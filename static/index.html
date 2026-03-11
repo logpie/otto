@@ -2,12 +2,91 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>CC Autonomous v2</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="CC Auto">
+<title>CC Autonomous</title>
+<link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<h1>CC Autonomous v2</h1>
-<p>Loading...</p>
-<link rel="stylesheet" href="/static/style.css">
+
+<!-- Status bar -->
+<header id="statusBar">
+  <h1>CC Autonomous</h1>
+  <div id="statusSummary" class="status-summary">Connecting...</div>
+</header>
+
+<!-- Project config (collapsible) -->
+<details class="section" id="projectSection" open>
+  <summary>Project</summary>
+  <div class="section-body">
+    <input type="text" id="projectDir" placeholder="Project directory (absolute path)">
+    <div class="info-row" id="verifyInfo">
+      <span class="label">Verification:</span>
+      <span class="value" id="verifyDetail">set project dir above</span>
+    </div>
+  </div>
+</details>
+
+<!-- Task input -->
+<div class="section" id="inputSection">
+  <div class="task-input-wrap">
+    <textarea id="taskInput" placeholder="Describe the task..." rows="2"></textarea>
+    <button id="addTaskBtn" class="btn primary" onclick="addTask()">Add</button>
+  </div>
+  <details class="advanced-toggle">
+    <summary>Advanced</summary>
+    <div class="advanced-fields">
+      <input type="text" id="verifyPromptInput"
+             placeholder="Verify goal (e.g. 'E2E latency < 500ms')">
+      <input type="text" id="verifyCmdInput"
+             placeholder="Verify command (e.g. 'pytest -x')">
+      <div class="field-row">
+        <label>Max retries:</label>
+        <input type="number" id="maxRetriesInput" value="3" min="1" max="10" class="small-input">
+      </div>
+    </div>
+  </details>
+</div>
+
+<!-- Workers -->
+<div class="section">
+  <div class="section-header">
+    <h2>Workers</h2>
+    <div class="worker-actions">
+      <button class="btn primary small" onclick="startWorker()">Start</button>
+      <button class="btn danger small" onclick="stopAllWorkers()">Stop All</button>
+    </div>
+  </div>
+  <div id="workerList" class="worker-list">
+    <div class="empty-state">No workers running</div>
+  </div>
+</div>
+
+<!-- Task list -->
+<div class="section">
+  <div class="section-header">
+    <h2>Tasks</h2>
+    <div class="task-filters">
+      <button class="filter-btn active" data-filter="all" onclick="setFilter('all')">All</button>
+      <button class="filter-btn" data-filter="active" onclick="setFilter('active')">Active</button>
+      <button class="filter-btn" data-filter="done" onclick="setFilter('done')">Done</button>
+    </div>
+  </div>
+  <div id="taskList" class="task-list"></div>
+</div>
+
+<!-- Git log (collapsible) -->
+<details class="section" id="gitSection">
+  <summary>Git Log</summary>
+  <div class="section-body">
+    <pre id="gitLog" class="git-log">set project dir above</pre>
+  </div>
+</details>
+
+<!-- Toast container -->
+<div id="toasts" class="toast-container"></div>
+
 <script src="/static/app.js"></script>
 </body>
 </html>
