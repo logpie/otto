@@ -115,7 +115,12 @@ def update_task(tasks_file: Path, task_id: str, **updates) -> None:
     _locked_task_rw(tasks_file, _update)
 
 
-async def _heartbeat_task(tasks_file: Path, task_id: str, interval: int = 60) -> None:
+HEARTBEAT_INTERVAL = 60
+# stale_timeout must be well above heartbeat interval to avoid premature requeue
+MIN_STALE_TIMEOUT = HEARTBEAT_INTERVAL * 5  # 300s
+
+
+async def _heartbeat_task(tasks_file: Path, task_id: str, interval: int = HEARTBEAT_INTERVAL) -> None:
     while True:
         await asyncio.sleep(interval)
         update_task(
@@ -398,6 +403,13 @@ async def worker_loop(
     logs_dir: Path | None = None,
 ) -> None:
     """Main worker loop: pick tasks, execute, verify, repeat."""
+    if stale_timeout < MIN_STALE_TIMEOUT:
+        logger.warning(
+            f"stale_timeout={stale_timeout}s is below minimum {MIN_STALE_TIMEOUT}s "
+            f"(heartbeat interval is {HEARTBEAT_INTERVAL}s). Clamping."
+        )
+        stale_timeout = MIN_STALE_TIMEOUT
+
     task_count = 0
 
     logger.info(f"Worker '{worker_name}' starting")

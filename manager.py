@@ -371,12 +371,25 @@ def create_app(
             return html_path.read_text()
         return "<h1>CC Autonomous v2</h1><p>static/index.html not found</p>"
 
-    @_app.on_event("shutdown")
-    def shutdown_event():
-        """Kill all worker subprocesses on shutdown."""
-        for name, proc in _app.state.workers.items():
+    def _stop_all_workers_and_requeue():
+        """Terminate all workers, wait for death, requeue their tasks."""
+        for name, proc in list(_app.state.workers.items()):
             if proc.poll() is None:
                 proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+            _locked_task_rw_manager(
+                _app.state.tasks_file,
+                lambda tasks, wn=name: _requeue_worker_tasks(tasks, wn),
+            )
+
+    @_app.on_event("shutdown")
+    def shutdown_event():
+        """Kill all worker subprocesses and requeue their tasks on shutdown."""
+        _stop_all_workers_and_requeue()
 
     return _app
 
@@ -401,9 +414,18 @@ if __name__ == "__main__":
 
     def handle_exit(sig, frame):
         print("\n[manager] Shutting down...")
-        for name, proc in app.state.workers.items():
+        for name, proc in list(app.state.workers.items()):
             if proc.poll() is None:
                 proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+            _locked_task_rw_manager(
+                app.state.tasks_file,
+                lambda tasks, wn=name: _requeue_worker_tasks(tasks, wn),
+            )
         os._exit(0)
 
     signal.signal(signal.SIGINT, handle_exit)
