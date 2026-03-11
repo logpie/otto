@@ -10,17 +10,19 @@ from fastapi.testclient import TestClient
 
 @pytest.fixture
 def app_with_tmp(tmp_path):
-    """Create a test app with temporary tasks file."""
     tasks_file = tmp_path / "tasks.json"
     tasks_file.write_text("[]")
     logs_dir = tmp_path / "logs"
     logs_dir.mkdir()
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    (static_dir / "index.html").write_text("<html><body>v2</body></html>")
 
-    import manager
-    manager.TASKS_FILE = tasks_file
-    manager.LOGS_DIR = logs_dir
-    manager.BASE_DIR = tmp_path
-    return TestClient(manager.app)
+    from manager import create_app
+    test_app = create_app(
+        base_dir=tmp_path, tasks_file=tasks_file, logs_dir=logs_dir
+    )
+    return TestClient(test_app)
 
 
 def test_create_task_with_new_fields(app_with_tmp):
@@ -71,18 +73,22 @@ def test_sse_endpoint_returns_event_stream(tmp_path):
     import httpx
     import uvicorn
 
-    import manager
+    from manager import create_app
     tasks_file = tmp_path / "tasks.json"
     tasks_file.write_text("[]")
     logs_dir = tmp_path / "logs"
     logs_dir.mkdir()
-    manager.TASKS_FILE = tasks_file
-    manager.LOGS_DIR = logs_dir
-    manager.BASE_DIR = tmp_path
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    (static_dir / "index.html").write_text("<html><body>v2</body></html>")
+
+    sse_app = create_app(
+        base_dir=tmp_path, tasks_file=tasks_file, logs_dir=logs_dir
+    )
 
     # Start uvicorn on a free port
     port = 18421
-    config = uvicorn.Config(manager.app, host="127.0.0.1", port=port, log_level="error")
+    config = uvicorn.Config(sse_app, host="127.0.0.1", port=port, log_level="error")
     server = uvicorn.Server(config)
     server.install_signal_handlers = lambda: None
     thread = threading.Thread(target=server.run, daemon=True)
