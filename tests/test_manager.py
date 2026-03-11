@@ -116,3 +116,64 @@ def test_sse_endpoint_returns_event_stream(tmp_path):
     finally:
         server.should_exit = True
         thread.join(timeout=3)
+
+
+def test_full_flow_smoke(app_with_tmp):
+    """Smoke test: create task, read it back, verify schema."""
+    # Create
+    resp = app_with_tmp.post("/api/tasks", json={
+        "prompt": "Test task",
+        "verify_prompt": "it works",
+        "verify_cmd": "echo ok",
+    })
+    assert resp.status_code == 200
+    task = resp.json()
+    task_id = task["id"]
+
+    # List
+    resp = app_with_tmp.get("/api/tasks")
+    tasks = resp.json()
+    assert len(tasks) == 1
+    assert tasks[0]["id"] == task_id
+    assert tasks[0]["verify_prompt"] == "it works"
+    assert tasks[0]["verify_cmd"] == "echo ok"
+    assert tasks[0]["cost_usd"] == 0.0
+    assert tasks[0]["session_id"] is None
+
+    # Retry
+    resp = app_with_tmp.post(f"/api/tasks/{task_id}/retry")
+    assert resp.status_code == 200
+
+    # Delete
+    resp = app_with_tmp.post("/api/tasks", json={"prompt": "Second task"})
+    id2 = resp.json()["id"]
+    resp = app_with_tmp.delete(f"/api/tasks/{id2}")
+    assert resp.status_code == 200
+    resp = app_with_tmp.get("/api/tasks")
+    assert len(resp.json()) == 1
+
+
+def test_index_serves_static_html(app_with_tmp):
+    """Verify index serves the static HTML file."""
+    resp = app_with_tmp.get("/")
+    assert resp.status_code == 200
+    assert "v2" in resp.text
+
+
+def test_worker_start_uses_worker_py(app_with_tmp):
+    """Verify worker start spawns worker.py, not ralph-loop.sh."""
+    from unittest.mock import patch, MagicMock
+
+    mock_proc = MagicMock()
+    mock_proc.pid = 12345
+    mock_proc.poll.return_value = None
+
+    with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+        resp = app_with_tmp.post("/api/workers/start", json={
+            "name": "test",
+            "project_dir": "/tmp/test",
+        })
+        assert resp.status_code == 200
+        cmd = mock_popen.call_args[0][0]
+        assert "worker.py" in cmd[1]
+        assert "ralph-loop.sh" not in " ".join(cmd)
