@@ -58,3 +58,55 @@ def test_verify_script_endpoints_removed(app_with_tmp):
 
     resp = app_with_tmp.post("/api/verify-run", json={})
     assert resp.status_code in (404, 405)
+
+
+def test_sse_endpoint_returns_event_stream(tmp_path):
+    """SSE endpoint should return text/event-stream content type.
+
+    Uses a real uvicorn server because Starlette's TestClient buffers the entire
+    response before returning, which hangs on infinite SSE generators.
+    """
+    import threading
+    import time
+    import httpx
+    import uvicorn
+
+    import manager
+    tasks_file = tmp_path / "tasks.json"
+    tasks_file.write_text("[]")
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir()
+    manager.TASKS_FILE = tasks_file
+    manager.LOGS_DIR = logs_dir
+    manager.BASE_DIR = tmp_path
+
+    # Start uvicorn on a free port
+    port = 18421
+    config = uvicorn.Config(manager.app, host="127.0.0.1", port=port, log_level="error")
+    server = uvicorn.Server(config)
+    server.install_signal_handlers = lambda: None
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+
+    # Wait for server to be ready
+    for _ in range(20):
+        try:
+            httpx.get(f"http://127.0.0.1:{port}/api/tasks", timeout=1)
+            break
+        except Exception:
+            time.sleep(0.1)
+
+    try:
+        with httpx.stream("GET", f"http://127.0.0.1:{port}/api/events", timeout=5) as resp:
+            assert resp.status_code == 200
+            assert "text/event-stream" in resp.headers["content-type"]
+            # Read first event
+            for line in resp.iter_lines():
+                if line.startswith("data:"):
+                    data = json.loads(line[5:].strip())
+                    assert "tasks" in data
+                    assert "workers" in data
+                    break
+    finally:
+        server.should_exit = True
+        thread.join(timeout=3)

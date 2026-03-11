@@ -7,6 +7,7 @@ Run:
 Then open http://localhost:8420 on your phone or browser.
 """
 
+import asyncio
 import json
 import os
 import subprocess
@@ -15,7 +16,7 @@ import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 app = FastAPI(title="CC Autonomous")
 
@@ -239,6 +240,44 @@ def verify_status(project_dir: str = ""):
     if test_files:
         return {"type": "auto-tests", "detail": ", ".join(f.name for f in test_files[:10])}
     return {"type": "none", "detail": "No verify.sh or test files found."}
+
+
+@app.get("/api/events")
+async def events():
+    """Server-Sent Events endpoint for live task/worker updates."""
+    async def event_stream():
+        last_data = ""
+        try:
+            while True:
+                tasks = load_tasks()
+                workers_status = {}
+                for name, proc in list(workers.items()):
+                    poll = proc.poll()
+                    workers_status[name] = {
+                        "pid": proc.pid,
+                        "status": "running" if poll is None else "exited",
+                        "code": poll,
+                    }
+                current_data = json.dumps(
+                    {"tasks": tasks, "workers": workers_status},
+                    default=str,
+                )
+                if current_data != last_data:
+                    yield f"data: {current_data}\n\n"
+                    last_data = current_data
+                await asyncio.sleep(1)
+        except (asyncio.CancelledError, GeneratorExit):
+            return
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ── Web UI ───────────────────────────────────────────────────────────────────
