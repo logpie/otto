@@ -85,3 +85,102 @@ def update_task(tasks_file: Path, task_id: str, **updates) -> None:
                     task["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
                 break
     _locked_task_rw(tasks_file, _update)
+
+
+# -- Prompt builder -----------------------------------------------------------
+
+# NOTE: The old ralph-loop.sh included "VERIFICATION AUTHORING RULES" telling the
+# agent to write/update verify.sh. Those are intentionally dropped in v2 because
+# verification is now orchestrator-owned — the agent never touches the test harness.
+_AUTONOMY_RULES = """\
+RULES:
+- NEVER ask questions or present options. Make the best decision and do it.
+- If something fails, fix it yourself. Try alternative approaches.
+- If an API is down or unreachable, switch to a working alternative.
+- After making changes, run the tests/app yourself to verify it works.
+- Do NOT stop until you have verified your changes work end-to-end.
+- Then commit with a descriptive message.
+- Do NOT add result caching or memoization to pass speed tests. Optimize the actual code path."""
+
+
+def build_prompt(task: dict, attempt: int = 1, verify_error: str = "") -> str:
+    """Build the prompt for Claude, including retry context if applicable."""
+    # Support both old 'verify' field and new 'verify_prompt' field
+    verify_goal = task.get("verify_prompt") or task.get("verify", "")
+    verify_section = ""
+    if verify_goal:
+        verify_section = f"\nVERIFICATION GOAL:\n{verify_goal}\n"
+
+    if attempt == 1:
+        return (
+            f"You are running autonomously with NO human in the loop.\n\n"
+            f"{_AUTONOMY_RULES}\n"
+            f"{verify_section}\n"
+            f"TASK: {task['prompt']}"
+        )
+    else:
+        return (
+            f"You are running autonomously with NO human in the loop. "
+            f"This is attempt {attempt}.\n\n"
+            f"Your previous attempt FAILED verification. "
+            f"Here is the error output:\n\n"
+            f"--- VERIFICATION ERROR ---\n"
+            f"{verify_error}\n"
+            f"--- END ERROR ---\n\n"
+            f"{_AUTONOMY_RULES}\n"
+            f"{verify_section}\n"
+            f"ORIGINAL TASK: {task['prompt']}"
+        )
+
+
+# -- Verification runner ------------------------------------------------------
+
+def run_verify(
+    project_dir: Path,
+    verify_cmd: str | None = None,
+    timeout: int = 120,
+) -> tuple[bool, str]:
+    """Run verification command. Returns (passed, output).
+
+    Priority:
+    1. Explicit verify_cmd if provided
+    2. Project verify.sh if it exists (backward compat with v1)
+    3. Auto-detect test files (pytest, then unittest)
+    4. Pass by default if nothing configured
+
+    NOTE: The orchestrator runs verify.sh, but the agent does NOT write it.
+    Existing verify.sh scripts from v1 are still honored.
+    """
+    if not verify_cmd:
+        # Check for existing verify.sh (backward compat)
+        verify_script = project_dir / "verify.sh"
+        if verify_script.exists() and os.access(verify_script, os.X_OK):
+            verify_cmd = "bash verify.sh"
+        else:
+            # Auto-detect test files (including one level of subdirectories)
+            test_files = (
+                list(project_dir.glob("test_*.py"))
+                + list(project_dir.glob("*_test.py"))
+                + list(project_dir.glob("*/test_*.py"))
+                + list(project_dir.glob("*/*_test.py"))
+            )
+            if test_files:
+                verify_cmd = f"{sys.executable} -m pytest -x --tb=short"
+            else:
+                return True, "No verification configured"
+
+    try:
+        result = subprocess.run(
+            verify_cmd,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=str(project_dir),
+        )
+        output = (result.stdout + result.stderr).strip()
+        return result.returncode == 0, output
+    except subprocess.TimeoutExpired:
+        return False, f"Verification timed out after {timeout}s"
+    except Exception as e:
+        return False, f"Verification error: {e}"

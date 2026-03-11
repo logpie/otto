@@ -70,3 +70,77 @@ def test_update_task_no_finished_at_for_in_progress(tasks_file):
     tasks = json.loads(tasks_file.read_text())
     t2 = next(t for t in tasks if t["id"] == "t2")
     assert t2.get("finished_at") is None
+
+
+def test_build_prompt_first_attempt():
+    from worker import build_prompt
+    task = {"prompt": "Fix the bug", "verify_prompt": "", "verify_cmd": ""}
+    result = build_prompt(task, attempt=1)
+    assert "Fix the bug" in result
+    assert "attempt" not in result.lower()  # No retry language on first attempt
+    assert "NEVER ask questions" in result
+
+
+def test_build_prompt_first_attempt_with_verify_prompt():
+    from worker import build_prompt
+    task = {"prompt": "Fix the bug", "verify_prompt": "tests must pass",
+            "verify_cmd": ""}
+    result = build_prompt(task, attempt=1)
+    assert "tests must pass" in result
+    assert "VERIFICATION GOAL" in result
+
+
+def test_build_prompt_retry_includes_error():
+    from worker import build_prompt
+    task = {"prompt": "Fix the bug", "verify_prompt": "", "verify_cmd": ""}
+    result = build_prompt(task, attempt=2, verify_error="AssertionError: 1 != 2")
+    assert "attempt 2" in result
+    assert "AssertionError: 1 != 2" in result
+    assert "VERIFICATION ERROR" in result
+    assert "Fix the bug" in result
+
+
+def test_build_prompt_legacy_verify_field():
+    """Old tasks have 'verify' instead of 'verify_prompt'."""
+    from worker import build_prompt
+    task = {"prompt": "Do it", "verify": "latency < 500ms"}
+    result = build_prompt(task, attempt=1)
+    assert "latency < 500ms" in result
+
+
+def test_run_verify_with_explicit_cmd(tmp_path):
+    from worker import run_verify
+    passed, output = run_verify(tmp_path, verify_cmd="echo 'all good'")
+    assert passed is True
+    assert "all good" in output
+
+
+def test_run_verify_cmd_failure(tmp_path):
+    from worker import run_verify
+    passed, output = run_verify(tmp_path, verify_cmd="echo 'bad' && exit 1")
+    assert passed is False
+    assert "bad" in output
+
+
+def test_run_verify_auto_detect_pytest(tmp_path):
+    """When no verify_cmd, falls back to detecting test files."""
+    from worker import run_verify
+    test_file = tmp_path / "test_example.py"
+    test_file.write_text("def test_ok(): assert True")
+    passed, output = run_verify(tmp_path)
+    assert passed is True
+
+
+def test_run_verify_no_tests(tmp_path):
+    """When no verify_cmd and no test files, pass by default."""
+    from worker import run_verify
+    passed, output = run_verify(tmp_path)
+    assert passed is True
+    assert "No verification" in output
+
+
+def test_run_verify_timeout(tmp_path):
+    from worker import run_verify
+    passed, output = run_verify(tmp_path, verify_cmd="sleep 10", timeout=1)
+    assert passed is False
+    assert "timed out" in output.lower()
