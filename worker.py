@@ -22,6 +22,8 @@ import tempfile
 import time
 from pathlib import Path
 
+from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
+
 logger = logging.getLogger("worker")
 
 
@@ -184,3 +186,238 @@ def run_verify(
         return False, f"Verification timed out after {timeout}s"
     except Exception as e:
         return False, f"Verification error: {e}"
+
+
+# -- Task runner with session resume ------------------------------------------
+
+async def run_task(
+    task: dict,
+    project_dir: Path,
+    max_retries: int = 3,
+    tasks_file: Path | None = None,
+    logs_dir: Path | None = None,
+) -> dict:
+    """Run a single task with verify-fix loop and session resume.
+
+    If tasks_file is provided, persists state after each attempt so the
+    UI shows live progress (attempts, cost, session_id) via SSE.
+
+    If logs_dir is provided, writes per-task log to logs_dir/{task_id}.log
+    so the dashboard Log button shows task-specific output.
+
+    NOTE on cost: ResultMessage.total_cost_usd is per-query (not cumulative
+    across resumed sessions), so we sum across attempts.
+    """
+    session_id = None
+    verify_error = ""
+    total_cost = 0.0
+
+    # Per-task log file for the dashboard Log button
+    task_log_handler = None
+    if logs_dir:
+        task_log_path = logs_dir / f"{task['id']}.log"
+        task_log_handler = logging.FileHandler(task_log_path, mode="a")
+        task_log_handler.setFormatter(
+            logging.Formatter("[%(asctime)s] %(message)s", datefmt="%H:%M:%S")
+        )
+        logger.addHandler(task_log_handler)
+        # Write attempt separator so all attempts are visible in one log
+        logger.info(f"{'='*60}")
+        logger.info(f"TASK {task['id']} — START")
+        logger.info(f"{'='*60}")
+
+    try:
+        return await _run_task_inner(
+            task, project_dir, max_retries, tasks_file,
+            session_id, verify_error, total_cost,
+        )
+    finally:
+        if task_log_handler:
+            logger.removeHandler(task_log_handler)
+            task_log_handler.close()
+
+
+async def _run_task_inner(
+    task, project_dir, max_retries, tasks_file,
+    session_id, verify_error, total_cost,
+):
+    for attempt in range(1, max_retries + 1):
+        logger.info(f"Task {task['id']}: attempt {attempt}/{max_retries}")
+
+        # Persist attempt count immediately so UI shows live progress
+        if tasks_file:
+            update_task(tasks_file, task["id"], attempts=attempt)
+
+        prompt = build_prompt(task, attempt, verify_error)
+
+        options = ClaudeAgentOptions(
+            permission_mode="bypassPermissions",
+            max_turns=50,
+            max_budget_usd=5.0,
+            cwd=str(project_dir),
+            setting_sources=["project"],
+        )
+        if session_id and attempt > 1:
+            options.resume = session_id
+
+        result_msg = None
+        try:
+            async for message in query(prompt=prompt, options=options):
+                if isinstance(message, ResultMessage):
+                    result_msg = message
+        except Exception as e:
+            logger.error(f"  SDK error: {e}")
+            verify_error = f"Claude Code process error: {e}"
+            if tasks_file:
+                update_task(tasks_file, task["id"],
+                            last_error=str(e), cost_usd=total_cost)
+            continue
+
+        if result_msg:
+            session_id = result_msg.session_id
+            if result_msg.total_cost_usd:
+                total_cost += result_msg.total_cost_usd
+            logger.info(
+                f"  Claude finished: {result_msg.subtype}, "
+                f"cost=${result_msg.total_cost_usd or 0:.4f}"
+            )
+            # Persist cost and session_id after each attempt
+            if tasks_file:
+                update_task(tasks_file, task["id"],
+                            cost_usd=total_cost, session_id=session_id)
+        else:
+            logger.warning("  No ResultMessage received from SDK")
+
+        # Run verification
+        verify_cmd = task.get("verify_cmd") or None
+        verify_timeout = task.get("verify_timeout", 120)
+        passed, output = run_verify(project_dir, verify_cmd, timeout=verify_timeout)
+
+        if passed:
+            logger.info("  Verification PASSED")
+            return {
+                "status": "completed",
+                "attempts": attempt,
+                "cost_usd": total_cost,
+                "session_id": session_id,
+            }
+
+        verify_error = output
+        logger.info(f"  Verification FAILED: {output[:200]}")
+        if tasks_file:
+            update_task(tasks_file, task["id"], last_error=output[:500])
+
+    return {
+        "status": "failed",
+        "attempts": max_retries,
+        "cost_usd": total_cost,
+        "session_id": session_id,
+    }
+
+
+# -- Main loop ----------------------------------------------------------------
+
+async def worker_loop(
+    tasks_file: Path,
+    project_dir: Path,
+    worker_name: str = "main",
+    poll_interval: int = 30,
+    max_tasks: int = 0,
+    max_retries: int = 3,
+    logs_dir: Path | None = None,
+) -> None:
+    """Main worker loop: pick tasks, execute, verify, repeat."""
+    task_count = 0
+
+    logger.info(f"Worker '{worker_name}' starting")
+    logger.info(f"  Tasks file: {tasks_file}")
+    logger.info(f"  Project dir: {project_dir}")
+    logger.info(f"  Max retries: {max_retries}")
+
+    while True:
+        task = pick_task(tasks_file, worker_name)
+        if not task:
+            logger.info(f"No pending tasks. Waiting {poll_interval}s...")
+            await asyncio.sleep(poll_interval)
+            continue
+
+        task_count += 1
+        logger.info(f"Task #{task_count} - ID: {task['id']}")
+        logger.info(f"  Prompt: {task['prompt'][:100]}")
+
+        # Per-task max_retries overrides worker default; sanitize for bad stored values
+        try:
+            effective_retries = max(1, min(int(task.get("max_retries", max_retries)), 10))
+        except (ValueError, TypeError):
+            effective_retries = max_retries
+        result = await run_task(
+            task, project_dir, effective_retries,
+            tasks_file=tasks_file, logs_dir=logs_dir,
+        )
+
+        update_task(
+            tasks_file,
+            task["id"],
+            status=result["status"],
+            attempts=result["attempts"],
+            cost_usd=result.get("cost_usd", 0),
+            session_id=result.get("session_id"),
+        )
+
+        logger.info(
+            f"Task {task['id']}: {result['status']} "
+            f"(attempt {result['attempts']}/{max_retries}, "
+            f"${result.get('cost_usd', 0):.4f})"
+        )
+
+        if max_tasks > 0 and task_count >= max_tasks:
+            logger.info(f"Reached max tasks ({max_tasks}). Exiting.")
+            break
+
+    logger.info("Worker loop finished.")
+
+
+# -- CLI entry point ----------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(description="CC Autonomous Worker v2")
+    parser.add_argument("--tasks-file", type=Path, required=True)
+    parser.add_argument("--project-dir", type=Path, required=True)
+    parser.add_argument("--worker-name", default="main")
+    parser.add_argument("--poll-interval", type=int, default=30)
+    parser.add_argument("--max-tasks", type=int, default=0)
+    parser.add_argument("--max-retries", type=int, default=3)
+    parser.add_argument("--log-file", type=Path, default=None)
+    args = parser.parse_args()
+
+    handlers = [logging.StreamHandler()]
+    if args.log_file:
+        args.log_file.parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(logging.FileHandler(args.log_file))
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="[%(asctime)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+        handlers=handlers,
+    )
+
+    # logs_dir defaults to same directory as tasks_file / "logs"
+    logs_dir = args.tasks_file.parent / "logs"
+    logs_dir.mkdir(exist_ok=True)
+
+    asyncio.run(
+        worker_loop(
+            tasks_file=args.tasks_file,
+            project_dir=args.project_dir,
+            worker_name=args.worker_name,
+            poll_interval=args.poll_interval,
+            max_tasks=args.max_tasks,
+            max_retries=args.max_retries,
+            logs_dir=logs_dir,
+        )
+    )
+
+
+if __name__ == "__main__":
+    main()

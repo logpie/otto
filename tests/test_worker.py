@@ -144,3 +144,94 @@ def test_run_verify_timeout(tmp_path):
     passed, output = run_verify(tmp_path, verify_cmd="sleep 10", timeout=1)
     assert passed is False
     assert "timed out" in output.lower()
+
+
+import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from claude_agent_sdk import ResultMessage
+
+
+@pytest.fixture
+def task_entry():
+    return {
+        "id": "test1",
+        "prompt": "Fix the bug",
+        "verify_prompt": "",
+        "verify_cmd": "echo 'pass'",
+        "status": "in_progress",
+    }
+
+
+@pytest.mark.asyncio
+async def test_run_task_passes_on_first_attempt(tasks_file, task_entry, tmp_path):
+    from worker import run_task
+
+    mock_result = MagicMock(spec=ResultMessage)
+    mock_result.session_id = "sess-123"
+    mock_result.total_cost_usd = 0.05
+    mock_result.subtype = "success"
+
+    async def mock_query(**kwargs):
+        yield mock_result
+
+    with patch("worker.query", side_effect=mock_query):
+        result = await run_task(task_entry, tmp_path, max_retries=3)
+
+    assert result["status"] == "completed"
+    assert result["attempts"] == 1
+    assert result["cost_usd"] == 0.05
+    assert result["session_id"] == "sess-123"
+
+
+@pytest.mark.asyncio
+async def test_run_task_resumes_session_on_retry(tasks_file, task_entry, tmp_path):
+    from worker import run_task
+
+    # First attempt: verification fails
+    task_entry["verify_cmd"] = "exit 1"
+    call_count = 0
+    captured_options = []
+
+    mock_result = MagicMock(spec=ResultMessage)
+    mock_result.session_id = "sess-456"
+    mock_result.total_cost_usd = 0.03
+    mock_result.subtype = "success"
+
+    async def mock_query(*, prompt, options=None):
+        nonlocal call_count
+        call_count += 1
+        captured_options.append(options)
+        if call_count >= 2:
+            # Make verify pass on second attempt
+            task_entry["verify_cmd"] = "echo 'fixed'"
+        yield mock_result
+
+    with patch("worker.query", side_effect=mock_query):
+        result = await run_task(task_entry, tmp_path, max_retries=3)
+
+    assert result["status"] == "completed"
+    assert result["attempts"] == 2
+    # Second call should have resume set
+    assert captured_options[1].resume == "sess-456"
+
+
+@pytest.mark.asyncio
+async def test_run_task_fails_after_max_retries(task_entry, tmp_path):
+    from worker import run_task
+
+    task_entry["verify_cmd"] = "exit 1"
+
+    mock_result = MagicMock(spec=ResultMessage)
+    mock_result.session_id = "sess-789"
+    mock_result.total_cost_usd = 0.02
+    mock_result.subtype = "success"
+
+    async def mock_query(**kwargs):
+        yield mock_result
+
+    with patch("worker.query", side_effect=mock_query):
+        result = await run_task(task_entry, tmp_path, max_retries=2)
+
+    assert result["status"] == "failed"
+    assert result["attempts"] == 2
