@@ -19,6 +19,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from verify_utils import _detect_verification
 
 # Module-level defaults (used by create_app when no overrides given)
 BASE_DIR = Path(__file__).parent
@@ -35,6 +36,7 @@ def _locked_task_rw_manager(tasks_file: Path, mutator):
     """
     import fcntl
     import tempfile
+    # Keep the lockfile naming identical to worker.py: tasks.json -> tasks.lock.
     lock_path = tasks_file.with_suffix(".lock")
     with open(lock_path, "a+") as lock_fh:
         fcntl.flock(lock_fh, fcntl.LOCK_EX)
@@ -51,6 +53,21 @@ def _locked_task_rw_manager(tasks_file: Path, mutator):
             os.unlink(tmp_path)
             raise
         return result
+
+
+def _requeue_worker_tasks(tasks: list[dict], worker_name: str) -> int:
+    requeued = 0
+    for task in tasks:
+        if (
+            task.get("status") == "in_progress"
+            and task.get("worker") == worker_name
+        ):
+            task["status"] = "pending"
+            task["started_at"] = None
+            task["finished_at"] = None
+            task["worker"] = None
+            requeued += 1
+    return requeued
 
 
 def create_app(
@@ -128,8 +145,18 @@ def create_app(
     @_app.delete("/api/tasks/{task_id}")
     def delete_task(task_id: str, request: Request):
         def _delete(tasks):
-            tasks[:] = [t for t in tasks if t["id"] != task_id]
-        _locked_task_rw_manager(request.app.state.tasks_file, _delete)
+            for idx, task in enumerate(tasks):
+                if task["id"] != task_id:
+                    continue
+                if task.get("status") == "in_progress":
+                    return False
+                del tasks[idx]
+                break
+            return True
+
+        deleted = _locked_task_rw_manager(request.app.state.tasks_file, _delete)
+        if not deleted:
+            return JSONResponse({"error": "task is currently in_progress"}, 409)
         return {"ok": True}
 
     @_app.post("/api/tasks/{task_id}/retry")
@@ -137,6 +164,8 @@ def create_app(
         def _retry(tasks):
             for t in tasks:
                 if t["id"] == task_id:
+                    if t.get("status") == "in_progress":
+                        return False
                     t["status"] = "pending"
                     t["started_at"] = None
                     t["finished_at"] = None
@@ -146,7 +175,11 @@ def create_app(
                     t["session_id"] = None
                     t.pop("last_error", None)
                     break
-        _locked_task_rw_manager(request.app.state.tasks_file, _retry)
+            return True
+
+        retried = _locked_task_rw_manager(request.app.state.tasks_file, _retry)
+        if not retried:
+            return JSONResponse({"error": "task is currently in_progress"}, 409)
         return {"ok": True}
 
     @_app.get("/api/tasks/{task_id}/log")
@@ -239,7 +272,15 @@ def create_app(
         proc = workers[name]
         if proc.poll() is None:
             proc.terminate()
-        return {"name": name, "status": "stopped"}
+        requeued = _locked_task_rw_manager(
+            request.app.state.tasks_file,
+            lambda tasks: _requeue_worker_tasks(tasks, name),
+        )
+        return {
+            "name": name,
+            "status": "stopped",
+            "requeued_tasks": requeued,
+        }
 
     @_app.get("/api/git/log")
     def git_log(project_dir: str = ""):
@@ -272,13 +313,7 @@ def create_app(
         """Check if project has a verify.sh or auto-detectable tests."""
         if not project_dir:
             return {"type": "none", "detail": "no project dir"}
-        p = Path(project_dir)
-        if (p / "verify.sh").exists():
-            return {"type": "verify.sh", "detail": (p / "verify.sh").read_text()[:500]}
-        test_files = list(p.glob("test_*.py")) + list(p.glob("*_test.py"))
-        if test_files:
-            return {"type": "auto-tests", "detail": ", ".join(f.name for f in test_files[:10])}
-        return {"type": "none", "detail": "No verify.sh or test files found."}
+        return _detect_verification(Path(project_dir))
 
     @_app.get("/api/events")
     async def events(request: Request):

@@ -1,8 +1,5 @@
 # tests/test_manager.py
 import json
-import tempfile
-from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -177,3 +174,82 @@ def test_worker_start_uses_worker_py(app_with_tmp):
         cmd = mock_popen.call_args[0][0]
         assert "worker.py" in cmd[1]
         assert "ralph-loop.sh" not in " ".join(cmd)
+
+
+def test_delete_in_progress_task_returns_409(app_with_tmp):
+    tasks = [
+        {
+            "id": "busy",
+            "prompt": "running",
+            "status": "in_progress",
+            "worker": "w1",
+        }
+    ]
+    app_with_tmp.app.state.tasks_file.write_text(json.dumps(tasks, indent=2))
+
+    resp = app_with_tmp.delete("/api/tasks/busy")
+
+    assert resp.status_code == 409
+    assert json.loads(app_with_tmp.app.state.tasks_file.read_text())[0]["status"] == "in_progress"
+
+
+def test_retry_in_progress_task_returns_409(app_with_tmp):
+    tasks = [
+        {
+            "id": "busy",
+            "prompt": "running",
+            "status": "in_progress",
+            "worker": "w1",
+            "attempts": 2,
+            "cost_usd": 1.23,
+            "session_id": "sess-1",
+        }
+    ]
+    app_with_tmp.app.state.tasks_file.write_text(json.dumps(tasks, indent=2))
+
+    resp = app_with_tmp.post("/api/tasks/busy/retry")
+
+    assert resp.status_code == 409
+    task = json.loads(app_with_tmp.app.state.tasks_file.read_text())[0]
+    assert task["status"] == "in_progress"
+    assert task["attempts"] == 2
+
+
+def test_stop_worker_requeues_its_in_progress_tasks(app_with_tmp):
+    from unittest.mock import MagicMock
+
+    tasks = [
+        {
+            "id": "busy",
+            "prompt": "running",
+            "status": "in_progress",
+            "started_at": "2026-01-01T00:00:00",
+            "finished_at": None,
+            "worker": "w1",
+        },
+        {
+            "id": "other",
+            "prompt": "running elsewhere",
+            "status": "in_progress",
+            "started_at": "2026-01-01T00:00:00",
+            "finished_at": None,
+            "worker": "w2",
+        },
+    ]
+    app_with_tmp.app.state.tasks_file.write_text(json.dumps(tasks, indent=2))
+
+    proc = MagicMock()
+    proc.poll.return_value = None
+    app_with_tmp.app.state.workers["w1"] = proc
+
+    resp = app_with_tmp.post("/api/workers/w1/stop")
+
+    assert resp.status_code == 200
+    assert resp.json()["requeued_tasks"] == 1
+    updated = json.loads(app_with_tmp.app.state.tasks_file.read_text())
+    busy = next(task for task in updated if task["id"] == "busy")
+    other = next(task for task in updated if task["id"] == "other")
+    assert busy["status"] == "pending"
+    assert busy["worker"] is None
+    assert busy["started_at"] is None
+    assert other["status"] == "in_progress"

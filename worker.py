@@ -23,6 +23,7 @@ import time
 from pathlib import Path
 
 from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
+from verify_utils import _detect_verification
 
 logger = logging.getLogger("worker")
 
@@ -33,8 +34,9 @@ def _locked_task_rw(tasks_file: Path, mutator):
     """Read-modify-write tasks.json under a separate lockfile.
 
     Uses a dedicated .lock file so that flock operates on a stable inode
-    (not the data file which gets replaced). Both worker and manager
-    MUST use this same pattern to avoid lost writes.
+    (not the data file which gets replaced). This intentionally uses the
+    sibling filename tasks.lock, and both worker and manager MUST use
+    that same convention to avoid lost writes.
 
     Args:
         tasks_file: Path to tasks.json
@@ -58,6 +60,15 @@ def _locked_task_rw(tasks_file: Path, mutator):
             os.unlink(tmp_path)
             raise
         return result
+
+
+def _parse_task_time(timestamp: str | None) -> float | None:
+    if not timestamp:
+        return None
+    try:
+        return time.mktime(time.strptime(timestamp, "%Y-%m-%dT%H:%M:%S"))
+    except (TypeError, ValueError):
+        return None
 
 
 def pick_task(tasks_file: Path, worker_name: str = "main") -> dict | None:
@@ -87,6 +98,29 @@ def update_task(tasks_file: Path, task_id: str, **updates) -> None:
                     task["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
                 break
     _locked_task_rw(tasks_file, _update)
+
+
+def requeue_stale_tasks(tasks_file: Path, stale_timeout: int = 1800) -> int:
+    """Reset abandoned in_progress tasks back to pending."""
+    cutoff = time.time() - stale_timeout
+    requeued = 0
+
+    def _requeue(tasks):
+        nonlocal requeued
+        for task in tasks:
+            if task.get("status") != "in_progress":
+                continue
+            started_at = _parse_task_time(task.get("started_at"))
+            if started_at is None or started_at >= cutoff:
+                continue
+            task["status"] = "pending"
+            task["worker"] = None
+            task["started_at"] = None
+            task["finished_at"] = None
+            requeued += 1
+
+    _locked_task_rw(tasks_file, _requeue)
+    return requeued
 
 
 # -- Prompt builder -----------------------------------------------------------
@@ -154,22 +188,10 @@ def run_verify(
     Existing verify.sh scripts from v1 are still honored.
     """
     if not verify_cmd:
-        # Check for existing verify.sh (backward compat)
-        verify_script = project_dir / "verify.sh"
-        if verify_script.exists() and os.access(verify_script, os.X_OK):
-            verify_cmd = "bash verify.sh"
-        else:
-            # Auto-detect test files (including one level of subdirectories)
-            test_files = (
-                list(project_dir.glob("test_*.py"))
-                + list(project_dir.glob("*_test.py"))
-                + list(project_dir.glob("*/test_*.py"))
-                + list(project_dir.glob("*/*_test.py"))
-            )
-            if test_files:
-                verify_cmd = f"{sys.executable} -m pytest -x --tb=short"
-            else:
-                return True, "No verification configured"
+        detection = _detect_verification(project_dir)
+        if detection["type"] == "none":
+            return True, detection["detail"]
+        verify_cmd = detection["cmd"]
 
     try:
         result = subprocess.run(
@@ -285,8 +307,20 @@ async def _run_task_inner(
             if tasks_file:
                 update_task(tasks_file, task["id"],
                             cost_usd=total_cost, session_id=session_id)
+            if result_msg.subtype != "success":
+                verify_error = (
+                    f"Agent session ended with subtype '{result_msg.subtype}'"
+                )
+                logger.warning(f"  Skipping verification: {verify_error}")
+                if tasks_file:
+                    update_task(tasks_file, task["id"], last_error=verify_error[:500])
+                continue
         else:
-            logger.warning("  No ResultMessage received from SDK")
+            verify_error = "No ResultMessage received from SDK"
+            logger.warning(f"  {verify_error}")
+            if tasks_file:
+                update_task(tasks_file, task["id"], last_error=verify_error[:500])
+            continue
 
         # Run verification
         verify_cmd = task.get("verify_cmd") or None
@@ -324,6 +358,7 @@ async def worker_loop(
     poll_interval: int = 30,
     max_tasks: int = 0,
     max_retries: int = 3,
+    stale_timeout: int = 1800,
     logs_dir: Path | None = None,
 ) -> None:
     """Main worker loop: pick tasks, execute, verify, repeat."""
@@ -333,8 +368,16 @@ async def worker_loop(
     logger.info(f"  Tasks file: {tasks_file}")
     logger.info(f"  Project dir: {project_dir}")
     logger.info(f"  Max retries: {max_retries}")
+    logger.info(f"  Stale timeout: {stale_timeout}s")
+
+    requeued = requeue_stale_tasks(tasks_file, stale_timeout=stale_timeout)
+    if requeued:
+        logger.warning(f"Requeued {requeued} stale task(s) on startup")
 
     while True:
+        requeued = requeue_stale_tasks(tasks_file, stale_timeout=stale_timeout)
+        if requeued:
+            logger.warning(f"Requeued {requeued} stale task(s)")
         task = pick_task(tasks_file, worker_name)
         if not task:
             logger.info(f"No pending tasks. Waiting {poll_interval}s...")
@@ -387,6 +430,7 @@ def main():
     parser.add_argument("--poll-interval", type=int, default=30)
     parser.add_argument("--max-tasks", type=int, default=0)
     parser.add_argument("--max-retries", type=int, default=3)
+    parser.add_argument("--stale-timeout", type=int, default=1800)
     parser.add_argument("--log-file", type=Path, default=None)
     args = parser.parse_args()
 
@@ -414,6 +458,7 @@ def main():
             poll_interval=args.poll_interval,
             max_tasks=args.max_tasks,
             max_retries=args.max_retries,
+            stale_timeout=args.stale_timeout,
             logs_dir=logs_dir,
         )
     )

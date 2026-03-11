@@ -1,7 +1,4 @@
 import json
-import tempfile
-import time
-from pathlib import Path
 
 import pytest
 
@@ -136,7 +133,7 @@ def test_run_verify_no_tests(tmp_path):
     from worker import run_verify
     passed, output = run_verify(tmp_path)
     assert passed is True
-    assert "No verification" in output
+    assert "No verify.sh or test files found." in output
 
 
 def test_run_verify_timeout(tmp_path):
@@ -145,9 +142,7 @@ def test_run_verify_timeout(tmp_path):
     assert passed is False
     assert "timed out" in output.lower()
 
-
-import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 from claude_agent_sdk import ResultMessage
 
@@ -231,6 +226,47 @@ async def test_run_task_fails_after_max_retries(task_entry, tmp_path):
         yield mock_result
 
     with patch("worker.query", side_effect=mock_query):
+        result = await run_task(task_entry, tmp_path, max_retries=2)
+
+    assert result["status"] == "failed"
+    assert result["attempts"] == 2
+
+
+@pytest.mark.asyncio
+async def test_run_task_skips_verification_on_agent_non_success(task_entry, tmp_path):
+    from worker import run_task
+
+    mock_result = MagicMock(spec=ResultMessage)
+    mock_result.session_id = "sess-error"
+    mock_result.total_cost_usd = 0.01
+    mock_result.subtype = "error_max_turns"
+
+    async def mock_query(**kwargs):
+        yield mock_result
+
+    with patch("worker.query", side_effect=mock_query), patch(
+        "worker.run_verify",
+        side_effect=AssertionError("verification should be skipped"),
+    ):
+        result = await run_task(task_entry, tmp_path, max_retries=2)
+
+    assert result["status"] == "failed"
+    assert result["attempts"] == 2
+    assert result["session_id"] == "sess-error"
+
+
+@pytest.mark.asyncio
+async def test_run_task_skips_verification_without_result_message(task_entry, tmp_path):
+    from worker import run_task
+
+    async def mock_query(**kwargs):
+        if False:
+            yield None
+
+    with patch("worker.query", side_effect=mock_query), patch(
+        "worker.run_verify",
+        side_effect=AssertionError("verification should be skipped"),
+    ):
         result = await run_task(task_entry, tmp_path, max_retries=2)
 
     assert result["status"] == "failed"
