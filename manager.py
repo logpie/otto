@@ -55,6 +55,18 @@ def _locked_task_rw_manager(tasks_file: Path, mutator):
         return result
 
 
+def _reset_task_for_requeue(task: dict) -> None:
+    task["status"] = "pending"
+    task["started_at"] = None
+    task["finished_at"] = None
+    task["heartbeat_at"] = None
+    task["worker"] = None
+    task["attempts"] = 0
+    task["cost_usd"] = 0.0
+    task["session_id"] = None
+    task.pop("last_error", None)
+
+
 def _requeue_worker_tasks(tasks: list[dict], worker_name: str) -> int:
     requeued = 0
     for task in tasks:
@@ -62,10 +74,7 @@ def _requeue_worker_tasks(tasks: list[dict], worker_name: str) -> int:
             task.get("status") == "in_progress"
             and task.get("worker") == worker_name
         ):
-            task["status"] = "pending"
-            task["started_at"] = None
-            task["finished_at"] = None
-            task["worker"] = None
+            _reset_task_for_requeue(task)
             requeued += 1
     return requeued
 
@@ -131,6 +140,7 @@ def create_app(
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "started_at": None,
             "finished_at": None,
+            "heartbeat_at": None,
             "worker": None,
             "attempts": 0,
             "cost_usd": 0.0,
@@ -166,14 +176,7 @@ def create_app(
                 if t["id"] == task_id:
                     if t.get("status") == "in_progress":
                         return False
-                    t["status"] = "pending"
-                    t["started_at"] = None
-                    t["finished_at"] = None
-                    t["worker"] = None
-                    t["attempts"] = 0
-                    t["cost_usd"] = 0.0
-                    t["session_id"] = None
-                    t.pop("last_error", None)
+                    _reset_task_for_requeue(t)
                     break
             return True
 
@@ -272,6 +275,11 @@ def create_app(
         proc = workers[name]
         if proc.poll() is None:
             proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
         requeued = _locked_task_rw_manager(
             request.app.state.tasks_file,
             lambda tasks: _requeue_worker_tasks(tasks, name),

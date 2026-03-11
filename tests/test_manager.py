@@ -225,7 +225,12 @@ def test_stop_worker_requeues_its_in_progress_tasks(app_with_tmp):
             "status": "in_progress",
             "started_at": "2026-01-01T00:00:00",
             "finished_at": None,
+            "heartbeat_at": "2026-01-01T00:05:00",
             "worker": "w1",
+            "attempts": 2,
+            "cost_usd": 1.23,
+            "session_id": "sess-1",
+            "last_error": "boom",
         },
         {
             "id": "other",
@@ -233,6 +238,7 @@ def test_stop_worker_requeues_its_in_progress_tasks(app_with_tmp):
             "status": "in_progress",
             "started_at": "2026-01-01T00:00:00",
             "finished_at": None,
+            "heartbeat_at": "2026-01-01T00:05:00",
             "worker": "w2",
         },
     ]
@@ -240,16 +246,24 @@ def test_stop_worker_requeues_its_in_progress_tasks(app_with_tmp):
 
     proc = MagicMock()
     proc.poll.return_value = None
+    proc.wait.return_value = 0
     app_with_tmp.app.state.workers["w1"] = proc
 
     resp = app_with_tmp.post("/api/workers/w1/stop")
 
     assert resp.status_code == 200
     assert resp.json()["requeued_tasks"] == 1
+    proc.terminate.assert_called_once_with()
+    proc.wait.assert_called_once_with(timeout=5)
     updated = json.loads(app_with_tmp.app.state.tasks_file.read_text())
     busy = next(task for task in updated if task["id"] == "busy")
     other = next(task for task in updated if task["id"] == "other")
     assert busy["status"] == "pending"
     assert busy["worker"] is None
     assert busy["started_at"] is None
+    assert busy["heartbeat_at"] is None
+    assert busy["attempts"] == 0
+    assert busy["cost_usd"] == 0.0
+    assert busy["session_id"] is None
+    assert "last_error" not in busy
     assert other["status"] == "in_progress"

@@ -12,6 +12,7 @@ Usage:
 
 import argparse
 import asyncio
+from contextlib import suppress
 import fcntl
 import json
 import logging
@@ -71,6 +72,18 @@ def _parse_task_time(timestamp: str | None) -> float | None:
         return None
 
 
+def _reset_task_for_requeue(task: dict) -> None:
+    task["status"] = "pending"
+    task["worker"] = None
+    task["started_at"] = None
+    task["finished_at"] = None
+    task["heartbeat_at"] = None
+    task["attempts"] = 0
+    task["cost_usd"] = 0.0
+    task["session_id"] = None
+    task.pop("last_error", None)
+
+
 def pick_task(tasks_file: Path, worker_name: str = "main") -> dict | None:
     """Atomically pick the first pending task and mark it in_progress."""
     picked = [None]
@@ -78,8 +91,10 @@ def pick_task(tasks_file: Path, worker_name: str = "main") -> dict | None:
     def _pick(tasks):
         for task in tasks:
             if task["status"] == "pending":
+                now = time.strftime("%Y-%m-%dT%H:%M:%S")
                 task["status"] = "in_progress"
-                task["started_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+                task["started_at"] = now
+                task["heartbeat_at"] = now
                 task["worker"] = worker_name
                 task.setdefault("attempts", 0)
                 picked[0] = dict(task)  # snapshot
@@ -100,6 +115,16 @@ def update_task(tasks_file: Path, task_id: str, **updates) -> None:
     _locked_task_rw(tasks_file, _update)
 
 
+async def _heartbeat_task(tasks_file: Path, task_id: str, interval: int = 60) -> None:
+    while True:
+        await asyncio.sleep(interval)
+        update_task(
+            tasks_file,
+            task_id,
+            heartbeat_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+        )
+
+
 def requeue_stale_tasks(tasks_file: Path, stale_timeout: int = 1800) -> int:
     """Reset abandoned in_progress tasks back to pending."""
     cutoff = time.time() - stale_timeout
@@ -110,13 +135,12 @@ def requeue_stale_tasks(tasks_file: Path, stale_timeout: int = 1800) -> int:
         for task in tasks:
             if task.get("status") != "in_progress":
                 continue
-            started_at = _parse_task_time(task.get("started_at"))
-            if started_at is None or started_at >= cutoff:
+            heartbeat_at = _parse_task_time(task.get("heartbeat_at"))
+            if heartbeat_at is None:
+                heartbeat_at = _parse_task_time(task.get("started_at"))
+            if heartbeat_at is None or heartbeat_at >= cutoff:
                 continue
-            task["status"] = "pending"
-            task["worker"] = None
-            task["started_at"] = None
-            task["finished_at"] = None
+            _reset_task_for_requeue(task)
             requeued += 1
 
     _locked_task_rw(tasks_file, _requeue)
@@ -267,8 +291,15 @@ async def _run_task_inner(
         logger.info(f"Task {task['id']}: attempt {attempt}/{max_retries}")
 
         # Persist attempt count immediately so UI shows live progress
+        heartbeat = None
         if tasks_file:
-            update_task(tasks_file, task["id"], attempts=attempt)
+            update_task(
+                tasks_file,
+                task["id"],
+                attempts=attempt,
+                heartbeat_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
+            )
+            heartbeat = asyncio.create_task(_heartbeat_task(tasks_file, task["id"]))
 
         prompt = build_prompt(task, attempt, verify_error)
 
@@ -284,62 +315,67 @@ async def _run_task_inner(
 
         result_msg = None
         try:
-            async for message in query(prompt=prompt, options=options):
-                if isinstance(message, ResultMessage):
-                    result_msg = message
-        except Exception as e:
-            logger.error(f"  SDK error: {e}")
-            verify_error = f"Claude Code process error: {e}"
-            if tasks_file:
-                update_task(tasks_file, task["id"],
-                            last_error=str(e), cost_usd=total_cost)
-            continue
-
-        if result_msg:
-            session_id = result_msg.session_id
-            if result_msg.total_cost_usd:
-                total_cost += result_msg.total_cost_usd
-            logger.info(
-                f"  Claude finished: {result_msg.subtype}, "
-                f"cost=${result_msg.total_cost_usd or 0:.4f}"
-            )
-            # Persist cost and session_id after each attempt
-            if tasks_file:
-                update_task(tasks_file, task["id"],
-                            cost_usd=total_cost, session_id=session_id)
-            if result_msg.subtype != "success":
-                verify_error = (
-                    f"Agent session ended with subtype '{result_msg.subtype}'"
+            try:
+                async for message in query(prompt=prompt, options=options):
+                    if isinstance(message, ResultMessage):
+                        result_msg = message
+            except Exception as e:
+                logger.error(f"  SDK error: {e}")
+                verify_error = f"Claude Code process error: {e}"
+                if tasks_file:
+                    update_task(tasks_file, task["id"],
+                                last_error=str(e), cost_usd=total_cost)
+                continue
+            if result_msg:
+                session_id = result_msg.session_id
+                if result_msg.total_cost_usd:
+                    total_cost += result_msg.total_cost_usd
+                logger.info(
+                    f"  Claude finished: {result_msg.subtype}, "
+                    f"cost=${result_msg.total_cost_usd or 0:.4f}"
                 )
-                logger.warning(f"  Skipping verification: {verify_error}")
+                # Persist cost and session_id after each attempt
+                if tasks_file:
+                    update_task(tasks_file, task["id"],
+                                cost_usd=total_cost, session_id=session_id)
+                if result_msg.subtype != "success":
+                    verify_error = (
+                        f"Agent session ended with subtype '{result_msg.subtype}'"
+                    )
+                    logger.warning(f"  Skipping verification: {verify_error}")
+                    if tasks_file:
+                        update_task(tasks_file, task["id"], last_error=verify_error[:500])
+                    continue
+            else:
+                verify_error = "No ResultMessage received from SDK"
+                logger.warning(f"  {verify_error}")
                 if tasks_file:
                     update_task(tasks_file, task["id"], last_error=verify_error[:500])
                 continue
-        else:
-            verify_error = "No ResultMessage received from SDK"
-            logger.warning(f"  {verify_error}")
+
+            # Run verification
+            verify_cmd = task.get("verify_cmd") or None
+            verify_timeout = task.get("verify_timeout", 120)
+            passed, output = run_verify(project_dir, verify_cmd, timeout=verify_timeout)
+
+            if passed:
+                logger.info("  Verification PASSED")
+                return {
+                    "status": "completed",
+                    "attempts": attempt,
+                    "cost_usd": total_cost,
+                    "session_id": session_id,
+                }
+
+            verify_error = output
+            logger.info(f"  Verification FAILED: {output[:200]}")
             if tasks_file:
-                update_task(tasks_file, task["id"], last_error=verify_error[:500])
-            continue
-
-        # Run verification
-        verify_cmd = task.get("verify_cmd") or None
-        verify_timeout = task.get("verify_timeout", 120)
-        passed, output = run_verify(project_dir, verify_cmd, timeout=verify_timeout)
-
-        if passed:
-            logger.info("  Verification PASSED")
-            return {
-                "status": "completed",
-                "attempts": attempt,
-                "cost_usd": total_cost,
-                "session_id": session_id,
-            }
-
-        verify_error = output
-        logger.info(f"  Verification FAILED: {output[:200]}")
-        if tasks_file:
-            update_task(tasks_file, task["id"], last_error=output[:500])
+                update_task(tasks_file, task["id"], last_error=output[:500])
+        finally:
+            if heartbeat:
+                heartbeat.cancel()
+                with suppress(asyncio.CancelledError):
+                    await heartbeat
 
     return {
         "status": "failed",

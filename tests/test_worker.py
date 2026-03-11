@@ -30,6 +30,7 @@ def test_pick_task_returns_first_pending(tasks_file):
     assert task["status"] == "in_progress"
     assert task["worker"] == "main"
     assert task["started_at"] is not None
+    assert task["heartbeat_at"] is not None
 
 
 def test_pick_task_updates_file(tasks_file):
@@ -39,6 +40,85 @@ def test_pick_task_updates_file(tasks_file):
     t2 = next(t for t in tasks if t["id"] == "t2")
     assert t2["status"] == "in_progress"
     assert t2["worker"] == "w1"
+    assert t2["heartbeat_at"] is not None
+
+
+def test_requeue_stale_tasks_uses_heartbeat_and_clears_run_state(tmp_path):
+    from worker import requeue_stale_tasks
+
+    tasks = [
+        {
+            "id": "stale-heartbeat",
+            "prompt": "stale heartbeat",
+            "status": "in_progress",
+            "started_at": "2099-01-01T00:00:00",
+            "finished_at": None,
+            "heartbeat_at": "2000-01-01T00:00:00",
+            "worker": "w1",
+            "attempts": 4,
+            "cost_usd": 2.5,
+            "session_id": "sess-stale",
+            "last_error": "old error",
+        },
+        {
+            "id": "healthy-heartbeat",
+            "prompt": "healthy heartbeat",
+            "status": "in_progress",
+            "started_at": "2000-01-01T00:00:00",
+            "finished_at": None,
+            "heartbeat_at": "2099-01-01T00:00:00",
+            "worker": "w2",
+            "attempts": 3,
+            "cost_usd": 1.0,
+            "session_id": "sess-healthy",
+        },
+        {
+            "id": "stale-started-at",
+            "prompt": "fallback to started_at",
+            "status": "in_progress",
+            "started_at": "2000-01-01T00:00:00",
+            "finished_at": None,
+            "worker": "w3",
+            "attempts": 2,
+            "cost_usd": 0.5,
+            "session_id": "sess-fallback",
+            "last_error": "retry me",
+        },
+    ]
+    tasks_file = tmp_path / "tasks.json"
+    tasks_file.write_text(json.dumps(tasks, indent=2))
+
+    requeued = requeue_stale_tasks(tasks_file, stale_timeout=1800)
+
+    assert requeued == 2
+    updated = json.loads(tasks_file.read_text())
+    stale_heartbeat = next(task for task in updated if task["id"] == "stale-heartbeat")
+    healthy_heartbeat = next(task for task in updated if task["id"] == "healthy-heartbeat")
+    stale_started_at = next(task for task in updated if task["id"] == "stale-started-at")
+
+    assert stale_heartbeat["status"] == "pending"
+    assert stale_heartbeat["worker"] is None
+    assert stale_heartbeat["started_at"] is None
+    assert stale_heartbeat["finished_at"] is None
+    assert stale_heartbeat["heartbeat_at"] is None
+    assert stale_heartbeat["attempts"] == 0
+    assert stale_heartbeat["cost_usd"] == 0.0
+    assert stale_heartbeat["session_id"] is None
+    assert "last_error" not in stale_heartbeat
+
+    assert healthy_heartbeat["status"] == "in_progress"
+    assert healthy_heartbeat["worker"] == "w2"
+    assert healthy_heartbeat["heartbeat_at"] == "2099-01-01T00:00:00"
+    assert healthy_heartbeat["attempts"] == 3
+
+    assert stale_started_at["status"] == "pending"
+    assert stale_started_at["worker"] is None
+    assert stale_started_at["started_at"] is None
+    assert stale_started_at["heartbeat_at"] is None
+    assert stale_started_at["attempts"] == 0
+    assert stale_started_at["cost_usd"] == 0.0
+    assert stale_started_at["session_id"] is None
+    assert "last_error" not in stale_started_at
 
 
 def test_pick_task_returns_none_when_no_pending(tasks_file):
