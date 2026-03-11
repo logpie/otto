@@ -358,10 +358,13 @@ async def _run_task_inner(
                     update_task(tasks_file, task["id"], last_error=verify_error[:500])
                 continue
 
-            # Run verification
+            # Run verification in a thread so the heartbeat task can
+            # continue updating heartbeat_at during long verify commands.
             verify_cmd = task.get("verify_cmd") or None
             verify_timeout = task.get("verify_timeout", 120)
-            passed, output = run_verify(project_dir, verify_cmd, timeout=verify_timeout)
+            passed, output = await asyncio.to_thread(
+                run_verify, project_dir, verify_cmd, timeout=verify_timeout
+            )
 
             if passed:
                 logger.info("  Verification PASSED")
