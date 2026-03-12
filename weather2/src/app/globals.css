@@ -23,56 +23,68 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* Custom scrollbar */
+/* Custom scrollbar - thin and subtle */
 ::-webkit-scrollbar {
-  width: 0px;
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
   background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.25);
 }
 
 /* Glass morphism effect */
 .glass {
-  background: rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.12);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 14px;
 }
 
 .glass-dark {
-  background: rgba(0, 0, 0, 0.15);
+  background: rgba(0, 0, 0, 0.2);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 14px;
 }
 
 /* Weather gradient backgrounds */
 .bg-clear-day {
-  background: linear-gradient(to bottom, #4A90D9, #6BB3F0, #87CEEB);
+  background: linear-gradient(180deg, #47a9f5 0%, #6bc1f7 40%, #87ceeb 100%);
 }
 
 .bg-clear-night {
-  background: linear-gradient(to bottom, #0f1b3d, #1a2951, #1e3a5f);
+  background: linear-gradient(180deg, #0c1445 0%, #1a2a5e 40%, #1e3a6f 100%);
 }
 
 .bg-cloudy {
-  background: linear-gradient(to bottom, #6b7b8d, #8a9bae, #a0b0c0);
+  background: linear-gradient(180deg, #6b7d91 0%, #8a9db2 50%, #a0b4c8 100%);
 }
 
 .bg-rainy {
-  background: linear-gradient(to bottom, #3d4f5f, #4a5d6e, #576b7d);
+  background: linear-gradient(180deg, #3d4f61 0%, #4e6475 50%, #5b7488 100%);
 }
 
 .bg-stormy {
-  background: linear-gradient(to bottom, #2c3e50, #34495e, #3d566e);
+  background: linear-gradient(180deg, #2a3a4e 0%, #364d63 50%, #3f5a72 100%);
 }
 
 .bg-snowy {
-  background: linear-gradient(to bottom, #7f8c9a, #95a5b5, #b0bec5);
+  background: linear-gradient(180deg, #8b99a8 0%, #a0b0bf 50%, #bcc8d3 100%);
 }
 
 .bg-foggy {
-  background: linear-gradient(to bottom, #8e9eab, #a5b5c4, #bcc8d3);
+  background: linear-gradient(180deg, #8e9eab 0%, #a5b5c4 50%, #bcc8d3 100%);
 }
 
 /* Hourly forecast scroll */
@@ -87,23 +99,11 @@ body {
   display: none;
 }
 
-/* Fade edges on hourly scroll */
-.hourly-container {
-  position: relative;
-}
-
-/* Sunrise/sunset gradient bar */
+/* UV gradient bar */
 .uv-gradient {
   background: linear-gradient(to right, #4ade80, #facc15, #f97316, #ef4444, #a855f7);
   height: 4px;
   border-radius: 2px;
-}
-
-/* Temperature bar gradient */
-.temp-bar {
-  background: linear-gradient(to right, #60a5fa, #34d399, #fbbf24, #f97316, #ef4444);
-  height: 6px;
-  border-radius: 3px;
 }
 
 /* Animated weather icons */
@@ -127,31 +127,66 @@ body {
 
 /* Search bar styling */
 .search-input::placeholder {
-  color: rgba(255, 255, 255, 0.5);
+  color: rgba(255, 255, 255, 0.45);
 }
 
-/* City card hover effect */
-.city-card {
-  transition: transform 0.2s ease, box-shadow 0.2s ease;
+/* Sidebar city item */
+.sidebar-city {
+  transition: background-color 0.15s ease;
+  border-radius: 10px;
+  cursor: pointer;
 }
 
-.city-card:hover {
-  transform: scale(1.02);
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+.sidebar-city:hover {
+  background: rgba(255, 255, 255, 0.08);
 }
 
-.city-card:active {
-  transform: scale(0.98);
+.sidebar-city.active {
+  background: rgba(255, 255, 255, 0.15);
 }
 
 /* Main content scroll */
 .main-scroll {
   overflow-y: auto;
-  scrollbar-width: none;
-  -ms-overflow-style: none;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
   height: 100%;
 }
 
 .main-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+
+.main-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.main-scroll::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 3px;
+}
+
+/* Sidebar scroll */
+.sidebar-scroll {
+  overflow-y: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.sidebar-scroll::-webkit-scrollbar {
   display: none;
+}
+
+/* Smooth transitions */
+.weather-transition {
+  transition: background 0.6s ease, opacity 0.3s ease;
+}
+
+/* Detail card hover */
+.detail-card {
+  transition: transform 0.15s ease, background-color 0.15s ease;
+}
+
+.detail-card:hover {
+  background: rgba(255, 255, 255, 0.16);
 }

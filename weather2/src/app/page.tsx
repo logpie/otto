@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import { SavedCity, WeatherData } from "@/lib/types";
-import CityList from "@/components/CityList";
+import Sidebar from "@/components/Sidebar";
 import WeatherDetail from "@/components/WeatherDetail";
 
 const DEFAULT_CITIES: SavedCity[] = [
@@ -54,16 +54,23 @@ function saveCities(cities: SavedCity[]) {
 
 export default function Home() {
   const [cities, setCities] = useState<SavedCity[]>(DEFAULT_CITIES);
-  const [selectedWeather, setSelectedWeather] = useState<WeatherData | null>(null);
-  const [view, setView] = useState<"list" | "detail">("list");
+  const [selectedCityId, setSelectedCityId] = useState<string | null>(null);
+  const [weatherCache, setWeatherCache] = useState<Record<string, WeatherData>>({});
   const [initialLoading, setInitialLoading] = useState(true);
 
   // Load cities from localStorage
   useEffect(() => {
     const loaded = loadCities();
     setCities(loaded);
+    if (loaded.length > 0) {
+      setSelectedCityId(loaded[0].id);
+    }
+    setInitialLoading(false);
+  }, []);
 
-    // Try to get user's location
+  // Try to get user's location
+  useEffect(() => {
+    if (typeof window === "undefined") return;
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
         async (position) => {
@@ -85,21 +92,21 @@ export default function Home() {
               saveCities(updated);
               return updated;
             });
+            setSelectedCityId("current-location");
           } catch {}
         },
-        () => {
-          // Geolocation denied — use defaults
-        },
+        () => {},
         { timeout: 5000 }
       );
     }
-
-    setInitialLoading(false);
   }, []);
 
-  const handleSelectCity = useCallback((weather: WeatherData) => {
-    setSelectedWeather(weather);
-    setView("detail");
+  const handleUpdateWeather = useCallback((cityId: string, data: WeatherData) => {
+    setWeatherCache((prev) => ({ ...prev, [cityId]: data }));
+  }, []);
+
+  const handleSelectCity = useCallback((cityId: string) => {
+    setSelectedCityId(cityId);
   }, []);
 
   const handleAddCity = useCallback((city: SavedCity) => {
@@ -109,41 +116,58 @@ export default function Home() {
       saveCities(updated);
       return updated;
     });
+    setSelectedCityId(city.id);
   }, []);
 
   const handleRemoveCity = useCallback((cityId: string) => {
     setCities((prev) => {
       const updated = prev.filter((c) => c.id !== cityId);
       saveCities(updated);
+      // If we removed the selected city, select the first one
+      if (cityId === selectedCityId && updated.length > 0) {
+        setSelectedCityId(updated[0].id);
+      }
       return updated;
     });
-  }, []);
-
-  const handleBack = useCallback(() => {
-    setView("list");
-    setSelectedWeather(null);
-  }, []);
+  }, [selectedCityId]);
 
   if (initialLoading) {
     return (
-      <div className="h-screen w-screen bg-gray-900 flex items-center justify-center">
-        <div className="text-white/50 text-lg">Loading...</div>
+      <div className="h-screen w-screen bg-[#1c1c1e] flex items-center justify-center">
+        <div className="text-white/40 text-lg">Loading...</div>
       </div>
     );
   }
 
+  const selectedWeather = selectedCityId ? weatherCache[selectedCityId] : null;
+
   return (
-    <div className="h-screen w-screen overflow-hidden">
-      {view === "detail" && selectedWeather ? (
-        <WeatherDetail weather={selectedWeather} onBack={handleBack} />
-      ) : (
-        <CityList
-          cities={cities}
-          onSelectCity={handleSelectCity}
-          onAddCity={handleAddCity}
-          onRemoveCity={handleRemoveCity}
-        />
-      )}
+    <div className="h-screen w-screen flex overflow-hidden">
+      {/* Sidebar */}
+      <Sidebar
+        cities={cities}
+        selectedCityId={selectedCityId}
+        weatherCache={weatherCache}
+        onSelectCity={handleSelectCity}
+        onAddCity={handleAddCity}
+        onRemoveCity={handleRemoveCity}
+        onUpdateWeather={handleUpdateWeather}
+      />
+
+      {/* Main Content */}
+      <main className="flex-1 h-full overflow-hidden">
+        {selectedWeather ? (
+          <WeatherDetail weather={selectedWeather} />
+        ) : (
+          <div className="h-full bg-clear-day flex items-center justify-center">
+            <div className="text-white/40 text-lg">
+              {cities.length === 0
+                ? "Add a city to get started"
+                : "Loading weather data..."}
+            </div>
+          </div>
+        )}
+      </main>
     </div>
   );
 }
