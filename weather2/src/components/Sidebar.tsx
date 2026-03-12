@@ -63,7 +63,7 @@ export default function Sidebar({
       } finally {
         setIsSearching(false);
       }
-    }, 300);
+    }, 150);
   }, []);
 
   const handleAddCity = (location: GeoLocation) => {
