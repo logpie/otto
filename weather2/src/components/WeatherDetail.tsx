@@ -1,5 +1,3 @@
-"use client";
-
 import React from "react";
 import { WeatherData } from "@/lib/types";
 import { getBackgroundClass } from "@/lib/weather-api";

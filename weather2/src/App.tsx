@@ -1,5 +1,3 @@
-"use client";
-
 import React, { useState, useEffect, useCallback } from "react";
 import { SavedCity, WeatherData } from "@/lib/types";
 import Sidebar from "@/components/Sidebar";
@@ -35,7 +33,6 @@ const DEFAULT_CITIES: SavedCity[] = [
 const STORAGE_KEY = "weather-app-cities";
 
 function loadCities(): SavedCity[] {
-  if (typeof window === "undefined") return DEFAULT_CITIES;
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
     if (stored) {
@@ -52,7 +49,7 @@ function saveCities(cities: SavedCity[]) {
   } catch {}
 }
 
-export default function Home() {
+export default function App() {
   const [cities, setCities] = useState<SavedCity[]>(DEFAULT_CITIES);
   const [selectedCityId, setSelectedCityId] = useState<string | null>(null);
   const [weatherCache, setWeatherCache] = useState<Record<string, WeatherData>>({});
@@ -70,7 +67,6 @@ export default function Home() {
 
   // Try to get user's location
   useEffect(() => {
-    if (typeof window === "undefined") return;
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
         async (position) => {
@@ -123,7 +119,6 @@ export default function Home() {
     setCities((prev) => {
       const updated = prev.filter((c) => c.id !== cityId);
       saveCities(updated);
-      // If we removed the selected city, select the first one
       if (cityId === selectedCityId && updated.length > 0) {
         setSelectedCityId(updated[0].id);
       }
@@ -143,7 +138,6 @@ export default function Home() {
 
   return (
     <div className="h-screen w-screen flex overflow-hidden">
-      {/* Sidebar */}
       <Sidebar
         cities={cities}
         selectedCityId={selectedCityId}
@@ -154,7 +148,6 @@ export default function Home() {
         onUpdateWeather={handleUpdateWeather}
       />
 
-      {/* Main Content */}
       <main className="flex-1 h-full overflow-hidden">
         {selectedWeather ? (
           <WeatherDetail weather={selectedWeather} />

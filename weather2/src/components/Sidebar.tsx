@@ -1,5 +1,3 @@
-"use client";
-
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { SavedCity, WeatherData, GeoLocation } from "@/lib/types";
 import { fetchWeather, searchLocations, getBackgroundClass } from "@/lib/weather-api";
@@ -96,12 +94,12 @@ export default function Sidebar({
 
   return (
     <aside className="w-[320px] h-full bg-[#1c1c1e]/95 backdrop-blur-xl border-r border-white/[0.06] flex flex-col shrink-0">
-      {/* Header */}
-      <div className="px-4 pt-5 pb-2 flex items-center justify-between">
+      {/* Header - draggable titlebar region */}
+      <div className="titlebar-drag px-4 pt-8 pb-2 flex items-center justify-between">
         <h1 className="text-[22px] font-bold text-white tracking-tight">Weather</h1>
         <button
           onClick={openSearch}
-          className="p-1.5 rounded-lg hover:bg-white/10 transition-colors"
+          className="titlebar-no-drag p-1.5 rounded-lg hover:bg-white/10 transition-colors"
           title="Add City"
         >
           <Plus size={18} className="text-white/70" />
