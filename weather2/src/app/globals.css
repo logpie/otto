@@ -1,0 +1,157 @@
+@import "tailwindcss";
+
+@theme inline {
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif;
+  color: white;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 0px;
+  background: transparent;
+}
+
+/* Glass morphism effect */
+.glass {
+  background: rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 16px;
+}
+
+.glass-dark {
+  background: rgba(0, 0, 0, 0.15);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+}
+
+/* Weather gradient backgrounds */
+.bg-clear-day {
+  background: linear-gradient(to bottom, #4A90D9, #6BB3F0, #87CEEB);
+}
+
+.bg-clear-night {
+  background: linear-gradient(to bottom, #0f1b3d, #1a2951, #1e3a5f);
+}
+
+.bg-cloudy {
+  background: linear-gradient(to bottom, #6b7b8d, #8a9bae, #a0b0c0);
+}
+
+.bg-rainy {
+  background: linear-gradient(to bottom, #3d4f5f, #4a5d6e, #576b7d);
+}
+
+.bg-stormy {
+  background: linear-gradient(to bottom, #2c3e50, #34495e, #3d566e);
+}
+
+.bg-snowy {
+  background: linear-gradient(to bottom, #7f8c9a, #95a5b5, #b0bec5);
+}
+
+.bg-foggy {
+  background: linear-gradient(to bottom, #8e9eab, #a5b5c4, #bcc8d3);
+}
+
+/* Hourly forecast scroll */
+.hourly-scroll {
+  overflow-x: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  scroll-behavior: smooth;
+}
+
+.hourly-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+/* Fade edges on hourly scroll */
+.hourly-container {
+  position: relative;
+}
+
+/* Sunrise/sunset gradient bar */
+.uv-gradient {
+  background: linear-gradient(to right, #4ade80, #facc15, #f97316, #ef4444, #a855f7);
+  height: 4px;
+  border-radius: 2px;
+}
+
+/* Temperature bar gradient */
+.temp-bar {
+  background: linear-gradient(to right, #60a5fa, #34d399, #fbbf24, #f97316, #ef4444);
+  height: 6px;
+  border-radius: 3px;
+}
+
+/* Animated weather icons */
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-5px); }
+}
+
+@keyframes pulse-slow {
+  0%, 100% { opacity: 0.8; }
+  50% { opacity: 1; }
+}
+
+.animate-float {
+  animation: float 3s ease-in-out infinite;
+}
+
+.animate-pulse-slow {
+  animation: pulse-slow 2s ease-in-out infinite;
+}
+
+/* Search bar styling */
+.search-input::placeholder {
+  color: rgba(255, 255, 255, 0.5);
+}
+
+/* City card hover effect */
+.city-card {
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.city-card:hover {
+  transform: scale(1.02);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+}
+
+.city-card:active {
+  transform: scale(0.98);
+}
+
+/* Main content scroll */
+.main-scroll {
+  overflow-y: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  height: 100%;
+}
+
+.main-scroll::-webkit-scrollbar {
+  display: none;
+}
