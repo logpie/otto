@@ -73,24 +73,29 @@ For each pending task:
 5. Await testgen if still running (block until complete or timeout at 120s).
    If testgen times out or fails, skip Tier 2 — log warning, continue with Tiers 1 and 3.
 
-6. Run tiered verification in a DISPOSABLE WORKTREE:
-   a. Create a temporary worktree from the current task branch HEAD.
-   b. Copy generated test from .git/otto/testgen/ into the temp worktree.
-   c. Run Tier 1 (existing tests) in temp worktree.
-   d. Run Tier 2 (generated tests) in temp worktree.
-   e. Run Tier 3 (custom verify command) in temp worktree.
-   f. Remove the temp worktree regardless of pass/fail.
-   This completely isolates verification side effects from the agent's working tree.
-   The agent never sees the generated test file, even on retries.
+6. Build a CANDIDATE COMMIT for verification:
+   a. From the agent's workspace, create a candidate commit on the task branch
+      that includes all agent changes (staged, unstaged, untracked code files).
+      If the agent already made commits, squash with `git reset --mixed <base_sha>`
+      first, then stage explicitly.
+   b. Copy generated test from .git/otto/testgen/ into the working tree, stage it,
+      amend the candidate commit to include it.
+   c. This candidate commit is the EXACT tree that will be verified and (if passing)
+      merged. Verified tree = committed tree, no gap.
 
-7. All pass → prepare final commit:
-   a. Copy generated test file from .git/otto/testgen/ into the project test directory
-      (on the task branch).
-   b. If the agent created commits, `git reset --mixed <base_sha>` to unstage everything,
-      then explicitly `git add` intended files + generated test (not `git add -A`).
-      If the agent did not commit, just `git add` the changed files + generated test.
-   c. Commit with message "otto: <first 60 chars of task prompt> (#<id>)".
-   d. Merge to default branch (fast-forward), delete branch, next task.
+   Run tiered verification in a DISPOSABLE WORKTREE:
+   d. Create a temp worktree with detached HEAD at the candidate commit.
+   e. Run Tier 1 (existing tests), Tier 2 (generated tests), Tier 3 (custom verify).
+   f. Remove the temp worktree regardless of pass/fail.
+   The agent's working tree is never touched by verification.
+   The agent never sees the generated test file, even on retries — after verification
+   (pass or fail), `git reset --mixed HEAD~1` on the task branch removes the candidate
+   commit and unstages the test file from the agent's workspace.
+
+7. All pass → the candidate commit IS the final commit. Reset the task branch to
+   the candidate commit (it was removed in step 6f for retry safety, re-apply it).
+   Update commit message to "otto: <first 60 chars of task prompt> (#<id>)".
+   Merge to default branch (fast-forward), delete branch, next task.
    If fast-forward fails (default branch diverged), preserve the branch and mark task
    as `failed` with error "branch diverged — otto/<key> preserved, manual rebase needed."
 
