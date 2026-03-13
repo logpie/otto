@@ -4,3 +4,4 @@ logs/
 tasks.json
 tasks.lock
 weather2/.next/
+.worktrees/
