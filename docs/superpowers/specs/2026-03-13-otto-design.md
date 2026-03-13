@@ -8,6 +8,8 @@ Otto is a CLI tool that runs autonomous Claude Code agents against a task queue 
 
 **Migration note:** This is a ground-up rewrite. The v2 system (tasks.json, FastAPI dashboard, worker.py) is replaced entirely. No backward compatibility layer.
 
+**Platform:** macOS and Linux only. Uses `flock` and `os.setpgrp` (POSIX).
+
 ---
 
 ## Design Decisions
@@ -19,7 +21,7 @@ The value is the autonomous loop, not a dashboard. CLI composes with cron, GitHu
 Parallel agents introduce merge conflicts, resource contention, and coordination complexity (Symphony needs an entire Elixir/BEAM runtime for this). Serial with branch-per-task is simple, reliable, and still fully autonomous — you throw a list of tasks at it and walk away.
 
 ### Branch-per-task
-Each task runs on `otto/<task-slug>`. The slug is derived from the task ID: `otto/task-<id>` (e.g., `otto/task-1`, `otto/task-2`). On success, merge to main (fast-forward). On failure, delete the branch. Main never has broken code. `git log` becomes a readable history of what otto accomplished.
+Each task gets a stable key (8-char hex from uuid4, e.g., `a1b2c3d4`) assigned at creation, used for branch names (`otto/a1b2c3d4`), log directories, and testgen artifacts. The numeric `id` field is display-only for human convenience. Keys survive import/reset without collision. On success, merge to default branch (fast-forward). On failure, delete the branch. The default branch never has broken code.
 
 ### Session resume on retries
 The agent sees what went wrong on previous attempts via `--resume <session_id>`. Strictly more information than starting fresh. Prevents repeating the same mistake.
@@ -49,7 +51,7 @@ For each pending task:
 
 1. Preflight: require clean working tree (no uncommitted changes). Abort if dirty.
 
-2. Create branch otto/task-<id> from current default branch HEAD.
+2. Create branch otto/<key> from current default branch HEAD.
    If branch already exists: check if it was preserved from a "main diverged" failure.
    If so, refuse to overwrite — user must manually resolve or `otto reset` first.
    If it's from an interrupted run (status != failed with diverge error), delete and recreate.
@@ -74,15 +76,18 @@ For each pending task:
 6. Run tiered verification:
    a. Existing test suite (auto-detected)
    b. Copy generated test from .git/otto/testgen/ into project, run it, then
-      remove from working tree. The agent never sees this file.
+      remove from working tree along with any side effects (*.pyc, __pycache__,
+      .pytest_cache, coverage files). The agent never sees this file.
    c. Custom verify command (if specified in task)
 
-7. All pass → hard reset to clean state, stage only code changes + generated test file
-   (not otto runtime files), commit with message
-   "otto: <first 60 chars of task prompt> (#<task-id>)",
-   merge to default branch (fast-forward), delete branch, next task.
+7. All pass → build the final commit from `git diff <base_sha> HEAD` (where base_sha
+   was recorded at branch creation in step 2). This handles both agent-modified files
+   and any agent-created commits correctly. Copy generated test file from .git/otto/testgen/
+   into the project test directory. Reset to base_sha, apply the combined diff + test file,
+   commit with message "otto: <first 60 chars of task prompt> (#<id>)".
+   Merge to default branch (fast-forward), delete branch, next task.
    If fast-forward fails (default branch diverged), preserve the branch and mark task
-   as `failed` with error "branch diverged — otto/task-<id> preserved, manual rebase needed."
+   as `failed` with error "branch diverged — otto/<key> preserved, manual rebase needed."
 
 8. Any fail → feed verification output (stdout/stderr only, NOT the test source code)
    to agent via session resume, retry (up to max_retries).
@@ -124,25 +129,32 @@ Retries happen within `running`. No separate retry state.
 ```yaml
 tasks:
   - id: 1
+    key: a1b2c3d4
     prompt: "Add JWT authentication to the API"
     status: pending
 
   - id: 2
+    key: e5f6a7b8
     prompt: "Fix memory leak in cache.py"
     verify: "python benchmark.py --check-memory"
     status: pending
 
   - id: 3
+    key: c9d0e1f2
     prompt: "Refactor database layer to use connection pooling"
     max_retries: 5
     status: pending
 ```
 
+`key` is auto-generated on task creation. Branch name: `otto/<key>`. Log dir: `otto_logs/<key>/`. Testgen dir: `.git/otto/testgen/<key>/`.
+
 Minimal required field: `prompt`. Everything else has defaults from `otto.yaml` or is auto-derived.
 
 Runtime state (`status`, `attempts`, `error`, `session_id`) is written back to the task file as the system runs. No separate state database.
 
-**Git hygiene:** `tasks.yaml`, `otto.yaml`, `otto_logs/`, and `.git/otto/` must be in `.gitignore`. Otto's `init` command adds them automatically. The `git add` in step 7 uses explicit file paths (from `git diff --name-only`), never `git add -A`, to avoid committing runtime state.
+**Git hygiene:** `tasks.yaml`, `otto.yaml`, and `otto_logs/` must be gitignored. Otto's `init` command adds them to `.git/info/exclude` (not `.gitignore`) to avoid dirtying the repo. `.git/otto/` is inherently invisible to git. Step 7 stages files explicitly (never `git add -A`).
+
+**Init and run:** `otto init` writes `otto.yaml` and updates `.git/info/exclude`. Neither modifies tracked files, so the working tree stays clean for `otto run`'s preflight check.
 
 ### Project config (`otto.yaml`)
 
@@ -178,7 +190,7 @@ Three tiers, run in order. First failure stops the chain.
   Mocks/fakes are allowed only when the project already provides them (e.g., test fixtures, local test servers).
   No external network calls unless explicitly allowlisted. Tests must be deterministic and hermetic.
 - Tests written to a file in the project's test directory, using the project's test framework.
-  Detection: pytest → `tests/otto_verify_task_<id>.py`, jest → `__tests__/otto_verify_task_<id>.test.js`, go → `otto_verify_task_<id>_test.go`.
+  Detection: pytest → `tests/otto_verify_<key>.py`, jest → `__tests__/otto_verify_<key>.test.js`, go → `otto_verify_<key>_test.go`.
 - Testgen prompt receives: task prompt, file tree listing (via `git ls-files`), and the project's test framework.
   It does NOT receive file contents or the agent's changes — only structure.
   Uses `git ls-files` (not `find`) to exclude .git, build artifacts, secrets, and vendored deps.
