@@ -1745,8 +1745,12 @@ async def run_all(
     """Run all pending tasks. Returns exit code (0=all passed, 1=any failed)."""
     default_branch = config["default_branch"]
 
-    # Acquire process lock
-    lock_path = project_dir / "otto.lock"
+    # Acquire process lock — use canonical repo root to prevent path aliasing
+    repo_root = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=project_dir, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    lock_path = Path(repo_root) / "otto.lock"
     lock_path.touch()
     lock_fh = open(lock_path, "r")
     try:
@@ -2080,7 +2084,11 @@ def run(prompt, dry_run):
         import os
         import time
 
-        lock_path = project_dir / "otto.lock"
+        repo_root = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=project_dir, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        lock_path = Path(repo_root) / "otto.lock"
         lock_path.touch()
         lock_fh = open(lock_path, "r")
         try:
