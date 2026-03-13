@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import { SavedCity, WeatherData, GeoLocation } from "@/lib/types";
+import { SavedCity, WeatherData, GeoLocation, FetchTimings } from "@/lib/types";
 import { fetchWeather, searchLocations, getBackgroundClass } from "@/lib/weather-api";
 import { getWeatherIcon } from "@/lib/weather-icons";
 import { MapPin, Search, X, Plus, Trash2 } from "lucide-react";
@@ -12,6 +12,7 @@ interface SidebarProps {
   onAddCity: (city: SavedCity) => void;
   onRemoveCity: (cityId: string) => void;
   onUpdateWeather: (cityId: string, data: WeatherData) => void;
+  onUpdateTimings?: (cityId: string, timings: FetchTimings) => void;
 }
 
 export default function Sidebar({
@@ -22,6 +23,7 @@ export default function Sidebar({
   onAddCity,
   onRemoveCity,
   onUpdateWeather,
+  onUpdateTimings,
 }: SidebarProps) {
   const [searching, setSearching] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -36,8 +38,9 @@ export default function Sidebar({
     cities.forEach((city) => {
       if (!weatherCache[city.id]) {
         fetchWeather(city.latitude, city.longitude, city.name, city.region, city.country)
-          .then((data) => {
-            onUpdateWeather(city.id, data);
+          .then(({ weather, timings }) => {
+            onUpdateWeather(city.id, weather);
+            onUpdateTimings?.(city.id, timings);
           })
           .catch(console.error);
       }

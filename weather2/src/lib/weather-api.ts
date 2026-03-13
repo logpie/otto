@@ -1,4 +1,4 @@
-import { WeatherData, HourlyForecast, DailyForecast, GeoLocation } from "./types";
+import { WeatherData, HourlyForecast, DailyForecast, GeoLocation, StageTiming, FetchTimings } from "./types";
 
 // Using Open-Meteo API (free, no API key needed)
 const GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search";
@@ -7,12 +7,13 @@ const WEATHER_URL = "https://api.open-meteo.com/v1/forecast";
 // Track connection readiness so we can await warming before first real request
 let _connectionsReady: Promise<void> | null = null;
 
+// Exported timing for connection warming stage
+export let warmConnectionTiming: StageTiming | null = null;
+
 // Pre-warm connections to both API hosts on module load.
-// This establishes TCP + TLS early so actual requests reuse the warm connection
-// and complete in <300ms instead of ~700ms (cold start).
-// With HTTP keep-alive, subsequent requests on the same host skip the ~500ms
-// TLS handshake and respond in ~160ms (weather) / ~260ms (geocoding).
 function warmConnections() {
+  const warmStart = performance.now();
+  const warmStartWall = Date.now();
   _connectionsReady = Promise.all([
     fetch(`${GEOCODING_URL}?name=a&count=1&language=en&format=json`, {
       priority: "low" as RequestPriority,
@@ -22,7 +23,13 @@ function warmConnections() {
       priority: "low" as RequestPriority,
       keepalive: true,
     }).catch(() => {}),
-  ]).then(() => {});
+  ]).then(() => {
+    warmConnectionTiming = {
+      label: "Connection Warming (TCP+TLS)",
+      startTime: warmStartWall,
+      duration: performance.now() - warmStart,
+    };
+  });
 }
 warmConnections();
 
@@ -105,7 +112,10 @@ export async function fetchWeather(
   locationName: string,
   region: string,
   country: string
-): Promise<WeatherData> {
+): Promise<{ weather: WeatherData; timings: FetchTimings }> {
+  const stages: StageTiming[] = [];
+  const totalStart = performance.now();
+
   const params = new URLSearchParams({
     latitude: latitude.toString(),
     longitude: longitude.toString(),
@@ -120,18 +130,47 @@ export async function fetchWeather(
     forecast_hours: "26",
   });
 
+  // Stage: Wait for warm connections
+  const warmStart = performance.now();
+  const warmStartWall = Date.now();
   await ensureWarm();
+  stages.push({
+    label: "Wait for Warm Connections",
+    startTime: warmStartWall,
+    duration: performance.now() - warmStart,
+  });
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 3000);
 
+  // Stage: Network fetch
+  const fetchStart = performance.now();
+  const fetchStartWall = Date.now();
   let data;
   try {
     const res = await fetch(`${WEATHER_URL}?${params}`, { signal: controller.signal, keepalive: true });
+    stages.push({
+      label: "Network Request",
+      startTime: fetchStartWall,
+      duration: performance.now() - fetchStart,
+    });
+
+    // Stage: JSON parse
+    const parseStart = performance.now();
+    const parseStartWall = Date.now();
     data = await res.json();
+    stages.push({
+      label: "JSON Parse",
+      startTime: parseStartWall,
+      duration: performance.now() - parseStart,
+    });
   } finally {
     clearTimeout(timeoutId);
   }
+
+  // Stage: Data transform
+  const transformStart = performance.now();
+  const transformStartWall = Date.now();
 
   const hourly: HourlyForecast[] = data.hourly.time.map((time: string, i: number) => {
     const condition = getWeatherCondition(data.hourly.weather_code[i]);
@@ -167,7 +206,15 @@ export async function fetchWeather(
 
   const currentCondition = getWeatherCondition(data.current.weather_code);
 
-  return {
+  stages.push({
+    label: "Data Transform",
+    startTime: transformStartWall,
+    duration: performance.now() - transformStart,
+  });
+
+  const totalDuration = performance.now() - totalStart;
+
+  const weather: WeatherData = {
     location: locationName,
     region,
     country,
@@ -194,6 +241,16 @@ export async function fetchWeather(
     hourly,
     daily,
   };
+
+  const timings: FetchTimings = {
+    cityId: `${latitude}-${longitude}`,
+    cityName: locationName,
+    stages,
+    totalDuration,
+    fetchedAt: new Date(),
+  };
+
+  return { weather, timings };
 }
 
 export function getBackgroundClass(code: number, isDay: boolean): string {

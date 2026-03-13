@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { SavedCity, WeatherData } from "@/lib/types";
+import { SavedCity, WeatherData, FetchTimings } from "@/lib/types";
 import Sidebar from "@/components/Sidebar";
 import WeatherDetail from "@/components/WeatherDetail";
+import TimingsPanel from "@/components/TimingsPanel";
 
 const DEFAULT_CITIES: SavedCity[] = [
   {
@@ -53,6 +54,7 @@ export default function App() {
   const [cities, setCities] = useState<SavedCity[]>(DEFAULT_CITIES);
   const [selectedCityId, setSelectedCityId] = useState<string | null>(null);
   const [weatherCache, setWeatherCache] = useState<Record<string, WeatherData>>({});
+  const [timingsCache, setTimingsCache] = useState<Record<string, FetchTimings>>({});
   const [initialLoading, setInitialLoading] = useState(true);
 
   // Load cities from localStorage
@@ -101,6 +103,10 @@ export default function App() {
     setWeatherCache((prev) => ({ ...prev, [cityId]: data }));
   }, []);
 
+  const handleUpdateTimings = useCallback((cityId: string, timings: FetchTimings) => {
+    setTimingsCache((prev) => ({ ...prev, [cityId]: timings }));
+  }, []);
+
   const handleSelectCity = useCallback((cityId: string) => {
     setSelectedCityId(cityId);
   }, []);
@@ -146,6 +152,7 @@ export default function App() {
         onAddCity={handleAddCity}
         onRemoveCity={handleRemoveCity}
         onUpdateWeather={handleUpdateWeather}
+        onUpdateTimings={handleUpdateTimings}
       />
 
       <main className="flex-1 h-full overflow-hidden">
@@ -161,6 +168,11 @@ export default function App() {
           </div>
         )}
       </main>
+
+      <TimingsPanel
+        timingsCache={timingsCache}
+        selectedCityId={selectedCityId}
+      />
     </div>
   );
 }

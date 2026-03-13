@@ -68,3 +68,17 @@ export interface SavedCity {
   longitude: number;
   isCurrentLocation?: boolean;
 }
+
+export interface StageTiming {
+  label: string;
+  startTime: number;   // wallclock ms since epoch
+  duration: number;     // elapsed ms
+}
+
+export interface FetchTimings {
+  cityId: string;
+  cityName: string;
+  stages: StageTiming[];
+  totalDuration: number;
+  fetchedAt: Date;
+}
