@@ -41,8 +41,13 @@ def check_clean_tree(project_dir: Path) -> bool:
         return False
     otto_runtime = {"tasks.yaml", ".tasks.lock"}
     for line in result.stdout.strip().splitlines():
-        # porcelain format: "XY filename" — filename starts at position 3
-        filename = line[3:].strip().strip('"')
+        # porcelain v1: 2-char status + space + path, but renamed entries
+        # use "XY old -> new". Split on whitespace after the status prefix.
+        # Status is always first 2 chars; path follows after a space.
+        parts = line.split(maxsplit=1)
+        if len(parts) < 2:
+            return False
+        filename = parts[1].strip('"')
         if filename not in otto_runtime:
             return False
     return True
