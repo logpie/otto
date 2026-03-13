@@ -35,6 +35,8 @@ LLM-as-judge is vibes. Generated pytest/jest tests are deterministic, runnable, 
 
 ## Core Loop
 
+Otto acquires a process-level lock (`otto.lock` via flock) before entering the loop. If another `otto run` is already active, exit with error "another otto process is running." This prevents two runners from picking up the same task.
+
 For each pending task:
 
 ```
@@ -42,7 +44,9 @@ For each pending task:
 2. Create branch otto/task-<id> from current main HEAD.
    If branch already exists (stale from interrupted run), delete and recreate.
 3. Start generating integration tests concurrently (separate claude -p).
-   Testgen sees project structure from BEFORE the agent starts (snapshot of file tree).
+   Testgen captures a file tree snapshot BEFORE the agent starts.
+   Testgen writes the generated test file to a temp path, then copies it onto the task branch
+   after the agent finishes (step 5) — no filesystem race with the agent.
 4. Run agent via claude-agent-sdk:
    - Prompt: task prompt + "You are working in <project_dir>."
    - Working directory: project root (on the task branch)
@@ -55,9 +59,13 @@ For each pending task:
    b. Generated integration tests (from step 3, if available)
    c. Custom verify command (if specified in task)
 7. All pass → commit all changes, merge branch to main (fast-forward), delete branch, next task.
-   If fast-forward fails (main diverged), abort task as failed — do not force merge.
+   If fast-forward fails (main diverged), preserve the branch and mark task as `failed`
+   with error "main diverged — branch otto/task-<id> preserved, manual rebase needed."
+   Do NOT delete the branch — the work is verified and should not be lost.
 8. Any fail → feed verification output to agent via session resume, retry (up to max_retries).
-   Resume uses the session_id from step 4. The resumed prompt includes:
+   Resume uses the MOST RECENT session_id (updated after each attempt in tasks.yaml).
+   Each resume builds on the previous attempt's context — the agent sees the full chain of failures.
+   The resumed prompt includes:
    "Verification failed. <tier name> output: <stderr/stdout>. Fix the issue."
 9. All retries exhausted → git checkout main, delete branch, log failure, next task.
 ```
