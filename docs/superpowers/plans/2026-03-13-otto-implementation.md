@@ -684,6 +684,20 @@ def update_task(tasks_path: Path, key: str, **updates) -> dict[str, Any]:
 
     _locked_rw(tasks_path, _update)
     return result
+
+
+def reset_all_tasks(tasks_path: Path) -> int:
+    """Reset all tasks to pending. Thread-safe via flock. Returns count reset."""
+    def _reset(tasks):
+        for t in tasks:
+            t["status"] = "pending"
+            t.pop("attempts", None)
+            t.pop("session_id", None)
+            t.pop("error", None)
+            t.pop("error_code", None)
+        return len(tasks)
+
+    return _locked_rw(tasks_path, _reset)
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
@@ -1808,7 +1822,11 @@ async def run_all(
     tasks_file: Path,
     project_dir: Path,
 ) -> int:
-    """Run all pending tasks. Returns exit code (0=all passed, 1=any failed)."""
+    """Run all pending tasks. Returns exit code (0=all passed, 1=any failed).
+
+    Lock order: otto.lock (process) → .tasks.lock (CRUD).
+    All commands that acquire both must follow this order to prevent deadlocks.
+    """
     default_branch = config["default_branch"]
 
     # Acquire process lock — use canonical git metadata dir (shared across linked worktrees)
@@ -2054,7 +2072,7 @@ from pathlib import Path
 import click
 
 from otto.config import create_config, git_meta_dir, load_config
-from otto.tasks import add_task, load_tasks, save_tasks, update_task
+from otto.tasks import add_task, load_tasks, reset_all_tasks, save_tasks, update_task
 
 
 @click.group()
@@ -2262,14 +2280,9 @@ def reset(yes):
         sys.exit(2)
 
     try:
+        # Lock order: otto.lock (process) → .tasks.lock (CRUD) to prevent deadlocks
         tasks_path = project_dir / "tasks.yaml"
-        tasks = load_tasks(tasks_path)
-        for t in tasks:
-            t["status"] = "pending"
-            t.pop("attempts", None)
-            t.pop("session_id", None)
-            t.pop("error", None)
-        save_tasks(tasks_path, tasks)
+        count = reset_all_tasks(tasks_path)
 
         # Delete otto/* branches
         result = subprocess.run(
@@ -2292,7 +2305,7 @@ def reset(yes):
         if testgen_dir.exists():
             shutil.rmtree(testgen_dir)
 
-        click.echo(f"Reset {len(tasks)} tasks to pending. Cleaned branches, logs, and testgen.")
+        click.echo(f"Reset {count} tasks to pending. Cleaned branches, logs, and testgen.")
     finally:
         fcntl.flock(lock_fh, fcntl.LOCK_UN)
         lock_fh.close()
