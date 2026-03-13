@@ -18,8 +18,12 @@ def detect_test_framework(project_dir: Path) -> str | None:
         try:
             pkg = json.loads((project_dir / "package.json").read_text())
             deps = {**pkg.get("devDependencies", {}), **pkg.get("dependencies", {})}
-            if "jest" in deps or "vitest" in deps or "mocha" in deps:
+            if "vitest" in deps:
+                return "vitest"
+            if "jest" in deps:
                 return "jest"
+            if "mocha" in deps:
+                return "mocha"
         except (json.JSONDecodeError, KeyError):
             pass
     if (project_dir / "go.mod").exists():
@@ -34,8 +38,10 @@ def test_file_path(framework: str, key: str) -> Path:
     match framework:
         case "pytest":
             return Path(f"tests/otto_verify_{key}.py")
-        case "jest":
+        case "jest" | "mocha":
             return Path(f"__tests__/otto_verify_{key}.test.js")
+        case "vitest":
+            return Path(f"__tests__/otto_verify_{key}.test.ts")
         case "go":
             return Path(f"otto_verify_{key}_test.go")
         case "cargo":

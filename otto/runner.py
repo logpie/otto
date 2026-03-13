@@ -353,20 +353,31 @@ async def run_task(
             )
             return False
 
-        # Write verification log
-        verify_log = log_dir / f"attempt-{attempt_num}-verify.log"
-        verify_log.write_text(
-            "\n".join(f"{t.tier}: {'PASS' if t.passed else 'FAIL'}\n{t.output}"
-                      for t in verify_result.tiers)
-        )
+        # Write verification log (non-critical, best-effort)
+        try:
+            verify_log = log_dir / f"attempt-{attempt_num}-verify.log"
+            verify_log.write_text(
+                "\n".join(f"{t.tier}: {'PASS' if t.passed else 'FAIL'}\n{t.output}"
+                          for t in verify_result.tiers)
+            )
+        except OSError as e:
+            logger.warning(f"Failed to write verify log: {e}")
 
         if verify_result.passed:
-            # Amend commit message
-            subprocess.run(
-                ["git", "commit", "--amend", "-m",
-                 f"otto: {prompt[:60]} (#{task_id})"],
-                cwd=project_dir, capture_output=True,
-            )
+            # Amend commit message (pre-merge, so cleanup is still safe)
+            try:
+                subprocess.run(
+                    ["git", "commit", "--amend", "-m",
+                     f"otto: {prompt[:60]} (#{task_id})"],
+                    cwd=project_dir, capture_output=True,
+                )
+            except Exception as e:
+                logger.error(f"Failed to amend commit: {e}")
+                _cleanup_task_failure(
+                    project_dir, key, default_branch, tasks_file,
+                    error=f"commit amend failed: {e}", error_code="internal_error",
+                )
+                return False
             # Merge to default — post-merge bookkeeping errors are non-destructive
             if merge_to_default(project_dir, key, default_branch):
                 testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / key

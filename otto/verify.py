@@ -97,7 +97,7 @@ def run_tier2(
     # Derive the repo-relative path from the filename
     fname = testgen_file.name
     rel_path = None
-    for fw in ("pytest", "jest", "go", "cargo"):
+    for fw in ("pytest", "jest", "vitest", "mocha", "go", "cargo"):
         candidate = test_file_path(fw, "PLACEHOLDER")
         if candidate.suffix == Path(fname).suffix:
             rel_path = candidate.parent / fname
@@ -116,7 +116,6 @@ def run_tier2(
         # when possible, so we preserve wrappers/options (uv run pytest, python -m pytest, etc.)
         if framework in ("pytest",):
             if test_command and "pytest" in test_command:
-                # Append the test file path to the configured pytest command
                 cmd = f"{test_command} {rel_path}"
             else:
                 cmd = f"pytest {rel_path} -v"
@@ -124,12 +123,17 @@ def run_tier2(
             cmd = f"go test ./{rel_path.parent}/..."
         elif framework == "cargo":
             cmd = f"cargo test"
-        else:
-            # jest/vitest/mocha — use configured test_command if available
+        elif framework in ("jest", "vitest", "mocha"):
             if test_command:
                 cmd = f"{test_command} -- {rel_path}"
             else:
-                cmd = f"npx jest {rel_path}"
+                # Use the detected runner directly (npx jest, npx vitest, npx mocha)
+                cmd = f"npx {framework} {rel_path}"
+        else:
+            if test_command:
+                cmd = f"{test_command} {rel_path}"
+            else:
+                cmd = f"pytest {rel_path} -v"
         result = subprocess.run(
             cmd,
             shell=True,
