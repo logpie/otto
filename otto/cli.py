@@ -165,7 +165,8 @@ def retry(task_id):
                 sys.exit(1)
             update_task(
                 tasks_path, t["key"],
-                status="pending", attempts=0, session_id=None, error=None,
+                status="pending", attempts=0, session_id=None,
+                error=None, error_code=None,
             )
             click.echo(f"Reset task #{task_id} to pending")
             return

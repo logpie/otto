@@ -19,7 +19,7 @@ except ImportError:
 from otto.config import git_meta_dir
 from otto.tasks import load_tasks, update_task
 from otto.testgen import generate_tests, detect_test_framework, test_file_path
-from otto.verify import run_verification
+from otto.verify import run_verification, _subprocess_env
 
 logger = logging.getLogger("otto.runner")
 
@@ -462,6 +462,7 @@ async def run_all(
             result = subprocess.run(
                 test_command, shell=True, cwd=project_dir,
                 capture_output=True, timeout=config["verify_timeout"],
+                env=_subprocess_env(),
             )
             if result.returncode != 0:
                 logger.error("Baseline tests failing — fix before running otto")

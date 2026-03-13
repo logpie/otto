@@ -74,6 +74,20 @@ class TestRetry:
         tasks = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())
         assert tasks["tasks"][0]["status"] == "pending"
 
+    def test_clears_error_code_on_retry(self, runner, tmp_git_repo, monkeypatch):
+        """Retry must clear error_code so diverged tasks can re-run."""
+        monkeypatch.chdir(tmp_git_repo)
+        runner.invoke(main, ["add", "Some task"])
+        tasks = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())
+        tasks["tasks"][0]["status"] = "failed"
+        tasks["tasks"][0]["error_code"] = "merge_diverged"
+        (tmp_git_repo / "tasks.yaml").write_text(yaml.dump(tasks))
+        result = runner.invoke(main, ["retry", "1"])
+        assert result.exit_code == 0
+        tasks = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())
+        assert tasks["tasks"][0]["status"] == "pending"
+        assert tasks["tasks"][0].get("error_code") is None
+
     def test_rejects_non_failed_task(self, runner, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
         runner.invoke(main, ["add", "Some task"])
