@@ -406,6 +406,17 @@ async def run_task(
             logger.warning(f"Failed to write verify log: {e}")
 
         if verify_result.passed:
+            # Remove testgen artifact from the commit (it was only needed for verification)
+            if testgen_file and testgen_file.exists():
+                framework = detect_test_framework(project_dir) or "pytest"
+                placeholder_path = test_file_path(framework, "placeholder")
+                testgen_in_tree = project_dir / placeholder_path.parent / testgen_file.name
+                if testgen_in_tree.exists():
+                    subprocess.run(
+                        ["git", "rm", "-f", str(testgen_in_tree.relative_to(project_dir))],
+                        cwd=project_dir, capture_output=True,
+                    )
+
             # Amend commit message (pre-merge, so cleanup is still safe)
             try:
                 amend_result = subprocess.run(
