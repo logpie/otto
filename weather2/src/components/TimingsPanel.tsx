@@ -15,27 +15,41 @@ function formatTime(ms: number): string {
 }
 
 function formatWallclock(date: Date): string {
-  return date.toLocaleTimeString([], {
+  const hms = date.toLocaleTimeString([], {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
   });
+  const ms = String(date.getMilliseconds()).padStart(3, "0");
+  return `${hms}.${ms}`;
 }
 
 function formatStageWallclock(startTime: number): string {
-  return new Date(startTime).toLocaleTimeString([], {
+  const d = new Date(startTime);
+  const hms = d.toLocaleTimeString([], {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
   });
+  const ms = String(d.getMilliseconds()).padStart(3, "0");
+  return `${hms}.${ms}`;
 }
 
-function StageRow({ stage, maxDuration }: { stage: StageTiming; maxDuration: number }) {
-  const barWidth = maxDuration > 0 ? (stage.duration / maxDuration) * 100 : 0;
+function StageRow({
+  stage,
+  timelineStart,
+  timelineSpan,
+}: {
+  stage: StageTiming;
+  timelineStart: number;
+  timelineSpan: number;
+}) {
+  const offsetPct = timelineSpan > 0 ? ((stage.startTime - timelineStart) / timelineSpan) * 100 : 0;
+  const widthPct = timelineSpan > 0 ? (stage.duration / timelineSpan) * 100 : 0;
 
   return (
     <div className="flex items-center gap-2 py-1">
-      <span className="text-[10px] text-white/40 w-[60px] shrink-0 tabular-nums text-right">
+      <span className="text-[10px] text-white/40 w-[80px] shrink-0 tabular-nums text-right font-mono">
         {formatStageWallclock(stage.startTime)}
       </span>
       <span className="text-[11px] text-white/70 w-[140px] shrink-0 truncate">
@@ -43,8 +57,11 @@ function StageRow({ stage, maxDuration }: { stage: StageTiming; maxDuration: num
       </span>
       <div className="flex-1 h-[6px] rounded-full bg-white/[0.06] relative overflow-hidden">
         <div
-          className="absolute left-0 top-0 h-full rounded-full bg-blue-400/60"
-          style={{ width: `${Math.max(barWidth, 2)}%` }}
+          className="absolute top-0 h-full rounded-full bg-blue-400/60"
+          style={{
+            left: `${offsetPct}%`,
+            width: `${Math.max(widthPct, 1)}%`,
+          }}
         />
       </div>
       <span className="text-[11px] text-white/50 w-[50px] shrink-0 text-right tabular-nums font-mono">
@@ -86,7 +103,12 @@ export default function TimingsPanel({ timingsCache, selectedCityId }: TimingsPa
     allStages.push(...displayTimings.stages);
   }
 
-  const maxDuration = Math.max(...allStages.map((s) => s.duration), 1);
+  // Compute timeline span for waterfall positioning
+  const timelineStart = allStages.length > 0 ? Math.min(...allStages.map((s) => s.startTime)) : 0;
+  const timelineEnd = allStages.length > 0
+    ? Math.max(...allStages.map((s) => s.startTime + s.duration))
+    : 1;
+  const timelineSpan = Math.max(timelineEnd - timelineStart, 1);
 
   return (
     <div className="fixed bottom-0 left-0 right-0 z-50">
@@ -137,7 +159,12 @@ export default function TimingsPanel({ timingsCache, selectedCityId }: TimingsPa
           {/* Waterfall */}
           <div className="space-y-0">
             {allStages.map((stage, i) => (
-              <StageRow key={i} stage={stage} maxDuration={maxDuration} />
+              <StageRow
+                key={i}
+                stage={stage}
+                timelineStart={timelineStart}
+                timelineSpan={timelineSpan}
+              />
             ))}
           </div>
 
