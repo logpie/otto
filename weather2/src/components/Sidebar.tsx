@@ -96,52 +96,52 @@ export default function Sidebar({
   };
 
   return (
-    <aside className="w-[320px] h-full bg-[#1c1c1e]/95 backdrop-blur-xl border-r border-white/[0.06] flex flex-col shrink-0">
+    <aside className="w-[300px] h-full bg-[#1c1c1e]/[0.97] backdrop-blur-2xl border-r border-white/[0.04] flex flex-col shrink-0">
       {/* Header - draggable titlebar region */}
-      <div className="titlebar-drag px-4 pt-8 pb-2 flex items-center justify-between">
-        <h1 className="text-[22px] font-bold text-white tracking-tight">Weather</h1>
+      <div className="titlebar-drag px-5 pt-9 pb-3 flex items-center justify-between">
+        <h1 className="text-[20px] font-semibold text-white/90 tracking-tight">Weather</h1>
         <button
           onClick={openSearch}
           className="titlebar-no-drag p-1.5 rounded-lg hover:bg-white/10 transition-colors"
           title="Add City"
         >
-          <Plus size={18} className="text-white/70" />
+          <Plus size={17} className="text-white/50" />
         </button>
       </div>
 
       {/* Search Bar */}
-      <div className="px-4 pb-2">
+      <div className="px-4 pb-2.5">
         {searching ? (
           <div>
-            <div className="flex items-center gap-2 bg-white/[0.08] rounded-lg px-3 py-2">
-              <Search size={15} className="text-white/40 shrink-0" />
+            <div className="flex items-center gap-2 bg-white/[0.06] rounded-[10px] px-3 py-[7px]">
+              <Search size={14} className="text-white/35 shrink-0" />
               <input
                 ref={inputRef}
                 type="text"
                 value={searchQuery}
                 onChange={(e) => handleSearch(e.target.value)}
                 placeholder="Search for a city"
-                className="search-input bg-transparent text-white text-sm outline-none w-full"
+                className="search-input bg-transparent text-white text-[13px] outline-none w-full"
                 autoFocus
               />
               <button onClick={closeSearch} className="shrink-0">
-                <X size={15} className="text-white/40 hover:text-white/70 transition-colors" />
+                <X size={14} className="text-white/35 hover:text-white/60 transition-colors" />
               </button>
             </div>
 
             {/* Search Results Dropdown */}
             {searchResults.length > 0 && (
-              <div className="mt-1.5 rounded-lg overflow-hidden bg-[#2c2c2e] border border-white/[0.06]">
+              <div className="mt-1.5 rounded-[10px] overflow-hidden bg-[#2c2c2e]/95 backdrop-blur-xl border border-white/[0.06]">
                 {searchResults.map((result, i) => (
                   <button
                     key={i}
                     onClick={() => handleAddCity(result)}
                     className="w-full px-3 py-2.5 flex items-center gap-2.5 hover:bg-white/[0.06] transition-colors text-left border-b border-white/[0.04] last:border-0"
                   >
-                    <MapPin size={14} className="text-white/30 shrink-0" />
+                    <MapPin size={13} className="text-white/25 shrink-0" />
                     <div>
-                      <div className="text-white text-sm font-medium">{result.name}</div>
-                      <div className="text-white/40 text-xs">
+                      <div className="text-white text-[13px] font-medium">{result.name}</div>
+                      <div className="text-white/35 text-[11px]">
                         {[result.region, result.country].filter(Boolean).join(", ")}
                       </div>
                     </div>
@@ -151,27 +151,27 @@ export default function Sidebar({
             )}
 
             {isSearching && (
-              <div className="mt-3 text-center text-white/30 text-xs">Searching...</div>
+              <div className="mt-3 text-center text-white/25 text-[11px]">Searching...</div>
             )}
 
             {searchQuery.length >= 2 && !isSearching && searchResults.length === 0 && (
-              <div className="mt-3 text-center text-white/30 text-xs">No results found</div>
+              <div className="mt-3 text-center text-white/25 text-[11px]">No results found</div>
             )}
           </div>
         ) : (
           <button
             onClick={openSearch}
-            className="w-full flex items-center gap-2 bg-white/[0.06] rounded-lg px-3 py-2 hover:bg-white/[0.08] transition-colors"
+            className="w-full flex items-center gap-2 bg-white/[0.04] rounded-[10px] px-3 py-[7px] hover:bg-white/[0.06] transition-colors"
           >
-            <Search size={15} className="text-white/30" />
-            <span className="text-white/30 text-sm">Search for a city</span>
+            <Search size={14} className="text-white/25" />
+            <span className="text-white/25 text-[13px]">Search for a city</span>
           </button>
         )}
       </div>
 
       {/* City List */}
-      <div className="flex-1 sidebar-scroll px-2 pb-4">
-        <div className="space-y-0.5">
+      <div className="flex-1 sidebar-scroll px-2.5 pb-4">
+        <div className="space-y-[2px]">
           {cities.map((city) => {
             const weather = weatherCache[city.id];
             const isSelected = city.id === selectedCityId;
@@ -188,46 +188,41 @@ export default function Sidebar({
                 onMouseEnter={() => setHoveredCity(city.id)}
                 onMouseLeave={() => setHoveredCity(null)}
               >
-                {/* Mini gradient background */}
+                {/* Mini gradient background for selected */}
                 <div
-                  className={`absolute inset-0 ${bgClass} opacity-${isSelected ? "40" : "0"} transition-opacity duration-300 rounded-[10px]`}
-                  style={{ opacity: isSelected ? 0.35 : 0 }}
+                  className={`absolute inset-0 ${bgClass} rounded-[12px] transition-opacity duration-300`}
+                  style={{ opacity: isSelected ? 0.3 : 0 }}
                 />
 
-                <div className="relative px-3 py-3 flex items-center justify-between">
+                <div className="relative px-3.5 py-3.5 flex items-center justify-between">
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-1.5">
                       {city.isCurrentLocation && (
-                        <MapPin size={12} className="text-white/50 shrink-0" />
+                        <MapPin size={11} className="text-white/45 shrink-0" />
                       )}
-                      <span className="text-[13px] font-semibold text-white truncate">
+                      <span className="text-[15px] font-semibold text-white truncate leading-tight">
                         {city.isCurrentLocation ? "My Location" : city.name}
                       </span>
                     </div>
                     {city.isCurrentLocation && city.name !== "Current Location" ? (
-                      <div className="text-[11px] text-white/40 mt-0.5 truncate">
+                      <div className="text-[11px] text-white/35 mt-1 truncate">
                         {city.name}
                       </div>
                     ) : (
-                      <div className="text-[11px] text-white/40 mt-0.5 truncate">
+                      <div className="text-[11px] text-white/35 mt-1 truncate">
                         {weather?.current.condition.description || (city.region || city.country)}
                       </div>
                     )}
                   </div>
 
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 shrink-0 ml-3">
                     {weather && (
-                      <div className="flex items-center gap-1.5">
-                        <div className="w-5 h-5 flex items-center justify-center opacity-70">
-                          {getWeatherIcon(weather.current.condition.icon, weather.current.isDay, 20)}
-                        </div>
-                        <span className="text-xl font-light text-white tabular-nums">
-                          {weather.current.temperature}°
-                        </span>
-                      </div>
+                      <span className="text-[24px] font-light text-white tabular-nums tracking-tight">
+                        {weather.current.temperature}°
+                      </span>
                     )}
                     {!weather && (
-                      <span className="text-lg font-light text-white/30">--°</span>
+                      <span className="text-[20px] font-light text-white/25 tabular-nums">--°</span>
                     )}
 
                     {/* Delete button on hover */}
@@ -239,7 +234,7 @@ export default function Sidebar({
                         }}
                         className="p-1 rounded-md hover:bg-white/10 transition-colors"
                       >
-                        <Trash2 size={12} className="text-white/40 hover:text-red-400" />
+                        <Trash2 size={11} className="text-white/35 hover:text-red-400" />
                       </button>
                     )}
                   </div>
@@ -251,12 +246,10 @@ export default function Sidebar({
       </div>
 
       {/* Footer */}
-      <div className="px-4 py-3 border-t border-white/[0.06]">
-        <div className="flex items-center justify-between">
-          <span className="text-[10px] text-white/20">
-            Open-Meteo · {cities.length} {cities.length === 1 ? "city" : "cities"}
-          </span>
-        </div>
+      <div className="px-5 py-3 border-t border-white/[0.04]">
+        <span className="text-[10px] text-white/15">
+          Open-Meteo · {cities.length} {cities.length === 1 ? "city" : "cities"}
+        </span>
       </div>
     </aside>
   );

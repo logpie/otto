@@ -38,58 +38,58 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.12);
   border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.25);
+  background: rgba(255, 255, 255, 0.2);
 }
 
-/* Glass morphism effect */
+/* Glass morphism effect - refined to match Apple */
 .glass {
-  background: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.08);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 14px;
+  border: 0.5px solid rgba(255, 255, 255, 0.15);
+  border-radius: 16px;
 }
 
 .glass-dark {
-  background: rgba(0, 0, 0, 0.2);
+  background: rgba(0, 0, 0, 0.15);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: 14px;
+  border: 0.5px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
 }
 
-/* Weather gradient backgrounds */
+/* Weather gradient backgrounds - deeper, richer like Apple */
 .bg-clear-day {
-  background: linear-gradient(180deg, #47a9f5 0%, #6bc1f7 40%, #87ceeb 100%);
+  background: linear-gradient(180deg, #1b6ef3 0%, #4a9af5 35%, #6db3f8 70%, #87ceeb 100%);
 }
 
 .bg-clear-night {
-  background: linear-gradient(180deg, #0c1445 0%, #1a2a5e 40%, #1e3a6f 100%);
+  background: linear-gradient(180deg, #0a0e2a 0%, #0f1b4d 30%, #162d6b 60%, #1e3a6f 100%);
 }
 
 .bg-cloudy {
-  background: linear-gradient(180deg, #6b7d91 0%, #8a9db2 50%, #a0b4c8 100%);
+  background: linear-gradient(180deg, #4e5f73 0%, #6b7d91 40%, #8a9db2 75%, #a0b4c8 100%);
 }
 
 .bg-rainy {
-  background: linear-gradient(180deg, #3d4f61 0%, #4e6475 50%, #5b7488 100%);
+  background: linear-gradient(180deg, #2d3d4f 0%, #3d4f61 35%, #4e6475 70%, #5b7488 100%);
 }
 
 .bg-stormy {
-  background: linear-gradient(180deg, #2a3a4e 0%, #364d63 50%, #3f5a72 100%);
+  background: linear-gradient(180deg, #1a2a3e 0%, #2a3a4e 35%, #364d63 70%, #3f5a72 100%);
 }
 
 .bg-snowy {
-  background: linear-gradient(180deg, #8b99a8 0%, #a0b0bf 50%, #bcc8d3 100%);
+  background: linear-gradient(180deg, #6b7988 0%, #8b99a8 40%, #a0b0bf 75%, #bcc8d3 100%);
 }
 
 .bg-foggy {
-  background: linear-gradient(180deg, #8e9eab 0%, #a5b5c4 50%, #bcc8d3 100%);
+  background: linear-gradient(180deg, #6e7e8b 0%, #8e9eab 40%, #a5b5c4 75%, #bcc8d3 100%);
 }
 
 /* Hourly forecast scroll */
@@ -132,29 +132,29 @@ body {
 
 /* Search bar styling */
 .search-input::placeholder {
-  color: rgba(255, 255, 255, 0.45);
+  color: rgba(255, 255, 255, 0.4);
 }
 
-/* Sidebar city item */
+/* Sidebar city item - Apple-style */
 .sidebar-city {
-  transition: background-color 0.15s ease;
-  border-radius: 10px;
+  transition: background-color 0.2s ease;
+  border-radius: 12px;
   cursor: pointer;
 }
 
 .sidebar-city:hover {
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.06);
 }
 
 .sidebar-city.active {
-  background: rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.12);
 }
 
 /* Main content scroll */
 .main-scroll {
   overflow-y: auto;
   scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
+  scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
   height: 100%;
 }
 
@@ -167,7 +167,7 @@ body {
 }
 
 .main-scroll::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.12);
   border-radius: 3px;
 }
 
@@ -184,14 +184,26 @@ body {
 
 /* Smooth transitions */
 .weather-transition {
-  transition: background 0.6s ease, opacity 0.3s ease;
+  transition: background 0.8s ease, opacity 0.3s ease;
 }
 
-/* Detail card hover */
+/* Detail card hover - subtle */
 .detail-card {
-  transition: transform 0.15s ease, background-color 0.15s ease;
+  transition: background-color 0.2s ease;
 }
 
 .detail-card:hover {
-  background: rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.12) !important;
+}
+
+/* Section divider line - Apple style */
+.section-divider {
+  height: 0.5px;
+  background: rgba(255, 255, 255, 0.15);
+  margin: 0;
+}
+
+/* Temperature bar gradient - Apple style (blue → green → yellow → orange) */
+.temp-bar-gradient {
+  background: linear-gradient(to right, #5ac8fa, #4cd964, #ffd60a, #ff9500, #ff3b30);
 }

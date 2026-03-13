@@ -72,8 +72,21 @@ function StageRow({
 }
 
 export default function TimingsPanel({ timingsCache, selectedCityId }: TimingsPanelProps) {
+  const [visible, setVisible] = useState(false);
   const [collapsed, setCollapsed] = useState(true);
   const [warmTiming, setWarmTiming] = useState<StageTiming | null>(null);
+
+  // Toggle visibility with Cmd+Shift+T
+  React.useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === "t") {
+        e.preventDefault();
+        setVisible((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
 
   // Poll for warm connection timing (it's set asynchronously)
   useEffect(() => {
@@ -90,7 +103,7 @@ export default function TimingsPanel({ timingsCache, selectedCityId }: TimingsPa
   const allTimings = Object.values(timingsCache);
   const selectedTimings = selectedCityId ? timingsCache[selectedCityId] : null;
 
-  if (allTimings.length === 0 && !warmTiming) return null;
+  if (!visible || (allTimings.length === 0 && !warmTiming)) return null;
 
   // Collect all stages for the selected city (or the first available)
   const displayTimings = selectedTimings || allTimings[0];

@@ -135,7 +135,7 @@ export default function App() {
   if (initialLoading) {
     return (
       <div className="h-screen w-screen bg-[#1c1c1e] flex items-center justify-center">
-        <div className="text-white/40 text-lg">Loading...</div>
+        <div className="text-white/25 text-[15px] font-light">Loading...</div>
       </div>
     );
   }
@@ -160,7 +160,7 @@ export default function App() {
           <WeatherDetail weather={selectedWeather} />
         ) : (
           <div className="h-full bg-clear-day flex items-center justify-center">
-            <div className="text-white/40 text-lg">
+            <div className="text-white/30 text-[15px] font-light">
               {cities.length === 0
                 ? "Add a city to get started"
                 : "Loading weather data..."}
