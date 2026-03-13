@@ -26,14 +26,26 @@ logger = logging.getLogger("otto.runner")
 
 
 def check_clean_tree(project_dir: Path) -> bool:
-    """Check if the working tree is clean (no uncommitted changes)."""
+    """Check if the working tree is clean (no uncommitted changes).
+
+    Ignores otto runtime files (tasks.yaml, .tasks.lock) since otto itself
+    modifies these during runs.
+    """
     result = subprocess.run(
         ["git", "status", "--porcelain"],
         cwd=project_dir,
         capture_output=True,
         text=True,
     )
-    return result.returncode == 0 and not result.stdout.strip()
+    if result.returncode != 0:
+        return False
+    otto_runtime = {"tasks.yaml", ".tasks.lock"}
+    for line in result.stdout.strip().splitlines():
+        # porcelain format: "XY filename" — filename starts at position 3
+        filename = line[3:].strip().strip('"')
+        if filename not in otto_runtime:
+            return False
+    return True
 
 
 def create_task_branch(
