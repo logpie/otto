@@ -1,0 +1,197 @@
+@import "tailwindcss";
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif;
+  color: white;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  user-select: none;
+}
+
+/* macOS titlebar drag region */
+.titlebar-drag {
+  -webkit-app-region: drag;
+}
+
+.titlebar-no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* Custom scrollbar - thin and subtle */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+/* Glass morphism effect */
+.glass {
+  background: rgba(255, 255, 255, 0.12);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 14px;
+}
+
+.glass-dark {
+  background: rgba(0, 0, 0, 0.2);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 14px;
+}
+
+/* Weather gradient backgrounds */
+.bg-clear-day {
+  background: linear-gradient(180deg, #47a9f5 0%, #6bc1f7 40%, #87ceeb 100%);
+}
+
+.bg-clear-night {
+  background: linear-gradient(180deg, #0c1445 0%, #1a2a5e 40%, #1e3a6f 100%);
+}
+
+.bg-cloudy {
+  background: linear-gradient(180deg, #6b7d91 0%, #8a9db2 50%, #a0b4c8 100%);
+}
+
+.bg-rainy {
+  background: linear-gradient(180deg, #3d4f61 0%, #4e6475 50%, #5b7488 100%);
+}
+
+.bg-stormy {
+  background: linear-gradient(180deg, #2a3a4e 0%, #364d63 50%, #3f5a72 100%);
+}
+
+.bg-snowy {
+  background: linear-gradient(180deg, #8b99a8 0%, #a0b0bf 50%, #bcc8d3 100%);
+}
+
+.bg-foggy {
+  background: linear-gradient(180deg, #8e9eab 0%, #a5b5c4 50%, #bcc8d3 100%);
+}
+
+/* Hourly forecast scroll */
+.hourly-scroll {
+  overflow-x: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  scroll-behavior: smooth;
+}
+
+.hourly-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+/* UV gradient bar */
+.uv-gradient {
+  background: linear-gradient(to right, #4ade80, #facc15, #f97316, #ef4444, #a855f7);
+  height: 4px;
+  border-radius: 2px;
+}
+
+/* Animated weather icons */
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-5px); }
+}
+
+@keyframes pulse-slow {
+  0%, 100% { opacity: 0.8; }
+  50% { opacity: 1; }
+}
+
+.animate-float {
+  animation: float 3s ease-in-out infinite;
+}
+
+.animate-pulse-slow {
+  animation: pulse-slow 2s ease-in-out infinite;
+}
+
+/* Search bar styling */
+.search-input::placeholder {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+/* Sidebar city item */
+.sidebar-city {
+  transition: background-color 0.15s ease;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.sidebar-city:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.sidebar-city.active {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+/* Main content scroll */
+.main-scroll {
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
+  height: 100%;
+}
+
+.main-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+
+.main-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.main-scroll::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 3px;
+}
+
+/* Sidebar scroll */
+.sidebar-scroll {
+  overflow-y: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.sidebar-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+/* Smooth transitions */
+.weather-transition {
+  transition: background 0.6s ease, opacity 0.3s ease;
+}
+
+/* Detail card hover */
+.detail-card {
+  transition: transform 0.15s ease, background-color 0.15s ease;
+}
+
+.detail-card:hover {
+  background: rgba(255, 255, 255, 0.16);
+}

@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+logs/
+tasks.json
+tasks.lock
+weather2/.next/
