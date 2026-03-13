@@ -310,3 +310,41 @@ Composable in scripts and CI.
 | Session resume on retry | cc-autonomous v2 | Agent keeps context of what failed |
 | Auto-detect test command | Composio | Zero-config for projects with existing tests |
 | Generated tests persist | otto (new) | Compound value — each task's tests guard future tasks |
+
+---
+
+## Plan Review
+
+### Round 1 — Codex
+- [ISSUE] Branch-per-task in single working tree unsafe — fixed: verification in disposable worktree
+- [ISSUE] Adversarial testgen leaks on retry — fixed: tests stored in .git/otto/, never in agent workspace
+- [ISSUE] No baseline verification — fixed: step 0 checks default branch is green
+- [ISSUE] Runtime state could be committed — fixed: .git/info/exclude + explicit staging
+- [ISSUE] flock doesn't kill orphan processes — fixed: process groups + os.setpgrp
+- [ISSUE] Stale branch deletion unsafe — fixed: refuse to delete diverge-preserved branches
+- [ISSUE] Agent may create commits — fixed: prompt forbids; squash fallback via reset --mixed
+- [ISSUE] No migration strategy — fixed: explicit "ground-up rewrite, no compat"
+- [ISSUE] find . -type f racey — fixed: git ls-files
+- [ISSUE] Test detection not reliable — fixed: prefer explicit config, warn on ambiguity
+- [ISSUE] Signal handling incomplete — fixed: kill process group
+- [ISSUE] "No mocks" too rigid — fixed: hermetic policy, project fakes allowed
+- [ISSUE] Default branch hardcoded — fixed: auto-detect, configurable
+
+### Round 2 — Codex
+- [ISSUE] Test persistence lost after hiding — fixed: copy into repo at commit time
+- [ISSUE] git diff misses uncommitted changes — fixed: reset --mixed + explicit staging
+- [ISSUE] otto init dirties repo — fixed: otto.yaml committable, runtime in .git/info/exclude
+- [ISSUE] 8-char key collision — fixed: 12-char hex with uniqueness check
+- [ISSUE] Tier 2 cleanup allowlist-based — fixed: disposable worktree eliminates cleanup need
+- [ISSUE] POSIX-only implicit — fixed: explicit platform constraint
+
+### Round 3 — Codex
+- [ISSUE] reset --soft leaves everything staged — fixed: use reset --mixed
+- [ISSUE] Test leak on smoke-check retry — fixed: disposable worktree for all verification
+- [ISSUE] git status misses ignored artifacts — fixed: disposable worktree
+- [ISSUE] File mutation restoration — fixed: disposable worktree
+
+### Round 4 — Codex
+- [ISSUE] Disposable worktree misses uncommitted changes — fixed: candidate commit pattern
+- [ISSUE] Same branch in two worktrees rejected — fixed: detached HEAD in temp worktree
+- [ISSUE] Verified tree != committed tree — fixed: candidate commit IS the final commit
