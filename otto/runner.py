@@ -16,7 +16,7 @@ try:
 except ImportError:
     from otto._agent_stub import ClaudeAgentOptions, query
 
-from otto.config import git_meta_dir, load_config
+from otto.config import git_meta_dir
 from otto.tasks import load_tasks, update_task
 from otto.testgen import generate_tests, detect_test_framework, test_file_path
 from otto.verify import run_verification
