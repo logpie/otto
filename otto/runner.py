@@ -366,16 +366,18 @@ async def run_task(
         if verify_result.passed:
             # Amend commit message (pre-merge, so cleanup is still safe)
             try:
-                subprocess.run(
+                amend_result = subprocess.run(
                     ["git", "commit", "--amend", "-m",
                      f"otto: {prompt[:60]} (#{task_id})"],
-                    cwd=project_dir, capture_output=True,
+                    cwd=project_dir, capture_output=True, text=True,
+                    check=True,
                 )
-            except Exception as e:
-                logger.error(f"Failed to amend commit: {e}")
+            except (subprocess.CalledProcessError, Exception) as e:
+                stderr = getattr(e, "stderr", str(e))
+                logger.error(f"Failed to amend commit: {stderr}")
                 _cleanup_task_failure(
                     project_dir, key, default_branch, tasks_file,
-                    error=f"commit amend failed: {e}", error_code="internal_error",
+                    error=f"commit amend failed: {stderr}", error_code="internal_error",
                 )
                 return False
             # Merge to default — post-merge bookkeeping errors are non-destructive
