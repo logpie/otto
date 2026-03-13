@@ -5,13 +5,21 @@ from typing import Any
 
 @dataclass
 class ClaudeAgentOptions:
-    prompt: str = ""
-    options: dict[str, Any] = field(default_factory=dict)
+    permission_mode: str | None = None
+    cwd: str | None = None
+    model: str | None = None
+    resume: str | None = None
+    max_turns: int | None = None
 
 
-class AgentResult:
-    session_id: str | None = None
+@dataclass
+class ResultMessage:
+    subtype: str = "success"
+    is_error: bool = False
+    session_id: str = ""
+    result: str | None = None
 
 
-def query(options: ClaudeAgentOptions) -> AgentResult:
-    return AgentResult()
+async def query(*, prompt: str, options: ClaudeAgentOptions | None = None):
+    """Stub that yields a single ResultMessage."""
+    yield ResultMessage()

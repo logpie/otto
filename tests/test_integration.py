@@ -3,7 +3,7 @@
 import asyncio
 import subprocess
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 
 from otto.config import create_config, load_config
 from otto.runner import run_all
@@ -20,6 +20,15 @@ def _commit_otto_config(repo: Path) -> None:
         ["git", "commit", "-m", "add otto config"],
         cwd=repo, capture_output=True, check=True,
     )
+
+
+def _make_fake_result(session_id="test-session"):
+    """Create a fake ResultMessage-like object."""
+    result = MagicMock()
+    result.session_id = session_id
+    result.is_error = False
+    result.subtype = "success"
+    return result
 
 
 class TestEndToEnd:
@@ -39,18 +48,13 @@ class TestEndToEnd:
         tasks_path = tmp_git_repo / "tasks.yaml"
         add_task(tasks_path, "Create hello.py that prints hello")
 
-        # ClaudeAgentOptions is mocked — any kwargs are accepted
-        mock_options_instance = MagicMock()
-        mock_options_cls.return_value = mock_options_instance
-
         # Mock agent: simulate creating a file
-        def fake_agent(options):
+        # query() is async generator — mock it as such
+        async def fake_query(*, prompt, options=None):
             (tmp_git_repo / "hello.py").write_text("print('hello')\n")
-            result = MagicMock()
-            result.session_id = "test-session-123"
-            return result
+            yield _make_fake_result("test-session-123")
 
-        mock_query.side_effect = fake_agent
+        mock_query.side_effect = fake_query
         mock_testgen.return_value = None  # Skip testgen
 
         # Run
@@ -90,14 +94,11 @@ class TestEndToEnd:
         # Per-task verify command that always fails
         add_task(tasks_path, "Do something that fails verification", verify="false")
 
-        mock_options_instance = MagicMock()
-        mock_options_cls.return_value = mock_options_instance
-
-        def fake_agent(options):
+        async def fake_query(*, prompt, options=None):
             (tmp_git_repo / "bad.py").write_text("broken\n")
-            return MagicMock(session_id="s1")
+            yield _make_fake_result("s1")
 
-        mock_query.side_effect = fake_agent
+        mock_query.side_effect = fake_query
         mock_testgen.return_value = None
 
         exit_code = asyncio.run(run_all(config, tasks_path, tmp_git_repo))

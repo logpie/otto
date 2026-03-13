@@ -13,8 +13,9 @@ from typing import Any
 
 try:
     from claude_agent_sdk import ClaudeAgentOptions, query
+    from claude_agent_sdk.types import ResultMessage
 except ImportError:
-    from otto._agent_stub import ClaudeAgentOptions, query
+    from otto._agent_stub import ClaudeAgentOptions, query, ResultMessage
 
 from otto.config import git_meta_dir
 from otto.tasks import load_tasks, update_task
@@ -288,24 +289,29 @@ async def run_task(
         # Run agent + build candidate + verify — catch infrastructure failures
         try:
             try:
-                options = ClaudeAgentOptions(
-                    prompt=agent_prompt,
-                    options={
-                        "dangerously_skip_permissions": True,
-                        "cwd": str(project_dir),
-                        "model": config["model"],
-                    },
+                agent_opts = ClaudeAgentOptions(
+                    permission_mode="bypassPermissions",
+                    cwd=str(project_dir),
+                    model=config["model"],
                 )
                 if session_id:
-                    options.options["resume"] = session_id
+                    agent_opts.resume = session_id
 
-                result = query(options)
+                # query() is async iterator — consume all messages, keep last ResultMessage
+                result_msg = None
+                async for message in query(prompt=agent_prompt, options=agent_opts):
+                    if isinstance(message, ResultMessage) or hasattr(message, "subtype"):
+                        result_msg = message
 
                 # Extract session_id for resume
-                if hasattr(result, "session_id"):
-                    session_id = result.session_id
+                if result_msg and result_msg.session_id:
+                    session_id = result_msg.session_id
                     if tasks_file:
                         update_task(tasks_file, key, session_id=session_id)
+
+                # Check if agent reported an error
+                if result_msg and result_msg.is_error:
+                    raise RuntimeError(f"Agent error: {result_msg.result or 'unknown'}")
 
             except Exception as e:
                 logger.error(f"Agent error: {e}")
