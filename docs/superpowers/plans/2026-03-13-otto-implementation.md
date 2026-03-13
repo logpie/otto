@@ -2459,3 +2459,47 @@ Expected: All tests PASS
 git add otto/ tests/ pyproject.toml
 git commit -m "chore: final polish and cleanup"
 ```
+
+---
+
+## Plan Review
+
+### Round 1 — Codex
+- [ISSUE] Signal handler async-unsafe (subprocess calls in handler) — fixed: flag-based approach, cleanup in main loop
+- [ISSUE] One-off mode no process lock — fixed: acquires `otto.lock` via flock
+- [ISSUE] Stringly-typed divergence detection — fixed: structured `error_code` field
+- [ISSUE] Newlines in filenames break staging — fixed: `git ls-files -z` with `split("\0")`
+- [ISSUE] Verification subprocesses not in process groups — fixed: `start_new_session=True`
+- [ISSUE] No test for ambiguous test command — fixed: added test
+- [ISSUE] Mock doesn't distinguish subprocess calls — fixed: `side_effect` with list
+- [ISSUE] ARG_MAX risk with testgen prompt — fixed: use `input=prompt` via stdin
+- [ISSUE] `_last_error` function attribute hack — fixed: local variable
+- [ISSUE] `git add --all` unsafe — fixed: `git add -u` + explicit untracked staging
+- [ISSUE] Missing diverge-preserved branch check — fixed: check `error_code == merge_diverged`
+- [ISSUE] No signal handling — fixed: SIGINT/SIGTERM handlers
+- [ISSUE] `cleanup_branch` uses `git checkout -` — fixed: accepts `default_branch` parameter
+- [ISSUE] Missing `otto add -f` — fixed: `--file/-f` option
+- [ISSUE] `otto reset` doesn't clean testgen — fixed: `.git/otto/` cleanup
+
+### Round 2 — Codex
+- [ISSUE] Lock path aliasing across linked worktrees — fixed: `git rev-parse --git-common-dir`
+- Other findings were clarifications of round 1 fixes (already applied)
+
+### Round 3 — Codex
+- [ISSUE] Testgen cleanup incomplete on full failure — fixed: clean `.git/otto/testgen/<key>/` on all terminal paths
+- Other findings already addressed by `git-common-dir` fix
+
+### Round 4 — Codex
+- [ISSUE] Redundant Tier 2 file copy — fixed: removed copy, test file already in candidate commit
+- [ISSUE] Testgen subprocess missing process group — fixed: `start_new_session=True`
+- [ISSUE] Testgen cleanup incomplete — fixed: clean in ALL terminal paths (success, diverge, failure)
+
+### Round 5 — Codex
+- [ISSUE] Missing testgen file should fail Tier 2, not skip — fixed: `passed=False` with error output
+- [ISSUE] `.git` is a file in linked worktrees — fixed: `git_meta_dir()` helper using `git rev-parse --git-common-dir`, replaced all hardcoded `.git/otto/` paths
+- [ISSUE] `otto reset` races with active workers — fixed: acquires `otto.lock` before mutating state
+- [ISSUE] Task CRUD lock path aliasing via symlinks — fixed: `tasks_path.resolve()` in `_locked_rw`
+- [ISSUE] `otto reset` races with concurrent CRUD ops — fixed: uses `reset_all_tasks()` which acquires `.tasks.lock` via `_locked_rw`; documented lock order (otto.lock → .tasks.lock)
+
+### Round 6 — Codex
+- APPROVED. No new issues.
