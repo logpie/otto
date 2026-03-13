@@ -1,0 +1,18 @@
+[project]
+name = "otto"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "click>=8.0",
+    "pyyaml>=6.0",
+    "claude-agent-sdk>=0.1.0",
+]
+
+[project.scripts]
+otto = "otto.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["otto*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
