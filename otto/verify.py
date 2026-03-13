@@ -78,7 +78,6 @@ def run_tier1(workdir: Path, test_command: str | None, timeout: int) -> TierResu
 def run_tier2(
     workdir: Path,
     testgen_file: Path | None,
-    test_command: str,
     timeout: int,
 ) -> TierResult:
     """Run generated integration tests in the worktree.
@@ -111,11 +110,17 @@ def run_tier2(
                           output=f"Generated test file not found at {rel_path} in candidate commit")
 
     try:
-        # Run just this test file
-        if "pytest" in test_command:
+        # Build framework-appropriate command for the generated test file
+        if framework in ("pytest",):
             cmd = f"pytest {rel_path} -v"
+        elif framework == "jest":
+            cmd = f"npx jest {rel_path}"
+        elif framework == "go":
+            cmd = f"go test ./{rel_path.parent}/..."
+        elif framework == "cargo":
+            cmd = f"cargo test"
         else:
-            cmd = test_command
+            cmd = f"pytest {rel_path} -v"
         result = subprocess.run(
             cmd,
             shell=True,
@@ -195,7 +200,7 @@ def run_verification(
             return VerifyResult(passed=False, tiers=tiers)
 
         # Tier 2: Generated tests
-        t2 = run_tier2(worktree_path, testgen_file, test_command or "pytest", timeout)
+        t2 = run_tier2(worktree_path, testgen_file, timeout)
         tiers.append(t2)
         if not t2.passed and not t2.skipped:
             return VerifyResult(passed=False, tiers=tiers)
