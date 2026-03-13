@@ -9,6 +9,25 @@ import pytest
 import yaml
 
 
+def pytest_collection_modifyitems(items):
+    """Remove collected items that are imported from non-test modules.
+
+    Prevents functions like `test_file_path` (imported from otto.testgen)
+    from being collected as tests when imported into test modules.
+    """
+    filtered = []
+    for item in items:
+        # Only filter Function items (not class-based tests)
+        if hasattr(item, "function"):
+            func = item.function
+            func_module = getattr(func, "__module__", None)
+            # If the function's __module__ doesn't start with "tests.", skip it
+            if func_module and not func_module.startswith("tests.") and func_module != item.module.__name__:
+                continue
+        filtered.append(item)
+    items[:] = filtered
+
+
 @pytest.fixture
 def tmp_git_repo(tmp_path):
     """Create a temporary git repo with an initial commit."""

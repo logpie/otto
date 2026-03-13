@@ -21,9 +21,28 @@ def git_meta_dir(project_dir: Path) -> Path:
     """Return the canonical git metadata directory (handles linked worktrees).
 
     In a normal repo, this returns project_dir/.git.
-    In a linked worktree, .git is a file — this returns the shared .git/ dir
-    via `git rev-parse --git-common-dir`.
+    In a linked worktree, .git is a file containing 'gitdir: <path>' — this
+    resolves the shared .git/ dir without spawning a subprocess.
     """
+    dot_git = project_dir / ".git"
+    if dot_git.is_dir():
+        return dot_git
+    if dot_git.is_file():
+        # Linked worktree: .git file contains "gitdir: <relative-path>"
+        content = dot_git.read_text().strip()
+        if content.startswith("gitdir:"):
+            wt_gitdir = Path(content[len("gitdir:"):].strip())
+            if not wt_gitdir.is_absolute():
+                wt_gitdir = (project_dir / wt_gitdir).resolve()
+            # Walk up from the worktree gitdir to find commondir
+            # e.g. /repo/.git/worktrees/wt-name/ → commondir file points to /repo/.git
+            commondir_file = wt_gitdir / "commondir"
+            if commondir_file.exists():
+                rel = commondir_file.read_text().strip()
+                common = Path(rel) if Path(rel).is_absolute() else (wt_gitdir / rel).resolve()
+                return common
+            return wt_gitdir
+    # Fallback: use subprocess for unusual repo layouts
     result = subprocess.run(
         ["git", "rev-parse", "--git-common-dir"],
         cwd=project_dir, capture_output=True, text=True, check=True,
