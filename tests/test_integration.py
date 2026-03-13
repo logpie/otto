@@ -5,9 +5,6 @@ import subprocess
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-import pytest
-import yaml
-
 from otto.config import create_config, load_config
 from otto.runner import run_all
 from otto.tasks import add_task, load_tasks
