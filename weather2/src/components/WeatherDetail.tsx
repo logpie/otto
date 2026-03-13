@@ -124,22 +124,31 @@ export default function WeatherDetail({ weather }: WeatherDetailProps) {
               <div className="flex gap-4 pb-0.5 min-w-max">
                 {weather.hourly.map((hour, i) => {
                   const time = parseISO(hour.time);
-                  const label = i === 0 ? "Now" : format(time, "ha").toLowerCase();
+                  const hourNum = time.getHours();
+                  const isNewDay = i > 0 && hourNum === 0;
+                  const label = i === 0 ? "Now" : isNewDay ? format(time, "EEE") : format(time, "ha").toLowerCase();
                   return (
-                    <div key={i} className="flex flex-col items-center gap-1.5 min-w-[44px]">
-                      <span className={`text-[13px] font-medium ${i === 0 ? 'opacity-90' : 'opacity-55'}`}>{label}</span>
-                      <div className="w-7 h-7 flex items-center justify-center my-0.5">
-                        {getWeatherIcon(hour.condition.icon, hour.isDay, 28)}
-                      </div>
-                      {hour.precipProbability > 10 ? (
-                        <span className="text-[11px] text-[#5ac8fa] font-medium leading-none">
-                          {hour.precipProbability}%
-                        </span>
-                      ) : (
-                        <span className="text-[11px] leading-none">&nbsp;</span>
+                    <React.Fragment key={i}>
+                      {isNewDay && (
+                        <div className="flex items-stretch mx-0">
+                          <div className="w-[0.5px] bg-white/15 my-2" />
+                        </div>
                       )}
-                      <span className={`text-[15px] font-medium ${i === 0 ? '' : 'opacity-90'}`}>{hour.temperature}°</span>
-                    </div>
+                      <div className="flex flex-col items-center gap-1.5 min-w-[44px]">
+                        <span className={`text-[13px] font-medium ${i === 0 ? 'opacity-90' : isNewDay ? 'opacity-70' : 'opacity-55'}`}>{label}</span>
+                        <div className="w-7 h-7 flex items-center justify-center my-0.5">
+                          {getWeatherIcon(hour.condition.icon, hour.isDay, 28)}
+                        </div>
+                        {hour.precipProbability > 10 ? (
+                          <span className="text-[11px] text-[#5ac8fa] font-medium leading-none">
+                            {hour.precipProbability}%
+                          </span>
+                        ) : (
+                          <span className="text-[11px] leading-none">&nbsp;</span>
+                        )}
+                        <span className={`text-[15px] font-medium ${i === 0 ? '' : 'opacity-90'}`}>{hour.temperature}°</span>
+                      </div>
+                    </React.Fragment>
                   );
                 })}
               </div>

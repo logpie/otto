@@ -191,7 +191,7 @@ export default function Sidebar({
                 {/* Mini gradient background for selected */}
                 <div
                   className={`absolute inset-0 ${bgClass} rounded-[12px] transition-opacity duration-300`}
-                  style={{ opacity: isSelected ? 0.3 : 0 }}
+                  style={{ opacity: isSelected ? 0.4 : 0 }}
                 />
 
                 <div className="relative px-3.5 py-3.5 flex items-center justify-between">

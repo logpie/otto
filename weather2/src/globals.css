@@ -147,7 +147,8 @@ body {
 }
 
 .sidebar-city.active {
-  background: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.18);
+  box-shadow: 0 0.5px 0 rgba(255, 255, 255, 0.06);
 }
 
 /* Main content scroll */
