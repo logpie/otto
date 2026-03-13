@@ -21,7 +21,7 @@ The value is the autonomous loop, not a dashboard. CLI composes with cron, GitHu
 Parallel agents introduce merge conflicts, resource contention, and coordination complexity (Symphony needs an entire Elixir/BEAM runtime for this). Serial with branch-per-task is simple, reliable, and still fully autonomous — you throw a list of tasks at it and walk away.
 
 ### Branch-per-task
-Each task gets a stable key (8-char hex from uuid4, e.g., `a1b2c3d4`) assigned at creation, used for branch names (`otto/a1b2c3d4`), log directories, and testgen artifacts. The numeric `id` field is display-only for human convenience. Keys survive import/reset without collision. On success, merge to default branch (fast-forward). On failure, delete the branch. The default branch never has broken code.
+Each task gets a stable key (12-char hex from uuid4, e.g., `a1b2c3d4e5f6`) assigned at creation, checked for uniqueness against existing tasks. Used for branch names (`otto/a1b2c3d4e5f6`), log directories, and testgen artifacts. The numeric `id` field is display-only for human convenience. Keys survive import/reset without collision. On success, merge to default branch (fast-forward). On failure, delete the branch. The default branch never has broken code.
 
 ### Session resume on retries
 The agent sees what went wrong on previous attempts via `--resume <session_id>`. Strictly more information than starting fresh. Prevents repeating the same mistake.
@@ -75,17 +75,20 @@ For each pending task:
 
 6. Run tiered verification:
    a. Existing test suite (auto-detected)
-   b. Copy generated test from .git/otto/testgen/ into project, run it, then
-      remove from working tree along with any side effects (*.pyc, __pycache__,
-      .pytest_cache, coverage files). The agent never sees this file.
+   b. Snapshot `git status --porcelain` before. Copy generated test from
+      .git/otto/testgen/ into project, run it. After: snapshot again, remove
+      the test file plus ALL new untracked/modified files that appeared during
+      the test run (diff the two snapshots). The agent never sees this file.
    c. Custom verify command (if specified in task)
 
-7. All pass → build the final commit from `git diff <base_sha> HEAD` (where base_sha
-   was recorded at branch creation in step 2). This handles both agent-modified files
-   and any agent-created commits correctly. Copy generated test file from .git/otto/testgen/
-   into the project test directory. Reset to base_sha, apply the combined diff + test file,
-   commit with message "otto: <first 60 chars of task prompt> (#<id>)".
-   Merge to default branch (fast-forward), delete branch, next task.
+7. All pass → prepare final commit:
+   a. Copy generated test file from .git/otto/testgen/ into the project test directory.
+   b. Rerun Tier 1 + Tier 2 as a post-commit smoke check (tests now include the
+      generated test in its final location). If this fails, treat as verification failure (step 8).
+   c. If the agent created commits, `git reset --soft <base_sha>` to collapse them.
+      Stage all intended changes + generated test file explicitly (not `git add -A`).
+      Commit with message "otto: <first 60 chars of task prompt> (#<id>)".
+   d. Merge to default branch (fast-forward), delete branch, next task.
    If fast-forward fails (default branch diverged), preserve the branch and mark task
    as `failed` with error "branch diverged — otto/<key> preserved, manual rebase needed."
 
@@ -152,9 +155,9 @@ Minimal required field: `prompt`. Everything else has defaults from `otto.yaml` 
 
 Runtime state (`status`, `attempts`, `error`, `session_id`) is written back to the task file as the system runs. No separate state database.
 
-**Git hygiene:** `tasks.yaml`, `otto.yaml`, and `otto_logs/` must be gitignored. Otto's `init` command adds them to `.git/info/exclude` (not `.gitignore`) to avoid dirtying the repo. `.git/otto/` is inherently invisible to git. Step 7 stages files explicitly (never `git add -A`).
+**Git hygiene:** `tasks.yaml` and `otto_logs/` are runtime-only — added to `.git/info/exclude` by `otto init`. `otto.yaml` is project config and SHOULD be committed (shareable across clones, CI, team members). `.git/otto/` is inherently invisible to git. Step 7 stages files explicitly (never `git add -A`).
 
-**Init and run:** `otto init` writes `otto.yaml` and updates `.git/info/exclude`. Neither modifies tracked files, so the working tree stays clean for `otto run`'s preflight check.
+**Init and run:** `otto init` creates `otto.yaml` (intended to be committed) and updates `.git/info/exclude` for runtime files. After init, the user should commit `otto.yaml` before running `otto run` (which requires a clean tree).
 
 ### Project config (`otto.yaml`)
 
