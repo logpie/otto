@@ -6,6 +6,8 @@ Otto is a CLI tool that runs autonomous Claude Code agents against a task queue 
 
 **Core insight:** Combine autoresearch's ratchet pattern (branch only moves forward) with adversarial integration test generation (a separate Claude invocation writes tests the agent can't see or game).
 
+**Migration note:** This is a ground-up rewrite. The v2 system (tasks.json, FastAPI dashboard, worker.py) is replaced entirely. No backward compatibility layer.
+
 ---
 
 ## Design Decisions
@@ -40,44 +42,70 @@ Otto acquires a process-level lock (`otto.lock` via flock) before entering the l
 For each pending task:
 
 ```
+0. Baseline check (once, before processing any tasks):
+   Run the existing test suite on the default branch. If it fails, abort with
+   "baseline tests failing — fix before running otto." This prevents attributing
+   pre-existing failures to the agent.
+
 1. Preflight: require clean working tree (no uncommitted changes). Abort if dirty.
-2. Create branch otto/task-<id> from current main HEAD.
-   If branch already exists (stale from interrupted run), delete and recreate.
+
+2. Create branch otto/task-<id> from current default branch HEAD.
+   If branch already exists: check if it was preserved from a "main diverged" failure.
+   If so, refuse to overwrite — user must manually resolve or `otto reset` first.
+   If it's from an interrupted run (status != failed with diverge error), delete and recreate.
+
 3. Start generating integration tests concurrently (separate claude -p).
-   Testgen captures a file tree snapshot BEFORE the agent starts.
-   Testgen writes the generated test file to a temp path, then copies it onto the task branch
-   after the agent finishes (step 5) — no filesystem race with the agent.
+   Testgen captures a file tree snapshot via `git ls-files` BEFORE the agent starts.
+   Testgen writes the generated test file to .git/otto/testgen/<task-id>/ (outside working tree).
+   The file is copied into the project test directory only at verification time (step 6b).
+   This keeps generated tests invisible to the agent on ALL attempts, including retries.
+
 4. Run agent via claude-agent-sdk:
-   - Prompt: task prompt + "You are working in <project_dir>."
+   - Prompt: task prompt + "You are working in <project_dir>. Do NOT create git commits."
    - Working directory: project root (on the task branch)
    - Tools: all (dangerously-skip-permissions — isolated branch is the safety net)
    - Model: from otto.yaml or task-level override
+   The agent must NOT commit. Otto owns all commits. If the agent creates commits,
+   otto squashes them into a single otto-authored commit at step 7.
+
 5. Await testgen if still running (block until complete or timeout at 120s).
    If testgen times out or fails, skip Tier 2 — log warning, continue with Tiers 1 and 3.
+
 6. Run tiered verification:
    a. Existing test suite (auto-detected)
-   b. Generated integration tests (from step 3, if available)
+   b. Copy generated test from .git/otto/testgen/ into project, run it, then
+      remove from working tree. The agent never sees this file.
    c. Custom verify command (if specified in task)
-7. All pass → stage all changes (including generated test file), commit with message
-   "otto: <first 60 chars of task prompt> (#<task-id>)", merge to main (fast-forward), delete branch, next task.
-   If fast-forward fails (main diverged), preserve the branch and mark task as `failed`
-   with error "main diverged — branch otto/task-<id> preserved, manual rebase needed."
-   Do NOT delete the branch — the work is verified and should not be lost.
-8. Any fail → feed verification output to agent via session resume, retry (up to max_retries).
+
+7. All pass → hard reset to clean state, stage only code changes + generated test file
+   (not otto runtime files), commit with message
+   "otto: <first 60 chars of task prompt> (#<task-id>)",
+   merge to default branch (fast-forward), delete branch, next task.
+   If fast-forward fails (default branch diverged), preserve the branch and mark task
+   as `failed` with error "branch diverged — otto/task-<id> preserved, manual rebase needed."
+
+8. Any fail → feed verification output (stdout/stderr only, NOT the test source code)
+   to agent via session resume, retry (up to max_retries).
    Resume uses the MOST RECENT session_id (updated after each attempt in tasks.yaml).
-   Each resume builds on the previous attempt's context — the agent sees the full chain of failures.
+   Each resume builds on the previous attempt's context.
    The resumed prompt includes:
    "Verification failed. <tier name> output: <stderr/stdout>. Fix the issue."
-9. All retries exhausted → git checkout main, delete branch, log failure, next task.
+
+9. All retries exhausted → git reset --hard, git checkout default branch,
+   delete branch, log failure, next task.
 ```
+
+### Default branch detection
+
+Otto auto-detects the default branch at init (`git symbolic-ref refs/remotes/origin/HEAD` or fallback to `main`/`master`). Stored in `otto.yaml` as `default_branch`.
 
 ### One-off mode
 
-`otto run "prompt"` creates an ephemeral task (not written to tasks.yaml), runs the same loop on a temporary branch `otto/adhoc-<timestamp>`, and cleans up on completion. Logs go to `otto_logs/adhoc-<timestamp>/`.
+`otto run "prompt"` creates an ephemeral task (not written to tasks.yaml), runs the same loop on a temporary branch `otto/adhoc-<timestamp>-<pid>` (PID prevents same-second collisions), and cleans up on completion. Logs go to `otto_logs/adhoc-<timestamp>-<pid>/`.
 
 ### Signal handling
 
-On SIGINT/SIGTERM, otto catches the signal, kills the running agent subprocess, checks out main, and deletes the task branch. The task is marked `failed` with error "interrupted". The repo is left in a clean state.
+On SIGINT/SIGTERM, otto catches the signal, kills the entire process group (agent, testgen, and any verification subprocesses), runs `git reset --hard && git checkout <default_branch>`, and deletes the task branch. The task is marked `failed` with error "interrupted". All subprocesses are started in their own process group (`os.setpgrp`) so they can be killed together.
 
 ---
 
@@ -114,6 +142,8 @@ Minimal required field: `prompt`. Everything else has defaults from `otto.yaml` 
 
 Runtime state (`status`, `attempts`, `error`, `session_id`) is written back to the task file as the system runs. No separate state database.
 
+**Git hygiene:** `tasks.yaml`, `otto.yaml`, `otto_logs/`, and `.git/otto/` must be in `.gitignore`. Otto's `init` command adds them automatically. The `git add` in step 7 uses explicit file paths (from `git diff --name-only`), never `git add -A`, to avoid committing runtime state.
+
 ### Project config (`otto.yaml`)
 
 ```yaml
@@ -121,6 +151,8 @@ test_command: pytest
 max_retries: 3
 model: sonnet
 project_dir: .
+default_branch: main          # auto-detected by otto init
+verify_timeout: 300            # seconds per verification tier
 ```
 
 Created by `otto init`, which auto-detects `test_command` from the project.
@@ -133,19 +165,23 @@ Three tiers, run in order. First failure stops the chain.
 
 ### Tier 1: Existing test suite
 
-- Auto-detected from project or configured in `otto.yaml` `test_command`.
+- Configured in `otto.yaml` `test_command` (preferred), or auto-detected from project.
 - Detection order: `pytest` → `npm test` → `go test ./...` → `cargo test` → `make test`.
+- If auto-detection is ambiguous (multiple candidates), warn and require explicit config.
 - Runs the full suite. Catches regressions.
-- Skipped if no test command found.
+- Skipped with warning if no test command found or configured.
 
 ### Tier 2: Generated integration tests
 
 - A separate `claude -p` call generates tests from the task prompt.
-- Prompt instructs: real dependencies, no mocks, behavioral/integration assertions.
+- Prompt instructs: behavioral/integration assertions using real dependencies where available.
+  Mocks/fakes are allowed only when the project already provides them (e.g., test fixtures, local test servers).
+  No external network calls unless explicitly allowlisted. Tests must be deterministic and hermetic.
 - Tests written to a file in the project's test directory, using the project's test framework.
   Detection: pytest → `tests/otto_verify_task_<id>.py`, jest → `__tests__/otto_verify_task_<id>.test.js`, go → `otto_verify_task_<id>_test.go`.
-- Testgen prompt receives: task prompt, file tree listing (`find . -type f`), and the project's test framework.
+- Testgen prompt receives: task prompt, file tree listing (via `git ls-files`), and the project's test framework.
   It does NOT receive file contents or the agent's changes — only structure.
+  Uses `git ls-files` (not `find`) to exclude .git, build artifacts, secrets, and vendored deps.
 - Generated concurrently with the agent's first attempt.
   If testgen completes before the agent, tests are ready immediately.
   If the agent completes first, runner awaits testgen (up to 120s timeout, then skips Tier 2).
