@@ -193,8 +193,32 @@ from otto.config import (
     create_config,
     detect_default_branch,
     detect_test_command,
+    git_meta_dir,
     load_config,
 )
+
+
+class TestGitMetaDir:
+    def test_returns_dot_git_for_normal_repo(self, tmp_git_repo):
+        result = git_meta_dir(tmp_git_repo)
+        assert result == tmp_git_repo / ".git"
+
+    def test_returns_common_dir_for_linked_worktree(self, tmp_git_repo):
+        """In a linked worktree, git_meta_dir returns the shared .git/ dir."""
+        import subprocess
+        wt_path = tmp_git_repo / "worktrees" / "test-wt"
+        subprocess.run(
+            ["git", "worktree", "add", str(wt_path), "-b", "test-wt-branch"],
+            cwd=tmp_git_repo, capture_output=True, check=True,
+        )
+        result = git_meta_dir(wt_path)
+        # Should point to the main repo's .git, not the worktree's .git file
+        assert result == tmp_git_repo / ".git"
+        # Clean up
+        subprocess.run(
+            ["git", "worktree", "remove", str(wt_path)],
+            cwd=tmp_git_repo, capture_output=True,
+        )
 
 
 class TestLoadConfig:
@@ -305,6 +329,20 @@ DEFAULT_CONFIG: dict[str, Any] = {
 }
 
 
+def git_meta_dir(project_dir: Path) -> Path:
+    """Return the canonical git metadata directory (handles linked worktrees).
+
+    In a normal repo, this returns project_dir/.git.
+    In a linked worktree, .git is a file — this returns the shared .git/ dir
+    via `git rev-parse --git-common-dir`.
+    """
+    result = subprocess.run(
+        ["git", "rev-parse", "--git-common-dir"],
+        cwd=project_dir, capture_output=True, text=True, check=True,
+    )
+    return Path(result.stdout.strip())
+
+
 def load_config(config_path: Path) -> dict[str, Any]:
     """Load otto.yaml, filling missing keys with defaults."""
     if not config_path.exists():
@@ -398,8 +436,8 @@ def create_config(project_dir: Path) -> Path:
     config_path = project_dir / "otto.yaml"
     config_path.write_text(yaml.dump(config, default_flow_style=False, sort_keys=False))
 
-    # Update .git/info/exclude for runtime files
-    exclude_path = project_dir / ".git" / "info" / "exclude"
+    # Update .git/info/exclude for runtime files (use git_meta_dir for linked worktrees)
+    exclude_path = git_meta_dir(project_dir) / "info" / "exclude"
     exclude_path.parent.mkdir(parents=True, exist_ok=True)
     existing = exclude_path.read_text() if exclude_path.exists() else ""
     entries = ["tasks.yaml", "otto_logs/", "otto.lock"]
@@ -737,8 +775,8 @@ class TestGenerateTests:
         assert result is not None
         assert result.exists()
         assert "test_hello" in result.read_text()
-        # Verify stored under .git/otto/testgen/
-        assert ".git/otto/testgen/" in str(result)
+        # Verify stored under <git-common-dir>/otto/testgen/
+        assert "otto/testgen/" in str(result)
 
     @patch("otto.testgen.subprocess.run")
     def test_returns_none_on_failure(self, mock_run, tmp_git_repo):
@@ -768,6 +806,8 @@ import json
 import re
 import subprocess
 from pathlib import Path
+
+from otto.config import git_meta_dir
 
 TESTGEN_TIMEOUT = 120  # seconds
 
@@ -873,8 +913,8 @@ def generate_tests(
     if fence_match:
         output = fence_match.group(1).strip()
 
-    # Write to .git/otto/testgen/<key>/
-    testgen_dir = project_dir / ".git" / "otto" / "testgen" / key
+    # Write to <git-common-dir>/otto/testgen/<key>/ (handles linked worktrees)
+    testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / key
     testgen_dir.mkdir(parents=True, exist_ok=True)
 
     rel_path = test_file_path(framework, key)
@@ -1148,8 +1188,9 @@ def run_tier2(
 
     dest = workdir / rel_path
     if not dest.exists():
-        return TierResult(tier="generated_tests", passed=True, skipped=True,
-                          output="Generated test file not found in candidate commit")
+        # testgen was requested but file is missing from candidate commit — fail, not skip
+        return TierResult(tier="generated_tests", passed=False,
+                          output=f"Generated test file not found at {rel_path} in candidate commit")
 
     try:
         # Run just this test file
@@ -1350,8 +1391,11 @@ class TestBuildCandidateCommit:
             cwd=tmp_git_repo, capture_output=True, text=True,
         ).stdout.strip()
         (tmp_git_repo / "new_file.py").write_text("print('hello')\n")
-        # Create a fake testgen file
-        testgen_dir = tmp_git_repo / ".git" / "otto" / "testgen" / "abc123def456"
+        # Create a fake testgen file (in the git metadata dir)
+        testgen_dir = Path(subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"],
+            cwd=tmp_git_repo, capture_output=True, text=True, check=True,
+        ).stdout.strip()) / "otto" / "testgen" / "abc123def456"
         testgen_dir.mkdir(parents=True)
         testgen_file = testgen_dir / "otto_verify_abc123def456.py"
         testgen_file.write_text("def test_verify(): assert True\n")
@@ -1417,7 +1461,7 @@ from typing import Any
 
 from claude_agent_sdk import ClaudeAgentOptions, query
 
-from otto.config import load_config
+from otto.config import git_meta_dir, load_config
 from otto.tasks import load_tasks, update_task
 from otto.testgen import generate_tests, detect_test_framework, test_file_path
 from otto.verify import run_verification
@@ -1706,7 +1750,7 @@ async def run_task(
             # Merge to default
             if merge_to_default(project_dir, key, default_branch):
                 # Clean testgen artifacts (test file is now in the repo)
-                testgen_dir = project_dir / ".git" / "otto" / "testgen" / key
+                testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / key
                 if testgen_dir.exists():
                     shutil.rmtree(testgen_dir, ignore_errors=True)
                 if tasks_file:
@@ -1715,7 +1759,7 @@ async def run_task(
                 return True
             else:
                 # Clean testgen artifacts (test file is in the preserved branch)
-                testgen_dir = project_dir / ".git" / "otto" / "testgen" / key
+                testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / key
                 if testgen_dir.exists():
                     shutil.rmtree(testgen_dir, ignore_errors=True)
                 if tasks_file:
@@ -1745,7 +1789,7 @@ async def run_task(
     )
     cleanup_branch(project_dir, key, default_branch)
     # Clean up testgen artifacts for this task
-    testgen_dir = project_dir / ".git" / "otto" / "testgen" / key
+    testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / key
     if testgen_dir.exists():
         shutil.rmtree(testgen_dir, ignore_errors=True)
     if tasks_file:
@@ -1765,13 +1809,8 @@ async def run_all(
     """Run all pending tasks. Returns exit code (0=all passed, 1=any failed)."""
     default_branch = config["default_branch"]
 
-    # Acquire process lock — use canonical repo root to prevent path aliasing
-    # Use git-common-dir for lock (shared across linked worktrees)
-    git_common = subprocess.run(
-        ["git", "rev-parse", "--git-common-dir"],
-        cwd=project_dir, capture_output=True, text=True, check=True,
-    ).stdout.strip()
-    lock_path = Path(git_common) / "otto.lock"
+    # Acquire process lock — use canonical git metadata dir (shared across linked worktrees)
+    lock_path = git_meta_dir(project_dir) / "otto.lock"
     lock_path.touch()
     lock_fh = open(lock_path, "r")
     try:
@@ -2012,7 +2051,7 @@ from pathlib import Path
 
 import click
 
-from otto.config import create_config, load_config
+from otto.config import create_config, git_meta_dir, load_config
 from otto.tasks import add_task, load_tasks, save_tasks, update_task
 
 
@@ -2105,11 +2144,7 @@ def run(prompt, dry_run):
         import os
         import time
 
-        git_common = subprocess.run(
-            ["git", "rev-parse", "--git-common-dir"],
-            cwd=project_dir, capture_output=True, text=True, check=True,
-        ).stdout.strip()
-        lock_path = Path(git_common) / "otto.lock"
+        lock_path = git_meta_dir(project_dir) / "otto.lock"
         lock_path.touch()
         lock_fh = open(lock_path, "r")
         try:
@@ -2235,8 +2270,8 @@ def reset(yes):
     if log_dir.exists():
         shutil.rmtree(log_dir)
 
-    # Clean testgen artifacts
-    testgen_dir = Path.cwd() / ".git" / "otto"
+    # Clean testgen artifacts (use git_meta_dir for linked worktree support)
+    testgen_dir = git_meta_dir(Path.cwd()) / "otto"
     if testgen_dir.exists():
         shutil.rmtree(testgen_dir)
 
