@@ -35,7 +35,7 @@ LLM-as-judge is vibes. Generated pytest/jest tests are deterministic, runnable, 
 
 ## Core Loop
 
-Otto acquires a process-level lock (`otto.lock` via flock) before entering the loop. If another `otto run` is already active, exit with error "another otto process is running." This prevents two runners from picking up the same task.
+Otto acquires a process-level lock (`otto.lock` via flock) before entering the loop. If another `otto run` is already active, exit with error "another otto process is running." This prevents two runners from picking up the same task. The lock uses `flock` (automatically released on process exit, including SIGKILL/crash) — no stale lock file issue.
 
 For each pending task:
 
@@ -58,7 +58,8 @@ For each pending task:
    a. Existing test suite (auto-detected)
    b. Generated integration tests (from step 3, if available)
    c. Custom verify command (if specified in task)
-7. All pass → commit all changes, merge branch to main (fast-forward), delete branch, next task.
+7. All pass → stage all changes (including generated test file), commit with message
+   "otto: <first 60 chars of task prompt> (#<task-id>)", merge to main (fast-forward), delete branch, next task.
    If fast-forward fails (main diverged), preserve the branch and mark task as `failed`
    with error "main diverged — branch otto/task-<id> preserved, manual rebase needed."
    Do NOT delete the branch — the work is verified and should not be lost.
@@ -207,12 +208,12 @@ otto init                          # Creates otto.yaml with auto-detected settin
 
 # Add tasks
 otto add "Add JWT auth"            # Appends to tasks.yaml, auto-generates ID
-otto add -f tasks.yaml             # Load tasks from a file
+otto add -f other_tasks.yaml       # Import tasks from a file (new IDs auto-assigned, ignoring any IDs in source)
 
 # Run
 otto run                           # Run all pending tasks in tasks.yaml
 otto run "Fix the bug in auth.py"  # One-off task, no tasks.yaml needed
-otto run --dry-run                 # Show what would run without executing
+otto run --dry-run                 # List pending tasks, detected test command, config — no execution
 
 # Monitor
 otto status                        # Table of tasks with status, attempts, timing
