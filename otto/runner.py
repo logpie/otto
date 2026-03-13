@@ -338,6 +338,9 @@ async def run_task(
 
     # All retries exhausted
     subprocess.run(["git", "reset", "--hard"], cwd=project_dir, capture_output=True)
+    # Remove untracked agent artifacts (respects .git/info/exclude so runtime
+    # files like tasks.yaml, otto_logs/ are preserved)
+    subprocess.run(["git", "clean", "-fd"], cwd=project_dir, capture_output=True)
     subprocess.run(
         ["git", "checkout", default_branch],
         cwd=project_dir, capture_output=True,
