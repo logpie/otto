@@ -138,16 +138,20 @@ function renderTasks() {
     const cost = t.cost_usd ? `$${t.cost_usd.toFixed(3)}` : '';
     const elapsed = t.started_at ? formatElapsed(t.started_at, t.finished_at) : '';
     const verifyGoal = t.verify_prompt || t.verify || '';
+    const verifyCmd = t.verify_cmd || '';
+    const isTerminal = ['failed', 'completed'].includes(t.status);
+    const isRunning = t.status === 'in_progress';
+    const showVerifyEdit = verifyEditOpen.has(t.id);
 
     // Build attempt dots
     let attemptDots = '';
-    if (t.status === 'in_progress' || t.status === 'failed' || attempts > 0) {
+    if (isRunning || t.status === 'failed' || attempts > 0) {
       const dots = [];
       for (let i = 1; i <= maxRetries; i++) {
-        if (attempts === 0 && t.status === 'in_progress' && i === 1)
+        if (attempts === 0 && isRunning && i === 1)
           dots.push('<span class="attempt-dot active"></span>');
         else if (i < attempts) dots.push('<span class="attempt-dot done"></span>');
-        else if (i === attempts && t.status === 'in_progress')
+        else if (i === attempts && isRunning)
           dots.push('<span class="attempt-dot active"></span>');
         else if (i === attempts && t.status === 'failed')
           dots.push('<span class="attempt-dot fail"></span>');
@@ -158,12 +162,47 @@ function renderTasks() {
       attemptDots = `<span class="attempt-bar">${dots.join('')}</span>`;
     }
 
+    // Verify section
+    let verifyHtml = '';
+    if (verifyGoal || verifyCmd) {
+      const lastError = t.last_error || '';
+      const verifyFailed = t.status === 'failed' && lastError.includes('Verification');
+      const verifyPassed = t.status === 'completed' && verifyCmd;
+      let statusLine = '';
+      if (verifyPassed) statusLine = '<span class="verify-status pass">verified</span>';
+      else if (verifyFailed) statusLine = '<span class="verify-status fail">verify failed</span>';
+      else if (isRunning) statusLine = '<span class="verify-status pending">running...</span>';
+      verifyHtml = `
+        <div class="task-verify">
+          ${statusLine}
+          ${verifyCmd ? `<details class="verify-details"><summary>script</summary><code>${esc(verifyCmd)}</code></details>` : ''}
+        </div>`;
+    }
+
+    // Inline verify editor for completed/failed tasks without verification
+    let verifyEditor = '';
+    if (showVerifyEdit) {
+      verifyEditor = `
+        <div class="verify-editor">
+          <input type="text" id="verify-goal-${t.id}"
+                 placeholder="How to verify it works..."
+                 value="${esc(verifyGoal)}"
+                 onkeydown="if(event.key==='Enter'){event.preventDefault();addVerifyAndRetry('${t.id}')}">
+          <div class="verify-editor-actions">
+            <button class="btn primary tiny" onclick="addVerifyAndRetry('${t.id}')">Save & Retry</button>
+            <button class="btn secondary tiny" onclick="updateTaskVerify('${t.id}')">Save</button>
+            <button class="btn secondary tiny" onclick="toggleVerifyEdit('${t.id}')">Cancel</button>
+          </div>
+        </div>`;
+    }
+
     return `
       <div class="task-card ${t.status}">
         <div class="task-prompt">${esc(t.prompt)}</div>
-        ${verifyGoal ? `<div class="task-verify-goal">Verify: ${esc(verifyGoal)}</div>` : ''}
+        ${verifyHtml}
+        ${verifyEditor}
         <div class="task-meta">
-          <span class="badge ${t.status}">${t.status}</span>
+          <span class="badge ${t.status}">${t.status.replace('_', ' ')}</span>
           ${attemptDots}
           ${cost ? `<span class="cost">${cost}</span>` : ''}
           ${elapsed ? `<span>${elapsed}</span>` : ''}
@@ -172,10 +211,15 @@ function renderTasks() {
         </div>
         <div class="task-actions">
           <button class="btn secondary tiny" onclick="toggleLog('${t.id}')">Log</button>
-          ${['failed', 'completed'].includes(t.status)
+          ${isTerminal
+            ? `<button class="btn secondary tiny" onclick="toggleVerifyEdit('${t.id}')">${verifyGoal ? 'Edit verify' : 'Add verify'}</button>`
+            : ''}
+          ${isTerminal
             ? `<button class="btn primary tiny" onclick="retryTask('${t.id}')">Retry</button>`
             : ''}
-          <button class="btn danger tiny" onclick="deleteTask('${t.id}')">Delete</button>
+          ${!isRunning
+            ? `<button class="btn danger tiny" onclick="deleteTask('${t.id}')">Delete</button>`
+            : ''}
         </div>
         <div class="log-box" id="log-${t.id}" style="display:none"></div>
       </div>`;
@@ -199,34 +243,44 @@ async function addTask() {
   const prompt = input.value.trim();
   if (!prompt) return;
 
-  const verifyPrompt = document.getElementById('verifyPromptInput').value.trim();
-  const verifyCmd = document.getElementById('verifyCmdInput').value.trim();
-  const maxRetries = parseInt(document.getElementById('maxRetriesInput').value) || 3;
-
-  await fetch(API + '/api/tasks', {
+  const res = await fetch(API + '/api/tasks', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      prompt,
-      verify_prompt: verifyPrompt,
-      verify_cmd: verifyCmd,
-      max_retries: maxRetries,
-    }),
+    body: JSON.stringify({ prompt }),
   });
 
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    notify('error', data.error || 'Failed to add task');
+    return;
+  }
+
   input.value = '';
-  document.getElementById('verifyPromptInput').value = '';
-  document.getElementById('verifyCmdInput').value = '';
   notify('info', 'Task added');
+
+  // Auto-start worker if none running
+  autoStartWorkerIfNeeded();
 }
 
 async function deleteTask(id) {
-  await fetch(API + '/api/tasks/' + id, { method: 'DELETE' });
+  const res = await fetch(API + '/api/tasks/' + id, { method: 'DELETE' });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    notify('error', data.error || 'Failed to delete task');
+    return;
+  }
+  notify('info', 'Task deleted');
 }
 
 async function retryTask(id) {
-  await fetch(API + '/api/tasks/' + id + '/retry', { method: 'POST' });
+  const res = await fetch(API + '/api/tasks/' + id + '/retry', { method: 'POST' });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    notify('error', data.error || 'Failed to retry task');
+    return;
+  }
   notify('info', 'Task queued for retry');
+  autoStartWorkerIfNeeded();
 }
 
 async function startWorker(name) {
@@ -236,11 +290,19 @@ async function startWorker(name) {
     return;
   }
   if (!name) name = 'main';
-  await fetch(API + '/api/workers/start', {
+  const res = await fetch(API + '/api/workers/start', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name, project_dir: projectDir }),
   });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    // Don't show error for auto-start when worker already running
+    if (!data.error?.includes('already running')) {
+      notify('error', data.error || 'Failed to start worker');
+    }
+    return;
+  }
   notify('info', `Worker '${name}' started`);
 }
 
@@ -254,6 +316,78 @@ async function stopAllWorkers() {
     await fetch(API + '/api/workers/' + name + '/stop', { method: 'POST' });
   }
   notify('info', 'All workers stopped');
+}
+
+function autoStartWorkerIfNeeded() {
+  const hasRunning = Object.values(lastWorkers).some(w => w.status === 'running');
+  if (hasRunning) return;
+  const projectDir = document.getElementById('projectDir').value.trim();
+  if (!projectDir) return;
+  startWorker('main');
+}
+
+async function updateTaskVerify(id) {
+  const goalEl = document.getElementById('verify-goal-' + id);
+  const verifyPrompt = goalEl ? goalEl.value.trim() : '';
+  if (!verifyPrompt) {
+    notify('error', 'Enter a verification goal');
+    return;
+  }
+
+  const res = await fetch(API + '/api/tasks/' + id, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ verify_prompt: verifyPrompt, verify_cmd: '' }),
+  });
+
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    notify('error', data.error || 'Failed to update task');
+    return;
+  }
+  notify('info', 'Verification updated');
+}
+
+async function addVerifyAndRetry(id) {
+  const goalEl = document.getElementById('verify-goal-' + id);
+  const verifyPrompt = goalEl ? goalEl.value.trim() : '';
+  if (!verifyPrompt) {
+    notify('error', 'Enter a verification goal');
+    return;
+  }
+
+  // Update verify fields first
+  let res = await fetch(API + '/api/tasks/' + id, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ verify_prompt: verifyPrompt, verify_cmd: '' }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    notify('error', data.error || 'Failed to update task');
+    return;
+  }
+
+  // Then retry
+  res = await fetch(API + '/api/tasks/' + id + '/retry', { method: 'POST' });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    notify('error', data.error || 'Failed to retry task');
+    return;
+  }
+  notify('info', 'Verification added, retrying task');
+  autoStartWorkerIfNeeded();
+}
+
+let verifyEditOpen = new Set();
+
+function toggleVerifyEdit(id) {
+  if (verifyEditOpen.has(id)) {
+    verifyEditOpen.delete(id);
+  } else {
+    verifyEditOpen.add(id);
+  }
+  renderTasks();
 }
 
 function setFilter(filter) {

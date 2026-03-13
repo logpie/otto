@@ -227,6 +227,17 @@ from unittest.mock import MagicMock, patch
 from claude_agent_sdk import ResultMessage
 
 
+def _mock_result(session_id="sess-1", cost=0.05, subtype="success"):
+    """Create a properly populated ResultMessage mock."""
+    m = MagicMock(spec=ResultMessage)
+    m.session_id = session_id
+    m.total_cost_usd = cost
+    m.subtype = subtype
+    m.num_turns = 5
+    m.duration_ms = 10000
+    return m
+
+
 @pytest.fixture
 def task_entry():
     return {
@@ -242,10 +253,7 @@ def task_entry():
 async def test_run_task_passes_on_first_attempt(tasks_file, task_entry, tmp_path):
     from worker import run_task
 
-    mock_result = MagicMock(spec=ResultMessage)
-    mock_result.session_id = "sess-123"
-    mock_result.total_cost_usd = 0.05
-    mock_result.subtype = "success"
+    mock_result = _mock_result("sess-123", 0.05)
 
     async def mock_query(**kwargs):
         yield mock_result
@@ -268,10 +276,7 @@ async def test_run_task_resumes_session_on_retry(tasks_file, task_entry, tmp_pat
     call_count = 0
     captured_options = []
 
-    mock_result = MagicMock(spec=ResultMessage)
-    mock_result.session_id = "sess-456"
-    mock_result.total_cost_usd = 0.03
-    mock_result.subtype = "success"
+    mock_result = _mock_result("sess-456", 0.03)
 
     async def mock_query(*, prompt, options=None):
         nonlocal call_count
@@ -297,10 +302,7 @@ async def test_run_task_fails_after_max_retries(task_entry, tmp_path):
 
     task_entry["verify_cmd"] = "exit 1"
 
-    mock_result = MagicMock(spec=ResultMessage)
-    mock_result.session_id = "sess-789"
-    mock_result.total_cost_usd = 0.02
-    mock_result.subtype = "success"
+    mock_result = _mock_result("sess-789", 0.02)
 
     async def mock_query(**kwargs):
         yield mock_result
@@ -316,10 +318,7 @@ async def test_run_task_fails_after_max_retries(task_entry, tmp_path):
 async def test_run_task_skips_verification_on_agent_non_success(task_entry, tmp_path):
     from worker import run_task
 
-    mock_result = MagicMock(spec=ResultMessage)
-    mock_result.session_id = "sess-error"
-    mock_result.total_cost_usd = 0.01
-    mock_result.subtype = "error_max_turns"
+    mock_result = _mock_result("sess-error", 0.01, "error_max_turns")
 
     async def mock_query(**kwargs):
         yield mock_result
@@ -351,3 +350,93 @@ async def test_run_task_skips_verification_without_result_message(task_entry, tm
 
     assert result["status"] == "failed"
     assert result["attempts"] == 2
+
+
+# -- generate_verify_script tests -------------------------------------------
+
+def test_generate_verify_script_success(tmp_path):
+    from worker import generate_verify_script
+
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(
+            stdout="grep -q 'hello' output.txt",
+            stderr="",
+            returncode=0,
+        )
+        result = generate_verify_script(
+            tmp_path, "output.txt should contain hello", "Write hello to output.txt"
+        )
+    assert result == "grep -q 'hello' output.txt"
+    mock_run.assert_called_once()
+    cmd = mock_run.call_args[0][0]
+    assert cmd[0] == "claude"
+    assert "-p" in cmd
+
+
+def test_generate_verify_script_strips_markdown_fences(tmp_path):
+    from worker import generate_verify_script
+
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(
+            stdout="```bash\ngrep -q 'hello' output.txt\n```",
+            stderr="",
+            returncode=0,
+        )
+        result = generate_verify_script(
+            tmp_path, "output.txt should contain hello", "Write hello"
+        )
+    assert result == "grep -q 'hello' output.txt"
+
+
+def test_generate_verify_script_returns_none_on_failure(tmp_path):
+    from worker import generate_verify_script
+
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(stdout="", stderr="error", returncode=1)
+        result = generate_verify_script(tmp_path, "check it", "do it")
+    assert result is None
+
+
+def test_generate_verify_script_returns_none_on_timeout(tmp_path):
+    from worker import generate_verify_script
+    import subprocess as sp
+
+    with patch("subprocess.run", side_effect=sp.TimeoutExpired("cmd", 60)):
+        result = generate_verify_script(tmp_path, "check it", "do it")
+    assert result is None
+
+
+def test_generate_verify_script_returns_none_when_cli_missing(tmp_path):
+    from worker import generate_verify_script
+
+    with patch("subprocess.run", side_effect=FileNotFoundError):
+        result = generate_verify_script(tmp_path, "check it", "do it")
+    assert result is None
+
+
+
+# -- Agent-written verify.sh tests ------------------------------------------
+
+@pytest.mark.asyncio
+async def test_run_task_uses_agent_written_verify_sh(tmp_path):
+    """Agent writes verify.sh; run_verify picks it up via auto-detect."""
+    from worker import run_task
+
+    task = {
+        "id": "vsh1",
+        "prompt": "Create hello.txt",
+        "verify_prompt": "",
+        "verify_cmd": "",
+        "status": "in_progress",
+    }
+
+    mock_result = _mock_result("sess-vsh", 0.02)
+
+    async def mock_query(**kwargs):
+        yield mock_result
+
+    with patch("worker.query", side_effect=mock_query), \
+         patch("worker.run_verify", return_value=(True, "ok")):
+        result = await run_task(task, tmp_path, max_retries=3)
+
+    assert result["status"] == "completed"

@@ -31,22 +31,10 @@
 <!-- Task input -->
 <div class="section" id="inputSection">
   <div class="task-input-wrap">
-    <textarea id="taskInput" placeholder="Describe the task..." rows="2"></textarea>
+    <textarea id="taskInput" placeholder="What to build or do..." rows="2"></textarea>
     <button id="addTaskBtn" class="btn primary" onclick="addTask()">Add</button>
   </div>
-  <details class="advanced-toggle">
-    <summary>Advanced</summary>
-    <div class="advanced-fields">
-      <input type="text" id="verifyPromptInput"
-             placeholder="Verify goal (e.g. 'E2E latency < 500ms')">
-      <input type="text" id="verifyCmdInput"
-             placeholder="Verify command (e.g. 'pytest -x')">
-      <div class="field-row">
-        <label>Max retries:</label>
-        <input type="number" id="maxRetriesInput" value="3" min="1" max="10" class="small-input">
-      </div>
-    </div>
-  </details>
+  <div class="input-hint">Verification auto-generates from your task description</div>
 </div>
 
 <!-- Workers -->

@@ -215,6 +215,42 @@ def test_retry_in_progress_task_returns_409(app_with_tmp):
     assert task["attempts"] == 2
 
 
+def test_patch_task_updates_verify_fields(app_with_tmp):
+    resp = app_with_tmp.post("/api/tasks", json={"prompt": "Build X"})
+    task_id = resp.json()["id"]
+
+    resp = app_with_tmp.patch(f"/api/tasks/{task_id}", json={
+        "verify_prompt": "app loads without errors",
+        "verify_cmd": "",
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["verify_prompt"] == "app loads without errors"
+    assert data["verify_cmd"] == ""
+
+    # Verify persisted
+    tasks = json.loads(app_with_tmp.app.state.tasks_file.read_text())
+    assert tasks[0]["verify_prompt"] == "app loads without errors"
+
+
+def test_patch_task_rejects_invalid_fields(app_with_tmp):
+    resp = app_with_tmp.post("/api/tasks", json={"prompt": "Build X"})
+    task_id = resp.json()["id"]
+
+    resp = app_with_tmp.patch(f"/api/tasks/{task_id}", json={
+        "status": "completed",
+        "prompt": "hacked",
+    })
+    assert resp.status_code == 400
+
+
+def test_patch_nonexistent_task_returns_404(app_with_tmp):
+    resp = app_with_tmp.patch("/api/tasks/nonexistent", json={
+        "verify_prompt": "test",
+    })
+    assert resp.status_code == 404
+
+
 def test_stop_worker_requeues_its_in_progress_tasks(app_with_tmp):
     from unittest.mock import MagicMock
 

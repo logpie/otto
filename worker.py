@@ -24,6 +24,14 @@ import time
 from pathlib import Path
 
 from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
+from claude_agent_sdk.types import (
+    AssistantMessage,
+    SystemMessage,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
+)
 from verify_utils import _detect_verification
 
 logger = logging.getLogger("worker")
@@ -226,6 +234,7 @@ def run_verify(
         result = subprocess.run(
             verify_cmd,
             shell=True,
+            executable="/bin/bash",
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -237,6 +246,82 @@ def run_verify(
         return False, f"Verification timed out after {timeout}s"
     except Exception as e:
         return False, f"Verification error: {e}"
+
+
+# -- NL spec → verification script -------------------------------------------
+
+def generate_verify_script(
+    project_dir: Path,
+    verify_prompt: str,
+    task_prompt: str,
+    timeout: int = 120,
+) -> str | None:
+    """One-time call: translate an NL verification spec into a shell command.
+
+    Spawns `claude -p` to inspect the project and produce a deterministic
+    verification command. Returns the command string, or None on failure.
+    """
+    gen_prompt = (
+        "You are a QA engineer writing a BEHAVIORAL verification script. "
+        "Given a task and verification goal, write a bash script that tests the "
+        "actual behavior — NOT by grepping source code for strings.\n\n"
+        "Good verifications:\n"
+        "- Build the app and check it compiles\n"
+        "- Start a server, curl an endpoint, check the response\n"
+        "- Run the program and check its output\n"
+        "- Time an operation and check it meets a threshold\n"
+        "- Run existing tests if they cover the feature\n\n"
+        "Bad verifications (DO NOT DO):\n"
+        "- grep for function names in source files\n"
+        "- Check if certain strings exist in code\n"
+        "- Inspect file contents instead of running code\n\n"
+        "The script must:\n"
+        "- Exit 0 on success, non-zero on failure\n"
+        "- Print a clear message on failure\n"
+        "- Clean up after itself (kill servers, remove temp files)\n"
+        "- Complete within 60 seconds\n"
+        "- Be self-contained bash that runs from the project root\n\n"
+        f"TASK: {task_prompt}\n\n"
+        f"VERIFICATION GOAL: {verify_prompt}\n\n"
+        "Look at the project to understand how to build/run it, then output ONLY "
+        "the bash script. No explanation, no markdown fences, no commentary."
+    )
+
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+    try:
+        result = subprocess.run(
+            ["claude", "-p", gen_prompt, "--max-turns", "5"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=str(project_dir),
+            env=env,
+        )
+        cmd = result.stdout.strip()
+        if not cmd or result.returncode != 0:
+            logger.warning(f"  Failed to generate verify script: {result.stderr[:200]}")
+            return None
+        # Extract code from markdown fences if present (model may add commentary)
+        import re
+        fence_match = re.search(r"```(?:\w*)\n(.*?)```", cmd, re.DOTALL)
+        if fence_match:
+            cmd = fence_match.group(1).strip()
+        elif "```" in cmd:
+            # Fallback: strip all fence lines
+            lines = cmd.splitlines()
+            lines = [l for l in lines if not l.startswith("```")]
+            cmd = "\n".join(lines).strip()
+        logger.info(f"  Generated verify command: {cmd[:200]}")
+        return cmd
+    except FileNotFoundError:
+        logger.warning("  claude CLI not found — cannot generate verify script")
+        return None
+    except subprocess.TimeoutExpired:
+        logger.warning("  Timed out generating verify script")
+        return None
+    except Exception as e:
+        logger.warning(f"  Error generating verify script: {e}")
+        return None
 
 
 # -- Task runner with session resume ------------------------------------------
@@ -292,6 +377,29 @@ async def _run_task_inner(
     task, project_dir, max_retries, tasks_file,
     session_id, verify_error, total_cost,
 ):
+    # If no verify_prompt was given, derive it from the task prompt itself.
+    verify_prompt = task.get("verify_prompt") or task.get("verify", "") or ""
+    if not verify_prompt:
+        verify_prompt = task["prompt"]
+        task["verify_prompt"] = verify_prompt
+        if tasks_file:
+            update_task(tasks_file, task["id"], verify_prompt=verify_prompt)
+        logger.info(f"  No verify_prompt set — using task prompt as verification goal")
+
+    # Start verify script generation concurrently with the first attempt.
+    # This is a separate claude -p process so it can't be gamed by the agent.
+    verify_gen_task = None
+    if not task.get("verify_cmd"):
+        logger.info(f"  Starting concurrent verify generation: {verify_prompt[:100]}")
+        verify_gen_task = asyncio.create_task(
+            asyncio.to_thread(
+                generate_verify_script,
+                project_dir,
+                verify_prompt,
+                task["prompt"],
+            )
+        )
+
     for attempt in range(1, max_retries + 1):
         logger.info(f"Task {task['id']}: attempt {attempt}/{max_retries}")
 
@@ -324,6 +432,28 @@ async def _run_task_inner(
                 async for message in query(prompt=prompt, options=options):
                     if isinstance(message, ResultMessage):
                         result_msg = message
+                    elif isinstance(message, AssistantMessage):
+                        if message.error:
+                            logger.warning(f"  [assistant:error] {message.error}")
+                        for block in message.content:
+                            if isinstance(block, TextBlock):
+                                logger.info(f"  [text] {block.text[:300]}")
+                            elif isinstance(block, ToolUseBlock):
+                                inp = str(block.input)[:200]
+                                logger.info(f"  [tool:call] {block.name}: {inp}")
+                            elif isinstance(block, ToolResultBlock):
+                                err = " (ERROR)" if block.is_error else ""
+                                content = str(block.content)[:200] if block.content else ""
+                                logger.info(f"  [tool:result]{err} {content}")
+                    elif isinstance(message, UserMessage):
+                        # Tool results come back as UserMessage
+                        for block in message.content:
+                            if isinstance(block, ToolResultBlock):
+                                err = " (ERROR)" if block.is_error else ""
+                                content = str(block.content)[:200] if block.content else ""
+                                logger.info(f"  [tool:result]{err} {content}")
+                    elif isinstance(message, SystemMessage):
+                        logger.info(f"  [system] {message.subtype}: {str(message.data)[:200]}")
             except Exception as e:
                 logger.error(f"  SDK error: {e}")
                 verify_error = f"Claude Code process error: {e}"
@@ -337,7 +467,10 @@ async def _run_task_inner(
                     total_cost += result_msg.total_cost_usd
                 logger.info(
                     f"  Claude finished: {result_msg.subtype}, "
-                    f"cost=${result_msg.total_cost_usd or 0:.4f}"
+                    f"turns={result_msg.num_turns}, "
+                    f"cost=${result_msg.total_cost_usd or 0:.4f}, "
+                    f"duration={result_msg.duration_ms / 1000:.0f}s, "
+                    f"session={result_msg.session_id}"
                 )
                 # Persist cost and session_id after each attempt
                 if tasks_file:
@@ -357,6 +490,21 @@ async def _run_task_inner(
                 if tasks_file:
                     update_task(tasks_file, task["id"], last_error=verify_error[:500])
                 continue
+
+            # Collect concurrently-generated verify script if ready
+            if verify_gen_task and not task.get("verify_cmd"):
+                try:
+                    generated_cmd = await verify_gen_task
+                    if generated_cmd:
+                        task["verify_cmd"] = generated_cmd
+                        if tasks_file:
+                            update_task(tasks_file, task["id"], verify_cmd=generated_cmd)
+                        logger.info(f"  Verify script ready: {generated_cmd[:150]}")
+                    else:
+                        logger.info("  Verify generation returned nothing — using auto-detect")
+                except Exception as e:
+                    logger.warning(f"  Verify generation failed: {e}")
+                verify_gen_task = None  # Don't await again on retry
 
             # Run verification in a thread so the heartbeat task can
             # continue updating heartbeat_at during long verify commands.

@@ -174,35 +174,10 @@ textarea {
   padding: 10px 20px;
 }
 
-.advanced-toggle {
-  margin-top: 6px;
-}
-
-.advanced-toggle > summary {
-  font-size: 12px;
+.input-hint {
+  margin-top: 4px;
+  font-size: 11px;
   color: var(--text-muted);
-  cursor: pointer;
-  list-style: none;
-}
-
-.advanced-toggle > summary::before {
-  content: '+ ';
-}
-
-.advanced-toggle[open] > summary::before {
-  content: '- ';
-}
-
-.advanced-fields {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-top: 6px;
-}
-
-.advanced-fields input {
-  font-size: 13px;
-  padding: 8px 10px;
 }
 
 .field-row {
@@ -335,10 +310,71 @@ textarea {
   line-height: 1.4;
 }
 
-.task-verify-goal {
-  font-size: 12px;
-  color: var(--accent-yellow);
+.task-verify {
+  margin-top: 6px;
+  padding: 6px 8px;
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-sm);
+  border-left: 2px solid var(--accent-yellow);
+}
+
+.verify-status {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.verify-status.pass {
+  color: var(--accent-green);
+}
+
+.verify-status.pass::before {
+  content: '\2713 ';
+}
+
+.verify-status.fail {
+  color: var(--accent-red);
+}
+
+.verify-status.fail::before {
+  content: '\2717 ';
+}
+
+.verify-status.pending {
+  font-style: italic;
+}
+
+.verify-details {
   margin-top: 4px;
+}
+
+.verify-details summary {
+  font-size: 11px;
+  color: var(--text-muted);
+  cursor: pointer;
+  list-style: none;
+}
+
+.verify-details summary::before {
+  content: '> ';
+}
+
+.verify-details[open] summary::before {
+  content: 'v ';
+}
+
+.verify-details code {
+  display: block;
+  margin-top: 4px;
+  font-family: 'SF Mono', 'Menlo', monospace;
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--bg-primary);
+  padding: 6px 8px;
+  border-radius: 3px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 200px;
+  overflow-y: auto;
 }
 
 .task-meta {
@@ -376,6 +412,26 @@ textarea {
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }
+}
+
+/* --- Verify editor (inline on task cards) --- */
+.verify-editor {
+  margin-top: 6px;
+  padding: 8px;
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+}
+
+.verify-editor input {
+  font-size: 13px;
+  padding: 6px 8px;
+  margin-bottom: 6px;
+}
+
+.verify-editor-actions {
+  display: flex;
+  gap: 6px;
 }
 
 .task-actions {

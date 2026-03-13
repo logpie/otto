@@ -169,6 +169,26 @@ def create_app(
             return JSONResponse({"error": "task is currently in_progress"}, 409)
         return {"ok": True}
 
+    @_app.patch("/api/tasks/{task_id}")
+    async def update_task_endpoint(task_id: str, request: Request):
+        body = await request.json()
+        allowed = {"verify_prompt", "verify_cmd", "max_retries"}
+        updates = {k: v for k, v in body.items() if k in allowed}
+        if not updates:
+            return JSONResponse({"error": "no valid fields to update"}, 400)
+
+        def _update(tasks):
+            for t in tasks:
+                if t["id"] == task_id:
+                    t.update(updates)
+                    return t
+            return None
+
+        result = _locked_task_rw_manager(request.app.state.tasks_file, _update)
+        if result is None:
+            return JSONResponse({"error": "task not found"}, 404)
+        return result
+
     @_app.post("/api/tasks/{task_id}/retry")
     def retry_task(task_id: str, request: Request):
         def _retry(tasks):
