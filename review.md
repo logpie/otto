@@ -22,3 +22,25 @@
 ### Round 4 — Codex re-reviewed fixes
 - [IMPORTANT] Heartbeat stops during blocking `subprocess.run()` in `run_verify()` — **fixed**: `asyncio.to_thread(run_verify, ...)` keeps event loop unblocked
 - APPROVED. No new issues.
+
+## Implementation Gate — 2026-03-13 — Otto v3 full implementation
+
+### Round 1 — Codex
+- [CRITICAL] Tasks forked from whatever branch is checked out, not default_branch — fixed: create_task_branch checks current branch and checks out default_branch first
+- [IMPORTANT] Failed agent attempt contaminates retry with partial edits — fixed: git reset --hard + clean -fd on agent exception
+- [IMPORTANT] Generated test files get wrong pathname for non-pytest frameworks — fixed: preserve testgen_file.name, use test_file_path only for directory
+- [IMPORTANT] Tier 2 command construction hardcodes runners and drops configured options — fixed: use configured test_command and append test file path
+- [IMPORTANT] Signal/timeout doesn't kill subprocess trees — acknowledged, deferred (start_new_session covers timeout; full os.killpg requires Popen refactor)
+- [IMPORTANT] Cleanup not unified across failure paths — fixed: _cleanup_task_failure helper used by retries-exhausted, interruption, and unexpected exceptions
+
+### Round 2 — Codex
+- [IMPORTANT] Tier 2 still hardcodes runners instead of using configured test_command — fixed: run_tier2 takes test_command param, appends file to configured command
+- [IMPORTANT] Broad try/except can corrupt post-merge state — fixed: narrowed try/except to pre-merge phases only
+
+### Round 3 — Codex
+- [IMPORTANT] Verify log writing and commit amend unprotected after narrowing — fixed: verify log wrapped in try/except OSError, commit amend in its own try/except
+- [IMPORTANT] JS framework detection collapses jest/vitest/mocha to "jest" — fixed: return concrete runner name, use npx {framework} for fallback
+
+### Round 4 — Codex
+- [IMPORTANT] Commit amend missing check=True so failures silently pass — fixed: added check=True and text=True, stderr captured in error message
+- APPROVED. No new issues.
