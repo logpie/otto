@@ -26,13 +26,16 @@ logger = logging.getLogger("otto.runner")
 
 
 def check_clean_tree(project_dir: Path) -> bool:
-    """Check if the working tree is clean (no uncommitted changes).
+    """Check that tracked files have no uncommitted changes.
 
-    Ignores otto runtime files (tasks.yaml, .tasks.lock) since otto itself
-    modifies these during runs.
+    Only checks tracked files — untracked files are fine (the agent may need
+    to coexist with user files like import configs, scratch notes, etc.).
+    Otto runtime files (tasks.yaml, .tasks.lock) are also ignored since otto
+    modifies them during runs.
     """
+    # -uno: suppress untracked files entirely
     result = subprocess.run(
-        ["git", "status", "--porcelain"],
+        ["git", "status", "--porcelain", "-uno"],
         cwd=project_dir,
         capture_output=True,
         text=True,
@@ -41,9 +44,6 @@ def check_clean_tree(project_dir: Path) -> bool:
         return False
     otto_runtime = {"tasks.yaml", ".tasks.lock"}
     for line in result.stdout.strip().splitlines():
-        # porcelain v1: 2-char status + space + path, but renamed entries
-        # use "XY old -> new". Split on whitespace after the status prefix.
-        # Status is always first 2 chars; path follows after a space.
         parts = line.split(maxsplit=1)
         if len(parts) < 2:
             return False
@@ -51,6 +51,19 @@ def check_clean_tree(project_dir: Path) -> bool:
         if filename not in otto_runtime:
             return False
     return True
+
+
+def _snapshot_untracked(project_dir: Path) -> set[str]:
+    """Return the set of currently untracked files (excluding ignored).
+
+    Used before agent runs so build_candidate_commit can distinguish
+    pre-existing untracked files from agent-created ones.
+    """
+    result = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        cwd=project_dir, capture_output=True, text=True,
+    )
+    return {f for f in result.stdout.split("\0") if f}
 
 
 def create_task_branch(
@@ -119,6 +132,7 @@ def build_candidate_commit(
     project_dir: Path,
     base_sha: str,
     testgen_file: Path | None,
+    pre_existing_untracked: set[str] | None = None,
 ) -> str:
     """Build a candidate commit with agent changes + generated test."""
     # If agent made commits, squash them
@@ -140,14 +154,14 @@ def build_candidate_commit(
         ["git", "add", "-u"],
         cwd=project_dir, capture_output=True, check=True,
     )
-    # Stage untracked files (excluding ignored via .git/info/exclude)
-    # Use -z for null-terminated output to handle filenames with special chars
+    # Stage agent-created untracked files (excluding ignored and pre-existing)
     untracked = subprocess.run(
         ["git", "ls-files", "--others", "--exclude-standard", "-z"],
         cwd=project_dir, capture_output=True, text=True,
     )
+    skip = pre_existing_untracked or set()
     for f in untracked.stdout.split("\0"):
-        if f:
+        if f and f not in skip:
             subprocess.run(
                 ["git", "add", "--", f],
                 cwd=project_dir, capture_output=True,
@@ -267,6 +281,9 @@ async def run_task(
     default_branch = config["default_branch"]
     timeout = config["verify_timeout"]
 
+    # Snapshot pre-existing untracked files so we don't sweep them into the commit
+    pre_existing_untracked = _snapshot_untracked(project_dir)
+
     # Create branch
     base_sha = create_task_branch(project_dir, key, default_branch, task=task)
     if tasks_file:
@@ -355,7 +372,9 @@ async def run_task(
                     testgen_file = testgen_task.result()
 
             # Build candidate commit
-            candidate_sha = build_candidate_commit(project_dir, base_sha, testgen_file)
+            candidate_sha = build_candidate_commit(
+                project_dir, base_sha, testgen_file, pre_existing_untracked
+            )
 
             # Run verification in disposable worktree
             verify_result = run_verification(

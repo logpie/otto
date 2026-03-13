@@ -36,10 +36,18 @@ class TestCheckCleanTree:
         (tmp_git_repo / ".tasks.lock").write_text("")
         assert check_clean_tree(tmp_git_repo) is True
 
-    def test_dirty_with_tasks_yaml_and_other(self, tmp_git_repo):
-        """If there's a real dirty file alongside tasks.yaml, still fails."""
-        (tmp_git_repo / "tasks.yaml").write_text("tasks: []\n")
-        (tmp_git_repo / "real_change.py").write_text("x = 1")
+    def test_ignores_untracked_files(self, tmp_git_repo):
+        """Untracked files (like user scratch files) should not count as dirty."""
+        (tmp_git_repo / "scratch.py").write_text("x = 1")
+        assert check_clean_tree(tmp_git_repo) is True
+
+    def test_dirty_tracked_file_fails(self, tmp_git_repo):
+        """Modified tracked files (not otto runtime) should still fail."""
+        # Create and commit a file, then modify it
+        (tmp_git_repo / "real.py").write_text("x = 1")
+        subprocess.run(["git", "add", "real.py"], cwd=tmp_git_repo, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "add real"], cwd=tmp_git_repo, capture_output=True)
+        (tmp_git_repo / "real.py").write_text("x = 2")
         assert check_clean_tree(tmp_git_repo) is False
 
 
