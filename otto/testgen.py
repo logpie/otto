@@ -1,5 +1,6 @@
 """Otto test generation — generate integration tests via claude -p."""
 
+import ast
 import json
 import re
 import subprocess
@@ -50,15 +51,43 @@ def test_file_path(framework: str, key: str) -> Path:
             return Path(f"tests/otto_verify_{key}.py")
 
 
-def build_testgen_prompt(task_prompt: str, file_tree: str, framework: str) -> str:
+def _read_existing_tests(project_dir: Path) -> str:
+    """Read existing test files to provide import style context."""
+    test_dirs = [project_dir / "tests", project_dir / "test"]
+    samples = []
+    for test_dir in test_dirs:
+        if not test_dir.is_dir():
+            continue
+        for f in sorted(test_dir.iterdir()):
+            if f.suffix == ".py" and f.name.startswith("test_"):
+                content = f.read_text()
+                # Take first 50 lines to show import patterns
+                lines = content.splitlines()[:50]
+                samples.append(f"# {f.relative_to(project_dir)}\n" + "\n".join(lines))
+                if len(samples) >= 2:
+                    break
+        if samples:
+            break
+    return "\n\n".join(samples) if samples else ""
+
+
+def build_testgen_prompt(task_prompt: str, file_tree: str, framework: str,
+                         existing_tests: str = "") -> str:
     """Build the prompt for test generation."""
+    example_section = ""
+    if existing_tests:
+        example_section = f"""
+EXISTING TESTS (follow the same import patterns and style):
+{existing_tests}
+"""
+
     return f"""You are a QA engineer writing integration tests for a coding task.
 
 TASK: {task_prompt}
 
 PROJECT FILES:
 {file_tree}
-
+{example_section}
 TEST FRAMEWORK: {framework}
 
 Write integration tests that verify the task was completed correctly.
@@ -68,8 +97,11 @@ Rules:
 - Tests must be hermetic and deterministic — no external network calls
 - Mocks/fakes ONLY if the project already provides test fixtures for them
 - Do NOT grep source code for strings — test actual behavior
-- Output ONLY the test file contents, no explanation or markdown fences
 - The tests should be runnable with the standard test command for {framework}
+- Follow the same import style as the existing tests above
+
+IMPORTANT: Output ONLY valid {framework} test code. No prose, no explanations, no markdown.
+Start directly with import statements.
 """
 
 
@@ -93,7 +125,8 @@ def generate_tests(
         file_tree = ""
 
     framework = detect_test_framework(project_dir) or "pytest"
-    prompt = build_testgen_prompt(task_prompt, file_tree, framework)
+    existing_tests = _read_existing_tests(project_dir)
+    prompt = build_testgen_prompt(task_prompt, file_tree, framework, existing_tests)
 
     # Run claude -p via stdin (avoids ARG_MAX on large file trees)
     try:
@@ -116,6 +149,18 @@ def generate_tests(
     fence_match = re.search(r"```(?:\w*)\n(.*?)```", output, re.DOTALL)
     if fence_match:
         output = fence_match.group(1).strip()
+
+    # Validate the output is parseable code (not prose)
+    if framework in ("pytest", "cargo", "go"):
+        # For Python, validate syntax
+        if framework == "pytest":
+            try:
+                ast.parse(output)
+            except SyntaxError:
+                return None
+            # Quick sanity: must contain at least one test function
+            if "def test_" not in output:
+                return None
 
     # Write to <git-common-dir>/otto/testgen/<key>/ (handles linked worktrees)
     testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / key
