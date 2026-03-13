@@ -17,7 +17,7 @@ The value is the autonomous loop, not a dashboard. CLI composes with cron, GitHu
 Parallel agents introduce merge conflicts, resource contention, and coordination complexity (Symphony needs an entire Elixir/BEAM runtime for this). Serial with branch-per-task is simple, reliable, and still fully autonomous — you throw a list of tasks at it and walk away.
 
 ### Branch-per-task
-Each task runs on `otto/<task-slug>`. On success, merge to main (fast-forward). On failure, delete the branch. Main never has broken code. `git log` becomes a readable history of what otto accomplished.
+Each task runs on `otto/<task-slug>`. The slug is derived from the task ID: `otto/task-<id>` (e.g., `otto/task-1`, `otto/task-2`). On success, merge to main (fast-forward). On failure, delete the branch. Main never has broken code. `git log` becomes a readable history of what otto accomplished.
 
 ### Session resume on retries
 The agent sees what went wrong on previous attempts via `--resume <session_id>`. Strictly more information than starting fresh. Prevents repeating the same mistake.
@@ -38,17 +38,37 @@ LLM-as-judge is vibes. Generated pytest/jest tests are deterministic, runnable, 
 For each pending task:
 
 ```
-1. Create branch otto/<task-slug>
-2. Start generating integration tests concurrently (separate claude -p)
-3. Run agent on the task (claude-agent-sdk, with task prompt + project context)
-4. Run tiered verification:
+1. Preflight: require clean working tree (no uncommitted changes). Abort if dirty.
+2. Create branch otto/task-<id> from current main HEAD.
+   If branch already exists (stale from interrupted run), delete and recreate.
+3. Start generating integration tests concurrently (separate claude -p).
+   Testgen sees project structure from BEFORE the agent starts (snapshot of file tree).
+4. Run agent via claude-agent-sdk:
+   - Prompt: task prompt + "You are working in <project_dir>."
+   - Working directory: project root (on the task branch)
+   - Tools: all (dangerously-skip-permissions — isolated branch is the safety net)
+   - Model: from otto.yaml or task-level override
+5. Await testgen if still running (block until complete or timeout at 120s).
+   If testgen times out or fails, skip Tier 2 — log warning, continue with Tiers 1 and 3.
+6. Run tiered verification:
    a. Existing test suite (auto-detected)
-   b. Generated integration tests (from step 2)
+   b. Generated integration tests (from step 3, if available)
    c. Custom verify command (if specified in task)
-5. All pass → commit, merge branch to main, next task
-6. Any fail → resume session with error context, retry (up to max_retries)
-7. All retries exhausted → delete branch, log failure, next task
+7. All pass → commit all changes, merge branch to main (fast-forward), delete branch, next task.
+   If fast-forward fails (main diverged), abort task as failed — do not force merge.
+8. Any fail → feed verification output to agent via session resume, retry (up to max_retries).
+   Resume uses the session_id from step 4. The resumed prompt includes:
+   "Verification failed. <tier name> output: <stderr/stdout>. Fix the issue."
+9. All retries exhausted → git checkout main, delete branch, log failure, next task.
 ```
+
+### One-off mode
+
+`otto run "prompt"` creates an ephemeral task (not written to tasks.yaml), runs the same loop on a temporary branch `otto/adhoc-<timestamp>`, and cleans up on completion. Logs go to `otto_logs/adhoc-<timestamp>/`.
+
+### Signal handling
+
+On SIGINT/SIGTERM, otto catches the signal, kills the running agent subprocess, checks out main, and deletes the task branch. The task is marked `failed` with error "interrupted". The repo is left in a clean state.
 
 ---
 
@@ -113,11 +133,17 @@ Three tiers, run in order. First failure stops the chain.
 
 - A separate `claude -p` call generates tests from the task prompt.
 - Prompt instructs: real dependencies, no mocks, behavioral/integration assertions.
-- Tests written to a file (e.g., `tests/otto_verify_<task_slug>.py`).
-- Generated concurrently with the agent's first attempt — ready by verification time.
-- Persisted in the repo — they become regression tests for future tasks.
+- Tests written to a file in the project's test directory, using the project's test framework.
+  Detection: pytest → `tests/otto_verify_task_<id>.py`, jest → `__tests__/otto_verify_task_<id>.test.js`, go → `otto_verify_task_<id>_test.go`.
+- Testgen prompt receives: task prompt, file tree listing (`find . -type f`), and the project's test framework.
+  It does NOT receive file contents or the agent's changes — only structure.
+- Generated concurrently with the agent's first attempt.
+  If testgen completes before the agent, tests are ready immediately.
+  If the agent completes first, runner awaits testgen (up to 120s timeout, then skips Tier 2).
+- Persisted in the repo — on task success, they merge with the task branch and become regression tests.
+  On task failure, they are deleted with the branch.
 - On retry, existing generated tests are reused (not regenerated).
-- Adversarial by construction: written by a separate invocation that sees only the task prompt and project structure, not the agent's implementation.
+- Adversarial by construction: testgen runs from a snapshot of the project BEFORE the agent starts, so it writes tests based on the spec (task prompt), not the implementation.
 
 ### Tier 3: Custom verify command
 
@@ -185,13 +211,16 @@ otto status                        # Table of tasks with status, attempts, timin
 otto logs <task-id>                # Show agent + verification logs for a task
 
 # Manage
-otto retry <task-id>               # Reset a failed task to pending
-otto reset                         # Reset all tasks to pending
+otto retry <task-id>               # Reset a failed task to pending, clear session_id
+otto reset                         # Reset all tasks to pending, delete otto/* branches, clear logs
 ```
 
 ### Logs
 
-Stored in `otto_logs/<task-id>/` — `agent.log`, `verify.log`, `testgen.log`. One directory per task.
+Stored in `otto_logs/<task-id>/` — one directory per task. Files:
+- `attempt-<n>-agent.log` — agent output per attempt
+- `attempt-<n>-verify.log` — verification output per attempt
+- `testgen.log` — test generation output (once per task)
 
 ### Exit codes
 
