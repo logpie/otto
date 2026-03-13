@@ -78,6 +78,7 @@ def run_tier1(workdir: Path, test_command: str | None, timeout: int) -> TierResu
 def run_tier2(
     workdir: Path,
     testgen_file: Path | None,
+    test_command: str | None,
     timeout: int,
 ) -> TierResult:
     """Run generated integration tests in the worktree.
@@ -85,6 +86,7 @@ def run_tier2(
     The test file is already in the worktree at its final path (baked into the
     candidate commit by build_candidate_commit). We just need to find and run it.
     The testgen_file path is used only to derive the filename for discovery.
+    Uses test_command (the configured command) to run the test file where possible.
     """
     if not testgen_file:
         return TierResult(tier="generated_tests", passed=True, skipped=True)
@@ -110,17 +112,24 @@ def run_tier2(
                           output=f"Generated test file not found at {rel_path} in candidate commit")
 
     try:
-        # Build framework-appropriate command for the generated test file
+        # Build test command: append the generated test file to the configured command
+        # when possible, so we preserve wrappers/options (uv run pytest, python -m pytest, etc.)
         if framework in ("pytest",):
-            cmd = f"pytest {rel_path} -v"
-        elif framework == "jest":
-            cmd = f"npx jest {rel_path}"
+            if test_command and "pytest" in test_command:
+                # Append the test file path to the configured pytest command
+                cmd = f"{test_command} {rel_path}"
+            else:
+                cmd = f"pytest {rel_path} -v"
         elif framework == "go":
             cmd = f"go test ./{rel_path.parent}/..."
         elif framework == "cargo":
             cmd = f"cargo test"
         else:
-            cmd = f"pytest {rel_path} -v"
+            # jest/vitest/mocha — use configured test_command if available
+            if test_command:
+                cmd = f"{test_command} -- {rel_path}"
+            else:
+                cmd = f"npx jest {rel_path}"
         result = subprocess.run(
             cmd,
             shell=True,
@@ -200,7 +209,7 @@ def run_verification(
             return VerifyResult(passed=False, tiers=tiers)
 
         # Tier 2: Generated tests
-        t2 = run_tier2(worktree_path, testgen_file, timeout)
+        t2 = run_tier2(worktree_path, testgen_file, test_command, timeout)
         tiers.append(t2)
         if not t2.passed and not t2.skipped:
             return VerifyResult(passed=False, tiers=tiers)

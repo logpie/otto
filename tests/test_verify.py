@@ -45,7 +45,7 @@ class TestRunTier2:
         tests_dir.mkdir()
         test_file = tests_dir / "otto_verify_test123.py"
         test_file.write_text("def test_ok(): assert True\n")
-        result = run_tier2(tmp_git_repo, test_file, timeout=60)
+        result = run_tier2(tmp_git_repo, test_file, "pytest", timeout=60)
         assert result.passed
 
     def test_fails_with_failing_test(self, tmp_git_repo):
@@ -53,12 +53,12 @@ class TestRunTier2:
         tests_dir.mkdir()
         test_file = tests_dir / "otto_verify_test123.py"
         test_file.write_text("def test_bad(): assert False\n")
-        result = run_tier2(tmp_git_repo, test_file, timeout=60)
+        result = run_tier2(tmp_git_repo, test_file, "pytest", timeout=60)
         assert not result.passed
         assert result.output
 
     def test_skips_when_no_file(self, tmp_git_repo):
-        result = run_tier2(tmp_git_repo, None, timeout=60)
+        result = run_tier2(tmp_git_repo, None, "pytest", timeout=60)
         assert result.passed
         assert result.skipped
 

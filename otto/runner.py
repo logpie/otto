@@ -265,27 +265,28 @@ async def run_task(
 
     session_id = None
     last_error = None  # verification failure output for retry feedback
-    try:
-        for attempt in range(max_retries + 1):
-            attempt_num = attempt + 1
-            logger.info(f"Task #{task_id} ({key}) — attempt {attempt_num}/{max_retries + 1}")
+    for attempt in range(max_retries + 1):
+        attempt_num = attempt + 1
+        logger.info(f"Task #{task_id} ({key}) — attempt {attempt_num}/{max_retries + 1}")
 
-            if tasks_file:
-                update_task(tasks_file, key, attempts=attempt_num)
+        if tasks_file:
+            update_task(tasks_file, key, attempts=attempt_num)
 
-            # Build agent prompt — on retries, use verification failure feedback
-            if attempt == 0 or last_error is None:
-                agent_prompt = (
-                    f"{prompt}\n\nYou are working in {project_dir}. Do NOT create git commits."
-                )
-            else:
-                agent_prompt = (
-                    f"Verification failed. Fix the issue.\n\n"
-                    f"{last_error}\n\n"
-                    f"Original task: {prompt}\n\n"
-                    f"You are working in {project_dir}. Do NOT create git commits."
-                )
+        # Build agent prompt — on retries, use verification failure feedback
+        if attempt == 0 or last_error is None:
+            agent_prompt = (
+                f"{prompt}\n\nYou are working in {project_dir}. Do NOT create git commits."
+            )
+        else:
+            agent_prompt = (
+                f"Verification failed. Fix the issue.\n\n"
+                f"{last_error}\n\n"
+                f"Original task: {prompt}\n\n"
+                f"You are working in {project_dir}. Do NOT create git commits."
+            )
 
+        # Run agent + build candidate + verify — catch infrastructure failures
+        try:
             try:
                 options = ClaudeAgentOptions(
                     prompt=agent_prompt,
@@ -343,70 +344,68 @@ async def run_task(
                 timeout=timeout,
             )
 
-            # Write verification log
-            verify_log = log_dir / f"attempt-{attempt_num}-verify.log"
-            verify_log.write_text(
-                "\n".join(f"{t.tier}: {'PASS' if t.passed else 'FAIL'}\n{t.output}"
-                          for t in verify_result.tiers)
+        except Exception as e:
+            # Unexpected error during agent/candidate/verify phases — safe to clean up
+            logger.error(f"Task #{task_id} unexpected error: {e}")
+            _cleanup_task_failure(
+                project_dir, key, default_branch, tasks_file,
+                error=f"unexpected error: {e}", error_code="internal_error",
+            )
+            return False
+
+        # Write verification log
+        verify_log = log_dir / f"attempt-{attempt_num}-verify.log"
+        verify_log.write_text(
+            "\n".join(f"{t.tier}: {'PASS' if t.passed else 'FAIL'}\n{t.output}"
+                      for t in verify_result.tiers)
+        )
+
+        if verify_result.passed:
+            # Amend commit message
+            subprocess.run(
+                ["git", "commit", "--amend", "-m",
+                 f"otto: {prompt[:60]} (#{task_id})"],
+                cwd=project_dir, capture_output=True,
+            )
+            # Merge to default — post-merge bookkeeping errors are non-destructive
+            if merge_to_default(project_dir, key, default_branch):
+                testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / key
+                if testgen_dir.exists():
+                    shutil.rmtree(testgen_dir, ignore_errors=True)
+                if tasks_file:
+                    update_task(tasks_file, key, status="passed")
+                logger.info(f"Task #{task_id} PASSED — merged to {default_branch}")
+                return True
+            else:
+                testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / key
+                if testgen_dir.exists():
+                    shutil.rmtree(testgen_dir, ignore_errors=True)
+                if tasks_file:
+                    update_task(
+                        tasks_file, key, status="failed",
+                        error=f"branch diverged — otto/{key} preserved, manual rebase needed",
+                        error_code="merge_diverged",
+                    )
+                logger.error(f"Task #{task_id} — merge failed (branch diverged)")
+                return False
+        else:
+            # Verification failed — unwind candidate commit for retry
+            subprocess.run(
+                ["git", "reset", "--mixed", "HEAD~1"],
+                cwd=project_dir, capture_output=True,
+            )
+            last_error = verify_result.failure_output
+            logger.warning(
+                f"Task #{task_id} attempt {attempt_num} — verification failed"
             )
 
-            if verify_result.passed:
-                # Amend commit message
-                subprocess.run(
-                    ["git", "commit", "--amend", "-m",
-                     f"otto: {prompt[:60]} (#{task_id})"],
-                    cwd=project_dir, capture_output=True,
-                )
-                # Merge to default
-                if merge_to_default(project_dir, key, default_branch):
-                    # Clean testgen artifacts (test file is now in the repo)
-                    testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / key
-                    if testgen_dir.exists():
-                        shutil.rmtree(testgen_dir, ignore_errors=True)
-                    if tasks_file:
-                        update_task(tasks_file, key, status="passed")
-                    logger.info(f"Task #{task_id} PASSED — merged to {default_branch}")
-                    return True
-                else:
-                    # Clean testgen artifacts (test file is in the preserved branch)
-                    testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / key
-                    if testgen_dir.exists():
-                        shutil.rmtree(testgen_dir, ignore_errors=True)
-                    if tasks_file:
-                        update_task(
-                            tasks_file, key, status="failed",
-                            error=f"branch diverged — otto/{key} preserved, manual rebase needed",
-                            error_code="merge_diverged",
-                        )
-                    logger.error(f"Task #{task_id} — merge failed (branch diverged)")
-                    return False
-            else:
-                # Verification failed — unwind candidate commit for retry
-                subprocess.run(
-                    ["git", "reset", "--mixed", "HEAD~1"],
-                    cwd=project_dir, capture_output=True,
-                )
-                last_error = verify_result.failure_output
-                logger.warning(
-                    f"Task #{task_id} attempt {attempt_num} — verification failed"
-                )
-
-        # All retries exhausted
-        _cleanup_task_failure(
-            project_dir, key, default_branch, tasks_file,
-            error="max retries exhausted", error_code="max_retries",
-        )
-        logger.error(f"Task #{task_id} FAILED — all retries exhausted")
-        return False
-
-    except Exception as e:
-        # Unexpected infrastructure failure — clean up deterministically
-        logger.error(f"Task #{task_id} unexpected error: {e}")
-        _cleanup_task_failure(
-            project_dir, key, default_branch, tasks_file,
-            error=f"unexpected error: {e}", error_code="internal_error",
-        )
-        return False
+    # All retries exhausted
+    _cleanup_task_failure(
+        project_dir, key, default_branch, tasks_file,
+        error="max retries exhausted", error_code="max_retries",
+    )
+    logger.error(f"Task #{task_id} FAILED — all retries exhausted")
+    return False
 
 
 async def run_all(
