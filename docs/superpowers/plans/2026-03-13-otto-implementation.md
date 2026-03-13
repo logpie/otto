@@ -859,6 +859,7 @@ def generate_tests(
             capture_output=True,
             text=True,
             timeout=TESTGEN_TIMEOUT,
+            start_new_session=True,  # own process group for clean kill on timeout
         )
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return None
@@ -1122,34 +1123,38 @@ def run_tier2(
     test_command: str,
     timeout: int,
 ) -> TierResult:
-    """Run generated integration tests in the worktree."""
-    if not testgen_file or not testgen_file.exists():
+    """Run generated integration tests in the worktree.
+
+    The test file is already in the worktree at its final path (baked into the
+    candidate commit by build_candidate_commit). We just need to find and run it.
+    The testgen_file path is used only to derive the filename for discovery.
+    """
+    if not testgen_file:
         return TierResult(tier="generated_tests", passed=True, skipped=True)
 
-    # Copy test file into worktree at the correct relative path
-    # Use the file's name to place it in the right directory (e.g., tests/)
+    # Find the test file in the worktree (it was staged into the candidate commit)
     from otto.testgen import test_file_path, detect_test_framework
     framework = detect_test_framework(workdir) or "pytest"
-    # Extract key from filename (otto_verify_<key>.py)
+    # Derive the repo-relative path from the filename
     fname = testgen_file.name
     rel_path = None
     for fw in ("pytest", "jest", "go", "cargo"):
         candidate = test_file_path(fw, "PLACEHOLDER")
         if candidate.suffix == Path(fname).suffix:
-            # Use the parent directory from the framework-specific path
             rel_path = candidate.parent / fname
             break
     if rel_path is None:
         rel_path = Path("tests") / fname
 
     dest = workdir / rel_path
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(testgen_file, dest)
+    if not dest.exists():
+        return TierResult(tier="generated_tests", passed=True, skipped=True,
+                          output="Generated test file not found in candidate commit")
 
     try:
         # Run just this test file
         if "pytest" in test_command:
-            cmd = f"pytest {dest.relative_to(workdir)} -v"
+            cmd = f"pytest {rel_path} -v"
         else:
             cmd = test_command
         result = subprocess.run(
@@ -1700,11 +1705,19 @@ async def run_task(
             )
             # Merge to default
             if merge_to_default(project_dir, key, default_branch):
+                # Clean testgen artifacts (test file is now in the repo)
+                testgen_dir = project_dir / ".git" / "otto" / "testgen" / key
+                if testgen_dir.exists():
+                    shutil.rmtree(testgen_dir, ignore_errors=True)
                 if tasks_file:
                     update_task(tasks_file, key, status="passed")
                 logger.info(f"Task #{task_id} PASSED — merged to {default_branch}")
                 return True
             else:
+                # Clean testgen artifacts (test file is in the preserved branch)
+                testgen_dir = project_dir / ".git" / "otto" / "testgen" / key
+                if testgen_dir.exists():
+                    shutil.rmtree(testgen_dir, ignore_errors=True)
                 if tasks_file:
                     update_task(
                         tasks_file, key, status="failed",
