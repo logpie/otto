@@ -1731,8 +1731,15 @@ async def run_task(
         cwd=project_dir, capture_output=True,
     )
     cleanup_branch(project_dir, key, default_branch)
+    # Clean up testgen artifacts for this task
+    testgen_dir = project_dir / ".git" / "otto" / "testgen" / key
+    if testgen_dir.exists():
+        shutil.rmtree(testgen_dir, ignore_errors=True)
     if tasks_file:
-        update_task(tasks_file, key, status="failed", error="max retries exhausted")
+        update_task(
+            tasks_file, key, status="failed",
+            error="max retries exhausted", error_code="max_retries",
+        )
     logger.error(f"Task #{task_id} FAILED — all retries exhausted")
     return False
 
@@ -1746,11 +1753,12 @@ async def run_all(
     default_branch = config["default_branch"]
 
     # Acquire process lock — use canonical repo root to prevent path aliasing
-    repo_root = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"],
+    # Use git-common-dir for lock (shared across linked worktrees)
+    git_common = subprocess.run(
+        ["git", "rev-parse", "--git-common-dir"],
         cwd=project_dir, capture_output=True, text=True, check=True,
     ).stdout.strip()
-    lock_path = Path(repo_root) / "otto.lock"
+    lock_path = Path(git_common) / "otto.lock"
     lock_path.touch()
     lock_fh = open(lock_path, "r")
     try:
@@ -2084,11 +2092,11 @@ def run(prompt, dry_run):
         import os
         import time
 
-        repo_root = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
+        git_common = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"],
             cwd=project_dir, capture_output=True, text=True, check=True,
         ).stdout.strip()
-        lock_path = Path(repo_root) / "otto.lock"
+        lock_path = Path(git_common) / "otto.lock"
         lock_path.touch()
         lock_fh = open(lock_path, "r")
         try:
