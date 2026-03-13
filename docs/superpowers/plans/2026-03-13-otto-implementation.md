@@ -1101,6 +1101,7 @@ def run_tier1(workdir: Path, test_command: str | None, timeout: int) -> TierResu
             capture_output=True,
             text=True,
             timeout=timeout,
+            start_new_session=True,  # own process group for clean kill
         )
         return TierResult(
             tier="existing_tests",
@@ -1185,6 +1186,7 @@ def run_tier3(workdir: Path, verify_cmd: str | None, timeout: int) -> TierResult
             text=True,
             timeout=timeout,
             executable="/bin/bash",
+            start_new_session=True,  # own process group for clean kill
         )
         return TierResult(
             tier="custom_verify",
@@ -1447,8 +1449,8 @@ def create_task_branch(
         capture_output=True,
     )
     if check.returncode == 0:
-        # Check if this was preserved from a diverge failure
-        if task and task.get("status") == "failed" and "diverged" in (task.get("error") or ""):
+        # Check if this was preserved from a diverge failure (structured error_code)
+        if task and task.get("status") == "failed" and task.get("error_code") == "merge_diverged":
             raise RuntimeError(
                 f"Branch otto/{key} preserved from diverge failure — "
                 f"manually resolve or run 'otto reset' first"
@@ -1506,14 +1508,15 @@ def build_candidate_commit(
         cwd=project_dir, capture_output=True, check=True,
     )
     # Stage untracked files (excluding ignored via .git/info/exclude)
+    # Use -z for null-terminated output to handle filenames with special chars
     untracked = subprocess.run(
-        ["git", "ls-files", "--others", "--exclude-standard"],
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
         cwd=project_dir, capture_output=True, text=True,
     )
-    for f in untracked.stdout.strip().split("\n"):
+    for f in untracked.stdout.split("\0"):
         if f:
             subprocess.run(
-                ["git", "add", f],
+                ["git", "add", "--", f],
                 cwd=project_dir, capture_output=True,
             )
 
@@ -1706,6 +1709,7 @@ async def run_task(
                     update_task(
                         tasks_file, key, status="failed",
                         error=f"branch diverged — otto/{key} preserved, manual rebase needed",
+                        error_code="merge_diverged",
                     )
                 logger.error(f"Task #{task_id} — merge failed (branch diverged)")
                 return False
@@ -1751,25 +1755,13 @@ async def run_all(
         logger.error("Another otto process is running")
         return 2
 
-    # Signal handling — cleanup on SIGINT/SIGTERM
+    # Signal handling — set flag, cleanup in main loop (async-safe)
     current_task_key = None
+    interrupted = False
 
     def _signal_handler(signum, frame):
-        logger.warning(f"Received signal {signum} — cleaning up")
-        # Kill child processes (they run in their own process group)
-        subprocess.run(["git", "reset", "--hard"], cwd=project_dir, capture_output=True)
-        subprocess.run(
-            ["git", "checkout", default_branch],
-            cwd=project_dir, capture_output=True,
-        )
-        if current_task_key:
-            cleanup_branch(project_dir, current_task_key, default_branch)
-            if tasks_file:
-                try:
-                    update_task(tasks_file, current_task_key, status="failed", error="interrupted")
-                except Exception:
-                    pass
-        sys.exit(1)
+        nonlocal interrupted
+        interrupted = True
 
     old_sigint = signal.signal(signal.SIGINT, _signal_handler)
     old_sigterm = signal.signal(signal.SIGTERM, _signal_handler)
@@ -1796,6 +1788,9 @@ async def run_all(
 
         any_failed = False
         for task in pending:
+            if interrupted:
+                logger.warning("Interrupted — cleaning up")
+                break
             current_task_key = task["key"]
             if not check_clean_tree(project_dir):
                 logger.error("Working tree is dirty — aborting")
@@ -1804,6 +1799,25 @@ async def run_all(
             if not success:
                 any_failed = True
             current_task_key = None
+
+        # Cleanup on interruption
+        if interrupted and current_task_key:
+            subprocess.run(["git", "reset", "--hard"], cwd=project_dir, capture_output=True)
+            subprocess.run(
+                ["git", "checkout", default_branch],
+                cwd=project_dir, capture_output=True,
+            )
+            cleanup_branch(project_dir, current_task_key, default_branch)
+            if tasks_file:
+                try:
+                    update_task(
+                        tasks_file, current_task_key,
+                        status="failed", error="interrupted",
+                        error_code="interrupted",
+                    )
+                except Exception:
+                    pass
+            return 1
 
         return 1 if any_failed else 0
 
@@ -2061,20 +2075,35 @@ def run(prompt, dry_run):
 
     if prompt:
         # One-off mode — adhoc-<timestamp>-<pid> per spec
+        # Still acquires process lock to prevent concurrent runs
+        import fcntl
         import os
         import time
 
-        key = f"adhoc-{int(time.time())}-{os.getpid()}"
-        task = {
-            "id": 0,
-            "key": key,
-            "prompt": prompt,
-            "status": "pending",
-        }
-        exit_code = asyncio.run(
-            run_task(task, config, project_dir, tasks_file=None)
-        )
-        sys.exit(0 if exit_code else 1)
+        lock_path = project_dir / "otto.lock"
+        lock_path.touch()
+        lock_fh = open(lock_path, "r")
+        try:
+            fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            click.echo("Another otto process is running", err=True)
+            sys.exit(2)
+
+        try:
+            key = f"adhoc-{int(time.time())}-{os.getpid()}"
+            task = {
+                "id": 0,
+                "key": key,
+                "prompt": prompt,
+                "status": "pending",
+            }
+            success = asyncio.run(
+                run_task(task, config, project_dir, tasks_file=None)
+            )
+            sys.exit(0 if success else 1)
+        finally:
+            fcntl.flock(lock_fh, fcntl.LOCK_UN)
+            lock_fh.close()
     else:
         tasks_path = project_dir / "tasks.yaml"
         exit_code = asyncio.run(run_all(config, tasks_path, project_dir))
