@@ -632,13 +632,15 @@ def save_tasks(tasks_path: Path, tasks: list[dict[str, Any]]) -> None:
 
 def _locked_rw(tasks_path: Path, mutator):
     """Read-modify-write tasks.yaml under flock."""
-    lock_path = tasks_path.parent / ".tasks.lock"
+    # Canonicalize to prevent symlink/alternate-path aliasing of the lock
+    canonical = tasks_path.resolve()
+    lock_path = canonical.parent / ".tasks.lock"
     lock_path.touch()
     with open(lock_path, "r") as lock_fh:
         fcntl.flock(lock_fh, fcntl.LOCK_EX)
-        tasks = load_tasks(tasks_path)
+        tasks = load_tasks(canonical)
         result = mutator(tasks)
-        save_tasks(tasks_path, tasks)
+        save_tasks(canonical, tasks)
         return result
 
 
@@ -2244,38 +2246,56 @@ def reset(yes):
     if not yes:
         click.confirm("Reset all tasks to pending and delete otto/* branches?", abort=True)
 
-    tasks_path = Path.cwd() / "tasks.yaml"
-    tasks = load_tasks(tasks_path)
-    for t in tasks:
-        t["status"] = "pending"
-        t.pop("attempts", None)
-        t.pop("session_id", None)
-        t.pop("error", None)
-    save_tasks(tasks_path, tasks)
-
-    # Delete otto/* branches
+    import fcntl
     import subprocess
-    result = subprocess.run(
-        ["git", "branch", "--list", "otto/*"],
-        capture_output=True, text=True,
-    )
-    for branch in result.stdout.strip().split("\n"):
-        branch = branch.strip()
-        if branch:
-            subprocess.run(["git", "branch", "-D", branch], capture_output=True)
 
-    # Clean logs
-    import shutil
-    log_dir = Path.cwd() / "otto_logs"
-    if log_dir.exists():
-        shutil.rmtree(log_dir)
+    project_dir = Path.cwd()
 
-    # Clean testgen artifacts (use git_meta_dir for linked worktree support)
-    testgen_dir = git_meta_dir(Path.cwd()) / "otto"
-    if testgen_dir.exists():
-        shutil.rmtree(testgen_dir)
+    # Acquire process lock — refuse to reset while a worker is active
+    lock_path = git_meta_dir(project_dir) / "otto.lock"
+    lock_path.touch()
+    lock_fh = open(lock_path, "r")
+    try:
+        fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        click.echo("Cannot reset while otto is running", err=True)
+        sys.exit(2)
 
-    click.echo(f"Reset {len(tasks)} tasks to pending. Cleaned branches, logs, and testgen.")
+    try:
+        tasks_path = project_dir / "tasks.yaml"
+        tasks = load_tasks(tasks_path)
+        for t in tasks:
+            t["status"] = "pending"
+            t.pop("attempts", None)
+            t.pop("session_id", None)
+            t.pop("error", None)
+        save_tasks(tasks_path, tasks)
+
+        # Delete otto/* branches
+        result = subprocess.run(
+            ["git", "branch", "--list", "otto/*"],
+            capture_output=True, text=True,
+        )
+        for branch in result.stdout.strip().split("\n"):
+            branch = branch.strip()
+            if branch:
+                subprocess.run(["git", "branch", "-D", branch], capture_output=True)
+
+        # Clean logs
+        import shutil
+        log_dir = project_dir / "otto_logs"
+        if log_dir.exists():
+            shutil.rmtree(log_dir)
+
+        # Clean testgen artifacts (use git_meta_dir for linked worktree support)
+        testgen_dir = git_meta_dir(project_dir) / "otto"
+        if testgen_dir.exists():
+            shutil.rmtree(testgen_dir)
+
+        click.echo(f"Reset {len(tasks)} tasks to pending. Cleaned branches, logs, and testgen.")
+    finally:
+        fcntl.flock(lock_fh, fcntl.LOCK_UN)
+        lock_fh.close()
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
