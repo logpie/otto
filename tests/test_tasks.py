@@ -1,0 +1,100 @@
+"""Tests for otto.tasks module."""
+
+import threading
+from pathlib import Path
+
+import pytest
+import yaml
+
+from otto.tasks import (
+    add_task,
+    generate_key,
+    load_tasks,
+    save_tasks,
+    update_task,
+)
+
+
+class TestGenerateKey:
+    def test_returns_12_char_hex(self):
+        key = generate_key(set())
+        assert len(key) == 12
+        assert all(c in "0123456789abcdef" for c in key)
+
+    def test_unique_against_existing(self):
+        existing = {generate_key(set()) for _ in range(100)}
+        new_key = generate_key(existing)
+        assert new_key not in existing
+
+
+class TestLoadSaveTasks:
+    def test_load_empty_file(self, tmp_git_repo):
+        path = tmp_git_repo / "tasks.yaml"
+        tasks = load_tasks(path)
+        assert tasks == []
+
+    def test_round_trip(self, tmp_git_repo):
+        path = tmp_git_repo / "tasks.yaml"
+        tasks = [{"id": 1, "key": "abc123def456", "prompt": "hello", "status": "pending"}]
+        save_tasks(path, tasks)
+        loaded = load_tasks(path)
+        assert loaded == tasks
+
+
+class TestAddTask:
+    def test_adds_task_with_auto_id_and_key(self, tmp_git_repo):
+        path = tmp_git_repo / "tasks.yaml"
+        task = add_task(path, "Build a login page")
+        assert task["id"] == 1
+        assert len(task["key"]) == 12
+        assert task["prompt"] == "Build a login page"
+        assert task["status"] == "pending"
+
+    def test_increments_id(self, tmp_git_repo):
+        path = tmp_git_repo / "tasks.yaml"
+        add_task(path, "First task")
+        task2 = add_task(path, "Second task")
+        assert task2["id"] == 2
+
+    def test_custom_verify_and_retries(self, tmp_git_repo):
+        path = tmp_git_repo / "tasks.yaml"
+        task = add_task(path, "Optimize", verify="python bench.py", max_retries=5)
+        assert task["verify"] == "python bench.py"
+        assert task["max_retries"] == 5
+
+
+class TestUpdateTask:
+    def test_updates_status(self, tmp_git_repo):
+        path = tmp_git_repo / "tasks.yaml"
+        task = add_task(path, "Do something")
+        updated = update_task(path, task["key"], status="running", attempts=1)
+        assert updated["status"] == "running"
+        assert updated["attempts"] == 1
+
+    def test_raises_on_unknown_key(self, tmp_git_repo):
+        path = tmp_git_repo / "tasks.yaml"
+        add_task(path, "Do something")
+        with pytest.raises(KeyError):
+            update_task(path, "nonexistent123", status="running")
+
+
+class TestConcurrentAccess:
+    def test_concurrent_adds_dont_lose_data(self, tmp_git_repo):
+        path = tmp_git_repo / "tasks.yaml"
+        errors = []
+
+        def add_one(i):
+            try:
+                add_task(path, f"Task {i}")
+            except Exception as e:
+                errors.append(e)
+
+        threads = [threading.Thread(target=add_one, args=(i,)) for i in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors
+        tasks = load_tasks(path)
+        assert len(tasks) == 10
