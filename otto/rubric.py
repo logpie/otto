@@ -144,3 +144,75 @@ Each criterion should be a single clear sentence describing what must be true.""
         return []
 
     return _parse_rubric_output(result.stdout)
+
+
+MARKDOWN_PARSE_TIMEOUT = 120  # seconds
+
+
+def parse_markdown_tasks(md_file: Path, project_dir: Path) -> list[dict]:
+    """Parse a markdown file into structured tasks via claude -p.
+
+    Sends the markdown content + project context to Claude, expects a JSON array
+    where each element has: prompt (str), rubric (list[str]), context (str).
+
+    Returns list of task dicts.
+    Raises ValueError on parse failure or invalid task structure.
+    """
+    md_content = md_file.read_text()
+    context = _gather_project_context(project_dir)
+
+    system_prompt = f"""You are a project manager breaking down a feature document into coding tasks.
+
+PROJECT CONTEXT:
+{context}
+
+DOCUMENT:
+{md_content}
+
+Break this document into individual coding tasks. For each task, provide:
+- "prompt": a clear, actionable description of what to implement
+- "rubric": a list of specific acceptance criteria (strings)
+- "context": relevant file paths or additional context (string, can be empty)
+
+Output ONLY a valid JSON array. No prose, no markdown fences, no explanations.
+Example format:
+[{{"prompt": "Add X feature", "rubric": ["criterion 1", "criterion 2"], "context": "relevant_file.py"}}]"""
+
+    try:
+        result = subprocess.run(
+            ["claude", "-p", "--output-format", "text"],
+            input=system_prompt,
+            capture_output=True,
+            text=True,
+            timeout=MARKDOWN_PARSE_TIMEOUT,
+            start_new_session=True,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        raise ValueError(f"Failed to parse markdown tasks: {exc}") from exc
+
+    if result.returncode != 0:
+        raise ValueError(f"Failed to parse markdown tasks: claude returned {result.returncode}")
+
+    output = result.stdout.strip()
+
+    # Extract JSON from markdown fences if present
+    fence_match = re.search(r"```(?:json)?\n(.*?)```", output, re.DOTALL)
+    if fence_match:
+        output = fence_match.group(1).strip()
+
+    try:
+        tasks = json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Failed to parse tasks JSON: {exc}") from exc
+
+    if not isinstance(tasks, list):
+        raise ValueError("Failed to parse tasks JSON: expected a JSON array")
+
+    # Validate structure
+    for i, task in enumerate(tasks):
+        if not isinstance(task, dict):
+            raise ValueError(f"Task {i} is not a dict")
+        if not task.get("prompt"):
+            raise ValueError(f"Task {i} missing 'prompt'")
+
+    return tasks

@@ -3,7 +3,8 @@
 import subprocess
 from pathlib import Path
 from unittest.mock import patch, MagicMock
-from otto.rubric import _gather_project_context, generate_rubric, _parse_rubric_output
+import json
+from otto.rubric import _gather_project_context, generate_rubric, _parse_rubric_output, parse_markdown_tasks
 
 
 class TestGatherProjectContext:
@@ -80,3 +81,67 @@ class TestGenerateRubric:
         mock_run.return_value = MagicMock(returncode=1, stdout="")
         rubric = generate_rubric("Add search", tmp_path)
         assert rubric == []
+
+
+class TestParseMarkdownTasks:
+    @patch("otto.rubric.subprocess.run")
+    def test_extracts_tasks(self, mock_run, tmp_path):
+        md_file = tmp_path / "features.md"
+        md_file.write_text("# Search\nAdd search.\n\n# Tags\nAdd tags.\n")
+
+        def side_effect(*args, **kwargs):
+            m = MagicMock()
+            m.returncode = 0
+            if args[0] == ["git", "ls-files"]:
+                m.stdout = "app.py"
+            else:
+                m.stdout = json.dumps([
+                    {"prompt": "Add search method", "rubric": ["case-insensitive"], "context": "store.py"},
+                    {"prompt": "Add tags support", "rubric": ["by_tag filters"], "context": ""},
+                ])
+            return m
+        mock_run.side_effect = side_effect
+
+        tasks = parse_markdown_tasks(md_file, tmp_path)
+        assert len(tasks) == 2
+        assert tasks[0]["prompt"] == "Add search method"
+        assert tasks[0]["rubric"] == ["case-insensitive"]
+        assert tasks[0]["context"] == "store.py"
+
+    @patch("otto.rubric.subprocess.run")
+    def test_raises_on_invalid_json(self, mock_run, tmp_path):
+        md_file = tmp_path / "features.md"
+        md_file.write_text("# Task\nDo something.\n")
+
+        def side_effect(*args, **kwargs):
+            m = MagicMock()
+            m.returncode = 0
+            if args[0] == ["git", "ls-files"]:
+                m.stdout = ""
+            else:
+                m.stdout = "This is not JSON"
+            return m
+        mock_run.side_effect = side_effect
+
+        import pytest as _pytest
+        with _pytest.raises(ValueError, match="Failed to parse"):
+            parse_markdown_tasks(md_file, tmp_path)
+
+    @patch("otto.rubric.subprocess.run")
+    def test_raises_on_empty_prompt(self, mock_run, tmp_path):
+        md_file = tmp_path / "features.md"
+        md_file.write_text("# Task\nDo something.\n")
+
+        def side_effect(*args, **kwargs):
+            m = MagicMock()
+            m.returncode = 0
+            if args[0] == ["git", "ls-files"]:
+                m.stdout = ""
+            else:
+                m.stdout = json.dumps([{"prompt": "", "rubric": [], "context": ""}])
+            return m
+        mock_run.side_effect = side_effect
+
+        import pytest as _pytest
+        with _pytest.raises(ValueError, match="missing 'prompt'"):
+            parse_markdown_tasks(md_file, tmp_path)
