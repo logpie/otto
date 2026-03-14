@@ -78,6 +78,28 @@ class TestUpdateTask:
             update_task(path, "nonexistent123", status="running")
 
 
+class TestAddTaskRubricAndContext:
+    def test_add_task_with_rubric(self, tmp_git_repo):
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        task = add_task(tasks_path, "Add search", rubric=["search is case-insensitive", "no matches returns empty list"])
+        assert task["rubric"] == ["search is case-insensitive", "no matches returns empty list"]
+        tasks = load_tasks(tasks_path)
+        assert tasks[0]["rubric"] == ["search is case-insensitive", "no matches returns empty list"]
+
+    def test_add_task_with_context(self, tmp_git_repo):
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        task = add_task(tasks_path, "Add search", context="BookmarkStore is in store.py")
+        assert task["context"] == "BookmarkStore is in store.py"
+        tasks = load_tasks(tasks_path)
+        assert tasks[0]["context"] == "BookmarkStore is in store.py"
+
+    def test_add_task_without_rubric(self, tmp_git_repo):
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        task = add_task(tasks_path, "Fix typo")
+        assert "rubric" not in task
+        assert "context" not in task
+
+
 class TestConcurrentAccess:
     def test_concurrent_adds_dont_lose_data(self, tmp_git_repo):
         path = tmp_git_repo / "tasks.yaml"
