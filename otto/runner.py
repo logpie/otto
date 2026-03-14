@@ -2,7 +2,6 @@
 
 import asyncio
 import fcntl
-import logging
 import os
 import shutil
 import signal
@@ -28,7 +27,7 @@ from otto.tasks import load_tasks, update_task
 from otto.testgen import generate_tests, detect_test_framework, test_file_path
 from otto.verify import run_verification, _subprocess_env
 
-logger = logging.getLogger("otto.runner")
+
 
 
 def check_clean_tree(project_dir: Path) -> bool:
@@ -281,6 +280,40 @@ _YELLOW = "\033[33m"
 _RESET = "\033[0m"
 
 
+def _log_info(msg: str) -> None:
+    print(f"{_DIM}{'─' * 60}{_RESET}", flush=True)
+    print(f"  {msg}", flush=True)
+
+
+def _log_task_start(task_id: int, key: str, attempt: int, max_attempts: int, prompt: str) -> None:
+    print(flush=True)
+    print(f"{_BOLD}{'━' * 60}{_RESET}", flush=True)
+    print(f"{_BOLD}  Task #{task_id}{_RESET}  {prompt[:50]}", flush=True)
+    print(f"  {_DIM}attempt {attempt}/{max_attempts}  ·  key {key}{_RESET}", flush=True)
+    print(f"{_BOLD}{'━' * 60}{_RESET}", flush=True)
+
+
+def _log_pass(task_id: int, branch: str) -> None:
+    print(f"\n  {_GREEN}{_BOLD}✓ Task #{task_id} PASSED{_RESET} {_DIM}— merged to {branch}{_RESET}", flush=True)
+
+
+def _log_fail(task_id: int, reason: str) -> None:
+    print(f"\n  {_RED}{_BOLD}✗ Task #{task_id} FAILED{_RESET} {_DIM}— {reason}{_RESET}", flush=True)
+
+
+def _log_warn(msg: str) -> None:
+    print(f"  {_YELLOW}⚠ {msg}{_RESET}", flush=True)
+
+
+def _log_verify(tiers: list) -> None:
+    """Print verification results inline."""
+    for t in tiers:
+        if t.skipped:
+            continue
+        icon = f"{_GREEN}✓{_RESET}" if t.passed else f"{_RED}✗{_RESET}"
+        print(f"  {icon} {t.tier}", flush=True)
+
+
 def _print_tool_use(block) -> None:
     """Print a tool use block like the Claude TUI."""
     name = block.name
@@ -359,7 +392,7 @@ async def run_task(
     last_error = None  # verification failure output for retry feedback
     for attempt in range(max_retries + 1):
         attempt_num = attempt + 1
-        logger.info(f"Task #{task_id} ({key}) — attempt {attempt_num}/{max_retries + 1}")
+        _log_task_start(task_id, key, attempt_num, max_retries + 1, prompt)
 
         if tasks_file:
             update_task(tasks_file, key, attempts=attempt_num)
@@ -420,7 +453,7 @@ async def run_task(
                     raise RuntimeError(f"Agent error: {result_msg.result or 'unknown'}")
 
             except Exception as e:
-                logger.error(f"Agent error: {e}")
+                _log_warn(f"Agent error: {e}")
                 # Reset workspace to base state before retrying
                 subprocess.run(
                     ["git", "reset", "--hard", base_sha],
@@ -438,7 +471,7 @@ async def run_task(
                 try:
                     testgen_file = await asyncio.wait_for(testgen_task, timeout=120)
                 except (asyncio.TimeoutError, Exception) as e:
-                    logger.warning(f"Testgen failed or timed out: {e}")
+                    _log_warn(f"Testgen failed or timed out: {e}")
             else:
                 if testgen_task.done():
                     testgen_file = testgen_task.result()
@@ -460,7 +493,7 @@ async def run_task(
 
         except Exception as e:
             # Unexpected error during agent/candidate/verify phases — safe to clean up
-            logger.error(f"Task #{task_id} unexpected error: {e}")
+            _log_fail(task_id, f"unexpected error: {e}")
             _cleanup_task_failure(
                 project_dir, key, default_branch, tasks_file,
                 error=f"unexpected error: {e}", error_code="internal_error",
@@ -475,7 +508,9 @@ async def run_task(
                           for t in verify_result.tiers)
             )
         except OSError as e:
-            logger.warning(f"Failed to write verify log: {e}")
+            pass  # best-effort log write
+
+        _log_verify(verify_result.tiers)
 
         if verify_result.passed:
             # Amend commit message (pre-merge, so cleanup is still safe)
@@ -488,7 +523,7 @@ async def run_task(
                 )
             except (subprocess.CalledProcessError, Exception) as e:
                 stderr = getattr(e, "stderr", str(e))
-                logger.error(f"Failed to amend commit: {stderr}")
+                _log_fail(task_id, f"commit amend failed: {stderr}")
                 _cleanup_task_failure(
                     project_dir, key, default_branch, tasks_file,
                     error=f"commit amend failed: {stderr}", error_code="internal_error",
@@ -501,7 +536,7 @@ async def run_task(
                     shutil.rmtree(testgen_dir, ignore_errors=True)
                 if tasks_file:
                     update_task(tasks_file, key, status="passed")
-                logger.info(f"Task #{task_id} PASSED — merged to {default_branch}")
+                _log_pass(task_id, default_branch)
                 return True
             else:
                 testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / key
@@ -513,7 +548,7 @@ async def run_task(
                         error=f"branch diverged — otto/{key} preserved, manual rebase needed",
                         error_code="merge_diverged",
                     )
-                logger.error(f"Task #{task_id} — merge failed (branch diverged)")
+                _log_fail(task_id, f"branch diverged — otto/{key} preserved, manual rebase needed")
                 return False
         else:
             # Verification failed — unwind candidate commit for retry
@@ -522,16 +557,14 @@ async def run_task(
                 cwd=project_dir, capture_output=True,
             )
             last_error = verify_result.failure_output
-            logger.warning(
-                f"Task #{task_id} attempt {attempt_num} — verification failed"
-            )
+            _log_warn(f"Verification failed — retrying")
 
     # All retries exhausted
     _cleanup_task_failure(
         project_dir, key, default_branch, tasks_file,
         error="max retries exhausted", error_code="max_retries",
     )
-    logger.error(f"Task #{task_id} FAILED — all retries exhausted")
+    _log_fail(task_id, "all retries exhausted")
     return False
 
 
@@ -554,7 +587,7 @@ async def run_all(
     try:
         fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        logger.error("Another otto process is running")
+        print(f"{_RED}Another otto process is running{_RESET}", flush=True)
         return 2
 
     # Signal handling — first Ctrl+C sets flag, second forces exit
@@ -565,10 +598,10 @@ async def run_all(
         nonlocal interrupted
         if interrupted:
             # Second signal — force exit
-            logger.warning("Force exit")
+            print(f"\n{_RED}Force exit{_RESET}", flush=True)
             sys.exit(1)
         interrupted = True
-        logger.warning("Interrupted — finishing current task then stopping (Ctrl+C again to force)")
+        print(f"\n{_YELLOW}⚠ Interrupted — finishing current task then stopping (Ctrl+C again to force){_RESET}", flush=True)
 
     old_sigint = signal.signal(signal.SIGINT, _signal_handler)
     old_sigterm = signal.signal(signal.SIGTERM, _signal_handler)
@@ -577,31 +610,31 @@ async def run_all(
         # Baseline check
         test_command = config.get("test_command")
         if test_command:
-            logger.info("Running baseline check...")
+            _log_info("Running baseline check...")
             result = subprocess.run(
                 test_command, shell=True, cwd=project_dir,
                 capture_output=True, timeout=config["verify_timeout"],
                 env=_subprocess_env(),
             )
             if result.returncode != 0:
-                logger.error("Baseline tests failing — fix before running otto")
+                print(f"  {_RED}✗ Baseline tests failing — fix before running otto{_RESET}", flush=True)
                 return 2
 
         # Process tasks
         tasks = load_tasks(tasks_file)
         pending = [t for t in tasks if t.get("status") == "pending"]
         if not pending:
-            logger.info("No pending tasks")
+            print(f"{_DIM}No pending tasks{_RESET}", flush=True)
             return 0
 
         any_failed = False
         for task in pending:
             if interrupted:
-                logger.warning("Interrupted — cleaning up")
+                _log_warn("Interrupted — cleaning up")
                 break
             current_task_key = task["key"]
             if not check_clean_tree(project_dir):
-                logger.error("Working tree is dirty — aborting")
+                print(f"  {_RED}✗ Working tree is dirty — aborting{_RESET}", flush=True)
                 return 2
             success = await run_task(task, config, project_dir, tasks_file)
             if not success:

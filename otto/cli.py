@@ -1,7 +1,6 @@
 """Otto CLI — entrypoint for all otto commands."""
 
 import asyncio
-import logging
 import sys
 from pathlib import Path
 
@@ -185,11 +184,6 @@ def run(prompt, dry_run):
         click.echo("Error: otto.yaml not found. Run 'otto init' first.", err=True)
         sys.exit(2)
     config = load_config(config_path)
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
-    )
 
     if dry_run:
         tasks_path = project_dir / "tasks.yaml"
