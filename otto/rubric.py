@@ -135,7 +135,7 @@ Include ALL of these categories:
 Scale the number of criteria to the task's complexity:
 - Simple tasks (typo fix, rename, config change): 3-5 criteria
 - Medium tasks (add a method, new CLI command): 6-10 criteria
-- Complex tasks (new feature with multiple components, API design): 10-15 criteria
+- Complex tasks (new feature with multiple components, API design): 10-12 criteria
 Focus on the MOST IMPORTANT criteria. Prefer fewer, high-quality criteria over many weak ones.
 
 Output ONLY a numbered list of criteria. No prose, no explanations.
