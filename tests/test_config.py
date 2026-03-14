@@ -110,8 +110,8 @@ class TestCreateConfig:
         config_path = create_config(tmp_git_repo)
         assert config_path.exists()
         cfg = yaml.safe_load(config_path.read_text())
-        assert "test_command" in cfg
         assert "default_branch" in cfg
+        assert "max_retries" in cfg
 
     def test_updates_git_info_exclude(self, tmp_git_repo):
         create_config(tmp_git_repo)

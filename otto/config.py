@@ -54,11 +54,18 @@ def git_meta_dir(project_dir: Path) -> Path:
 
 
 def load_config(config_path: Path) -> dict[str, Any]:
-    """Load otto.yaml, filling missing keys with defaults."""
+    """Load otto.yaml, filling missing keys with defaults.
+
+    If test_command is not explicitly set, auto-detects at load time.
+    """
     if not config_path.exists():
         return dict(DEFAULT_CONFIG)
     raw = yaml.safe_load(config_path.read_text()) or {}
-    return {**DEFAULT_CONFIG, **raw}
+    config = {**DEFAULT_CONFIG, **raw}
+    # Auto-detect test_command if not explicitly configured
+    if "test_command" not in raw:
+        config["test_command"] = detect_test_command(config_path.parent)
+    return config
 
 
 def detect_test_command(project_dir: Path) -> str | None:
@@ -131,11 +138,9 @@ def detect_default_branch(project_dir: Path) -> str:
 
 def create_config(project_dir: Path) -> Path:
     """Create otto.yaml with auto-detected settings. Updates .git/info/exclude."""
-    test_cmd = detect_test_command(project_dir)
     default_branch = detect_default_branch(project_dir)
 
     config = {
-        "test_command": test_cmd,
         "max_retries": DEFAULT_CONFIG["max_retries"],
         "model": DEFAULT_CONFIG["model"],
         "project_dir": str(DEFAULT_CONFIG["project_dir"]),
