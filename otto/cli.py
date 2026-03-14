@@ -273,15 +273,16 @@ def status():
 
 @main.command()
 @click.argument("task_id", type=int)
-def retry(task_id):
-    """Reset a failed task to pending."""
+@click.option("--force", is_flag=True, help="Reset any task, not just failed ones")
+def retry(task_id, force):
+    """Reset a failed task to pending (use --force for any status)."""
     tasks_path = Path.cwd() / "tasks.yaml"
     tasks = load_tasks(tasks_path)
     for t in tasks:
         if t.get("id") == task_id:
-            if t.get("status") != "failed":
+            if not force and t.get("status") != "failed":
                 click.echo(
-                    f"Task #{task_id} is '{t.get('status')}', not 'failed'", err=True
+                    f"Task #{task_id} is '{t.get('status')}', not 'failed'. Use --force to override.", err=True
                 )
                 sys.exit(1)
             update_task(
