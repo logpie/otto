@@ -12,7 +12,10 @@ from otto.rubric import generate_rubric, parse_markdown_tasks
 from otto.tasks import add_task, add_tasks, load_tasks, reset_all_tasks, save_tasks, update_task
 
 
-@click.group()
+CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
+
+
+@click.group(context_settings=CONTEXT_SETTINGS)
 def main():
     """Otto — autonomous Claude Code agent runner."""
     pass
