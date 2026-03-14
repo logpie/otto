@@ -13,9 +13,12 @@ from typing import Any
 
 try:
     from claude_agent_sdk import ClaudeAgentOptions, query
-    from claude_agent_sdk.types import ResultMessage
+    from claude_agent_sdk.types import AssistantMessage, ResultMessage, TextBlock, ToolUseBlock
 except ImportError:
     from otto._agent_stub import ClaudeAgentOptions, query, ResultMessage
+    AssistantMessage = None  # type: ignore[assignment,misc]
+    TextBlock = None  # type: ignore[assignment,misc]
+    ToolUseBlock = None  # type: ignore[assignment,misc]
 
 from otto.config import git_meta_dir
 from otto.tasks import load_tasks, update_task
@@ -342,11 +345,17 @@ async def run_task(
                 if session_id:
                     agent_opts.resume = session_id
 
-                # query() is async iterator — consume all messages, keep last ResultMessage
+                # query() is async iterator — stream messages, keep last ResultMessage
                 result_msg = None
                 async for message in query(prompt=agent_prompt, options=agent_opts):
                     if isinstance(message, ResultMessage) or hasattr(message, "subtype"):
                         result_msg = message
+                    elif AssistantMessage and isinstance(message, AssistantMessage):
+                        for block in message.content:
+                            if TextBlock and isinstance(block, TextBlock) and block.text:
+                                print(block.text, flush=True)
+                            elif ToolUseBlock and isinstance(block, ToolUseBlock):
+                                print(f"  → {block.name}", flush=True)
 
                 # Extract session_id for resume
                 if result_msg and result_msg.session_id:
