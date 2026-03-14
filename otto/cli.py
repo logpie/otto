@@ -15,6 +15,18 @@ from otto.tasks import add_task, add_tasks, load_tasks, reset_all_tasks, save_ta
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 
 
+def _require_git():
+    """Exit with a friendly error if not in a git repo."""
+    import subprocess
+    result = subprocess.run(
+        ["git", "rev-parse", "--git-dir"],
+        capture_output=True, cwd=Path.cwd(),
+    )
+    if result.returncode != 0:
+        click.echo("Error: not a git repository. Run 'git init' first.", err=True)
+        sys.exit(2)
+
+
 @click.group(context_settings=CONTEXT_SETTINGS)
 def main():
     """Otto — autonomous Claude Code agent runner."""
@@ -24,6 +36,7 @@ def main():
 @main.command()
 def init():
     """Initialize otto for this project."""
+    _require_git()
     project_dir = Path.cwd()
     config_path = create_config(project_dir)
     config = load_config(config_path)
