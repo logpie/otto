@@ -114,3 +114,58 @@ class TestEndToEnd:
             capture_output=True, text=True,
         ).stdout
         assert "otto/" not in branches
+
+
+class TestRubricEndToEnd:
+    @patch("otto.runner.ClaudeAgentOptions")
+    @patch("otto.runner.generate_tests")
+    @patch("otto.testgen.generate_tests_from_rubric")
+    @patch("otto.runner.query")
+    def test_rubric_uses_generate_tests_from_rubric(
+        self, mock_query, mock_rubric_testgen, mock_testgen, mock_options_cls, tmp_git_repo
+    ):
+        """Task with rubric+context uses generate_tests_from_rubric, not generate_tests.
+
+        Also verifies that the context field appears in the agent prompt.
+        """
+        # Setup: create config, commit it so tree is clean
+        create_config(tmp_git_repo)
+        _commit_otto_config(tmp_git_repo)
+
+        config = load_config(tmp_git_repo / "otto.yaml")
+        config["test_command"] = None  # Skip baseline and tier 1
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        add_task(
+            tasks_path,
+            "Add search",
+            rubric=["search is case-insensitive"],
+            context="Store is in store.py",
+        )
+
+        # Capture prompt passed to query
+        captured_prompts = []
+
+        async def fake_query(*, prompt, options=None):
+            captured_prompts.append(prompt)
+            (tmp_git_repo / "search.py").write_text("def search(): pass\n")
+            yield _make_fake_result("rubric-session")
+
+        mock_query.side_effect = fake_query
+        mock_rubric_testgen.return_value = None  # Skip tier 2
+        mock_testgen.return_value = None  # Should not be called
+
+        # Run
+        exit_code = asyncio.run(run_all(config, tasks_path, tmp_git_repo))
+
+        # Verify
+        assert exit_code == 0
+
+        # generate_tests_from_rubric should be called (rubric path)
+        mock_rubric_testgen.assert_called_once()
+
+        # generate_tests should NOT be called (non-rubric path)
+        mock_testgen.assert_not_called()
+
+        # Context should appear in the agent prompt
+        assert len(captured_prompts) >= 1
+        assert "Context: Store is in store.py" in captured_prompts[0]
