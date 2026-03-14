@@ -3,8 +3,18 @@
 import ast
 import json
 import re
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
+
+try:
+    from claude_agent_sdk import ClaudeAgentOptions, query
+    from claude_agent_sdk.types import ResultMessage, TextBlock, ToolUseBlock
+except ImportError:
+    from otto._agent_stub import ClaudeAgentOptions, query, ResultMessage
+    TextBlock = None  # type: ignore[assignment,misc]
+    ToolUseBlock = None  # type: ignore[assignment,misc]
 
 from otto.config import git_meta_dir
 
@@ -163,6 +173,87 @@ def build_blackbox_context(project_dir: Path) -> str:
         sections.append(f"EXISTING TEST SAMPLES:\n{test_samples}")
 
     return "\n\n".join(sections)
+
+
+async def run_testgen_agent(
+    rubric: list[str],
+    key: str,
+    blackbox_context: str,
+    project_dir: Path,
+    framework: str = "pytest",
+) -> Path | None:
+    """Run adversarial testgen agent in an isolated temp directory.
+
+    The agent receives blackbox_context (public stubs, file tree) as a string
+    in its prompt. It writes the test file in the temp dir. After generation,
+    we copy the test file to the project's tests/ directory.
+
+    This enforces mechanical isolation — the agent literally cannot read
+    implementation code.
+
+    Returns path to the copied test file, or None if agent failed to produce one.
+    """
+    rubric_text = "\n".join(f"{i + 1}. {item}" for i, item in enumerate(rubric))
+    test_rel = f"tests/otto_verify_{key}.py"
+
+    prompt = f"""You are a QA engineer writing black-box tests from a specification.
+You have NOT seen the implementation — it hasn't been written yet.
+Your job is to write tests that will CATCH BUGS, not confirm correctness.
+
+SPEC (acceptance criteria):
+{rubric_text}
+
+PROJECT CONTEXT (public interface only):
+{blackbox_context}
+
+Write a complete {framework} test file at: {test_rel}
+
+Your tests MUST:
+- Test the public interface only (CLI via subprocess, library via imports)
+- Be designed to FAIL on the current codebase (the feature doesn't exist yet)
+- Be independent and hermetic (use tmp_path, no shared state)
+- Use subprocess.run() for CLI testing, not CliRunner
+- Include negative tests (what should NOT happen)
+
+Write the test file now. Do NOT explain — just write the file.
+"""
+
+    tmp_dir = tempfile.mkdtemp(prefix="otto_testgen_")
+    try:
+        # Create tests/ subdirectory in temp dir
+        (Path(tmp_dir) / "tests").mkdir(parents=True, exist_ok=True)
+
+        agent_opts = ClaudeAgentOptions(
+            permission_mode="bypassPermissions",
+            cwd=tmp_dir,
+        )
+
+        # Stream agent messages
+        async for message in query(prompt=prompt, options=agent_opts):
+            if isinstance(message, ResultMessage):
+                pass  # Final result
+            elif hasattr(message, "session_id") and hasattr(message, "is_error"):
+                pass  # Duck-type ResultMessage
+            elif hasattr(message, "content"):
+                for block in message.content:
+                    if TextBlock and isinstance(block, TextBlock) and block.text:
+                        print(block.text, flush=True)
+                    elif ToolUseBlock and isinstance(block, ToolUseBlock):
+                        print(f"  → {block.name}", flush=True)
+
+        # Check if test file was written in temp dir
+        test_file_in_tmp = Path(tmp_dir) / test_rel
+        if not test_file_in_tmp.exists():
+            return None
+
+        # Copy to project dir
+        dest = project_dir / test_rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(test_file_in_tmp), str(dest))
+        return dest
+
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def detect_test_framework(project_dir: Path) -> str | None:

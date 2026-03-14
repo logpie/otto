@@ -14,6 +14,7 @@ from otto.testgen import (
     test_file_path,
     generate_tests,
     generate_tests_from_rubric,
+    run_testgen_agent,
     _validate_test_output,
 )
 
@@ -200,6 +201,62 @@ class TestExtractPublicStubs:
 
     def test_syntax_error_returns_empty(self):
         assert _extract_public_stubs("def broken(:\n") == ""
+
+
+class TestRunTestgenAgent:
+    @patch("otto.testgen.query")
+    def test_writes_test_file_in_isolation(self, mock_query, tmp_git_repo):
+        """Agent should write test file in temp dir, which gets copied to project."""
+        import asyncio
+
+        async def fake_query(*, prompt, options=None):
+            # Agent writes file in its cwd (the temp dir)
+            cwd = Path(options.cwd) if hasattr(options, "cwd") and options.cwd else Path.cwd()
+            test_dir = cwd / "tests"
+            test_dir.mkdir(parents=True, exist_ok=True)
+            (test_dir / "otto_verify_testkey.py").write_text(
+                "import pytest\n\ndef test_search():\n    assert False\n"
+            )
+            from otto._agent_stub import ResultMessage
+
+            yield ResultMessage(session_id="s1")
+
+        mock_query.side_effect = fake_query
+
+        result = asyncio.run(
+            run_testgen_agent(
+                rubric=["search is case-insensitive"],
+                key="testkey",
+                blackbox_context="FILE TREE:\napp.py",
+                project_dir=tmp_git_repo,
+            )
+        )
+        assert result is not None
+        assert result.exists()
+        assert "tests/otto_verify_testkey.py" in str(result)
+        assert "def test_search" in result.read_text()
+
+    @patch("otto.testgen.query")
+    def test_returns_none_on_failure(self, mock_query, tmp_git_repo):
+        """If agent doesn't write a test file, return None."""
+        import asyncio
+
+        async def fake_query(*, prompt, options=None):
+            from otto._agent_stub import ResultMessage
+
+            yield ResultMessage(session_id="s1")
+
+        mock_query.side_effect = fake_query
+
+        result = asyncio.run(
+            run_testgen_agent(
+                rubric=["search works"],
+                key="badkey",
+                blackbox_context="FILE TREE:\napp.py",
+                project_dir=tmp_git_repo,
+            )
+        )
+        assert result is None
 
 
 class TestBuildBlackboxContext:
