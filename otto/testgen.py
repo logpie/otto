@@ -8,7 +8,7 @@ from pathlib import Path
 
 from otto.config import git_meta_dir
 
-TESTGEN_TIMEOUT = 120  # seconds
+TESTGEN_TIMEOUT = 300  # seconds — needs headroom for large prompts with full project context
 
 
 def detect_test_framework(project_dir: Path) -> str | None:
@@ -156,6 +156,8 @@ def _validate_test_output(output: str, framework: str) -> bool:
 
 def _call_and_validate(prompt: str, framework: str) -> str | None:
     """Call claude -p, strip markdown fences, validate output. Returns code or None."""
+    import sys
+
     try:
         result = subprocess.run(
             ["claude", "-p", "--output-format", "text"],
@@ -165,10 +167,19 @@ def _call_and_validate(prompt: str, framework: str) -> str | None:
             timeout=TESTGEN_TIMEOUT,
             start_new_session=True,
         )
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except subprocess.TimeoutExpired:
+        print(f"  testgen: timed out after {TESTGEN_TIMEOUT}s", file=sys.stderr, flush=True)
+        return None
+    except FileNotFoundError:
+        print("  testgen: claude CLI not found", file=sys.stderr, flush=True)
         return None
 
-    if result.returncode != 0 or not result.stdout.strip():
+    if result.returncode != 0:
+        print(f"  testgen: claude exited {result.returncode}: {result.stderr[:200]}", file=sys.stderr, flush=True)
+        return None
+
+    if not result.stdout.strip():
+        print("  testgen: empty output from claude", file=sys.stderr, flush=True)
         return None
 
     output = result.stdout.strip()
@@ -178,6 +189,8 @@ def _call_and_validate(prompt: str, framework: str) -> str | None:
 
     if _validate_test_output(output, framework):
         return output
+
+    print(f"  testgen: validation failed — first 100 chars: {output[:100]}", file=sys.stderr, flush=True)
     return None
 
 

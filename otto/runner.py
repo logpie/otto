@@ -687,7 +687,7 @@ async def _run_integration_gate(
     passed_tasks: list[dict],
     config: dict,
     project_dir: Path,
-) -> bool:
+) -> bool | None:
     """Generate and run cross-feature integration tests. Returns True if passed."""
     from otto.testgen import generate_integration_tests
     from otto.verify import run_integration_gate
@@ -709,10 +709,10 @@ async def _run_integration_gate(
             print(f"  {_GREEN}✓{_RESET} {_DIM}Integration tests generated{_RESET}", flush=True)
         else:
             _log_warn("Integration test generation failed — skipping gate")
-            return True
+            return None  # None = skipped (distinct from True=passed, False=failed)
     except Exception as e:
         _log_warn(f"Integration test generation failed: {e}")
-        return True
+        return None
 
     # Commit integration test file to main
     tests_dir = project_dir / "tests"
@@ -914,18 +914,20 @@ async def run_all(
 
         # Integration gate — run after 2+ tasks pass
         passed_tasks = [t for t, s in results if s]
-        integration_passed = True
+        integration_result: bool | None = None  # None=skipped/not-run, True=passed, False=failed
         skip_integration = config.get("no_integration", False)
 
         if len(passed_tasks) >= 2 and not skip_integration:
-            integration_passed = await _run_integration_gate(
+            integration_result = await _run_integration_gate(
                 passed_tasks, config, project_dir,
             )
 
         # Print run summary
-        _print_summary(results, time.monotonic() - run_start, integration_passed if len(passed_tasks) >= 2 and not skip_integration else None)
+        _print_summary(results, time.monotonic() - run_start, integration_result)
 
-        any_failed = any(not s for _, s in results) or not integration_passed
+        any_failed = any(not s for _, s in results)
+        if integration_result is False:
+            any_failed = True
         return 1 if any_failed else 0
 
     finally:
