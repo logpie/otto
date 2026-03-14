@@ -98,7 +98,6 @@ class TestRunVerification:
             project_dir=tmp_git_repo,
             candidate_sha=head,
             test_command=None,
-            testgen_file=None,
             verify_cmd=None,
             timeout=60,
         )
@@ -130,7 +129,6 @@ class TestRunVerification:
             project_dir=tmp_git_repo,
             candidate_sha=head,
             test_command="pytest",
-            testgen_file=None,
             verify_cmd="echo should_not_run",
             timeout=60,
         )

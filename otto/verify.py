@@ -189,7 +189,6 @@ def run_verification(
     project_dir: Path,
     candidate_sha: str,
     test_command: str | None,
-    testgen_file: Path | None,
     verify_cmd: str | None,
     timeout: int,
 ) -> VerifyResult:
@@ -206,19 +205,13 @@ def run_verification(
             check=True,
         )
 
-        # Tier 1: Existing tests
+        # Run all tests (existing + rubric-generated) in one pass
         t1 = run_tier1(worktree_path, test_command, timeout)
         tiers.append(t1)
         if not t1.passed and not t1.skipped:
             return VerifyResult(passed=False, tiers=tiers)
 
-        # Tier 2: Generated tests
-        t2 = run_tier2(worktree_path, testgen_file, test_command, timeout)
-        tiers.append(t2)
-        if not t2.passed and not t2.skipped:
-            return VerifyResult(passed=False, tiers=tiers)
-
-        # Tier 3: Custom verify
+        # Custom verify command (if provided)
         t3 = run_tier3(worktree_path, verify_cmd, timeout)
         tiers.append(t3)
 

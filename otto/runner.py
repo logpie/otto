@@ -481,7 +481,8 @@ async def run_task(
                 f"{last_error}\n\n"
                 f"Original task: {prompt}\n\n"
                 f"You are working in {project_dir}. Do NOT create git commits. "
-                f"Do NOT write tests — acceptance tests will be generated separately."
+                f"Do NOT write tests — acceptance tests will be generated separately. "
+                f"You may edit any file in the project to make all tests pass."
             )
 
         # Run agent + build candidate + verify — catch infrastructure failures
@@ -575,7 +576,6 @@ async def run_task(
                 project_dir=project_dir,
                 candidate_sha=candidate_sha,
                 test_command=test_command,
-                testgen_file=testgen_file,
                 verify_cmd=verify_cmd,
                 timeout=timeout,
             )
