@@ -13,6 +13,15 @@ from otto.tasks import add_task, add_tasks, load_tasks, reset_all_tasks, save_ta
 
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 
+# ANSI styling
+_B = "\033[1m"       # bold
+_D = "\033[2m"       # dim
+_G = "\033[32m"      # green
+_Y = "\033[33m"      # yellow
+_C = "\033[36m"      # cyan
+_R = "\033[31m"      # red
+_0 = "\033[0m"       # reset
+
 
 def _require_git():
     """Exit with a friendly error if not in a git repo."""
@@ -39,10 +48,10 @@ def init():
     project_dir = Path.cwd()
     config_path = create_config(project_dir)
     config = load_config(config_path)
-    click.echo(f"Created {config_path}")
-    click.echo(f"  default_branch: {config['default_branch']}")
-    click.echo(f"  max_retries: {config['max_retries']}")
-    click.echo("\nCommit otto.yaml to share config with your team.")
+    click.echo(f"{_G}✓{_0} Created {_B}{config_path.name}{_0}")
+    click.echo(f"  {_D}default_branch:{_0} {config['default_branch']}")
+    click.echo(f"  {_D}max_retries:{_0}    {config['max_retries']}")
+    click.echo(f"\n{_D}Commit otto.yaml to share config with your team.{_0}")
 
 
 def _import_tasks(import_path: Path, tasks_path: Path) -> None:
@@ -127,11 +136,11 @@ def _print_imported_tasks(tasks: list) -> None:
     """Print summary of imported tasks with rubric details."""
     for task in tasks:
         rubric = task.get("rubric", [])
-        click.echo(f"  #{task['id']} {task['prompt'][:55]}")
+        click.echo(f"  {_G}✓{_0} {_B}#{task['id']}{_0} {task['prompt'][:55]}")
         if rubric:
             for item in rubric:
-                click.echo(f"       - {item}")
-    click.echo(f"\nImported {len(tasks)} tasks. Review rubrics in tasks.yaml before running.")
+                click.echo(f"       {_D}-{_0} {item}")
+    click.echo(f"\n{_G}✓{_0} Imported {_B}{len(tasks)}{_0} tasks. Review rubrics in tasks.yaml before running.")
 
 
 @main.command()
@@ -156,19 +165,19 @@ def add(prompt, verify, max_retries, import_file, no_rubric):
     # Generate rubric unless --no-rubric
     rubric = None
     if not no_rubric:
-        click.echo("Generating rubric...")
+        click.echo(f"{_D}Generating rubric...{_0}")
         rubric_items = generate_rubric(prompt, Path.cwd())
         if rubric_items:
             rubric = rubric_items
-            click.echo(f"Rubric ({len(rubric_items)} criteria):")
+            click.echo(f"{_G}✓{_0} Rubric ({_B}{len(rubric_items)}{_0} criteria):")
             for item in rubric_items:
-                click.echo(f"  - {item}")
+                click.echo(f"  {_D}-{_0} {item}")
         else:
-            click.echo("No rubric generated.")
+            click.echo(f"{_Y}⚠{_0} No rubric generated.")
 
     task = add_task(tasks_path, prompt, verify=verify, max_retries=max_retries,
                     rubric=rubric)
-    click.echo(f"Added task #{task['id']} ({task['key']}): {prompt}")
+    click.echo(f"{_G}✓{_0} Added task {_B}#{task['id']}{_0} {_D}({task['key']}){_0}: {prompt}")
 
 
 @main.command()
@@ -239,19 +248,26 @@ def status():
     tasks_path = Path.cwd() / "tasks.yaml"
     tasks = load_tasks(tasks_path)
     if not tasks:
-        click.echo("No tasks found. Use 'otto add' to create one.")
+        click.echo(f"{_D}No tasks found. Use 'otto add' to create one.{_0}")
         return
 
-    # Simple table with rubric count
-    click.echo(f"{'ID':>4}  {'Key':12}  {'Status':10}  {'Att':>3}  {'Rubric':>6}  Prompt")
-    click.echo("-" * 80)
+    click.echo(f"{_B}{'ID':>4}  {'Status':10}  {'Att':>3}  {'Rubric':>6}  Prompt{_0}")
+    click.echo(f"{_D}{'─' * 70}{_0}")
     for t in tasks:
+        status_str = t.get("status", "?")
         rubric_count = len(t.get("rubric", []))
+        # Color status
+        if status_str == "passed":
+            status_styled = f"{_G}{status_str:10}{_0}"
+        elif status_str == "failed":
+            status_styled = f"{_R}{status_str:10}{_0}"
+        elif status_str == "running":
+            status_styled = f"{_C}{status_str:10}{_0}"
+        else:
+            status_styled = f"{_D}{status_str:10}{_0}"
         click.echo(
-            f"{t.get('id', '?'):>4}  {t.get('key', '?'):12}  "
-            f"{t.get('status', '?'):10}  {t.get('attempts', 0):>3}  "
-            f"{rubric_count:>6}  "
-            f"{t['prompt'][:40]}"
+            f"{t.get('id', '?'):>4}  {status_styled}  {t.get('attempts', 0):>3}  "
+            f"{rubric_count:>6}  {t['prompt'][:40]}"
         )
 
 
@@ -273,7 +289,7 @@ def retry(task_id):
                 status="pending", attempts=0, session_id=None,
                 error=None, error_code=None,
             )
-            click.echo(f"Reset task #{task_id} to pending")
+            click.echo(f"{_G}✓{_0} Reset task {_B}#{task_id}{_0} to pending")
             return
     click.echo(f"Task #{task_id} not found", err=True)
     sys.exit(1)
@@ -289,10 +305,12 @@ def logs(task_id):
         if t.get("id") == task_id:
             log_dir = Path.cwd() / "otto_logs" / t["key"]
             if not log_dir.exists():
-                click.echo(f"No logs for task #{task_id}")
+                click.echo(f"{_D}No logs for task #{task_id}{_0}")
                 return
             for log_file in sorted(log_dir.iterdir()):
-                click.echo(f"\n=== {log_file.name} ===")
+                click.echo(f"\n{_B}{'━' * 40}{_0}")
+                click.echo(f"{_B}  {log_file.name}{_0}")
+                click.echo(f"{_B}{'━' * 40}{_0}")
                 click.echo(log_file.read_text())
             return
     click.echo(f"Task #{task_id} not found", err=True)
@@ -347,7 +365,7 @@ def reset(yes):
         if testgen_dir.exists():
             shutil.rmtree(testgen_dir)
 
-        click.echo(f"Reset {count} tasks to pending. Cleaned branches, logs, and testgen.")
+        click.echo(f"{_G}✓{_0} Reset {_B}{count}{_0} tasks. Cleaned branches, logs, and testgen.")
     finally:
         fcntl.flock(lock_fh, fcntl.LOCK_UN)
         lock_fh.close()

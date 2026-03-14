@@ -25,9 +25,9 @@ class TestInit:
 
     def test_shows_detected_settings(self, runner, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
-        (tmp_git_repo / "tests").mkdir()
         result = runner.invoke(main, ["init"])
-        assert "pytest" in result.output or "test_command" in result.output
+        assert "default_branch" in result.output
+        assert "max_retries" in result.output
 
 
 class TestAdd:
