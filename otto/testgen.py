@@ -156,13 +156,16 @@ def _validate_test_output(output: str, framework: str) -> bool:
     return False
 
 
-def _call_and_validate(prompt: str, framework: str) -> str | None:
-    """Call claude -p, strip markdown fences, validate output. Returns code or None."""
+def _call_and_validate(prompt: str, framework: str) -> tuple[str | None, str | None]:
+    """Call claude -p, strip markdown fences, validate output.
+
+    Returns (code, None) on success, or (None, bad_output) on failure.
+    """
     import sys
 
     try:
         result = subprocess.run(
-            ["claude", "-p", "--output-format", "text", "--allowed-tools", ""],
+            ["claude", "-p", "--output-format", "text"],
             input=prompt,
             capture_output=True,
             text=True,
@@ -171,18 +174,18 @@ def _call_and_validate(prompt: str, framework: str) -> str | None:
         )
     except subprocess.TimeoutExpired:
         print(f"  testgen: timed out after {TESTGEN_TIMEOUT}s", file=sys.stderr, flush=True)
-        return None
+        return None, None
     except FileNotFoundError:
         print("  testgen: claude CLI not found", file=sys.stderr, flush=True)
-        return None
+        return None, None
 
     if result.returncode != 0:
         print(f"  testgen: claude exited {result.returncode}: {result.stderr[:200]}", file=sys.stderr, flush=True)
-        return None
+        return None, None
 
     if not result.stdout.strip():
         print("  testgen: empty output from claude", file=sys.stderr, flush=True)
-        return None
+        return None, None
 
     output = result.stdout.strip()
     fence_match = re.search(r"```(?:\w*)\n(.*?)```", output, re.DOTALL)
@@ -190,27 +193,38 @@ def _call_and_validate(prompt: str, framework: str) -> str | None:
         output = fence_match.group(1).strip()
 
     if _validate_test_output(output, framework):
-        return output
+        return output, None
 
     print(f"  testgen: validation failed — first 100 chars: {output[:100]}", file=sys.stderr, flush=True)
+    return None, output
+
+
+def _call_with_retry(prompt: str, framework: str, max_retries: int = 2) -> str | None:
+    """Call claude -p with retries on validation failure.
+
+    Each retry includes the previous bad output so the model knows what went wrong.
+    """
+    last_bad_output = None
+
+    for attempt in range(max_retries + 1):
+        if attempt == 0:
+            current_prompt = prompt
+        else:
+            current_prompt = (
+                f"I asked you to generate {framework} test code but your output was not valid code.\n\n"
+                f"Your bad output started with:\n{last_bad_output[:200] if last_bad_output else '(empty)'}\n\n"
+                f"This is wrong. Output ONLY executable {framework} test code. "
+                f"The very first line must be an import statement. No prose, no explanations, "
+                f"no file paths, no asking for permissions.\n\n"
+                f"Original request:\n{prompt}"
+            )
+
+        code, bad_output = _call_and_validate(current_prompt, framework)
+        if code is not None:
+            return code
+        last_bad_output = bad_output
+
     return None
-
-
-def _call_with_retry(prompt: str, framework: str) -> str | None:
-    """Call claude -p with one retry on validation failure."""
-    output = _call_and_validate(prompt, framework)
-    if output is not None:
-        return output
-
-    # Retry once with error feedback
-    retry_prompt = (
-        f"Your previous output was not valid {framework} test code. "
-        f"You are a code generator, not an agent. Do NOT ask for permissions or explain anything. "
-        f"Output ONLY raw executable test code starting with import statements. "
-        f"No markdown, no prose, no descriptions.\n\n"
-        f"Original request:\n{prompt}"
-    )
-    return _call_and_validate(retry_prompt, framework)
 
 
 def generate_tests(
