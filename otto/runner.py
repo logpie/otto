@@ -566,6 +566,28 @@ async def run_task(
                 if testgen_task.done():
                     testgen_file = testgen_task.result()
 
+            # Check if agent made any changes
+            diff_check = subprocess.run(
+                ["git", "diff", "--quiet", base_sha],
+                cwd=project_dir, capture_output=True,
+            )
+            untracked_check = subprocess.run(
+                ["git", "ls-files", "--others", "--exclude-standard"],
+                cwd=project_dir, capture_output=True, text=True,
+            )
+            new_untracked = {f for f in untracked_check.stdout.strip().splitlines() if f} - pre_existing_untracked
+            no_changes = diff_check.returncode == 0 and not new_untracked
+
+            if no_changes and not testgen_file:
+                # No code changes and no rubric tests — nothing to commit
+                print(f"  {_DIM}No changes needed{_RESET}", flush=True)
+                subprocess.run(["git", "checkout", default_branch], cwd=project_dir, capture_output=True)
+                cleanup_branch(project_dir, key, default_branch)
+                if tasks_file:
+                    update_task(tasks_file, key, status="passed")
+                _log_pass(task_id, default_branch, time.monotonic() - task_start)
+                return True
+
             # Build candidate commit
             candidate_sha = build_candidate_commit(
                 project_dir, base_sha, testgen_file, pre_existing_untracked
