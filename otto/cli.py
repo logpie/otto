@@ -378,10 +378,23 @@ def reset(yes):
         if testgen_dir.exists():
             shutil.rmtree(testgen_dir)
 
-        # Clean committed integration test file
-        integration_test = project_dir / "tests" / "otto_integration.py"
-        if integration_test.exists():
-            integration_test.unlink()
+        # Clean committed otto test files (git rm so tree stays clean)
+        import glob
+        otto_test_files = (
+            glob.glob(str(project_dir / "tests" / "test_otto_*.py"))
+            + glob.glob(str(project_dir / "tests" / "otto_verify_*.py"))
+            + [str(project_dir / "tests" / "otto_integration.py")]
+        )
+        removed_any = False
+        for f in otto_test_files:
+            if Path(f).exists():
+                subprocess.run(["git", "rm", "-f", f], cwd=project_dir, capture_output=True)
+                removed_any = True
+        if removed_any:
+            subprocess.run(
+                ["git", "commit", "-m", "otto: clean up test files"],
+                cwd=project_dir, capture_output=True,
+            )
 
         click.echo(f"{_G}✓{_0} Reset {_B}{count}{_0} tasks. Cleaned branches, logs, and testgen.")
     finally:
