@@ -273,9 +273,14 @@ def status():
 
 @main.command()
 @click.argument("task_id", type=int)
+@click.argument("feedback", required=False)
 @click.option("--force", is_flag=True, help="Reset any task, not just failed ones")
-def retry(task_id, force):
-    """Reset a failed task to pending (use --force for any status)."""
+def retry(task_id, feedback, force):
+    """Reset a failed task to pending (use --force for any status).
+
+    Optionally provide feedback to guide the agent on what to fix:
+      otto retry --force 2 "Output format is ugly, use a table"
+    """
     tasks_path = Path.cwd() / "tasks.yaml"
     tasks = load_tasks(tasks_path)
     for t in tasks:
@@ -285,15 +290,16 @@ def retry(task_id, force):
                     f"Task #{task_id} is '{t.get('status')}', not 'failed'. Use --force to override.", err=True
                 )
                 sys.exit(1)
-            if force and t.get("status") == "passed":
-                click.echo(f"{_Y}⚠{_0} Task #{task_id} was previously passed. Its code is still on {_B}main{_0}.")
-                click.echo(f"  {_D}Edit rubrics in tasks.yaml to change acceptance criteria, then run.{_0}")
-            update_task(
-                tasks_path, t["key"],
-                status="pending", attempts=0, session_id=None,
-                error=None, error_code=None,
-            )
+            updates: dict = {
+                "status": "pending", "attempts": 0,
+                "session_id": None, "error": None, "error_code": None,
+            }
+            if feedback:
+                updates["feedback"] = feedback
+            update_task(tasks_path, t["key"], **updates)
             click.echo(f"{_G}✓{_0} Reset task {_B}#{task_id}{_0} to pending")
+            if feedback:
+                click.echo(f"  {_D}Feedback: {feedback}{_0}")
             return
     click.echo(f"Task #{task_id} not found", err=True)
     sys.exit(1)

@@ -468,10 +468,14 @@ async def run_task(
         if tasks_file:
             update_task(tasks_file, key, attempts=attempt_num)
 
-        # Build agent prompt — on retries, use verification failure feedback
+        # Build agent prompt — include user feedback and/or verification errors
+        feedback = task.get("feedback", "")
         if attempt == 0 or last_error is None:
+            base_prompt = prompt
+            if feedback:
+                base_prompt = f"{prompt}\n\nIMPORTANT feedback from the user:\n{feedback}"
             agent_prompt = (
-                f"{prompt}\n\n"
+                f"{base_prompt}\n\n"
                 f"You are working in {project_dir}. Do NOT create git commits. "
                 f"Do NOT write tests — acceptance tests will be generated separately."
             )
