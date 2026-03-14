@@ -290,9 +290,16 @@ async def run_task(
         update_task(tasks_file, key, status="running", attempts=0)
 
     # Start testgen concurrently
-    testgen_task = asyncio.create_task(
-        asyncio.to_thread(generate_tests, prompt, project_dir, key)
-    )
+    rubric = task.get("rubric")
+    if rubric:
+        from otto.testgen import generate_tests_from_rubric
+        testgen_task = asyncio.create_task(
+            asyncio.to_thread(generate_tests_from_rubric, rubric, prompt, project_dir, key)
+        )
+    else:
+        testgen_task = asyncio.create_task(
+            asyncio.to_thread(generate_tests, prompt, project_dir, key)
+        )
 
     # Setup log directory
     log_dir = project_dir / "otto_logs" / key
@@ -308,17 +315,19 @@ async def run_task(
             update_task(tasks_file, key, attempts=attempt_num)
 
         # Build agent prompt — on retries, use verification failure feedback
+        context = task.get("context", "")
         if attempt == 0 or last_error is None:
-            agent_prompt = (
+            base_prompt = (
                 f"{prompt}\n\nYou are working in {project_dir}. Do NOT create git commits."
             )
         else:
-            agent_prompt = (
+            base_prompt = (
                 f"Verification failed. Fix the issue.\n\n"
                 f"{last_error}\n\n"
                 f"Original task: {prompt}\n\n"
                 f"You are working in {project_dir}. Do NOT create git commits."
             )
+        agent_prompt = f"Context: {context}\n\n{base_prompt}" if context else base_prompt
 
         # Run agent + build candidate + verify — catch infrastructure failures
         try:

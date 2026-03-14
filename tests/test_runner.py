@@ -139,3 +139,20 @@ class TestCleanupBranch:
             ["git", "branch"], cwd=tmp_git_repo, capture_output=True, text=True,
         ).stdout
         assert "otto/abc123def456" not in branches
+
+
+class TestContextPrepending:
+    def test_context_in_initial_prompt(self):
+        context = "Store is in store.py"
+        prompt = "Add search"
+        base = f"{prompt}\n\nDo NOT create git commits."
+        agent_prompt = f"Context: {context}\n\n{base}" if context else base
+        assert "Context: Store is in store.py" in agent_prompt
+        assert "Add search" in agent_prompt
+
+    def test_no_context_omits_prefix(self):
+        context = ""
+        prompt = "Fix typo"
+        base = f"{prompt}\n\nDo NOT create git commits."
+        agent_prompt = f"Context: {context}\n\n{base}" if context else base
+        assert "Context:" not in agent_prompt
