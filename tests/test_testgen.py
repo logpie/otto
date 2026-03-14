@@ -1,11 +1,14 @@
 """Tests for otto.testgen module."""
 
+import subprocess
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
 
 from otto.testgen import (
+    _extract_public_stubs,
+    build_blackbox_context,
     build_testgen_prompt,
     detect_test_framework,
     test_file_path,
@@ -164,3 +167,64 @@ class TestGenerateTestsFromRubric:
             ["criterion"], "task", tmp_path, "key123"
         )
         assert result is None
+
+
+class TestExtractPublicStubs:
+    def test_function_signature_only(self):
+        code = 'def search(query: str) -> list:\n    """Find items."""\n    return [x for x in items if query in x]\n'
+        stubs = _extract_public_stubs(code)
+        assert "def search(query: str) -> list:" in stubs
+        assert "Find items." in stubs
+        assert "return [x for x in items" not in stubs
+
+    def test_class_with_methods(self):
+        code = (
+            'class Store:\n'
+            '    """A store."""\n'
+            '    def add(self, url: str) -> dict:\n'
+            '        """Add item."""\n'
+            '        self.items.append(url)\n'
+            '        return {"url": url}\n'
+        )
+        stubs = _extract_public_stubs(code)
+        assert "class Store:" in stubs
+        assert "A store." in stubs
+        assert "def add(self, url: str) -> dict:" in stubs
+        assert "Add item." in stubs
+        assert "items.append" not in stubs
+
+    def test_module_constants(self):
+        code = 'MAX_RETRIES = 3\nTIMEOUT = 120\n\ndef foo():\n    pass\n'
+        stubs = _extract_public_stubs(code)
+        assert "MAX_RETRIES = 3" in stubs
+
+    def test_syntax_error_returns_empty(self):
+        assert _extract_public_stubs("def broken(:\n") == ""
+
+
+class TestBuildBlackboxContext:
+    def test_includes_file_tree(self, tmp_git_repo):
+        (tmp_git_repo / "app.py").write_text("x = 1\n")
+        subprocess.run(["git", "add", "."], cwd=tmp_git_repo, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "add app"], cwd=tmp_git_repo, capture_output=True)
+        ctx = build_blackbox_context(tmp_git_repo)
+        assert "app.py" in ctx
+
+    def test_includes_stubs_not_bodies(self, tmp_git_repo):
+        (tmp_git_repo / "app.py").write_text(
+            'def search(q: str) -> list:\n    """Search."""\n    return [x for x in data]\n'
+        )
+        subprocess.run(["git", "add", "."], cwd=tmp_git_repo, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "add app"], cwd=tmp_git_repo, capture_output=True)
+        ctx = build_blackbox_context(tmp_git_repo)
+        assert "def search(q: str) -> list:" in ctx
+        assert "return [x for x in data]" not in ctx
+
+    def test_includes_test_samples(self, tmp_git_repo):
+        (tmp_git_repo / "tests").mkdir()
+        (tmp_git_repo / "tests" / "test_app.py").write_text("import pytest\ndef test_foo(): pass\n")
+        (tmp_git_repo / "app.py").write_text("x = 1\n")
+        subprocess.run(["git", "add", "."], cwd=tmp_git_repo, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "add"], cwd=tmp_git_repo, capture_output=True)
+        ctx = build_blackbox_context(tmp_git_repo)
+        assert "import pytest" in ctx

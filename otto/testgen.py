@@ -11,6 +11,160 @@ from otto.config import git_meta_dir
 TESTGEN_TIMEOUT = 180  # seconds
 
 
+def _extract_public_stubs(source_code: str) -> str:
+    """Extract public API stubs from Python source code using AST.
+
+    Returns function/method signatures with docstrings, class definitions,
+    and module-level constants. Does NOT include function bodies or
+    implementation logic. Python-only for MVP.
+    """
+    try:
+        tree = ast.parse(source_code)
+    except SyntaxError:
+        return ""
+
+    lines: list[str] = []
+
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            # Top-level function: signature + docstring only
+            prefix = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
+            # Decorators
+            for dec in node.decorator_list:
+                lines.append(f"@{ast.unparse(dec)}")
+            sig = f"{prefix} {node.name}({ast.unparse(ast.arguments(**{f: getattr(node.args, f) for f in node.args._fields}))}):"
+            # Add return annotation if present
+            if node.returns:
+                sig = f"{prefix} {node.name}({ast.unparse(node.args)}) -> {ast.unparse(node.returns)}:"
+            lines.append(sig)
+            docstring = ast.get_docstring(node)
+            if docstring:
+                lines.append(f'    """{docstring}"""')
+            lines.append("")
+
+        elif isinstance(node, ast.ClassDef):
+            # Class: definition + docstring + method stubs
+            for dec in node.decorator_list:
+                lines.append(f"@{ast.unparse(dec)}")
+            lines.append(f"class {node.name}:")
+            docstring = ast.get_docstring(node)
+            if docstring:
+                lines.append(f'    """{docstring}"""')
+            for item in node.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    prefix = "async def" if isinstance(item, ast.AsyncFunctionDef) else "def"
+                    for dec in item.decorator_list:
+                        lines.append(f"    @{ast.unparse(dec)}")
+                    if item.returns:
+                        sig = f"    {prefix} {item.name}({ast.unparse(item.args)}) -> {ast.unparse(item.returns)}:"
+                    else:
+                        sig = f"    {prefix} {item.name}({ast.unparse(item.args)}):"
+                    lines.append(sig)
+                    method_doc = ast.get_docstring(item)
+                    if method_doc:
+                        lines.append(f'        """{method_doc}"""')
+                elif isinstance(item, ast.Assign):
+                    lines.append(f"    {ast.unparse(item)}")
+            lines.append("")
+
+        elif isinstance(node, ast.Assign):
+            # Module-level constant/assignment
+            lines.append(ast.unparse(node))
+
+        elif isinstance(node, ast.AnnAssign):
+            # Module-level annotated assignment (e.g. x: int = 5)
+            lines.append(ast.unparse(node))
+
+    return "\n".join(lines).strip()
+
+
+def build_blackbox_context(project_dir: Path) -> str:
+    """Build a sanitized project context for adversarial test generation.
+
+    Returns a string containing:
+    1. File tree (via git ls-files)
+    2. Public API stubs (signatures + docstrings, no bodies) for each .py source file
+    3. CLI help (best effort)
+    4. Existing test samples
+
+    Skips tests/, __init__.py, and conftest.py when extracting stubs.
+    Python-only for MVP.
+    """
+    sections: list[str] = []
+
+    # 1. File tree
+    try:
+        tree_result = subprocess.run(
+            ["git", "ls-files"],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        file_tree = tree_result.stdout.strip() if tree_result.returncode == 0 else ""
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        file_tree = ""
+    if file_tree:
+        sections.append(f"FILE TREE:\n{file_tree}")
+
+    # 2. Public API stubs
+    stubs_parts: list[str] = []
+    if file_tree:
+        for rel_path in file_tree.splitlines():
+            rel = rel_path.strip()
+            if not rel.endswith(".py"):
+                continue
+            # Skip test files, __init__.py, conftest.py
+            basename = Path(rel).name
+            if basename.startswith("test_") or basename in ("__init__.py", "conftest.py"):
+                continue
+            if rel.startswith("tests/") or rel.startswith("test/"):
+                continue
+            full = project_dir / rel
+            if not full.is_file():
+                continue
+            try:
+                source = full.read_text()
+            except (OSError, UnicodeDecodeError):
+                continue
+            stubs = _extract_public_stubs(source)
+            if stubs:
+                stubs_parts.append(f"# {rel}\n{stubs}")
+    if stubs_parts:
+        sections.append("PUBLIC API STUBS:\n" + "\n\n".join(stubs_parts))
+
+    # 3. CLI help (best effort — try python -m <package> --help)
+    # Detect top-level package name from __main__.py or setup files
+    cli_help = ""
+    for rel_path in (file_tree or "").splitlines():
+        rel = rel_path.strip()
+        if rel.endswith("__main__.py"):
+            pkg = str(Path(rel).parent).replace("/", ".")
+            if pkg and pkg != ".":
+                try:
+                    result = subprocess.run(
+                        ["python", "-m", pkg, "--help"],
+                        cwd=project_dir,
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                    if result.returncode == 0 and result.stdout.strip():
+                        cli_help = result.stdout.strip()
+                except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                    pass
+                break
+    if cli_help:
+        sections.append(f"CLI HELP:\n{cli_help}")
+
+    # 4. Existing test samples
+    test_samples = _read_existing_tests(project_dir)
+    if test_samples:
+        sections.append(f"EXISTING TEST SAMPLES:\n{test_samples}")
+
+    return "\n\n".join(sections)
+
+
 def detect_test_framework(project_dir: Path) -> str | None:
     """Detect which test framework the project uses."""
     if (project_dir / "tests").is_dir() or (project_dir / "test").is_dir():
