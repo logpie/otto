@@ -13,12 +13,15 @@ from typing import Any
 
 try:
     from claude_agent_sdk import ClaudeAgentOptions, query
-    from claude_agent_sdk.types import AssistantMessage, ResultMessage, TextBlock, ToolUseBlock
+    from claude_agent_sdk.types import (
+        AssistantMessage, ResultMessage, TextBlock, ToolResultBlock, ToolUseBlock,
+    )
 except ImportError:
     from otto._agent_stub import ClaudeAgentOptions, query, ResultMessage
     AssistantMessage = None  # type: ignore[assignment,misc]
     TextBlock = None  # type: ignore[assignment,misc]
     ToolUseBlock = None  # type: ignore[assignment,misc]
+    ToolResultBlock = None  # type: ignore[assignment,misc]
 
 from otto.config import git_meta_dir
 from otto.tasks import load_tasks, update_task
@@ -268,6 +271,50 @@ def _cleanup_task_failure(
             pass
 
 
+# ANSI color codes
+_DIM = "\033[2m"
+_BOLD = "\033[1m"
+_CYAN = "\033[36m"
+_GREEN = "\033[32m"
+_RED = "\033[31m"
+_YELLOW = "\033[33m"
+_RESET = "\033[0m"
+
+
+def _print_tool_use(block) -> None:
+    """Print a tool use block like the Claude TUI."""
+    name = block.name
+    inputs = block.input or {}
+
+    # Format like: ● Read  bookmarks/store.py
+    label = f"{_CYAN}{_BOLD}● {name}{_RESET}"
+
+    # Show key argument inline based on tool type
+    detail = ""
+    if name in ("Read", "Glob", "Grep"):
+        detail = inputs.get("file_path") or inputs.get("path") or inputs.get("pattern") or ""
+    elif name in ("Edit", "Write"):
+        detail = inputs.get("file_path") or ""
+    elif name == "Bash":
+        cmd = inputs.get("command") or ""
+        detail = cmd[:80] + ("..." if len(cmd) > 80 else "")
+
+    if detail:
+        print(f"  {label}  {_DIM}{detail}{_RESET}", flush=True)
+    else:
+        print(f"  {label}", flush=True)
+
+
+def _print_tool_result(block) -> None:
+    """Print a tool result block — only show errors."""
+    if block.is_error:
+        content = block.content if isinstance(block.content, str) else str(block.content)
+        # Truncate long errors
+        if len(content) > 200:
+            content = content[:200] + "..."
+        print(f"  {_RED}✗ Error: {content}{_RESET}", flush=True)
+
+
 async def run_task(
     task: dict[str, Any],
     config: dict[str, Any],
@@ -358,7 +405,9 @@ async def run_task(
                             if TextBlock and isinstance(block, TextBlock) and block.text:
                                 print(block.text, flush=True)
                             elif ToolUseBlock and isinstance(block, ToolUseBlock):
-                                print(f"  → {block.name}", flush=True)
+                                _print_tool_use(block)
+                            elif ToolResultBlock and isinstance(block, ToolResultBlock):
+                                _print_tool_result(block)
 
                 # Extract session_id for resume
                 if result_msg and getattr(result_msg, "session_id", None):
