@@ -683,7 +683,127 @@ async def run_task(
     return False
 
 
-def _print_summary(results: list[tuple[dict, bool]], total_duration: float) -> None:
+async def _run_integration_gate(
+    passed_tasks: list[dict],
+    config: dict,
+    project_dir: Path,
+) -> bool:
+    """Generate and run cross-feature integration tests. Returns True if passed."""
+    from otto.testgen import generate_integration_tests
+    from otto.verify import run_integration_gate
+
+    default_branch = config["default_branch"]
+    test_command = config.get("test_command")
+    timeout = config["verify_timeout"]
+    max_retries = config.get("max_retries", 3)
+
+    print(flush=True)
+    _log_info("Integration gate — testing features together")
+    print(f"  {_DIM}Generating cross-feature integration tests...{_RESET}", flush=True)
+
+    # Generate integration tests
+    integration_file = None
+    try:
+        integration_file = generate_integration_tests(passed_tasks, project_dir)
+        if integration_file:
+            print(f"  {_GREEN}✓{_RESET} {_DIM}Integration tests generated{_RESET}", flush=True)
+        else:
+            _log_warn("Integration test generation failed — skipping gate")
+            return True
+    except Exception as e:
+        _log_warn(f"Integration test generation failed: {e}")
+        return True
+
+    # Commit integration test file to main
+    tests_dir = project_dir / "tests"
+    tests_dir.mkdir(parents=True, exist_ok=True)
+    dest = tests_dir / "otto_integration.py"
+    shutil.copy2(integration_file, dest)
+    subprocess.run(["git", "add", str(dest)], cwd=project_dir, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "otto: add cross-feature integration tests"],
+        cwd=project_dir, capture_output=True,
+    )
+
+    # Run integration gate (full test suite + integration tests in clean worktree)
+    print(f"  {_DIM}Running integration tests...{_RESET}", flush=True)
+    gate_result = run_integration_gate(
+        project_dir=project_dir,
+        test_command=test_command,
+        integration_test_file=integration_file,
+        timeout=timeout,
+    )
+    _log_verify(gate_result.tiers)
+
+    if gate_result.passed:
+        print(f"\n  {_GREEN}{_BOLD}✓ Integration gate PASSED{_RESET}", flush=True)
+        return True
+
+    # Integration tests failed — spawn agent to fix
+    for attempt in range(max_retries):
+        print(f"\n  {_YELLOW}⚠ Integration tests failed — fixing (attempt {attempt + 1}/{max_retries}){_RESET}", flush=True)
+
+        fix_prompt = (
+            f"Cross-feature integration tests are failing. Fix the issues.\n\n"
+            f"{gate_result.failure_output}\n\n"
+            f"You are working in {project_dir}. Do NOT create git commits. "
+            f"You may edit any file in the project to make all tests pass."
+        )
+
+        try:
+            agent_opts = ClaudeAgentOptions(
+                permission_mode="bypassPermissions",
+                cwd=str(project_dir),
+            )
+            if config.get("model"):
+                agent_opts.model = config["model"]
+
+            async for message in query(prompt=fix_prompt, options=agent_opts):
+                if AssistantMessage and isinstance(message, AssistantMessage):
+                    for block in message.content:
+                        if TextBlock and isinstance(block, TextBlock) and block.text:
+                            print(block.text, flush=True)
+                        elif ToolUseBlock and isinstance(block, ToolUseBlock):
+                            _print_tool_use(block)
+                        elif ToolResultBlock and isinstance(block, ToolResultBlock):
+                            _print_tool_result(block)
+        except Exception as e:
+            _log_warn(f"Agent error: {e}")
+            continue
+
+        # Commit the fix
+        subprocess.run(["git", "add", "-u"], cwd=project_dir, capture_output=True)
+        # Stage new untracked files (agent might create new ones)
+        untracked = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            cwd=project_dir, capture_output=True, text=True,
+        )
+        for f in untracked.stdout.split("\0"):
+            if f:
+                subprocess.run(["git", "add", "--", f], cwd=project_dir, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "otto: fix cross-feature integration issues", "--allow-empty"],
+            cwd=project_dir, capture_output=True,
+        )
+
+        # Re-verify
+        gate_result = run_integration_gate(
+            project_dir=project_dir,
+            test_command=test_command,
+            integration_test_file=None,  # already committed
+            timeout=timeout,
+        )
+        _log_verify(gate_result.tiers)
+
+        if gate_result.passed:
+            print(f"\n  {_GREEN}{_BOLD}✓ Integration gate PASSED{_RESET} {_DIM}(after fix){_RESET}", flush=True)
+            return True
+
+    print(f"\n  {_RED}{_BOLD}✗ Integration gate FAILED{_RESET} {_DIM}— cross-feature issues remain{_RESET}", flush=True)
+    return False
+
+
+def _print_summary(results: list[tuple[dict, bool]], total_duration: float, integration_passed: bool | None = None) -> None:
     """Print summary of all tasks after a run."""
     passed = sum(1 for _, s in results if s)
     failed = len(results) - passed
@@ -702,6 +822,12 @@ def _print_summary(results: list[tuple[dict, bool]], total_duration: float) -> N
         print(f"  {_GREEN}{_BOLD}{passed}/{len(results)} tasks passed{_RESET}", flush=True)
     else:
         print(f"  {_GREEN}{passed} passed{_RESET}  {_RED}{failed} failed{_RESET}  {_DIM}of {len(results)} tasks{_RESET}", flush=True)
+
+    if integration_passed is not None:
+        icon = f"{_GREEN}✓{_RESET}" if integration_passed else f"{_RED}✗{_RESET}"
+        label = "passed" if integration_passed else "FAILED"
+        print(f"  {icon} Integration gate {label}", flush=True)
+
     print(flush=True)
 
 
@@ -786,10 +912,20 @@ async def run_all(
             )
             return 1
 
-        # Print run summary
-        _print_summary(results, time.monotonic() - run_start)
+        # Integration gate — run after 2+ tasks pass
+        passed_tasks = [t for t, s in results if s]
+        integration_passed = True
+        skip_integration = config.get("no_integration", False)
 
-        any_failed = any(not s for _, s in results)
+        if len(passed_tasks) >= 2 and not skip_integration:
+            integration_passed = await _run_integration_gate(
+                passed_tasks, config, project_dir,
+            )
+
+        # Print run summary
+        _print_summary(results, time.monotonic() - run_start, integration_passed if len(passed_tasks) >= 2 and not skip_integration else None)
+
+        any_failed = any(not s for _, s in results) or not integration_passed
         return 1 if any_failed else 0
 
     finally:

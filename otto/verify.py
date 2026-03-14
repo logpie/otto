@@ -227,3 +227,51 @@ def run_verification(
         )
         if worktree_path.exists():
             shutil.rmtree(worktree_path, ignore_errors=True)
+
+
+def run_integration_gate(
+    project_dir: Path,
+    test_command: str | None,
+    integration_test_file: Path | None,
+    timeout: int,
+) -> VerifyResult:
+    """Run integration gate in a clean disposable worktree.
+
+    Tests HEAD of the current branch (all tasks already merged).
+    Runs the full test suite (cross-task regression) plus integration tests.
+    """
+    tiers: list[TierResult] = []
+
+    head_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=project_dir, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    worktree_path = Path(tempfile.mkdtemp(prefix="otto-integration-"))
+
+    try:
+        subprocess.run(
+            ["git", "worktree", "add", "--detach", str(worktree_path), head_sha],
+            cwd=project_dir, capture_output=True, check=True,
+        )
+
+        # Copy integration test file into worktree
+        if integration_test_file and integration_test_file.exists():
+            dest = worktree_path / "tests" / "otto_integration.py"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(integration_test_file, dest)
+
+        # Run full test suite (regression + integration tests in one pass)
+        t1 = run_tier1(worktree_path, test_command, timeout)
+        tiers.append(t1)
+
+        all_passed = all(t.passed for t in tiers)
+        return VerifyResult(passed=all_passed, tiers=tiers)
+
+    finally:
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", str(worktree_path)],
+            cwd=project_dir, capture_output=True,
+        )
+        if worktree_path.exists():
+            shutil.rmtree(worktree_path, ignore_errors=True)

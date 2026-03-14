@@ -183,7 +183,8 @@ def add(prompt, verify, max_retries, import_file, no_rubric):
 @main.command()
 @click.argument("prompt", required=False)
 @click.option("--dry-run", is_flag=True, help="Show what would run without executing")
-def run(prompt, dry_run):
+@click.option("--no-integration", is_flag=True, help="Skip post-run integration tests")
+def run(prompt, dry_run, no_integration):
     """Run pending tasks (or a one-off task if prompt given)."""
     from otto.runner import run_all, run_task
 
@@ -193,6 +194,8 @@ def run(prompt, dry_run):
         click.echo("Error: otto.yaml not found. Run 'otto init' first.", err=True)
         sys.exit(2)
     config = load_config(config_path)
+    if no_integration:
+        config["no_integration"] = True
 
     if dry_run:
         tasks_path = project_dir / "tasks.yaml"
@@ -374,6 +377,11 @@ def reset(yes):
         testgen_dir = git_meta_dir(project_dir) / "otto"
         if testgen_dir.exists():
             shutil.rmtree(testgen_dir)
+
+        # Clean committed integration test file
+        integration_test = project_dir / "tests" / "otto_integration.py"
+        if integration_test.exists():
+            integration_test.unlink()
 
         click.echo(f"{_G}✓{_0} Reset {_B}{count}{_0} tasks. Cleaned branches, logs, and testgen.")
     finally:

@@ -309,3 +309,78 @@ Start directly with import statements.
     out_file.write_text(output)
 
     return out_file
+
+
+def generate_integration_tests(
+    tasks: list[dict],
+    project_dir: Path,
+) -> Path | None:
+    """Generate cross-feature integration tests via claude -p.
+
+    Takes ALL passed tasks and generates tests that exercise features
+    working together — multi-step workflows crossing task boundaries.
+    """
+    from otto.rubric import _gather_project_context
+
+    framework = detect_test_framework(project_dir) or "pytest"
+    context = _gather_project_context(project_dir)
+    existing_tests = _read_existing_tests(project_dir)
+
+    task_sections = []
+    for i, task in enumerate(tasks, 1):
+        section = f"FEATURE {i}: {task['prompt']}"
+        rubric = task.get("rubric", [])
+        if rubric:
+            section += "\nRubric:\n" + "\n".join(f"  - {r}" for r in rubric)
+        task_sections.append(section)
+
+    example_section = ""
+    if existing_tests:
+        example_section = f"""
+EXISTING TESTS (for reference on fixtures/helpers — do NOT copy how they invoke the system under test):
+{existing_tests}
+"""
+
+    llm_prompt = f"""You are a QA engineer writing cross-feature INTEGRATION tests.
+
+The following features were implemented:
+
+{chr(10).join(task_sections)}
+
+PROJECT CONTEXT:
+{context}
+{example_section}
+TEST FRAMEWORK: {framework}
+
+Write integration tests that exercise these features WORKING TOGETHER.
+
+Focus on:
+- Multi-step workflows crossing feature boundaries (create via feature A, verify via feature B)
+- State interactions (one feature's changes visible to another)
+- Data round-trips (import then search then export — verify consistency)
+- Features not interfering with each other
+
+Do NOT re-test individual features — those are already covered.
+Test ONLY cross-feature interactions and multi-step workflows.
+
+Rules — "test like a user":
+- CLI apps: use subprocess.run() to invoke the actual command. Check stdout, stderr, exit codes.
+  Do NOT use in-process test runners (CliRunner, invoke()).
+- Libraries/APIs: import and call the public interface as a consumer would.
+- Tests must be hermetic and deterministic — no external network calls
+- The tests should be runnable with the standard test command for {framework}
+
+IMPORTANT: Output ONLY valid {framework} test code. No prose, no explanations, no markdown.
+Start directly with import statements.
+"""
+
+    output = _call_with_retry(llm_prompt, framework)
+    if output is None:
+        return None
+
+    testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / "_integration"
+    testgen_dir.mkdir(parents=True, exist_ok=True)
+    out_file = testgen_dir / "otto_integration.py"
+    out_file.write_text(output)
+
+    return out_file
