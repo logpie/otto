@@ -46,8 +46,6 @@ def _import_tasks(import_path: Path, tasks_path: Path) -> None:
             item = {"prompt": t["prompt"]}
             if t.get("rubric"):
                 item["rubric"] = t["rubric"]
-            if t.get("context"):
-                item["context"] = t["context"]
             if t.get("verify"):
                 item["verify"] = t["verify"]
             if t.get("max_retries") is not None:
@@ -97,8 +95,6 @@ def _import_tasks(import_path: Path, tasks_path: Path) -> None:
                 item["verify"] = t["verify"]
             if t.get("max_retries") is not None:
                 item["max_retries"] = t["max_retries"]
-            if t.get("context"):
-                item["context"] = t["context"]
             batch.append(item)
         click.echo()
         results = add_tasks(tasks_path, batch)
@@ -113,8 +109,6 @@ def _print_imported_tasks(tasks: list) -> None:
         if rubric:
             for item in rubric:
                 click.echo(f"       - {item}")
-        if task.get("context"):
-            click.echo(f"       context: {task['context'][:60]}")
     click.echo(f"\nImported {len(tasks)} tasks. Review rubrics in tasks.yaml before running.")
 
 

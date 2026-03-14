@@ -170,20 +170,19 @@ DOCUMENT:
 {md_content}
 
 Break this document into individual coding tasks. For each task, provide:
-- "prompt": a clear, actionable description of what to implement (including tests)
+- "prompt": a clear, actionable description of what to implement
 - "rubric": 5-8 concrete, testable acceptance criteria
-- "context": relevant file paths or additional context (string, can be empty)
 
 IMPORTANT RULES:
-- Each task should be a complete, self-contained unit of work — implementation AND tests together. Do NOT create separate tasks for writing tests.
-- Test expectations belong in the rubric, not as separate tasks.
+- Each task should be a complete, self-contained unit of work.
+- Do NOT create separate tasks for writing tests — test expectations belong in the rubric.
 - One heading/section in the document = one task (unless a section is too large, then split by feature, not by "implement" vs "test").
 - Rubric items must be specific enough to write a test from. Cover: happy path, edge cases, error conditions.
 - Reference actual function/class names from the project source when possible.
 
 Output ONLY a valid JSON array. No prose, no markdown fences, no explanations.
 Example format:
-[{{"prompt": "Add search method to BookmarkStore and tests", "rubric": ["search('python') returns matching bookmarks", "search is case-insensitive", "no matches returns empty list"], "context": "bookmarks/store.py"}}]"""
+[{{"prompt": "Add search method to BookmarkStore", "rubric": ["search('python') returns matching bookmarks", "search is case-insensitive", "no matches returns empty list"]}}]"""
 
     try:
         result = subprocess.run(

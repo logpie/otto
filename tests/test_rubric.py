@@ -96,8 +96,8 @@ class TestParseMarkdownTasks:
                 m.stdout = "app.py"
             else:
                 m.stdout = json.dumps([
-                    {"prompt": "Add search method", "rubric": ["case-insensitive"], "context": "store.py"},
-                    {"prompt": "Add tags support", "rubric": ["by_tag filters"], "context": ""},
+                    {"prompt": "Add search method", "rubric": ["case-insensitive"]},
+                    {"prompt": "Add tags support", "rubric": ["by_tag filters"]},
                 ])
             return m
         mock_run.side_effect = side_effect
@@ -106,7 +106,6 @@ class TestParseMarkdownTasks:
         assert len(tasks) == 2
         assert tasks[0]["prompt"] == "Add search method"
         assert tasks[0]["rubric"] == ["case-insensitive"]
-        assert tasks[0]["context"] == "store.py"
 
     @patch("otto.rubric.subprocess.run")
     def test_raises_on_invalid_json(self, mock_run, tmp_path):
@@ -138,7 +137,7 @@ class TestParseMarkdownTasks:
             if args[0] == ["git", "ls-files"]:
                 m.stdout = ""
             else:
-                m.stdout = json.dumps([{"prompt": "", "rubric": [], "context": ""}])
+                m.stdout = json.dumps([{"prompt": "", "rubric": []}])
             return m
         mock_run.side_effect = side_effect
 

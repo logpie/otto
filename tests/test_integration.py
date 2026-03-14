@@ -124,9 +124,9 @@ class TestRubricEndToEnd:
     def test_rubric_uses_generate_tests_from_rubric(
         self, mock_query, mock_rubric_testgen, mock_testgen, mock_options_cls, tmp_git_repo
     ):
-        """Task with rubric+context uses generate_tests_from_rubric, not generate_tests.
+        """Task with rubric uses generate_tests_from_rubric, not generate_tests.
 
-        Also verifies that the context field appears in the agent prompt.
+        Also verifies the agent prompt includes the no-tests instruction.
         """
         # Setup: create config, commit it so tree is clean
         create_config(tmp_git_repo)
@@ -139,7 +139,6 @@ class TestRubricEndToEnd:
             tasks_path,
             "Add search",
             rubric=["search is case-insensitive"],
-            context="Store is in store.py",
         )
 
         # Capture prompt passed to query
@@ -166,6 +165,6 @@ class TestRubricEndToEnd:
         # generate_tests should NOT be called (non-rubric path)
         mock_testgen.assert_not_called()
 
-        # Context should appear in the agent prompt
+        # Agent prompt should include no-tests instruction
         assert len(captured_prompts) >= 1
-        assert "Context: Store is in store.py" in captured_prompts[0]
+        assert "Do NOT write tests" in captured_prompts[0]

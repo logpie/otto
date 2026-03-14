@@ -79,7 +79,7 @@ class TestUpdateTask:
             update_task(path, "nonexistent123", status="running")
 
 
-class TestAddTaskRubricAndContext:
+class TestAddTaskRubric:
     def test_add_task_with_rubric(self, tmp_git_repo):
         tasks_path = tmp_git_repo / "tasks.yaml"
         task = add_task(tasks_path, "Add search", rubric=["search is case-insensitive", "no matches returns empty list"])
@@ -87,18 +87,10 @@ class TestAddTaskRubricAndContext:
         tasks = load_tasks(tasks_path)
         assert tasks[0]["rubric"] == ["search is case-insensitive", "no matches returns empty list"]
 
-    def test_add_task_with_context(self, tmp_git_repo):
-        tasks_path = tmp_git_repo / "tasks.yaml"
-        task = add_task(tasks_path, "Add search", context="BookmarkStore is in store.py")
-        assert task["context"] == "BookmarkStore is in store.py"
-        tasks = load_tasks(tasks_path)
-        assert tasks[0]["context"] == "BookmarkStore is in store.py"
-
     def test_add_task_without_rubric(self, tmp_git_repo):
         tasks_path = tmp_git_repo / "tasks.yaml"
         task = add_task(tasks_path, "Fix typo")
         assert "rubric" not in task
-        assert "context" not in task
 
 
 class TestAddTasksBatch:
@@ -106,7 +98,7 @@ class TestAddTasksBatch:
         tasks_path = tmp_git_repo / "tasks.yaml"
         batch = [
             {"prompt": "Task A", "rubric": ["criterion 1"]},
-            {"prompt": "Task B", "rubric": ["criterion 2"], "context": "some context"},
+            {"prompt": "Task B", "rubric": ["criterion 2"]},
             {"prompt": "Task C"},
         ]
         results = add_tasks(tasks_path, batch)
@@ -117,7 +109,7 @@ class TestAddTasksBatch:
         tasks = load_tasks(tasks_path)
         assert len(tasks) == 3
         assert tasks[0]["rubric"] == ["criterion 1"]
-        assert tasks[1]["context"] == "some context"
+        assert tasks[1]["rubric"] == ["criterion 2"]
         assert "rubric" not in tasks[2]
 
     def test_add_tasks_appends_to_existing(self, tmp_git_repo):

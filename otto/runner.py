@@ -315,19 +315,20 @@ async def run_task(
             update_task(tasks_file, key, attempts=attempt_num)
 
         # Build agent prompt — on retries, use verification failure feedback
-        context = task.get("context", "")
         if attempt == 0 or last_error is None:
-            base_prompt = (
-                f"{prompt}\n\nYou are working in {project_dir}. Do NOT create git commits."
+            agent_prompt = (
+                f"{prompt}\n\n"
+                f"You are working in {project_dir}. Do NOT create git commits. "
+                f"Do NOT write tests — acceptance tests will be generated separately."
             )
         else:
-            base_prompt = (
+            agent_prompt = (
                 f"Verification failed. Fix the issue.\n\n"
                 f"{last_error}\n\n"
                 f"Original task: {prompt}\n\n"
-                f"You are working in {project_dir}. Do NOT create git commits."
+                f"You are working in {project_dir}. Do NOT create git commits. "
+                f"Do NOT write tests — acceptance tests will be generated separately."
             )
-        agent_prompt = f"Context: {context}\n\n{base_prompt}" if context else base_prompt
 
         # Run agent + build candidate + verify — catch infrastructure failures
         try:
@@ -416,17 +417,6 @@ async def run_task(
             logger.warning(f"Failed to write verify log: {e}")
 
         if verify_result.passed:
-            # Remove testgen artifact from the commit (it was only needed for verification)
-            if testgen_file and testgen_file.exists():
-                framework = detect_test_framework(project_dir) or "pytest"
-                placeholder_path = test_file_path(framework, "placeholder")
-                testgen_in_tree = project_dir / placeholder_path.parent / testgen_file.name
-                if testgen_in_tree.exists():
-                    subprocess.run(
-                        ["git", "rm", "-f", str(testgen_in_tree.relative_to(project_dir))],
-                        cwd=project_dir, capture_output=True,
-                    )
-
             # Amend commit message (pre-merge, so cleanup is still safe)
             try:
                 amend_result = subprocess.run(

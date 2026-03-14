@@ -64,7 +64,6 @@ def add_task(
     verify: str | None = None,
     max_retries: int | None = None,
     rubric: list[str] | None = None,
-    context: str | None = None,
 ) -> dict[str, Any]:
     """Add a new task to tasks.yaml. Thread-safe via flock."""
     def _add(tasks):
@@ -82,8 +81,6 @@ def add_task(
             task["max_retries"] = max_retries
         if rubric is not None:
             task["rubric"] = rubric
-        if context is not None:
-            task["context"] = context
         tasks.append(task)
         return task
 
@@ -109,7 +106,7 @@ def add_tasks(
                 "status": "pending",
             }
             existing_keys.add(task["key"])
-            for field in ("verify", "max_retries", "rubric", "context"):
+            for field in ("verify", "max_retries", "rubric"):
                 if field in item and item[field] is not None:
                     task[field] = item[field]
             tasks.append(task)

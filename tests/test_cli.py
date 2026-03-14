@@ -181,7 +181,7 @@ class TestAddImport:
     def test_import_md(self, mock_parse, runner, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
         mock_parse.return_value = [
-            {"prompt": "Add search", "rubric": ["criterion 1"], "context": "ctx"},
+            {"prompt": "Add search", "rubric": ["criterion 1"]},
         ]
         md_file = tmp_git_repo / "features.md"
         md_file.write_text("# Search\nAdd search.\n")
@@ -190,7 +190,6 @@ class TestAddImport:
         tasks = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())
         assert len(tasks["tasks"]) == 1
         assert tasks["tasks"][0]["rubric"] == ["criterion 1"]
-        assert tasks["tasks"][0]["context"] == "ctx"
 
     @patch("otto.cli.generate_rubric")
     def test_import_yaml_preserves_rubric(self, mock_gen, runner, tmp_git_repo, monkeypatch):
