@@ -2,6 +2,7 @@
 
 import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 import yaml
@@ -32,13 +33,13 @@ class TestInit:
 class TestAdd:
     def test_adds_task(self, runner, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
-        result = runner.invoke(main, ["add", "Build a login page"])
+        result = runner.invoke(main, ["add", "--no-rubric", "Build a login page"])
         assert result.exit_code == 0
         assert "Added task" in result.output
 
     def test_adds_with_verify(self, runner, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
-        result = runner.invoke(main, ["add", "Optimize", "--verify", "python bench.py"])
+        result = runner.invoke(main, ["add", "--no-rubric", "Optimize", "--verify", "python bench.py"])
         assert result.exit_code == 0
         tasks = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())["tasks"]
         assert tasks[0]["verify"] == "python bench.py"
@@ -64,7 +65,7 @@ class TestAdd:
 class TestRetry:
     def test_resets_failed_task(self, runner, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
-        runner.invoke(main, ["add", "Some task"])
+        runner.invoke(main, ["add", "--no-rubric", "Some task"])
         # Manually set to failed
         tasks = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())
         tasks["tasks"][0]["status"] = "failed"
@@ -77,7 +78,7 @@ class TestRetry:
     def test_clears_error_code_on_retry(self, runner, tmp_git_repo, monkeypatch):
         """Retry must clear error_code so diverged tasks can re-run."""
         monkeypatch.chdir(tmp_git_repo)
-        runner.invoke(main, ["add", "Some task"])
+        runner.invoke(main, ["add", "--no-rubric", "Some task"])
         tasks = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())
         tasks["tasks"][0]["status"] = "failed"
         tasks["tasks"][0]["error_code"] = "merge_diverged"
@@ -90,7 +91,7 @@ class TestRetry:
 
     def test_rejects_non_failed_task(self, runner, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
-        runner.invoke(main, ["add", "Some task"])
+        runner.invoke(main, ["add", "--no-rubric", "Some task"])
         result = runner.invoke(main, ["retry", "1"])
         assert result.exit_code != 0
 
@@ -100,7 +101,7 @@ class TestRun:
         monkeypatch.chdir(tmp_git_repo)
         from otto.config import create_config
         create_config(tmp_git_repo)
-        runner.invoke(main, ["add", "Task 1"])
+        runner.invoke(main, ["add", "--no-rubric", "Task 1"])
         result = runner.invoke(main, ["run", "--dry-run"])
         assert result.exit_code == 0
         assert "Pending tasks: 1" in result.output
@@ -115,7 +116,7 @@ class TestStatus:
 
     def test_shows_task_table(self, runner, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
-        runner.invoke(main, ["add", "First task"])
+        runner.invoke(main, ["add", "--no-rubric", "First task"])
         result = runner.invoke(main, ["status"])
         assert "First task" in result.output
         assert "pending" in result.output
@@ -124,6 +125,37 @@ class TestStatus:
 class TestReset:
     def test_resets_all_tasks(self, runner, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
-        runner.invoke(main, ["add", "Task 1"])
+        runner.invoke(main, ["add", "--no-rubric", "Task 1"])
         result = runner.invoke(main, ["reset", "--yes"])
         assert result.exit_code == 0
+
+
+class TestAddRubric:
+    @patch("otto.cli.generate_rubric")
+    def test_add_generates_rubric(self, mock_gen, runner, tmp_git_repo, monkeypatch):
+        monkeypatch.chdir(tmp_git_repo)
+        mock_gen.return_value = ["criterion 1", "criterion 2"]
+        result = runner.invoke(main, ["add", "Add search"])
+        assert result.exit_code == 0
+        assert "Rubric" in result.output
+        assert "criterion 1" in result.output
+        tasks = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())
+        assert tasks["tasks"][0]["rubric"] == ["criterion 1", "criterion 2"]
+
+    @patch("otto.cli.generate_rubric")
+    def test_add_no_rubric_flag(self, mock_gen, runner, tmp_git_repo, monkeypatch):
+        monkeypatch.chdir(tmp_git_repo)
+        result = runner.invoke(main, ["add", "--no-rubric", "Fix typo"])
+        assert result.exit_code == 0
+        mock_gen.assert_not_called()
+        tasks = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())
+        assert "rubric" not in tasks["tasks"][0]
+
+    @patch("otto.cli.generate_rubric")
+    def test_add_empty_rubric_not_stored(self, mock_gen, runner, tmp_git_repo, monkeypatch):
+        monkeypatch.chdir(tmp_git_repo)
+        mock_gen.return_value = []
+        result = runner.invoke(main, ["add", "Fix typo"])
+        assert result.exit_code == 0
+        tasks = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())
+        assert "rubric" not in tasks["tasks"][0]

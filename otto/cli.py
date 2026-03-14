@@ -8,6 +8,7 @@ from pathlib import Path
 import click
 
 from otto.config import create_config, git_meta_dir, load_config
+from otto.rubric import generate_rubric
 from otto.tasks import add_task, load_tasks, reset_all_tasks, save_tasks, update_task
 
 
@@ -36,8 +37,9 @@ def init():
 @click.option("--verify", default=None, help="Custom verification command")
 @click.option("--max-retries", default=None, type=int, help="Max retry attempts")
 @click.option("-f", "--file", "import_file", default=None, type=click.Path(exists=True),
-              help="Import tasks from a YAML file")
-def add(prompt, verify, max_retries, import_file):
+              help="Import tasks from a file (.yaml, .md, .txt)")
+@click.option("--no-rubric", is_flag=True, help="Skip rubric generation")
+def add(prompt, verify, max_retries, import_file, no_rubric):
     """Add a task to the queue (or import from file with -f)."""
     import yaml as _yaml
 
@@ -57,7 +59,21 @@ def add(prompt, verify, max_retries, import_file):
         click.echo("Error: provide a prompt or use -f to import", err=True)
         sys.exit(2)
 
-    task = add_task(tasks_path, prompt, verify=verify, max_retries=max_retries)
+    # Generate rubric unless --no-rubric
+    rubric = None
+    if not no_rubric:
+        click.echo("Generating rubric...")
+        rubric_items = generate_rubric(prompt, Path.cwd())
+        if rubric_items:
+            rubric = rubric_items
+            click.echo(f"Rubric ({len(rubric_items)} criteria):")
+            for item in rubric_items:
+                click.echo(f"  - {item}")
+        else:
+            click.echo("No rubric generated.")
+
+    task = add_task(tasks_path, prompt, verify=verify, max_retries=max_retries,
+                    rubric=rubric)
     click.echo(f"Added task #{task['id']} ({task['key']}): {prompt}")
 
 
