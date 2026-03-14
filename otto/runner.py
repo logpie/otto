@@ -339,13 +339,27 @@ def _print_tool_use(block) -> None:
 
 
 def _print_tool_result(block) -> None:
-    """Print a tool result block — only show errors."""
+    """Print tool result — truncated output for success, full for errors."""
+    content = block.content if isinstance(block.content, str) else str(block.content)
+    if not content.strip():
+        return
     if block.is_error:
-        content = block.content if isinstance(block.content, str) else str(block.content)
-        # Truncate long errors
-        if len(content) > 200:
-            content = content[:200] + "..."
-        print(f"  {_RED}✗ Error: {content}{_RESET}", flush=True)
+        lines = content.strip().splitlines()
+        # Show last few lines of error (most useful part)
+        shown = lines[-5:] if len(lines) > 5 else lines
+        for line in shown:
+            print(f"    {_RED}{line}{_RESET}", flush=True)
+    else:
+        lines = content.strip().splitlines()
+        if len(lines) <= 3:
+            for line in lines:
+                print(f"    {_DIM}{line}{_RESET}", flush=True)
+        else:
+            # Show first 2 + last line with count
+            print(f"    {_DIM}{lines[0]}{_RESET}", flush=True)
+            print(f"    {_DIM}{lines[1]}{_RESET}", flush=True)
+            print(f"    {_DIM}... ({len(lines) - 3} more lines){_RESET}", flush=True)
+            print(f"    {_DIM}{lines[-1]}{_RESET}", flush=True)
 
 
 async def run_task(
