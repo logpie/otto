@@ -137,7 +137,7 @@ Each criterion should be a single clear sentence. Use "does NOT" or "must NOT" f
 
     try:
         result = subprocess.run(
-            ["claude", "-p", "--output-format", "text"],
+            ["claude", "-p", "--output-format", "text", "--allowed-tools", ""],
             input=system_prompt,
             capture_output=True,
             text=True,
@@ -195,7 +195,7 @@ Example format:
 
     try:
         result = subprocess.run(
-            ["claude", "-p", "--output-format", "text"],
+            ["claude", "-p", "--output-format", "text", "--allowed-tools", ""],
             input=system_prompt,
             capture_output=True,
             text=True,

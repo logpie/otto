@@ -162,7 +162,7 @@ def _call_and_validate(prompt: str, framework: str) -> str | None:
 
     try:
         result = subprocess.run(
-            ["claude", "-p", "--output-format", "text"],
+            ["claude", "-p", "--output-format", "text", "--allowed-tools", ""],
             input=prompt,
             capture_output=True,
             text=True,
