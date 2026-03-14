@@ -285,6 +285,10 @@ def retry(task_id, force):
                     f"Task #{task_id} is '{t.get('status')}', not 'failed'. Use --force to override.", err=True
                 )
                 sys.exit(1)
+            if force and t.get("status") == "passed":
+                click.echo(f"{_Y}⚠{_0} Task #{task_id} was previously passed. Its code is still on {_B}main{_0}.")
+                click.echo(f"  {_D}The agent will re-run on top of the existing code.{_0}")
+                click.echo(f"  {_D}To start fresh, revert the commit first: git revert <sha>{_0}")
             update_task(
                 tasks_path, t["key"],
                 status="pending", attempts=0, session_id=None,
