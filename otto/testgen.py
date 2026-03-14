@@ -2,10 +2,13 @@
 
 import ast
 import json
+import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 try:
@@ -19,6 +22,18 @@ except ImportError:
 from otto.config import git_meta_dir
 
 TESTGEN_TIMEOUT = 180  # seconds
+
+
+@dataclass
+class TestValidationResult:
+    """Result of validating generated tests."""
+
+    __test__ = False  # prevent pytest from collecting this as a test class
+
+    status: str  # "tdd_ok", "all_pass", "collection_error", "no_tests"
+    passed: int = 0
+    failed: int = 0
+    error_output: str = ""
 
 
 def _extract_public_stubs(source_code: str) -> str:
@@ -254,6 +269,119 @@ Write the test file now. Do NOT explain — just write the file.
 
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def _subprocess_env() -> dict:
+    """Return env dict with current Python's bin dir on PATH.
+
+    Re-implemented here (mirrors otto.verify._subprocess_env) to avoid
+    importing from verify which would create coupling.
+    """
+    venv_bin = str(Path(sys.executable).parent)
+    env = os.environ.copy()
+    existing = env.get("PATH", "")
+    if venv_bin not in existing.split(os.pathsep):
+        env["PATH"] = venv_bin + os.pathsep + existing
+    return env
+
+
+def validate_generated_tests(
+    test_file: Path,
+    framework: str,
+    project_dir: Path,
+) -> TestValidationResult:
+    """Two-phase validation of generated test file.
+
+    Phase 1: ``pytest --collect-only`` — checks syntax, imports, fixture resolution.
+    Phase 2: ``pytest <file> -v`` — runs tests, counts passed/failed.
+
+    Returns a TestValidationResult with status:
+    - ``"collection_error"`` — syntax/import errors (test is broken)
+    - ``"no_tests"`` — no test functions found
+    - ``"all_pass"`` — all tests pass (tests may be trivial)
+    - ``"tdd_ok"`` — some/all tests fail (TDD invariant holds)
+    """
+    env = _subprocess_env()
+
+    # Phase 1: collection check
+    try:
+        collect = subprocess.run(
+            [sys.executable, "-m", "pytest", "--collect-only", "-q", str(test_file)],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        return TestValidationResult(
+            status="collection_error",
+            error_output="Collection timed out",
+        )
+
+    if collect.returncode != 0:
+        return TestValidationResult(
+            status="collection_error",
+            error_output=(collect.stdout + collect.stderr)[:2000],
+        )
+
+    # Check if any tests were collected
+    combined = collect.stdout + collect.stderr
+    # pytest --collect-only -q outputs "N tests collected" or "no tests ran"
+    if "no tests ran" in combined or "0 selected" in combined:
+        return TestValidationResult(status="no_tests")
+    # Also check for empty collection (e.g. file with no test_ functions)
+    # pytest -q --collect-only lists test items, then "N tests collected"
+    import re as _re
+    collected_match = _re.search(r"(\d+) tests? collected", combined)
+    if collected_match and int(collected_match.group(1)) == 0:
+        return TestValidationResult(status="no_tests")
+
+    # Phase 2: run tests
+    try:
+        run = subprocess.run(
+            [sys.executable, "-m", "pytest", str(test_file), "-v"],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        return TestValidationResult(
+            status="collection_error",
+            error_output="Test run timed out",
+        )
+
+    output = run.stdout + run.stderr
+
+    # Parse passed/failed counts from pytest output
+    # Typical lines: "2 passed", "1 failed, 1 passed", "2 failed"
+    passed = 0
+    failed = 0
+    passed_match = _re.search(r"(\d+) passed", output)
+    failed_match = _re.search(r"(\d+) failed", output)
+    if passed_match:
+        passed = int(passed_match.group(1))
+    if failed_match:
+        failed = int(failed_match.group(1))
+
+    if passed == 0 and failed == 0:
+        return TestValidationResult(status="no_tests", error_output=output[:2000])
+
+    if failed > 0:
+        return TestValidationResult(
+            status="tdd_ok",
+            passed=passed,
+            failed=failed,
+            error_output=output[:2000],
+        )
+
+    return TestValidationResult(
+        status="all_pass",
+        passed=passed,
+        failed=failed,
+    )
 
 
 def detect_test_framework(project_dir: Path) -> str | None:

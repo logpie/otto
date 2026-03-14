@@ -15,6 +15,8 @@ from otto.testgen import (
     generate_tests,
     generate_tests_from_rubric,
     run_testgen_agent,
+    validate_generated_tests,
+    TestValidationResult,
     _validate_test_output,
 )
 
@@ -285,3 +287,34 @@ class TestBuildBlackboxContext:
         subprocess.run(["git", "commit", "-m", "add"], cwd=tmp_git_repo, capture_output=True)
         ctx = build_blackbox_context(tmp_git_repo)
         assert "import pytest" in ctx
+
+
+class TestValidateGeneratedTests:
+    def test_collection_failure(self, tmp_path):
+        test_file = tmp_path / "test_bad.py"
+        test_file.write_text("def test_foo(:\n    pass\n")
+        result = validate_generated_tests(test_file, "pytest", tmp_path)
+        assert result.status == "collection_error"
+
+    def test_all_fail(self, tmp_path):
+        test_file = tmp_path / "test_good.py"
+        test_file.write_text("def test_a():\n    assert False\ndef test_b():\n    assert False\n")
+        result = validate_generated_tests(test_file, "pytest", tmp_path)
+        assert result.status == "tdd_ok"
+        assert result.failed > 0
+        assert result.passed == 0
+
+    def test_all_pass(self, tmp_path):
+        test_file = tmp_path / "test_trivial.py"
+        test_file.write_text("def test_a():\n    assert True\ndef test_b():\n    assert True\n")
+        result = validate_generated_tests(test_file, "pytest", tmp_path)
+        assert result.status == "all_pass"
+        assert result.passed == 2
+
+    def test_mixed(self, tmp_path):
+        test_file = tmp_path / "test_mixed.py"
+        test_file.write_text("def test_pass():\n    assert True\ndef test_fail():\n    assert False\n")
+        result = validate_generated_tests(test_file, "pytest", tmp_path)
+        assert result.status == "tdd_ok"
+        assert result.passed == 1
+        assert result.failed == 1
