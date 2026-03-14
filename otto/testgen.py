@@ -8,7 +8,7 @@ from pathlib import Path
 
 from otto.config import git_meta_dir
 
-TESTGEN_TIMEOUT = 300  # seconds — needs headroom for large prompts with full project context
+TESTGEN_TIMEOUT = 180  # seconds
 
 
 def detect_test_framework(project_dir: Path) -> str | None:
