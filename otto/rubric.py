@@ -87,3 +87,60 @@ def _gather_project_context(project_dir: Path) -> str:
         sections.append(f"EXISTING TESTS:\n{existing_tests}")
 
     return "\n\n".join(sections)
+
+
+# Regex to strip numbered ("1. ", "1) ") or bullet ("- ", "* ") prefixes
+_LIST_PREFIX_RE = re.compile(r"^\s*(?:\d+[.)]\s*|[-*]\s+)")
+
+RUBRIC_TIMEOUT = 120  # seconds
+
+
+def _parse_rubric_output(text: str) -> list[str]:
+    """Parse LLM output into a list of rubric criteria strings.
+
+    Strips numbering (1. , 1) ) and bullets (- , * ) prefixes.
+    Skips empty lines.
+    """
+    criteria = []
+    for line in text.splitlines():
+        stripped = _LIST_PREFIX_RE.sub("", line).strip()
+        if stripped:
+            criteria.append(stripped)
+    return criteria
+
+
+def generate_rubric(prompt: str, project_dir: Path) -> list[str]:
+    """Generate a rubric for a single task via claude -p.
+
+    Returns a list of rubric criterion strings, or empty list on failure.
+    """
+    context = _gather_project_context(project_dir)
+
+    system_prompt = f"""You are a senior QA engineer. Given a coding task and project context,
+generate a rubric: a numbered list of specific, testable acceptance criteria
+that verify the task was completed correctly.
+
+PROJECT CONTEXT:
+{context}
+
+TASK: {prompt}
+
+Output ONLY a numbered list of criteria. No prose, no explanations.
+Each criterion should be a single clear sentence describing what must be true."""
+
+    try:
+        result = subprocess.run(
+            ["claude", "-p", "--output-format", "text"],
+            input=system_prompt,
+            capture_output=True,
+            text=True,
+            timeout=RUBRIC_TIMEOUT,
+            start_new_session=True,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return []
+
+    if result.returncode != 0 or not result.stdout.strip():
+        return []
+
+    return _parse_rubric_output(result.stdout)
