@@ -81,7 +81,9 @@ EXISTING TESTS (for reference on fixtures/helpers — do NOT copy how they invok
 {existing_tests}
 """
 
-    return f"""You are a QA engineer writing integration tests for a coding task.
+    return f"""You are a code generator. Your ONLY job is to output valid {framework} test code.
+Do NOT explain what you're doing. Do NOT ask for permissions. Do NOT describe the tests.
+Do NOT use markdown fences. Just output the raw test code starting with import statements.
 
 TASK: {task_prompt}
 
@@ -203,8 +205,9 @@ def _call_with_retry(prompt: str, framework: str) -> str | None:
     # Retry once with error feedback
     retry_prompt = (
         f"Your previous output was not valid {framework} test code. "
-        f"Output ONLY executable test code. No markdown fences, no prose, no explanations. "
-        f"Start directly with import statements.\n\n"
+        f"You are a code generator, not an agent. Do NOT ask for permissions or explain anything. "
+        f"Output ONLY raw executable test code starting with import statements. "
+        f"No markdown, no prose, no descriptions.\n\n"
         f"Original request:\n{prompt}"
     )
     return _call_and_validate(retry_prompt, framework)
@@ -278,7 +281,9 @@ EXISTING TESTS (for reference on fixtures/helpers — do NOT copy how they invok
 {existing_tests}
 """
 
-    llm_prompt = f"""You are a QA engineer writing integration tests for a coding task.
+    llm_prompt = f"""You are a code generator. Your ONLY job is to output valid {framework} test code.
+Do NOT explain what you're doing. Do NOT ask for permissions. Do NOT describe the tests.
+Do NOT use markdown fences. Just output the raw test code starting with import statements.
 
 TASK: {prompt}
 
@@ -354,9 +359,11 @@ EXISTING TESTS (for reference on fixtures/helpers — do NOT copy how they invok
 {existing_tests}
 """
 
-    llm_prompt = f"""You are a QA engineer writing cross-feature INTEGRATION tests.
+    llm_prompt = f"""You are a code generator. Your ONLY job is to output valid {framework} test code.
+Do NOT explain what you're doing. Do NOT ask for permissions. Do NOT describe the tests.
+Do NOT use markdown fences. Just output the raw test code starting with import statements.
 
-The following features were implemented:
+Write cross-feature INTEGRATION tests. The following features were implemented:
 
 {chr(10).join(task_sections)}
 
