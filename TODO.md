@@ -2,29 +2,41 @@
 
 ## Rubric & Test Generation
 
-- [ ] **Smarter rubric generation**: Give the LLM more project context — read the actual source files referenced in the task, not just file tree. Current `_gather_project_context` reads up to 5 files/100 lines; may miss the relevant ones.
-- [ ] **Rubric-to-test quality**: Generated tests sometimes have import errors or test the wrong thing. Explore: run a validation pass (import check, quick syntax run) before committing. Or use a two-step: generate test, then have a second LLM call review/fix it.
-- [ ] **Framework-specific test patterns**: Current generation prompt is generic. Could provide framework-specific examples (pytest fixtures, jest mocking patterns, etc.) for higher quality output.
-- [ ] **User-provided test examples**: Let users point to a "golden" test file as a style reference, beyond what `_read_existing_tests` auto-detects.
-- [ ] **Rubric refinement loop**: If rubric-generated tests fail to parse or import, auto-retry with the error message fed back to the LLM (similar to how agent retries work).
+- [x] **"Test like a user" principle**: Generated tests now use subprocess for CLIs, public API for libraries. No more CliRunner.
+- [x] **Anti-pattern rubrics**: Rubric generation now requires happy path, error handling, negative ("does NOT"), and edge case categories.
+- [x] **Test generation retry**: Single retry with error feedback when validation fails.
+- [ ] **Smarter context gathering**: Current `_gather_project_context` reads up to 5 files/100 lines; may miss the relevant ones. Could read files referenced in the task prompt, or use the agent's file reads as hints.
+- [ ] **Framework-specific test patterns**: Provide framework-specific examples (pytest fixtures with tmp_path, jest mocking patterns, etc.) for higher quality output.
 - [ ] **Test deduplication**: When rubric tests overlap with existing project tests, detect and skip duplicates instead of testing the same thing twice.
+- [ ] **Rubric count tuning**: 22 rubrics for one task is too many — testgen times out. Cap at 8-10 criteria, prioritize the most important ones.
 
 ## Adversarial Testing
 
-- [ ] **Anti-pattern tests**: Generated tests should include cases that verify the code does NOT do the wrong thing — e.g. "search does not return unrelated bookmarks", "delete does not affect other records", "invalid input does not silently succeed". The rubric prompt should explicitly ask for "what should NOT happen" alongside "what should happen".
-- [ ] **Boundary and abuse cases**: Generate tests for boundaries (empty input, huge input, unicode, special chars, None where unexpected) and misuse (calling methods in wrong order, concurrent access, re-entrance).
+- [x] **Anti-pattern tests**: Rubric prompt now explicitly asks for "does NOT" / "must NOT" criteria.
 - [ ] **Regression-style rubrics**: When a task modifies existing code, auto-generate rubric items that verify existing behavior is preserved — not just that new behavior works. "Search still works after adding tags" type checks.
 - [ ] **Security anti-patterns**: For tasks involving user input, file paths, or external data, generate tests that verify common vulnerabilities don't exist — injection, path traversal, unescaped output, etc.
+- [ ] **Mutation-style checks**: After the agent implements a feature, intentionally break a key line and verify the tests catch it. If they don't, the tests are too weak.
 
 ## Integration Testing
 
-- [ ] **Cross-task integration tests**: When multiple tasks touch the same module, generate integration tests that verify the features work together — e.g. "search works on bookmarks that have tags", "export includes favorite status".
-- [ ] **End-to-end behavioral tests**: Generate tests that exercise the full stack (CLI → store → file) rather than just unit-testing individual methods. Verify the system works as a user would use it.
-- [ ] **State interaction tests**: Generate tests that verify features interact correctly with shared state — e.g. "adding a bookmark, favoriting it, then exporting includes the favorite", "deleting a tagged bookmark updates tag counts".
+- [ ] **Post-run integration tests**: After ALL tasks complete (not per-task), generate one final test file that exercises features working together. Run it as a final gate before the run summary. E.g., "import bookmarks from JSON, search them, favorite one, export as HTML — verify the exported HTML includes the favorited imported bookmark."
+- [ ] **Cross-task regression gate**: Before marking a task as passed, run ALL existing tests (already done via tier 1). But also: after the full run completes, run the entire test suite one more time as a final sanity check — catches interactions that individual task verification missed.
+- [ ] **State interaction tests**: Generate tests that exercise multi-step workflows — e.g., "add → favorite → delete → verify favorites count updated", "import → search → export → verify roundtrip."
+- [ ] **Environment tests**: Verify the project works in a clean environment — fresh install, no cached state, no leftover files. Catches implicit dependencies.
 
 ## Observability
 
-- [ ] **Live agent streaming**: Print agent messages to stdout in real time as they stream from `query()`. The async iterator already yields `AssistantMessage` objects — just print them instead of silently consuming. Add a `--quiet` flag to suppress for CI/background use.
-- [ ] **Agent session logs**: Also persist the full conversation to `otto_logs/<key>/attempt-N-agent.log` for post-mortem debugging.
+- [x] **Live agent streaming**: Agent messages stream to stdout in real time with styled formatting.
+- [x] **Agent session logs**: Full conversation persisted to `otto_logs/<key>/attempt-N-agent.log`.
+- [x] **Timing**: Wall-clock time shown per task and for the full run.
 - [ ] **Cost tracking**: Log token usage and cost per task from `ResultMessage.total_cost_usd` and `ResultMessage.usage`. Show in `otto status` or `otto logs`.
-- [ ] **Timing**: Log wall-clock time per attempt (agent duration, testgen duration, verify duration) for identifying bottlenecks.
+- [ ] **Test coverage delta**: After each task, measure test coverage change. Did the new tests actually cover the new code? Warns if coverage didn't increase.
+- [ ] **`--quiet` mode**: Suppress agent streaming for CI/background use. Only show task pass/fail and summary.
+
+## UX
+
+- [ ] **`otto diff <id>`**: Show the git diff for a specific task's commit. Shorthand for finding the right SHA.
+- [ ] **`otto show <id>`**: Show task details — prompt, rubrics, status, attempts, feedback, log snippets.
+- [ ] **Parallel tasks**: Run independent tasks concurrently on separate branches. Merge sequentially. Would need dependency detection or user annotation.
+- [ ] **Watch mode**: `otto watch` re-runs on file changes (like `features.md` edits). Auto-imports and runs.
+- [ ] **Progress bar**: Show overall progress (3/5 tasks) and per-task progress (agent working / verifying / merging).
