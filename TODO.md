@@ -5,7 +5,13 @@
 - [x] **"Test like a user" principle**: Generated tests now use subprocess for CLIs, public API for libraries. No more CliRunner.
 - [x] **Anti-pattern rubrics**: Rubric generation now requires happy path, error handling, negative ("does NOT"), and edge case categories.
 - [x] **Test generation retry**: Single retry with error feedback when validation fails.
-- [ ] **Smarter context gathering**: Current `_gather_project_context` reads up to 5 random files/100 lines; misses the relevant ones and bloats prompts causing timeouts. Fix: capture which files the agent read/edited during its run (from ToolUseBlock stream), pass only those to testgen. This gives the LLM exactly the files that matter instead of guessing.
+- [ ] **Smarter context gathering**: Current `_gather_project_context` reads up to 5 random files/100 lines; misses the relevant ones and bloats prompts causing timeouts. Multiple signals to combine:
+  - **Agent-touched files**: Capture Read/Edit/Write paths from the ToolUseBlock stream during the agent run. These are the files the agent found relevant.
+  - **Import graph**: Follow imports from touched files (e.g., if agent edited `cli.py` which imports from `store.py`, include `store.py`). Can use AST `import` parsing or simple regex — no need for full LSP.
+  - **Test infrastructure**: Always include `conftest.py`, test fixtures, `__init__.py` in test dirs — the LLM needs these to generate compatible tests.
+  - **Git diff**: After the agent runs, `git diff --name-only` gives exactly which files changed. Combined with `git diff` content, this is the most precise signal.
+  - **Fallback**: For integration tests (no single agent run), use the union of all task diffs + their import graphs.
+  - Consider: LSP could give precise type info and call graphs, but adds a heavy dependency. Start with import-graph parsing + git diff, escalate to LSP only if needed.
 - [ ] **Framework-specific test patterns**: Provide framework-specific examples (pytest fixtures with tmp_path, jest mocking patterns, etc.) for higher quality output.
 - [ ] **Test deduplication**: When rubric tests overlap with existing project tests, detect and skip duplicates instead of testing the same thing twice.
 - [ ] **Rubric count tuning**: 22 rubrics for one task is too many — testgen times out. Cap at 8-10 criteria, prioritize the most important ones.
