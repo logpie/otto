@@ -348,7 +348,10 @@ async def run_task(
                 # query() is async iterator — stream messages, keep last ResultMessage
                 result_msg = None
                 async for message in query(prompt=agent_prompt, options=agent_opts):
-                    if isinstance(message, ResultMessage) or hasattr(message, "subtype"):
+                    if isinstance(message, ResultMessage):
+                        result_msg = message
+                    elif hasattr(message, "session_id") and hasattr(message, "is_error"):
+                        # Duck-type check for ResultMessage (mocks, stub)
                         result_msg = message
                     elif AssistantMessage and isinstance(message, AssistantMessage):
                         for block in message.content:
@@ -358,7 +361,7 @@ async def run_task(
                                 print(f"  → {block.name}", flush=True)
 
                 # Extract session_id for resume
-                if result_msg and result_msg.session_id:
+                if result_msg and getattr(result_msg, "session_id", None):
                     session_id = result_msg.session_id
                     if tasks_file:
                         update_task(tasks_file, key, session_id=session_id)
@@ -505,13 +508,18 @@ async def run_all(
         logger.error("Another otto process is running")
         return 2
 
-    # Signal handling — set flag, cleanup in main loop (async-safe)
+    # Signal handling — first Ctrl+C sets flag, second forces exit
     current_task_key = None
     interrupted = False
 
     def _signal_handler(signum, frame):
         nonlocal interrupted
+        if interrupted:
+            # Second signal — force exit
+            logger.warning("Force exit")
+            sys.exit(1)
         interrupted = True
+        logger.warning("Interrupted — finishing current task then stopping (Ctrl+C again to force)")
 
     old_sigint = signal.signal(signal.SIGINT, _signal_handler)
     old_sigterm = signal.signal(signal.SIGTERM, _signal_handler)
