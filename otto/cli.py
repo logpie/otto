@@ -136,7 +136,7 @@ def _print_imported_tasks(tasks: list) -> None:
     """Print summary of imported tasks with rubric details."""
     for task in tasks:
         rubric = task.get("rubric", [])
-        click.echo(f"  {_G}✓{_0} {_B}#{task['id']}{_0} {task['prompt'][:55]}")
+        click.echo(f"  {_G}✓{_0} {_B}#{task['id']}{_0} {task['prompt'][:80]}")
         if rubric:
             for item in rubric:
                 click.echo(f"       {_D}-{_0} {item}")
@@ -270,7 +270,7 @@ def status():
             status_styled = f"{_D}{status_str:10}{_0}"
         click.echo(
             f"{t.get('id', '?'):>4}  {status_styled}  {t.get('attempts', 0):>3}  "
-            f"{rubric_count:>6}  {t['prompt'][:40]}"
+            f"{rubric_count:>6}  {t['prompt'][:70]}"
         )
 
 

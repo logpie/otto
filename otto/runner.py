@@ -289,7 +289,7 @@ def _log_info(msg: str) -> None:
 def _log_task_start(task_id: int, key: str, attempt: int, max_attempts: int, prompt: str) -> None:
     print(flush=True)
     print(f"{_BOLD}{'━' * 60}{_RESET}", flush=True)
-    print(f"{_BOLD}  Task #{task_id}{_RESET}  {prompt[:50]}", flush=True)
+    print(f"{_BOLD}  Task #{task_id}{_RESET}  {prompt[:80]}", flush=True)
     print(f"  {_DIM}attempt {attempt}/{max_attempts}  ·  key {key}{_RESET}", flush=True)
     print(f"{_BOLD}{'━' * 60}{_RESET}", flush=True)
 
@@ -815,7 +815,7 @@ def _print_summary(results: list[tuple[dict, bool]], total_duration: float, inte
 
     for task, success in results:
         icon = f"{_GREEN}✓{_RESET}" if success else f"{_RED}✗{_RESET}"
-        print(f"  {icon} {_BOLD}#{task['id']}{_RESET}  {task['prompt'][:50]}", flush=True)
+        print(f"  {icon} {_BOLD}#{task['id']}{_RESET}  {task['prompt'][:80]}", flush=True)
 
     print(flush=True)
     if failed == 0:
