@@ -44,8 +44,10 @@ class TestAdd:
         tasks = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())["tasks"]
         assert tasks[0]["verify"] == "python bench.py"
 
-    def test_imports_from_file(self, runner, tmp_git_repo, monkeypatch):
+    @patch("otto.cli.generate_rubric")
+    def test_imports_from_file(self, mock_gen, runner, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
+        mock_gen.return_value = []
         import_file = tmp_git_repo / "import.yaml"
         import_file.write_text(yaml.dump({
             "tasks": [
@@ -159,3 +161,51 @@ class TestAddRubric:
         assert result.exit_code == 0
         tasks = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())
         assert "rubric" not in tasks["tasks"][0]
+
+
+class TestAddImport:
+    @patch("otto.cli.generate_rubric")
+    def test_import_txt(self, mock_gen, runner, tmp_git_repo, monkeypatch):
+        monkeypatch.chdir(tmp_git_repo)
+        mock_gen.return_value = ["auto criterion"]
+        txt_file = tmp_git_repo / "tasks.txt"
+        txt_file.write_text("Add search\n# comment\nAdd tags\n\n")
+        result = runner.invoke(main, ["add", "-f", str(txt_file)])
+        assert result.exit_code == 0
+        tasks = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())
+        assert len(tasks["tasks"]) == 2
+        assert tasks["tasks"][0]["prompt"] == "Add search"
+        assert tasks["tasks"][0]["rubric"] == ["auto criterion"]
+
+    @patch("otto.cli.parse_markdown_tasks")
+    def test_import_md(self, mock_parse, runner, tmp_git_repo, monkeypatch):
+        monkeypatch.chdir(tmp_git_repo)
+        mock_parse.return_value = [
+            {"prompt": "Add search", "rubric": ["criterion 1"], "context": "ctx"},
+        ]
+        md_file = tmp_git_repo / "features.md"
+        md_file.write_text("# Search\nAdd search.\n")
+        result = runner.invoke(main, ["add", "-f", str(md_file)])
+        assert result.exit_code == 0
+        tasks = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())
+        assert len(tasks["tasks"]) == 1
+        assert tasks["tasks"][0]["rubric"] == ["criterion 1"]
+        assert tasks["tasks"][0]["context"] == "ctx"
+
+    @patch("otto.cli.generate_rubric")
+    def test_import_yaml_preserves_rubric(self, mock_gen, runner, tmp_git_repo, monkeypatch):
+        monkeypatch.chdir(tmp_git_repo)
+        yaml_file = tmp_git_repo / "import.yaml"
+        yaml_file.write_text(yaml.dump({
+            "tasks": [
+                {"prompt": "Task with rubric", "rubric": ["existing criterion"]},
+                {"prompt": "Task without rubric"},
+            ]
+        }))
+        mock_gen.return_value = ["auto criterion"]
+        result = runner.invoke(main, ["add", "-f", str(yaml_file)])
+        assert result.exit_code == 0
+        tasks = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())
+        assert tasks["tasks"][0]["rubric"] == ["existing criterion"]
+        # Only called for task without rubric
+        mock_gen.assert_called_once()

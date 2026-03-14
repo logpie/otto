@@ -8,8 +8,8 @@ from pathlib import Path
 import click
 
 from otto.config import create_config, git_meta_dir, load_config
-from otto.rubric import generate_rubric
-from otto.tasks import add_task, load_tasks, reset_all_tasks, save_tasks, update_task
+from otto.rubric import generate_rubric, parse_markdown_tasks
+from otto.tasks import add_task, add_tasks, load_tasks, reset_all_tasks, save_tasks, update_task
 
 
 @click.group()
@@ -32,6 +32,79 @@ def init():
     click.echo("\nCommit otto.yaml to share config with your team.")
 
 
+def _import_tasks(import_path: Path, tasks_path: Path) -> None:
+    """Import tasks from .md, .txt, or .yaml files with rubric generation."""
+    import yaml as _yaml
+
+    project_dir = Path.cwd()
+    suffix = import_path.suffix.lower()
+
+    if suffix == ".md":
+        # Markdown: single LLM call via parse_markdown_tasks
+        parsed = parse_markdown_tasks(import_path, project_dir)
+        batch = []
+        for t in parsed:
+            item = {"prompt": t["prompt"]}
+            if t.get("rubric"):
+                item["rubric"] = t["rubric"]
+            if t.get("context"):
+                item["context"] = t["context"]
+            if t.get("verify"):
+                item["verify"] = t["verify"]
+            if t.get("max_retries") is not None:
+                item["max_retries"] = t["max_retries"]
+            batch.append(item)
+        results = add_tasks(tasks_path, batch)
+        for task in results:
+            click.echo(f"Added task #{task['id']} ({task['key']}): {task['prompt'][:60]}")
+        click.echo(f"Imported {len(results)} tasks")
+
+    elif suffix == ".txt":
+        # Text: one task per non-empty line, skip # comments
+        lines = import_path.read_text().splitlines()
+        batch = []
+        for line in lines:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            click.echo(f"Generating rubric for: {stripped[:60]}...")
+            rubric_items = generate_rubric(stripped, project_dir)
+            item = {"prompt": stripped}
+            if rubric_items:
+                item["rubric"] = rubric_items
+            batch.append(item)
+        results = add_tasks(tasks_path, batch)
+        for task in results:
+            click.echo(f"Added task #{task['id']} ({task['key']}): {task['prompt'][:60]}")
+        click.echo(f"Imported {len(results)} tasks")
+
+    else:
+        # YAML: structured import, generate rubric for tasks without one
+        data = _yaml.safe_load(import_path.read_text()) or {}
+        imported = data.get("tasks", [])
+        batch = []
+        for t in imported:
+            item = {"prompt": t["prompt"]}
+            if t.get("rubric"):
+                item["rubric"] = t["rubric"]
+            else:
+                click.echo(f"Generating rubric for: {t['prompt'][:60]}...")
+                rubric_items = generate_rubric(t["prompt"], project_dir)
+                if rubric_items:
+                    item["rubric"] = rubric_items
+            if t.get("verify"):
+                item["verify"] = t["verify"]
+            if t.get("max_retries") is not None:
+                item["max_retries"] = t["max_retries"]
+            if t.get("context"):
+                item["context"] = t["context"]
+            batch.append(item)
+        results = add_tasks(tasks_path, batch)
+        for task in results:
+            click.echo(f"Added task #{task['id']} ({task['key']}): {task['prompt'][:60]}")
+        click.echo(f"Imported {len(results)} tasks")
+
+
 @main.command()
 @click.argument("prompt", required=False)
 @click.option("--verify", default=None, help="Custom verification command")
@@ -41,18 +114,10 @@ def init():
 @click.option("--no-rubric", is_flag=True, help="Skip rubric generation")
 def add(prompt, verify, max_retries, import_file, no_rubric):
     """Add a task to the queue (or import from file with -f)."""
-    import yaml as _yaml
-
     tasks_path = Path.cwd() / "tasks.yaml"
 
     if import_file:
-        data = _yaml.safe_load(Path(import_file).read_text()) or {}
-        imported = data.get("tasks", [])
-        for t in imported:
-            task = add_task(tasks_path, t["prompt"],
-                           verify=t.get("verify"), max_retries=t.get("max_retries"))
-            click.echo(f"Added task #{task['id']} ({task['key']}): {t['prompt'][:60]}")
-        click.echo(f"Imported {len(imported)} tasks")
+        _import_tasks(Path(import_file), tasks_path)
         return
 
     if not prompt:
