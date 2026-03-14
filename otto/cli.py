@@ -31,8 +31,15 @@ def init():
 
 
 def _import_tasks(import_path: Path, tasks_path: Path) -> None:
-    """Import tasks from .md, .txt, or .yaml files with rubric generation."""
+    """Import tasks from .md, .txt, or .yaml files with rubric generation.
+
+    Replaces any existing tasks — the import file is the source of truth.
+    """
     import yaml as _yaml
+
+    # Clear existing tasks — import replaces, not appends
+    if tasks_path.exists():
+        tasks_path.unlink()
 
     project_dir = Path.cwd()
     suffix = import_path.suffix.lower()
