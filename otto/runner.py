@@ -7,6 +7,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -293,12 +294,22 @@ def _log_task_start(task_id: int, key: str, attempt: int, max_attempts: int, pro
     print(f"{_BOLD}{'━' * 60}{_RESET}", flush=True)
 
 
-def _log_pass(task_id: int, branch: str) -> None:
-    print(f"\n  {_GREEN}{_BOLD}✓ Task #{task_id} PASSED{_RESET} {_DIM}— merged to {branch}{_RESET}", flush=True)
+def _format_duration(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    minutes = int(seconds // 60)
+    secs = int(seconds % 60)
+    return f"{minutes}m{secs}s"
 
 
-def _log_fail(task_id: int, reason: str) -> None:
-    print(f"\n  {_RED}{_BOLD}✗ Task #{task_id} FAILED{_RESET} {_DIM}— {reason}{_RESET}", flush=True)
+def _log_pass(task_id: int, branch: str, duration: float | None = None) -> None:
+    dur = f" in {_format_duration(duration)}" if duration else ""
+    print(f"\n  {_GREEN}{_BOLD}✓ Task #{task_id} PASSED{_RESET} {_DIM}— merged to {branch}{dur}{_RESET}", flush=True)
+
+
+def _log_fail(task_id: int, reason: str, duration: float | None = None) -> None:
+    dur = f" in {_format_duration(duration)}" if duration else ""
+    print(f"\n  {_RED}{_BOLD}✗ Task #{task_id} FAILED{_RESET} {_DIM}— {reason}{dur}{_RESET}", flush=True)
 
 
 def _log_warn(msg: str) -> None:
@@ -409,6 +420,8 @@ async def run_task(
     # Snapshot pre-existing untracked files so we don't sweep them into the commit
     pre_existing_untracked = _snapshot_untracked(project_dir)
 
+    task_start = time.monotonic()
+
     # Create branch
     base_sha = create_task_branch(project_dir, key, default_branch, task=task)
     if tasks_file:
@@ -417,11 +430,13 @@ async def run_task(
     # Start testgen concurrently
     rubric = task.get("rubric")
     if rubric:
+        print(f"  {_DIM}Generating rubric tests ({len(rubric)} criteria)...{_RESET}", flush=True)
         from otto.testgen import generate_tests_from_rubric
         testgen_task = asyncio.create_task(
             asyncio.to_thread(generate_tests_from_rubric, rubric, prompt, project_dir, key)
         )
     else:
+        print(f"  {_DIM}Generating adversarial tests...{_RESET}", flush=True)
         testgen_task = asyncio.create_task(
             asyncio.to_thread(generate_tests, prompt, project_dir, key)
         )
@@ -512,6 +527,10 @@ async def run_task(
             if attempt == 0:
                 try:
                     testgen_file = await asyncio.wait_for(testgen_task, timeout=120)
+                    if testgen_file:
+                        print(f"  {_GREEN}✓{_RESET} {_DIM}Rubric tests ready{_RESET}", flush=True)
+                    else:
+                        print(f"  {_DIM}No rubric tests generated (tier 2 skipped){_RESET}", flush=True)
                 except (asyncio.TimeoutError, Exception) as e:
                     _log_warn(f"Testgen failed or timed out: {e}")
             else:
@@ -535,7 +554,7 @@ async def run_task(
 
         except Exception as e:
             # Unexpected error during agent/candidate/verify phases — safe to clean up
-            _log_fail(task_id, f"unexpected error: {e}")
+            _log_fail(task_id, f"unexpected error: {e}", time.monotonic() - task_start)
             _cleanup_task_failure(
                 project_dir, key, default_branch, tasks_file,
                 error=f"unexpected error: {e}", error_code="internal_error",
@@ -565,7 +584,7 @@ async def run_task(
                 )
             except (subprocess.CalledProcessError, Exception) as e:
                 stderr = getattr(e, "stderr", str(e))
-                _log_fail(task_id, f"commit amend failed: {stderr}")
+                _log_fail(task_id, f"commit amend failed: {stderr}", time.monotonic() - task_start)
                 _cleanup_task_failure(
                     project_dir, key, default_branch, tasks_file,
                     error=f"commit amend failed: {stderr}", error_code="internal_error",
@@ -578,7 +597,7 @@ async def run_task(
                     shutil.rmtree(testgen_dir, ignore_errors=True)
                 if tasks_file:
                     update_task(tasks_file, key, status="passed")
-                _log_pass(task_id, default_branch)
+                _log_pass(task_id, default_branch, time.monotonic() - task_start)
                 return True
             else:
                 testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / key
@@ -590,7 +609,7 @@ async def run_task(
                         error=f"branch diverged — otto/{key} preserved, manual rebase needed",
                         error_code="merge_diverged",
                     )
-                _log_fail(task_id, f"branch diverged — otto/{key} preserved, manual rebase needed")
+                _log_fail(task_id, f"branch diverged — otto/{key} preserved, manual rebase needed", time.monotonic() - task_start)
                 return False
         else:
             # Verification failed — unwind candidate commit for retry
@@ -606,8 +625,30 @@ async def run_task(
         project_dir, key, default_branch, tasks_file,
         error="max retries exhausted", error_code="max_retries",
     )
-    _log_fail(task_id, "all retries exhausted")
+    _log_fail(task_id, "all retries exhausted", time.monotonic() - task_start)
     return False
+
+
+def _print_summary(results: list[tuple[dict, bool]], total_duration: float) -> None:
+    """Print summary of all tasks after a run."""
+    passed = sum(1 for _, s in results if s)
+    failed = len(results) - passed
+
+    print(flush=True)
+    print(f"{_BOLD}{'━' * 60}{_RESET}", flush=True)
+    print(f"{_BOLD}  Run complete{_RESET}  {_DIM}{_format_duration(total_duration)}{_RESET}", flush=True)
+    print(f"{_BOLD}{'━' * 60}{_RESET}", flush=True)
+
+    for task, success in results:
+        icon = f"{_GREEN}✓{_RESET}" if success else f"{_RED}✗{_RESET}"
+        print(f"  {icon} {_BOLD}#{task['id']}{_RESET}  {task['prompt'][:50]}", flush=True)
+
+    print(flush=True)
+    if failed == 0:
+        print(f"  {_GREEN}{_BOLD}{passed}/{len(results)} tasks passed{_RESET}", flush=True)
+    else:
+        print(f"  {_GREEN}{passed} passed{_RESET}  {_RED}{failed} failed{_RESET}  {_DIM}of {len(results)} tasks{_RESET}", flush=True)
+    print(flush=True)
 
 
 async def run_all(
@@ -669,7 +710,8 @@ async def run_all(
             print(f"{_DIM}No pending tasks{_RESET}", flush=True)
             return 0
 
-        any_failed = False
+        run_start = time.monotonic()
+        results: list[tuple[dict, bool]] = []  # (task, success)
         for task in pending:
             if interrupted:
                 _log_warn("Interrupted — cleaning up")
@@ -679,8 +721,7 @@ async def run_all(
                 print(f"  {_RED}✗ Working tree is dirty — aborting{_RESET}", flush=True)
                 return 2
             success = await run_task(task, config, project_dir, tasks_file)
-            if not success:
-                any_failed = True
+            results.append((task, success))
             current_task_key = None
 
         # Cleanup on interruption
@@ -691,6 +732,10 @@ async def run_all(
             )
             return 1
 
+        # Print run summary
+        _print_summary(results, time.monotonic() - run_start)
+
+        any_failed = any(not s for _, s in results)
         return 1 if any_failed else 0
 
     finally:
