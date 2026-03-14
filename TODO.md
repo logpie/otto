@@ -21,3 +21,9 @@
 - [ ] **Cross-task integration tests**: When multiple tasks touch the same module, generate integration tests that verify the features work together — e.g. "search works on bookmarks that have tags", "export includes favorite status".
 - [ ] **End-to-end behavioral tests**: Generate tests that exercise the full stack (CLI → store → file) rather than just unit-testing individual methods. Verify the system works as a user would use it.
 - [ ] **State interaction tests**: Generate tests that verify features interact correctly with shared state — e.g. "adding a bookmark, favoriting it, then exporting includes the favorite", "deleting a tagged bookmark updates tag counts".
+
+## Observability
+
+- [ ] **Agent session logs**: Capture the full agent conversation (messages, tool calls, file edits) to `otto_logs/<key>/attempt-N-agent.log`. Currently only verification output is logged — if a task fails, there's no way to see what the agent actually did without `claude --resume <session_id>`.
+- [ ] **Cost tracking**: Log token usage and cost per task from `ResultMessage.total_cost_usd` and `ResultMessage.usage`. Show in `otto status` or `otto logs`.
+- [ ] **Timing**: Log wall-clock time per attempt (agent duration, testgen duration, verify duration) for identifying bottlenecks.
