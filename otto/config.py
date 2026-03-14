@@ -10,8 +10,7 @@ import yaml
 DEFAULT_CONFIG: dict[str, Any] = {
     "test_command": None,
     "max_retries": 3,
-    "model": "sonnet",
-    "project_dir": ".",
+    "model": None,
     "default_branch": "main",
     "verify_timeout": 300,
 }
@@ -142,8 +141,6 @@ def create_config(project_dir: Path) -> Path:
 
     config = {
         "max_retries": DEFAULT_CONFIG["max_retries"],
-        "model": DEFAULT_CONFIG["model"],
-        "project_dir": str(DEFAULT_CONFIG["project_dir"]),
         "default_branch": default_branch,
         "verify_timeout": DEFAULT_CONFIG["verify_timeout"],
     }

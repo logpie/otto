@@ -335,8 +335,9 @@ async def run_task(
                 agent_opts = ClaudeAgentOptions(
                     permission_mode="bypassPermissions",
                     cwd=str(project_dir),
-                    model=config["model"],
                 )
+                if config.get("model"):
+                    agent_opts.model = config["model"]
                 if session_id:
                     agent_opts.resume = session_id
 

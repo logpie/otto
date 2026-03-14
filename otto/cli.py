@@ -27,10 +27,6 @@ def init():
     click.echo(f"Created {config_path}")
     click.echo(f"  default_branch: {config['default_branch']}")
     click.echo(f"  max_retries: {config['max_retries']}")
-    click.echo(f"  model: {config['model']}")
-    test_cmd = config.get("test_command")
-    if test_cmd:
-        click.echo(f"  test_command: {test_cmd} (auto-detected)")
     click.echo("\nCommit otto.yaml to share config with your team.")
 
 
@@ -168,11 +164,7 @@ def run(prompt, dry_run):
         tasks = load_tasks(tasks_path)
         pending = [t for t in tasks if t.get("status") == "pending"]
         click.echo(f"Config: {project_dir / 'otto.yaml'}")
-        click.echo(f"  model: {config['model']}")
         click.echo(f"  max_retries: {config['max_retries']}")
-        test_cmd = config.get("test_command")
-        if test_cmd:
-            click.echo(f"  test_command: {test_cmd} (auto-detected)")
         click.echo(f"\nPending tasks: {len(pending)}")
         for t in pending:
             click.echo(f"  #{t['id']} ({t['key']}): {t['prompt'][:60]}")
