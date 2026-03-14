@@ -90,6 +90,35 @@ def add_task(
     return _locked_rw(tasks_path, _add)
 
 
+def add_tasks(
+    tasks_path: Path,
+    batch: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Add multiple tasks atomically. Thread-safe via flock."""
+    results: list[dict[str, Any]] = []
+
+    def _add_batch(tasks):
+        existing_keys = {t["key"] for t in tasks if "key" in t}
+        max_id = max((t.get("id", 0) for t in tasks), default=0)
+        for item in batch:
+            max_id += 1
+            task: dict[str, Any] = {
+                "id": max_id,
+                "key": generate_key(existing_keys),
+                "prompt": item["prompt"],
+                "status": "pending",
+            }
+            existing_keys.add(task["key"])
+            for field in ("verify", "max_retries", "rubric", "context"):
+                if field in item and item[field] is not None:
+                    task[field] = item[field]
+            tasks.append(task)
+            results.append(task)
+
+    _locked_rw(tasks_path, _add_batch)
+    return results
+
+
 def update_task(tasks_path: Path, key: str, **updates) -> dict[str, Any]:
     """Update a task by key. Thread-safe via flock. Raises KeyError if not found."""
     result = {}

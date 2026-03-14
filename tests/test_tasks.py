@@ -8,6 +8,7 @@ import yaml
 
 from otto.tasks import (
     add_task,
+    add_tasks,
     generate_key,
     load_tasks,
     save_tasks,
@@ -98,6 +99,35 @@ class TestAddTaskRubricAndContext:
         task = add_task(tasks_path, "Fix typo")
         assert "rubric" not in task
         assert "context" not in task
+
+
+class TestAddTasksBatch:
+    def test_add_tasks_batch(self, tmp_git_repo):
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        batch = [
+            {"prompt": "Task A", "rubric": ["criterion 1"]},
+            {"prompt": "Task B", "rubric": ["criterion 2"], "context": "some context"},
+            {"prompt": "Task C"},
+        ]
+        results = add_tasks(tasks_path, batch)
+        assert len(results) == 3
+        assert results[0]["id"] == 1
+        assert results[1]["id"] == 2
+        assert results[2]["id"] == 3
+        tasks = load_tasks(tasks_path)
+        assert len(tasks) == 3
+        assert tasks[0]["rubric"] == ["criterion 1"]
+        assert tasks[1]["context"] == "some context"
+        assert "rubric" not in tasks[2]
+
+    def test_add_tasks_appends_to_existing(self, tmp_git_repo):
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        add_task(tasks_path, "Existing task")
+        batch = [{"prompt": "New task"}]
+        results = add_tasks(tasks_path, batch)
+        assert results[0]["id"] == 2
+        tasks = load_tasks(tasks_path)
+        assert len(tasks) == 2
 
 
 class TestConcurrentAccess:
