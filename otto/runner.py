@@ -377,6 +377,20 @@ def _print_tool_use(block) -> None:
                 print(f"    {_DIM}  ... ({len(lines) - 3} more lines){_RESET}", flush=True)
 
 
+def _tool_use_summary(block) -> str:
+    """Return a one-line summary of a tool use for logging."""
+    inputs = block.input or {}
+    name = block.name
+    if name in ("Read", "Glob", "Grep"):
+        return inputs.get("file_path") or inputs.get("path") or inputs.get("pattern") or ""
+    elif name in ("Edit", "Write"):
+        return inputs.get("file_path") or ""
+    elif name == "Bash":
+        cmd = inputs.get("command") or ""
+        return cmd[:120]
+    return ""
+
+
 def _print_tool_result(block) -> None:
     """Print tool result — truncated output for success, full for errors."""
     content = block.content if isinstance(block.content, str) else str(block.content)
@@ -483,6 +497,7 @@ async def run_task(
                     agent_opts.resume = session_id
 
                 # query() is async iterator — stream messages, keep last ResultMessage
+                agent_log_lines: list[str] = []
                 result_msg = None
                 async for message in query(prompt=agent_prompt, options=agent_opts):
                     if isinstance(message, ResultMessage):
@@ -494,10 +509,23 @@ async def run_task(
                         for block in message.content:
                             if TextBlock and isinstance(block, TextBlock) and block.text:
                                 print(block.text, flush=True)
+                                agent_log_lines.append(block.text)
                             elif ToolUseBlock and isinstance(block, ToolUseBlock):
                                 _print_tool_use(block)
+                                agent_log_lines.append(f"● {block.name}  {_tool_use_summary(block)}")
                             elif ToolResultBlock and isinstance(block, ToolResultBlock):
                                 _print_tool_result(block)
+                                content = block.content if isinstance(block.content, str) else str(block.content)
+                                if content.strip():
+                                    prefix = "ERROR: " if block.is_error else ""
+                                    agent_log_lines.append(f"  {prefix}{content[:500]}")
+
+                # Persist agent log
+                try:
+                    agent_log = log_dir / f"attempt-{attempt_num}-agent.log"
+                    agent_log.write_text("\n".join(agent_log_lines))
+                except OSError:
+                    pass
 
                 # Extract session_id for resume
                 if result_msg and getattr(result_msg, "session_id", None):
