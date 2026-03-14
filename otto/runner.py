@@ -314,6 +314,10 @@ def _log_verify(tiers: list) -> None:
         print(f"  {icon} {t.tier}", flush=True)
 
 
+_GREEN_DIM = "\033[32;2m"
+_RED_DIM = "\033[31;2m"
+
+
 def _print_tool_use(block) -> None:
     """Print a tool use block like the Claude TUI."""
     name = block.name
@@ -336,6 +340,30 @@ def _print_tool_use(block) -> None:
         print(f"  {label}  {_DIM}{detail}{_RESET}", flush=True)
     else:
         print(f"  {label}", flush=True)
+
+    # Show edit diff for Edit tool
+    if name == "Edit":
+        old = inputs.get("old_string", "")
+        new = inputs.get("new_string", "")
+        if old or new:
+            for line in old.splitlines()[:3]:
+                print(f"    {_RED_DIM}- {line}{_RESET}", flush=True)
+            if old.count("\n") > 3:
+                print(f"    {_DIM}  ... ({old.count(chr(10)) - 3} more lines){_RESET}", flush=True)
+            for line in new.splitlines()[:3]:
+                print(f"    {_GREEN_DIM}+ {line}{_RESET}", flush=True)
+            if new.count("\n") > 3:
+                print(f"    {_DIM}  ... ({new.count(chr(10)) - 3} more lines){_RESET}", flush=True)
+
+    # Show content preview for Write tool
+    elif name == "Write":
+        content = inputs.get("content", "")
+        if content:
+            lines = content.splitlines()
+            for line in lines[:3]:
+                print(f"    {_GREEN_DIM}+ {line}{_RESET}", flush=True)
+            if len(lines) > 3:
+                print(f"    {_DIM}  ... ({len(lines) - 3} more lines){_RESET}", flush=True)
 
 
 def _print_tool_result(block) -> None:
