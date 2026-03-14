@@ -161,7 +161,7 @@ def parse_markdown_tasks(md_file: Path, project_dir: Path) -> list[dict]:
     md_content = md_file.read_text()
     context = _gather_project_context(project_dir)
 
-    system_prompt = f"""You are a project manager breaking down a feature document into coding tasks.
+    system_prompt = f"""You are a senior QA engineer and technical PM breaking down a feature document into coding tasks.
 
 PROJECT CONTEXT:
 {context}
@@ -170,13 +170,20 @@ DOCUMENT:
 {md_content}
 
 Break this document into individual coding tasks. For each task, provide:
-- "prompt": a clear, actionable description of what to implement
-- "rubric": a list of specific acceptance criteria (strings)
+- "prompt": a clear, actionable description of what to implement (including tests)
+- "rubric": 5-8 concrete, testable acceptance criteria
 - "context": relevant file paths or additional context (string, can be empty)
+
+IMPORTANT RULES:
+- Each task should be a complete, self-contained unit of work — implementation AND tests together. Do NOT create separate tasks for writing tests.
+- Test expectations belong in the rubric, not as separate tasks.
+- One heading/section in the document = one task (unless a section is too large, then split by feature, not by "implement" vs "test").
+- Rubric items must be specific enough to write a test from. Cover: happy path, edge cases, error conditions.
+- Reference actual function/class names from the project source when possible.
 
 Output ONLY a valid JSON array. No prose, no markdown fences, no explanations.
 Example format:
-[{{"prompt": "Add X feature", "rubric": ["criterion 1", "criterion 2"], "context": "relevant_file.py"}}]"""
+[{{"prompt": "Add search method to BookmarkStore and tests", "rubric": ["search('python') returns matching bookmarks", "search is case-insensitive", "no matches returns empty list"], "context": "bookmarks/store.py"}}]"""
 
     try:
         result = subprocess.run(
