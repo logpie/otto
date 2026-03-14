@@ -73,7 +73,8 @@ class TestGenerateTests:
     def test_returns_none_on_failure(self, mock_run, tmp_git_repo):
         mock_run.side_effect = [
             MagicMock(returncode=0, stdout="file1.py\n"),  # git ls-files
-            MagicMock(returncode=1, stdout="", stderr="error"),  # claude -p
+            MagicMock(returncode=1, stdout="", stderr="error"),  # claude -p (first attempt)
+            MagicMock(returncode=1, stdout="", stderr="error"),  # claude -p (retry)
         ]
         result = generate_tests(
             task_prompt="Do something",

@@ -125,8 +125,15 @@ PROJECT CONTEXT:
 
 TASK: {prompt}
 
+Include ALL of these categories:
+- Happy path: the feature works as described
+- Error handling: invalid inputs, missing data, edge cases produce clear errors (not crashes or silent failures)
+- Negative/anti-pattern: things that must NOT happen (e.g., "delete does NOT affect other records",
+  "search does NOT return unrelated results", "invalid input does NOT silently succeed")
+- Edge cases: empty inputs, boundary values, special characters, zero/null cases
+
 Output ONLY a numbered list of criteria. No prose, no explanations.
-Each criterion should be a single clear sentence describing what must be true."""
+Each criterion should be a single clear sentence. Use "does NOT" or "must NOT" for negative criteria."""
 
     try:
         result = subprocess.run(
@@ -177,7 +184,9 @@ IMPORTANT RULES:
 - Each task should be a complete, self-contained unit of work.
 - Do NOT create separate tasks for writing tests — test expectations belong in the rubric.
 - One heading/section in the document = one task (unless a section is too large, then split by feature, not by "implement" vs "test").
-- Rubric items must be specific enough to write a test from. Cover: happy path, edge cases, error conditions.
+- Rubric items must be specific enough to write a test from. Cover: happy path, edge cases,
+  error conditions, and anti-patterns (things that must NOT happen — e.g., "delete does NOT
+  affect unrelated records", "invalid input does NOT silently succeed").
 - Reference actual function/class names from the project source when possible.
 
 Output ONLY a valid JSON array. No prose, no markdown fences, no explanations.

@@ -77,7 +77,7 @@ def build_testgen_prompt(task_prompt: str, file_tree: str, framework: str,
     example_section = ""
     if existing_tests:
         example_section = f"""
-EXISTING TESTS (follow the same import patterns and style):
+EXISTING TESTS (for reference on fixtures/helpers — do NOT copy how they invoke the system under test):
 {existing_tests}
 """
 
@@ -92,13 +92,17 @@ TEST FRAMEWORK: {framework}
 
 Write integration tests that verify the task was completed correctly.
 
-Rules:
-- Write behavioral tests that exercise the REAL system (build, run, check output)
+Rules — "test like a user":
+- Test the system the way a real user would use it:
+  - CLI apps: use subprocess.run() to invoke the actual command. Check stdout, stderr, exit codes.
+    Do NOT use in-process test runners (CliRunner, invoke()) — they skip the real entry point
+    and miss bugs like missing __main__.py or broken package setup.
+  - Libraries/APIs: import and call the public interface as a consumer would.
+  - Web apps: make HTTP requests to the actual server endpoint.
 - Tests must be hermetic and deterministic — no external network calls
 - Mocks/fakes ONLY if the project already provides test fixtures for them
 - Do NOT grep source code for strings — test actual behavior
 - The tests should be runnable with the standard test command for {framework}
-- Follow the same import style as the existing tests above
 
 IMPORTANT: Output ONLY valid {framework} test code. No prose, no explanations, no markdown.
 Start directly with import statements.
@@ -150,6 +154,49 @@ def _validate_test_output(output: str, framework: str) -> bool:
     return False
 
 
+def _call_and_validate(prompt: str, framework: str) -> str | None:
+    """Call claude -p, strip markdown fences, validate output. Returns code or None."""
+    try:
+        result = subprocess.run(
+            ["claude", "-p", "--output-format", "text"],
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=TESTGEN_TIMEOUT,
+            start_new_session=True,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+
+    output = result.stdout.strip()
+    fence_match = re.search(r"```(?:\w*)\n(.*?)```", output, re.DOTALL)
+    if fence_match:
+        output = fence_match.group(1).strip()
+
+    if _validate_test_output(output, framework):
+        return output
+    return None
+
+
+def _call_with_retry(prompt: str, framework: str) -> str | None:
+    """Call claude -p with one retry on validation failure."""
+    output = _call_and_validate(prompt, framework)
+    if output is not None:
+        return output
+
+    # Retry once with error feedback
+    retry_prompt = (
+        f"Your previous output was not valid {framework} test code. "
+        f"Output ONLY executable test code. No markdown fences, no prose, no explanations. "
+        f"Start directly with import statements.\n\n"
+        f"Original request:\n{prompt}"
+    )
+    return _call_and_validate(retry_prompt, framework)
+
+
 def generate_tests(
     task_prompt: str,
     project_dir: Path,
@@ -173,30 +220,8 @@ def generate_tests(
     existing_tests = _read_existing_tests(project_dir)
     prompt = build_testgen_prompt(task_prompt, file_tree, framework, existing_tests)
 
-    # Run claude -p via stdin (avoids ARG_MAX on large file trees)
-    try:
-        result = subprocess.run(
-            ["claude", "-p", "--output-format", "text"],
-            input=prompt,
-            capture_output=True,
-            text=True,
-            timeout=TESTGEN_TIMEOUT,
-            start_new_session=True,  # own process group for clean kill on timeout
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return None
-
-    if result.returncode != 0 or not result.stdout.strip():
-        return None
-
-    # Extract code from markdown fences if present
-    output = result.stdout.strip()
-    fence_match = re.search(r"```(?:\w*)\n(.*?)```", output, re.DOTALL)
-    if fence_match:
-        output = fence_match.group(1).strip()
-
-    # Validate the output is parseable code (not prose)
-    if not _validate_test_output(output, framework):
+    output = _call_with_retry(prompt, framework)
+    if output is None:
         return None
 
     # Write to <git-common-dir>/otto/testgen/<key>/ (handles linked worktrees)
@@ -236,7 +261,7 @@ def generate_tests_from_rubric(
     example_section = ""
     if existing_tests:
         example_section = f"""
-EXISTING TESTS (follow the same import patterns and style):
+EXISTING TESTS (for reference on fixtures/helpers — do NOT copy how they invoke the system under test):
 {existing_tests}
 """
 
@@ -254,42 +279,25 @@ TEST FRAMEWORK: {framework}
 
 Write integration tests that verify EACH rubric criterion was met.
 
-Rules:
+Rules — "test like a user":
 - One or more test functions per rubric item
-- Write behavioral tests that exercise the REAL system (build, run, check output)
+- Test the system the way a real user would use it:
+  - CLI apps: use subprocess.run() to invoke the actual command. Check stdout, stderr, exit codes.
+    Do NOT use in-process test runners (CliRunner, invoke()) — they skip the real entry point
+    and miss bugs like missing __main__.py or broken package setup.
+  - Libraries/APIs: import and call the public interface as a consumer would.
+  - Web apps: make HTTP requests to the actual server endpoint.
 - Tests must be hermetic and deterministic — no external network calls
 - Mocks/fakes ONLY if the project already provides test fixtures for them
 - Do NOT grep source code for strings — test actual behavior
 - The tests should be runnable with the standard test command for {framework}
-- Follow the same import style as the existing tests above
 
 IMPORTANT: Output ONLY valid {framework} test code. No prose, no explanations, no markdown.
 Start directly with import statements.
 """
 
-    try:
-        result = subprocess.run(
-            ["claude", "-p", "--output-format", "text"],
-            input=llm_prompt,
-            capture_output=True,
-            text=True,
-            timeout=TESTGEN_TIMEOUT,
-            start_new_session=True,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return None
-
-    if result.returncode != 0 or not result.stdout.strip():
-        return None
-
-    # Extract code from markdown fences if present
-    output = result.stdout.strip()
-    fence_match = re.search(r"```(?:\w*)\n(.*?)```", output, re.DOTALL)
-    if fence_match:
-        output = fence_match.group(1).strip()
-
-    # Validate the output is parseable code (not prose)
-    if not _validate_test_output(output, framework):
+    output = _call_with_retry(llm_prompt, framework)
+    if output is None:
         return None
 
     # Write to <git-common-dir>/otto/testgen/<key>/
