@@ -84,7 +84,7 @@ New fields:
 | `.txt` | Extension | One task per non-empty line (skip `#` comments), auto-generate rubrics per task |
 | `.yaml`/`.yml` | Extension | Structured import, auto-generate rubrics for tasks missing them |
 
-Pre-written rubrics in YAML/MD are preserved — Otto only generates for tasks that don't have them.
+Pre-written rubrics in YAML imports are preserved — Otto only generates for tasks that don't have them. Markdown imports always go through LLM parsing (no structured preservation guarantee — the LLM extracts what it can from freeform text).
 
 ## New Module: `otto/rubric.py`
 
@@ -143,12 +143,15 @@ New flag: `--no-rubric` — skip generation, task has no rubric (falls back to a
 
 ### `otto add -f <file>`
 
+**All-or-nothing import:** Parse, generate rubrics, and validate everything first. Only write to `tasks.yaml` if all tasks succeed. If any step fails, report the error and don't import any tasks. This prevents half-imported state.
+
 1. Detect format by extension
 2. For `.md`: call `parse_markdown_tasks(filepath, project_dir)` — single LLM call
 3. For `.txt`: read lines, call `generate_rubric()` per task — multiple LLM calls
 4. For `.yaml`: load structured data, call `generate_rubric()` for tasks without rubric
-5. Create tasks via `add_task()` with rubric data
-6. Print summary
+5. Validate all parsed tasks
+6. Write all tasks to `tasks.yaml` in one locked batch via `add_tasks()` (new batch variant)
+7. Print summary
 
 ### `otto status`
 
@@ -201,14 +204,23 @@ EXISTING TESTS:
 <test samples>
 ```
 
-Same validation as existing testgen: ast.parse, must contain `def test_`, written to testgen dir.
+Validation is framework-aware (shared with `generate_tests()`):
+- **pytest**: `ast.parse` + must contain `def test_`
+- **jest/vitest/mocha**: check for `describe(` or `it(` or `test(`
+- **go/cargo**: basic syntax check (non-empty, no prose preamble)
+
+If validation fails, returns None (tier 2 skipped, not a failure).
 
 ### Context field usage
 
-When `task.get("context")` is non-empty, prepend to the agent prompt:
+`context` is prepended to the agent prompt on **every attempt** (initial and retries):
 
 ```python
+# Initial attempt
 agent_prompt = f"Context: {context}\n\n{prompt}\n\nYou are working in {project_dir}..."
+
+# Retry attempt
+agent_prompt = f"Context: {context}\n\nVerification failed. Fix the issue.\n\n{last_error}\n\nOriginal task: {prompt}\n\n..."
 ```
 
 ## Task changes (`tasks.py`)
@@ -232,7 +244,7 @@ Rubric and context are stored in the task dict, serialized to YAML.
 
 - Task lifecycle (pending → running → passed/failed)
 - Branch-per-task, ff-only merge
-- Retry mechanics — rubric persists, tests regenerated from same criteria
+- Retry mechanics — rubric persists across retries, tests generated **once per task** (before first attempt) and reused across retries, same as current auto-testgen
 - Process locking, signal handling
 - Tier 1 (existing tests), tier 3 (custom verify)
 - `otto run "one-off prompt"` — no rubric (one-off tasks use auto-testgen)
@@ -243,7 +255,7 @@ Rubric and context are stored in the task dict, serialized to YAML.
 |------|---------|
 | `otto/rubric.py` | **New** — `parse_markdown_tasks()`, `generate_rubric()`, `_gather_project_context()` |
 | `otto/testgen.py` | Add `generate_tests_from_rubric()` |
-| `otto/tasks.py` | `add_task()` accepts `rubric` and `context` params |
+| `otto/tasks.py` | `add_task()` accepts `rubric` and `context` params; new `add_tasks()` batch variant for all-or-nothing import |
 | `otto/cli.py` | `add` command: rubric generation, `--no-rubric` flag, `.md`/`.txt` support, status rubric column |
 | `otto/runner.py` | Route to rubric-based testgen when rubric present, prepend context to agent prompt |
 | `tests/` | Tests for each changed module |
