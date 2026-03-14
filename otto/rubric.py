@@ -132,6 +132,12 @@ Include ALL of these categories:
   "search does NOT return unrelated results", "invalid input does NOT silently succeed")
 - Edge cases: empty inputs, boundary values, special characters, zero/null cases
 
+Scale the number of criteria to the task's complexity:
+- Simple tasks (typo fix, rename, config change): 3-5 criteria
+- Medium tasks (add a method, new CLI command): 6-10 criteria
+- Complex tasks (new feature with multiple components, API design): 10-15 criteria
+Focus on the MOST IMPORTANT criteria. Prefer fewer, high-quality criteria over many weak ones.
+
 Output ONLY a numbered list of criteria. No prose, no explanations.
 Each criterion should be a single clear sentence. Use "does NOT" or "must NOT" for negative criteria."""
 
