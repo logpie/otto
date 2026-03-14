@@ -5,7 +5,7 @@
 - [x] **"Test like a user" principle**: Generated tests now use subprocess for CLIs, public API for libraries. No more CliRunner.
 - [x] **Anti-pattern rubrics**: Rubric generation now requires happy path, error handling, negative ("does NOT"), and edge case categories.
 - [x] **Test generation retry**: Single retry with error feedback when validation fails.
-- [ ] **Smarter context gathering**: Current `_gather_project_context` reads up to 5 files/100 lines; may miss the relevant ones. Could read files referenced in the task prompt, or use the agent's file reads as hints.
+- [ ] **Smarter context gathering**: Current `_gather_project_context` reads up to 5 random files/100 lines; misses the relevant ones and bloats prompts causing timeouts. Fix: capture which files the agent read/edited during its run (from ToolUseBlock stream), pass only those to testgen. This gives the LLM exactly the files that matter instead of guessing.
 - [ ] **Framework-specific test patterns**: Provide framework-specific examples (pytest fixtures with tmp_path, jest mocking patterns, etc.) for higher quality output.
 - [ ] **Test deduplication**: When rubric tests overlap with existing project tests, detect and skip duplicates instead of testing the same thing twice.
 - [ ] **Rubric count tuning**: 22 rubrics for one task is too many — testgen times out. Cap at 8-10 criteria, prioritize the most important ones.
