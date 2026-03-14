@@ -141,3 +141,36 @@ class TestCleanupBranch:
         assert "otto/abc123def456" not in branches
 
 
+class TestTamperDetection:
+    def test_detects_modified_test_file(self, tmp_git_repo):
+        test_file = tmp_git_repo / "tests" / "otto_verify_abc.py"
+        test_file.parent.mkdir(exist_ok=True)
+        test_file.write_text("def test_a(): assert False\n")
+        subprocess.run(["git", "add", "."], cwd=tmp_git_repo, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "tests"], cwd=tmp_git_repo, capture_output=True)
+        original_sha = subprocess.run(
+            ["git", "hash-object", str(test_file)],
+            capture_output=True, text=True,
+        ).stdout.strip()
+
+        # Tamper with file
+        test_file.write_text("def test_a(): assert True\n")
+        current_sha = subprocess.run(
+            ["git", "hash-object", str(test_file)],
+            capture_output=True, text=True,
+        ).stdout.strip()
+
+        assert current_sha != original_sha
+
+        # Restore
+        subprocess.run(
+            ["git", "checkout", "HEAD", "--", "tests/otto_verify_abc.py"],
+            cwd=tmp_git_repo, capture_output=True,
+        )
+        restored_sha = subprocess.run(
+            ["git", "hash-object", str(test_file)],
+            capture_output=True, text=True,
+        ).stdout.strip()
+        assert restored_sha == original_sha
+
+

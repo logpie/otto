@@ -119,21 +119,25 @@ class TestEndToEnd:
 class TestRubricEndToEnd:
     @patch("otto.runner.ClaudeAgentOptions")
     @patch("otto.runner.generate_tests")
-    @patch("otto.testgen.generate_tests_from_rubric")
+    @patch("otto.testgen.validate_generated_tests")
+    @patch("otto.testgen.run_testgen_agent")
+    @patch("otto.testgen.build_blackbox_context")
     @patch("otto.runner.query")
-    def test_rubric_uses_generate_tests_from_rubric(
-        self, mock_query, mock_rubric_testgen, mock_testgen, mock_options_cls, tmp_git_repo
+    def test_rubric_uses_adversarial_testgen(
+        self, mock_query, mock_blackbox, mock_testgen_agent,
+        mock_validate, mock_testgen, mock_options_cls, tmp_git_repo,
     ):
-        """Task with rubric uses generate_tests_from_rubric, not generate_tests.
+        """Task with rubric uses adversarial testgen (build_blackbox_context +
+        run_testgen_agent + validate_generated_tests), not generate_tests.
 
-        Also verifies the agent prompt includes the no-tests instruction.
+        Also verifies the agent prompt includes the acceptance tests instruction.
         """
         # Setup: create config, commit it so tree is clean
         create_config(tmp_git_repo)
         _commit_otto_config(tmp_git_repo)
 
         config = load_config(tmp_git_repo / "otto.yaml")
-        config["test_command"] = None  # Skip baseline and tier 1
+        config["test_command"] = "true"  # Always-pass command — exercises verify without real tests
         tasks_path = tmp_git_repo / "tasks.yaml"
         add_task(
             tasks_path,
@@ -150,8 +154,27 @@ class TestRubricEndToEnd:
             yield _make_fake_result("rubric-session")
 
         mock_query.side_effect = fake_query
-        mock_rubric_testgen.return_value = None  # Skip tier 2
-        mock_testgen.return_value = None  # Should not be called
+        mock_blackbox.return_value = "FILE TREE:\nREADME.md"
+
+        # run_testgen_agent returns a test file path
+        # Test checks that search.py is importable (the agent will create it)
+        test_file = tmp_git_repo / "tests" / "otto_verify_search.py"
+
+        async def fake_testgen_agent(rubric, key, ctx, project_dir, **kw):
+            test_file.parent.mkdir(parents=True, exist_ok=True)
+            test_file.write_text("def test_search():\n    assert True\n")
+            return test_file
+
+        mock_testgen_agent.side_effect = fake_testgen_agent
+
+        # Validation returns tdd_ok (some tests fail — expected pre-implementation)
+        mock_validate_result = MagicMock()
+        mock_validate_result.status = "tdd_ok"
+        mock_validate_result.passed = 0
+        mock_validate_result.failed = 1
+        mock_validate.return_value = mock_validate_result
+
+        mock_testgen.return_value = None  # Should not be called (non-rubric path)
 
         # Run
         exit_code = asyncio.run(run_all(config, tasks_path, tmp_git_repo))
@@ -159,12 +182,15 @@ class TestRubricEndToEnd:
         # Verify
         assert exit_code == 0
 
-        # generate_tests_from_rubric should be called (rubric path)
-        mock_rubric_testgen.assert_called_once()
+        # Adversarial testgen functions should be called
+        mock_blackbox.assert_called_once()
+        mock_testgen_agent.assert_called_once()
+        mock_validate.assert_called_once()
 
         # generate_tests should NOT be called (non-rubric path)
         mock_testgen.assert_not_called()
 
-        # Agent prompt should include no-tests instruction
+        # Agent prompt should include acceptance tests instruction
         assert len(captured_prompts) >= 1
-        assert "Do NOT write tests" in captured_prompts[0]
+        assert "ACCEPTANCE TESTS" in captured_prompts[0]
+        assert "Do NOT modify this file" in captured_prompts[0]

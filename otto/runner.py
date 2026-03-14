@@ -23,7 +23,7 @@ except ImportError:
     ToolUseBlock = None  # type: ignore[assignment,misc]
     ToolResultBlock = None  # type: ignore[assignment,misc]
 
-from otto.config import git_meta_dir
+from otto.config import git_meta_dir, detect_test_command
 from otto.tasks import load_tasks, update_task
 from otto.testgen import generate_tests, detect_test_framework, test_file_path
 from otto.verify import run_verification, _subprocess_env
@@ -441,15 +441,74 @@ async def run_task(
     if tasks_file:
         update_task(tasks_file, key, status="running", attempts=0)
 
-    # Start testgen concurrently
+    # Auto-detect test_command if rubric exists but no test_command configured
     rubric = task.get("rubric")
+    if rubric and not test_command:
+        test_command = detect_test_command(project_dir)
+        if not test_command:
+            test_command = "pytest"  # fallback for Python projects
+
+    # Adversarial testgen: write tests BEFORE coding agent when rubric exists
+    test_file_path_val = None
+    test_commit_sha = None
+    test_file_sha = None
+
     if rubric:
-        print(f"  {_DIM}Generating rubric tests ({len(rubric)} criteria)...{_RESET}", flush=True)
-        from otto.testgen import generate_tests_from_rubric
-        testgen_task = asyncio.create_task(
-            asyncio.to_thread(generate_tests_from_rubric, rubric, prompt, project_dir, key)
-        )
+        from otto.testgen import build_blackbox_context, run_testgen_agent, validate_generated_tests
+
+        print(f"  {_DIM}Building black-box context...{_RESET}", flush=True)
+        blackbox_ctx = build_blackbox_context(project_dir)
+
+        print(f"  {_DIM}Testgen agent writing adversarial tests ({len(rubric)} criteria)...{_RESET}", flush=True)
+        test_file_path_val = await run_testgen_agent(rubric, key, blackbox_ctx, project_dir)
+
+        if test_file_path_val:
+            # Two-phase validation
+            validation = validate_generated_tests(test_file_path_val, "pytest", project_dir)
+
+            if validation.status == "collection_error":
+                _log_warn(f"Generated tests have errors — regenerating once")
+                test_file_path_val.unlink()
+                test_file_path_val = await run_testgen_agent(rubric, key, blackbox_ctx, project_dir)
+                if test_file_path_val:
+                    validation = validate_generated_tests(test_file_path_val, "pytest", project_dir)
+                    if validation.status == "collection_error":
+                        _log_warn("Regenerated tests still broken — skipping rubric tests")
+                        test_file_path_val.unlink()
+                        test_file_path_val = None
+
+            if test_file_path_val and validation.status == "all_pass":
+                print(f"\n  {_YELLOW}{_BOLD}⚠⚠⚠ WARNING: All rubric tests PASS before implementation{_RESET}", flush=True)
+                print(f"  {_DIM}Regenerating tests...{_RESET}", flush=True)
+                test_file_path_val.unlink()
+                test_file_path_val = await run_testgen_agent(rubric, key, blackbox_ctx, project_dir)
+                if test_file_path_val:
+                    validation = validate_generated_tests(test_file_path_val, "pytest", project_dir)
+                    if validation.status == "all_pass":
+                        print(f"\n  {_YELLOW}{_BOLD}⚠⚠⚠ WARNING: Tests still pass — skipping rubric tests for task #{task_id}{_RESET}", flush=True)
+                        print(f"  {_DIM}Coding agent will run WITHOUT adversarial test coverage.{_RESET}", flush=True)
+                        test_file_path_val.unlink()
+                        test_file_path_val = None
+
+            if test_file_path_val and validation.status == "tdd_ok":
+                print(f"  {_GREEN}✓{_RESET} {_DIM}Adversarial tests ready ({validation.failed} failing, {validation.passed} regression){_RESET}", flush=True)
+
+        # Commit test file if we have one
+        if test_file_path_val:
+            subprocess.run(["git", "add", str(test_file_path_val.relative_to(project_dir))],
+                           cwd=project_dir, capture_output=True)
+            subprocess.run(["git", "commit", "-m", f"otto: add rubric tests for task #{task_id}"],
+                           cwd=project_dir, capture_output=True)
+            test_commit_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=project_dir,
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            test_file_sha = subprocess.run(
+                ["git", "hash-object", str(test_file_path_val)],
+                capture_output=True, text=True,
+            ).stdout.strip()
     else:
+        # No rubric — use old concurrent testgen approach
         print(f"  {_DIM}Generating adversarial tests...{_RESET}", flush=True)
         testgen_task = asyncio.create_task(
             asyncio.to_thread(generate_tests, prompt, project_dir, key)
@@ -487,6 +546,13 @@ async def run_task(
                 f"You are working in {project_dir}. Do NOT create git commits. "
                 f"Do NOT write tests — acceptance tests will be generated separately. "
                 f"You may edit any file in the project to make all tests pass."
+            )
+
+        # Tell the coding agent about adversarial test file (do NOT modify it)
+        if test_file_path_val:
+            agent_prompt += (
+                f"\n\nACCEPTANCE TESTS: {test_file_path_val.relative_to(project_dir)} contains tests you must pass. "
+                f"Do NOT modify this file — these are adversarial tests you must satisfy."
             )
 
         # Run agent + build candidate + verify — catch infrastructure failures
@@ -544,9 +610,10 @@ async def run_task(
 
             except Exception as e:
                 _log_warn(f"Agent error: {e}")
-                # Reset workspace to base state before retrying
+                # Reset workspace — preserve test commit if it exists
+                reset_sha = test_commit_sha if test_commit_sha else base_sha
                 subprocess.run(
-                    ["git", "reset", "--hard", base_sha],
+                    ["git", "reset", "--hard", reset_sha],
                     cwd=project_dir, capture_output=True,
                 )
                 subprocess.run(
@@ -555,24 +622,40 @@ async def run_task(
                 )
                 continue
 
-            # Await testgen on first attempt
+            # Await testgen on first attempt (only for non-rubric path)
             testgen_file = None
-            if attempt == 0:
-                try:
-                    testgen_file = await asyncio.wait_for(testgen_task, timeout=120)
-                    if testgen_file:
-                        print(f"  {_GREEN}✓{_RESET} {_DIM}Rubric tests ready{_RESET}", flush=True)
-                    else:
-                        print(f"  {_DIM}No rubric tests generated (tier 2 skipped){_RESET}", flush=True)
-                except (asyncio.TimeoutError, Exception) as e:
-                    _log_warn(f"Testgen failed or timed out: {e}")
-            else:
-                if testgen_task.done():
-                    testgen_file = testgen_task.result()
+            if not rubric:
+                if attempt == 0:
+                    try:
+                        testgen_file = await asyncio.wait_for(testgen_task, timeout=120)
+                        if testgen_file:
+                            print(f"  {_GREEN}✓{_RESET} {_DIM}Rubric tests ready{_RESET}", flush=True)
+                        else:
+                            print(f"  {_DIM}No rubric tests generated (tier 2 skipped){_RESET}", flush=True)
+                    except (asyncio.TimeoutError, Exception) as e:
+                        _log_warn(f"Testgen failed or timed out: {e}")
+                else:
+                    if testgen_task.done():
+                        testgen_file = testgen_task.result()
 
-            # Check if agent made any changes
+            # Tamper check: ensure coding agent didn't modify the test file
+            if test_file_sha and test_file_path_val:
+                current = subprocess.run(
+                    ["git", "hash-object", str(test_file_path_val)],
+                    capture_output=True, text=True, cwd=project_dir,
+                ).stdout.strip()
+                if current != test_file_sha:
+                    subprocess.run(
+                        ["git", "checkout", test_commit_sha, "--",
+                         str(test_file_path_val.relative_to(project_dir))],
+                        cwd=project_dir, capture_output=True,
+                    )
+                    print(f"  {_YELLOW}⚠ Test file tampered by coding agent — restored{_RESET}", flush=True)
+
+            # Check if agent made any changes (compare against appropriate base)
+            commit_base = test_commit_sha if test_commit_sha else base_sha
             diff_check = subprocess.run(
-                ["git", "diff", "--quiet", base_sha],
+                ["git", "diff", "--quiet", commit_base],
                 cwd=project_dir, capture_output=True,
             )
             untracked_check = subprocess.run(
@@ -593,8 +676,11 @@ async def run_task(
                 return True
 
             # Build candidate commit
+            # When rubric tests exist, they're already committed — pass test_commit_sha as base
+            # and testgen_file=None (tests are already in the tree)
             candidate_sha = build_candidate_commit(
-                project_dir, base_sha, testgen_file, pre_existing_untracked
+                project_dir, commit_base, testgen_file if not rubric else None,
+                pre_existing_untracked,
             )
 
             # Run verification in disposable worktree
@@ -628,20 +714,42 @@ async def run_task(
         _log_verify(verify_result.tiers)
 
         if verify_result.passed:
-            # Amend commit message (pre-merge, so cleanup is still safe)
+            # Squash all branch commits into a single commit
+            # When rubric tests exist, there are 2 commits (test + candidate) to squash
             try:
-                amend_result = subprocess.run(
-                    ["git", "commit", "--amend", "-m",
+                # Reset to base_sha (not commit_base) to squash everything into one commit
+                subprocess.run(
+                    ["git", "reset", "--mixed", base_sha],
+                    cwd=project_dir, capture_output=True, check=True,
+                )
+                # Re-stage everything
+                subprocess.run(
+                    ["git", "add", "-u"],
+                    cwd=project_dir, capture_output=True, check=True,
+                )
+                untracked_final = subprocess.run(
+                    ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+                    cwd=project_dir, capture_output=True, text=True,
+                )
+                skip = pre_existing_untracked or set()
+                for f in untracked_final.stdout.split("\0"):
+                    if f and f not in skip:
+                        subprocess.run(
+                            ["git", "add", "--", f],
+                            cwd=project_dir, capture_output=True,
+                        )
+                subprocess.run(
+                    ["git", "commit", "-m",
                      f"otto: {prompt[:60]} (#{task_id})"],
                     cwd=project_dir, capture_output=True, text=True,
                     check=True,
                 )
             except (subprocess.CalledProcessError, Exception) as e:
                 stderr = getattr(e, "stderr", str(e))
-                _log_fail(task_id, f"commit amend failed: {stderr}", time.monotonic() - task_start)
+                _log_fail(task_id, f"squash commit failed: {stderr}", time.monotonic() - task_start)
                 _cleanup_task_failure(
                     project_dir, key, default_branch, tasks_file,
-                    error=f"commit amend failed: {stderr}", error_code="internal_error",
+                    error=f"squash commit failed: {stderr}", error_code="internal_error",
                 )
                 return False
             # Merge to default — post-merge bookkeeping errors are non-destructive
@@ -668,7 +776,7 @@ async def run_task(
         else:
             # Verification failed — unwind candidate commit for retry
             subprocess.run(
-                ["git", "reset", "--mixed", "HEAD~1"],
+                ["git", "reset", "--mixed", commit_base],
                 cwd=project_dir, capture_output=True,
             )
             last_error = verify_result.failure_output
