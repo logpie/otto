@@ -209,3 +209,16 @@ class TestAddImport:
         assert tasks["tasks"][0]["rubric"] == ["existing criterion"]
         # Only called for task without rubric
         mock_gen.assert_called_once()
+
+
+class TestStatusRubric:
+    def test_shows_rubric_count(self, runner, tmp_git_repo, monkeypatch):
+        monkeypatch.chdir(tmp_git_repo)
+        from otto.tasks import add_task
+        add_task(tmp_git_repo / "tasks.yaml", "Task with rubric",
+                 rubric=["c1", "c2", "c3"])
+        add_task(tmp_git_repo / "tasks.yaml", "Task without rubric")
+        result = runner.invoke(main, ["status"])
+        assert result.exit_code == 0
+        # Should show rubric count column
+        assert "Rubric" in result.output

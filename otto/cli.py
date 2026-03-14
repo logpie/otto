@@ -220,13 +220,15 @@ def status():
         click.echo("No tasks found. Use 'otto add' to create one.")
         return
 
-    # Simple table
-    click.echo(f"{'ID':>4}  {'Key':12}  {'Status':10}  {'Att':>3}  Prompt")
-    click.echo("-" * 70)
+    # Simple table with rubric count
+    click.echo(f"{'ID':>4}  {'Key':12}  {'Status':10}  {'Att':>3}  {'Rubric':>6}  Prompt")
+    click.echo("-" * 80)
     for t in tasks:
+        rubric_count = len(t.get("rubric", []))
         click.echo(
             f"{t.get('id', '?'):>4}  {t.get('key', '?'):12}  "
             f"{t.get('status', '?'):10}  {t.get('attempts', 0):>3}  "
+            f"{rubric_count:>6}  "
             f"{t['prompt'][:40]}"
         )
 
