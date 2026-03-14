@@ -24,6 +24,7 @@
 
 ## Observability
 
-- [ ] **Agent session logs**: Capture the full agent conversation (messages, tool calls, file edits) to `otto_logs/<key>/attempt-N-agent.log`. Currently only verification output is logged — if a task fails, there's no way to see what the agent actually did without `claude --resume <session_id>`.
+- [ ] **Live agent streaming**: Print agent messages to stdout in real time as they stream from `query()`. The async iterator already yields `AssistantMessage` objects — just print them instead of silently consuming. Add a `--quiet` flag to suppress for CI/background use.
+- [ ] **Agent session logs**: Also persist the full conversation to `otto_logs/<key>/attempt-N-agent.log` for post-mortem debugging.
 - [ ] **Cost tracking**: Log token usage and cost per task from `ResultMessage.total_cost_usd` and `ResultMessage.usage`. Show in `otto status` or `otto logs`.
 - [ ] **Timing**: Log wall-clock time per attempt (agent duration, testgen duration, verify duration) for identifying bottlenecks.
