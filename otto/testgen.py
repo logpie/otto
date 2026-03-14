@@ -254,7 +254,16 @@ Write the test file now. Do NOT explain — just write the file.
                     if TextBlock and isinstance(block, TextBlock) and block.text:
                         print(block.text, flush=True)
                     elif ToolUseBlock and isinstance(block, ToolUseBlock):
-                        print(f"  → {block.name}", flush=True)
+                        inputs = block.input or {}
+                        detail = ""
+                        if block.name in ("Read", "Glob", "Grep"):
+                            detail = inputs.get("file_path") or inputs.get("path") or inputs.get("pattern") or ""
+                        elif block.name in ("Edit", "Write"):
+                            detail = inputs.get("file_path") or ""
+                        elif block.name == "Bash":
+                            cmd = inputs.get("command") or ""
+                            detail = cmd[:80]
+                        print(f"  → {block.name}  {detail}", flush=True)
 
         # Check if test file was written in temp dir
         test_file_in_tmp = Path(tmp_dir) / test_rel
