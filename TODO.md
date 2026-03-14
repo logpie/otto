@@ -19,6 +19,7 @@
 ## Adversarial Testing
 
 - [x] **Anti-pattern tests**: Rubric prompt now explicitly asks for "does NOT" / "must NOT" criteria.
+- [x] **Adversarial testgen agent**: Full Agent SDK testgen that writes black-box TDD tests from rubric BEFORE the coding agent runs. Mechanical isolation (temp dir, AST stubs only). Two-phase validation. Tamper detection.
 - [ ] **Regression-style rubrics**: When a task modifies existing code, auto-generate rubric items that verify existing behavior is preserved — not just that new behavior works. "Search still works after adding tags" type checks.
 - [ ] **Security anti-patterns**: For tasks involving user input, file paths, or external data, generate tests that verify common vulnerabilities don't exist — injection, path traversal, unescaped output, etc.
 - [ ] **Mutation-style checks**: After the agent implements a feature, intentionally break a key line and verify the tests catch it. If they don't, the tests are too weak.
