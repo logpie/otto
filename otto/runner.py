@@ -448,6 +448,13 @@ async def run_task(
         if not test_command:
             test_command = "pytest"  # fallback for Python projects
 
+    # Print task header before testgen (so testgen output is under the right task)
+    print(flush=True)
+    print(f"{_BOLD}{'━' * 60}{_RESET}", flush=True)
+    print(f"{_BOLD}  Task #{task_id}{_RESET}  {prompt[:80]}", flush=True)
+    print(f"  {_DIM}key {key}{_RESET}", flush=True)
+    print(f"{_BOLD}{'━' * 60}{_RESET}", flush=True)
+
     # Adversarial testgen: write tests BEFORE coding agent when rubric exists
     test_file_path_val = None
     test_commit_sha = None
@@ -522,7 +529,7 @@ async def run_task(
     last_error = None  # verification failure output for retry feedback
     for attempt in range(max_retries + 1):
         attempt_num = attempt + 1
-        _log_task_start(task_id, key, attempt_num, max_retries + 1, prompt)
+        print(f"\n  {_DIM}attempt {attempt_num}/{max_retries + 1}{_RESET}", flush=True)
 
         if tasks_file:
             update_task(tasks_file, key, attempts=attempt_num)
