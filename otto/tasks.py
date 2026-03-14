@@ -123,7 +123,11 @@ def update_task(tasks_path: Path, key: str, **updates) -> dict[str, Any]:
     def _update(tasks):
         for task in tasks:
             if task.get("key") == key:
-                task.update(updates)
+                for k, v in updates.items():
+                    if v is None:
+                        task.pop(k, None)
+                    else:
+                        task[k] = v
                 result.update(task)
                 return
         raise KeyError(f"Task with key '{key}' not found")
