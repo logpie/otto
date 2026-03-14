@@ -38,8 +38,9 @@ def _import_tasks(import_path: Path, tasks_path: Path) -> None:
     suffix = import_path.suffix.lower()
 
     if suffix == ".md":
-        # Markdown: single LLM call via parse_markdown_tasks
+        click.echo(f"Parsing {import_path.name} (this may take 10-20s)...")
         parsed = parse_markdown_tasks(import_path, project_dir)
+        click.echo(f"Extracted {len(parsed)} tasks from markdown.\n")
         batch = []
         for t in parsed:
             item = {"prompt": t["prompt"]}
@@ -53,43 +54,45 @@ def _import_tasks(import_path: Path, tasks_path: Path) -> None:
                 item["max_retries"] = t["max_retries"]
             batch.append(item)
         results = add_tasks(tasks_path, batch)
-        for task in results:
-            click.echo(f"Added task #{task['id']} ({task['key']}): {task['prompt'][:60]}")
-        click.echo(f"Imported {len(results)} tasks")
+        _print_imported_tasks(results)
 
     elif suffix == ".txt":
-        # Text: one task per non-empty line, skip # comments
-        lines = import_path.read_text().splitlines()
+        lines = [l.strip() for l in import_path.read_text().splitlines()
+                 if l.strip() and not l.strip().startswith("#")]
+        click.echo(f"Found {len(lines)} tasks in {import_path.name}.\n")
         batch = []
-        for line in lines:
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#"):
-                continue
-            click.echo(f"Generating rubric for: {stripped[:60]}...")
-            rubric_items = generate_rubric(stripped, project_dir)
-            item = {"prompt": stripped}
+        for i, line in enumerate(lines, 1):
+            click.echo(f"[{i}/{len(lines)}] Generating rubric for: {line[:50]}...")
+            rubric_items = generate_rubric(line, project_dir)
+            item = {"prompt": line}
             if rubric_items:
                 item["rubric"] = rubric_items
+                click.echo(f"  {len(rubric_items)} criteria generated")
+            else:
+                click.echo(f"  no rubric generated")
             batch.append(item)
+        click.echo()
         results = add_tasks(tasks_path, batch)
-        for task in results:
-            click.echo(f"Added task #{task['id']} ({task['key']}): {task['prompt'][:60]}")
-        click.echo(f"Imported {len(results)} tasks")
+        _print_imported_tasks(results)
 
     else:
-        # YAML: structured import, generate rubric for tasks without one
         data = _yaml.safe_load(import_path.read_text()) or {}
         imported = data.get("tasks", [])
+        click.echo(f"Found {len(imported)} tasks in {import_path.name}.\n")
         batch = []
-        for t in imported:
+        for i, t in enumerate(imported, 1):
             item = {"prompt": t["prompt"]}
             if t.get("rubric"):
                 item["rubric"] = t["rubric"]
+                click.echo(f"[{i}/{len(imported)}] {t['prompt'][:50]} — {len(t['rubric'])} rubric items (from file)")
             else:
-                click.echo(f"Generating rubric for: {t['prompt'][:60]}...")
+                click.echo(f"[{i}/{len(imported)}] Generating rubric for: {t['prompt'][:50]}...")
                 rubric_items = generate_rubric(t["prompt"], project_dir)
                 if rubric_items:
                     item["rubric"] = rubric_items
+                    click.echo(f"  {len(rubric_items)} criteria generated")
+                else:
+                    click.echo(f"  no rubric generated")
             if t.get("verify"):
                 item["verify"] = t["verify"]
             if t.get("max_retries") is not None:
@@ -97,10 +100,22 @@ def _import_tasks(import_path: Path, tasks_path: Path) -> None:
             if t.get("context"):
                 item["context"] = t["context"]
             batch.append(item)
+        click.echo()
         results = add_tasks(tasks_path, batch)
-        for task in results:
-            click.echo(f"Added task #{task['id']} ({task['key']}): {task['prompt'][:60]}")
-        click.echo(f"Imported {len(results)} tasks")
+        _print_imported_tasks(results)
+
+
+def _print_imported_tasks(tasks: list) -> None:
+    """Print summary of imported tasks with rubric details."""
+    for task in tasks:
+        rubric = task.get("rubric", [])
+        click.echo(f"  #{task['id']} {task['prompt'][:55]}")
+        if rubric:
+            for item in rubric:
+                click.echo(f"       - {item}")
+        if task.get("context"):
+            click.echo(f"       context: {task['context'][:60]}")
+    click.echo(f"\nImported {len(tasks)} tasks. Review rubrics in tasks.yaml before running.")
 
 
 @main.command()
