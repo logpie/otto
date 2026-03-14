@@ -100,12 +100,12 @@ class TestBuildCandidateCommit:
             git_common_dir = (tmp_git_repo / git_common_dir).resolve()
         testgen_dir = git_common_dir / "otto" / "testgen" / "abc123def456"
         testgen_dir.mkdir(parents=True)
-        testgen_file = testgen_dir / "otto_verify_abc123def456.py"
+        testgen_file = testgen_dir / "test_otto_abc123def456.py"
         testgen_file.write_text("def test_verify(): assert True\n")
         candidate = build_candidate_commit(tmp_git_repo, base_sha, testgen_file=testgen_file)
         # Verify test file is in the candidate
         show = subprocess.run(
-            ["git", "show", f"{candidate}:tests/otto_verify_abc123def456.py"],
+            ["git", "show", f"{candidate}:tests/test_otto_abc123def456.py"],
             cwd=tmp_git_repo, capture_output=True, text=True,
         )
         assert show.returncode == 0
@@ -143,7 +143,7 @@ class TestCleanupBranch:
 
 class TestTamperDetection:
     def test_detects_modified_test_file(self, tmp_git_repo):
-        test_file = tmp_git_repo / "tests" / "otto_verify_abc.py"
+        test_file = tmp_git_repo / "tests" / "test_otto_abc.py"
         test_file.parent.mkdir(exist_ok=True)
         test_file.write_text("def test_a(): assert False\n")
         subprocess.run(["git", "add", "."], cwd=tmp_git_repo, capture_output=True)
@@ -164,7 +164,7 @@ class TestTamperDetection:
 
         # Restore
         subprocess.run(
-            ["git", "checkout", "HEAD", "--", "tests/otto_verify_abc.py"],
+            ["git", "checkout", "HEAD", "--", "tests/test_otto_abc.py"],
             cwd=tmp_git_repo, capture_output=True,
         )
         restored_sha = subprocess.run(

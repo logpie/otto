@@ -209,7 +209,7 @@ async def run_testgen_agent(
     Returns path to the copied test file, or None if agent failed to produce one.
     """
     rubric_text = "\n".join(f"{i + 1}. {item}" for i, item in enumerate(rubric))
-    test_rel = f"tests/otto_verify_{key}.py"
+    test_rel = f"tests/test_otto_{key}.py"
 
     prompt = f"""You are a QA engineer writing black-box tests from a specification.
 You have NOT seen the implementation — it hasn't been written yet.
@@ -411,17 +411,17 @@ def test_file_path(framework: str, key: str) -> Path:
     """Return the relative path for a generated test file."""
     match framework:
         case "pytest":
-            return Path(f"tests/otto_verify_{key}.py")
+            return Path(f"tests/test_otto_{key}.py")
         case "jest" | "mocha":
-            return Path(f"__tests__/otto_verify_{key}.test.js")
+            return Path(f"__tests__/test_otto_{key}.test.js")
         case "vitest":
-            return Path(f"__tests__/otto_verify_{key}.test.ts")
+            return Path(f"__tests__/test_otto_{key}.test.ts")
         case "go":
-            return Path(f"otto_verify_{key}_test.go")
+            return Path(f"test_otto_{key}_test.go")
         case "cargo":
-            return Path(f"tests/otto_verify_{key}.rs")
+            return Path(f"tests/test_otto_{key}.rs")
         case _:
-            return Path(f"tests/otto_verify_{key}.py")
+            return Path(f"tests/test_otto_{key}.py")
 
 
 def _read_existing_tests(project_dir: Path) -> str:

@@ -43,7 +43,7 @@ class TestRunTier2:
     def test_passes_with_passing_test(self, tmp_git_repo):
         tests_dir = tmp_git_repo / "tests"
         tests_dir.mkdir()
-        test_file = tests_dir / "otto_verify_test123.py"
+        test_file = tests_dir / "test_otto_test123.py"
         test_file.write_text("def test_ok(): assert True\n")
         result = run_tier2(tmp_git_repo, test_file, "pytest", timeout=60)
         assert result.passed
@@ -51,7 +51,7 @@ class TestRunTier2:
     def test_fails_with_failing_test(self, tmp_git_repo):
         tests_dir = tmp_git_repo / "tests"
         tests_dir.mkdir()
-        test_file = tests_dir / "otto_verify_test123.py"
+        test_file = tests_dir / "test_otto_test123.py"
         test_file.write_text("def test_bad(): assert False\n")
         result = run_tier2(tmp_git_repo, test_file, "pytest", timeout=60)
         assert not result.passed

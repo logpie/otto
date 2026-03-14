@@ -37,11 +37,11 @@ class TestDetectTestFramework:
 class TestTestFilePath:
     def test_pytest_path(self):
         p = test_file_path("pytest", "abc123def456")
-        assert p == Path("tests/otto_verify_abc123def456.py")
+        assert p == Path("tests/test_otto_abc123def456.py")
 
     def test_jest_path(self):
         p = test_file_path("jest", "abc123def456")
-        assert p == Path("__tests__/otto_verify_abc123def456.test.js")
+        assert p == Path("__tests__/test_otto_abc123def456.test.js")
 
 
 class TestBuildTestgenPrompt:
@@ -216,7 +216,7 @@ class TestRunTestgenAgent:
             cwd = Path(options.cwd) if hasattr(options, "cwd") and options.cwd else Path.cwd()
             test_dir = cwd / "tests"
             test_dir.mkdir(parents=True, exist_ok=True)
-            (test_dir / "otto_verify_testkey.py").write_text(
+            (test_dir / "test_otto_testkey.py").write_text(
                 "import pytest\n\ndef test_search():\n    assert False\n"
             )
             from otto._agent_stub import ResultMessage
@@ -235,7 +235,7 @@ class TestRunTestgenAgent:
         )
         assert result is not None
         assert result.exists()
-        assert "tests/otto_verify_testkey.py" in str(result)
+        assert "tests/test_otto_testkey.py" in str(result)
         assert "def test_search" in result.read_text()
 
     @patch("otto.testgen.query")

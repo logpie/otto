@@ -158,7 +158,7 @@ class TestRubricEndToEnd:
 
         # run_testgen_agent returns a test file path
         # Test checks that search.py is importable (the agent will create it)
-        test_file = tmp_git_repo / "tests" / "otto_verify_search.py"
+        test_file = tmp_git_repo / "tests" / "test_otto_search.py"
 
         async def fake_testgen_agent(rubric, key, ctx, project_dir, **kw):
             test_file.parent.mkdir(parents=True, exist_ok=True)
