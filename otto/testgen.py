@@ -105,6 +105,51 @@ Start directly with import statements.
 """
 
 
+def _validate_test_output(output: str, framework: str) -> bool:
+    """Validate that LLM output is actual test code, not prose.
+
+    Checks are framework-aware:
+    - pytest: ast.parse + must contain 'def test_'
+    - jest/vitest/mocha: must contain describe(, it(, or test(
+    - go/cargo: first non-empty line must start with a code keyword
+    - Empty string: always False
+    """
+    if not output or not output.strip():
+        return False
+
+    output = output.strip()
+
+    if framework == "pytest":
+        try:
+            ast.parse(output)
+        except SyntaxError:
+            return False
+        if "def test_" not in output:
+            return False
+        return True
+
+    if framework in ("jest", "vitest", "mocha"):
+        # Must contain at least one test construct
+        if any(kw in output for kw in ("describe(", "it(", "test(")):
+            return True
+        return False
+
+    if framework in ("go", "cargo"):
+        # First non-empty line must start with a code keyword
+        first_line = ""
+        for line in output.splitlines():
+            stripped = line.strip()
+            if stripped:
+                first_line = stripped
+                break
+        go_keywords = ("package", "import", "func", "type", "var", "const")
+        cargo_keywords = ("use", "mod", "fn", "#[", "pub", "extern")
+        keywords = go_keywords if framework == "go" else cargo_keywords
+        return any(first_line.startswith(kw) for kw in keywords)
+
+    return False
+
+
 def generate_tests(
     task_prompt: str,
     project_dir: Path,
@@ -151,18 +196,103 @@ def generate_tests(
         output = fence_match.group(1).strip()
 
     # Validate the output is parseable code (not prose)
-    if framework in ("pytest", "cargo", "go"):
-        # For Python, validate syntax
-        if framework == "pytest":
-            try:
-                ast.parse(output)
-            except SyntaxError:
-                return None
-            # Quick sanity: must contain at least one test function
-            if "def test_" not in output:
-                return None
+    if not _validate_test_output(output, framework):
+        return None
 
     # Write to <git-common-dir>/otto/testgen/<key>/ (handles linked worktrees)
+    testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / key
+    testgen_dir.mkdir(parents=True, exist_ok=True)
+
+    rel_path = test_file_path(framework, key)
+    out_file = testgen_dir / rel_path.name
+    out_file.write_text(output)
+
+    return out_file
+
+
+def generate_tests_from_rubric(
+    rubric: list[str],
+    prompt: str,
+    project_dir: Path,
+    key: str,
+) -> Path | None:
+    """Generate integration tests from explicit rubric items via claude -p.
+
+    Uses _gather_project_context from otto.rubric for richer project context
+    (source files + existing tests), unlike generate_tests which only uses file tree.
+
+    Returns path to generated test file, or None on failure/invalid output.
+    """
+    # Import here to avoid circular import (rubric imports from testgen)
+    from otto.rubric import _gather_project_context
+
+    context = _gather_project_context(project_dir)
+    framework = detect_test_framework(project_dir) or "pytest"
+    existing_tests = _read_existing_tests(project_dir)
+
+    # Build numbered rubric list
+    rubric_text = "\n".join(f"{i + 1}. {item}" for i, item in enumerate(rubric))
+
+    example_section = ""
+    if existing_tests:
+        example_section = f"""
+EXISTING TESTS (follow the same import patterns and style):
+{existing_tests}
+"""
+
+    llm_prompt = f"""You are a QA engineer writing integration tests for a coding task.
+
+TASK: {prompt}
+
+RUBRIC (each criterion MUST have a corresponding test):
+{rubric_text}
+
+PROJECT CONTEXT:
+{context}
+{example_section}
+TEST FRAMEWORK: {framework}
+
+Write integration tests that verify EACH rubric criterion was met.
+
+Rules:
+- One or more test functions per rubric item
+- Write behavioral tests that exercise the REAL system (build, run, check output)
+- Tests must be hermetic and deterministic — no external network calls
+- Mocks/fakes ONLY if the project already provides test fixtures for them
+- Do NOT grep source code for strings — test actual behavior
+- The tests should be runnable with the standard test command for {framework}
+- Follow the same import style as the existing tests above
+
+IMPORTANT: Output ONLY valid {framework} test code. No prose, no explanations, no markdown.
+Start directly with import statements.
+"""
+
+    try:
+        result = subprocess.run(
+            ["claude", "-p", "--output-format", "text"],
+            input=llm_prompt,
+            capture_output=True,
+            text=True,
+            timeout=TESTGEN_TIMEOUT,
+            start_new_session=True,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+
+    # Extract code from markdown fences if present
+    output = result.stdout.strip()
+    fence_match = re.search(r"```(?:\w*)\n(.*?)```", output, re.DOTALL)
+    if fence_match:
+        output = fence_match.group(1).strip()
+
+    # Validate the output is parseable code (not prose)
+    if not _validate_test_output(output, framework):
+        return None
+
+    # Write to <git-common-dir>/otto/testgen/<key>/
     testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / key
     testgen_dir.mkdir(parents=True, exist_ok=True)
 
