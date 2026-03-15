@@ -154,13 +154,14 @@ class TestAddRubric:
         assert "rubric" not in tasks["tasks"][0]
 
     @patch("otto.cli.generate_rubric")
-    def test_add_empty_rubric_not_stored(self, mock_gen, runner, tmp_git_repo, monkeypatch):
+    def test_add_empty_rubric_aborts(self, mock_gen, runner, tmp_git_repo, monkeypatch):
+        """Empty rubric gen should abort — no ghost task created."""
         monkeypatch.chdir(tmp_git_repo)
         mock_gen.return_value = []
         result = runner.invoke(main, ["add", "Fix typo"])
-        assert result.exit_code == 0
-        tasks = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())
-        assert "rubric" not in tasks["tasks"][0]
+        assert result.exit_code != 0
+        # Task should NOT have been created
+        assert not (tmp_git_repo / "tasks.yaml").exists()
 
 
 class TestAddImport:
