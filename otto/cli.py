@@ -400,10 +400,18 @@ def show(task_id):
 
 @main.command()
 @click.option("--yes", is_flag=True, help="Skip confirmation")
-def reset(yes):
-    """Reset all tasks and clean up branches."""
+@click.option("--hard", is_flag=True, help="Also revert otto commits from git history")
+def reset(yes, hard):
+    """Reset all tasks and clean up branches.
+
+    --hard also reverts otto's git commits, restoring the codebase
+    to the state before otto ran.
+    """
     if not yes:
-        click.confirm("Reset all tasks to pending and delete otto/* branches?", abort=True)
+        msg = "Reset all tasks and delete otto/* branches?"
+        if hard:
+            msg = "HARD RESET: revert all otto commits and restore codebase?"
+        click.confirm(msg, abort=True)
 
     import fcntl
     import subprocess
@@ -421,9 +429,42 @@ def reset(yes):
         sys.exit(2)
 
     try:
-        # Lock order: otto.lock (process) → .tasks.lock (CRUD) to prevent deadlocks
+        # Delete tasks.yaml entirely (not just reset status)
         tasks_path = project_dir / "tasks.yaml"
-        count = reset_all_tasks(tasks_path)
+        count = 0
+        if tasks_path.exists():
+            from otto.tasks import load_tasks
+            count = len(load_tasks(tasks_path))
+            tasks_path.unlink()
+        tasks_lock = tasks_path.parent / ".tasks.lock"
+        if tasks_lock.exists():
+            tasks_lock.unlink()
+
+        # Hard reset: revert all otto commits
+        if hard:
+            # Find and revert commits with "otto:" prefix
+            result = subprocess.run(
+                ["git", "log", "--oneline", "--all", "--grep=otto:"],
+                capture_output=True, text=True, cwd=project_dir,
+            )
+            otto_commits = [line.split()[0] for line in result.stdout.strip().splitlines() if line]
+            if otto_commits:
+                # Revert in reverse order (newest first)
+                for sha in otto_commits:
+                    revert = subprocess.run(
+                        ["git", "revert", "--no-commit", sha],
+                        cwd=project_dir, capture_output=True,
+                    )
+                    if revert.returncode != 0:
+                        # Conflict — abort and warn
+                        subprocess.run(["git", "revert", "--abort"], cwd=project_dir, capture_output=True)
+                        click.echo(f"{_Y}⚠{_0} Could not revert commit {sha} — skipping", err=True)
+                # Commit the reverts
+                subprocess.run(
+                    ["git", "commit", "-m", "otto: hard reset — reverted all otto commits"],
+                    cwd=project_dir, capture_output=True,
+                )
+                click.echo(f"  {_D}Reverted {len(otto_commits)} otto commits{_0}")
 
         # Delete otto/* branches
         result = subprocess.run(
@@ -464,7 +505,10 @@ def reset(yes):
                 cwd=project_dir, capture_output=True,
             )
 
-        click.echo(f"{_G}✓{_0} Reset {_B}{count}{_0} tasks. Cleaned branches, logs, and testgen.")
+        msg = f"{_G}✓{_0} Reset {_B}{count}{_0} tasks. Cleaned branches, logs, and testgen."
+        if hard:
+            msg += " Reverted otto commits."
+        click.echo(msg)
     finally:
         fcntl.flock(lock_fh, fcntl.LOCK_UN)
         lock_fh.close()
