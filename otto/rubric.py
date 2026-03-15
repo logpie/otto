@@ -3,7 +3,6 @@
 import asyncio
 import json
 import re
-import subprocess
 import tempfile
 from pathlib import Path
 
@@ -15,6 +14,8 @@ except ImportError:
     AssistantMessage = None  # type: ignore[assignment,misc]
     TextBlock = None  # type: ignore[assignment,misc]
     ToolUseBlock = None  # type: ignore[assignment,misc]
+
+from otto.display import print_agent_tool
 
 
 # Regex to strip numbered ("1. ", "1) ") or bullet ("- ", "* ") prefixes
@@ -102,15 +103,7 @@ Write ONLY a numbered list to {rubric_file}. One criterion per line. No prose.""
                     if TextBlock and isinstance(block, TextBlock) and block.text:
                         print(block.text, flush=True)
                     elif ToolUseBlock and isinstance(block, ToolUseBlock):
-                        inputs = block.input or {}
-                        detail = ""
-                        if block.name in ("Read", "Glob", "Grep"):
-                            detail = inputs.get("file_path") or inputs.get("path") or ""
-                        elif block.name == "Bash":
-                            detail = (inputs.get("command") or "")[:60]
-                        elif block.name == "Write":
-                            detail = inputs.get("file_path") or ""
-                        print(f"  \033[36m\033[1m● {block.name}\033[0m  \033[2m{detail}\033[0m", flush=True)
+                        print_agent_tool(block)
     except Exception as e:
         print(f"  rubric agent error: {e}", flush=True)
         return []
@@ -184,15 +177,7 @@ Example: [{{"prompt": "Add search", "rubric": ["search works", "case-insensitive
                     if TextBlock and isinstance(block, TextBlock) and block.text:
                         print(block.text, flush=True)
                     elif ToolUseBlock and isinstance(block, ToolUseBlock):
-                        inputs = block.input or {}
-                        detail = ""
-                        if block.name in ("Read", "Glob", "Grep"):
-                            detail = inputs.get("file_path") or inputs.get("path") or ""
-                        elif block.name == "Bash":
-                            detail = (inputs.get("command") or "")[:60]
-                        elif block.name == "Write":
-                            detail = inputs.get("file_path") or ""
-                        print(f"  \033[36m\033[1m● {block.name}\033[0m  \033[2m{detail}\033[0m", flush=True)
+                        print_agent_tool(block)
     except Exception as e:
         raise ValueError(f"Failed to parse markdown tasks: {e}") from e
 

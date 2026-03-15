@@ -26,6 +26,7 @@ except ImportError:
     ToolResultBlock = None  # type: ignore[assignment,misc]
 
 from otto.config import git_meta_dir, detect_test_command
+from otto.display import _truncate_at_word
 from otto.tasks import load_tasks, update_task
 from otto.testgen import generate_tests, detect_test_framework, test_file_path, run_mutation_check
 from otto.verify import VerifyResult, run_tier1, run_verification, _subprocess_env
@@ -549,7 +550,7 @@ def _print_tool_use(block) -> None:
         detail = inputs.get("file_path") or ""
     elif name == "Bash":
         cmd = inputs.get("command") or ""
-        detail = cmd[:80] + ("..." if len(cmd) > 80 else "")
+        detail = _truncate_at_word(cmd, 80)
 
     if detail:
         print(f"  {label}  {_DIM}{detail}{_RESET}", flush=True)
@@ -591,7 +592,7 @@ def _tool_use_summary(block) -> str:
         return inputs.get("file_path") or ""
     elif name == "Bash":
         cmd = inputs.get("command") or ""
-        return cmd[:120]
+        return _truncate_at_word(cmd, 120)
     return ""
 
 

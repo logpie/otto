@@ -21,6 +21,7 @@ except ImportError:
     ToolUseBlock = None  # type: ignore[assignment,misc]
 
 from otto.config import git_meta_dir
+from otto.display import print_agent_tool
 
 
 @dataclass
@@ -484,27 +485,8 @@ Do NOT finish until validation passes AND self-review is done.
                         print(block.text, flush=True)
                         log_lines.append(block.text)
                     elif ToolUseBlock and isinstance(block, ToolUseBlock):
-                        inputs = block.input or {}
-                        detail = ""
-                        if block.name in ("Read", "Glob", "Grep"):
-                            detail = inputs.get("file_path") or inputs.get("path") or inputs.get("pattern") or ""
-                        elif block.name in ("Edit", "Write"):
-                            detail = inputs.get("file_path") or ""
-                        elif block.name == "Bash":
-                            cmd = inputs.get("command") or ""
-                            detail = cmd[:80]
-                        # Strip temp dir prefix for cleaner display
-                        if tmp_dir and detail.startswith(tmp_dir):
-                            detail = detail[len(tmp_dir):].lstrip("/")
-                        elif "/otto_testgen_" in detail:
-                            # Strip everything up to and including the testgen temp dir
-                            idx = detail.find("/otto_testgen_")
-                            rest = detail[idx:]
-                            # Find the next / after the temp dir name
-                            parts = rest.split("/", 2)
-                            detail = parts[2] if len(parts) > 2 else detail
-                        print(f"  \033[36m\033[1m● {block.name}\033[0m  \033[2m{detail}\033[0m", flush=True)
-                        log_lines.append(f"→ {block.name}  {detail}")
+                        log_line = print_agent_tool(block)
+                        log_lines.append(log_line)
 
         # Check if test file was written in temp dir
         test_file_in_tmp = Path(tmp_dir) / test_rel
@@ -779,16 +761,7 @@ Do NOT finish until validation passes AND self-review is done."""
                     if TextBlock and isinstance(block, TextBlock) and block.text:
                         print(block.text, flush=True)
                     elif ToolUseBlock and isinstance(block, ToolUseBlock):
-                        inputs = block.input or {}
-                        detail = ""
-                        if block.name in ("Read", "Glob", "Grep"):
-                            detail = inputs.get("file_path") or inputs.get("path") or inputs.get("pattern") or ""
-                        elif block.name in ("Edit", "Write"):
-                            detail = inputs.get("file_path") or ""
-                        elif block.name == "Bash":
-                            cmd = inputs.get("command") or ""
-                            detail = cmd[:80]
-                        print(f"  \033[36m\033[1m● {block.name}\033[0m  \033[2m{detail}\033[0m", flush=True)
+                        print_agent_tool(block)
 
         if out_file.exists():
             return out_file
@@ -905,16 +878,7 @@ Do NOT finish until validation passes AND self-review is done."""
                     if TextBlock and isinstance(block, TextBlock) and block.text:
                         print(block.text, flush=True)
                     elif ToolUseBlock and isinstance(block, ToolUseBlock):
-                        inputs = block.input or {}
-                        detail = ""
-                        if block.name in ("Read", "Glob", "Grep"):
-                            detail = inputs.get("file_path") or inputs.get("path") or inputs.get("pattern") or ""
-                        elif block.name in ("Edit", "Write"):
-                            detail = inputs.get("file_path") or ""
-                        elif block.name == "Bash":
-                            cmd = inputs.get("command") or ""
-                            detail = cmd[:80]
-                        print(f"  \033[36m\033[1m● {block.name}\033[0m  \033[2m{detail}\033[0m", flush=True)
+                        print_agent_tool(block)
 
         if out_file.exists():
             return out_file
