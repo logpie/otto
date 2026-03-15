@@ -410,6 +410,7 @@ Write the test file now. Do NOT explain — just write the file.
         agent_opts = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
             cwd=tmp_dir,
+            max_turns=20,
         )
 
         # Stream agent messages
@@ -681,6 +682,7 @@ Write the test file now. Do NOT explain — just write the file."""
         agent_opts = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
             cwd=str(project_dir),
+            max_turns=20,
         )
 
         async for message in query(prompt=prompt, options=agent_opts):
@@ -794,6 +796,7 @@ Write the test file now. Do NOT explain — just write the file."""
         agent_opts = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
             cwd=str(project_dir),
+            max_turns=20,
         )
 
         async for message in query(prompt=prompt, options=agent_opts):

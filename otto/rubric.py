@@ -90,6 +90,7 @@ Write ONLY a numbered list to {rubric_file}. One criterion per line. No prose.""
         agent_opts = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
             cwd=str(project_dir),
+            max_turns=20,
         )
 
         async for message in query(prompt=agent_prompt, options=agent_opts):
@@ -172,6 +173,7 @@ Example: [{{"prompt": "Add search", "rubric": ["search works", "case-insensitive
         agent_opts = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
             cwd=str(project_dir),
+            max_turns=20,
         )
 
         async for message in query(prompt=agent_prompt, options=agent_opts):
