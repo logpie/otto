@@ -709,7 +709,8 @@ async def generate_tests(
     """Generate integration tests via Agent SDK. Returns path to generated test file or None."""
     framework = detect_test_framework(project_dir) or "pytest"
     existing_tests = _read_existing_tests(project_dir)
-    source_context = get_relevant_file_contents(project_dir, task_hint=task_prompt)
+    # Pre-implementation: use stubs only (same as adversarial — don't show full source)
+    blackbox_ctx = build_blackbox_context(project_dir, task_hint=task_prompt)
 
     # Write to <git-common-dir>/otto/testgen/<key>/ (handles linked worktrees)
     testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / key
@@ -729,10 +730,8 @@ EXISTING TESTS (for reference on fixtures/helpers — do NOT copy how they invok
 
 TASK: {task_prompt}
 
-PROJECT DIRECTORY: {project_dir}
-
-RELEVANT SOURCE FILES (already read for you — start writing tests immediately):
-{source_context}
+PROJECT CONTEXT (public interface only):
+{blackbox_ctx}
 {example_section}
 TEST FRAMEWORK: {framework}
 
