@@ -401,7 +401,13 @@ Testing quality guidelines:
 - Prefer fewer strong tests over many weak ones.
 - Always include a smoke test: if the project has a CLI, verify `python -m <package> --help` exits 0.
 
-Write the test file now. Do NOT explain — just write the file.
+Write the test file, then VALIDATE it before finishing:
+1. Write the test file
+2. Run: python -c "import ast; ast.parse(open('<test_file>').read()); print('SYNTAX OK')"
+3. If syntax error: fix it and re-validate
+4. Run: python -m pytest --collect-only <test_file>
+5. If collection fails (import error, missing fixture): fix and re-validate
+Do NOT finish until both checks pass.
 """
     try:
         # Create tests/ subdirectory in temp dir
@@ -683,7 +689,13 @@ Rules — "test like a user":
 - Do NOT grep source code for strings — test actual behavior
 - The tests should be runnable with the standard test command for {framework}
 
-Write the test file now. Do NOT explain — just write the file."""
+Write the test file, then VALIDATE it before finishing:
+1. Write the test file
+2. Run: python -c "import ast; ast.parse(open('<test_file>').read()); print('SYNTAX OK')"
+3. If syntax error: fix it and re-validate
+4. Run: python -m pytest --collect-only <test_file>
+5. If collection fails (import error, missing fixture): fix and re-validate
+Do NOT finish until both checks pass."""
 
     try:
         agent_opts = ClaudeAgentOptions(
@@ -797,7 +809,13 @@ Rules — "test like a user":
 - Tests must be hermetic and deterministic — no external network calls
 - The tests should be runnable with the standard test command for {framework}
 
-Write the test file now. Do NOT explain — just write the file."""
+Write the test file, then VALIDATE it before finishing:
+1. Write the test file
+2. Run: python -c "import ast; ast.parse(open('<test_file>').read()); print('SYNTAX OK')"
+3. If syntax error: fix it and re-validate
+4. Run: python -m pytest --collect-only <test_file>
+5. If collection fails (import error, missing fixture): fix and re-validate
+Do NOT finish until both checks pass."""
 
     try:
         agent_opts = ClaudeAgentOptions(
