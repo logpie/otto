@@ -103,17 +103,131 @@ def _extract_public_stubs(source_code: str) -> str:
     return "\n".join(lines).strip()
 
 
-def build_blackbox_context(project_dir: Path) -> str:
+_MAX_STUB_FILES = 15  # Max source files to extract stubs from
+
+
+def _build_project_index(project_dir: Path, source_files: list[str]) -> tuple[dict[str, str], dict[str, set[str]]]:
+    """Build a symbol index and import graph from Python source files.
+
+    Returns:
+        symbol_to_file: {"BookmarkStore": "store.py", "search": "store.py", ...}
+        import_graph: {"cli.py": {"store.py", "config.py"}, ...}
+    """
+    symbol_to_file: dict[str, str] = {}
+    import_graph: dict[str, set[str]] = {}
+
+    # Map module paths to file paths (e.g., "bookmarks.store" -> "bookmarks/store.py")
+    module_to_file: dict[str, str] = {}
+    for rel in source_files:
+        # "bookmarks/store.py" -> "bookmarks.store"
+        mod = rel.replace("/", ".").removesuffix(".py")
+        module_to_file[mod] = rel
+        # Also map just the last component: "store" -> "bookmarks/store.py"
+        parts = mod.split(".")
+        if len(parts) > 1:
+            module_to_file[parts[-1]] = rel
+
+    for rel in source_files:
+        full = project_dir / rel
+        try:
+            source = full.read_text()
+            tree = ast.parse(source)
+        except (OSError, UnicodeDecodeError, SyntaxError):
+            continue
+
+        # Extract symbols defined in this file
+        for node in ast.iter_child_nodes(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                symbol_to_file[node.name] = rel
+            elif isinstance(node, ast.ClassDef):
+                symbol_to_file[node.name] = rel
+                # Also index methods as "ClassName.method"
+                for item in node.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        symbol_to_file[f"{node.name}.{item.name}"] = rel
+
+        # Extract imports to build dependency graph
+        deps: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                # "from bookmarks.store import X" -> find "bookmarks.store" or "store"
+                mod = node.module
+                if mod in module_to_file:
+                    deps.add(module_to_file[mod])
+                # Try suffix match: "from store import X" when file is "bookmarks/store.py"
+                last = mod.split(".")[-1]
+                if last in module_to_file:
+                    deps.add(module_to_file[last])
+        if deps:
+            import_graph[rel] = deps
+
+    return symbol_to_file, import_graph
+
+
+def _find_relevant_files(
+    task_hint: str,
+    source_files: list[str],
+    symbol_to_file: dict[str, str],
+    import_graph: dict[str, set[str]],
+    max_files: int = _MAX_STUB_FILES,
+) -> list[str]:
+    """Find files relevant to a task using symbol matching + import graph traversal.
+
+    1. Extract words from task_hint that match known symbols
+    2. Find files containing those symbols
+    3. Follow import graph to find related files
+    4. Return up to max_files
+    """
+    if not task_hint:
+        return source_files[:max_files]
+
+    # Extract words from hint that could be symbols (3+ chars, alphanumeric)
+    hint_words = {w for w in re.split(r'[\s\W]+', task_hint) if len(w) >= 3}
+    # Also try "ClassName.method" patterns
+    hint_lower = task_hint.lower()
+
+    # Find directly referenced files
+    relevant: set[str] = set()
+    for word in hint_words:
+        # Exact symbol match
+        if word in symbol_to_file:
+            relevant.add(symbol_to_file[word])
+        # Case-insensitive match
+        for sym, filepath in symbol_to_file.items():
+            if sym.lower() == word.lower():
+                relevant.add(filepath)
+
+    # Follow import graph one level — files that import from relevant files, or that relevant files import
+    expanded: set[str] = set(relevant)
+    for filepath in relevant:
+        # Files that this file imports from
+        if filepath in import_graph:
+            expanded.update(import_graph[filepath])
+        # Files that import this file
+        for other, deps in import_graph.items():
+            if filepath in deps:
+                expanded.add(other)
+
+    # If we found relevant files, use them. Otherwise fall back to all files.
+    if expanded:
+        result = sorted(expanded)
+    else:
+        result = source_files
+
+    return result[:max_files]
+
+
+def build_blackbox_context(project_dir: Path, task_hint: str = "") -> str:
     """Build a sanitized project context for adversarial test generation.
 
     Returns a string containing:
     1. File tree (via git ls-files)
-    2. Public API stubs (signatures + docstrings, no bodies) for each .py source file
+    2. Public API stubs (signatures + docstrings, no bodies) — for relevant files only
     3. CLI help (best effort)
     4. Existing test samples
 
-    Skips tests/, __init__.py, and conftest.py when extracting stubs.
-    Python-only for MVP.
+    Uses AST-based symbol index + import graph to find relevant files.
+    Falls back to all files (capped at _MAX_STUB_FILES) if no matches found.
     """
     sections: list[str] = []
 
@@ -132,22 +246,35 @@ def build_blackbox_context(project_dir: Path) -> str:
     if file_tree:
         sections.append(f"FILE TREE:\n{file_tree}")
 
-    # 2. Public API stubs
-    stubs_parts: list[str] = []
+    # Collect candidate source files
+    source_files: list[str] = []
     if file_tree:
         for rel_path in file_tree.splitlines():
             rel = rel_path.strip()
             if not rel.endswith(".py"):
                 continue
-            # Skip test files, __init__.py, conftest.py
             basename = Path(rel).name
             if basename.startswith("test_") or basename in ("__init__.py", "conftest.py"):
                 continue
             if rel.startswith("tests/") or rel.startswith("test/"):
                 continue
             full = project_dir / rel
-            if not full.is_file():
-                continue
+            if full.is_file():
+                source_files.append(rel)
+
+    # 2. Public API stubs — use symbol index to pick relevant files
+    if source_files:
+        if len(source_files) <= _MAX_STUB_FILES:
+            # Small project — include everything
+            selected = source_files
+        else:
+            # Large project — use AST index to find relevant files
+            symbol_to_file, import_graph = _build_project_index(project_dir, source_files)
+            selected = _find_relevant_files(task_hint, source_files, symbol_to_file, import_graph)
+
+        stubs_parts: list[str] = []
+        for rel in selected:
+            full = project_dir / rel
             try:
                 source = full.read_text()
             except (OSError, UnicodeDecodeError):
@@ -155,8 +282,8 @@ def build_blackbox_context(project_dir: Path) -> str:
             stubs = _extract_public_stubs(source)
             if stubs:
                 stubs_parts.append(f"# {rel}\n{stubs}")
-    if stubs_parts:
-        sections.append("PUBLIC API STUBS:\n" + "\n\n".join(stubs_parts))
+        if stubs_parts:
+            sections.append("PUBLIC API STUBS:\n" + "\n\n".join(stubs_parts))
 
     # 3. CLI help (best effort — try python -m <package> --help)
     # Detect top-level package name from __main__.py or setup files
