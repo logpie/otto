@@ -48,14 +48,18 @@ class TestCheckCleanTree:
         (tmp_git_repo / "scratch.py").write_text("x = 1")
         assert check_clean_tree(tmp_git_repo) is True
 
-    def test_dirty_tracked_file_fails(self, tmp_git_repo):
-        """Modified tracked files (not otto runtime) should still fail."""
-        # Create and commit a file, then modify it
+    def test_dirty_tracked_file_auto_stashes(self, tmp_git_repo):
+        """Modified tracked files get auto-stashed, returning True."""
         (tmp_git_repo / "real.py").write_text("x = 1")
         subprocess.run(["git", "add", "real.py"], cwd=tmp_git_repo, capture_output=True)
         subprocess.run(["git", "commit", "-m", "add real"], cwd=tmp_git_repo, capture_output=True)
         (tmp_git_repo / "real.py").write_text("x = 2")
-        assert check_clean_tree(tmp_git_repo) is False
+        assert check_clean_tree(tmp_git_repo) is True
+        stash = subprocess.run(
+            ["git", "stash", "list"], cwd=tmp_git_repo,
+            capture_output=True, text=True,
+        )
+        assert "otto: auto-stash" in stash.stdout
 
 
 class TestCreateTaskBranch:
