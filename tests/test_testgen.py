@@ -1,5 +1,6 @@
 """Tests for otto.testgen module."""
 
+import asyncio
 import subprocess
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -9,15 +10,14 @@ import pytest
 from otto.testgen import (
     _extract_public_stubs,
     build_blackbox_context,
-    build_testgen_prompt,
     detect_test_framework,
     test_file_path,
     generate_tests,
+    generate_integration_tests,
     run_testgen_agent,
     run_mutation_check,
     validate_generated_tests,
     TestValidationResult,
-    _validate_test_output,
 )
 
 
@@ -44,74 +44,102 @@ class TestTestFilePath:
         assert p == Path("__tests__/test_otto_abc123def456.test.js")
 
 
-class TestBuildTestgenPrompt:
-    def test_contains_task_prompt(self):
-        prompt = build_testgen_prompt("Add auth", "file1.py\nfile2.py", "pytest")
-        assert "Add auth" in prompt
-        assert "file1.py" in prompt
-        assert "pytest" in prompt
-
-    def test_instructs_hermetic_tests(self):
-        prompt = build_testgen_prompt("Do stuff", "app.py", "pytest")
-        assert "mock" in prompt.lower() or "hermetic" in prompt.lower()
-
-
 class TestGenerateTests:
-    @patch("otto.testgen.subprocess.run")
-    def test_generates_test_file(self, mock_run, tmp_git_repo):
-        mock_run.side_effect = [
-            MagicMock(returncode=0, stdout="file1.py\nfile2.py\n"),  # git ls-files
-            MagicMock(returncode=0, stdout='def test_hello():\n    assert True\n'),  # claude -p
-        ]
+    @patch("otto.testgen.query")
+    def test_generates_test_file(self, mock_query, tmp_git_repo):
+        """Agent writes test file to the testgen dir."""
         key = "abc123def456"
-        result = generate_tests(
+
+        async def fake_query(*, prompt, options=None):
+            # The prompt tells the agent where to write the file —
+            # extract the out_file path from the prompt and write there
+            import re
+            match = re.search(r"Write the test file to: (.+)", prompt)
+            if match:
+                out_path = Path(match.group(1).strip())
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_text(
+                    "import pytest\n\ndef test_hello():\n    assert True\n"
+                )
+            from otto._agent_stub import ResultMessage
+            yield ResultMessage(session_id="s1")
+
+        mock_query.side_effect = fake_query
+
+        result = asyncio.run(generate_tests(
             task_prompt="Add hello function",
             project_dir=tmp_git_repo,
             key=key,
-        )
+        ))
         assert result is not None
         assert result.exists()
         assert "test_hello" in result.read_text()
         # Verify stored under <git-common-dir>/otto/testgen/
         assert "otto/testgen/" in str(result)
 
-    @patch("otto.testgen.subprocess.run")
-    def test_returns_none_on_failure(self, mock_run, tmp_git_repo):
-        mock_run.side_effect = [
-            MagicMock(returncode=0, stdout="file1.py\n"),  # git ls-files
-            MagicMock(returncode=1, stdout="", stderr="error"),  # claude -p (attempt 1)
-            MagicMock(returncode=1, stdout="", stderr="error"),  # claude -p (retry 1)
-            MagicMock(returncode=1, stdout="", stderr="error"),  # claude -p (retry 2)
-        ]
-        result = generate_tests(
+    @patch("otto.testgen.query")
+    def test_returns_none_on_failure(self, mock_query, tmp_git_repo):
+        """If agent doesn't write a test file, return None."""
+        async def fake_query(*, prompt, options=None):
+            from otto._agent_stub import ResultMessage
+            yield ResultMessage(session_id="s1")
+
+        mock_query.side_effect = fake_query
+
+        result = asyncio.run(generate_tests(
             task_prompt="Do something",
             project_dir=tmp_git_repo,
             key="abc123def456",
-        )
+        ))
         assert result is None
 
 
-class TestValidateTestOutput:
-    def test_valid_pytest(self):
-        code = "import pytest\n\ndef test_something():\n    assert True"
-        assert _validate_test_output(code, "pytest") is True
+class TestGenerateIntegrationTests:
+    @patch("otto.testgen.query")
+    def test_generates_integration_file(self, mock_query, tmp_git_repo):
+        """Agent writes integration test file to the testgen dir."""
+        tasks = [
+            {"prompt": "Add search feature", "rubric": ["search works"]},
+            {"prompt": "Add favorites", "rubric": ["favorites persist"]},
+        ]
 
-    def test_invalid_pytest_syntax(self):
-        assert _validate_test_output("this is not python{{{", "pytest") is False
+        async def fake_query(*, prompt, options=None):
+            import re
+            match = re.search(r"Write the test file to: (.+)", prompt)
+            if match:
+                out_path = Path(match.group(1).strip())
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_text(
+                    "import pytest\n\ndef test_search_then_favorite():\n    assert True\n"
+                )
+            from otto._agent_stub import ResultMessage
+            yield ResultMessage(session_id="s1")
 
-    def test_invalid_pytest_no_test_func(self):
-        assert _validate_test_output("x = 1", "pytest") is False
+        mock_query.side_effect = fake_query
 
-    def test_prose_rejected(self):
-        assert _validate_test_output("Here are some tests I wrote:", "pytest") is False
+        result = asyncio.run(generate_integration_tests(
+            tasks=tasks,
+            project_dir=tmp_git_repo,
+        ))
+        assert result is not None
+        assert result.exists()
+        assert "otto_integration.py" in result.name
+        assert "test_search_then_favorite" in result.read_text()
 
-    def test_valid_jest(self):
-        code = "describe('test', () => { it('works', () => {}) })"
-        assert _validate_test_output(code, "jest") is True
+    @patch("otto.testgen.query")
+    def test_returns_none_on_failure(self, mock_query, tmp_git_repo):
+        """If agent doesn't write a test file, return None."""
+        async def fake_query(*, prompt, options=None):
+            from otto._agent_stub import ResultMessage
+            yield ResultMessage(session_id="s1")
 
-    def test_empty_rejected(self):
-        assert _validate_test_output("", "pytest") is False
+        mock_query.side_effect = fake_query
 
+        result = asyncio.run(generate_integration_tests(
+            tasks=[{"prompt": "Do stuff"}],
+            project_dir=tmp_git_repo,
+        ))
+        assert result is None
 
 
 class TestExtractPublicStubs:
@@ -151,8 +179,6 @@ class TestRunTestgenAgent:
     @patch("otto.testgen.query")
     def test_writes_test_file_in_isolation(self, mock_query, tmp_git_repo):
         """Agent should write test file in temp dir, which gets copied to project."""
-        import asyncio
-
         async def fake_query(*, prompt, options=None):
             # Agent writes file in its cwd (the temp dir)
             cwd = Path(options.cwd) if hasattr(options, "cwd") and options.cwd else Path.cwd()
@@ -184,8 +210,6 @@ class TestRunTestgenAgent:
     @patch("otto.testgen.query")
     def test_returns_none_on_failure(self, mock_query, tmp_git_repo):
         """If agent doesn't write a test file, return None."""
-        import asyncio
-
         async def fake_query(*, prompt, options=None):
             from otto._agent_stub import ResultMessage
 

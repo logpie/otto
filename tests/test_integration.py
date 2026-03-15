@@ -33,7 +33,7 @@ def _make_fake_result(session_id="test-session"):
 
 class TestEndToEnd:
     @patch("otto.runner.ClaudeAgentOptions")
-    @patch("otto.runner.generate_tests")
+    @patch("otto.runner.generate_tests", new_callable=AsyncMock)
     @patch("otto.runner.query")
     def test_task_passes_and_merges(
         self, mock_query, mock_testgen, mock_options_cls, tmp_git_repo
@@ -73,7 +73,7 @@ class TestEndToEnd:
         assert branch == "main"
 
     @patch("otto.runner.ClaudeAgentOptions")
-    @patch("otto.runner.generate_tests")
+    @patch("otto.runner.generate_tests", new_callable=AsyncMock)
     @patch("otto.runner.query")
     def test_task_fails_and_reverts(
         self, mock_query, mock_testgen, mock_options_cls, tmp_git_repo
@@ -118,7 +118,7 @@ class TestEndToEnd:
 
 class TestRubricEndToEnd:
     @patch("otto.runner.ClaudeAgentOptions")
-    @patch("otto.runner.generate_tests")
+    @patch("otto.runner.generate_tests", new_callable=AsyncMock)
     @patch("otto.testgen.validate_generated_tests")
     @patch("otto.testgen.run_testgen_agent")
     @patch("otto.testgen.build_blackbox_context")

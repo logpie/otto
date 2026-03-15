@@ -547,7 +547,7 @@ async def run_task(
         # No rubric — use old concurrent testgen approach
         print(f"  {_DIM}Generating adversarial tests...{_RESET}", flush=True)
         testgen_task = asyncio.create_task(
-            asyncio.to_thread(generate_tests, prompt, project_dir, key)
+            generate_tests(prompt, project_dir, key)
         )
 
     # Setup log directory
@@ -888,7 +888,7 @@ async def _run_integration_gate(
     # Generate integration tests
     integration_file = None
     try:
-        integration_file = generate_integration_tests(passed_tasks, project_dir)
+        integration_file = await generate_integration_tests(passed_tasks, project_dir)
         if integration_file:
             print(f"  {_GREEN}✓{_RESET} {_DIM}Integration tests generated{_RESET}", flush=True)
         else:

@@ -1,6 +1,7 @@
-"""Otto test generation — generate integration tests via claude -p."""
+"""Otto test generation — generate integration tests via Agent SDK."""
 
 import ast
+import asyncio
 import json
 import os
 import re
@@ -20,8 +21,6 @@ except ImportError:
     ToolUseBlock = None  # type: ignore[assignment,misc]
 
 from otto.config import git_meta_dir
-
-TESTGEN_TIMEOUT = 180  # seconds
 
 
 @dataclass
@@ -625,188 +624,14 @@ def _read_existing_tests(project_dir: Path) -> str:
     return "\n\n".join(samples) if samples else ""
 
 
-def build_testgen_prompt(task_prompt: str, file_tree: str, framework: str,
-                         existing_tests: str = "") -> str:
-    """Build the prompt for test generation."""
-    example_section = ""
-    if existing_tests:
-        example_section = f"""
-EXISTING TESTS (for reference on fixtures/helpers — do NOT copy how they invoke the system under test):
-{existing_tests}
-"""
-
-    return f"""You are a code generator. Your ONLY job is to output valid {framework} test code.
-Do NOT explain what you're doing. Do NOT ask for permissions. Do NOT describe the tests.
-Do NOT use markdown fences. Just output the raw test code starting with import statements.
-
-TASK: {task_prompt}
-
-PROJECT FILES:
-{file_tree}
-{example_section}
-TEST FRAMEWORK: {framework}
-
-Write integration tests that verify the task was completed correctly.
-
-Rules — "test like a user":
-- Test the system the way a real user would use it:
-  - CLI apps: use subprocess.run() to invoke the actual command. Check stdout, stderr, exit codes.
-    Do NOT use in-process test runners (CliRunner, invoke()) — they skip the real entry point
-    and miss bugs like missing __main__.py or broken package setup.
-  - Libraries/APIs: import and call the public interface as a consumer would.
-  - Web apps: make HTTP requests to the actual server endpoint.
-- Tests must be hermetic and deterministic — no external network calls
-- Mocks/fakes ONLY if the project already provides test fixtures for them
-- Do NOT grep source code for strings — test actual behavior
-- The tests should be runnable with the standard test command for {framework}
-
-IMPORTANT: Output ONLY valid {framework} test code. No prose, no explanations, no markdown.
-Start directly with import statements.
-"""
-
-
-def _validate_test_output(output: str, framework: str) -> bool:
-    """Validate that LLM output is actual test code, not prose.
-
-    Checks are framework-aware:
-    - pytest: ast.parse + must contain 'def test_'
-    - jest/vitest/mocha: must contain describe(, it(, or test(
-    - go/cargo: first non-empty line must start with a code keyword
-    - Empty string: always False
-    """
-    if not output or not output.strip():
-        return False
-
-    output = output.strip()
-
-    if framework == "pytest":
-        try:
-            ast.parse(output)
-        except SyntaxError:
-            return False
-        if "def test_" not in output:
-            return False
-        return True
-
-    if framework in ("jest", "vitest", "mocha"):
-        # Must contain at least one test construct
-        if any(kw in output for kw in ("describe(", "it(", "test(")):
-            return True
-        return False
-
-    if framework in ("go", "cargo"):
-        # First non-empty line must start with a code keyword
-        first_line = ""
-        for line in output.splitlines():
-            stripped = line.strip()
-            if stripped:
-                first_line = stripped
-                break
-        go_keywords = ("package", "import", "func", "type", "var", "const")
-        cargo_keywords = ("use", "mod", "fn", "#[", "pub", "extern")
-        keywords = go_keywords if framework == "go" else cargo_keywords
-        return any(first_line.startswith(kw) for kw in keywords)
-
-    return False
-
-
-def _call_and_validate(prompt: str, framework: str) -> tuple[str | None, str | None]:
-    """Call claude -p, strip markdown fences, validate output.
-
-    Returns (code, None) on success, or (None, bad_output) on failure.
-    """
-    import sys
-
-    try:
-        result = subprocess.run(
-            ["claude", "-p", "--output-format", "text"],
-            input=prompt,
-            capture_output=True,
-            text=True,
-            timeout=TESTGEN_TIMEOUT,
-            start_new_session=True,
-        )
-    except subprocess.TimeoutExpired:
-        print(f"  testgen: timed out after {TESTGEN_TIMEOUT}s", file=sys.stderr, flush=True)
-        return None, None
-    except FileNotFoundError:
-        print("  testgen: claude CLI not found", file=sys.stderr, flush=True)
-        return None, None
-
-    if result.returncode != 0:
-        print(f"  testgen: claude exited {result.returncode}: {result.stderr[:200]}", file=sys.stderr, flush=True)
-        return None, None
-
-    if not result.stdout.strip():
-        print("  testgen: empty output from claude", file=sys.stderr, flush=True)
-        return None, None
-
-    output = result.stdout.strip()
-    fence_match = re.search(r"```(?:\w*)\n(.*?)```", output, re.DOTALL)
-    if fence_match:
-        output = fence_match.group(1).strip()
-
-    if _validate_test_output(output, framework):
-        return output, None
-
-    print(f"  testgen: validation failed — first 100 chars: {output[:100]}", file=sys.stderr, flush=True)
-    return None, output
-
-
-def _call_with_retry(prompt: str, framework: str, max_retries: int = 2) -> str | None:
-    """Call claude -p with retries on validation failure.
-
-    Each retry includes the previous bad output so the model knows what went wrong.
-    """
-    last_bad_output = None
-
-    for attempt in range(max_retries + 1):
-        if attempt == 0:
-            current_prompt = prompt
-        else:
-            current_prompt = (
-                f"I asked you to generate {framework} test code but your output was not valid code.\n\n"
-                f"Your bad output started with:\n{last_bad_output[:200] if last_bad_output else '(empty)'}\n\n"
-                f"This is wrong. Output ONLY executable {framework} test code. "
-                f"The very first line must be an import statement. No prose, no explanations, "
-                f"no file paths, no asking for permissions.\n\n"
-                f"Original request:\n{prompt}"
-            )
-
-        code, bad_output = _call_and_validate(current_prompt, framework)
-        if code is not None:
-            return code
-        last_bad_output = bad_output
-
-    return None
-
-
-def generate_tests(
+async def generate_tests(
     task_prompt: str,
     project_dir: Path,
     key: str,
 ) -> Path | None:
-    """Generate integration tests via claude -p. Returns path to generated test file or None."""
-    # Capture file tree
-    try:
-        tree_result = subprocess.run(
-            ["git", "ls-files"],
-            cwd=project_dir,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        file_tree = tree_result.stdout if tree_result.returncode == 0 else ""
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        file_tree = ""
-
+    """Generate integration tests via Agent SDK. Returns path to generated test file or None."""
     framework = detect_test_framework(project_dir) or "pytest"
     existing_tests = _read_existing_tests(project_dir)
-    prompt = build_testgen_prompt(task_prompt, file_tree, framework, existing_tests)
-
-    output = _call_with_retry(prompt, framework)
-    if output is None:
-        return None
 
     # Write to <git-common-dir>/otto/testgen/<key>/ (handles linked worktrees)
     testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / key
@@ -814,25 +639,91 @@ def generate_tests(
 
     rel_path = test_file_path(framework, key)
     out_file = testgen_dir / rel_path.name
-    out_file.write_text(output)
 
-    return out_file
+    example_section = ""
+    if existing_tests:
+        example_section = f"""
+EXISTING TESTS (for reference on fixtures/helpers — do NOT copy how they invoke the system under test):
+{existing_tests}
+"""
+
+    prompt = f"""You are a QA engineer writing integration tests for a coding task.
+
+TASK: {task_prompt}
+
+PROJECT DIRECTORY: {project_dir}
+
+BEFORE writing any tests:
+1. Explore the project — read source files, understand the architecture.
+2. If there's a CLI, run --help to see existing commands.
+3. Check existing tests to understand import patterns, fixtures, and style.
+4. Think about how a real user would use this feature and what could go wrong.
+{example_section}
+TEST FRAMEWORK: {framework}
+
+Write integration tests that verify the task was completed correctly.
+Write the test file to: {out_file}
+
+Rules — "test like a user":
+- Test the system the way a real user would use it:
+  - CLI apps: use subprocess.run() to invoke the actual command. Check stdout, stderr, exit codes.
+    Do NOT use in-process test runners (CliRunner, invoke()) — they skip the real entry point.
+  - Libraries/APIs: import and call the public interface as a consumer would.
+  - Web apps: make HTTP requests to the actual server endpoint.
+- Tests must be hermetic and deterministic — no external network calls
+- Mocks/fakes ONLY if the project already provides test fixtures for them
+- Do NOT grep source code for strings — test actual behavior
+- The tests should be runnable with the standard test command for {framework}
+
+Write the test file now. Do NOT explain — just write the file."""
+
+    try:
+        agent_opts = ClaudeAgentOptions(
+            permission_mode="bypassPermissions",
+            cwd=str(project_dir),
+        )
+
+        async for message in query(prompt=prompt, options=agent_opts):
+            if isinstance(message, ResultMessage):
+                pass
+            elif hasattr(message, "session_id") and hasattr(message, "is_error"):
+                pass
+            elif hasattr(message, "content"):
+                for block in message.content:
+                    if TextBlock and isinstance(block, TextBlock) and block.text:
+                        print(block.text, flush=True)
+                    elif ToolUseBlock and isinstance(block, ToolUseBlock):
+                        inputs = block.input or {}
+                        detail = ""
+                        if block.name in ("Read", "Glob", "Grep"):
+                            detail = inputs.get("file_path") or inputs.get("path") or inputs.get("pattern") or ""
+                        elif block.name in ("Edit", "Write"):
+                            detail = inputs.get("file_path") or ""
+                        elif block.name == "Bash":
+                            cmd = inputs.get("command") or ""
+                            detail = cmd[:80]
+                        print(f"  → {block.name}  {detail}", flush=True)
+
+        if out_file.exists():
+            return out_file
+        return None
+
+    except Exception as e:
+        print(f"  testgen agent error: {e}", file=sys.stderr, flush=True)
+        return None
 
 
 
-def generate_integration_tests(
+async def generate_integration_tests(
     tasks: list[dict],
     project_dir: Path,
 ) -> Path | None:
-    """Generate cross-feature integration tests via claude -p.
+    """Generate cross-feature integration tests via Agent SDK.
 
     Takes ALL passed tasks and generates tests that exercise features
     working together — multi-step workflows crossing task boundaries.
     """
     framework = detect_test_framework(project_dir) or "pytest"
-    # Build task hint from all task prompts for smart file selection
-    all_prompts = " ".join(t.get("prompt", "") for t in tasks)
-    context = build_blackbox_context(project_dir, task_hint=all_prompts)
     existing_tests = _read_existing_tests(project_dir)
 
     task_sections = []
@@ -850,23 +741,31 @@ EXISTING TESTS (for reference on fixtures/helpers — do NOT copy how they invok
 {existing_tests}
 """
 
-    llm_prompt = f"""You are a code generator. Your ONLY job is to output valid {framework} test code.
-Do NOT explain what you're doing. Do NOT ask for permissions. Do NOT describe the tests.
-Do NOT use markdown fences. Just output the raw test code starting with import statements.
+    testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / "_integration"
+    testgen_dir.mkdir(parents=True, exist_ok=True)
+    out_file = testgen_dir / "otto_integration.py"
 
-Write cross-feature INTEGRATION tests. The following features were implemented:
+    prompt = f"""You are a QA engineer writing cross-feature integration tests.
+
+The following features were implemented:
 
 {chr(10).join(task_sections)}
 
-PROJECT CONTEXT:
-{context}
+PROJECT DIRECTORY: {project_dir}
+
+BEFORE writing any tests:
+1. Explore the project — read source files, understand how features interact.
+2. If there's a CLI, run --help to see existing commands.
+3. Check existing tests to understand import patterns and fixtures.
+4. Think about how features work together in real usage.
 {example_section}
 TEST FRAMEWORK: {framework}
 
 Write integration tests that exercise these features WORKING TOGETHER.
+Write the test file to: {out_file}
 
 Focus on:
-- User journey tests: simulate a real session (e.g., add bookmarks → search → favorite a result → list favorites → verify the searched-and-favorited bookmark appears)
+- User journey tests: simulate a real session (e.g., add bookmarks -> search -> favorite a result -> list favorites -> verify the searched-and-favorited bookmark appears)
 - State consistency: after feature A modifies data, feature B sees the updated state correctly
 - Data round-trips: create via one feature, read via another, verify consistency
 - Feature independence: using feature A does NOT break feature B's behavior
@@ -878,7 +777,7 @@ Test ONLY cross-feature interactions and multi-step workflows.
 Include:
 - A smoke test: run --help or a basic command to verify the app works with all features present.
 - Full CLI-to-CLI pipelines: if one command produces output another consumes, test the pipeline
-  end-to-end via subprocess (e.g., train a model → classify text → verify result).
+  end-to-end via subprocess (e.g., train a model -> classify text -> verify result).
 - Data persistence across features: if feature A saves state, verify feature B can read it.
 - Real user scenarios: what would a user actually do in a single session? Simulate that.
 
@@ -889,20 +788,42 @@ Rules — "test like a user":
 - Tests must be hermetic and deterministic — no external network calls
 - The tests should be runnable with the standard test command for {framework}
 
-IMPORTANT: Output ONLY valid {framework} test code. No prose, no explanations, no markdown.
-Start directly with import statements.
-"""
+Write the test file now. Do NOT explain — just write the file."""
 
-    output = _call_with_retry(llm_prompt, framework)
-    if output is None:
+    try:
+        agent_opts = ClaudeAgentOptions(
+            permission_mode="bypassPermissions",
+            cwd=str(project_dir),
+        )
+
+        async for message in query(prompt=prompt, options=agent_opts):
+            if isinstance(message, ResultMessage):
+                pass
+            elif hasattr(message, "session_id") and hasattr(message, "is_error"):
+                pass
+            elif hasattr(message, "content"):
+                for block in message.content:
+                    if TextBlock and isinstance(block, TextBlock) and block.text:
+                        print(block.text, flush=True)
+                    elif ToolUseBlock and isinstance(block, ToolUseBlock):
+                        inputs = block.input or {}
+                        detail = ""
+                        if block.name in ("Read", "Glob", "Grep"):
+                            detail = inputs.get("file_path") or inputs.get("path") or inputs.get("pattern") or ""
+                        elif block.name in ("Edit", "Write"):
+                            detail = inputs.get("file_path") or ""
+                        elif block.name == "Bash":
+                            cmd = inputs.get("command") or ""
+                            detail = cmd[:80]
+                        print(f"  → {block.name}  {detail}", flush=True)
+
+        if out_file.exists():
+            return out_file
         return None
 
-    testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / "_integration"
-    testgen_dir.mkdir(parents=True, exist_ok=True)
-    out_file = testgen_dir / "otto_integration.py"
-    out_file.write_text(output)
-
-    return out_file
+    except Exception as e:
+        print(f"  integration testgen agent error: {e}", file=sys.stderr, flush=True)
+        return None
 
 
 def run_mutation_check(
