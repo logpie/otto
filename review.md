@@ -44,3 +44,21 @@
 ### Round 4 — Codex
 - [IMPORTANT] Commit amend missing check=True so failures silently pass — fixed: added check=True and text=True, stderr captured in error message
 - APPROVED. No new issues.
+
+## Implementation Gate — 2026-03-15 — Session: adversarial testgen, smart context, cost tracking, mutation checks
+
+### Round 1 — Codex
+- [CRITICAL] git clean -fd deletes user's untracked files — fixed: snapshot pre-existing, only clean otto-created
+- [CRITICAL] Rubric mode no-changes skip causes false PASS — fixed: check test_file_path_val
+- [CRITICAL] Integration gate commits to main before passing — fixed: run in worktrees, commit only after pass
+- [IMPORTANT] validate_generated_tests no_tests status not rejected — noted, deferred
+- [IMPORTANT] Rubric mode hardcoded to pytest — noted, deferred (Python-only MVP)
+- [IMPORTANT] Mutation check can't distinguish syntax from behavioral failures — noted, deferred
+- [IMPORTANT] parse_markdown_tasks doesn't validate rubric field type — noted, deferred
+- [NOTE] Import graph misses some relative imports — noted
+- [NOTE] tempfile.mktemp TOCTOU, minor dead code — noted
+
+### Round 2 — Codex reviewed fixes
+- [IMPORTANT] Pre-existing untracked file corruption risk — acknowledged as known limitation
+- [IMPORTANT] Integration gate copy-back RuntimeError not caught — fixed: wrapped in try/except
+- APPROVED. No new issues.
