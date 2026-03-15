@@ -384,9 +384,15 @@ Your tests MUST:
 - Be independent and hermetic (use tmp_path, no shared state)
 - Use subprocess.run() for CLI testing, not CliRunner
 - Include negative tests (what should NOT happen)
-- Test the FULL user workflow, not just individual functions — e.g., if there's a "train"
-  and "classify" command, test the complete pipeline: create data file → train → classify → verify output
+- Test the FULL user workflow, not just individual functions
 - Test data persistence: if the feature saves/loads state, verify the roundtrip works
+
+Think like a devil's advocate — how might a developer implement this INCORRECTLY?
+- What corners might they cut? (skip normalization, hardcode values, ignore edge cases)
+- What math/logic might they get wrong? (off-by-one, wrong formula, missing terms)
+- What would a lazy implementation look like? Write tests that would catch it.
+- For each spec item, ask: "could this pass with a trivially wrong implementation?"
+  If yes, make the test more specific.
 
 Testing quality guidelines:
 - NO trivial tests (assert exists, assert type, assert True). Every test must verify behavior that could break.
