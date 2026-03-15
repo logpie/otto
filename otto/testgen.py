@@ -236,6 +236,8 @@ Testing quality guidelines:
 - Use pytest.mark.parametrize for the same behavior with different inputs.
 - Split tests when a failure would be ambiguous — each test should pinpoint one broken behavior.
 - Prefer fewer strong tests over many weak ones.
+- Always include a smoke test: if the project has a CLI, verify `python -m <package> --help` exits 0.
+  This catches broken imports, missing __main__.py, and circular dependencies.
 
 Write the test file now. Do NOT explain — just write the file.
 """
