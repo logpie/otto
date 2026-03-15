@@ -196,7 +196,7 @@ async def run_testgen_agent(
     blackbox_context: str,
     project_dir: Path,
     framework: str = "pytest",
-) -> Path | None:
+) -> tuple[Path | None, list[str]]:
     """Run adversarial testgen agent in an isolated temp directory.
 
     The agent receives blackbox_context (public stubs, file tree) as a string
@@ -206,11 +206,12 @@ async def run_testgen_agent(
     This enforces mechanical isolation — the agent literally cannot read
     implementation code.
 
-    Returns path to the copied test file, or None if agent failed to produce one.
+    Returns (path to the copied test file or None, list of log lines).
     """
     rubric_text = "\n".join(f"{i + 1}. {item}" for i, item in enumerate(rubric))
     test_rel = f"tests/test_otto_{key}.py"
     tmp_dir = tempfile.mkdtemp(prefix="otto_testgen_")
+    log_lines: list[str] = []
 
     prompt = f"""You are a QA engineer writing black-box tests from a specification.
 You have NOT seen the implementation — it hasn't been written yet.
@@ -262,6 +263,7 @@ Write the test file now. Do NOT explain — just write the file.
                 for block in message.content:
                     if TextBlock and isinstance(block, TextBlock) and block.text:
                         print(block.text, flush=True)
+                        log_lines.append(block.text)
                     elif ToolUseBlock and isinstance(block, ToolUseBlock):
                         inputs = block.input or {}
                         detail = ""
@@ -273,17 +275,18 @@ Write the test file now. Do NOT explain — just write the file.
                             cmd = inputs.get("command") or ""
                             detail = cmd[:80]
                         print(f"  → {block.name}  {detail}", flush=True)
+                        log_lines.append(f"→ {block.name}  {detail}")
 
         # Check if test file was written in temp dir
         test_file_in_tmp = Path(tmp_dir) / test_rel
         if not test_file_in_tmp.exists():
-            return None
+            return None, log_lines
 
         # Copy to project dir
         dest = project_dir / test_rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(str(test_file_in_tmp), str(dest))
-        return dest
+        return dest, log_lines
 
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)

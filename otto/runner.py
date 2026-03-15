@@ -467,7 +467,8 @@ async def run_task(
         blackbox_ctx = build_blackbox_context(project_dir)
 
         print(f"  {_DIM}Testgen agent writing adversarial tests ({len(rubric)} criteria)...{_RESET}", flush=True)
-        test_file_path_val = await run_testgen_agent(rubric, key, blackbox_ctx, project_dir)
+        testgen_logs: list[str] = []
+        test_file_path_val, testgen_logs = await run_testgen_agent(rubric, key, blackbox_ctx, project_dir)
 
         if test_file_path_val:
             # Two-phase validation
@@ -476,7 +477,8 @@ async def run_task(
             if validation.status == "collection_error":
                 _log_warn(f"Generated tests have errors — regenerating once")
                 test_file_path_val.unlink()
-                test_file_path_val = await run_testgen_agent(rubric, key, blackbox_ctx, project_dir)
+                test_file_path_val, regen_logs = await run_testgen_agent(rubric, key, blackbox_ctx, project_dir)
+                testgen_logs.extend(regen_logs)
                 if test_file_path_val:
                     validation = validate_generated_tests(test_file_path_val, "pytest", project_dir)
                     if validation.status == "collection_error":
@@ -488,7 +490,8 @@ async def run_task(
                 print(f"\n  {_YELLOW}{_BOLD}⚠⚠⚠ WARNING: All rubric tests PASS before implementation{_RESET}", flush=True)
                 print(f"  {_DIM}Regenerating tests...{_RESET}", flush=True)
                 test_file_path_val.unlink()
-                test_file_path_val = await run_testgen_agent(rubric, key, blackbox_ctx, project_dir)
+                test_file_path_val, regen_logs = await run_testgen_agent(rubric, key, blackbox_ctx, project_dir)
+                testgen_logs.extend(regen_logs)
                 if test_file_path_val:
                     validation = validate_generated_tests(test_file_path_val, "pytest", project_dir)
                     if validation.status == "all_pass":
@@ -524,6 +527,14 @@ async def run_task(
     # Setup log directory
     log_dir = project_dir / "otto_logs" / key
     log_dir.mkdir(parents=True, exist_ok=True)
+
+    # Persist testgen agent log if we ran the testgen agent
+    if rubric and testgen_logs:
+        try:
+            testgen_log_file = log_dir / "testgen-agent.log"
+            testgen_log_file.write_text("\n".join(testgen_logs))
+        except OSError:
+            pass
 
     session_id = None
     last_error = None  # verification failure output for retry feedback

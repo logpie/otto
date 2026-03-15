@@ -163,7 +163,7 @@ class TestRubricEndToEnd:
         async def fake_testgen_agent(rubric, key, ctx, project_dir, **kw):
             test_file.parent.mkdir(parents=True, exist_ok=True)
             test_file.write_text("def test_search():\n    assert True\n")
-            return test_file
+            return test_file, []
 
         mock_testgen_agent.side_effect = fake_testgen_agent
 

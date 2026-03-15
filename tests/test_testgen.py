@@ -225,7 +225,7 @@ class TestRunTestgenAgent:
 
         mock_query.side_effect = fake_query
 
-        result = asyncio.run(
+        result, log_lines = asyncio.run(
             run_testgen_agent(
                 rubric=["search is case-insensitive"],
                 key="testkey",
@@ -237,6 +237,7 @@ class TestRunTestgenAgent:
         assert result.exists()
         assert "tests/test_otto_testkey.py" in str(result)
         assert "def test_search" in result.read_text()
+        assert isinstance(log_lines, list)
 
     @patch("otto.testgen.query")
     def test_returns_none_on_failure(self, mock_query, tmp_git_repo):
@@ -250,7 +251,7 @@ class TestRunTestgenAgent:
 
         mock_query.side_effect = fake_query
 
-        result = asyncio.run(
+        result, log_lines = asyncio.run(
             run_testgen_agent(
                 rubric=["search works"],
                 key="badkey",
@@ -259,6 +260,7 @@ class TestRunTestgenAgent:
             )
         )
         assert result is None
+        assert isinstance(log_lines, list)
 
 
 class TestBuildBlackboxContext:
