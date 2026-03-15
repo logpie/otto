@@ -106,7 +106,7 @@ Write ONLY a numbered list to {rubric_file}. One criterion per line. No prose.""
                             detail = (inputs.get("command") or "")[:60]
                         elif block.name == "Write":
                             detail = inputs.get("file_path") or ""
-                        print(f"  → {block.name}  {detail}", flush=True)
+                        print(f"  \033[36m\033[1m● {block.name}\033[0m  \033[2m{detail}\033[0m", flush=True)
     except Exception as e:
         print(f"  rubric agent error: {e}", flush=True)
         return []
@@ -188,7 +188,7 @@ Example: [{{"prompt": "Add search", "rubric": ["search works", "case-insensitive
                             detail = (inputs.get("command") or "")[:60]
                         elif block.name == "Write":
                             detail = inputs.get("file_path") or ""
-                        print(f"  → {block.name}  {detail}", flush=True)
+                        print(f"  \033[36m\033[1m● {block.name}\033[0m  \033[2m{detail}\033[0m", flush=True)
     except Exception as e:
         raise ValueError(f"Failed to parse markdown tasks: {e}") from e
 

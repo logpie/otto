@@ -433,7 +433,7 @@ Write the test file now. Do NOT explain — just write the file.
                         elif block.name == "Bash":
                             cmd = inputs.get("command") or ""
                             detail = cmd[:80]
-                        print(f"  → {block.name}  {detail}", flush=True)
+                        print(f"  \033[36m\033[1m● {block.name}\033[0m  \033[2m{detail}\033[0m", flush=True)
                         log_lines.append(f"→ {block.name}  {detail}")
 
         # Check if test file was written in temp dir
@@ -702,7 +702,7 @@ Write the test file now. Do NOT explain — just write the file."""
                         elif block.name == "Bash":
                             cmd = inputs.get("command") or ""
                             detail = cmd[:80]
-                        print(f"  → {block.name}  {detail}", flush=True)
+                        print(f"  \033[36m\033[1m● {block.name}\033[0m  \033[2m{detail}\033[0m", flush=True)
 
         if out_file.exists():
             return out_file
@@ -815,7 +815,7 @@ Write the test file now. Do NOT explain — just write the file."""
                         elif block.name == "Bash":
                             cmd = inputs.get("command") or ""
                             detail = cmd[:80]
-                        print(f"  → {block.name}  {detail}", flush=True)
+                        print(f"  \033[36m\033[1m● {block.name}\033[0m  \033[2m{detail}\033[0m", flush=True)
 
         if out_file.exists():
             return out_file
