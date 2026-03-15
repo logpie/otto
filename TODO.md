@@ -29,6 +29,7 @@
 - [ ] **Test coverage delta**: Run `pytest --cov` before/after each task, warn if coverage didn't increase.
 
 ### Low Priority
+- [ ] **`--fast` mode**: Toggle `claude -p` one-shot for rubric/testgen instead of agentic. 5-10x faster and cheaper but lower quality (~70% vs ~95% reliability). Useful for prototyping and simple projects.
 - [ ] **Parallel tasks**: Run independent tasks concurrently on separate branches.
 - [ ] **Environment tests**: Verify project works in a clean environment — fresh install, no cached state.
 - [ ] **Watch mode**: `otto watch` auto-reimports and reruns on file changes.
