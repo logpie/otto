@@ -709,6 +709,7 @@ async def generate_tests(
     """Generate integration tests via Agent SDK. Returns path to generated test file or None."""
     framework = detect_test_framework(project_dir) or "pytest"
     existing_tests = _read_existing_tests(project_dir)
+    source_context = get_relevant_file_contents(project_dir, task_hint=task_prompt)
 
     # Write to <git-common-dir>/otto/testgen/<key>/ (handles linked worktrees)
     testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / key
@@ -730,11 +731,8 @@ TASK: {task_prompt}
 
 PROJECT DIRECTORY: {project_dir}
 
-BEFORE writing any tests:
-1. Explore the project — read source files, understand the architecture.
-2. If there's a CLI, run --help to see existing commands.
-3. Check existing tests to understand import patterns, fixtures, and style.
-4. Think about how a real user would use this feature and what could go wrong.
+RELEVANT SOURCE FILES (already read for you — start writing tests immediately):
+{source_context}
 {example_section}
 TEST FRAMEWORK: {framework}
 
@@ -815,6 +813,10 @@ async def generate_integration_tests(
     framework = detect_test_framework(project_dir) or "pytest"
     existing_tests = _read_existing_tests(project_dir)
 
+    # Include relevant source files so agent doesn't need to explore
+    all_prompts = " ".join(t.get("prompt", "") for t in tasks)
+    source_context = get_relevant_file_contents(project_dir, task_hint=all_prompts)
+
     task_sections = []
     for i, task in enumerate(tasks, 1):
         section = f"FEATURE {i}: {task['prompt']}"
@@ -842,11 +844,8 @@ The following features were implemented:
 
 PROJECT DIRECTORY: {project_dir}
 
-BEFORE writing any tests:
-1. Explore the project — read source files, understand how features interact.
-2. If there's a CLI, run --help to see existing commands.
-3. Check existing tests to understand import patterns and fixtures.
-4. Think about how features work together in real usage.
+RELEVANT SOURCE FILES (already read for you — start writing tests immediately):
+{source_context}
 {example_section}
 TEST FRAMEWORK: {framework}
 
