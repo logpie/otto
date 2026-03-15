@@ -166,14 +166,21 @@ def add(prompt, verify, max_retries, import_file, no_rubric):
     rubric = None
     if not no_rubric:
         click.echo(f"{_D}Generating rubric...{_0}")
-        rubric_items = generate_rubric(prompt, Path.cwd())
+        try:
+            rubric_items = generate_rubric(prompt, Path.cwd())
+        except Exception as e:
+            click.echo(f"{_R}✗{_0} Rubric generation failed: {e}", err=True)
+            click.echo(f"{_D}Task not created. Fix the issue or use --no-rubric.{_0}", err=True)
+            sys.exit(1)
         if rubric_items:
             rubric = rubric_items
             click.echo(f"{_G}✓{_0} Rubric ({_B}{len(rubric_items)}{_0} criteria):")
             for item in rubric_items:
                 click.echo(f"  {_D}-{_0} {item}")
         else:
-            click.echo(f"{_Y}⚠{_0} No rubric generated.")
+            click.echo(f"{_Y}⚠{_0} Rubric generation returned empty — task not created.", err=True)
+            click.echo(f"{_D}Retry or use --no-rubric to skip rubric generation.{_0}", err=True)
+            sys.exit(1)
 
     task = add_task(tasks_path, prompt, verify=verify, max_retries=max_retries,
                     rubric=rubric)
