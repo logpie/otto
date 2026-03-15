@@ -175,6 +175,54 @@ def _build_project_index(project_dir: Path, source_files: list[str]) -> tuple[di
     return symbol_to_file, import_graph
 
 
+def get_relevant_file_contents(project_dir: Path, task_hint: str = "") -> str:
+    """Return full contents of files relevant to a task.
+
+    Uses the same AST symbol index + import graph as build_blackbox_context,
+    but returns full file contents instead of stubs. For the coding agent
+    who needs to read and edit files.
+    """
+    try:
+        tree_result = subprocess.run(
+            ["git", "ls-files"], cwd=project_dir,
+            capture_output=True, text=True, timeout=10,
+        )
+        file_tree = tree_result.stdout.strip() if tree_result.returncode == 0 else ""
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return ""
+
+    source_files: list[str] = []
+    for rel in file_tree.splitlines():
+        rel = rel.strip()
+        if not rel.endswith(".py"):
+            continue
+        bn = Path(rel).name
+        if bn in ("__init__.py", "conftest.py"):
+            continue
+        if (project_dir / rel).is_file():
+            source_files.append(rel)
+
+    if not source_files:
+        return ""
+
+    if len(source_files) > _MAX_STUB_FILES and task_hint:
+        sym, graph = _build_project_index(project_dir, source_files)
+        selected = _find_relevant_files(task_hint, source_files, sym, graph)
+    else:
+        selected = source_files[:_MAX_STUB_FILES]
+
+    parts: list[str] = []
+    for rel in selected:
+        full = project_dir / rel
+        try:
+            content = full.read_text()
+            parts.append(f"# {rel}\n{content}")
+        except (OSError, UnicodeDecodeError):
+            continue
+
+    return "\n\n".join(parts)
+
+
 def _find_relevant_files(
     task_hint: str,
     source_files: list[str],

@@ -763,18 +763,23 @@ async def run_task(
         if tasks_file:
             update_task(tasks_file, key, attempts=attempt_num)
 
-        # Build agent prompt — include user feedback and/or verification errors
+        # Build agent prompt — include relevant source files so agent doesn't need to explore
         feedback = task.get("feedback", "")
         if attempt == 0 or last_error is None:
             base_prompt = prompt
             if feedback:
                 base_prompt = f"{prompt}\n\nIMPORTANT feedback from the user:\n{feedback}"
+
+            # Include relevant source files in the prompt
+            from otto.testgen import get_relevant_file_contents
+            source_context = get_relevant_file_contents(project_dir, task_hint=prompt)
+
             agent_prompt = (
                 f"{base_prompt}\n\n"
                 f"You are working in {project_dir}. Do NOT create git commits. "
                 f"Do NOT write tests — acceptance tests will be generated separately.\n\n"
-                f"Be EFFICIENT: read only the files you need to edit. "
-                f"Do NOT explore the entire project — focus on the task."
+                f"RELEVANT SOURCE FILES (already read for you — start coding immediately):\n"
+                f"{source_context}"
             )
         else:
             agent_prompt = (
