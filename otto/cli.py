@@ -440,31 +440,28 @@ def reset(yes, hard):
         if tasks_lock.exists():
             tasks_lock.unlink()
 
-        # Hard reset: revert all otto commits
+        # Hard reset: reset to before the first otto commit
         if hard:
-            # Find and revert commits with "otto:" prefix
             result = subprocess.run(
                 ["git", "log", "--oneline", "--all", "--grep=otto:"],
                 capture_output=True, text=True, cwd=project_dir,
             )
             otto_commits = [line.split()[0] for line in result.stdout.strip().splitlines() if line]
             if otto_commits:
-                # Revert in reverse order (newest first)
-                for sha in otto_commits:
-                    revert = subprocess.run(
-                        ["git", "revert", "--no-commit", sha],
+                # Find the parent of the oldest otto commit
+                oldest = otto_commits[-1]  # last in the list = oldest
+                parent = subprocess.run(
+                    ["git", "rev-parse", f"{oldest}^"],
+                    cwd=project_dir, capture_output=True, text=True,
+                )
+                if parent.returncode == 0 and parent.stdout.strip():
+                    subprocess.run(
+                        ["git", "reset", "--hard", parent.stdout.strip()],
                         cwd=project_dir, capture_output=True,
                     )
-                    if revert.returncode != 0:
-                        # Conflict — abort and warn
-                        subprocess.run(["git", "revert", "--abort"], cwd=project_dir, capture_output=True)
-                        click.echo(f"{_Y}⚠{_0} Could not revert commit {sha} — skipping", err=True)
-                # Commit the reverts
-                subprocess.run(
-                    ["git", "commit", "-m", "otto: hard reset — reverted all otto commits"],
-                    cwd=project_dir, capture_output=True,
-                )
-                click.echo(f"  {_D}Reverted {len(otto_commits)} otto commits{_0}")
+                    click.echo(f"  {_D}Reset to before first otto commit ({len(otto_commits)} commits removed){_0}")
+                else:
+                    click.echo(f"{_Y}⚠{_0} Could not find parent of oldest otto commit", err=True)
 
         # Delete otto/* branches
         result = subprocess.run(
