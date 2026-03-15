@@ -230,6 +230,13 @@ Your tests MUST:
 - Use subprocess.run() for CLI testing, not CliRunner
 - Include negative tests (what should NOT happen)
 
+Testing quality guidelines:
+- NO trivial tests (assert exists, assert type, assert True). Every test must verify behavior that could break.
+- Bundle tests that share expensive setup — don't duplicate identical fixtures across many tests.
+- Use pytest.mark.parametrize for the same behavior with different inputs.
+- Split tests when a failure would be ambiguous — each test should pinpoint one broken behavior.
+- Prefer fewer strong tests over many weak ones.
+
 Write the test file now. Do NOT explain — just write the file.
 """
 
