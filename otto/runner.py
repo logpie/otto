@@ -472,6 +472,56 @@ def _log_verify(tiers: list) -> None:
 
 
 _GREEN_DIM = "\033[32;2m"
+
+
+async def _diagnose_test_bug(
+    rubric: list[str],
+    failure_output: str,
+    test_file: Path,
+    project_dir: Path,
+) -> str | None:
+    """Diagnose whether a test failure is a test bug or an implementation bug.
+
+    Reads the rubric, the failing test, and the failure output.
+    Returns a description of the test bug if found, or None if the test is correct.
+    Uses a one-shot claude -p call (cheap, fast).
+    """
+    try:
+        test_content = test_file.read_text()
+    except OSError:
+        return None
+
+    rubric_text = "\n".join(f"- {r}" for r in rubric)
+    # Truncate to keep prompt reasonable
+    failure_snippet = failure_output[:2000]
+    test_snippet = test_content[:3000]
+
+    prompt = (
+        f"You are a QA judge. A coding agent failed to pass an adversarial test. "
+        f"Determine if the TEST has a bug, or if the IMPLEMENTATION needs fixing.\n\n"
+        f"SPEC (rubric):\n{rubric_text}\n\n"
+        f"TEST FILE (first 3000 chars):\n{test_snippet}\n\n"
+        f"FAILURE OUTPUT:\n{failure_snippet}\n\n"
+        f"Analyze: does the failing test expect behavior that the spec describes? "
+        f"Or does the test expect something the spec does NOT ask for (test bug)?\n\n"
+        f"Answer with EXACTLY one line:\n"
+        f"TEST_BUG: <description> — if the test expects behavior not in the spec\n"
+        f"IMPLEMENTATION_BUG — if the test correctly tests the spec and the code is wrong"
+    )
+
+    try:
+        result = subprocess.run(
+            ["claude", "-p", "--output-format", "text"],
+            input=prompt,
+            capture_output=True, text=True, timeout=30,
+            start_new_session=True,
+        )
+        if result.returncode == 0 and result.stdout.strip().startswith("TEST_BUG:"):
+            return result.stdout.strip()[len("TEST_BUG:"):].strip()
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+
+    return None
 _RED_DIM = "\033[31;2m"
 
 
@@ -1016,7 +1066,53 @@ async def run_task(
                 _log_fail(task_id, f"branch diverged — otto/{key} preserved, manual rebase needed", time.monotonic() - task_start, cost=total_cost)
                 return False
         else:
-            # Verification failed — unwind candidate commit for retry
+            # Verification failed — check if adversarial test has a bug
+            if test_file_path_val and verify_result.failure_output:
+                test_bug = await _diagnose_test_bug(
+                    rubric, verify_result.failure_output,
+                    test_file_path_val, project_dir,
+                )
+                if test_bug:
+                    print(f"  {_YELLOW}⚠ Detected test bug — regenerating adversarial tests{_RESET}", flush=True)
+                    print(f"    {_DIM}{test_bug}{_RESET}", flush=True)
+                    # Unwind, regenerate tests, and restart the attempt loop
+                    subprocess.run(
+                        ["git", "reset", "--hard", base_sha],
+                        cwd=project_dir, capture_output=True,
+                    )
+                    _remove_otto_created_untracked(project_dir, pre_existing_untracked)
+                    subprocess.run(["git", "checkout", default_branch],
+                                   cwd=project_dir, capture_output=True)
+                    cleanup_branch(project_dir, key, default_branch)
+                    # Re-create branch and regenerate tests
+                    base_sha = create_task_branch(project_dir, key, default_branch, task=task)
+                    if test_file_path_val.exists():
+                        test_file_path_val.unlink()
+                    from otto.testgen import build_blackbox_context, run_testgen_agent, validate_generated_tests
+                    blackbox_ctx = build_blackbox_context(project_dir, task_hint=task_hint)
+                    test_file_path_val, testgen_logs = await run_testgen_agent(
+                        rubric, key, blackbox_ctx, project_dir
+                    )
+                    if test_file_path_val:
+                        validation = validate_generated_tests(test_file_path_val, "pytest", project_dir)
+                        if validation.status == "tdd_ok":
+                            subprocess.run(["git", "add", str(test_file_path_val.relative_to(project_dir))],
+                                           cwd=project_dir, capture_output=True)
+                            subprocess.run(["git", "commit", "-m", f"otto: regenerate rubric tests for task #{task_id}"],
+                                           cwd=project_dir, capture_output=True)
+                            test_commit_sha = subprocess.run(
+                                ["git", "rev-parse", "HEAD"], cwd=project_dir,
+                                capture_output=True, text=True, check=True,
+                            ).stdout.strip()
+                            commit_base = test_commit_sha
+                            test_file_sha = subprocess.run(
+                                ["git", "hash-object", str(test_file_path_val)],
+                                capture_output=True, text=True,
+                            ).stdout.strip()
+                            print(f"  {_GREEN}✓{_RESET} {_DIM}Regenerated adversarial tests ({validation.failed} failing){_RESET}", flush=True)
+                    continue  # restart the attempt loop with new tests
+
+            # Unwind candidate commit for retry
             subprocess.run(
                 ["git", "reset", "--mixed", commit_base],
                 cwd=project_dir, capture_output=True,
