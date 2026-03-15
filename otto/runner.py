@@ -2,11 +2,13 @@
 
 import asyncio
 import fcntl
+import hashlib
 import os
 import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -26,7 +28,7 @@ except ImportError:
 from otto.config import git_meta_dir, detect_test_command
 from otto.tasks import load_tasks, update_task
 from otto.testgen import generate_tests, detect_test_framework, test_file_path, run_mutation_check
-from otto.verify import run_verification, _subprocess_env
+from otto.verify import VerifyResult, run_tier1, run_verification, _subprocess_env
 
 
 
@@ -84,6 +86,122 @@ def _snapshot_untracked(project_dir: Path) -> set[str]:
         cwd=project_dir, capture_output=True, text=True,
     )
     return {f for f in result.stdout.split("\0") if f}
+
+
+def _prune_empty_parents(path: Path, root: Path) -> None:
+    """Remove empty parent directories up to, but not including, root."""
+    current = path
+    while current != root:
+        try:
+            current.rmdir()
+        except OSError:
+            break
+        current = current.parent
+
+
+def _remove_path(path: Path, root: Path) -> None:
+    """Remove a file/symlink/directory and prune empty parents."""
+    if not path.exists() and not path.is_symlink():
+        return
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path, ignore_errors=True)
+    else:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return
+    _prune_empty_parents(path.parent, root)
+
+
+def _remove_otto_created_untracked(
+    project_dir: Path,
+    pre_existing_untracked: set[str] | None,
+) -> None:
+    """Delete only untracked files created during the run."""
+    if pre_existing_untracked is None:
+        return
+
+    current_untracked = _snapshot_untracked(project_dir)
+    created_untracked = sorted(
+        current_untracked - pre_existing_untracked,
+        key=lambda rel: len(Path(rel).parts),
+        reverse=True,
+    )
+    for rel_path in created_untracked:
+        _remove_path(project_dir / rel_path, project_dir)
+
+
+def _restore_workspace_state(
+    project_dir: Path,
+    reset_ref: str | None = None,
+    pre_existing_untracked: set[str] | None = None,
+) -> None:
+    """Restore tracked files and remove only Otto-created untracked files."""
+    cmd = ["git", "reset", "--hard"]
+    if reset_ref:
+        cmd.append(reset_ref)
+    subprocess.run(cmd, cwd=project_dir, capture_output=True)
+    _remove_otto_created_untracked(project_dir, pre_existing_untracked)
+
+
+def _file_sha256(path: Path) -> str:
+    """Return a stable hash for tamper checks."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _list_worktree_changes(worktree_dir: Path) -> tuple[set[str], set[str]]:
+    """Return tracked and untracked paths changed from HEAD in a worktree."""
+    tracked = subprocess.run(
+        ["git", "diff", "--name-only", "HEAD"],
+        cwd=worktree_dir, capture_output=True, text=True, check=True,
+    )
+    tracked_paths = {line for line in tracked.stdout.splitlines() if line}
+    untracked_paths = _snapshot_untracked(worktree_dir)
+    return tracked_paths, untracked_paths
+
+
+def _copy_changed_paths_from_worktree(
+    source_dir: Path,
+    dest_dir: Path,
+    tracked_paths: set[str],
+    untracked_paths: set[str],
+    pre_existing_untracked: set[str] | None = None,
+) -> set[str]:
+    """Copy a verified worktree diff back onto the main checkout."""
+    changed_paths = tracked_paths | untracked_paths
+    preserve = pre_existing_untracked or set()
+
+    for rel_path in sorted(changed_paths):
+        source = source_dir / rel_path
+        dest = dest_dir / rel_path
+
+        if rel_path in untracked_paths and rel_path in preserve:
+            raise RuntimeError(
+                f"refusing to overwrite pre-existing untracked file: {rel_path}"
+            )
+
+        if source.exists() or source.is_symlink():
+            if dest.exists() or dest.is_symlink():
+                if dest.is_dir() and not dest.is_symlink():
+                    shutil.rmtree(dest, ignore_errors=True)
+                else:
+                    dest.unlink(missing_ok=True)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, dest, follow_symlinks=False)
+        else:
+            _remove_path(dest, dest_dir)
+
+    return changed_paths
+
+
+def _run_integration_gate_in_worktree(
+    worktree_dir: Path,
+    test_command: str | None,
+    timeout: int,
+) -> VerifyResult:
+    """Run the integration gate against a mutable worktree checkout."""
+    tier = run_tier1(worktree_dir, test_command, timeout)
+    return VerifyResult(passed=tier.passed or tier.skipped, tiers=[tier])
 
 
 def create_task_branch(
@@ -260,13 +378,16 @@ def _cleanup_task_failure(
     key: str,
     default_branch: str,
     tasks_file: Path | None,
+    pre_existing_untracked: set[str] | None = None,
     error: str = "unknown",
     error_code: str = "unknown",
     cost_usd: float = 0.0,
 ) -> None:
     """Unified cleanup for all task failure paths: retries exhausted, interruption, exceptions."""
-    subprocess.run(["git", "reset", "--hard"], cwd=project_dir, capture_output=True)
-    subprocess.run(["git", "clean", "-fd"], cwd=project_dir, capture_output=True)
+    _restore_workspace_state(
+        project_dir,
+        pre_existing_untracked=pre_existing_untracked,
+    )
     subprocess.run(
         ["git", "checkout", default_branch],
         cwd=project_dir, capture_output=True,
@@ -662,13 +783,10 @@ async def run_task(
                 _log_warn(f"Agent error: {e}")
                 # Reset workspace — preserve test commit if it exists
                 reset_sha = test_commit_sha if test_commit_sha else base_sha
-                subprocess.run(
-                    ["git", "reset", "--hard", reset_sha],
-                    cwd=project_dir, capture_output=True,
-                )
-                subprocess.run(
-                    ["git", "clean", "-fd"],
-                    cwd=project_dir, capture_output=True,
+                _restore_workspace_state(
+                    project_dir,
+                    reset_ref=reset_sha,
+                    pre_existing_untracked=pre_existing_untracked,
                 )
                 continue
 
@@ -715,7 +833,7 @@ async def run_task(
             new_untracked = {f for f in untracked_check.stdout.strip().splitlines() if f} - pre_existing_untracked
             no_changes = diff_check.returncode == 0 and not new_untracked
 
-            if no_changes and not testgen_file:
+            if no_changes and not testgen_file and not test_file_path_val:
                 # No code changes and no rubric tests — nothing to commit
                 print(f"  {_DIM}No changes needed{_RESET}", flush=True)
                 subprocess.run(["git", "checkout", default_branch], cwd=project_dir, capture_output=True)
@@ -750,6 +868,7 @@ async def run_task(
             _log_fail(task_id, f"unexpected error: {e}", time.monotonic() - task_start, cost=total_cost)
             _cleanup_task_failure(
                 project_dir, key, default_branch, tasks_file,
+                pre_existing_untracked=pre_existing_untracked,
                 error=f"unexpected error: {e}", error_code="internal_error",
                 cost_usd=total_cost,
             )
@@ -803,6 +922,7 @@ async def run_task(
                 _log_fail(task_id, f"squash commit failed: {stderr}", time.monotonic() - task_start, cost=total_cost)
                 _cleanup_task_failure(
                     project_dir, key, default_branch, tasks_file,
+                    pre_existing_untracked=pre_existing_untracked,
                     error=f"squash commit failed: {stderr}", error_code="internal_error",
                     cost_usd=total_cost,
                 )
@@ -860,6 +980,7 @@ async def run_task(
     # All retries exhausted
     _cleanup_task_failure(
         project_dir, key, default_branch, tasks_file,
+        pre_existing_untracked=pre_existing_untracked,
         error="max retries exhausted", error_code="max_retries",
         cost_usd=total_cost,
     )
@@ -876,10 +997,10 @@ async def _run_integration_gate(
     from otto.testgen import generate_integration_tests
     from otto.verify import run_integration_gate
 
-    default_branch = config["default_branch"]
     test_command = config.get("test_command")
     timeout = config["verify_timeout"]
     max_retries = config.get("max_retries", 3)
+    pre_existing_untracked = _snapshot_untracked(project_dir)
 
     print(flush=True)
     _log_info("Integration gate — testing features together")
@@ -898,18 +1019,7 @@ async def _run_integration_gate(
         _log_warn(f"Integration test generation failed: {e}")
         return None
 
-    # Commit integration test file to main
-    tests_dir = project_dir / "tests"
-    tests_dir.mkdir(parents=True, exist_ok=True)
-    dest = tests_dir / "otto_integration.py"
-    shutil.copy2(integration_file, dest)
-    subprocess.run(["git", "add", str(dest)], cwd=project_dir, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "otto: add cross-feature integration tests"],
-        cwd=project_dir, capture_output=True,
-    )
-
-    # Run integration gate (full test suite + integration tests in clean worktree)
+    # Run integration gate against a disposable worktree first.
     print(f"  {_DIM}Running integration tests...{_RESET}", flush=True)
     gate_result = run_integration_gate(
         project_dir=project_dir,
@@ -920,68 +1030,110 @@ async def _run_integration_gate(
     _log_verify(gate_result.tiers)
 
     if gate_result.passed:
+        dest = project_dir / "tests" / "otto_integration.py"
+        if str(dest.relative_to(project_dir)) in pre_existing_untracked:
+            _log_warn("Integration test path conflicts with a pre-existing untracked file")
+            return False
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(integration_file, dest)
+        subprocess.run(
+            ["git", "add", str(dest.relative_to(project_dir))],
+            cwd=project_dir, capture_output=True, check=True,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "otto: add cross-feature integration tests"],
+            cwd=project_dir, capture_output=True, check=True,
+        )
         print(f"\n  {_GREEN}{_BOLD}✓ Integration gate PASSED{_RESET}", flush=True)
         return True
 
-    # Integration tests failed — spawn agent to fix
-    for attempt in range(max_retries):
-        print(f"\n  {_YELLOW}⚠ Integration tests failed — fixing (attempt {attempt + 1}/{max_retries}){_RESET}", flush=True)
+    # Integration tests failed — fix them in an isolated worktree so main stays clean.
+    fix_worktree = Path(tempfile.mkdtemp(prefix="otto-integration-fix-"))
+    integration_rel_path = Path("tests") / "otto_integration.py"
+    worktree_test_file = fix_worktree / integration_rel_path
+    integration_test_sha = _file_sha256(integration_file)
 
-        fix_prompt = (
-            f"Cross-feature integration tests are failing. Fix the issues.\n\n"
-            f"{gate_result.failure_output}\n\n"
-            f"You are working in {project_dir}. Do NOT create git commits. "
-            f"You may edit any file in the project to make all tests pass."
-        )
-
-        try:
-            agent_opts = ClaudeAgentOptions(
-                permission_mode="bypassPermissions",
-                cwd=str(project_dir),
-            )
-            if config.get("model"):
-                agent_opts.model = config["model"]
-
-            async for message in query(prompt=fix_prompt, options=agent_opts):
-                if AssistantMessage and isinstance(message, AssistantMessage):
-                    for block in message.content:
-                        if TextBlock and isinstance(block, TextBlock) and block.text:
-                            print(block.text, flush=True)
-                        elif ToolUseBlock and isinstance(block, ToolUseBlock):
-                            _print_tool_use(block)
-                        elif ToolResultBlock and isinstance(block, ToolResultBlock):
-                            _print_tool_result(block)
-        except Exception as e:
-            _log_warn(f"Agent error: {e}")
-            continue
-
-        # Commit the fix
-        subprocess.run(["git", "add", "-u"], cwd=project_dir, capture_output=True)
-        # Stage new untracked files (agent might create new ones)
-        untracked = subprocess.run(
-            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
-            cwd=project_dir, capture_output=True, text=True,
-        )
-        for f in untracked.stdout.split("\0"):
-            if f:
-                subprocess.run(["git", "add", "--", f], cwd=project_dir, capture_output=True)
+    try:
         subprocess.run(
-            ["git", "commit", "-m", "otto: fix cross-feature integration issues", "--allow-empty"],
+            ["git", "worktree", "add", "--detach", str(fix_worktree), "HEAD"],
+            cwd=project_dir, capture_output=True, check=True,
+        )
+        worktree_test_file.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(integration_file, worktree_test_file)
+
+        for attempt in range(max_retries):
+            print(f"\n  {_YELLOW}⚠ Integration tests failed — fixing (attempt {attempt + 1}/{max_retries}){_RESET}", flush=True)
+
+            fix_prompt = (
+                f"Cross-feature integration tests are failing. Fix the issues.\n\n"
+                f"{gate_result.failure_output}\n\n"
+                f"You are working in {fix_worktree}. Do NOT create git commits. "
+                f"ACCEPTANCE TESTS: {integration_rel_path} contains the integration tests you must satisfy. "
+                f"Do NOT modify this file. You may edit any other project file to make all tests pass."
+            )
+
+            try:
+                agent_opts = ClaudeAgentOptions(
+                    permission_mode="bypassPermissions",
+                    cwd=str(fix_worktree),
+                )
+                if config.get("model"):
+                    agent_opts.model = config["model"]
+
+                async for message in query(prompt=fix_prompt, options=agent_opts):
+                    if AssistantMessage and isinstance(message, AssistantMessage):
+                        for block in message.content:
+                            if TextBlock and isinstance(block, TextBlock) and block.text:
+                                print(block.text, flush=True)
+                            elif ToolUseBlock and isinstance(block, ToolUseBlock):
+                                _print_tool_use(block)
+                            elif ToolResultBlock and isinstance(block, ToolResultBlock):
+                                _print_tool_result(block)
+            except Exception as e:
+                _log_warn(f"Agent error: {e}")
+                continue
+
+            if (
+                not worktree_test_file.exists()
+                or _file_sha256(worktree_test_file) != integration_test_sha
+            ):
+                shutil.copy2(integration_file, worktree_test_file)
+                _log_warn("Integration test file tampered by coding agent — restored")
+
+            gate_result = _run_integration_gate_in_worktree(
+                fix_worktree,
+                test_command,
+                timeout,
+            )
+            _log_verify(gate_result.tiers)
+
+            if gate_result.passed:
+                tracked_paths, untracked_paths = _list_worktree_changes(fix_worktree)
+                changed_paths = _copy_changed_paths_from_worktree(
+                    fix_worktree,
+                    project_dir,
+                    tracked_paths,
+                    untracked_paths,
+                    pre_existing_untracked=pre_existing_untracked,
+                )
+                for rel_path in sorted(changed_paths):
+                    subprocess.run(
+                        ["git", "add", "--", rel_path],
+                        cwd=project_dir, capture_output=True, check=True,
+                    )
+                subprocess.run(
+                    ["git", "commit", "-m", "otto: add cross-feature integration tests"],
+                    cwd=project_dir, capture_output=True, check=True,
+                )
+                print(f"\n  {_GREEN}{_BOLD}✓ Integration gate PASSED{_RESET} {_DIM}(after fix){_RESET}", flush=True)
+                return True
+    finally:
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", str(fix_worktree)],
             cwd=project_dir, capture_output=True,
         )
-
-        # Re-verify
-        gate_result = run_integration_gate(
-            project_dir=project_dir,
-            test_command=test_command,
-            integration_test_file=None,  # already committed
-            timeout=timeout,
-        )
-        _log_verify(gate_result.tiers)
-
-        if gate_result.passed:
-            print(f"\n  {_GREEN}{_BOLD}✓ Integration gate PASSED{_RESET} {_DIM}(after fix){_RESET}", flush=True)
-            return True
+        if fix_worktree.exists():
+            shutil.rmtree(fix_worktree, ignore_errors=True)
 
     print(f"\n  {_RED}{_BOLD}✗ Integration gate FAILED{_RESET} {_DIM}— cross-feature issues remain{_RESET}", flush=True)
     return False
@@ -1040,6 +1192,7 @@ async def run_all(
 
     # Signal handling — first Ctrl+C sets flag, second forces exit
     current_task_key = None
+    current_pre_existing_untracked: set[str] | None = None
     interrupted = False
 
     def _signal_handler(signum, frame):
@@ -1085,15 +1238,19 @@ async def run_all(
             if not check_clean_tree(project_dir):
                 print(f"  {_RED}✗ Working tree is dirty — aborting{_RESET}", flush=True)
                 return 2
+            current_pre_existing_untracked = _snapshot_untracked(project_dir)
             success = await run_task(task, config, project_dir, tasks_file)
             results.append((task, success))
             current_task_key = None
+            current_pre_existing_untracked = None
 
         # Cleanup on interruption
         if interrupted and current_task_key:
             _cleanup_task_failure(
                 project_dir, current_task_key, default_branch,
-                tasks_file, error="interrupted", error_code="interrupted",
+                tasks_file,
+                pre_existing_untracked=current_pre_existing_untracked,
+                error="interrupted", error_code="interrupted",
             )
             return 1
 
