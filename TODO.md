@@ -19,8 +19,8 @@
 ## Remaining
 
 ### High Priority
-- [ ] **Mutation-style checks**: After tests pass, intentionally break a key line and verify the tests catch it. Validates that adversarial tests actually catch bugs, not just exercise code. Without this, we have no signal for test quality.
-- [ ] **Cost tracking**: Log token usage and cost per task from `ResultMessage.total_cost_usd`. Show in `otto status`. Users are blind to spend right now.
+- [x] **Mutation-style checks**: After tests pass, comments out a random implementation line and re-runs adversarial tests. Reports whether mutation was caught. Informational signal for test quality.
+- [x] **Cost tracking**: Per-task cost from `ResultMessage.total_cost_usd`. Shows in `otto status`, `otto show`, task pass/fail lines, and run summary.
 
 ### Medium Priority
 - [ ] **Framework-specific test patterns**: Provide framework-specific examples (pytest fixtures, jest patterns) for higher quality generated tests.
