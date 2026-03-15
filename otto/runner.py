@@ -478,7 +478,8 @@ async def run_task(
         from otto.testgen import build_blackbox_context, run_testgen_agent, validate_generated_tests
 
         print(f"  {_DIM}Building black-box context...{_RESET}", flush=True)
-        blackbox_ctx = build_blackbox_context(project_dir)
+        task_hint = prompt + "\n" + "\n".join(rubric)
+        blackbox_ctx = build_blackbox_context(project_dir, task_hint=task_hint)
 
         print(f"  {_DIM}Testgen agent writing adversarial tests ({len(rubric)} criteria)...{_RESET}", flush=True)
         testgen_logs: list[str] = []

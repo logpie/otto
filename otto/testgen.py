@@ -149,12 +149,24 @@ def _build_project_index(project_dir: Path, source_files: list[str]) -> tuple[di
         # Extract imports to build dependency graph
         deps: set[str] = set()
         for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module:
-                # "from bookmarks.store import X" -> find "bookmarks.store" or "store"
-                mod = node.module
+            modules_to_check: list[str] = []
+            if isinstance(node, ast.ImportFrom):
+                if node.module:
+                    modules_to_check.append(node.module)
+                # Relative imports: "from . import store" or "from .store import X"
+                if node.level and node.level > 0:
+                    # Resolve relative to current file's package
+                    current_parts = Path(rel).parts[:-1]  # directory parts
+                    if node.module:
+                        modules_to_check.append(".".join(current_parts) + "." + node.module)
+            elif isinstance(node, ast.Import):
+                # "import pkg.mod"
+                for alias in node.names:
+                    modules_to_check.append(alias.name)
+
+            for mod in modules_to_check:
                 if mod in module_to_file:
                     deps.add(module_to_file[mod])
-                # Try suffix match: "from store import X" when file is "bookmarks/store.py"
                 last = mod.split(".")[-1]
                 if last in module_to_file:
                     deps.add(module_to_file[last])
@@ -181,20 +193,27 @@ def _find_relevant_files(
     if not task_hint:
         return source_files[:max_files]
 
-    # Extract words from hint that could be symbols (3+ chars, alphanumeric)
+    # Extract words from hint that could be symbols (3+ chars)
     hint_words = {w for w in re.split(r'[\s\W]+', task_hint) if len(w) >= 3}
-    # Also try "ClassName.method" patterns
-    hint_lower = task_hint.lower()
+    # Also keep dotted names intact: "BookmarkStore.search" stays as one token
+    for match in re.findall(r'\b\w+\.\w+\b', task_hint):
+        hint_words.add(match)
 
-    # Find directly referenced files
+    # Find directly referenced files via substring matching
     relevant: set[str] = set()
     for word in hint_words:
-        # Exact symbol match
-        if word in symbol_to_file:
-            relevant.add(symbol_to_file[word])
-        # Case-insensitive match
+        word_lower = word.lower()
         for sym, filepath in symbol_to_file.items():
-            if sym.lower() == word.lower():
+            sym_lower = sym.lower()
+            # Substring match: "bilibili" matches "BilibiliCrawler", "bilibili_config"
+            # Also: "crawler" matches "base_crawler", "CrawlerManager"
+            if word_lower in sym_lower or sym_lower in word_lower:
+                relevant.add(filepath)
+    # Also match against file paths directly
+    for word in hint_words:
+        word_lower = word.lower()
+        for filepath in source_files:
+            if word_lower in filepath.lower():
                 relevant.add(filepath)
 
     # Follow import graph one level — files that import from relevant files, or that relevant files import
