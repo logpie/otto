@@ -331,6 +331,71 @@ def logs(task_id):
 
 
 @main.command()
+@click.argument("task_id", type=int)
+def diff(task_id):
+    """Show the git diff for a task's commit."""
+    import subprocess
+    # Find commit by message pattern
+    result = subprocess.run(
+        ["git", "log", "--oneline", "--all", f"--grep=(#{task_id})"],
+        capture_output=True, text=True,
+    )
+    commits = result.stdout.strip().splitlines()
+    if not commits:
+        click.echo(f"No commit found for task #{task_id}", err=True)
+        sys.exit(1)
+    sha = commits[0].split()[0]
+    # Show the diff
+    subprocess.run(["git", "show", sha, "--stat"])
+    click.echo()
+    subprocess.run(["git", "show", sha, "--no-stat"])
+
+
+@main.command()
+@click.argument("task_id", type=int)
+def show(task_id):
+    """Show details for a task."""
+    tasks_path = Path.cwd() / "tasks.yaml"
+    tasks = load_tasks(tasks_path)
+    for t in tasks:
+        if t.get("id") == task_id:
+            # Print styled details
+            click.echo(f"{_B}Task #{task_id}{_0}  {_D}({t.get('key', '?')}){_0}")
+            click.echo(f"  {_D}Status:{_0}   {t.get('status', '?')}")
+            click.echo(f"  {_D}Attempts:{_0} {t.get('attempts', 0)}")
+            click.echo(f"\n  {_D}Prompt:{_0}")
+            click.echo(f"  {t['prompt']}")
+            rubric = t.get("rubric", [])
+            if rubric:
+                click.echo(f"\n  {_D}Rubric ({len(rubric)}):{_0}")
+                for i, item in enumerate(rubric, 1):
+                    click.echo(f"    {i}. {item}")
+            if t.get("feedback"):
+                click.echo(f"\n  {_D}Feedback:{_0} {t['feedback']}")
+            if t.get("error"):
+                click.echo(f"\n  {_R}Error:{_0} {t['error']}")
+            # Find commit
+            import subprocess
+            result = subprocess.run(
+                ["git", "log", "--oneline", "--all", f"--grep=(#{task_id})"],
+                capture_output=True, text=True,
+            )
+            if result.stdout.strip():
+                click.echo(f"\n  {_D}Commit:{_0} {result.stdout.strip().splitlines()[0]}")
+            # Check for test file
+            test_file = Path.cwd() / "tests" / f"test_otto_{t['key']}.py"
+            if test_file.exists():
+                click.echo(f"  {_D}Test file:{_0} {test_file.relative_to(Path.cwd())}")
+            # Check for logs
+            log_dir = Path.cwd() / "otto_logs" / t["key"]
+            if log_dir.exists():
+                click.echo(f"  {_D}Logs:{_0} {log_dir.relative_to(Path.cwd())}/")
+            return
+    click.echo(f"Task #{task_id} not found", err=True)
+    sys.exit(1)
+
+
+@main.command()
 @click.option("--yes", is_flag=True, help="Skip confirmation")
 def reset(yes):
     """Reset all tasks and clean up branches."""

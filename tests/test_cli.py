@@ -210,6 +210,22 @@ class TestAddImport:
         mock_gen.assert_called_once()
 
 
+class TestDiffAndShow:
+    def test_show_displays_task(self, runner, tmp_git_repo, monkeypatch):
+        monkeypatch.chdir(tmp_git_repo)
+        from otto.tasks import add_task
+        add_task(tmp_git_repo / "tasks.yaml", "Test task", rubric=["criterion 1"])
+        result = runner.invoke(main, ["show", "1"])
+        assert result.exit_code == 0
+        assert "Test task" in result.output
+        assert "criterion 1" in result.output
+
+    def test_show_not_found(self, runner, tmp_git_repo, monkeypatch):
+        monkeypatch.chdir(tmp_git_repo)
+        result = runner.invoke(main, ["show", "999"])
+        assert result.exit_code != 0
+
+
 class TestStatusRubric:
     def test_shows_rubric_count(self, runner, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
