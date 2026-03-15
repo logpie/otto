@@ -3,29 +3,37 @@
 ## System Overview
 
 ```
-User writes features.md
-        ↓
-   otto add -f features.md
-        ↓
-   ┌─────────────────────┐
-   │  Rubric Agent        │  Agentic (Agent SDK, max_turns=10)
-   │  Reads project files │  Writes behavioral acceptance criteria
-   │  Runs CLI --help     │  Self-reviews and improves criteria
-   │  Writes rubrics      │  Aborts if generation fails (no ghost tasks)
-   └─────────────────────┘
-        ↓
-   tasks.yaml created (task + rubrics)
-        ↓
-   otto run
+User writes features.md          User writes prompt directly
+        ↓                                 ↓
+   otto add -f features.md        otto add "do X"
+        ↓                                 ↓
+   ┌─────────────────────┐      ┌─────────────────────┐
+   │  Markdown Agent      │      │  Rubric Agent        │
+   │  Splits doc into     │      │  Reads project files │
+   │  tasks + rubrics     │      │  Writes acceptance   │
+   │  max_turns=10        │      │  criteria            │
+   └─────────────────────┘      │  max_turns=10        │
+        ↓                        └─────────────────────┘
+        ↓                                 ↓
+   tasks.yaml created            tasks.yaml created
+   (tasks + rubrics)             (task + rubrics)
+        │                                 │
+        │    ┌────────────────────────────┘
+        │    │    (--no-rubric skips rubric gen
+        │    │     → task has no rubric
+        │    │     → no adversarial TDD at run time)
+        ▼    ▼
+      otto run
         ↓
    For each pending task:
    ┌─────────────────────────────────────────────────────┐
    │                    TASK EXECUTION                     │
    │                                                       │
-   │  1. TESTGEN AGENT (adversarial, pre-implementation)   │
-   │  2. TDD CHECK                                         │
-   │  3. COMMIT TESTS                                      │
-   │  4. CODING AGENT (implementation)                     │
+   │  IF RUBRIC:                    IF NO RUBRIC:          │
+   │  1. TESTGEN AGENT (adv.)      1. CODING AGENT        │
+   │  2. TDD CHECK                 2. VERIFICATION         │
+   │  3. COMMIT TESTS              3. MERGE                │
+   │  4. CODING AGENT                                      │
    │  5. TAMPER CHECK                                      │
    │  6. VERIFICATION                                      │
    │  7. MUTATION CHECK                                    │
@@ -54,104 +62,107 @@ User writes features.md
                     ┌────────▼─────────┐
                     │  Has rubric?     │
                     └──┬──────────┬────┘
-                    yes│          │no
-           ┌───────────▼──┐  ┌───▼──────────────┐
-           │ ADVERSARIAL  │  │ FALLBACK TESTGEN  │
-           │ TESTGEN      │  │ (Agent SDK)       │
-           │              │  │ Runs concurrently │
-           │ Isolated     │  │ with coding agent │
-           │ temp dir     │  └───────────────────┘
-           │ AST stubs    │
-           │ only         │
-           │              │
-           │ Writes tests │
-           │ → validate   │
-           │ → self-review│
-           └──────┬───────┘
-                  │
-           ┌──────▼───────┐
-           │  TDD CHECK   │
-           │              │
-           │ Phase A:     │
-           │  --collect-  │
-           │  only        │
-           │  (syntax)    │
-           │              │
-           │ Phase B:     │
-           │  Run tests   │
-           │  (must fail) │
-           └──┬───────┬───┘
-              │       │
-         tdd_ok   all_pass
-              │       │
-              │   ┌───▼──────────────┐
-              │   │ Feature exists?  │
-              │   └──┬──────────┬────┘
-              │    yes│         │no
-              │      │    ┌────▼─────────┐
-              │      │    │ Regenerate   │
-              │      │    │ tests once   │
-              │      │    └──────────────┘
-              │      │
-              │   Keep as regression
-              │
-           ┌──▼──────────┐
-           │ COMMIT TESTS │
-           │ Record SHA   │
-           │ for tamper   │
-           │ detection    │
-           └──────┬───────┘
-                  │
-    ┌─────────────▼───────────────┐
-    │     ATTEMPT LOOP            │
-    │     (up to max_retries+1)   │
-    │                             │
-    │  ┌────────────────────┐     │
-    │  │ CODING AGENT       │     │
-    │  │ Agent SDK          │     │
-    │  │ max_turns=20       │     │
-    │  │                    │     │
-    │  │ Gets relevant      │     │
-    │  │ source files in    │     │
-    │  │ prompt             │     │
-    │  │                    │     │
-    │  │ "Implement ONLY    │     │
-    │  │  what spec asks"   │     │
-    │  └─────────┬──────────┘     │
-    │            │                │
-    │  ┌─────────▼──────────┐     │
-    │  │ TAMPER CHECK       │     │
-    │  │ SHA match?         │     │
-    │  │ Restore if not     │     │
-    │  └─────────┬──────────┘     │
-    │            │                │
-    │  ┌─────────▼──────────┐     │
-    │  │ BUILD CANDIDATE    │     │
-    │  │ Squash commits     │     │
-    │  │ Include test file  │     │
-    │  └─────────┬──────────┘     │
-    │            │                │
-    │  ┌─────────▼──────────┐     │
-    │  │ VERIFICATION       │     │
-    │  │ Disposable worktree│     │
-    │  │ Full test suite    │     │
-    │  └──┬────────────┬────┘     │
-    │   pass          fail        │
-    │     │             │         │
-    │     │    ┌────────▼──────┐  │
-    │     │    │ JUDGE: test   │  │
-    │     │    │ bug or impl   │  │
-    │     │    │ bug?          │  │
-    │     │    └──┬────────┬───┘  │
-    │     │   test_bug  impl_bug  │
-    │     │       │         │     │
-    │     │  Regenerate   Retry   │
-    │     │  tests        attempt │
-    │     │                       │
-    └─────┼───────────────────────┘
+                    yes│          │no (--no-rubric)
+                       │          │
+                       │   Skip adversarial TDD
+                       │   Go straight to ──────────────┐
+                       │   coding agent                  │
+           ┌───────────▼──┐                              │
+           │ ADVERSARIAL  │                              │
+           │ TESTGEN      │                              │
+           │              │                              │
+           │ Isolated     │                              │
+           │ temp dir     │                              │
+           │ AST stubs    │                              │
+           │ only         │                              │
+           │              │                              │
+           │ Writes tests │                              │
+           │ → validate   │                              │
+           │ → self-review│                              │
+           └──────┬───────┘                              │
+                  │                                      │
+           ┌──────▼───────┐                              │
+           │  TDD CHECK   │                              │
+           │              │                              │
+           │ Phase A:     │                              │
+           │  --collect-  │                              │
+           │  only        │                              │
+           │  (syntax)    │                              │
+           │              │                              │
+           │ Phase B:     │                              │
+           │  Run tests   │                              │
+           │  (must fail) │                              │
+           └──┬───────┬───┘                              │
+              │       │                                  │
+         tdd_ok   all_pass                               │
+              │       │                                  │
+              │   ┌───▼──────────────┐                   │
+              │   │ Feature exists?  │                   │
+              │   └──┬──────────┬────┘                   │
+              │    yes│         │no                      │
+              │      │    ┌────▼─────────┐              │
+              │      │    │ Regenerate   │              │
+              │      │    │ tests once   │              │
+              │      │    └──────────────┘              │
+              │      │                                  │
+              │   Keep as regression                    │
+              │                                         │
+           ┌──▼──────────┐                              │
+           │ COMMIT TESTS │                              │
+           │ Record SHA   │                              │
+           │ for tamper   │                              │
+           │ detection    │                              │
+           └──────┬───────┘                              │
+                  │                                      │
+    ┌─────────────▼──────────────────────────────────────▼┐
+    │     ATTEMPT LOOP                                    │
+    │     (up to max_retries+1)                           │
+    │                                                     │
+    │  ┌────────────────────┐                             │
+    │  │ CODING AGENT       │                             │
+    │  │ Agent SDK          │                             │
+    │  │ max_turns=20       │                             │
+    │  │                    │                             │
+    │  │ Gets relevant      │                             │
+    │  │ source files in    │                             │
+    │  │ prompt             │                             │
+    │  │                    │                             │
+    │  │ "Implement ONLY    │                             │
+    │  │  what spec asks"   │                             │
+    │  └─────────┬──────────┘                             │
+    │            │                                        │
+    │  ┌─────────▼──────────┐                             │
+    │  │ TAMPER CHECK       │  (only if rubric tests)     │
+    │  │ SHA match?         │                             │
+    │  │ Restore if not     │                             │
+    │  └─────────┬──────────┘                             │
+    │            │                                        │
+    │  ┌─────────▼──────────┐                             │
+    │  │ BUILD CANDIDATE    │                             │
+    │  │ Squash commits     │                             │
+    │  └─────────┬──────────┘                             │
+    │            │                                        │
+    │  ┌─────────▼──────────┐                             │
+    │  │ VERIFICATION       │                             │
+    │  │ Disposable worktree│                             │
+    │  │ Full test suite    │                             │
+    │  └──┬────────────┬────┘                             │
+    │   pass          fail                                │
+    │     │             │                                 │
+    │     │    ┌────────▼──────┐                          │
+    │     │    │ JUDGE: test   │  (only if rubric tests)  │
+    │     │    │ bug or impl   │                          │
+    │     │    │ bug?          │                          │
+    │     │    └──┬────────┬───┘                          │
+    │     │   test_bug  impl_bug                          │
+    │     │       │         │                             │
+    │     │  Regenerate   Retry                           │
+    │     │  tests        attempt                         │
+    │     │                                               │
+    └─────┼───────────────────────────────────────────────┘
           │
    ┌──────▼───────┐
-   │ MUTATION      │
+   │ MUTATION      │  (only if rubric tests)
    │ CHECK         │
    │               │
    │ Comment out   │
@@ -261,9 +272,12 @@ User writes features.md
 ```
 otto/
 ├── cli.py          CLI commands (add, run, status, retry, logs, diff, show, reset)
+│                   add: --no-rubric skips rubric gen (task runs without adversarial TDD)
+│                   run: --no-integration skips integration gate
 ├── runner.py       Core execution loop, agent orchestration, cost tracking
-│                   ~1400 lines — largest file, handles:
+│                   Handles:
 │                   - Task execution (testgen → coding → verify → merge)
+│                   - Two paths: with rubric (adversarial TDD) or without (code + verify)
 │                   - Attempt loop with retries
 │                   - Tamper detection (git blob SHA)
 │                   - Mutation checks
@@ -279,7 +293,6 @@ otto/
 │                   - _find_relevant_files() — smart file selection
 │                   - get_relevant_file_contents() — full source for coding agent
 │                   - run_testgen_agent() — adversarial testgen in temp dir
-│                   - generate_tests() — fallback (no rubric)
 │                   - generate_integration_tests() — post-run cross-feature
 │                   - validate_generated_tests() — two-phase (collect + TDD)
 │                   - run_mutation_check() — comment out line, check tests catch it
@@ -320,16 +333,19 @@ tests/
 ## Data Flow
 
 ```
-features.md ──→ otto add -f ──→ tasks.yaml
-                    │
-                    ▼
-              Rubric Agent
-              (agentic, reads project)
-                    │
-                    ▼
-              tasks.yaml with rubrics
-                    │
-                    ▼
+features.md ──→ otto add -f ──→ tasks.yaml     "do X" ──→ otto add ──→ tasks.yaml
+                    │                                          │
+                    ▼                                          ▼
+              Markdown Agent                            Rubric Agent
+              (splits into tasks + rubrics)             (writes acceptance criteria)
+                    │                                          │
+                    ▼                                          ▼
+              tasks.yaml with rubrics               tasks.yaml with rubrics
+                    │                                          │
+                    │    ┌─────────────────────────────────────┘
+                    │    │    (--no-rubric → task without rubric
+                    │    │     → skips adversarial TDD)
+                    ▼    ▼
               otto run
                     │
         ┌───────────┼───────────┐
@@ -389,6 +405,7 @@ otto_logs/<key>/
 5. **Pre-impl agents get stubs, post-impl get full source**
 6. **All agents have max_turns limits** — prevents infinite loops
 7. **Rubric gen failure aborts task creation** — no ghost tasks
-8. **git clean only removes otto-created files** — pre-existing untracked files preserved
-9. **Integration gate runs in worktree** — main not mutated until gate passes
-10. **Judge decides test bug vs impl bug** — prevents coding agent from hallucinating workarounds
+8. **`--no-rubric` is respected at run time** — no auto-generation, task runs without adversarial TDD
+9. **git clean only removes otto-created files** — pre-existing untracked files preserved
+10. **Integration gate runs in worktree** — main not mutated until gate passes
+11. **Judge decides test bug vs impl bug** — prevents coding agent from hallucinating workarounds

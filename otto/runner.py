@@ -28,7 +28,7 @@ except ImportError:
 from otto.config import git_meta_dir, detect_test_command
 from otto.display import _truncate_at_word
 from otto.tasks import load_tasks, update_task
-from otto.testgen import generate_tests, detect_test_framework, test_file_path, run_mutation_check
+from otto.testgen import detect_test_framework, test_file_path, run_mutation_check
 from otto.verify import VerifyResult, run_tier1, run_verification, _subprocess_env
 
 
@@ -743,12 +743,7 @@ async def run_task(
                 ["git", "hash-object", str(test_file_path_val)],
                 capture_output=True, text=True,
             ).stdout.strip()
-    else:
-        # No rubric — use old concurrent testgen approach
-        print(f"  {_DIM}Generating adversarial tests...{_RESET}", flush=True)
-        testgen_task = asyncio.create_task(
-            generate_tests(prompt, project_dir, key)
-        )
+    # (No fallback path — all tasks go through adversarial TDD or run with existing tests only)
 
     # Setup log directory
     log_dir = project_dir / "otto_logs" / key
@@ -896,22 +891,6 @@ async def run_task(
                 )
                 continue
 
-            # Await testgen on first attempt (only for non-rubric path)
-            testgen_file = None
-            if not rubric:
-                if attempt == 0:
-                    try:
-                        testgen_file = await asyncio.wait_for(testgen_task, timeout=120)
-                        if testgen_file:
-                            print(f"  {_GREEN}✓{_RESET} {_DIM}Rubric tests ready{_RESET}", flush=True)
-                        else:
-                            print(f"  {_DIM}No rubric tests generated (tier 2 skipped){_RESET}", flush=True)
-                    except (asyncio.TimeoutError, Exception) as e:
-                        _log_warn(f"Testgen failed or timed out: {e}")
-                else:
-                    if testgen_task.done():
-                        testgen_file = testgen_task.result()
-
             # Tamper check: ensure coding agent didn't modify the test file
             if test_file_sha and test_file_path_val:
                 current = subprocess.run(
@@ -939,7 +918,7 @@ async def run_task(
             new_untracked = {f for f in untracked_check.stdout.strip().splitlines() if f} - pre_existing_untracked
             no_changes = diff_check.returncode == 0 and not new_untracked
 
-            if no_changes and not testgen_file and not test_file_path_val:
+            if no_changes and not test_file_path_val:
                 # No code changes and no rubric tests — nothing to commit
                 print(f"  {_DIM}No changes needed{_RESET}", flush=True)
                 subprocess.run(["git", "checkout", default_branch], cwd=project_dir, capture_output=True)
@@ -960,10 +939,10 @@ async def run_task(
                 return True
 
             # Build candidate commit
-            # When rubric tests exist, they're already committed — pass test_commit_sha as base
-            # and testgen_file=None (tests are already in the tree)
+            # Rubric tests are already committed — testgen_file is always None
+            # (old fallback path removed; adversarial tests committed before attempt loop)
             candidate_sha = build_candidate_commit(
-                project_dir, commit_base, testgen_file if not rubric else None,
+                project_dir, commit_base, None,
                 pre_existing_untracked,
             )
 

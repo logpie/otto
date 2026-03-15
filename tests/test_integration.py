@@ -33,29 +33,35 @@ def _make_fake_result(session_id="test-session"):
 
 class TestEndToEnd:
     @patch("otto.runner.ClaudeAgentOptions")
-    @patch("otto.runner.generate_tests", new_callable=AsyncMock)
+    @patch("otto.testgen.validate_generated_tests")
+    @patch("otto.testgen.run_testgen_agent")
+    @patch("otto.testgen.build_blackbox_context")
     @patch("otto.runner.query")
     def test_task_passes_and_merges(
-        self, mock_query, mock_testgen, mock_options_cls, tmp_git_repo
+        self, mock_query, mock_blackbox, mock_testgen_agent,
+        mock_validate, mock_options_cls, tmp_git_repo
     ):
-        """Full flow: add task → run → verify → merge to main."""
-        # Setup: create config, commit it so tree is clean
+        """Full flow: add task with rubric → run → verify → merge to main."""
         create_config(tmp_git_repo)
         _commit_otto_config(tmp_git_repo)
 
         config = load_config(tmp_git_repo / "otto.yaml")
-        config["test_command"] = None  # Skip baseline and tier 1
+        config["test_command"] = "true"  # always-pass — rubric tasks auto-detect pytest if None
         tasks_path = tmp_git_repo / "tasks.yaml"
-        add_task(tasks_path, "Create hello.py that prints hello")
+        add_task(tasks_path, "Create hello.py that prints hello",
+                 rubric=["hello.py exists and prints hello"])
 
-        # Mock agent: simulate creating a file
-        # query() is async generator — mock it as such
+        # Mock testgen to skip (returns no test file)
+        mock_blackbox.return_value = ""
+        async def fake_testgen(*args, **kwargs):
+            return None, []
+        mock_testgen_agent.side_effect = fake_testgen
+
         async def fake_query(*, prompt, options=None):
             (tmp_git_repo / "hello.py").write_text("print('hello')\n")
             yield _make_fake_result("test-session-123")
 
         mock_query.side_effect = fake_query
-        mock_testgen.return_value = None  # Skip testgen
 
         # Run
         exit_code = asyncio.run(run_all(config, tasks_path, tmp_git_repo))
@@ -73,33 +79,36 @@ class TestEndToEnd:
         assert branch == "main"
 
     @patch("otto.runner.ClaudeAgentOptions")
-    @patch("otto.runner.generate_tests", new_callable=AsyncMock)
+    @patch("otto.testgen.validate_generated_tests")
+    @patch("otto.testgen.run_testgen_agent")
+    @patch("otto.testgen.build_blackbox_context")
     @patch("otto.runner.query")
     def test_task_fails_and_reverts(
-        self, mock_query, mock_testgen, mock_options_cls, tmp_git_repo
+        self, mock_query, mock_blackbox, mock_testgen_agent,
+        mock_validate, mock_options_cls, tmp_git_repo
     ):
-        """Task fails verify_cmd → branch deleted, main untouched.
-
-        Uses a per-task verify command ('false') rather than test_command so
-        the global baseline check is skipped (test_command=None).
-        """
-        # Setup: create config, commit it so tree is clean
+        """Task fails verify_cmd → branch deleted, main untouched."""
         create_config(tmp_git_repo)
         _commit_otto_config(tmp_git_repo)
 
         config = load_config(tmp_git_repo / "otto.yaml")
-        config["test_command"] = None  # Skip baseline; no tier-1 test suite
+        config["test_command"] = "true"  # always-pass — rubric tasks auto-detect pytest if None
         config["max_retries"] = 0
         tasks_path = tmp_git_repo / "tasks.yaml"
-        # Per-task verify command that always fails
-        add_task(tasks_path, "Do something that fails verification", verify="false")
+        add_task(tasks_path, "Do something that fails verification",
+                 verify="false", rubric=["it works"])
+
+        # Mock testgen to skip (returns no test file)
+        mock_blackbox.return_value = ""
+        async def fake_testgen(*args, **kwargs):
+            return None, []
+        mock_testgen_agent.side_effect = fake_testgen
 
         async def fake_query(*, prompt, options=None):
             (tmp_git_repo / "bad.py").write_text("broken\n")
             yield _make_fake_result("s1")
 
         mock_query.side_effect = fake_query
-        mock_testgen.return_value = None
 
         exit_code = asyncio.run(run_all(config, tasks_path, tmp_git_repo))
 
@@ -118,17 +127,16 @@ class TestEndToEnd:
 
 class TestRubricEndToEnd:
     @patch("otto.runner.ClaudeAgentOptions")
-    @patch("otto.runner.generate_tests", new_callable=AsyncMock)
     @patch("otto.testgen.validate_generated_tests")
     @patch("otto.testgen.run_testgen_agent")
     @patch("otto.testgen.build_blackbox_context")
     @patch("otto.runner.query")
     def test_rubric_uses_adversarial_testgen(
         self, mock_query, mock_blackbox, mock_testgen_agent,
-        mock_validate, mock_testgen, mock_options_cls, tmp_git_repo,
+        mock_validate, mock_options_cls, tmp_git_repo,
     ):
         """Task with rubric uses adversarial testgen (build_blackbox_context +
-        run_testgen_agent + validate_generated_tests), not generate_tests.
+        run_testgen_agent + validate_generated_tests).
 
         Also verifies the agent prompt includes the acceptance tests instruction.
         """
@@ -174,8 +182,6 @@ class TestRubricEndToEnd:
         mock_validate_result.failed = 1
         mock_validate.return_value = mock_validate_result
 
-        mock_testgen.return_value = None  # Should not be called (non-rubric path)
-
         # Run
         exit_code = asyncio.run(run_all(config, tasks_path, tmp_git_repo))
 
@@ -186,9 +192,6 @@ class TestRubricEndToEnd:
         mock_blackbox.assert_called_once()
         mock_testgen_agent.assert_called_once()
         mock_validate.assert_called_once()
-
-        # generate_tests should NOT be called (non-rubric path)
-        mock_testgen.assert_not_called()
 
         # Agent prompt should include acceptance tests instruction
         assert len(captured_prompts) >= 1
