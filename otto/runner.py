@@ -463,12 +463,19 @@ def _log_warn(msg: str) -> None:
 
 
 def _log_verify(tiers: list) -> None:
-    """Print verification results inline."""
+    """Print verification results inline with test counts."""
+    import re as _re
     for t in tiers:
         if t.skipped:
             continue
         icon = f"{_GREEN}✓{_RESET}" if t.passed else f"{_RED}✗{_RESET}"
-        print(f"  {icon} {t.tier}", flush=True)
+        # Extract test count from output if available
+        count_str = ""
+        if t.output:
+            match = _re.search(r"(\d+) passed", t.output)
+            if match:
+                count_str = f" {_DIM}({match.group(1)} tests){_RESET}"
+        print(f"  {icon} {t.tier}{count_str}", flush=True)
 
 
 _GREEN_DIM = "\033[32;2m"
@@ -716,7 +723,7 @@ async def run_task(
                             print(f"  {_DIM}Tests still pass — keeping as regression tests.{_RESET}", flush=True)
 
             if test_file_path_val and validation.status == "tdd_ok":
-                print(f"  {_GREEN}✓{_RESET} {_DIM}Adversarial tests ready ({validation.failed} failing, {validation.passed} regression){_RESET}", flush=True)
+                print(f"  {_GREEN}✓{_RESET} Adversarial tests ready — {_BOLD}{validation.failed} failing{_RESET}, {_DIM}{validation.passed} regression{_RESET}", flush=True)
 
         # Commit test file if we have one
         if test_file_path_val:
@@ -1044,9 +1051,9 @@ async def run_task(
                         project_dir, test_file_path_val, test_command or "pytest",
                     )
                     if caught:
-                        print(f"  {_GREEN}✓{_RESET} {_DIM}Mutation check: tests caught the intentional break{_RESET}", flush=True)
+                        print(f"  {_GREEN}{_BOLD}✓ Mutation check: caught{_RESET} {_DIM}— {mut_desc}{_RESET}", flush=True)
                     else:
-                        print(f"  {_YELLOW}⚠ Mutation check: tests did NOT catch an intentional break — tests may be weak{_RESET}", flush=True)
+                        print(f"  {_RED}{_BOLD}✗ Mutation check: NOT caught{_RESET} {_DIM}— tests may be weak{_RESET}", flush=True)
                         print(f"    {_DIM}{mut_desc}{_RESET}", flush=True)
                     # Persist mutation check result
                     try:
