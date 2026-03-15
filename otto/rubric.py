@@ -57,12 +57,16 @@ TASK: {prompt}
 
 PROJECT DIRECTORY: {project_dir}
 
-BEFORE writing criteria:
-1. Read at most 3-5 source files most relevant to the task
-2. If there's a CLI, run --help (one command)
-3. Write the criteria — don't explore further
-
-Then write a numbered list of acceptance criteria to: {rubric_file}
+Follow these steps:
+1. Read 3-5 source files most relevant to the task
+2. If there's a CLI, run --help to understand the user experience
+3. Write initial criteria to: {rubric_file}
+4. SELF-REVIEW: Read your criteria back and ask:
+   - Are any criteria about implementation details instead of user behavior? Rewrite them.
+   - Are any criteria trivial (would pass with a broken implementation)? Strengthen them.
+   - Did I miss error handling, edge cases, or anti-patterns? Add them.
+   - Would these criteria actually catch real bugs? If not, improve them.
+5. Write the improved criteria to the same file (overwrite)
 
 Write criteria about BEHAVIOR the user experiences, not implementation details.
 - BAD: "reads a TSV file (label\\ttext per line)" — too prescriptive about format

@@ -449,13 +449,18 @@ Testing quality guidelines:
 - Prefer fewer strong tests over many weak ones.
 - Always include a smoke test: if the project has a CLI, verify `python -m <package> --help` exits 0.
 
-Write the test file, then VALIDATE it before finishing:
+Follow these steps:
 1. Write the test file
-2. Run: python -c "import ast; ast.parse(open('<test_file>').read()); print('SYNTAX OK')"
-3. If syntax error: fix it and re-validate
-4. Run: python -m pytest --collect-only <test_file>
-5. If collection fails (import error, missing fixture): fix and re-validate
-Do NOT finish until both checks pass.
+2. VALIDATE syntax: python -c "import ast; ast.parse(open('<test_file>').read()); print('OK')"
+3. If syntax error: fix and re-validate
+4. VALIDATE collection: python -m pytest --collect-only <test_file>
+5. If collection fails: fix and re-validate
+6. SELF-REVIEW: Read your tests back and ask:
+   - Are any tests trivial (would pass with a broken implementation)? Strengthen them.
+   - Could a lazy implementation (return empty list, hardcoded value) pass? Add tests that catch it.
+   - Do assertions verify actual behavior or just check types/existence? Tighten them.
+7. If you improved tests in step 6, re-run validation (steps 2-5)
+Do NOT finish until validation passes AND self-review is done.
 """
     try:
         # Create tests/ subdirectory in temp dir
@@ -737,13 +742,18 @@ Rules — "test like a user":
 - Do NOT grep source code for strings — test actual behavior
 - The tests should be runnable with the standard test command for {framework}
 
-Write the test file, then VALIDATE it before finishing:
+Follow these steps:
 1. Write the test file
-2. Run: python -c "import ast; ast.parse(open('<test_file>').read()); print('SYNTAX OK')"
-3. If syntax error: fix it and re-validate
-4. Run: python -m pytest --collect-only <test_file>
-5. If collection fails (import error, missing fixture): fix and re-validate
-Do NOT finish until both checks pass."""
+2. VALIDATE syntax: python -c "import ast; ast.parse(open('<test_file>').read()); print('OK')"
+3. If syntax error: fix and re-validate
+4. VALIDATE collection: python -m pytest --collect-only <test_file>
+5. If collection fails: fix and re-validate
+6. SELF-REVIEW: Read your tests back and ask:
+   - Are any tests trivial (would pass with a broken implementation)? Strengthen them.
+   - Could a lazy implementation (return empty list, hardcoded value) pass? Add tests that catch it.
+   - Do assertions verify actual behavior or just check types/existence? Tighten them.
+7. If you improved tests in step 6, re-run validation (steps 2-5)
+Do NOT finish until validation passes AND self-review is done."""
 
     try:
         agent_opts = ClaudeAgentOptions(
@@ -857,13 +867,18 @@ Rules — "test like a user":
 - Tests must be hermetic and deterministic — no external network calls
 - The tests should be runnable with the standard test command for {framework}
 
-Write the test file, then VALIDATE it before finishing:
+Follow these steps:
 1. Write the test file
-2. Run: python -c "import ast; ast.parse(open('<test_file>').read()); print('SYNTAX OK')"
-3. If syntax error: fix it and re-validate
-4. Run: python -m pytest --collect-only <test_file>
-5. If collection fails (import error, missing fixture): fix and re-validate
-Do NOT finish until both checks pass."""
+2. VALIDATE syntax: python -c "import ast; ast.parse(open('<test_file>').read()); print('OK')"
+3. If syntax error: fix and re-validate
+4. VALIDATE collection: python -m pytest --collect-only <test_file>
+5. If collection fails: fix and re-validate
+6. SELF-REVIEW: Read your tests back and ask:
+   - Are any tests trivial (would pass with a broken implementation)? Strengthen them.
+   - Could a lazy implementation (return empty list, hardcoded value) pass? Add tests that catch it.
+   - Do assertions verify actual behavior or just check types/existence? Tighten them.
+7. If you improved tests in step 6, re-run validation (steps 2-5)
+Do NOT finish until validation passes AND self-review is done."""
 
     try:
         agent_opts = ClaudeAgentOptions(
