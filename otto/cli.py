@@ -254,11 +254,13 @@ def status():
         click.echo(f"{_D}No tasks found. Use 'otto add' to create one.{_0}")
         return
 
-    click.echo(f"{_B}{'ID':>4}  {'Status':10}  {'Att':>3}  {'Rubric':>6}  Prompt{_0}")
-    click.echo(f"{_D}{'─' * 70}{_0}")
+    click.echo(f"{_B}{'ID':>4}  {'Status':10}  {'Att':>3}  {'Rubric':>6}  {'Cost':>7}  Prompt{_0}")
+    click.echo(f"{_D}{'─' * 80}{_0}")
     for t in tasks:
         status_str = t.get("status", "?")
         rubric_count = len(t.get("rubric", []))
+        cost = t.get("cost_usd", 0.0)
+        cost_str = f"${cost:.2f}" if cost else ""
         # Color status
         if status_str == "passed":
             status_styled = f"{_G}{status_str:10}{_0}"
@@ -270,7 +272,7 @@ def status():
             status_styled = f"{_D}{status_str:10}{_0}"
         click.echo(
             f"{t.get('id', '?'):>4}  {status_styled}  {t.get('attempts', 0):>3}  "
-            f"{rubric_count:>6}  {t['prompt'][:70]}"
+            f"{rubric_count:>6}  {cost_str:>7}  {t['prompt'][:60]}"
         )
 
 
@@ -361,6 +363,9 @@ def show(task_id):
             click.echo(f"{_B}Task #{task_id}{_0}  {_D}({t.get('key', '?')}){_0}")
             click.echo(f"  {_D}Status:{_0}   {t.get('status', '?')}")
             click.echo(f"  {_D}Attempts:{_0} {t.get('attempts', 0)}")
+            cost = t.get("cost_usd", 0.0)
+            if cost:
+                click.echo(f"  {_D}Cost:{_0}     ${cost:.2f}")
             click.echo(f"\n  {_D}Prompt:{_0}")
             click.echo(f"  {t['prompt']}")
             rubric = t.get("rubric", [])

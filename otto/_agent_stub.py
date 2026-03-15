@@ -18,6 +18,8 @@ class ResultMessage:
     is_error: bool = False
     session_id: str = ""
     result: str | None = None
+    total_cost_usd: float | None = None
+    usage: dict[str, Any] | None = None
 
 
 async def query(*, prompt: str, options: ClaudeAgentOptions | None = None):

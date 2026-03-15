@@ -237,3 +237,27 @@ class TestStatusRubric:
         assert result.exit_code == 0
         # Should show rubric count column
         assert "Rubric" in result.output
+
+
+class TestStatusCost:
+    def test_shows_cost(self, runner, tmp_git_repo, monkeypatch):
+        monkeypatch.chdir(tmp_git_repo)
+        from otto.tasks import add_task, load_tasks, update_task
+        add_task(tmp_git_repo / "tasks.yaml", "Task with cost")
+        tasks = load_tasks(tmp_git_repo / "tasks.yaml")
+        update_task(tmp_git_repo / "tasks.yaml",
+                    tasks[0]["key"],
+                    cost_usd=0.15)
+        result = runner.invoke(main, ["status"])
+        assert "$0.15" in result.output
+
+    def test_shows_cost_in_show(self, runner, tmp_git_repo, monkeypatch):
+        monkeypatch.chdir(tmp_git_repo)
+        from otto.tasks import add_task, load_tasks, update_task
+        add_task(tmp_git_repo / "tasks.yaml", "Task with cost")
+        tasks = load_tasks(tmp_git_repo / "tasks.yaml")
+        update_task(tmp_git_repo / "tasks.yaml",
+                    tasks[0]["key"],
+                    cost_usd=0.42)
+        result = runner.invoke(main, ["show", "1"])
+        assert "$0.42" in result.output

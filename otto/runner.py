@@ -262,6 +262,7 @@ def _cleanup_task_failure(
     tasks_file: Path | None,
     error: str = "unknown",
     error_code: str = "unknown",
+    cost_usd: float = 0.0,
 ) -> None:
     """Unified cleanup for all task failure paths: retries exhausted, interruption, exceptions."""
     subprocess.run(["git", "reset", "--hard"], cwd=project_dir, capture_output=True)
@@ -277,10 +278,12 @@ def _cleanup_task_failure(
         shutil.rmtree(testgen_dir, ignore_errors=True)
     if tasks_file:
         try:
-            update_task(
-                tasks_file, key,
-                status="failed", error=error, error_code=error_code,
-            )
+            updates: dict[str, Any] = {
+                "status": "failed", "error": error, "error_code": error_code,
+            }
+            if cost_usd > 0:
+                updates["cost_usd"] = cost_usd
+            update_task(tasks_file, key, **updates)
         except Exception:
             pass
 
@@ -316,14 +319,22 @@ def _format_duration(seconds: float) -> str:
     return f"{minutes}m{secs}s"
 
 
-def _log_pass(task_id: int, branch: str, duration: float | None = None) -> None:
-    dur = f" in {_format_duration(duration)}" if duration else ""
-    print(f"\n  {_GREEN}{_BOLD}✓ Task #{task_id} PASSED{_RESET} {_DIM}— merged to {branch}{dur}{_RESET}", flush=True)
+def _format_cost(cost: float) -> str:
+    if cost < 0.01:
+        return f"${cost:.4f}"
+    return f"${cost:.2f}"
 
 
-def _log_fail(task_id: int, reason: str, duration: float | None = None) -> None:
+def _log_pass(task_id: int, branch: str, duration: float | None = None, cost: float = 0.0) -> None:
     dur = f" in {_format_duration(duration)}" if duration else ""
-    print(f"\n  {_RED}{_BOLD}✗ Task #{task_id} FAILED{_RESET} {_DIM}— {reason}{dur}{_RESET}", flush=True)
+    cost_str = f" ({_format_cost(cost)})" if cost > 0 else ""
+    print(f"\n  {_GREEN}{_BOLD}✓ Task #{task_id} PASSED{_RESET} {_DIM}— merged to {branch}{dur}{cost_str}{_RESET}", flush=True)
+
+
+def _log_fail(task_id: int, reason: str, duration: float | None = None, cost: float = 0.0) -> None:
+    dur = f" in {_format_duration(duration)}" if duration else ""
+    cost_str = f" ({_format_cost(cost)})" if cost > 0 else ""
+    print(f"\n  {_RED}{_BOLD}✗ Task #{task_id} FAILED{_RESET} {_DIM}— {reason}{dur}{cost_str}{_RESET}", flush=True)
 
 
 def _log_warn(msg: str) -> None:
@@ -553,6 +564,7 @@ async def run_task(
 
     session_id = None
     last_error = None  # verification failure output for retry feedback
+    total_cost = 0.0  # accumulated cost across retries
     for attempt in range(max_retries + 1):
         attempt_num = attempt + 1
         print(f"\n  {_DIM}attempt {attempt_num}/{max_retries + 1}{_RESET}", flush=True)
@@ -637,6 +649,11 @@ async def run_task(
                     if tasks_file:
                         update_task(tasks_file, key, session_id=session_id)
 
+                # Extract cost from result
+                raw_cost = getattr(result_msg, "total_cost_usd", None)
+                attempt_cost = float(raw_cost) if isinstance(raw_cost, (int, float)) else 0.0
+                total_cost += attempt_cost
+
                 # Check if agent reported an error
                 if result_msg and result_msg.is_error:
                     raise RuntimeError(f"Agent error: {result_msg.result or 'unknown'}")
@@ -704,8 +721,11 @@ async def run_task(
                 subprocess.run(["git", "checkout", default_branch], cwd=project_dir, capture_output=True)
                 cleanup_branch(project_dir, key, default_branch)
                 if tasks_file:
-                    update_task(tasks_file, key, status="passed")
-                _log_pass(task_id, default_branch, time.monotonic() - task_start)
+                    updates = {"status": "passed"}
+                    if total_cost > 0:
+                        updates["cost_usd"] = total_cost
+                    update_task(tasks_file, key, **updates)
+                _log_pass(task_id, default_branch, time.monotonic() - task_start, cost=total_cost)
                 return True
 
             # Build candidate commit
@@ -727,10 +747,11 @@ async def run_task(
 
         except Exception as e:
             # Unexpected error during agent/candidate/verify phases — safe to clean up
-            _log_fail(task_id, f"unexpected error: {e}", time.monotonic() - task_start)
+            _log_fail(task_id, f"unexpected error: {e}", time.monotonic() - task_start, cost=total_cost)
             _cleanup_task_failure(
                 project_dir, key, default_branch, tasks_file,
                 error=f"unexpected error: {e}", error_code="internal_error",
+                cost_usd=total_cost,
             )
             return False
 
@@ -779,10 +800,11 @@ async def run_task(
                 )
             except (subprocess.CalledProcessError, Exception) as e:
                 stderr = getattr(e, "stderr", str(e))
-                _log_fail(task_id, f"squash commit failed: {stderr}", time.monotonic() - task_start)
+                _log_fail(task_id, f"squash commit failed: {stderr}", time.monotonic() - task_start, cost=total_cost)
                 _cleanup_task_failure(
                     project_dir, key, default_branch, tasks_file,
                     error=f"squash commit failed: {stderr}", error_code="internal_error",
+                    cost_usd=total_cost,
                 )
                 return False
             # Merge to default — post-merge bookkeeping errors are non-destructive
@@ -791,20 +813,26 @@ async def run_task(
                 if testgen_dir.exists():
                     shutil.rmtree(testgen_dir, ignore_errors=True)
                 if tasks_file:
-                    update_task(tasks_file, key, status="passed")
-                _log_pass(task_id, default_branch, time.monotonic() - task_start)
+                    updates = {"status": "passed"}
+                    if total_cost > 0:
+                        updates["cost_usd"] = total_cost
+                    update_task(tasks_file, key, **updates)
+                _log_pass(task_id, default_branch, time.monotonic() - task_start, cost=total_cost)
                 return True
             else:
                 testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / key
                 if testgen_dir.exists():
                     shutil.rmtree(testgen_dir, ignore_errors=True)
                 if tasks_file:
-                    update_task(
-                        tasks_file, key, status="failed",
-                        error=f"branch diverged — otto/{key} preserved, manual rebase needed",
-                        error_code="merge_diverged",
-                    )
-                _log_fail(task_id, f"branch diverged — otto/{key} preserved, manual rebase needed", time.monotonic() - task_start)
+                    updates: dict[str, Any] = {
+                        "status": "failed",
+                        "error": f"branch diverged — otto/{key} preserved, manual rebase needed",
+                        "error_code": "merge_diverged",
+                    }
+                    if total_cost > 0:
+                        updates["cost_usd"] = total_cost
+                    update_task(tasks_file, key, **updates)
+                _log_fail(task_id, f"branch diverged — otto/{key} preserved, manual rebase needed", time.monotonic() - task_start, cost=total_cost)
                 return False
         else:
             # Verification failed — unwind candidate commit for retry
@@ -819,8 +847,9 @@ async def run_task(
     _cleanup_task_failure(
         project_dir, key, default_branch, tasks_file,
         error="max retries exhausted", error_code="max_retries",
+        cost_usd=total_cost,
     )
-    _log_fail(task_id, "all retries exhausted", time.monotonic() - task_start)
+    _log_fail(task_id, "all retries exhausted", time.monotonic() - task_start, cost=total_cost)
     return False
 
 
@@ -944,14 +973,15 @@ async def _run_integration_gate(
     return False
 
 
-def _print_summary(results: list[tuple[dict, bool]], total_duration: float, integration_passed: bool | None = None) -> None:
+def _print_summary(results: list[tuple[dict, bool]], total_duration: float, integration_passed: bool | None = None, total_cost: float = 0.0) -> None:
     """Print summary of all tasks after a run."""
     passed = sum(1 for _, s in results if s)
     failed = len(results) - passed
 
+    cost_str = f"  {_format_cost(total_cost)}" if total_cost > 0 else ""
     print(flush=True)
     print(f"{_BOLD}{'━' * 60}{_RESET}", flush=True)
-    print(f"{_BOLD}  Run complete{_RESET}  {_DIM}{_format_duration(total_duration)}{_RESET}", flush=True)
+    print(f"{_BOLD}  Run complete{_RESET}  {_DIM}{_format_duration(total_duration)}{cost_str}{_RESET}", flush=True)
     print(f"{_BOLD}{'━' * 60}{_RESET}", flush=True)
 
     for task, success in results:
@@ -1063,8 +1093,16 @@ async def run_all(
                 passed_tasks, config, project_dir,
             )
 
+        # Calculate total cost from task records
+        run_total_cost = 0.0
+        final_tasks = load_tasks(tasks_file)
+        task_keys_in_run = {t["key"] for t, _ in results}
+        for t in final_tasks:
+            if t.get("key") in task_keys_in_run:
+                run_total_cost += t.get("cost_usd", 0.0)
+
         # Print run summary
-        _print_summary(results, time.monotonic() - run_start, integration_result)
+        _print_summary(results, time.monotonic() - run_start, integration_result, total_cost=run_total_cost)
 
         any_failed = any(not s for _, s in results)
         if integration_result is False:
