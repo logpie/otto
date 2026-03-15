@@ -7,11 +7,7 @@
 - [x] **Test generation retry**: Retries with error feedback when validation fails.
 - [x] **Rubric count scaling**: Rubric count scales with task complexity (3-5 simple, 6-10 medium, 10-12 complex).
 - [x] **Test quality guidelines**: No trivial tests, bundle shared setup, use parametrize, smoke tests for CLIs.
-- [ ] **Smarter context gathering**: Current `_gather_project_context` reads up to 5 random files/100 lines; misses the relevant ones and bloats prompts causing timeouts. Multiple signals to combine:
-  - **Agent-touched files**: Capture Read/Edit/Write paths from the ToolUseBlock stream during the agent run.
-  - **Import graph**: Follow imports from touched files via AST parsing.
-  - **Test infrastructure**: Always include `conftest.py`, test fixtures, `__init__.py` in test dirs.
-  - **Git diff**: After the agent runs, `git diff --name-only` gives exactly which files changed.
+- [x] **Smarter context gathering**: AST-based symbol index + import graph selects relevant files for large projects. 86% context reduction on 153-file project (40K→6K tokens). Task prompt + rubric keywords matched against symbol names with substring matching + import graph traversal.
 - [ ] **Framework-specific test patterns**: Provide framework-specific examples (pytest fixtures, jest patterns, etc.).
 - [ ] **Test deduplication**: When rubric tests overlap with existing project tests, detect and skip duplicates.
 
