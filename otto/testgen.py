@@ -906,10 +906,10 @@ def generate_integration_tests(
     Takes ALL passed tasks and generates tests that exercise features
     working together — multi-step workflows crossing task boundaries.
     """
-    from otto.rubric import _gather_project_context
-
     framework = detect_test_framework(project_dir) or "pytest"
-    context = _gather_project_context(project_dir)
+    # Build task hint from all task prompts for smart file selection
+    all_prompts = " ".join(t.get("prompt", "") for t in tasks)
+    context = build_blackbox_context(project_dir, task_hint=all_prompts)
     existing_tests = _read_existing_tests(project_dir)
 
     task_sections = []
