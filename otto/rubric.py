@@ -125,17 +125,22 @@ PROJECT CONTEXT:
 
 TASK: {prompt}
 
+IMPORTANT: Write criteria about BEHAVIOR the user experiences, not implementation details.
+- BAD: "reads a TSV file (label\\ttext per line)" — too prescriptive about format
+- GOOD: "accepts a file with labeled examples and trains successfully" — describes behavior
+- BAD: "uses Laplace smoothing with alpha=1" — implementation detail
+- GOOD: "handles words not seen during training without crashing" — describes behavior
+
 Include ALL of these categories:
-- Happy path: the feature works as described
-- Error handling: invalid inputs, missing data, edge cases produce clear errors (not crashes or silent failures)
-- Negative/anti-pattern: things that must NOT happen (e.g., "delete does NOT affect other records",
-  "search does NOT return unrelated results", "invalid input does NOT silently succeed")
-- Edge cases: empty inputs, boundary values, special characters, zero/null cases
+- Happy path: the feature works as described for a real user
+- Error handling: what happens when the user provides wrong/missing/malformed input?
+- Negative/anti-pattern: things that must NOT happen ("does NOT crash", "does NOT corrupt data",
+  "does NOT return wrong results")
+- Edge cases: empty inputs, boundary values, special characters, zero/null, unicode
+- Real-world usage: how would a user actually use this? What would they try that might break?
 
 If this task MODIFIES existing functionality (not a brand new feature):
 - Include regression criteria: verify that existing behavior is preserved after the change
-- Example: "existing search still works after adding tags", "delete still works after adding favorites"
-- These protect against the change breaking something that already works
 
 Scale the number of criteria to the task's complexity:
 - Simple tasks (typo fix, rename, config change): 3-5 criteria

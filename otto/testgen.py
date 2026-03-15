@@ -226,12 +226,21 @@ PROJECT CONTEXT (public interface only):
 Your working directory is: {tmp_dir}
 Write the test file to: {tmp_dir}/{test_rel}
 
+BEFORE writing any tests:
+1. Read the existing test files in the project to understand import patterns, fixtures, and style.
+2. Read the public API stubs above carefully — understand what functions/classes exist.
+3. Think about what a REAL USER would do with this feature and what could go wrong.
+Only THEN write the test file.
+
 Your tests MUST:
 - Test the public interface only (CLI via subprocess, library via imports)
 - Be designed to FAIL on the current codebase (the feature doesn't exist yet)
 - Be independent and hermetic (use tmp_path, no shared state)
 - Use subprocess.run() for CLI testing, not CliRunner
 - Include negative tests (what should NOT happen)
+- Test the FULL user workflow, not just individual functions — e.g., if there's a "train"
+  and "classify" command, test the complete pipeline: create data file → train → classify → verify output
+- Test data persistence: if the feature saves/loads state, verify the roundtrip works
 
 Testing quality guidelines:
 - NO trivial tests (assert exists, assert type, assert True). Every test must verify behavior that could break.
@@ -240,7 +249,6 @@ Testing quality guidelines:
 - Split tests when a failure would be ambiguous — each test should pinpoint one broken behavior.
 - Prefer fewer strong tests over many weak ones.
 - Always include a smoke test: if the project has a CLI, verify `python -m <package> --help` exits 0.
-  This catches broken imports, missing __main__.py, and circular dependencies.
 
 Write the test file now. Do NOT explain — just write the file.
 """
@@ -791,7 +799,13 @@ Focus on:
 
 Do NOT re-test individual features — those are already covered by per-task tests.
 Test ONLY cross-feature interactions and multi-step workflows.
-Include a smoke test: run --help or a basic command to verify the app still works with all features present.
+
+Include:
+- A smoke test: run --help or a basic command to verify the app works with all features present.
+- Full CLI-to-CLI pipelines: if one command produces output another consumes, test the pipeline
+  end-to-end via subprocess (e.g., train a model → classify text → verify result).
+- Data persistence across features: if feature A saves state, verify feature B can read it.
+- Real user scenarios: what would a user actually do in a single session? Simulate that.
 
 Rules — "test like a user":
 - CLI apps: use subprocess.run() to invoke the actual command. Check stdout, stderr, exit codes.
