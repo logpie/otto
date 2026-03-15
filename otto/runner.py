@@ -34,12 +34,10 @@ from otto.verify import run_verification, _subprocess_env
 def check_clean_tree(project_dir: Path) -> bool:
     """Check that tracked files have no uncommitted changes.
 
-    Only checks tracked files — untracked files are fine (the agent may need
-    to coexist with user files like import configs, scratch notes, etc.).
-    Otto runtime files (tasks.yaml, .tasks.lock) are also ignored since otto
-    modifies them during runs.
+    Only checks tracked files — untracked files are fine.
+    Otto runtime files (tasks.yaml, .tasks.lock) are ignored.
+    If the tree is dirty with non-otto changes, auto-stash them.
     """
-    # -uno: suppress untracked files entirely
     result = subprocess.run(
         ["git", "status", "--porcelain", "-uno"],
         cwd=project_dir,
@@ -48,14 +46,30 @@ def check_clean_tree(project_dir: Path) -> bool:
     )
     if result.returncode != 0:
         return False
+
     otto_runtime = {"tasks.yaml", ".tasks.lock"}
+    has_non_otto_changes = False
     for line in result.stdout.strip().splitlines():
         parts = line.split(maxsplit=1)
         if len(parts) < 2:
-            return False
+            has_non_otto_changes = True
+            break
         filename = parts[1].strip('"')
         if filename not in otto_runtime:
-            return False
+            has_non_otto_changes = True
+            break
+
+    if has_non_otto_changes:
+        # Auto-stash non-otto changes so we can proceed
+        stash = subprocess.run(
+            ["git", "stash", "push", "-m", "otto: auto-stash before run"],
+            cwd=project_dir, capture_output=True, text=True,
+        )
+        if stash.returncode == 0 and "No local changes" not in stash.stdout:
+            print(f"  {_DIM}Auto-stashed uncommitted changes{_RESET}", flush=True)
+            return True
+        return False
+
     return True
 
 
@@ -1057,6 +1071,15 @@ async def run_all(
         return 1 if any_failed else 0
 
     finally:
+        # Restore auto-stashed changes if any
+        stash_list = subprocess.run(
+            ["git", "stash", "list"],
+            cwd=project_dir, capture_output=True, text=True,
+        )
+        if stash_list.returncode == 0 and "otto: auto-stash before run" in stash_list.stdout:
+            subprocess.run(["git", "stash", "pop"], cwd=project_dir, capture_output=True)
+            print(f"  {_DIM}Restored auto-stashed changes{_RESET}", flush=True)
+
         signal.signal(signal.SIGINT, old_sigint)
         signal.signal(signal.SIGTERM, old_sigterm)
         fcntl.flock(lock_fh, fcntl.LOCK_UN)
