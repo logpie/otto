@@ -465,6 +465,7 @@ def _log_warn(msg: str) -> None:
 def _log_verify(tiers: list) -> None:
     """Print verification results inline with test counts."""
     import re as _re
+    print(f"\n  {_DIM}{'─' * 50}{_RESET}", flush=True)
     for t in tiers:
         if t.skipped:
             continue
@@ -723,7 +724,9 @@ async def run_task(
                             print(f"  {_DIM}Tests still pass — keeping as regression tests.{_RESET}", flush=True)
 
             if test_file_path_val and validation.status == "tdd_ok":
+                print(f"\n  {_DIM}{'─' * 50}{_RESET}", flush=True)
                 print(f"  {_GREEN}✓{_RESET} Adversarial tests ready — {_BOLD}{validation.failed} failing{_RESET}, {_DIM}{validation.passed} regression{_RESET}", flush=True)
+                print(f"  {_DIM}{'─' * 50}{_RESET}", flush=True)
 
         # Commit test file if we have one
         if test_file_path_val:
@@ -1044,7 +1047,8 @@ async def run_task(
                     cost_usd=total_cost,
                 )
                 return False
-            # Mutation check — validate test quality (informational only)
+            # Mutation check — validate test quality
+            print(flush=True)
             if test_file_path_val:
                 try:
                     caught, mut_desc = run_mutation_check(
