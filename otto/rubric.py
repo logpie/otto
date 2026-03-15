@@ -57,11 +57,10 @@ TASK: {prompt}
 
 PROJECT DIRECTORY: {project_dir}
 
-BEFORE writing any criteria:
-1. Explore the project — read source files, understand the architecture
-2. If there's a CLI, run --help to see existing commands and how they work
-3. Check existing tests to understand what's already covered
-4. Think about how a real user would use this feature
+BEFORE writing criteria:
+1. Read at most 3-5 source files most relevant to the task
+2. If there's a CLI, run --help (one command)
+3. Write the criteria — don't explore further
 
 Then write a numbered list of acceptance criteria to: {rubric_file}
 
@@ -90,7 +89,7 @@ Write ONLY a numbered list to {rubric_file}. One criterion per line. No prose.""
         agent_opts = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
             cwd=str(project_dir),
-            max_turns=20,
+            max_turns=10,
         )
 
         async for message in query(prompt=agent_prompt, options=agent_opts):
@@ -146,10 +145,9 @@ DOCUMENT:
 PROJECT DIRECTORY: {project_dir}
 
 BEFORE writing tasks:
-1. Explore the project — read source files, understand the architecture and existing code
-2. If there's a CLI, run --help to see existing commands
-3. Check existing tests to understand patterns
-4. Understand what already exists vs what needs to be built
+1. Read at most 3-5 source files most relevant to the document
+2. If there's a CLI, run --help (one command)
+3. Write the tasks — don't explore further
 
 Then write a JSON array to: {output_file}
 
@@ -173,7 +171,7 @@ Example: [{{"prompt": "Add search", "rubric": ["search works", "case-insensitive
         agent_opts = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
             cwd=str(project_dir),
-            max_turns=20,
+            max_turns=10,
         )
 
         async for message in query(prompt=agent_prompt, options=agent_opts):

@@ -805,7 +805,7 @@ async def run_task(
                 agent_opts = ClaudeAgentOptions(
                     permission_mode="bypassPermissions",
                     cwd=str(project_dir),
-                    max_turns=30,  # prevent infinite loops
+                    max_turns=20,  # prevent infinite loops
                 )
                 if config.get("model"):
                     agent_opts.model = config["model"]
@@ -1229,7 +1229,7 @@ async def _run_integration_gate(
                 agent_opts = ClaudeAgentOptions(
                     permission_mode="bypassPermissions",
                     cwd=str(fix_worktree),
-                    max_turns=20,
+                    max_turns=15,
                 )
                 if config.get("model"):
                     agent_opts.model = config["model"]

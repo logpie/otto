@@ -416,7 +416,7 @@ Do NOT finish until both checks pass.
         agent_opts = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
             cwd=tmp_dir,
-            max_turns=20,
+            max_turns=15,
         )
 
         # Stream agent messages
@@ -701,7 +701,7 @@ Do NOT finish until both checks pass."""
         agent_opts = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
             cwd=str(project_dir),
-            max_turns=20,
+            max_turns=15,
         )
 
         async for message in query(prompt=prompt, options=agent_opts):
@@ -821,7 +821,7 @@ Do NOT finish until both checks pass."""
         agent_opts = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
             cwd=str(project_dir),
-            max_turns=20,
+            max_turns=15,
         )
 
         async for message in query(prompt=prompt, options=agent_opts):
