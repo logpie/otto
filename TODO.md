@@ -4,46 +4,45 @@
 
 - [x] **"Test like a user" principle**: Generated tests now use subprocess for CLIs, public API for libraries. No more CliRunner.
 - [x] **Anti-pattern rubrics**: Rubric generation now requires happy path, error handling, negative ("does NOT"), and edge case categories.
-- [x] **Test generation retry**: Single retry with error feedback when validation fails.
+- [x] **Test generation retry**: Retries with error feedback when validation fails.
+- [x] **Rubric count scaling**: Rubric count scales with task complexity (3-5 simple, 6-10 medium, 10-12 complex).
+- [x] **Test quality guidelines**: No trivial tests, bundle shared setup, use parametrize, smoke tests for CLIs.
 - [ ] **Smarter context gathering**: Current `_gather_project_context` reads up to 5 random files/100 lines; misses the relevant ones and bloats prompts causing timeouts. Multiple signals to combine:
-  - **Agent-touched files**: Capture Read/Edit/Write paths from the ToolUseBlock stream during the agent run. These are the files the agent found relevant.
-  - **Import graph**: Follow imports from touched files (e.g., if agent edited `cli.py` which imports from `store.py`, include `store.py`). Can use AST `import` parsing or simple regex — no need for full LSP.
-  - **Test infrastructure**: Always include `conftest.py`, test fixtures, `__init__.py` in test dirs — the LLM needs these to generate compatible tests.
-  - **Git diff**: After the agent runs, `git diff --name-only` gives exactly which files changed. Combined with `git diff` content, this is the most precise signal.
-  - **Fallback**: For integration tests (no single agent run), use the union of all task diffs + their import graphs.
-  - Consider: LSP could give precise type info and call graphs, but adds a heavy dependency. Start with import-graph parsing + git diff, escalate to LSP only if needed.
-- [ ] **Framework-specific test patterns**: Provide framework-specific examples (pytest fixtures with tmp_path, jest mocking patterns, etc.) for higher quality output.
-- [ ] **Test deduplication**: When rubric tests overlap with existing project tests, detect and skip duplicates instead of testing the same thing twice.
-- [ ] **Rubric count tuning**: 22 rubrics for one task is too many — testgen times out. Cap at 8-10 criteria, prioritize the most important ones.
+  - **Agent-touched files**: Capture Read/Edit/Write paths from the ToolUseBlock stream during the agent run.
+  - **Import graph**: Follow imports from touched files via AST parsing.
+  - **Test infrastructure**: Always include `conftest.py`, test fixtures, `__init__.py` in test dirs.
+  - **Git diff**: After the agent runs, `git diff --name-only` gives exactly which files changed.
+- [ ] **Framework-specific test patterns**: Provide framework-specific examples (pytest fixtures, jest patterns, etc.).
+- [ ] **Test deduplication**: When rubric tests overlap with existing project tests, detect and skip duplicates.
 
 ## Adversarial Testing
 
-- [x] **Anti-pattern tests**: Rubric prompt now explicitly asks for "does NOT" / "must NOT" criteria.
-- [x] **Adversarial testgen agent**: Full Agent SDK testgen that writes black-box TDD tests from rubric BEFORE the coding agent runs. Mechanical isolation (temp dir, AST stubs only). Two-phase validation. Tamper detection.
-- [ ] **Regression-style rubrics**: When a task modifies existing code, auto-generate rubric items that verify existing behavior is preserved — not just that new behavior works. "Search still works after adding tags" type checks.
-- [ ] **Security anti-patterns**: For tasks involving user input, file paths, or external data, generate tests that verify common vulnerabilities don't exist — injection, path traversal, unescaped output, etc.
-- [ ] **Mutation-style checks**: After the agent implements a feature, intentionally break a key line and verify the tests catch it. If they don't, the tests are too weak.
+- [x] **Anti-pattern tests**: Rubric prompt explicitly asks for "does NOT" / "must NOT" criteria.
+- [x] **Adversarial testgen agent**: Full Agent SDK testgen that writes black-box TDD tests from rubric BEFORE coding agent. Mechanical isolation (temp dir, AST stubs). Two-phase validation. Tamper detection.
+- [x] **Regression-style rubrics**: Rubric generation includes "existing X still works after adding Y" criteria.
+- [ ] **Security anti-patterns**: Generate tests that verify common vulnerabilities don't exist — injection, path traversal, unescaped output.
+- [ ] **Mutation-style checks**: Intentionally break a key line and verify the tests catch it. If they don't, tests are too weak.
 
 ## Integration Testing
 
-- [ ] **Post-run integration tests**: After ALL tasks complete (not per-task), generate one final test file that exercises features working together. Run it as a final gate before the run summary. E.g., "import bookmarks from JSON, search them, favorite one, export as HTML — verify the exported HTML includes the favorited imported bookmark."
-- [ ] **Cross-task regression gate**: Before marking a task as passed, run ALL existing tests (already done via tier 1). But also: after the full run completes, run the entire test suite one more time as a final sanity check — catches interactions that individual task verification missed.
-- [ ] **State interaction tests**: Generate tests that exercise multi-step workflows — e.g., "add → favorite → delete → verify favorites count updated", "import → search → export → verify roundtrip."
-- [ ] **Environment tests**: Verify the project works in a clean environment — fresh install, no cached state, no leftover files. Catches implicit dependencies.
+- [x] **Post-run integration tests**: Integration gate generates cross-feature tests after 2+ tasks pass. Agent fixes failures.
+- [ ] **Cross-task regression gate**: After full run, run entire test suite one more time as final sanity check.
+- [ ] **Environment tests**: Verify project works in a clean environment — fresh install, no cached state.
 
 ## Observability
 
-- [x] **Live agent streaming**: Agent messages stream to stdout in real time with styled formatting.
-- [x] **Agent session logs**: Full conversation persisted to `otto_logs/<key>/attempt-N-agent.log`.
-- [x] **Timing**: Wall-clock time shown per task and for the full run.
-- [ ] **Cost tracking**: Log token usage and cost per task from `ResultMessage.total_cost_usd` and `ResultMessage.usage`. Show in `otto status` or `otto logs`.
-- [ ] **Test coverage delta**: After each task, measure test coverage change. Did the new tests actually cover the new code? Warns if coverage didn't increase.
-- [ ] **`--quiet` mode**: Suppress agent streaming for CI/background use. Only show task pass/fail and summary.
+- [x] **Live agent streaming**: Agent messages stream to stdout with styled ANSI formatting.
+- [x] **Agent session logs**: Coding agent logs persisted to `otto_logs/<key>/attempt-N-agent.log`.
+- [x] **Testgen agent logs**: Testgen agent logs persisted to `otto_logs/<key>/testgen-agent.log`.
+- [x] **Timing**: Wall-clock time per task and full run.
+- [ ] **Cost tracking**: Log token usage and cost per task from `ResultMessage.total_cost_usd`. Show in `otto status`.
+- [ ] **Test coverage delta**: Measure test coverage change per task. Warn if coverage didn't increase.
+- [ ] **`--quiet` mode**: Suppress agent streaming for CI/background use.
 
 ## UX
 
-- [ ] **`otto diff <id>`**: Show the git diff for a specific task's commit. Shorthand for finding the right SHA.
-- [ ] **`otto show <id>`**: Show task details — prompt, rubrics, status, attempts, feedback, log snippets.
-- [ ] **Parallel tasks**: Run independent tasks concurrently on separate branches. Merge sequentially. Would need dependency detection or user annotation.
-- [ ] **Watch mode**: `otto watch` re-runs on file changes (like `features.md` edits). Auto-imports and runs.
-- [ ] **Progress bar**: Show overall progress (3/5 tasks) and per-task progress (agent working / verifying / merging).
+- [x] **`otto diff <id>`**: Show git diff for a task's commit.
+- [x] **`otto show <id>`**: Show task details — prompt, rubrics, status, commit, test file, logs.
+- [ ] **Parallel tasks**: Run independent tasks concurrently on separate branches.
+- [ ] **Watch mode**: `otto watch` re-runs on file changes.
+- [ ] **Progress bar**: Overall progress (3/5 tasks) and per-task progress.
