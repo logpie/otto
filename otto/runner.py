@@ -738,7 +738,13 @@ async def run_task(
         if test_file_path_val:
             agent_prompt += (
                 f"\n\nACCEPTANCE TESTS: {test_file_path_val.relative_to(project_dir)} contains tests you must pass. "
-                f"Do NOT modify this file — these are adversarial tests you must satisfy."
+                f"Do NOT modify this file — these are adversarial tests you must satisfy.\n\n"
+                f"IMPORTANT: Implement ONLY what the task description asks for. "
+                f"If a test seems to require functionality beyond the spec (e.g., a non-standard "
+                f"algorithm extension), implement the STANDARD behavior and let that test fail. "
+                f"Do NOT invent non-standard features, workarounds, or hacks to pass a suspicious test. "
+                f"A correct standard implementation that fails one questionable test is better than "
+                f"a corrupted implementation that passes all tests."
             )
 
         # Run agent + build candidate + verify — catch infrastructure failures
