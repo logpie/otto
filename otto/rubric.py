@@ -59,9 +59,8 @@ TASK: {prompt}
 PROJECT DIRECTORY: {project_dir}
 
 Follow these steps:
-1. Read 3-5 source files most relevant to the task
-2. If there's a CLI, run --help to understand the user experience
-3. Write initial criteria to: {rubric_file}
+1. Read the 2-3 source files most directly related to the task (e.g., the module to modify + its CLI). Run --help if there's a CLI. Do NOT read every file in the project.
+2. Write initial criteria to: {rubric_file}
 4. SELF-REVIEW: Read your criteria back and ask:
    - Are any criteria about implementation details instead of user behavior? Rewrite them.
    - Are any criteria trivial (would pass with a broken implementation)? Strengthen them.

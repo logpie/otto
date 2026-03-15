@@ -414,54 +414,34 @@ Your job is to write tests that will CATCH BUGS, not confirm correctness.
 SPEC (acceptance criteria):
 {rubric_text}
 
-PROJECT CONTEXT (public interface only):
+PROJECT CONTEXT (public interface only — all context you need is here):
 {blackbox_context}
 
 Your working directory is: {tmp_dir}
 Write the test file to: {tmp_dir}/{test_rel}
 
-BEFORE writing any tests:
-1. Read the existing test files in the project to understand import patterns, fixtures, and style.
-2. Read the public API stubs above carefully — understand what functions/classes exist.
-3. Think about what a REAL USER would do with this feature and what could go wrong.
-Only THEN write the test file.
+IMPORTANT: Everything you need is in the SPEC and PROJECT CONTEXT above.
+Do NOT read files or explore — start writing the test file IMMEDIATELY.
+Only read files if validation fails and you need to debug an import issue.
 
-Your tests MUST:
+Requirements for tests:
 - Test the public interface only (CLI via subprocess, library via imports)
 - Be designed to FAIL on the current codebase (the feature doesn't exist yet)
 - Be independent and hermetic (use tmp_path, no shared state)
 - Use subprocess.run() for CLI testing, not CliRunner
 - Include negative tests (what should NOT happen)
-- Test the FULL user workflow, not just individual functions
-- Test data persistence: if the feature saves/loads state, verify the roundtrip works
+- Test full user workflows and data persistence
+- Think like a devil's advocate — catch lazy/buggy implementations
+- NO trivial tests. Use pytest.mark.parametrize where appropriate.
 
-Think like a devil's advocate — how might a developer implement this INCORRECTLY?
-- What corners might they cut? (skip normalization, hardcode values, ignore edge cases)
-- What math/logic might they get wrong? (off-by-one, wrong formula, missing terms)
-- What would a lazy implementation look like? Write tests that would catch it.
-- For each spec item, ask: "could this pass with a trivially wrong implementation?"
-  If yes, make the test more specific.
-
-Testing quality guidelines:
-- NO trivial tests (assert exists, assert type, assert True). Every test must verify behavior that could break.
-- Bundle tests that share expensive setup — don't duplicate identical fixtures across many tests.
-- Use pytest.mark.parametrize for the same behavior with different inputs.
-- Split tests when a failure would be ambiguous — each test should pinpoint one broken behavior.
-- Prefer fewer strong tests over many weak ones.
-- Always include a smoke test: if the project has a CLI, verify `python -m <package> --help` exits 0.
-
-Follow these steps:
-1. Write the test file
-2. VALIDATE syntax: python -c "import ast; ast.parse(open('<test_file>').read()); print('OK')"
+Steps:
+1. WRITE the test file immediately (don't explore first)
+2. VALIDATE: python -c "import ast; ast.parse(open('<test_file>').read()); print('OK')"
 3. If syntax error: fix and re-validate
-4. VALIDATE collection: python -m pytest --collect-only <test_file>
-5. If collection fails: fix and re-validate
-6. SELF-REVIEW: Read your tests back and ask:
-   - Are any tests trivial (would pass with a broken implementation)? Strengthen them.
-   - Could a lazy implementation (return empty list, hardcoded value) pass? Add tests that catch it.
-   - Do assertions verify actual behavior or just check types/existence? Tighten them.
-7. If you improved tests in step 6, re-run validation (steps 2-5)
-Do NOT finish until validation passes AND self-review is done.
+4. VALIDATE: python -m pytest --collect-only <test_file>
+5. If collection fails: read relevant files to debug, fix, re-validate
+6. SELF-REVIEW: Could a lazy implementation pass these tests? Strengthen if needed.
+7. If improved in step 6, re-validate (steps 2-4)
 """
     try:
         # Create tests/ subdirectory in temp dir
