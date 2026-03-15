@@ -132,6 +132,11 @@ Include ALL of these categories:
   "search does NOT return unrelated results", "invalid input does NOT silently succeed")
 - Edge cases: empty inputs, boundary values, special characters, zero/null cases
 
+If this task MODIFIES existing functionality (not a brand new feature):
+- Include regression criteria: verify that existing behavior is preserved after the change
+- Example: "existing search still works after adding tags", "delete still works after adding favorites"
+- These protect against the change breaking something that already works
+
 Scale the number of criteria to the task's complexity:
 - Simple tasks (typo fix, rename, config change): 3-5 criteria
 - Medium tasks (add a method, new CLI command): 6-10 criteria
@@ -193,6 +198,10 @@ IMPORTANT RULES:
 - Rubric items must be specific enough to write a test from. Cover: happy path, edge cases,
   error conditions, and anti-patterns (things that must NOT happen — e.g., "delete does NOT
   affect unrelated records", "invalid input does NOT silently succeed").
+- If a task MODIFIES existing functionality (not a brand new feature), include regression
+  criteria: verify that existing behavior is preserved after the change. Example: "existing
+  search still works after adding tags", "delete still works after adding favorites". These
+  protect against the change breaking something that already works.
 - Reference actual function/class names from the project source when possible.
 
 Output ONLY a valid JSON array. No prose, no markdown fences, no explanations.
