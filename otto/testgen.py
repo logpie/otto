@@ -974,3 +974,98 @@ Start directly with import statements.
     out_file.write_text(output)
 
     return out_file
+
+
+def run_mutation_check(
+    project_dir: Path,
+    test_file: Path,
+    test_command: str,
+    timeout: int = 60,
+) -> tuple[bool, str]:
+    """Run a simple mutation check: comment out a random non-trivial line in the
+    most recently changed source file, run the test file, check if tests catch it.
+
+    Returns (caught, description) where caught=True means tests detected the mutation.
+    Restores the file after the check.
+    """
+    import random
+
+    # Find the most recently changed source file via git diff
+    diff_result = subprocess.run(
+        ["git", "diff", "--name-only", "HEAD~1"],
+        cwd=project_dir, capture_output=True, text=True,
+    )
+    if diff_result.returncode != 0 or not diff_result.stdout.strip():
+        return False, "could not determine changed files"
+
+    # Filter to source files (not tests, not configs)
+    changed = []
+    for f in diff_result.stdout.strip().splitlines():
+        f = f.strip()
+        if not f.endswith(".py"):
+            continue
+        name = Path(f).name
+        if name.startswith("test_") or name == "conftest.py" or name == "__init__.py":
+            continue
+        if f.startswith("tests/") or f.startswith("test/"):
+            continue
+        if (project_dir / f).is_file():
+            changed.append(f)
+
+    if not changed:
+        return False, "no source files changed"
+
+    # Pick the first changed source file (most likely the implementation)
+    target_file = project_dir / changed[0]
+    original_content = target_file.read_text()
+    lines = original_content.splitlines()
+
+    # Find non-trivial lines (not blank, not comment, not import, not decorators)
+    candidates = []
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#"):
+            continue
+        if stripped.startswith("import ") or stripped.startswith("from "):
+            continue
+        if stripped.startswith("@"):
+            continue
+        if stripped in ("pass", "...", '"""', "'''"):
+            continue
+        # Skip class/def declarations themselves (we want body lines)
+        if stripped.startswith("class ") or stripped.startswith("def ") or stripped.startswith("async def "):
+            continue
+        candidates.append(i)
+
+    if not candidates:
+        return False, f"no mutable lines in {changed[0]}"
+
+    # Pick a random non-trivial line
+    line_idx = random.choice(candidates)
+    mutated_line = lines[line_idx]
+    description = f"commented out line {line_idx + 1} in {changed[0]}: {mutated_line.strip()[:60]}"
+
+    # Apply mutation
+    lines[line_idx] = "# MUTATION: " + mutated_line
+    target_file.write_text("\n".join(lines) + "\n")
+
+    try:
+        # Run just the adversarial test file
+        env = _subprocess_env()
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", str(test_file), "-x", "-q"],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+        )
+        caught = result.returncode != 0
+        return caught, description
+    except subprocess.TimeoutExpired:
+        return False, f"mutation test timed out ({description})"
+    finally:
+        # Always restore the file
+        target_file.write_text(original_content)

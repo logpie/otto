@@ -15,6 +15,7 @@ from otto.testgen import (
     generate_tests,
     generate_tests_from_rubric,
     run_testgen_agent,
+    run_mutation_check,
     validate_generated_tests,
     TestValidationResult,
     _validate_test_output,
@@ -320,3 +321,101 @@ class TestValidateGeneratedTests:
         assert result.status == "tdd_ok"
         assert result.passed == 1
         assert result.failed == 1
+
+
+class TestMutationCheck:
+    def _init_git(self, path):
+        """Initialize a git repo with config."""
+        subprocess.run(["git", "init"], cwd=path, capture_output=True, check=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@test.com"],
+            cwd=path, capture_output=True, check=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Test"],
+            cwd=path, capture_output=True, check=True,
+        )
+
+    def test_catches_broken_code(self, tmp_path):
+        """Mutation check detects when commenting out a line breaks tests."""
+        src = tmp_path / "app.py"
+        src.write_text("def add(a, b):\n    return a + b\n")
+        test = tmp_path / "test_app.py"
+        test.write_text(
+            "import sys\nsys.path.insert(0, '.')\n"
+            "from app import add\n"
+            "def test_add():\n    assert add(1, 2) == 3\n"
+        )
+
+        # Init git with an initial commit, then modify and commit
+        self._init_git(tmp_path)
+        subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "init"],
+            cwd=tmp_path, capture_output=True, check=True,
+        )
+        # Make a second commit so HEAD~1 diff shows app.py
+        src.write_text("def add(a, b):\n    result = a + b\n    return result\n")
+        subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "update add"],
+            cwd=tmp_path, capture_output=True, check=True,
+        )
+
+        caught, desc = run_mutation_check(tmp_path, test, "pytest", timeout=30)
+        assert caught is True
+        assert "app.py" in desc
+
+    def test_no_source_files(self, tmp_path):
+        """Mutation check handles no changed source files gracefully."""
+        self._init_git(tmp_path)
+        readme = tmp_path / "README.md"
+        readme.write_text("# hello\n")
+        subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "init"],
+            cwd=tmp_path, capture_output=True, check=True,
+        )
+        # Second commit changes only a non-py file
+        readme.write_text("# updated\n")
+        subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "update readme"],
+            cwd=tmp_path, capture_output=True, check=True,
+        )
+
+        test = tmp_path / "test_app.py"
+        test.write_text("def test_noop():\n    pass\n")
+        caught, desc = run_mutation_check(tmp_path, test, "pytest", timeout=30)
+        assert caught is False
+        assert "no source files" in desc
+
+    def test_restores_file_after_mutation(self, tmp_path):
+        """Mutation check restores the original file even if tests fail."""
+        src = tmp_path / "app.py"
+        original = "def add(a, b):\n    return a + b\n"
+        src.write_text(original)
+        test = tmp_path / "test_app.py"
+        test.write_text(
+            "import sys\nsys.path.insert(0, '.')\n"
+            "from app import add\n"
+            "def test_add():\n    assert add(1, 2) == 3\n"
+        )
+
+        self._init_git(tmp_path)
+        subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "init"],
+            cwd=tmp_path, capture_output=True, check=True,
+        )
+        src.write_text("def add(a, b):\n    result = a + b\n    return result\n")
+        subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "update"],
+            cwd=tmp_path, capture_output=True, check=True,
+        )
+
+        content_before = src.read_text()
+        run_mutation_check(tmp_path, test, "pytest", timeout=30)
+        content_after = src.read_text()
+        assert content_after == content_before

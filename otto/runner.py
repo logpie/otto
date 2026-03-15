@@ -25,7 +25,7 @@ except ImportError:
 
 from otto.config import git_meta_dir, detect_test_command
 from otto.tasks import load_tasks, update_task
-from otto.testgen import generate_tests, detect_test_framework, test_file_path
+from otto.testgen import generate_tests, detect_test_framework, test_file_path, run_mutation_check
 from otto.verify import run_verification, _subprocess_env
 
 
@@ -807,6 +807,20 @@ async def run_task(
                     cost_usd=total_cost,
                 )
                 return False
+            # Mutation check — validate test quality (informational only)
+            if test_file_path_val:
+                try:
+                    caught, mut_desc = run_mutation_check(
+                        project_dir, test_file_path_val, test_command or "pytest",
+                    )
+                    if caught:
+                        print(f"  {_GREEN}✓{_RESET} {_DIM}Mutation check: tests caught the intentional break{_RESET}", flush=True)
+                    else:
+                        print(f"  {_YELLOW}⚠ Mutation check: tests did NOT catch an intentional break — tests may be weak{_RESET}", flush=True)
+                        print(f"    {_DIM}{mut_desc}{_RESET}", flush=True)
+                except Exception as e:
+                    print(f"  {_DIM}Mutation check skipped: {e}{_RESET}", flush=True)
+
             # Merge to default — post-merge bookkeeping errors are non-destructive
             if merge_to_default(project_dir, key, default_branch):
                 testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / key
