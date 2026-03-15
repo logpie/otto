@@ -997,6 +997,14 @@ async def run_task(
                             ["git", "add", "--", f],
                             cwd=project_dir, capture_output=True,
                         )
+                # After git add -u and untracked staging, explicitly add the test file
+                # (it was ADDED in the test commit, so after reset --mixed it's untracked
+                # and gets filtered out by pre_existing_untracked)
+                if test_file_path_val and test_file_path_val.exists():
+                    subprocess.run(
+                        ["git", "add", "--", str(test_file_path_val.relative_to(project_dir))],
+                        cwd=project_dir, capture_output=True,
+                    )
                 subprocess.run(
                     ["git", "commit", "-m",
                      f"otto: {prompt[:60]} (#{task_id})"],
