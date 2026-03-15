@@ -16,7 +16,6 @@
 - [x] **Anti-pattern tests**: Rubric prompt explicitly asks for "does NOT" / "must NOT" criteria.
 - [x] **Adversarial testgen agent**: Full Agent SDK testgen that writes black-box TDD tests from rubric BEFORE coding agent. Mechanical isolation (temp dir, AST stubs). Two-phase validation. Tamper detection.
 - [x] **Regression-style rubrics**: Rubric generation includes "existing X still works after adding Y" criteria.
-- [ ] **Security anti-patterns**: Generate tests that verify common vulnerabilities don't exist — injection, path traversal, unescaped output.
 - [ ] **Mutation-style checks**: Intentionally break a key line and verify the tests catch it. If they don't, tests are too weak.
 
 ## Integration Testing
@@ -33,7 +32,6 @@
 - [x] **Timing**: Wall-clock time per task and full run.
 - [ ] **Cost tracking**: Log token usage and cost per task from `ResultMessage.total_cost_usd`. Show in `otto status`.
 - [ ] **Test coverage delta**: Measure test coverage change per task. Warn if coverage didn't increase.
-- [ ] **`--quiet` mode**: Suppress agent streaming for CI/background use.
 
 ## UX
 
