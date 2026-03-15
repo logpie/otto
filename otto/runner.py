@@ -772,7 +772,9 @@ async def run_task(
             agent_prompt = (
                 f"{base_prompt}\n\n"
                 f"You are working in {project_dir}. Do NOT create git commits. "
-                f"Do NOT write tests — acceptance tests will be generated separately."
+                f"Do NOT write tests — acceptance tests will be generated separately.\n\n"
+                f"Be EFFICIENT: read only the files you need to edit. "
+                f"Do NOT explore the entire project — focus on the task."
             )
         else:
             agent_prompt = (

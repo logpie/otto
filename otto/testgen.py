@@ -442,6 +442,13 @@ Write the test file now. Do NOT explain — just write the file.
         if not test_file_in_tmp.exists():
             return None, log_lines
 
+        # Validate syntax before copying
+        try:
+            ast.parse(test_file_in_tmp.read_text())
+        except SyntaxError as e:
+            print(f"  testgen: generated test has syntax error: {e}", flush=True)
+            return None, log_lines
+
         # Copy to project dir
         dest = project_dir / test_rel
         dest.parent.mkdir(parents=True, exist_ok=True)
