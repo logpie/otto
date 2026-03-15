@@ -780,13 +780,15 @@ TEST FRAMEWORK: {framework}
 Write integration tests that exercise these features WORKING TOGETHER.
 
 Focus on:
-- Multi-step workflows crossing feature boundaries (create via feature A, verify via feature B)
-- State interactions (one feature's changes visible to another)
-- Data round-trips (import then search then export — verify consistency)
-- Features not interfering with each other
+- User journey tests: simulate a real session (e.g., add bookmarks → search → favorite a result → list favorites → verify the searched-and-favorited bookmark appears)
+- State consistency: after feature A modifies data, feature B sees the updated state correctly
+- Data round-trips: create via one feature, read via another, verify consistency
+- Feature independence: using feature A does NOT break feature B's behavior
+- Ordering: verify operations work regardless of the order features are used
 
-Do NOT re-test individual features — those are already covered.
+Do NOT re-test individual features — those are already covered by per-task tests.
 Test ONLY cross-feature interactions and multi-step workflows.
+Include a smoke test: run --help or a basic command to verify the app still works with all features present.
 
 Rules — "test like a user":
 - CLI apps: use subprocess.run() to invoke the actual command. Check stdout, stderr, exit codes.
