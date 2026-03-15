@@ -13,7 +13,6 @@ from otto.testgen import (
     detect_test_framework,
     test_file_path,
     generate_tests,
-    generate_tests_from_rubric,
     run_testgen_agent,
     run_mutation_check,
     validate_generated_tests,
@@ -113,64 +112,6 @@ class TestValidateTestOutput:
     def test_empty_rejected(self):
         assert _validate_test_output("", "pytest") is False
 
-
-class TestGenerateTestsFromRubric:
-    @patch("otto.testgen.subprocess.run")
-    def test_creates_test_file(self, mock_run, tmp_path):
-        import subprocess as real_subprocess
-        real_subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
-        real_subprocess.run(
-            ["git", "commit", "--allow-empty", "-m", "init"],
-            cwd=tmp_path, capture_output=True,
-        )
-        (tmp_path / "tests").mkdir()
-
-        test_code = (
-            'from app import search\n\n'
-            'def test_case_insensitive():\n'
-            '    assert search("PYTHON") == search("python")\n'
-        )
-
-        def side_effect(*args, **kwargs):
-            m = MagicMock()
-            m.returncode = 0
-            if "ls-files" in str(args):
-                m.stdout = "app.py"
-            elif "claude" in str(args):
-                m.stdout = test_code
-            return m
-
-        mock_run.side_effect = side_effect
-
-        result = generate_tests_from_rubric(
-            ["search is case-insensitive"], "Add search", tmp_path, "testkey123"
-        )
-        assert result is not None
-        assert result.exists()
-        assert "def test_case_insensitive" in result.read_text()
-
-    @patch("otto.testgen.subprocess.run")
-    def test_returns_none_on_prose(self, mock_run, tmp_path):
-        import subprocess as real_subprocess
-        real_subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
-        real_subprocess.run(
-            ["git", "commit", "--allow-empty", "-m", "init"],
-            cwd=tmp_path, capture_output=True,
-        )
-        (tmp_path / "tests").mkdir()
-
-        def side_effect(*args, **kwargs):
-            m = MagicMock()
-            m.returncode = 0
-            m.stdout = "Here is what I would test..."
-            return m
-
-        mock_run.side_effect = side_effect
-
-        result = generate_tests_from_rubric(
-            ["criterion"], "task", tmp_path, "key123"
-        )
-        assert result is None
 
 
 class TestExtractPublicStubs:
