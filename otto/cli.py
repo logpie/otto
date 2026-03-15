@@ -346,9 +346,7 @@ def diff(task_id):
         sys.exit(1)
     sha = commits[0].split()[0]
     # Show the diff
-    subprocess.run(["git", "show", sha, "--stat"])
-    click.echo()
-    subprocess.run(["git", "show", sha, "--no-stat"])
+    subprocess.run(["git", "show", sha])
 
 
 @main.command()
