@@ -683,6 +683,19 @@ async def run_task(
         except OSError:
             pass
 
+    # Persist TDD check results
+    if rubric and test_file_path_val:
+        try:
+            tdd_log = log_dir / "tdd-check.log"
+            tdd_log.write_text(
+                f"status: {validation.status}\n"
+                f"passed: {validation.passed}\n"
+                f"failed: {validation.failed}\n"
+                f"error_output:\n{validation.error_output}\n"
+            )
+        except (OSError, NameError):
+            pass
+
     session_id = None
     last_error = None  # verification failure output for retry feedback
     total_cost = 0.0  # accumulated cost across retries
@@ -938,6 +951,12 @@ async def run_task(
                     else:
                         print(f"  {_YELLOW}⚠ Mutation check: tests did NOT catch an intentional break — tests may be weak{_RESET}", flush=True)
                         print(f"    {_DIM}{mut_desc}{_RESET}", flush=True)
+                    # Persist mutation check result
+                    try:
+                        mut_log = log_dir / f"attempt-{attempt_num}-mutation.log"
+                        mut_log.write_text(f"caught: {caught}\n{mut_desc}\n")
+                    except OSError:
+                        pass
                 except Exception as e:
                     print(f"  {_DIM}Mutation check skipped: {e}{_RESET}", flush=True)
 
