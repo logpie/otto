@@ -1108,23 +1108,27 @@ async def _run_integration_gate(
             _log_verify(gate_result.tiers)
 
             if gate_result.passed:
-                tracked_paths, untracked_paths = _list_worktree_changes(fix_worktree)
-                changed_paths = _copy_changed_paths_from_worktree(
-                    fix_worktree,
-                    project_dir,
-                    tracked_paths,
-                    untracked_paths,
-                    pre_existing_untracked=pre_existing_untracked,
-                )
-                for rel_path in sorted(changed_paths):
+                try:
+                    tracked_paths, untracked_paths = _list_worktree_changes(fix_worktree)
+                    changed_paths = _copy_changed_paths_from_worktree(
+                        fix_worktree,
+                        project_dir,
+                        tracked_paths,
+                        untracked_paths,
+                        pre_existing_untracked=pre_existing_untracked,
+                    )
+                    for rel_path in sorted(changed_paths):
+                        subprocess.run(
+                            ["git", "add", "--", rel_path],
+                            cwd=project_dir, capture_output=True, check=True,
+                        )
                     subprocess.run(
-                        ["git", "add", "--", rel_path],
+                        ["git", "commit", "-m", "otto: add cross-feature integration tests"],
                         cwd=project_dir, capture_output=True, check=True,
                     )
-                subprocess.run(
-                    ["git", "commit", "-m", "otto: add cross-feature integration tests"],
-                    cwd=project_dir, capture_output=True, check=True,
-                )
+                except RuntimeError as e:
+                    _log_warn(f"Integration gate copy-back conflict: {e}")
+                    return False
                 print(f"\n  {_GREEN}{_BOLD}✓ Integration gate PASSED{_RESET} {_DIM}(after fix){_RESET}", flush=True)
                 return True
     finally:
