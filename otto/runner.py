@@ -601,6 +601,9 @@ async def run_task(
     print(f"  {_DIM}key {key}{_RESET}", flush=True)
     print(f"{_BOLD}{'━' * 60}{_RESET}", flush=True)
 
+    # Timing for profiling
+    timings: dict[str, float] = {}
+
     # Adversarial testgen: write tests BEFORE coding agent when rubric exists
     test_file_path_val = None
     test_commit_sha = None
@@ -610,12 +613,16 @@ async def run_task(
         from otto.testgen import build_blackbox_context, run_testgen_agent, validate_generated_tests
 
         print(f"  {_DIM}Building black-box context...{_RESET}", flush=True)
+        t0 = time.monotonic()
         task_hint = prompt + "\n" + "\n".join(rubric)
         blackbox_ctx = build_blackbox_context(project_dir, task_hint=task_hint)
+        timings["blackbox_context"] = time.monotonic() - t0
 
         print(f"  {_DIM}Testgen agent writing adversarial tests ({len(rubric)} criteria)...{_RESET}", flush=True)
+        t0 = time.monotonic()
         testgen_logs: list[str] = []
         test_file_path_val, testgen_logs = await run_testgen_agent(rubric, key, blackbox_ctx, project_dir)
+        timings["testgen_agent"] = time.monotonic() - t0
 
         if test_file_path_val:
             # Two-phase validation
@@ -856,7 +863,14 @@ async def run_task(
                     if total_cost > 0:
                         updates["cost_usd"] = total_cost
                     update_task(tasks_file, key, **updates)
-                _log_pass(task_id, default_branch, time.monotonic() - task_start, cost=total_cost)
+                timings["total"] = time.monotonic() - task_start
+                _log_pass(task_id, default_branch, timings["total"], cost=total_cost)
+                try:
+                    (log_dir / "timing.log").write_text(
+                        "\n".join(f"{k}: {v:.1f}s" for k, v in timings.items()) + "\n"
+                    )
+                except OSError:
+                    pass
                 return True
 
             # Build candidate commit
@@ -970,7 +984,14 @@ async def run_task(
                     if total_cost > 0:
                         updates["cost_usd"] = total_cost
                     update_task(tasks_file, key, **updates)
-                _log_pass(task_id, default_branch, time.monotonic() - task_start, cost=total_cost)
+                timings["total"] = time.monotonic() - task_start
+                _log_pass(task_id, default_branch, timings["total"], cost=total_cost)
+                try:
+                    (log_dir / "timing.log").write_text(
+                        "\n".join(f"{k}: {v:.1f}s" for k, v in timings.items()) + "\n"
+                    )
+                except OSError:
+                    pass
                 return True
             else:
                 testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / key
