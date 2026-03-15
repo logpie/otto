@@ -691,18 +691,29 @@ async def run_task(
                         test_file_path_val = None
 
             if test_file_path_val and validation.status == "all_pass":
-                print(f"\n  {_YELLOW}{_BOLD}⚠⚠⚠ WARNING: All rubric tests PASS before implementation{_RESET}", flush=True)
-                print(f"  {_DIM}Regenerating tests...{_RESET}", flush=True)
-                test_file_path_val.unlink()
-                test_file_path_val, regen_logs = await run_testgen_agent(rubric, key, blackbox_ctx, project_dir)
-                testgen_logs.extend(regen_logs)
-                if test_file_path_val:
+                # Check if feature already exists (code from a previous run)
+                # If so, keep tests as regression coverage — don't waste time regenerating
+                source_context = get_relevant_file_contents(project_dir, task_hint=prompt)
+                # Simple heuristic: if source files mention key words from the task, feature likely exists
+                prompt_words = {w.lower() for w in prompt.split() if len(w) >= 4}
+                source_lower = source_context.lower()
+                matches = sum(1 for w in prompt_words if w in source_lower)
+                feature_likely_exists = matches >= 3
+
+                if feature_likely_exists:
+                    print(f"  {_DIM}All tests pass — feature likely already implemented. Keeping as regression tests.{_RESET}", flush=True)
+                    # Keep the tests, they serve as regression coverage
                     validation = validate_generated_tests(test_file_path_val, "pytest", project_dir)
-                    if validation.status == "all_pass":
-                        print(f"\n  {_YELLOW}{_BOLD}⚠⚠⚠ WARNING: Tests still pass — skipping rubric tests for task #{task_id}{_RESET}", flush=True)
-                        print(f"  {_DIM}Coding agent will run WITHOUT adversarial test coverage.{_RESET}", flush=True)
-                        test_file_path_val.unlink()
-                        test_file_path_val = None
+                else:
+                    print(f"\n  {_YELLOW}{_BOLD}⚠⚠⚠ WARNING: All rubric tests PASS before implementation — tests may be too weak{_RESET}", flush=True)
+                    print(f"  {_DIM}Regenerating tests...{_RESET}", flush=True)
+                    test_file_path_val.unlink()
+                    test_file_path_val, regen_logs = await run_testgen_agent(rubric, key, blackbox_ctx, project_dir)
+                    testgen_logs.extend(regen_logs)
+                    if test_file_path_val:
+                        validation = validate_generated_tests(test_file_path_val, "pytest", project_dir)
+                        if validation.status == "all_pass":
+                            print(f"  {_DIM}Tests still pass — keeping as regression tests.{_RESET}", flush=True)
 
             if test_file_path_val and validation.status == "tdd_ok":
                 print(f"  {_GREEN}✓{_RESET} {_DIM}Adversarial tests ready ({validation.failed} failing, {validation.passed} regression){_RESET}", flush=True)
