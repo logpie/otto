@@ -493,6 +493,16 @@ Do NOT finish until validation passes AND self-review is done.
                         elif block.name == "Bash":
                             cmd = inputs.get("command") or ""
                             detail = cmd[:80]
+                        # Strip temp dir prefix for cleaner display
+                        if tmp_dir and detail.startswith(tmp_dir):
+                            detail = detail[len(tmp_dir):].lstrip("/")
+                        elif "/otto_testgen_" in detail:
+                            # Strip everything up to and including the testgen temp dir
+                            idx = detail.find("/otto_testgen_")
+                            rest = detail[idx:]
+                            # Find the next / after the temp dir name
+                            parts = rest.split("/", 2)
+                            detail = parts[2] if len(parts) > 2 else detail
                         print(f"  \033[36m\033[1m● {block.name}\033[0m  \033[2m{detail}\033[0m", flush=True)
                         log_lines.append(f"→ {block.name}  {detail}")
 
