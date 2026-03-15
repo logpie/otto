@@ -210,6 +210,7 @@ async def run_testgen_agent(
     """
     rubric_text = "\n".join(f"{i + 1}. {item}" for i, item in enumerate(rubric))
     test_rel = f"tests/test_otto_{key}.py"
+    tmp_dir = tempfile.mkdtemp(prefix="otto_testgen_")
 
     prompt = f"""You are a QA engineer writing black-box tests from a specification.
 You have NOT seen the implementation — it hasn't been written yet.
@@ -221,7 +222,8 @@ SPEC (acceptance criteria):
 PROJECT CONTEXT (public interface only):
 {blackbox_context}
 
-Write a complete {framework} test file at: {test_rel}
+Your working directory is: {tmp_dir}
+Write the test file to: {tmp_dir}/{test_rel}
 
 Your tests MUST:
 - Test the public interface only (CLI via subprocess, library via imports)
@@ -241,8 +243,6 @@ Testing quality guidelines:
 
 Write the test file now. Do NOT explain — just write the file.
 """
-
-    tmp_dir = tempfile.mkdtemp(prefix="otto_testgen_")
     try:
         # Create tests/ subdirectory in temp dir
         (Path(tmp_dir) / "tests").mkdir(parents=True, exist_ok=True)
