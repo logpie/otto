@@ -46,10 +46,11 @@ def _extract_tool_detail(name: str, inputs: dict) -> str:
     return ""
 
 
-def print_agent_tool(block) -> str:
+def print_agent_tool(block, quiet: bool = False) -> str:
     """Print an agent tool use block with ANSI styling and return a log line.
 
     Accepts any object with .name and .input attributes (ToolUseBlock or similar).
+    When quiet=True, skips printing but still returns the log line.
 
     Prints:  ``  \\033[36m\\033[1m\\u25cf ToolName\\033[0m  \\033[2mdetail\\033[0m``
     Returns: ``\\u2192 ToolName  detail``  (plain text for logging)
@@ -60,10 +61,11 @@ def print_agent_tool(block) -> str:
     detail = _extract_tool_detail(name, inputs)
     detail = _strip_temp_prefix(detail)
 
-    label = f"{_CYAN}{_BOLD}\u25cf {name}{_RESET}"
-    if detail:
-        print(f"  {label}  {_DIM}{detail}{_RESET}", flush=True)
-    else:
-        print(f"  {label}", flush=True)
+    if not quiet:
+        label = f"{_CYAN}{_BOLD}\u25cf {name}{_RESET}"
+        if detail:
+            print(f"  {label}  {_DIM}{detail}{_RESET}", flush=True)
+        else:
+            print(f"  {label}", flush=True)
 
     return f"\u2192 {name}  {detail}"

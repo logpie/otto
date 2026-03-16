@@ -13,6 +13,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "model": None,
     "default_branch": "main",
     "verify_timeout": 300,
+    "max_parallel": 3,
 }
 
 

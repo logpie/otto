@@ -8,10 +8,18 @@ import click
 
 from otto.config import create_config, git_meta_dir, load_config
 from otto.rubric import generate_rubric, parse_markdown_tasks
-from otto.tasks import add_task, add_tasks, load_tasks, reset_all_tasks, save_tasks, update_task
+from otto.tasks import add_task, add_tasks, delete_task, load_tasks, reset_all_tasks, save_tasks, update_task
 
 
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
+
+
+def _format_duration(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    minutes = int(seconds // 60)
+    secs = int(seconds % 60)
+    return f"{minutes}m{secs}s"
 
 # ANSI styling
 _B = "\033[1m"       # bold
@@ -37,11 +45,14 @@ def _require_git():
 
 @click.group(context_settings=CONTEXT_SETTINGS)
 def main():
-    """Otto — autonomous Claude Code agent runner."""
+    """Otto — autonomous Claude Code agent runner.
+
+    Run 'otto COMMAND -h' for command-specific options.
+    """
     pass
 
 
-@main.command()
+@main.command(context_settings=CONTEXT_SETTINGS)
 def init():
     """Initialize otto for this project."""
     _require_git()
@@ -81,6 +92,8 @@ def _import_tasks(import_path: Path, tasks_path: Path) -> None:
                 item["verify"] = t["verify"]
             if t.get("max_retries") is not None:
                 item["max_retries"] = t["max_retries"]
+            if t.get("depends_on") is not None:
+                item["depends_on"] = t["depends_on"]
             batch.append(item)
         results = add_tasks(tasks_path, batch)
         _print_imported_tasks(results)
@@ -143,7 +156,7 @@ def _print_imported_tasks(tasks: list) -> None:
     click.echo(f"\n{_G}✓{_0} Imported {_B}{len(tasks)}{_0} tasks. Review rubrics in tasks.yaml before running.")
 
 
-@main.command()
+@main.command(context_settings=CONTEXT_SETTINGS)
 @click.argument("prompt", required=False)
 @click.option("--verify", default=None, help="Custom verification command")
 @click.option("--max-retries", default=None, type=int, help="Max retry attempts")
@@ -164,6 +177,9 @@ def add(prompt, verify, max_retries, import_file, no_rubric):
 
     # Generate rubric unless --no-rubric
     rubric = None
+    if no_rubric:
+        click.echo(f"{_Y}{_B}⚠ WARNING:{_0} {_Y}No rubric → no adversarial tests → no verification gate.{_0}")
+        click.echo(f"  {_Y}The coding agent's output will be merged with zero quality checks.{_0}")
     if not no_rubric:
         click.echo(f"{_D}Generating rubric...{_0}")
         try:
@@ -187,11 +203,12 @@ def add(prompt, verify, max_retries, import_file, no_rubric):
     click.echo(f"{_G}✓{_0} Added task {_B}#{task['id']}{_0} {_D}({task['key']}){_0}: {prompt}")
 
 
-@main.command()
+@main.command(context_settings=CONTEXT_SETTINGS)
 @click.argument("prompt", required=False)
 @click.option("--dry-run", is_flag=True, help="Show what would run without executing")
 @click.option("--no-integration", is_flag=True, help="Skip post-run integration tests")
-def run(prompt, dry_run, no_integration):
+@click.option("--no-parallel", is_flag=True, help="Force serial execution (full streaming output per task)")
+def run(prompt, dry_run, no_integration, no_parallel):
     """Run pending tasks (or a one-off task if prompt given)."""
     from otto.runner import run_all, run_task
 
@@ -203,6 +220,8 @@ def run(prompt, dry_run, no_integration):
     config = load_config(config_path)
     if no_integration:
         config["no_integration"] = True
+    if no_parallel:
+        config["max_parallel"] = 1
 
     if dry_run:
         tasks_path = project_dir / "tasks.yaml"
@@ -252,26 +271,49 @@ def run(prompt, dry_run, no_integration):
         sys.exit(exit_code)
 
 
-@main.command()
+@main.command(context_settings=CONTEXT_SETTINGS)
 def status():
     """Show task status."""
+    import fcntl
     tasks_path = Path.cwd() / "tasks.yaml"
     tasks = load_tasks(tasks_path)
     if not tasks:
         click.echo(f"{_D}No tasks found. Use 'otto add' to create one.{_0}")
         return
 
-    click.echo(f"{_B}{'ID':>4}  {'Status':10}  {'Att':>3}  {'Rubric':>6}  {'Cost':>7}  Prompt{_0}")
-    click.echo(f"{_D}{'─' * 80}{_0}")
+    # Detect stale "running" tasks — if no otto process holds the lock, they crashed
+    running = [t for t in tasks if t.get("status") == "running"]
+    if running:
+        lock_path = git_meta_dir(Path.cwd()) / "otto.lock"
+        otto_is_running = False
+        if lock_path.exists():
+            try:
+                lock_fh = open(lock_path, "r")
+                fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(lock_fh, fcntl.LOCK_UN)
+                lock_fh.close()
+            except BlockingIOError:
+                otto_is_running = True
+        if not otto_is_running:
+            for t in running:
+                click.echo(f"{_Y}⚠ Task #{t['id']} stuck in 'running' (otto crashed?) — will auto-recover on next 'otto run'{_0}")
+            click.echo()
+
+    click.echo(f"{_B}{'ID':>4}  {'Status':10}  {'Att':>3}  {'Deps':>4}  {'Rubric':>6}  {'Cost':>7}  {'Time':>6}  Prompt{_0}")
+    click.echo(f"{_D}{'─' * 94}{_0}")
     for t in tasks:
         status_str = t.get("status", "?")
         rubric_count = len(t.get("rubric", []))
+        deps = t.get("depends_on") or []
+        deps_str = str(len(deps)) if deps else ""
         cost = t.get("cost_usd", 0.0)
         cost_str = f"${cost:.2f}" if cost else ""
+        dur = t.get("duration_s", 0.0)
+        dur_str = _format_duration(dur) if dur else ""
         # Color status
         if status_str == "passed":
             status_styled = f"{_G}{status_str:10}{_0}"
-        elif status_str == "failed":
+        elif status_str in ("failed", "blocked"):
             status_styled = f"{_R}{status_str:10}{_0}"
         elif status_str == "running":
             status_styled = f"{_C}{status_str:10}{_0}"
@@ -279,11 +321,45 @@ def status():
             status_styled = f"{_D}{status_str:10}{_0}"
         click.echo(
             f"{t.get('id', '?'):>4}  {status_styled}  {t.get('attempts', 0):>3}  "
-            f"{rubric_count:>6}  {cost_str:>7}  {t['prompt'][:60]}"
+            f"{deps_str:>4}  {rubric_count:>6}  {cost_str:>7}  {dur_str:>6}  {t['prompt'][:50]}"
         )
+        # Show error for failed/blocked tasks
+        if status_str in ("failed", "blocked") and t.get("error"):
+            click.echo(f"        {_R}↳ {t['error'][:70]}{_0}")
+
+    # Summary
+    counts = {}
+    total_cost = 0.0
+    total_dur = 0.0
+    for t in tasks:
+        s = t.get("status", "?")
+        counts[s] = counts.get(s, 0) + 1
+        total_cost += t.get("cost_usd", 0.0)
+        total_dur += t.get("duration_s", 0.0)
+    click.echo(f"{_D}{'─' * 94}{_0}")
+    parts = []
+    if counts.get("passed"):
+        parts.append(f"{_G}{counts['passed']} passed{_0}")
+    if counts.get("failed"):
+        parts.append(f"{_R}{counts['failed']} failed{_0}")
+    if counts.get("blocked"):
+        parts.append(f"{_R}{counts['blocked']} blocked{_0}")
+    if counts.get("pending"):
+        parts.append(f"{_D}{counts['pending']} pending{_0}")
+    if counts.get("running"):
+        parts.append(f"{_C}{counts['running']} running{_0}")
+    summary = ", ".join(parts)
+    extras = []
+    if total_cost > 0:
+        extras.append(f"${total_cost:.2f}")
+    if total_dur > 0:
+        extras.append(_format_duration(total_dur))
+    if extras:
+        summary += f"  {_D}— {', '.join(extras)}{_0}"
+    click.echo(f"  {summary}")
 
 
-@main.command()
+@main.command(context_settings=CONTEXT_SETTINGS)
 @click.argument("task_id", type=int)
 @click.argument("feedback", required=False)
 @click.option("--force", is_flag=True, help="Reset any task, not just failed ones")
@@ -317,7 +393,55 @@ def retry(task_id, feedback, force):
     sys.exit(1)
 
 
-@main.command()
+@main.command(context_settings=CONTEXT_SETTINGS)
+@click.argument("task_id", type=int)
+def delete(task_id):
+    """Remove a task from the status list (does NOT revert code).
+
+    For pending tasks: removes the task before it runs.
+    For passed tasks: only removes from tracking — merged code stays on main.
+    For failed tasks: removes from tracking (branch already cleaned up).
+
+    To undo all otto code changes, use 'otto reset --hard'.
+    """
+    tasks_path = Path.cwd() / "tasks.yaml"
+    tasks = load_tasks(tasks_path)
+    target = None
+    for t in tasks:
+        if t.get("id") == task_id:
+            target = t
+            break
+    if not target:
+        click.echo(f"Task #{task_id} not found", err=True)
+        sys.exit(1)
+
+    task_status = target.get("status", "pending")
+    if task_status == "running":
+        click.echo(f"{_R}✗{_0} Cannot delete a running task. Wait for it to finish or reset.", err=True)
+        sys.exit(1)
+    if task_status == "passed":
+        click.echo(f"{_Y}⚠{_0} Task already merged — this only removes it from the status list.")
+        click.echo(f"  {_D}Code, commits, and test files stay on main.{_0}")
+        click.echo(f"  {_D}To undo code changes: 'otto reset --hard' or 'git revert'.{_0}")
+        click.confirm("  Continue?", abort=True)
+
+    # Warn if other pending tasks depend on this one
+    dependents = [
+        t for t in tasks
+        if t.get("id") != task_id
+        and t.get("status") == "pending"
+        and task_id in (t.get("depends_on") or [])
+    ]
+    if dependents:
+        dep_ids = ", ".join(f"#{t['id']}" for t in dependents)
+        click.echo(f"{_Y}⚠{_0} Pending tasks depend on this one: {dep_ids}")
+        click.confirm("  Continue?", abort=True)
+
+    delete_task(tasks_path, task_id)
+    click.echo(f"{_G}✓{_0} Deleted task {_B}#{task_id}{_0}: {target['prompt'][:60]}")
+
+
+@main.command(context_settings=CONTEXT_SETTINGS)
 @click.argument("task_id", type=int)
 def logs(task_id):
     """Show logs for a task."""
@@ -339,7 +463,7 @@ def logs(task_id):
     sys.exit(1)
 
 
-@main.command()
+@main.command(context_settings=CONTEXT_SETTINGS)
 @click.argument("task_id", type=int)
 def diff(task_id):
     """Show the git diff for a task's commit."""
@@ -358,7 +482,7 @@ def diff(task_id):
     subprocess.run(["git", "show", sha])
 
 
-@main.command()
+@main.command(context_settings=CONTEXT_SETTINGS)
 @click.argument("task_id", type=int)
 def show(task_id):
     """Show details for a task."""
@@ -373,6 +497,9 @@ def show(task_id):
             cost = t.get("cost_usd", 0.0)
             if cost:
                 click.echo(f"  {_D}Cost:{_0}     ${cost:.2f}")
+            deps = t.get("depends_on") or []
+            if deps:
+                click.echo(f"  {_D}Deps:{_0}     {', '.join(f'#{d}' for d in deps)}")
             click.echo(f"\n  {_D}Prompt:{_0}")
             click.echo(f"  {t['prompt']}")
             rubric = t.get("rubric", [])
@@ -405,7 +532,7 @@ def show(task_id):
     sys.exit(1)
 
 
-@main.command()
+@main.command(context_settings=CONTEXT_SETTINGS)
 @click.option("--yes", is_flag=True, help="Skip confirmation")
 @click.option("--hard", is_flag=True, help="Also revert otto commits from git history")
 def reset(yes, hard):

@@ -122,6 +122,65 @@ class TestAddTasksBatch:
         assert len(tasks) == 2
 
 
+class TestDependsOn:
+    def test_add_tasks_with_depends_on(self, tmp_git_repo):
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        batch = [
+            {"prompt": "Create User model"},
+            {"prompt": "Add auth using User", "depends_on": [0]},
+            {"prompt": "Add admin panel", "depends_on": [0, 1]},
+        ]
+        results = add_tasks(tasks_path, batch)
+        assert results[0].get("depends_on") is None  # no deps → not stored
+        assert results[1]["depends_on"] == [1]  # index 0 → id 1
+        assert results[2]["depends_on"] == [1, 2]  # indices [0,1] → ids [1,2]
+
+    def test_depends_on_self_ref_rejected(self, tmp_git_repo):
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        batch = [
+            {"prompt": "Task A", "depends_on": [0]},
+        ]
+        with pytest.raises(ValueError, match="depends on itself"):
+            add_tasks(tasks_path, batch)
+
+    def test_depends_on_out_of_range_rejected(self, tmp_git_repo):
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        batch = [
+            {"prompt": "Task A", "depends_on": [5]},
+        ]
+        with pytest.raises(ValueError, match="out of range"):
+            add_tasks(tasks_path, batch)
+
+    def test_depends_on_cycle_rejected(self, tmp_git_repo):
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        batch = [
+            {"prompt": "Task A", "depends_on": [1]},
+            {"prompt": "Task B", "depends_on": [0]},
+        ]
+        with pytest.raises(ValueError, match="cycle"):
+            add_tasks(tasks_path, batch)
+
+    def test_depends_on_no_deps_is_fine(self, tmp_git_repo):
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        batch = [
+            {"prompt": "Task A"},
+            {"prompt": "Task B"},
+        ]
+        results = add_tasks(tasks_path, batch)
+        assert "depends_on" not in results[0]
+        assert "depends_on" not in results[1]
+
+    def test_depends_on_persisted_in_yaml(self, tmp_git_repo):
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        batch = [
+            {"prompt": "Task A"},
+            {"prompt": "Task B", "depends_on": [0]},
+        ]
+        add_tasks(tasks_path, batch)
+        tasks = load_tasks(tasks_path)
+        assert tasks[1]["depends_on"] == [1]
+
+
 class TestConcurrentAccess:
     def test_concurrent_adds_dont_lose_data(self, tmp_git_repo):
         path = tmp_git_repo / "tasks.yaml"

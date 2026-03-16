@@ -150,6 +150,9 @@ Then write a JSON array to: {output_file}
 Each element should have:
 - "prompt": a clear, actionable description of what to implement
 - "rubric": 5-10 concrete, testable acceptance criteria
+- "depends_on": indices (0-based) of tasks this one requires, or [] if independent.
+  Task B depends on A if B needs code/APIs/data that A creates.
+  When unsure, include the dependency (safe default).
 
 RULES:
 - Each task is a complete, self-contained unit of work
@@ -161,7 +164,7 @@ RULES:
 - If a task modifies existing functionality, include regression criteria
 
 Write ONLY a valid JSON array to {output_file}. No prose.
-Example: [{{"prompt": "Add search", "rubric": ["search works", "case-insensitive"]}}]"""
+Example: [{{"prompt": "Add search", "rubric": ["search works", "case-insensitive"], "depends_on": []}}, {{"prompt": "Add search filters", "rubric": ["filters work"], "depends_on": [0]}}]"""
 
     try:
         agent_opts = ClaudeAgentOptions(
@@ -204,5 +207,11 @@ Example: [{{"prompt": "Add search", "rubric": ["search works", "case-insensitive
             raise ValueError(f"Task {i} is not a dict")
         if not task.get("prompt"):
             raise ValueError(f"Task {i} missing 'prompt'")
+        # Normalize depends_on: ensure it's a list of ints or absent
+        deps = task.get("depends_on")
+        if deps is not None:
+            if not isinstance(deps, list):
+                raise ValueError(f"Task {i} 'depends_on' must be a list")
+            task["depends_on"] = [int(d) for d in deps]
 
     return tasks

@@ -390,6 +390,7 @@ async def run_testgen_agent(
     blackbox_context: str,
     project_dir: Path,
     framework: str = "pytest",
+    quiet: bool = False,
 ) -> tuple[Path | None, list[str]]:
     """Run adversarial testgen agent in an isolated temp directory.
 
@@ -462,10 +463,11 @@ Steps:
             elif hasattr(message, "content"):
                 for block in message.content:
                     if TextBlock and isinstance(block, TextBlock) and block.text:
-                        print(block.text, flush=True)
+                        if not quiet:
+                            print(block.text, flush=True)
                         log_lines.append(block.text)
                     elif ToolUseBlock and isinstance(block, ToolUseBlock):
-                        log_line = print_agent_tool(block)
+                        log_line = print_agent_tool(block, quiet=quiet)
                         log_lines.append(log_line)
 
         # Check if test file was written in temp dir
@@ -644,23 +646,35 @@ def test_file_path(framework: str, key: str) -> Path:
 
 
 def _read_existing_tests(project_dir: Path) -> str:
-    """Read existing test files to provide import style context."""
+    """Read existing test files to provide import style context.
+
+    Prioritizes otto-generated tests (test_otto_*.py) so that later testgen
+    agents follow the same conventions/helpers as earlier ones.
+    """
     test_dirs = [project_dir / "tests", project_dir / "test"]
-    samples = []
+    otto_samples: list[str] = []
+    other_samples: list[str] = []
     for test_dir in test_dirs:
         if not test_dir.is_dir():
             continue
         for f in sorted(test_dir.iterdir()):
-            if f.suffix == ".py" and f.name.startswith("test_"):
+            if f.suffix != ".py" or not f.name.startswith("test_"):
+                continue
+            try:
                 content = f.read_text()
-                # Take first 50 lines to show import patterns
+            except (OSError, UnicodeDecodeError):
+                continue
+            # Otto-generated tests — include more (full helpers + first tests)
+            if f.name.startswith("test_otto_"):
+                lines = content.splitlines()[:80]
+                otto_samples.append(f"# {f.relative_to(project_dir)}\n" + "\n".join(lines))
+            elif len(other_samples) < 2:
                 lines = content.splitlines()[:50]
-                samples.append(f"# {f.relative_to(project_dir)}\n" + "\n".join(lines))
-                if len(samples) >= 2:
-                    break
-        if samples:
+                other_samples.append(f"# {f.relative_to(project_dir)}\n" + "\n".join(lines))
+        if otto_samples or other_samples:
             break
-    return "\n\n".join(samples) if samples else ""
+    # Otto tests first (convention source), then regular tests
+    return "\n\n".join(otto_samples + other_samples) if (otto_samples or other_samples) else ""
 
 
 async def generate_tests(
@@ -756,11 +770,13 @@ Do NOT finish until validation passes AND self-review is done."""
 async def generate_integration_tests(
     tasks: list[dict],
     project_dir: Path,
+    ripple_risks: list[tuple[int, str, str]] | None = None,
 ) -> Path | None:
     """Generate cross-feature integration tests via Agent SDK.
 
     Takes ALL passed tasks and generates tests that exercise features
     working together — multi-step workflows crossing task boundaries.
+    ripple_risks: list of (task_id, changed_file, affected_file) from reconciliation.
     """
     framework = detect_test_framework(project_dir) or "pytest"
     existing_tests = _read_existing_tests(project_dir)
@@ -788,6 +804,17 @@ EXISTING TESTS (for reference on fixtures/helpers — do NOT copy how they invok
     testgen_dir.mkdir(parents=True, exist_ok=True)
     out_file = testgen_dir / "otto_integration.py"
 
+    ripple_section = ""
+    if ripple_risks:
+        lines = []
+        for tid, changed, affected in ripple_risks:
+            lines.append(f"  {affected} imports {changed} (changed by task #{tid})")
+        ripple_section = (
+            "\n\nRIPPLE RISKS — these files import from files changed by tasks "
+            "but were not part of any task:\n" + "\n".join(lines) +
+            "\nWrite integration tests that specifically exercise these interactions.\n"
+        )
+
     prompt = f"""You are a QA engineer writing cross-feature integration tests.
 
 The following features were implemented:
@@ -798,7 +825,7 @@ PROJECT DIRECTORY: {project_dir}
 
 RELEVANT SOURCE FILES (already read for you — start writing tests immediately):
 {source_context}
-{example_section}
+{example_section}{ripple_section}
 TEST FRAMEWORK: {framework}
 
 Write integration tests that exercise these features WORKING TOGETHER.

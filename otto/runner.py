@@ -2,6 +2,7 @@
 
 import asyncio
 import fcntl
+import graphlib
 import hashlib
 import os
 import shutil
@@ -383,6 +384,7 @@ def _cleanup_task_failure(
     error: str = "unknown",
     error_code: str = "unknown",
     cost_usd: float = 0.0,
+    duration_s: float = 0.0,
 ) -> None:
     """Unified cleanup for all task failure paths: retries exhausted, interruption, exceptions."""
     _restore_workspace_state(
@@ -405,6 +407,8 @@ def _cleanup_task_failure(
             }
             if cost_usd > 0:
                 updates["cost_usd"] = cost_usd
+            if duration_s > 0:
+                updates["duration_s"] = round(duration_s, 1)
             update_task(tasks_file, key, **updates)
         except Exception:
             pass
@@ -620,13 +624,58 @@ def _print_tool_result(block) -> None:
             print(f"    {_DIM}{lines[-1]}{_RESET}", flush=True)
 
 
+def _setup_task_worktree(project_dir: Path, key: str, base_sha: str) -> Path:
+    """Create an isolated git worktree for parallel task execution."""
+    wt_dir = project_dir / ".worktrees" / f"otto-{key}"
+    branch_name = f"otto/{key}"
+    # Clean up stale worktree if it exists
+    if wt_dir.exists():
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", str(wt_dir)],
+            cwd=project_dir, capture_output=True,
+        )
+    # Delete stale branch if it exists
+    subprocess.run(
+        ["git", "branch", "-D", branch_name],
+        cwd=project_dir, capture_output=True,
+    )
+    wt_dir.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "worktree", "add", str(wt_dir), "-b", branch_name, base_sha],
+        cwd=project_dir, capture_output=True, check=True,
+    )
+    return wt_dir
+
+
+def _teardown_task_worktree(project_dir: Path, key: str) -> None:
+    """Remove a task's git worktree and its branch."""
+    wt_dir = project_dir / ".worktrees" / f"otto-{key}"
+    subprocess.run(
+        ["git", "worktree", "remove", "--force", str(wt_dir)],
+        cwd=project_dir, capture_output=True,
+    )
+    if wt_dir.exists():
+        shutil.rmtree(wt_dir, ignore_errors=True)
+
+
 async def run_task(
     task: dict[str, Any],
     config: dict[str, Any],
     project_dir: Path,
     tasks_file: Path | None,
+    work_dir: Path | None = None,
+    pre_generated_test: Path | None = None,
 ) -> bool:
-    """Run a single task through the full loop. Returns True if passed."""
+    """Run a single task through the full loop. Returns True if passed.
+
+    When work_dir is set (parallel mode), the task runs in an isolated worktree:
+    - Branch creation and merge are handled by the caller
+    - All agent/git operations use work_dir as cwd
+    - tasks_file operations still use project_dir (via flock)
+
+    When pre_generated_test is set, skips testgen and uses the provided test file.
+    Used when testgen was run sequentially before parallel coding.
+    """
     key = task["key"]
     task_id = task["id"]
     prompt = task["prompt"]
@@ -635,30 +684,52 @@ async def run_task(
     test_command = config.get("test_command")
     default_branch = config["default_branch"]
     timeout = config["verify_timeout"]
+    parallel_mode = work_dir is not None
+    effective_dir = work_dir if parallel_mode else project_dir
+
+    # In parallel mode, prefix structural messages and suppress verbose agent output.
+    # Full output goes to log files (otto logs <id>).
+    _task_tag = f"[#{task_id}]" if parallel_mode else ""
+
+    def _tprint(msg: str = "", **kwargs) -> None:
+        """Print with task prefix in parallel mode."""
+        if _task_tag:
+            print(f"  {_DIM}{_task_tag}{_RESET} {msg}", flush=True)
+        else:
+            print(msg, flush=True)
 
     # Snapshot pre-existing untracked files so we don't sweep them into the commit
-    pre_existing_untracked = _snapshot_untracked(project_dir)
+    pre_existing_untracked = _snapshot_untracked(effective_dir)
 
     task_start = time.monotonic()
 
-    # Create branch
-    base_sha = create_task_branch(project_dir, key, default_branch, task=task)
+    # Create branch (skip in parallel mode — caller sets up worktree with branch)
+    if parallel_mode:
+        base_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=effective_dir, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+    else:
+        base_sha = create_task_branch(project_dir, key, default_branch, task=task)
     if tasks_file:
         update_task(tasks_file, key, status="running", attempts=0)
 
     # Auto-detect test_command if rubric exists but no test_command configured
     rubric = task.get("rubric")
     if rubric and not test_command:
-        test_command = detect_test_command(project_dir)
+        test_command = detect_test_command(effective_dir)
         if not test_command:
             test_command = "pytest"  # fallback for Python projects
 
     # Print task header before testgen (so testgen output is under the right task)
-    print(flush=True)
-    print(f"{_BOLD}{'━' * 60}{_RESET}", flush=True)
-    print(f"{_BOLD}  Task #{task_id}{_RESET}  {prompt[:80]}", flush=True)
-    print(f"  {_DIM}key {key}{_RESET}", flush=True)
-    print(f"{_BOLD}{'━' * 60}{_RESET}", flush=True)
+    if parallel_mode:
+        _tprint(f"{_BOLD}Task #{task_id}{_RESET}  {prompt[:60]}  {_DIM}started{_RESET}")
+    else:
+        print(flush=True)
+        print(f"{_BOLD}{'━' * 60}{_RESET}", flush=True)
+        print(f"{_BOLD}  Task #{task_id}{_RESET}  {prompt[:80]}", flush=True)
+        print(f"  {_DIM}key {key}{_RESET}", flush=True)
+        print(f"{_BOLD}{'━' * 60}{_RESET}", flush=True)
 
     # Timing for profiling
     timings: dict[str, float] = {}
@@ -668,32 +739,51 @@ async def run_task(
     test_commit_sha = None
     test_file_sha = None
 
-    if rubric:
+    if not rubric and not parallel_mode:
+        print(f"\n  {_YELLOW}{_BOLD}⚠ No rubric — skipping adversarial TDD{_RESET}", flush=True)
+        if test_command:
+            print(f"  {_DIM}Relying on existing tests:{_RESET} {test_command}", flush=True)
+        if verify_cmd:
+            print(f"  {_DIM}Relying on verify command:{_RESET} {verify_cmd}", flush=True)
+        if not test_command and not verify_cmd:
+            print(f"  {_YELLOW}No test command, no verify command — agent output will be merged unchecked.{_RESET}", flush=True)
+        print(f"  {_DIM}Use 'otto add' without --no-rubric to enable adversarial TDD.{_RESET}\n", flush=True)
+
+    if rubric and pre_generated_test:
+        # Testgen was run sequentially before parallel coding — use pre-generated test
+        test_file_path_val = pre_generated_test
+        from otto.testgen import validate_generated_tests
+        validation = validate_generated_tests(test_file_path_val, "pytest", effective_dir)
+        testgen_logs = []
+
+    elif rubric:
         from otto.testgen import build_blackbox_context, run_testgen_agent, validate_generated_tests
 
-        print(f"  {_DIM}Building black-box context...{_RESET}", flush=True)
+        if not parallel_mode:
+            print(f"  {_DIM}Building black-box context...{_RESET}", flush=True)
         t0 = time.monotonic()
         task_hint = prompt + "\n" + "\n".join(rubric)
-        blackbox_ctx = build_blackbox_context(project_dir, task_hint=task_hint)
+        blackbox_ctx = build_blackbox_context(effective_dir, task_hint=task_hint)
         timings["blackbox_context"] = time.monotonic() - t0
 
-        print(f"  {_DIM}Testgen agent writing adversarial tests ({len(rubric)} criteria)...{_RESET}", flush=True)
+        if not parallel_mode:
+            print(f"  {_DIM}Testgen agent writing adversarial tests ({len(rubric)} criteria)...{_RESET}", flush=True)
         t0 = time.monotonic()
         testgen_logs: list[str] = []
-        test_file_path_val, testgen_logs = await run_testgen_agent(rubric, key, blackbox_ctx, project_dir)
+        test_file_path_val, testgen_logs = await run_testgen_agent(rubric, key, blackbox_ctx, effective_dir, quiet=parallel_mode)
         timings["testgen_agent"] = time.monotonic() - t0
 
         if test_file_path_val:
             # Two-phase validation
-            validation = validate_generated_tests(test_file_path_val, "pytest", project_dir)
+            validation = validate_generated_tests(test_file_path_val, "pytest", effective_dir)
 
             if validation.status == "collection_error":
                 _log_warn(f"Generated tests have errors — regenerating once")
                 test_file_path_val.unlink()
-                test_file_path_val, regen_logs = await run_testgen_agent(rubric, key, blackbox_ctx, project_dir)
+                test_file_path_val, regen_logs = await run_testgen_agent(rubric, key, blackbox_ctx, effective_dir, quiet=parallel_mode)
                 testgen_logs.extend(regen_logs)
                 if test_file_path_val:
-                    validation = validate_generated_tests(test_file_path_val, "pytest", project_dir)
+                    validation = validate_generated_tests(test_file_path_val, "pytest", effective_dir)
                     if validation.status == "collection_error":
                         _log_warn("Regenerated tests still broken — skipping rubric tests")
                         test_file_path_val.unlink()
@@ -702,7 +792,7 @@ async def run_task(
             if test_file_path_val and validation.status == "all_pass":
                 # Check if feature already exists (code from a previous run)
                 # If so, keep tests as regression coverage — don't waste time regenerating
-                source_context = get_relevant_file_contents(project_dir, task_hint=prompt)
+                source_context = get_relevant_file_contents(effective_dir, task_hint=prompt)
                 # Simple heuristic: if source files mention key words from the task, feature likely exists
                 prompt_words = {w.lower() for w in prompt.split() if len(w) >= 4}
                 source_lower = source_context.lower()
@@ -710,33 +800,35 @@ async def run_task(
                 feature_likely_exists = matches >= 3
 
                 if feature_likely_exists:
-                    print(f"  {_DIM}All tests pass — feature likely already implemented. Keeping as regression tests.{_RESET}", flush=True)
+                    if not parallel_mode:
+                        print(f"  {_DIM}All tests pass — feature likely already implemented. Keeping as regression tests.{_RESET}", flush=True)
                     # Keep the tests, they serve as regression coverage
-                    validation = validate_generated_tests(test_file_path_val, "pytest", project_dir)
+                    validation = validate_generated_tests(test_file_path_val, "pytest", effective_dir)
                 else:
-                    print(f"\n  {_YELLOW}{_BOLD}⚠⚠⚠ WARNING: All rubric tests PASS before implementation — tests may be too weak{_RESET}", flush=True)
-                    print(f"  {_DIM}Regenerating tests...{_RESET}", flush=True)
+                    if not parallel_mode:
+                        print(f"\n  {_YELLOW}{_BOLD}⚠⚠⚠ WARNING: All rubric tests PASS before implementation — tests may be too weak{_RESET}", flush=True)
+                        print(f"  {_DIM}Regenerating tests...{_RESET}", flush=True)
                     test_file_path_val.unlink()
-                    test_file_path_val, regen_logs = await run_testgen_agent(rubric, key, blackbox_ctx, project_dir)
+                    test_file_path_val, regen_logs = await run_testgen_agent(rubric, key, blackbox_ctx, effective_dir, quiet=parallel_mode)
                     testgen_logs.extend(regen_logs)
                     if test_file_path_val:
-                        validation = validate_generated_tests(test_file_path_val, "pytest", project_dir)
+                        validation = validate_generated_tests(test_file_path_val, "pytest", effective_dir)
                         if validation.status == "all_pass":
                             print(f"  {_DIM}Tests still pass — keeping as regression tests.{_RESET}", flush=True)
 
-            if test_file_path_val and validation.status == "tdd_ok":
+            if test_file_path_val and validation.status == "tdd_ok" and not parallel_mode:
                 print(f"\n  {_DIM}{'─' * 50}{_RESET}", flush=True)
                 print(f"  {_GREEN}✓{_RESET} Adversarial tests ready — {_BOLD}{validation.failed} failing{_RESET}, {_DIM}{validation.passed} regression{_RESET}", flush=True)
                 print(f"  {_DIM}{'─' * 50}{_RESET}", flush=True)
 
         # Commit test file if we have one
         if test_file_path_val:
-            subprocess.run(["git", "add", str(test_file_path_val.relative_to(project_dir))],
-                           cwd=project_dir, capture_output=True)
+            subprocess.run(["git", "add", str(test_file_path_val.relative_to(effective_dir))],
+                           cwd=effective_dir, capture_output=True)
             subprocess.run(["git", "commit", "-m", f"otto: add rubric tests for task #{task_id}"],
-                           cwd=project_dir, capture_output=True)
+                           cwd=effective_dir, capture_output=True)
             test_commit_sha = subprocess.run(
-                ["git", "rev-parse", "HEAD"], cwd=project_dir,
+                ["git", "rev-parse", "HEAD"], cwd=effective_dir,
                 capture_output=True, text=True, check=True,
             ).stdout.strip()
             test_file_sha = subprocess.run(
@@ -775,7 +867,8 @@ async def run_task(
     total_cost = 0.0  # accumulated cost across retries
     for attempt in range(max_retries + 1):
         attempt_num = attempt + 1
-        print(f"\n  {_DIM}attempt {attempt_num}/{max_retries + 1}{_RESET}", flush=True)
+        if not parallel_mode:
+            print(f"\n  {_DIM}attempt {attempt_num}/{max_retries + 1}{_RESET}", flush=True)
 
         if tasks_file:
             update_task(tasks_file, key, attempts=attempt_num)
@@ -789,11 +882,11 @@ async def run_task(
 
             # Include relevant source files in the prompt
             from otto.testgen import get_relevant_file_contents
-            source_context = get_relevant_file_contents(project_dir, task_hint=prompt)
+            source_context = get_relevant_file_contents(effective_dir, task_hint=prompt)
 
             agent_prompt = (
                 f"{base_prompt}\n\n"
-                f"You are working in {project_dir}. Do NOT create git commits. "
+                f"You are working in {effective_dir}. Do NOT create git commits. "
                 f"Do NOT write tests — acceptance tests will be generated separately.\n\n"
                 f"RELEVANT SOURCE FILES (already read for you — start coding immediately):\n"
                 f"{source_context}"
@@ -803,7 +896,7 @@ async def run_task(
                 f"Verification failed. Fix the issue.\n\n"
                 f"{last_error}\n\n"
                 f"Original task: {prompt}\n\n"
-                f"You are working in {project_dir}. Do NOT create git commits. "
+                f"You are working in {effective_dir}. Do NOT create git commits. "
                 f"Do NOT write tests — acceptance tests will be generated separately. "
                 f"You may edit any file in the project to make all tests pass."
             )
@@ -811,7 +904,7 @@ async def run_task(
         # Tell the coding agent about adversarial test file (do NOT modify it)
         if test_file_path_val:
             agent_prompt += (
-                f"\n\nACCEPTANCE TESTS: {test_file_path_val.relative_to(project_dir)} contains tests you must pass. "
+                f"\n\nACCEPTANCE TESTS: {test_file_path_val.relative_to(effective_dir)} contains tests you must pass. "
                 f"Do NOT modify this file — these are adversarial tests you must satisfy.\n\n"
                 f"IMPORTANT: Implement ONLY what the task description asks for. "
                 f"If a test seems to require functionality beyond the spec (e.g., a non-standard "
@@ -826,7 +919,7 @@ async def run_task(
             try:
                 agent_opts = ClaudeAgentOptions(
                     permission_mode="bypassPermissions",
-                    cwd=str(project_dir),
+                    cwd=str(effective_dir),
                     max_turns=20,  # prevent infinite loops
                 )
                 if config.get("model"):
@@ -846,13 +939,16 @@ async def run_task(
                     elif AssistantMessage and isinstance(message, AssistantMessage):
                         for block in message.content:
                             if TextBlock and isinstance(block, TextBlock) and block.text:
-                                print(block.text, flush=True)
+                                if not parallel_mode:
+                                    print(block.text, flush=True)
                                 agent_log_lines.append(block.text)
                             elif ToolUseBlock and isinstance(block, ToolUseBlock):
-                                _print_tool_use(block)
+                                if not parallel_mode:
+                                    _print_tool_use(block)
                                 agent_log_lines.append(f"● {block.name}  {_tool_use_summary(block)}")
                             elif ToolResultBlock and isinstance(block, ToolResultBlock):
-                                _print_tool_result(block)
+                                if not parallel_mode:
+                                    _print_tool_result(block)
                                 content = block.content if isinstance(block.content, str) else str(block.content)
                                 if content.strip():
                                     prefix = "ERROR: " if block.is_error else ""
@@ -885,7 +981,7 @@ async def run_task(
                 # Reset workspace — preserve test commit if it exists
                 reset_sha = test_commit_sha if test_commit_sha else base_sha
                 _restore_workspace_state(
-                    project_dir,
+                    effective_dir,
                     reset_ref=reset_sha,
                     pre_existing_untracked=pre_existing_untracked,
                 )
@@ -895,40 +991,43 @@ async def run_task(
             if test_file_sha and test_file_path_val:
                 current = subprocess.run(
                     ["git", "hash-object", str(test_file_path_val)],
-                    capture_output=True, text=True, cwd=project_dir,
+                    capture_output=True, text=True, cwd=effective_dir,
                 ).stdout.strip()
                 if current != test_file_sha:
                     subprocess.run(
                         ["git", "checkout", test_commit_sha, "--",
-                         str(test_file_path_val.relative_to(project_dir))],
-                        cwd=project_dir, capture_output=True,
+                         str(test_file_path_val.relative_to(effective_dir))],
+                        cwd=effective_dir, capture_output=True,
                     )
-                    print(f"  {_YELLOW}⚠ Test file tampered by coding agent — restored{_RESET}", flush=True)
+                    if not parallel_mode:
+                        print(f"  {_YELLOW}⚠ Test file tampered by coding agent — restored{_RESET}", flush=True)
 
             # Check if agent made any changes (compare against appropriate base)
             commit_base = test_commit_sha if test_commit_sha else base_sha
             diff_check = subprocess.run(
                 ["git", "diff", "--quiet", commit_base],
-                cwd=project_dir, capture_output=True,
+                cwd=effective_dir, capture_output=True,
             )
             untracked_check = subprocess.run(
                 ["git", "ls-files", "--others", "--exclude-standard"],
-                cwd=project_dir, capture_output=True, text=True,
+                cwd=effective_dir, capture_output=True, text=True,
             )
             new_untracked = {f for f in untracked_check.stdout.strip().splitlines() if f} - pre_existing_untracked
             no_changes = diff_check.returncode == 0 and not new_untracked
 
             if no_changes and not test_file_path_val:
                 # No code changes and no rubric tests — nothing to commit
-                print(f"  {_DIM}No changes needed{_RESET}", flush=True)
-                subprocess.run(["git", "checkout", default_branch], cwd=project_dir, capture_output=True)
-                cleanup_branch(project_dir, key, default_branch)
+                if not parallel_mode:
+                    print(f"  {_DIM}No changes needed{_RESET}", flush=True)
+                if not parallel_mode:
+                    subprocess.run(["git", "checkout", default_branch], cwd=project_dir, capture_output=True)
+                    cleanup_branch(project_dir, key, default_branch)
+                timings["total"] = time.monotonic() - task_start
                 if tasks_file:
-                    updates = {"status": "passed"}
+                    updates = {"status": "passed", "duration_s": round(timings["total"], 1)}
                     if total_cost > 0:
                         updates["cost_usd"] = total_cost
                     update_task(tasks_file, key, **updates)
-                timings["total"] = time.monotonic() - task_start
                 _log_pass(task_id, default_branch, timings["total"], cost=total_cost)
                 try:
                     (log_dir / "timing.log").write_text(
@@ -942,13 +1041,13 @@ async def run_task(
             # Rubric tests are already committed — testgen_file is always None
             # (old fallback path removed; adversarial tests committed before attempt loop)
             candidate_sha = build_candidate_commit(
-                project_dir, commit_base, None,
+                effective_dir, commit_base, None,
                 pre_existing_untracked,
             )
 
             # Run verification in disposable worktree
             verify_result = run_verification(
-                project_dir=project_dir,
+                project_dir=effective_dir,
                 candidate_sha=candidate_sha,
                 test_command=test_command,
                 verify_cmd=verify_cmd,
@@ -958,12 +1057,20 @@ async def run_task(
         except Exception as e:
             # Unexpected error during agent/candidate/verify phases — safe to clean up
             _log_fail(task_id, f"unexpected error: {e}", time.monotonic() - task_start, cost=total_cost)
-            _cleanup_task_failure(
-                project_dir, key, default_branch, tasks_file,
-                pre_existing_untracked=pre_existing_untracked,
-                error=f"unexpected error: {e}", error_code="internal_error",
-                cost_usd=total_cost,
-            )
+            if not parallel_mode:
+                _cleanup_task_failure(
+                    project_dir, key, default_branch, tasks_file,
+                    pre_existing_untracked=pre_existing_untracked,
+                    error=f"unexpected error: {e}", error_code="internal_error",
+                    cost_usd=total_cost,
+                    duration_s=time.monotonic() - task_start,
+                )
+            elif tasks_file:
+                update_task(tasks_file, key,
+                            status="failed", error=f"unexpected error: {e}",
+                            error_code="internal_error",
+                            cost_usd=total_cost,
+                            duration_s=round(time.monotonic() - task_start, 1))
             return False
 
         # Write verification log (non-critical, best-effort)
@@ -976,7 +1083,8 @@ async def run_task(
         except OSError as e:
             pass  # best-effort log write
 
-        _log_verify(verify_result.tiers)
+        if not parallel_mode:
+            _log_verify(verify_result.tiers)
 
         if verify_result.passed:
             # Squash all branch commits into a single commit
@@ -985,54 +1093,63 @@ async def run_task(
                 # Reset to base_sha (not commit_base) to squash everything into one commit
                 subprocess.run(
                     ["git", "reset", "--mixed", base_sha],
-                    cwd=project_dir, capture_output=True, check=True,
+                    cwd=effective_dir, capture_output=True, check=True,
                 )
                 # Re-stage everything
                 subprocess.run(
                     ["git", "add", "-u"],
-                    cwd=project_dir, capture_output=True, check=True,
+                    cwd=effective_dir, capture_output=True, check=True,
                 )
                 untracked_final = subprocess.run(
                     ["git", "ls-files", "--others", "--exclude-standard", "-z"],
-                    cwd=project_dir, capture_output=True, text=True,
+                    cwd=effective_dir, capture_output=True, text=True,
                 )
                 skip = pre_existing_untracked or set()
                 for f in untracked_final.stdout.split("\0"):
                     if f and f not in skip:
                         subprocess.run(
                             ["git", "add", "--", f],
-                            cwd=project_dir, capture_output=True,
+                            cwd=effective_dir, capture_output=True,
                         )
                 # After git add -u and untracked staging, explicitly add the test file
                 # (it was ADDED in the test commit, so after reset --mixed it's untracked
                 # and gets filtered out by pre_existing_untracked)
                 if test_file_path_val and test_file_path_val.exists():
                     subprocess.run(
-                        ["git", "add", "--", str(test_file_path_val.relative_to(project_dir))],
-                        cwd=project_dir, capture_output=True,
+                        ["git", "add", "--", str(test_file_path_val.relative_to(effective_dir))],
+                        cwd=effective_dir, capture_output=True,
                     )
                 subprocess.run(
                     ["git", "commit", "-m",
                      f"otto: {prompt[:60]} (#{task_id})"],
-                    cwd=project_dir, capture_output=True, text=True,
+                    cwd=effective_dir, capture_output=True, text=True,
                     check=True,
                 )
             except (subprocess.CalledProcessError, Exception) as e:
                 stderr = getattr(e, "stderr", str(e))
                 _log_fail(task_id, f"squash commit failed: {stderr}", time.monotonic() - task_start, cost=total_cost)
-                _cleanup_task_failure(
-                    project_dir, key, default_branch, tasks_file,
-                    pre_existing_untracked=pre_existing_untracked,
-                    error=f"squash commit failed: {stderr}", error_code="internal_error",
-                    cost_usd=total_cost,
-                )
+                if not parallel_mode:
+                    _cleanup_task_failure(
+                        project_dir, key, default_branch, tasks_file,
+                        pre_existing_untracked=pre_existing_untracked,
+                        error=f"squash commit failed: {stderr}", error_code="internal_error",
+                        cost_usd=total_cost,
+                        duration_s=time.monotonic() - task_start,
+                    )
+                elif tasks_file:
+                    update_task(tasks_file, key,
+                                status="failed", error=f"squash commit failed: {stderr}",
+                                error_code="internal_error",
+                                cost_usd=total_cost,
+                                duration_s=round(time.monotonic() - task_start, 1))
                 return False
             # Mutation check — validate test quality
-            print(flush=True)
-            if test_file_path_val:
+            if not parallel_mode:
+                print(flush=True)
+            if test_file_path_val and not parallel_mode:
                 try:
                     caught, mut_desc = run_mutation_check(
-                        project_dir, test_file_path_val, test_command or "pytest",
+                        effective_dir, test_file_path_val, test_command or "pytest",
                     )
                     if caught:
                         print(f"  {_GREEN}{_BOLD}✓ Mutation check: caught{_RESET} {_DIM}— {mut_desc}{_RESET}", flush=True)
@@ -1048,17 +1165,37 @@ async def run_task(
                 except Exception as e:
                     print(f"  {_DIM}Mutation check skipped: {e}{_RESET}", flush=True)
 
+            # In parallel mode, caller handles merge — just return success
+            if parallel_mode:
+                testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / key
+                if testgen_dir.exists():
+                    shutil.rmtree(testgen_dir, ignore_errors=True)
+                timings["total"] = time.monotonic() - task_start
+                if tasks_file:
+                    updates = {"status": "passed", "duration_s": round(timings["total"], 1)}
+                    if total_cost > 0:
+                        updates["cost_usd"] = total_cost
+                    update_task(tasks_file, key, **updates)
+                _log_pass(task_id, default_branch, timings["total"], cost=total_cost)
+                try:
+                    (log_dir / "timing.log").write_text(
+                        "\n".join(f"{k}: {v:.1f}s" for k, v in timings.items()) + "\n"
+                    )
+                except OSError:
+                    pass
+                return True
+
             # Merge to default — post-merge bookkeeping errors are non-destructive
             if merge_to_default(project_dir, key, default_branch):
                 testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / key
                 if testgen_dir.exists():
                     shutil.rmtree(testgen_dir, ignore_errors=True)
+                timings["total"] = time.monotonic() - task_start
                 if tasks_file:
-                    updates = {"status": "passed"}
+                    updates = {"status": "passed", "duration_s": round(timings["total"], 1)}
                     if total_cost > 0:
                         updates["cost_usd"] = total_cost
                     update_task(tasks_file, key, **updates)
-                timings["total"] = time.monotonic() - task_start
                 _log_pass(task_id, default_branch, timings["total"], cost=total_cost)
                 try:
                     (log_dir / "timing.log").write_text(
@@ -1087,7 +1224,7 @@ async def run_task(
             if test_file_path_val and verify_result.failure_output:
                 test_bug = await _diagnose_test_bug(
                     rubric, verify_result.failure_output,
-                    test_file_path_val, project_dir,
+                    test_file_path_val, effective_dir,
                 )
                 if test_bug:
                     print(f"  {_YELLOW}⚠ Detected test bug — regenerating adversarial tests{_RESET}", flush=True)
@@ -1095,30 +1232,31 @@ async def run_task(
                     # Unwind, regenerate tests, and restart the attempt loop
                     subprocess.run(
                         ["git", "reset", "--hard", base_sha],
-                        cwd=project_dir, capture_output=True,
+                        cwd=effective_dir, capture_output=True,
                     )
-                    _remove_otto_created_untracked(project_dir, pre_existing_untracked)
-                    subprocess.run(["git", "checkout", default_branch],
-                                   cwd=project_dir, capture_output=True)
-                    cleanup_branch(project_dir, key, default_branch)
-                    # Re-create branch and regenerate tests
-                    base_sha = create_task_branch(project_dir, key, default_branch, task=task)
+                    _remove_otto_created_untracked(effective_dir, pre_existing_untracked)
+                    if not parallel_mode:
+                        subprocess.run(["git", "checkout", default_branch],
+                                       cwd=project_dir, capture_output=True)
+                        cleanup_branch(project_dir, key, default_branch)
+                        # Re-create branch and regenerate tests
+                        base_sha = create_task_branch(project_dir, key, default_branch, task=task)
                     if test_file_path_val.exists():
                         test_file_path_val.unlink()
                     from otto.testgen import build_blackbox_context, run_testgen_agent, validate_generated_tests
-                    blackbox_ctx = build_blackbox_context(project_dir, task_hint=task_hint)
+                    blackbox_ctx = build_blackbox_context(effective_dir, task_hint=task_hint)
                     test_file_path_val, testgen_logs = await run_testgen_agent(
-                        rubric, key, blackbox_ctx, project_dir
+                        rubric, key, blackbox_ctx, effective_dir, quiet=parallel_mode
                     )
                     if test_file_path_val:
-                        validation = validate_generated_tests(test_file_path_val, "pytest", project_dir)
+                        validation = validate_generated_tests(test_file_path_val, "pytest", effective_dir)
                         if validation.status == "tdd_ok":
-                            subprocess.run(["git", "add", str(test_file_path_val.relative_to(project_dir))],
-                                           cwd=project_dir, capture_output=True)
+                            subprocess.run(["git", "add", str(test_file_path_val.relative_to(effective_dir))],
+                                           cwd=effective_dir, capture_output=True)
                             subprocess.run(["git", "commit", "-m", f"otto: regenerate rubric tests for task #{task_id}"],
-                                           cwd=project_dir, capture_output=True)
+                                           cwd=effective_dir, capture_output=True)
                             test_commit_sha = subprocess.run(
-                                ["git", "rev-parse", "HEAD"], cwd=project_dir,
+                                ["git", "rev-parse", "HEAD"], cwd=effective_dir,
                                 capture_output=True, text=True, check=True,
                             ).stdout.strip()
                             commit_base = test_commit_sha
@@ -1132,18 +1270,27 @@ async def run_task(
             # Unwind candidate commit for retry
             subprocess.run(
                 ["git", "reset", "--mixed", commit_base],
-                cwd=project_dir, capture_output=True,
+                cwd=effective_dir, capture_output=True,
             )
             last_error = verify_result.failure_output
-            _log_warn(f"Verification failed — retrying")
+            if not parallel_mode:
+                _log_warn(f"Verification failed — retrying")
 
     # All retries exhausted
-    _cleanup_task_failure(
-        project_dir, key, default_branch, tasks_file,
-        pre_existing_untracked=pre_existing_untracked,
-        error="max retries exhausted", error_code="max_retries",
-        cost_usd=total_cost,
-    )
+    if not parallel_mode:
+        _cleanup_task_failure(
+            project_dir, key, default_branch, tasks_file,
+            pre_existing_untracked=pre_existing_untracked,
+            error="max retries exhausted", error_code="max_retries",
+            cost_usd=total_cost,
+            duration_s=time.monotonic() - task_start,
+        )
+    elif tasks_file:
+        update_task(tasks_file, key,
+                    status="failed", error="max retries exhausted",
+                    error_code="max_retries",
+                    cost_usd=total_cost,
+                    duration_s=round(time.monotonic() - task_start, 1))
     _log_fail(task_id, "all retries exhausted", time.monotonic() - task_start, cost=total_cost)
     return False
 
@@ -1152,6 +1299,7 @@ async def _run_integration_gate(
     passed_tasks: list[dict],
     config: dict,
     project_dir: Path,
+    ripple_risks: list[tuple[int, str, str]] | None = None,
 ) -> bool | None:
     """Generate and run cross-feature integration tests. Returns True if passed."""
     from otto.testgen import generate_integration_tests
@@ -1169,7 +1317,9 @@ async def _run_integration_gate(
     # Generate integration tests
     integration_file = None
     try:
-        integration_file = await generate_integration_tests(passed_tasks, project_dir)
+        integration_file = await generate_integration_tests(
+            passed_tasks, project_dir, ripple_risks=ripple_risks,
+        )
         if integration_file:
             print(f"  {_GREEN}✓{_RESET} {_DIM}Integration tests generated{_RESET}", flush=True)
         else:
@@ -1304,6 +1454,138 @@ async def _run_integration_gate(
     return False
 
 
+def _record_changed_files(
+    project_dir: Path,
+    tasks_file: Path,
+    task_key: str,
+    base_sha: str,
+) -> list[str]:
+    """Record which files a task changed (for reconciliation)."""
+    result = subprocess.run(
+        ["git", "diff", "--name-only", base_sha, "HEAD"],
+        cwd=project_dir, capture_output=True, text=True,
+    )
+    changed = [f for f in result.stdout.strip().splitlines() if f]
+    if changed:
+        update_task(tasks_file, task_key, changed_files=changed)
+    return changed
+
+
+def _reconcile_dependencies(
+    tasks_file: Path,
+    project_dir: Path,
+) -> list[tuple[int, str, str]]:
+    """Post-run reconciliation: detect hidden dependencies and ripple risks.
+
+    Returns list of (task_id, changed_file, affected_file) ripple risks.
+    """
+    from otto.testgen import _build_project_index
+
+    tasks = load_tasks(tasks_file)
+    passed = [t for t in tasks if t.get("status") == "passed" and t.get("changed_files")]
+    if len(passed) < 2:
+        return []
+
+    # Build import graph from project source files
+    source_result = subprocess.run(
+        ["git", "ls-files", "--", "*.py"],
+        cwd=project_dir, capture_output=True, text=True,
+    )
+    source_files = [f for f in source_result.stdout.strip().splitlines() if f]
+    _, import_graph = _build_project_index(project_dir, source_files)
+
+    # Invert: file → files that depend on it
+    dependents: dict[str, set[str]] = {}
+    for importer, imported_set in import_graph.items():
+        for imported in imported_set:
+            dependents.setdefault(imported, set()).add(importer)
+
+    # Track which files each task changed
+    task_files: dict[int, set[str]] = {}
+    all_changed: dict[str, int] = {}  # file → task_id that changed it
+    for t in passed:
+        tid = t["id"]
+        files = set(t.get("changed_files") or [])
+        task_files[tid] = files
+        for f in files:
+            all_changed[f] = tid
+
+    # Build dependency lookup
+    task_by_id = {t["id"]: t for t in tasks}
+
+    warnings_printed = False
+    updated_deps = False
+    ripple_risks: list[tuple[int, str, str]] = []
+
+    # Level 1: File overlap between independent tasks
+    for i, t1 in enumerate(passed):
+        for t2 in passed[i + 1:]:
+            # Check if they have a declared dependency
+            t1_deps = set(t1.get("depends_on") or [])
+            t2_deps = set(t2.get("depends_on") or [])
+            if t2["id"] in t1_deps or t1["id"] in t2_deps:
+                continue  # Already declared dependency
+            overlap = task_files.get(t1["id"], set()) & task_files.get(t2["id"], set())
+            if overlap:
+                if not warnings_printed:
+                    print(f"\n  {_YELLOW}{_BOLD}Reconciliation warnings:{_RESET}", flush=True)
+                    warnings_printed = True
+                print(f"  {_YELLOW}⚠ Tasks #{t1['id']} and #{t2['id']} both modified: {', '.join(sorted(overlap))}{_RESET}", flush=True)
+                print(f"    {_DIM}→ Hidden dependency detected. Updating depends_on.{_RESET}", flush=True)
+                # Update depends_on: later task depends on earlier
+                deps = list(t2.get("depends_on") or [])
+                if t1["id"] not in deps:
+                    deps.append(t1["id"])
+                    update_task(tasks_file, t2["key"], depends_on=deps)
+                    updated_deps = True
+
+    # Level 2: Import graph ripple analysis
+    for t in passed:
+        tid = t["id"]
+        for changed_file in task_files.get(tid, []):
+            affected_files = dependents.get(changed_file, set())
+            for affected in affected_files:
+                # Case A: affected file changed by another task → hidden dependency
+                if affected in all_changed and all_changed[affected] != tid:
+                    other_tid = all_changed[affected]
+                    other_task = task_by_id.get(other_tid)
+                    if other_task:
+                        other_deps = set(other_task.get("depends_on") or [])
+                        t_deps = set(t.get("depends_on") or [])
+                        if tid not in other_deps and other_tid not in t_deps:
+                            if not warnings_printed:
+                                print(f"\n  {_YELLOW}{_BOLD}Reconciliation warnings:{_RESET}", flush=True)
+                                warnings_printed = True
+                            print(f"  {_YELLOW}⚠ Task #{tid} changed {changed_file}, "
+                                  f"Task #{other_tid} changed {affected} which imports it{_RESET}", flush=True)
+                            deps = list(other_task.get("depends_on") or [])
+                            if tid not in deps:
+                                deps.append(tid)
+                                update_task(tasks_file, other_task["key"], depends_on=deps)
+                                updated_deps = True
+
+                # Case B: affected file NOT changed by any task → ripple risk
+                elif affected not in all_changed:
+                    ripple_risks.append((tid, changed_file, affected))
+
+    # Print ripple risks
+    if ripple_risks:
+        if not warnings_printed:
+            print(f"\n  {_YELLOW}{_BOLD}Reconciliation warnings:{_RESET}", flush=True)
+        seen: set[str] = set()
+        for tid, changed, affected in ripple_risks:
+            key = f"{changed}->{affected}"
+            if key not in seen:
+                seen.add(key)
+                print(f"  {_YELLOW}⚠ Ripple risk: Task #{tid} changed {changed}{_RESET}", flush=True)
+                print(f"    {_DIM}{affected} imports {changed} but was not part of any task{_RESET}", flush=True)
+
+    if updated_deps:
+        print(f"  {_DIM}Updated depends_on in tasks.yaml for future retries{_RESET}", flush=True)
+
+    return ripple_risks
+
+
 def _print_summary(results: list[tuple[dict, bool]], total_duration: float, integration_passed: bool | None = None, total_cost: float = 0.0) -> None:
     """Print summary of all tasks after a run."""
     passed = sum(1 for _, s in results if s)
@@ -1386,28 +1668,265 @@ async def run_all(
                 print(f"  {_RED}✗ Baseline tests failing — fix before running otto{_RESET}", flush=True)
                 return 2
 
-        # Process tasks
+        # Recover stale "running" tasks from prior crashed runs
+        tasks = load_tasks(tasks_file)
+        for t in tasks:
+            if t.get("status") == "running":
+                update_task(tasks_file, t["key"], status="pending",
+                            error=None, session_id=None)
+                print(f"  {_YELLOW}⚠ Task #{t['id']} was stuck in 'running' — reset to pending{_RESET}", flush=True)
+
+        # Auto-unblock tasks whose dependencies are now pending (retried)
+        tasks = load_tasks(tasks_file)
+        pending_or_passed = {t["id"] for t in tasks if t.get("status") in ("pending", "passed")}
+        for t in tasks:
+            if t.get("status") == "blocked":
+                deps = t.get("depends_on") or []
+                still_blocked = [d for d in deps if d not in pending_or_passed]
+                if not still_blocked:
+                    update_task(tasks_file, t["key"], status="pending",
+                                error=None)
+                    print(f"  {_YELLOW}⚠ Task #{t['id']} unblocked — dependencies now pending/passed{_RESET}", flush=True)
+
+        # Process tasks with dependency ordering
         tasks = load_tasks(tasks_file)
         pending = [t for t in tasks if t.get("status") == "pending"]
         if not pending:
             print(f"{_DIM}No pending tasks{_RESET}", flush=True)
             return 0
 
+        # Build sets for dependency resolution
+        pending_ids = {t["id"] for t in pending}
+        pending_by_id = {t["id"]: t for t in pending}
+        # Find tasks that failed in prior runs (dependencies that can't be satisfied)
+        all_tasks_by_id = {t["id"]: t for t in tasks}
+        prior_failed_ids = {
+            t["id"] for t in tasks
+            if t.get("status") in ("failed", "blocked")
+        }
+
+        # Build topological sorter
+        ts = graphlib.TopologicalSorter()
+        blocked_before_start: list[tuple[dict, int]] = []  # (task, failed_dep_id)
+        for t in pending:
+            deps = t.get("depends_on") or []
+            # Check if any dependency failed in a prior run
+            failed_deps = [d for d in deps if d in prior_failed_ids]
+            if failed_deps:
+                blocked_before_start.append((t, failed_deps[0]))
+                continue
+            # Only include pending deps (already-passed deps are satisfied)
+            pending_deps = [d for d in deps if d in pending_ids]
+            ts.add(t["id"], *pending_deps)
+
+        # Mark pre-blocked tasks
+        for t, failed_dep in blocked_before_start:
+            dep_task = all_tasks_by_id.get(failed_dep)
+            dep_label = f"#{failed_dep}" if not dep_task else f"#{failed_dep}"
+            update_task(tasks_file, t["key"],
+                        status="blocked",
+                        error=f"dependency {dep_label} failed")
+            print(f"  {_RED}✗ Task #{t['id']} blocked{_RESET} {_DIM}— dependency #{failed_dep} failed{_RESET}", flush=True)
+
+        try:
+            ts.prepare()
+        except graphlib.CycleError as e:
+            print(f"  {_RED}✗ Dependency cycle detected: {e}{_RESET}", flush=True)
+            return 2
+
+        max_parallel = config.get("max_parallel", 3)
+        semaphore = asyncio.Semaphore(max_parallel)
+
         run_start = time.monotonic()
         results: list[tuple[dict, bool]] = []  # (task, success)
-        for task in pending:
+        failed_ids: set[int] = set()
+
+        async def _run_in_worktree(
+            t: dict, base_sha: str, pre_test: Path | None = None,
+        ) -> tuple[dict, bool]:
+            """Run a task in an isolated worktree for parallel execution."""
+            async with semaphore:
+                wt_dir = _setup_task_worktree(project_dir, t["key"], base_sha)
+                try:
+                    # Remap pre-generated test path to worktree location
+                    wt_test = None
+                    if pre_test and pre_test.exists():
+                        rel = pre_test.relative_to(project_dir)
+                        wt_test = wt_dir / rel
+                    success = await run_task(
+                        t, config, project_dir, tasks_file,
+                        work_dir=wt_dir, pre_generated_test=wt_test,
+                    )
+                    return (t, success)
+                finally:
+                    _teardown_task_worktree(project_dir, t["key"])
+
+        async def _merge_task_branch(key: str, default_branch_name: str) -> bool:
+            """Merge a task branch to default with rebase retry."""
+            if merge_to_default(project_dir, key, default_branch_name):
+                return True
+            # ff-only failed (main advanced from earlier merge) — try rebase
+            branch_name = f"otto/{key}"
+            rebase = subprocess.run(
+                ["git", "rebase", default_branch_name, branch_name],
+                cwd=project_dir, capture_output=True,
+            )
+            if rebase.returncode != 0:
+                # Rebase conflict — abort and report
+                subprocess.run(
+                    ["git", "rebase", "--abort"],
+                    cwd=project_dir, capture_output=True,
+                )
+                return False
+            return merge_to_default(project_dir, key, default_branch_name)
+
+        while ts.is_active():
             if interrupted:
                 _log_warn("Interrupted — cleaning up")
                 break
-            current_task_key = task["key"]
-            if not check_clean_tree(project_dir):
-                print(f"  {_RED}✗ Working tree is dirty — aborting{_RESET}", flush=True)
-                return 2
-            current_pre_existing_untracked = _snapshot_untracked(project_dir)
-            success = await run_task(task, config, project_dir, tasks_file)
-            results.append((task, success))
-            current_task_key = None
-            current_pre_existing_untracked = None
+            ready_ids = list(ts.get_ready())
+
+            # Filter out blocked tasks first
+            runnable: list[dict] = []
+            for task_id in ready_ids:
+                task = pending_by_id[task_id]
+                task_deps = task.get("depends_on") or []
+                blocked_by = [d for d in task_deps if d in failed_ids]
+                if blocked_by:
+                    update_task(tasks_file, task["key"],
+                                status="blocked",
+                                error=f"dependency #{blocked_by[0]} failed")
+                    print(f"  {_RED}✗ Task #{task_id} blocked{_RESET} {_DIM}— dependency #{blocked_by[0]} failed{_RESET}", flush=True)
+                    results.append((task, False))
+                    ts.done(task_id)
+                else:
+                    runnable.append(task)
+
+            if not runnable:
+                continue
+
+            if (len(runnable) == 1 or max_parallel <= 1) and not interrupted:
+                # Single task or --no-parallel — run in main tree (full streaming output)
+                for task in runnable:
+                    if interrupted:
+                        ts.done(task["id"])
+                        continue
+                    current_task_key = task["key"]
+                    if not check_clean_tree(project_dir):
+                        print(f"  {_RED}✗ Working tree is dirty — aborting{_RESET}", flush=True)
+                        return 2
+                    current_pre_existing_untracked = _snapshot_untracked(project_dir)
+                    pre_task_sha = subprocess.run(
+                        ["git", "rev-parse", "HEAD"],
+                        cwd=project_dir, capture_output=True, text=True,
+                    ).stdout.strip()
+                    success = await run_task(task, config, project_dir, tasks_file)
+                    if success:
+                        _record_changed_files(project_dir, tasks_file, task["key"], pre_task_sha)
+                    results.append((task, success))
+                    if not success:
+                        failed_ids.add(task["id"])
+                    current_task_key = None
+                    current_pre_existing_untracked = None
+                    ts.done(task["id"])
+            elif not interrupted:
+                # Multiple ready — run in parallel worktrees
+                print(f"\n  {_CYAN}{_BOLD}⚡ Running {len(runnable)} tasks in parallel{_RESET}", flush=True)
+
+                # Sequential testgen phase — generate tests one at a time so each
+                # testgen agent sees prior tasks' test patterns (prevents convention drift)
+                pre_testgen_sha = subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=project_dir, capture_output=True, text=True, check=True,
+                ).stdout.strip()
+                pre_tests: dict[str, Path | None] = {}
+                for t in runnable:
+                    if interrupted:
+                        break
+                    t_rubric = t.get("rubric")
+                    if not t_rubric:
+                        pre_tests[t["key"]] = None
+                        continue
+                    print(f"  {_DIM}[#{t['id']}] Generating tests...{_RESET}", flush=True)
+                    from otto.testgen import build_blackbox_context, run_testgen_agent, validate_generated_tests
+                    task_hint = t["prompt"] + "\n" + "\n".join(t_rubric)
+                    t_tc = config.get("test_command")
+                    if not t_tc:
+                        t_tc = detect_test_command(project_dir) or "pytest"
+                    ctx = build_blackbox_context(project_dir, task_hint=task_hint)
+                    test_path, _ = await run_testgen_agent(t_rubric, t["key"], ctx, project_dir)
+                    if test_path:
+                        validation = validate_generated_tests(test_path, "pytest", project_dir)
+                        if validation.status == "collection_error":
+                            test_path.unlink()
+                            test_path, _ = await run_testgen_agent(t_rubric, t["key"], ctx, project_dir)
+                            if test_path:
+                                validation = validate_generated_tests(test_path, "pytest", project_dir)
+                                if validation.status == "collection_error":
+                                    test_path.unlink()
+                                    test_path = None
+                    pre_tests[t["key"]] = test_path
+                    # Commit test file to main so next testgen sees it
+                    if test_path and test_path.exists():
+                        rel = str(test_path.relative_to(project_dir))
+                        subprocess.run(["git", "add", rel], cwd=project_dir, capture_output=True)
+                        subprocess.run(
+                            ["git", "commit", "-m", f"otto: pre-generate tests for #{t['id']}"],
+                            cwd=project_dir, capture_output=True,
+                        )
+
+                base_sha = subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=project_dir, capture_output=True, text=True, check=True,
+                ).stdout.strip()
+
+                coros = [_run_in_worktree(t, base_sha, pre_tests.get(t["key"])) for t in runnable]
+
+                # Reset main to before pre-generated test commits — worktrees already branched
+                if base_sha != pre_testgen_sha:
+                    subprocess.run(
+                        ["git", "reset", "--hard", pre_testgen_sha],
+                        cwd=project_dir, capture_output=True,
+                    )
+
+                parallel_results = await asyncio.gather(*coros, return_exceptions=True)
+
+                # Sequential merge for successful tasks
+                for i, result in enumerate(parallel_results):
+                    t = runnable[i]
+                    if isinstance(result, Exception):
+                        _log_fail(t["id"], f"parallel task error: {result}")
+                        results.append((t, False))
+                        failed_ids.add(t["id"])
+                    else:
+                        _, success = result
+                        if success:
+                            pre_merge_sha = subprocess.run(
+                                ["git", "rev-parse", "HEAD"],
+                                cwd=project_dir, capture_output=True, text=True,
+                            ).stdout.strip()
+                            merged = await _merge_task_branch(t["key"], default_branch)
+                            if not merged:
+                                _log_fail(t["id"], f"merge failed after parallel run")
+                                if tasks_file:
+                                    update_task(tasks_file, t["key"],
+                                                status="failed",
+                                                error="merge conflict after parallel execution",
+                                                error_code="merge_diverged")
+                                results.append((t, False))
+                                failed_ids.add(t["id"])
+                            else:
+                                _record_changed_files(project_dir, tasks_file, t["key"], pre_merge_sha)
+                                results.append((t, True))
+                        else:
+                            results.append((t, False))
+                            failed_ids.add(t["id"])
+                    # Clean up worktree branch if merge didn't delete it
+                    subprocess.run(
+                        ["git", "branch", "-D", f"otto/{t['key']}"],
+                        cwd=project_dir, capture_output=True,
+                    )
+                    ts.done(t["id"])
 
         # Cleanup on interruption
         if interrupted and current_task_key:
@@ -1419,14 +1938,20 @@ async def run_all(
             )
             return 1
 
-        # Integration gate — run after 2+ tasks pass
+        # Post-run reconciliation — detect hidden dependencies and ripple risks
         passed_tasks = [t for t, s in results if s]
+        ripple_risks: list[tuple[int, str, str]] = []
+        if len(passed_tasks) >= 2:
+            ripple_risks = _reconcile_dependencies(tasks_file, project_dir)
+
+        # Integration gate — run after 2+ tasks pass
         integration_result: bool | None = None  # None=skipped/not-run, True=passed, False=failed
         skip_integration = config.get("no_integration", False)
 
         if len(passed_tasks) >= 2 and not skip_integration:
             integration_result = await _run_integration_gate(
                 passed_tasks, config, project_dir,
+                ripple_risks=ripple_risks,
             )
 
         # Calculate total cost from task records

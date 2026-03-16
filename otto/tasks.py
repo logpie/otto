@@ -1,6 +1,7 @@
 """Otto task management — CRUD on tasks.yaml with file locking."""
 
 import fcntl
+import graphlib
 import os
 import tempfile
 import uuid
@@ -91,12 +92,20 @@ def add_tasks(
     tasks_path: Path,
     batch: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Add multiple tasks atomically. Thread-safe via flock."""
+    """Add multiple tasks atomically. Thread-safe via flock.
+
+    Batch items may include 'depends_on' as 0-based indices into the batch.
+    These are translated to task IDs after ID assignment, validated for
+    range, self-refs, and cycles.
+    """
     results: list[dict[str, Any]] = []
 
     def _add_batch(tasks):
         existing_keys = {t["key"] for t in tasks if "key" in t}
         max_id = max((t.get("id", 0) for t in tasks), default=0)
+
+        # First pass: assign IDs and keys
+        new_tasks: list[tuple[dict[str, Any], dict[str, Any]]] = []
         for item in batch:
             max_id += 1
             task: dict[str, Any] = {
@@ -109,6 +118,33 @@ def add_tasks(
             for field in ("verify", "max_retries", "rubric"):
                 if field in item and item[field] is not None:
                     task[field] = item[field]
+            new_tasks.append((item, task))
+
+        # Second pass: translate depends_on indices to task IDs
+        for i, (item, task) in enumerate(new_tasks):
+            dep_indices = item.get("depends_on")
+            if not dep_indices:
+                continue
+            for idx in dep_indices:
+                if idx == i:
+                    raise ValueError(f"Task {i} depends on itself")
+                if idx < 0 or idx >= len(batch):
+                    raise ValueError(
+                        f"Task {i} depends_on index {idx} out of range [0, {len(batch) - 1}]"
+                    )
+            task["depends_on"] = [new_tasks[idx][1]["id"] for idx in dep_indices]
+
+        # Cycle validation
+        ts = graphlib.TopologicalSorter()
+        for _, task in new_tasks:
+            deps = task.get("depends_on") or []
+            ts.add(task["id"], *deps)
+        try:
+            ts.prepare()
+        except graphlib.CycleError as e:
+            raise ValueError(f"Dependency cycle detected: {e}") from e
+
+        for _, task in new_tasks:
             tasks.append(task)
             results.append(task)
 
@@ -136,6 +172,22 @@ def update_task(tasks_path: Path, key: str, **updates) -> dict[str, Any]:
     return result
 
 
+def delete_task(tasks_path: Path, task_id: int) -> dict[str, Any]:
+    """Delete a task by ID. Thread-safe via flock. Raises KeyError if not found."""
+    removed: dict[str, Any] = {}
+
+    def _delete(tasks):
+        for i, task in enumerate(tasks):
+            if task.get("id") == task_id:
+                removed.update(task)
+                tasks.pop(i)
+                return
+        raise KeyError(f"Task #{task_id} not found")
+
+    _locked_rw(tasks_path, _delete)
+    return removed
+
+
 def reset_all_tasks(tasks_path: Path) -> int:
     """Reset all tasks to pending. Thread-safe via flock. Returns count reset."""
     def _reset(tasks):
@@ -145,6 +197,7 @@ def reset_all_tasks(tasks_path: Path) -> int:
             t.pop("session_id", None)
             t.pop("error", None)
             t.pop("error_code", None)
+            t.pop("changed_files", None)
         return len(tasks)
 
     return _locked_rw(tasks_path, _reset)
