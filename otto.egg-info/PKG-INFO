@@ -1,7 +1,0 @@
-Metadata-Version: 2.4
-Name: otto
-Version: 0.1.0
-Requires-Python: >=3.11
-Requires-Dist: click>=8.0
-Requires-Dist: pyyaml>=6.0
-Requires-Dist: claude-agent-sdk>=0.1.0
