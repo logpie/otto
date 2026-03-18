@@ -1,0 +1,15 @@
+name: add-export-import
+repo: bookmarks
+commit: 3187ed78ad89bd4c74c77acb6c23e784a72c77c6
+difficulty: medium
+timeout: 300
+tags: [feature, io]
+spec: |
+  Add export and import functionality to bookmarks.py:
+  1. export_bookmarks(filepath, format="json") — export all bookmarks.
+     Supported formats: "json" (default) and "csv". CSV columns: url, title, tags
+     (tags joined with semicolons).
+  2. import_bookmarks(import_path, filepath) — import bookmarks from a JSON or
+     CSV file (auto-detect format by extension). Skip duplicates (same URL).
+  3. Add "export" and "import" CLI commands.
+validator: validators/add-export-import/

@@ -1,0 +1,12 @@
+name: add-bookmark-count
+repo: bookmarks
+commit: 3187ed78ad89bd4c74c77acb6c23e784a72c77c6
+difficulty: easy
+timeout: 180
+tags: [feature, cli]
+spec: |
+  Add a "count" command to the CLI that prints the total number of saved
+  bookmarks. Usage: bookmarks.py count. Output format: "N bookmarks"
+  where N is the count. Also add a count_bookmarks() function that
+  returns the integer count.
+validator: validators/add-bookmark-count/

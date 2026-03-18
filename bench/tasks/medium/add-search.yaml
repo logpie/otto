@@ -1,0 +1,12 @@
+name: add-search
+repo: bookmarks
+commit: 3187ed78ad89bd4c74c77acb6c23e784a72c77c6
+difficulty: medium
+timeout: 300
+tags: [feature, search]
+spec: |
+  Add a search_bookmarks() function that accepts a query string and filepath.
+  It should search case-insensitively against both title and URL fields.
+  Return all matching bookmarks as a list. Also add a "search" CLI command:
+  bookmarks.py search <query>. Return 400-style error message for empty query.
+validator: validators/add-search/

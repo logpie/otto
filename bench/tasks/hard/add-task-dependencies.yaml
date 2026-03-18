@@ -1,0 +1,17 @@
+name: add-task-dependencies
+repo: taskflow
+commit: 0b5cf02b63c6841140791a1606961698405306b4
+difficulty: hard
+timeout: 600
+tags: [feature, graph]
+spec: |
+  Add task dependency support to TaskFlow:
+  1. Add a depends_on field (list of task titles) to the Task dataclass.
+  2. Add add_dependency(task_title, depends_on_title) method to TaskStore.
+  3. Add a can_start(title) method that returns True only if all dependencies
+     are in "done" status.
+  4. Add a get_ready_tasks() method that returns all tasks that are "todo"
+     and have all dependencies satisfied (or no dependencies).
+  5. Validate: raise ValueError if adding a dependency would create a cycle.
+     Use topological sort for cycle detection.
+validator: validators/add-task-dependencies/

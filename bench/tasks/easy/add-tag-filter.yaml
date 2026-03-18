@@ -1,0 +1,11 @@
+name: add-tag-filter
+repo: bookmarks
+commit: 3187ed78ad89bd4c74c77acb6c23e784a72c77c6
+difficulty: easy
+timeout: 180
+tags: [feature, filter]
+spec: |
+  Add a filter_by_tag() function to bookmarks.py that accepts a tag string
+  and a filepath, and returns only bookmarks that contain that tag in their
+  tags list. The function should be case-insensitive.
+validator: validators/add-tag-filter/

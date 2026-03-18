@@ -463,6 +463,22 @@ Steps:
         # Create tests/ subdirectory in temp dir
         (Path(tmp_dir) / "tests").mkdir(parents=True, exist_ok=True)
 
+        # Copy source files into temp dir so pytest --collect-only can resolve imports.
+        # This doesn't break adversarial isolation — the agent's prompt only has stubs,
+        # and we tell it not to read files. The copies just let pytest validate imports.
+        import shutil as _shutil
+        for src_file in project_dir.glob("*.py"):
+            if not src_file.name.startswith("test_"):
+                _shutil.copy2(str(src_file), str(Path(tmp_dir) / src_file.name))
+        # Also copy tests/__init__.py and conftest.py if they exist
+        src_tests = project_dir / "tests"
+        if src_tests.is_dir():
+            dst_tests = Path(tmp_dir) / "tests"
+            for init_file in ["__init__.py", "conftest.py"]:
+                src_init = src_tests / init_file
+                if src_init.exists():
+                    _shutil.copy2(str(src_init), str(dst_tests / init_file))
+
         agent_opts = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
             cwd=tmp_dir,
@@ -773,6 +789,19 @@ Steps:
     results: dict[str, Path | None] = {}
     try:
         (Path(tmp_dir) / "tests").mkdir(parents=True, exist_ok=True)
+
+        # Copy source files so pytest --collect-only can resolve imports
+        import shutil as _shutil
+        for src_file in project_dir.glob("*.py"):
+            if not src_file.name.startswith("test_"):
+                _shutil.copy2(str(src_file), str(Path(tmp_dir) / src_file.name))
+        src_tests = project_dir / "tests"
+        if src_tests.is_dir():
+            dst_tests = Path(tmp_dir) / "tests"
+            for init_file in ["__init__.py", "conftest.py"]:
+                src_init = src_tests / init_file
+                if src_init.exists():
+                    _shutil.copy2(str(src_init), str(dst_tests / init_file))
 
         agent_opts = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
