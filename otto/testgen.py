@@ -767,6 +767,7 @@ Steps:
 4. VALIDATE collection: python -m pytest --collect-only <file>
 5. If errors: fix and re-validate
 6. SELF-REVIEW: Could a lazy implementation pass these tests? Strengthen if needed.
+   If unsure about exact API details, read the specific source file to verify.
 """
 
     results: dict[str, Path | None] = {}
@@ -903,6 +904,7 @@ Follow these steps:
    - Are any tests trivial (would pass with a broken implementation)? Strengthen them.
    - Could a lazy implementation (return empty list, hardcoded value) pass? Add tests that catch it.
    - Do assertions verify actual behavior or just check types/existence? Tighten them.
+   - Unsure about exact API details? Read the specific source file to verify.
 7. If you improved tests in step 6, re-run validation (steps 2-5)
 Do NOT finish until validation passes AND self-review is done."""
 
@@ -1047,6 +1049,7 @@ Follow these steps:
    - Are any tests trivial (would pass with a broken implementation)? Strengthen them.
    - Could a lazy implementation (return empty list, hardcoded value) pass? Add tests that catch it.
    - Do assertions verify actual behavior or just check types/existence? Tighten them.
+   - Unsure about exact API details? Read the specific source file to verify.
 7. If you improved tests in step 6, re-run validation (steps 2-5)
 Do NOT finish until validation passes AND self-review is done."""
 
