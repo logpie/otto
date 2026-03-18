@@ -49,38 +49,52 @@ def generate_rubric(prompt: str, project_dir: Path) -> list[str]:
 
 
 async def _run_rubric_agent(prompt: str, project_dir: Path) -> list[str]:
-    """Run the rubric generation agent."""
+    """Run the rubric generation agent with pre-loaded context (adaptive mode).
+
+    Pre-loads project context (API stubs, file tree, CLI help, existing tests)
+    so the agent can start writing immediately. The agent retains permission
+    to read specific files during self-review if it needs to verify details.
+
+    Benchmarked: 2x faster than exploration-first approach, same quality.
+    """
     rubric_file = Path(tempfile.mktemp(suffix=".txt", prefix="otto_rubric_"))
+
+    # Pre-load project context (always fresh from current source)
+    from otto.testgen import build_blackbox_context
+    blackbox_ctx = build_blackbox_context(project_dir, task_hint=prompt)
+
+    # Include architect conventions if available (supplementary, may be stale)
+    from otto.architect import load_design_context
+    design_ctx = load_design_context(project_dir, role="coding")
+    design_section = ""
+    if design_ctx:
+        design_section = f"\n\nDESIGN CONVENTIONS (from architect — may be stale, verify against source if unsure):\n{design_ctx}\n"
 
     agent_prompt = f"""You are a senior QA engineer writing acceptance criteria for a coding task.
 
 TASK: {prompt}
 
-PROJECT DIRECTORY: {project_dir}
+PROJECT CONTEXT (current source — start from this):
+{blackbox_ctx}{design_section}
 
-Follow these steps:
-1. Read the 2-3 source files most directly related to the task (e.g., the module to modify + its CLI). Run --help if there's a CLI. Do NOT read every file in the project.
-2. Write initial criteria to: {rubric_file}
-4. SELF-REVIEW: Read your criteria back and ask:
+Write acceptance criteria to: {rubric_file}
+
+Steps:
+1. WRITE the criteria file immediately — the context above should be sufficient.
+2. SELF-REVIEW: Read your criteria back and ask:
    - Are any criteria about implementation details instead of user behavior? Rewrite them.
    - Are any criteria trivial (would pass with a broken implementation)? Strengthen them.
    - Did I miss error handling, edge cases, or anti-patterns? Add them.
-   - Would these criteria actually catch real bugs? If not, improve them.
-5. Write the improved criteria to the same file (overwrite)
+   - Am I unsure about how something works (exact flag names, enum values, error behavior)?
+     If so, read the specific file to verify — but only what you need, not broad exploration.
+3. Check coverage — ensure at least one criterion for each:
+   happy path, error handling, edge cases, negative/anti-pattern, regression
+4. REWRITE the file with all improvements.
+Do NOT finish until self-review is done.
 
 Write criteria about BEHAVIOR the user experiences, not implementation details.
 - BAD: "reads a TSV file (label\\ttext per line)" — too prescriptive about format
 - GOOD: "accepts a file with labeled examples and trains successfully" — describes behavior
-
-Include ALL of these categories:
-- Happy path: the feature works as described for a real user
-- Error handling: what happens with wrong/missing/malformed input?
-- Negative/anti-pattern: things that must NOT happen ("does NOT crash", "does NOT corrupt data")
-- Edge cases: empty inputs, boundary values, special characters
-- Real-world usage: what would a user actually try that might break?
-
-If this task MODIFIES existing functionality:
-- Include regression criteria: existing behavior is preserved after the change
 
 Scale by complexity:
 - Simple tasks (typo, rename): 3-5 criteria
@@ -93,7 +107,7 @@ Write ONLY a numbered list to {rubric_file}. One criterion per line. No prose.""
         agent_opts = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
             cwd=str(project_dir),
-            max_turns=10,
+            max_turns=8,  # adaptive: typically 2-4 turns (write, review, rewrite)
         )
 
         async for message in query(prompt=agent_prompt, options=agent_opts):
