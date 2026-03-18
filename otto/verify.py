@@ -191,8 +191,14 @@ def run_verification(
     test_command: str | None,
     verify_cmd: str | None,
     timeout: int,
+    exclude_test_files: list[Path] | None = None,
 ) -> VerifyResult:
-    """Run all verification tiers in a disposable worktree."""
+    """Run all verification tiers in a disposable worktree.
+
+    exclude_test_files: paths (relative to project root) to delete from
+    the disposable worktree before running tests. Used in parallel mode
+    to exclude sibling tasks' test files that can't pass yet.
+    """
     tiers: list[TierResult] = []
     worktree_path = Path(tempfile.mkdtemp(prefix="otto-verify-"))
 
@@ -204,6 +210,13 @@ def run_verification(
             capture_output=True,
             check=True,
         )
+
+        # Remove sibling test files from disposable worktree (parallel mode)
+        if exclude_test_files:
+            for rel_path in exclude_test_files:
+                excl = worktree_path / rel_path
+                if excl.exists():
+                    excl.unlink()
 
         # Run all tests (existing + rubric-generated) in one pass
         t1 = run_tier1(worktree_path, test_command, timeout)

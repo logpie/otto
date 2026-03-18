@@ -127,13 +127,14 @@ class TestEndToEnd:
 
 class TestRubricEndToEnd:
     @patch("otto.runner.ClaudeAgentOptions")
+    @patch("otto.test_validation.validate_test_quality", return_value=[])
     @patch("otto.testgen.validate_generated_tests")
     @patch("otto.testgen.run_testgen_agent")
     @patch("otto.testgen.build_blackbox_context")
     @patch("otto.runner.query")
     def test_rubric_uses_adversarial_testgen(
         self, mock_query, mock_blackbox, mock_testgen_agent,
-        mock_validate, mock_options_cls, tmp_git_repo,
+        mock_validate, mock_quality, mock_options_cls, tmp_git_repo,
     ):
         """Task with rubric uses adversarial testgen (build_blackbox_context +
         run_testgen_agent + validate_generated_tests).

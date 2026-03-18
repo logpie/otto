@@ -665,6 +665,7 @@ async def run_task(
     tasks_file: Path | None,
     work_dir: Path | None = None,
     pre_generated_test: Path | None = None,
+    sibling_test_files: list[Path] | None = None,
 ) -> bool:
     """Run a single task through the full loop. Returns True if passed.
 
@@ -675,6 +676,10 @@ async def run_task(
 
     When pre_generated_test is set, skips testgen and uses the provided test file.
     Used when testgen was run sequentially before parallel coding.
+
+    sibling_test_files: repo-relative paths of other tasks' test files running
+    in parallel. Excluded from verification worktrees to prevent cross-task
+    contamination.
     """
     key = task["key"]
     task_id = task["id"]
@@ -686,6 +691,7 @@ async def run_task(
     timeout = config["verify_timeout"]
     parallel_mode = work_dir is not None
     effective_dir = work_dir if parallel_mode else project_dir
+
 
     # In parallel mode, prefix structural messages and suppress verbose agent output.
     # Full output goes to log files (otto logs <id>).
@@ -720,6 +726,7 @@ async def run_task(
         test_command = detect_test_command(effective_dir)
         if not test_command:
             test_command = "pytest"  # fallback for Python projects
+
 
     # Print task header before testgen (so testgen output is under the right task)
     if parallel_mode:
@@ -821,6 +828,46 @@ async def run_task(
                 print(f"  {_GREEN}✓{_RESET} Adversarial tests ready — {_BOLD}{validation.failed} failing{_RESET}, {_DIM}{validation.passed} regression{_RESET}", flush=True)
                 print(f"  {_DIM}{'─' * 50}{_RESET}", flush=True)
 
+        # Static quality validation — regenerate once on errors
+        if test_file_path_val and rubric:
+            from otto.test_validation import validate_test_quality
+            quality_warnings = validate_test_quality(test_file_path_val, effective_dir)
+            quality_errors = [w for w in quality_warnings if w.severity == "error"]
+            if quality_errors:
+                if not parallel_mode:
+                    _log_warn(f"Test quality issues ({len(quality_errors)} errors) — regenerating")
+                    for w in quality_errors[:5]:
+                        print(f"    {w}", flush=True)
+                # Build feedback from error messages for testgen agent
+                feedback_lines = [w.message for w in quality_errors[:5]]
+                quality_feedback = (
+                    "Fix these test quality issues:\n"
+                    + "\n".join(f"- {line}" for line in feedback_lines)
+                )
+                # Regenerate with feedback baked into prompt
+                test_file_path_val.unlink(missing_ok=True)
+                from otto.testgen import build_blackbox_context, run_testgen_agent, validate_generated_tests
+                task_hint = prompt + "\n" + "\n".join(rubric) + "\n\n" + quality_feedback
+                regen_ctx = build_blackbox_context(effective_dir, task_hint=task_hint)
+                test_file_path_val, _ = await run_testgen_agent(
+                    rubric, key, regen_ctx, effective_dir, quiet=parallel_mode,
+                )
+                if test_file_path_val:
+                    validation = validate_generated_tests(test_file_path_val, "pytest", effective_dir)
+                    if validation.status == "collection_error":
+                        if not parallel_mode:
+                            _log_warn("Regenerated tests have collection errors — skipping")
+                        test_file_path_val.unlink(missing_ok=True)
+                        test_file_path_val = None
+                    else:
+                        # Re-validate quality (don't loop — one regen attempt only)
+                        regen_warnings = validate_test_quality(test_file_path_val, effective_dir)
+                        regen_errors = [w for w in regen_warnings if w.severity == "error"]
+                        if regen_errors and not parallel_mode:
+                            _log_warn(f"Regenerated tests still have {len(regen_errors)} quality issues — proceeding anyway")
+                        elif not parallel_mode and validation.status == "tdd_ok":
+                            print(f"  {_GREEN}✓{_RESET} {_DIM}Regenerated tests clean ({validation.failed} failing){_RESET}", flush=True)
+
         # Commit test file if we have one
         if test_file_path_val:
             subprocess.run(["git", "add", str(test_file_path_val.relative_to(effective_dir))],
@@ -884,12 +931,24 @@ async def run_task(
             from otto.testgen import get_relevant_file_contents
             source_context = get_relevant_file_contents(effective_dir, task_hint=prompt)
 
+            # Include architect design context if available
+            from otto.architect import load_design_context
+            design_ctx = load_design_context(project_dir, role="coding")
+
+            design_section = ""
+            if design_ctx:
+                design_section = (
+                    f"\n\nDESIGN CONVENTIONS (follow these — other tasks depend on them):\n"
+                    f"{design_ctx}\n"
+                )
+
             agent_prompt = (
                 f"{base_prompt}\n\n"
                 f"You are working in {effective_dir}. Do NOT create git commits. "
                 f"Do NOT write tests — acceptance tests will be generated separately.\n\n"
                 f"RELEVANT SOURCE FILES (already read for you — start coding immediately):\n"
                 f"{source_context}"
+                f"{design_section}"
             )
         else:
             agent_prompt = (
@@ -1052,6 +1111,7 @@ async def run_task(
                 test_command=test_command,
                 verify_cmd=verify_cmd,
                 timeout=timeout,
+                exclude_test_files=sibling_test_files,
             )
 
         except Exception as e:
@@ -1295,11 +1355,154 @@ async def run_task(
     return False
 
 
+async def _review_cross_task_changes(
+    passed_tasks: list[dict],
+    project_dir: Path,
+    config: dict,
+    run_start_sha: str | None = None,
+) -> bool:
+    """Review all changes from independent coding agents for cross-task consistency.
+
+    Runs a Claude agent that sees the combined diff and fixes inconsistencies
+    (duplicate code, import conflicts, naming collisions). Returns True if
+    review edits were made, False if no issues found or review failed.
+
+    run_start_sha: SHA at the beginning of the current run. If provided, diffs
+    only changes from this run (not old otto commits from prior runs).
+    """
+    # Use run_start_sha if available, otherwise find the first otto commit
+    diff_base = run_start_sha
+    if not diff_base:
+        base_sha = subprocess.run(
+            ["git", "log", "--format=%H", "--reverse", "--grep=otto:"],
+            cwd=project_dir, capture_output=True, text=True,
+        )
+        for line in base_sha.stdout.strip().splitlines():
+            if line.strip():
+                parent = subprocess.run(
+                    ["git", "rev-parse", f"{line.strip()}^"],
+                    cwd=project_dir, capture_output=True, text=True,
+                )
+                if parent.returncode == 0:
+                    diff_base = parent.stdout.strip()
+                break
+
+    if not diff_base:
+        return False
+
+    diff_result = subprocess.run(
+        ["git", "diff", diff_base, "HEAD"],
+        cwd=project_dir, capture_output=True, text=True,
+    )
+    if not diff_result.stdout.strip():
+        return False
+
+    # Truncate diff if too large
+    combined_diff = diff_result.stdout
+    if len(combined_diff) > 15000:
+        combined_diff = combined_diff[:15000] + "\n... (truncated)"
+
+    task_list = "\n".join(
+        f"- Task #{t.get('id', '?')}: {t.get('prompt', '')[:80]}"
+        for t in passed_tasks
+    )
+
+    prompt = f"""You are a senior engineer reviewing implementations from {len(passed_tasks)} coding agents.
+Each agent worked independently on a separate feature. Your job: find and fix
+inconsistencies across their combined changes.
+
+TASKS IMPLEMENTED:
+{task_list}
+
+FULL DIFF (all task changes combined):
+{combined_diff}
+
+Look for:
+- Duplicate code that should be a shared helper
+- Inconsistent error handling patterns
+- Import conflicts or naming collisions
+- Missing edge cases one agent handled but another didn't
+
+Fix issues directly. Do NOT create git commits.
+Only fix real problems — don't refactor for style.
+If everything looks consistent, just say "No cross-task issues found."
+"""
+
+    print(f"  {_DIM}Reviewing cross-task consistency...{_RESET}", flush=True)
+
+    # Snapshot untracked files before review so we only revert otto-created ones
+    pre_review_untracked = _snapshot_untracked(project_dir)
+
+    try:
+        agent_opts = ClaudeAgentOptions(
+            permission_mode="bypassPermissions",
+            cwd=str(project_dir),
+            max_turns=15,
+        )
+        if config.get("model"):
+            agent_opts.model = config["model"]
+
+        made_changes = False
+        async for message in query(prompt=prompt, options=agent_opts):
+            if isinstance(message, ResultMessage):
+                pass
+            elif hasattr(message, "session_id") and hasattr(message, "is_error"):
+                pass
+            elif AssistantMessage and isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if TextBlock and isinstance(block, TextBlock) and block.text:
+                        print(block.text, flush=True)
+                    elif ToolUseBlock and isinstance(block, ToolUseBlock):
+                        _print_tool_use(block)
+                        if block.name in ("Edit", "Write", "Bash"):
+                            made_changes = True
+                    elif ToolResultBlock and isinstance(block, ToolResultBlock):
+                        _print_tool_result(block)
+
+        if made_changes:
+            # Verify that review edits didn't break anything
+            test_command = config.get("test_command")
+            if test_command:
+                check = subprocess.run(
+                    test_command, shell=True, cwd=project_dir,
+                    capture_output=True, timeout=config["verify_timeout"],
+                    env=_subprocess_env(),
+                )
+                if check.returncode != 0:
+                    # Review edits broke tests — revert tracked files and only
+                    # remove otto-created untracked files (not user-owned ones)
+                    subprocess.run(
+                        ["git", "checkout", "."],
+                        cwd=project_dir, capture_output=True,
+                    )
+                    _remove_otto_created_untracked(project_dir, pre_review_untracked)
+                    print(f"  {_YELLOW}⚠ Review edits broke tests — reverted{_RESET}", flush=True)
+                    return False
+
+            # Commit review fixes — stage tracked changes + otto-created untracked files
+            subprocess.run(["git", "add", "-u"], cwd=project_dir, capture_output=True)
+            new_untracked = _snapshot_untracked(project_dir) - pre_review_untracked
+            for f in new_untracked:
+                subprocess.run(["git", "add", "--", f], cwd=project_dir, capture_output=True)
+            subprocess.run(
+                ["git", "commit", "-m", "otto: cross-task consistency review fixes"],
+                cwd=project_dir, capture_output=True,
+            )
+            print(f"  {_GREEN}✓{_RESET} {_DIM}Cross-task review fixes applied{_RESET}", flush=True)
+            return True
+
+    except Exception as e:
+        print(f"  {_DIM}Cross-task review skipped: {e}{_RESET}", flush=True)
+
+    return False
+
+
 async def _run_integration_gate(
     passed_tasks: list[dict],
     config: dict,
     project_dir: Path,
     ripple_risks: list[tuple[int, str, str]] | None = None,
+    run_start_sha: str | None = None,
 ) -> bool | None:
     """Generate and run cross-feature integration tests. Returns True if passed."""
     from otto.testgen import generate_integration_tests
@@ -1309,6 +1512,12 @@ async def _run_integration_gate(
     timeout = config["verify_timeout"]
     max_retries = config.get("max_retries", 3)
     pre_existing_untracked = _snapshot_untracked(project_dir)
+
+    # Phase A: Review all changes for cross-task consistency (new in v2)
+    if len(passed_tasks) >= 2:
+        await _review_cross_task_changes(
+            passed_tasks, project_dir, config, run_start_sha=run_start_sha,
+        )
 
     print(flush=True)
     _log_info("Integration gate — testing features together")
@@ -1695,6 +1904,63 @@ async def run_all(
             print(f"{_DIM}No pending tasks{_RESET}", flush=True)
             return 0
 
+        # Architect phase — analyze codebase and produce shared conventions
+        if not config.get("no_architect", False) and len(pending) >= 2:
+            from otto.architect import run_architect_agent, is_stale
+            arch_dir = project_dir / "otto_arch"
+
+            should_run = not arch_dir.exists()
+            if arch_dir.exists() and is_stale(project_dir):
+                should_run = True
+                print(f"  {_YELLOW}⚠ Architecture docs stale — refreshing{_RESET}", flush=True)
+            # Always run if file-plan.md is missing (needed for dependency injection)
+            if arch_dir.exists() and not (arch_dir / "file-plan.md").exists():
+                should_run = True
+
+            if should_run:
+                action = "Analyzing codebase" if not arch_dir.exists() else "Refreshing"
+                _log_info(f"Architect — {action}")
+                try:
+                    arch_path = await run_architect_agent(pending, project_dir)
+                    if arch_path:
+                        print(f"  {_GREEN}✓{_RESET} {_DIM}Architecture docs ready{_RESET}", flush=True)
+                        # Commit conftest.py if architect generated it
+                        conftest = project_dir / "tests" / "conftest.py"
+                        if conftest.exists():
+                            subprocess.run(
+                                ["git", "add", str(conftest.relative_to(project_dir))],
+                                cwd=project_dir, capture_output=True,
+                            )
+                            subprocess.run(
+                                ["git", "commit", "-m", "otto: architect conftest.py"],
+                                cwd=project_dir, capture_output=True,
+                            )
+                except Exception as e:
+                    _log_warn(f"Architect failed: {e} — continuing without design docs")
+
+        # Phase 1: Inject dependencies from architect's file-plan.md
+        from otto.architect import parse_file_plan
+        arch_deps = parse_file_plan(project_dir)
+        if arch_deps:
+            # Reload tasks to get current state after potential architect changes
+            tasks = load_tasks(tasks_file)
+            pending = [t for t in tasks if t.get("status") == "pending"]
+            pending_by_id_tmp = {t["id"]: t for t in pending}
+            injected = 0
+            for dep_id, on_id in arch_deps:
+                task = pending_by_id_tmp.get(dep_id)
+                if task:
+                    deps = list(task.get("depends_on") or [])
+                    if on_id not in deps:
+                        deps.append(on_id)
+                        update_task(tasks_file, task["key"], depends_on=deps)
+                        injected += 1
+            if injected:
+                print(f"  {_DIM}Injected {injected} dependencies from file-plan.md{_RESET}", flush=True)
+                # Reload tasks after dependency injection
+                tasks = load_tasks(tasks_file)
+                pending = [t for t in tasks if t.get("status") == "pending"]
+
         # Build sets for dependency resolution
         pending_ids = {t["id"] for t in pending}
         pending_by_id = {t["id"]: t for t in pending}
@@ -1738,11 +2004,18 @@ async def run_all(
         semaphore = asyncio.Semaphore(max_parallel)
 
         run_start = time.monotonic()
+        # Capture SHA at run start for scoped cross-task review diff
+        run_start_sha_result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=project_dir, capture_output=True, text=True,
+        )
+        _run_start_sha = run_start_sha_result.stdout.strip() if run_start_sha_result.returncode == 0 else None
         results: list[tuple[dict, bool]] = []  # (task, success)
         failed_ids: set[int] = set()
 
         async def _run_in_worktree(
             t: dict, base_sha: str, pre_test: Path | None = None,
+            sibling_tests: list[Path] | None = None,
         ) -> tuple[dict, bool]:
             """Run a task in an isolated worktree for parallel execution."""
             async with semaphore:
@@ -1756,6 +2029,7 @@ async def run_all(
                     success = await run_task(
                         t, config, project_dir, tasks_file,
                         work_dir=wt_dir, pre_generated_test=wt_test,
+                        sibling_test_files=sibling_tests,
                     )
                     return (t, success)
                 finally:
@@ -1833,54 +2107,134 @@ async def run_all(
                 # Multiple ready — run in parallel worktrees
                 print(f"\n  {_CYAN}{_BOLD}⚡ Running {len(runnable)} tasks in parallel{_RESET}", flush=True)
 
-                # Sequential testgen phase — generate tests one at a time so each
-                # testgen agent sees prior tasks' test patterns (prevents convention drift)
+                # Testgen phase — holistic for consistency, with per-task fallback
                 pre_testgen_sha = subprocess.run(
                     ["git", "rev-parse", "HEAD"],
                     cwd=project_dir, capture_output=True, text=True, check=True,
                 ).stdout.strip()
                 pre_tests: dict[str, Path | None] = {}
-                for t in runnable:
-                    if interrupted:
-                        break
-                    t_rubric = t.get("rubric")
-                    if not t_rubric:
-                        pre_tests[t["key"]] = None
-                        continue
-                    print(f"  {_DIM}[#{t['id']}] Generating tests...{_RESET}", flush=True)
-                    from otto.testgen import build_blackbox_context, run_testgen_agent, validate_generated_tests
-                    task_hint = t["prompt"] + "\n" + "\n".join(t_rubric)
-                    t_tc = config.get("test_command")
-                    if not t_tc:
-                        t_tc = detect_test_command(project_dir) or "pytest"
-                    ctx = build_blackbox_context(project_dir, task_hint=task_hint)
-                    test_path, _ = await run_testgen_agent(t_rubric, t["key"], ctx, project_dir)
-                    if test_path:
-                        validation = validate_generated_tests(test_path, "pytest", project_dir)
-                        if validation.status == "collection_error":
-                            test_path.unlink()
-                            test_path, _ = await run_testgen_agent(t_rubric, t["key"], ctx, project_dir)
+
+                # Identify tasks with rubrics for testgen
+                runnable_with_rubrics = [t for t in runnable if t.get("rubric")]
+                tasks_without_rubrics = [t for t in runnable if not t.get("rubric")]
+                for t in tasks_without_rubrics:
+                    pre_tests[t["key"]] = None
+
+                if runnable_with_rubrics and not interrupted:
+                    from otto.testgen import (
+                        build_blackbox_context, run_holistic_testgen,
+                        run_testgen_agent, validate_generated_tests,
+                    )
+
+                    # Try holistic testgen first (all tasks at once)
+                    print(f"  {_DIM}Holistic testgen for {len(runnable_with_rubrics)} tasks...{_RESET}", flush=True)
+                    all_hints = " ".join(
+                        t["prompt"] + " " + " ".join(t.get("rubric", []))
+                        for t in runnable_with_rubrics
+                    )
+                    ctx = build_blackbox_context(project_dir, task_hint=all_hints)
+                    holistic_results = await run_holistic_testgen(
+                        runnable_with_rubrics, project_dir, ctx, quiet=True,
+                    )
+
+                    # Validate holistic results, fall back to per-task for failures
+                    for t in runnable_with_rubrics:
+                        if interrupted:
+                            break
+                        key = t["key"]
+                        test_path = holistic_results.get(key)
+
+                        if test_path:
+                            validation = validate_generated_tests(test_path, "pytest", project_dir)
+                            if validation.status == "collection_error":
+                                test_path = None  # Will fall back below
+
+                        if not test_path:
+                            # Per-task fallback
+                            print(f"  {_DIM}[#{t['id']}] Holistic test failed — per-task fallback...{_RESET}", flush=True)
+                            task_hint = t["prompt"] + "\n" + "\n".join(t.get("rubric", []))
+                            task_ctx = build_blackbox_context(project_dir, task_hint=task_hint)
+                            test_path, _ = await run_testgen_agent(
+                                t["rubric"], key, task_ctx, project_dir, quiet=True,
+                            )
                             if test_path:
                                 validation = validate_generated_tests(test_path, "pytest", project_dir)
                                 if validation.status == "collection_error":
                                     test_path.unlink()
                                     test_path = None
-                    pre_tests[t["key"]] = test_path
-                    # Commit test file to main so next testgen sees it
-                    if test_path and test_path.exists():
-                        rel = str(test_path.relative_to(project_dir))
-                        subprocess.run(["git", "add", rel], cwd=project_dir, capture_output=True)
+
+                        # Static quality validation — regenerate on errors
+                        if test_path and t.get("rubric"):
+                            from otto.test_validation import validate_test_quality
+                            qw = validate_test_quality(test_path, project_dir)
+                            qe = [w for w in qw if w.severity == "error"]
+                            if qe:
+                                print(f"  {_DIM}[#{t['id']}] Test quality: {len(qe)} errors — regenerating{_RESET}", flush=True)
+                                for w in qe[:3]:
+                                    print(f"    {_DIM}{w}{_RESET}", flush=True)
+                                # Regenerate with feedback
+                                feedback = "\n".join(f"- {w.message}" for w in qe[:5])
+                                test_path.unlink(missing_ok=True)
+                                task_hint = t["prompt"] + "\n" + "\n".join(t.get("rubric", [])) + "\n\nFix these test issues:\n" + feedback
+                                task_ctx = build_blackbox_context(project_dir, task_hint=task_hint)
+                                test_path, _ = await run_testgen_agent(
+                                    t["rubric"], key, task_ctx, project_dir, quiet=True,
+                                )
+                                if test_path:
+                                    validation = validate_generated_tests(test_path, "pytest", project_dir)
+                                    if validation.status == "collection_error":
+                                        test_path.unlink(missing_ok=True)
+                                        test_path = None
+
+                        pre_tests[key] = test_path
+
+                    # Commit conftest.py if holistic testgen created it
+                    conftest = project_dir / "tests" / "conftest.py"
+                    if conftest.exists():
                         subprocess.run(
-                            ["git", "commit", "-m", f"otto: pre-generate tests for #{t['id']}"],
+                            ["git", "add", str(conftest.relative_to(project_dir))],
                             cwd=project_dir, capture_output=True,
                         )
+                        subprocess.run(
+                            ["git", "commit", "-m", "otto: holistic testgen conftest.py"],
+                            cwd=project_dir, capture_output=True,
+                        )
+
+                    # Copy test files into tests/ and commit so worktrees see them.
+                    # testgen stores output under .git/otto/testgen/ which git won't add,
+                    # so we copy to the proper location first.
+                    for t in runnable_with_rubrics:
+                        test_path = pre_tests.get(t["key"])
+                        if test_path and test_path.exists():
+                            dest = project_dir / "tests" / test_path.name
+                            dest.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(str(test_path), str(dest))
+                            pre_tests[t["key"]] = dest  # update to repo-relative path
+                            rel = str(dest.relative_to(project_dir))
+                            subprocess.run(["git", "add", rel], cwd=project_dir, capture_output=True)
+                            subprocess.run(
+                                ["git", "commit", "-m", f"otto: pre-generate tests for #{t['id']}"],
+                                cwd=project_dir, capture_output=True,
+                            )
 
                 base_sha = subprocess.run(
                     ["git", "rev-parse", "HEAD"],
                     cwd=project_dir, capture_output=True, text=True, check=True,
                 ).stdout.strip()
 
-                coros = [_run_in_worktree(t, base_sha, pre_tests.get(t["key"])) for t in runnable]
+                # Build sibling test file lists — actual paths from pre-generation,
+                # so exclusion works regardless of test framework.
+                coros = []
+                for t in runnable:
+                    sibling_paths = [
+                        p.relative_to(project_dir)
+                        for k, p in pre_tests.items()
+                        if k != t["key"] and p is not None
+                    ]
+                    coros.append(_run_in_worktree(
+                        t, base_sha, pre_tests.get(t["key"]),
+                        sibling_tests=sibling_paths or None,
+                    ))
 
                 # Reset main to before pre-generated test commits — worktrees already branched
                 if base_sha != pre_testgen_sha:
@@ -1944,6 +2298,15 @@ async def run_all(
         if len(passed_tasks) >= 2:
             ripple_risks = _reconcile_dependencies(tasks_file, project_dir)
 
+            # Feed reconciliation learnings back to architect docs
+            if ripple_risks:
+                from otto.architect import feed_reconciliation_learnings
+                warnings = [
+                    f"Task #{tid} changed {changed}, {affected} imports it but was not part of any task"
+                    for tid, changed, affected in ripple_risks
+                ]
+                feed_reconciliation_learnings(project_dir, warnings)
+
         # Integration gate — run after 2+ tasks pass
         integration_result: bool | None = None  # None=skipped/not-run, True=passed, False=failed
         skip_integration = config.get("no_integration", False)
@@ -1952,6 +2315,7 @@ async def run_all(
             integration_result = await _run_integration_gate(
                 passed_tasks, config, project_dir,
                 ripple_risks=ripple_risks,
+                run_start_sha=_run_start_sha,
             )
 
         # Calculate total cost from task records

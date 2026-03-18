@@ -408,6 +408,13 @@ async def run_testgen_agent(
     tmp_dir = tempfile.mkdtemp(prefix="otto_testgen_")
     log_lines: list[str] = []
 
+    # Include architect design context if available
+    from otto.architect import load_design_context
+    design_ctx = load_design_context(project_dir, role="testgen")
+    design_section = ""
+    if design_ctx:
+        design_section = f"\n\nTEST CONVENTIONS AND DATA MODEL (follow these):\n{design_ctx}\n"
+
     prompt = f"""You are a QA engineer writing black-box tests from a specification.
 You have NOT seen the implementation — it hasn't been written yet.
 Your job is to write tests that will CATCH BUGS, not confirm correctness.
@@ -416,7 +423,7 @@ SPEC (acceptance criteria):
 {rubric_text}
 
 PROJECT CONTEXT (public interface only — all context you need is here):
-{blackbox_context}
+{blackbox_context}{design_section}
 
 Your working directory is: {tmp_dir}
 Write the test file to: {tmp_dir}/{test_rel}
@@ -677,6 +684,145 @@ def _read_existing_tests(project_dir: Path) -> str:
     return "\n\n".join(otto_samples + other_samples) if (otto_samples or other_samples) else ""
 
 
+async def run_holistic_testgen(
+    tasks: list[dict],
+    project_dir: Path,
+    blackbox_context: str,
+    quiet: bool = False,
+) -> dict[str, Path | None]:
+    """Generate tests for ALL tasks in a single agent call.
+
+    Produces consistent test files with shared conftest.py. Returns
+    {key: test_file_path} for each task. Falls back to per-task testgen
+    if holistic fails for a specific task.
+    """
+    from otto.architect import load_design_context
+
+    task_sections = []
+    for i, t in enumerate(tasks, 1):
+        rubric = t.get("rubric", [])
+        rubric_text = "\n".join(f"   - {item}" for item in rubric)
+        task_sections.append(
+            f"{i}. Task #{t.get('id', '?')} (key: {t['key']}): {t['prompt']}\n"
+            f"   Rubric:\n{rubric_text}"
+        )
+
+    design_ctx = load_design_context(project_dir, role="testgen")
+    design_section = ""
+    if design_ctx:
+        design_section = f"\n\nTEST CONVENTIONS AND DATA MODEL (follow these):\n{design_ctx}\n"
+
+    tmp_dir = tempfile.mkdtemp(prefix="otto_holistic_testgen_")
+
+    # Build file list for agent
+    test_files_list = []
+    for t in tasks:
+        test_files_list.append(f"- tests/test_otto_{t['key']}.py — tests for task #{t.get('id', '?')}")
+
+    prompt = f"""You are a QA engineer writing adversarial tests for ALL features at once.
+You have NOT seen the implementation — it hasn't been written yet.
+Your job is to write tests that will CATCH BUGS, not confirm correctness.
+
+TASKS:
+{chr(10).join(task_sections)}
+
+PROJECT CONTEXT (public interface only — all context you need is here):
+{blackbox_context}{design_section}
+
+Your working directory is: {tmp_dir}
+Write these files in {tmp_dir}:
+- tests/conftest.py — shared fixtures for ALL test files
+{chr(10).join(test_files_list)}
+
+CRITICAL RULES:
+- Use CONSISTENT conventions across all test files
+- Share fixtures via conftest.py. Each file must be independently runnable.
+- Test the public interface only (CLI via subprocess, library via imports)
+- Be designed to FAIL on the current codebase (features don't exist yet)
+- Be independent and hermetic (use tmp_path, no shared state)
+- Use subprocess.run() for CLI testing, not CliRunner
+- Include negative tests (what should NOT happen)
+- Think like a devil's advocate — catch lazy/buggy implementations
+- NO trivial tests. Use pytest.mark.parametrize where appropriate.
+
+Steps:
+1. WRITE conftest.py with shared fixtures
+2. WRITE each test file
+3. VALIDATE each: python -c "import ast; ast.parse(open('<file>').read()); print('OK')"
+4. VALIDATE collection: python -m pytest --collect-only <file>
+5. If errors: fix and re-validate
+6. SELF-REVIEW: Could a lazy implementation pass these tests? Strengthen if needed.
+"""
+
+    results: dict[str, Path | None] = {}
+    try:
+        (Path(tmp_dir) / "tests").mkdir(parents=True, exist_ok=True)
+
+        agent_opts = ClaudeAgentOptions(
+            permission_mode="bypassPermissions",
+            cwd=tmp_dir,
+            max_turns=20,
+        )
+
+        async for message in query(prompt=prompt, options=agent_opts):
+            if isinstance(message, ResultMessage):
+                pass
+            elif hasattr(message, "session_id") and hasattr(message, "is_error"):
+                pass
+            elif hasattr(message, "content"):
+                for block in message.content:
+                    if TextBlock and isinstance(block, TextBlock) and block.text:
+                        if not quiet:
+                            print(block.text, flush=True)
+                    elif ToolUseBlock and isinstance(block, ToolUseBlock):
+                        print_agent_tool(block, quiet=quiet)
+
+        # Collect generated test files
+        from otto.config import git_meta_dir
+        for t in tasks:
+            key = t["key"]
+            test_rel = f"tests/test_otto_{key}.py"
+            test_in_tmp = Path(tmp_dir) / test_rel
+
+            if not test_in_tmp.exists():
+                results[key] = None
+                continue
+
+            # Validate syntax
+            try:
+                ast.parse(test_in_tmp.read_text())
+            except SyntaxError:
+                results[key] = None
+                continue
+
+            # Copy to testgen storage
+            testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / key
+            testgen_dir.mkdir(parents=True, exist_ok=True)
+            dest = testgen_dir / f"test_otto_{key}.py"
+            shutil.copy2(str(test_in_tmp), str(dest))
+            results[key] = dest
+
+        # Copy conftest.py if generated and valid
+        conftest_tmp = Path(tmp_dir) / "tests" / "conftest.py"
+        if conftest_tmp.exists():
+            try:
+                ast.parse(conftest_tmp.read_text())
+                conftest_dest = project_dir / "tests" / "conftest.py"
+                conftest_dest.parent.mkdir(parents=True, exist_ok=True)
+                if not conftest_dest.exists():
+                    shutil.copy2(str(conftest_tmp), str(conftest_dest))
+            except SyntaxError:
+                pass  # Skip invalid conftest
+
+    except Exception as e:
+        if not quiet:
+            print(f"  holistic testgen error: {e}", flush=True)
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    return results
+
+
 async def generate_tests(
     task_prompt: str,
     project_dir: Path,
@@ -815,6 +961,13 @@ EXISTING TESTS (for reference on fixtures/helpers — do NOT copy how they invok
             "\nWrite integration tests that specifically exercise these interactions.\n"
         )
 
+    # Include architect design context for integration tests
+    from otto.architect import load_design_context
+    integ_design_ctx = load_design_context(project_dir, role="integration")
+    integ_design_section = ""
+    if integ_design_ctx:
+        integ_design_section = f"\n\nARCHITECTURE AND TEST CONVENTIONS (follow these):\n{integ_design_ctx}\n"
+
     prompt = f"""You are a QA engineer writing cross-feature integration tests.
 
 The following features were implemented:
@@ -825,7 +978,7 @@ PROJECT DIRECTORY: {project_dir}
 
 RELEVANT SOURCE FILES (already read for you — start writing tests immediately):
 {source_context}
-{example_section}{ripple_section}
+{example_section}{ripple_section}{integ_design_section}
 TEST FRAMEWORK: {framework}
 
 Write integration tests that exercise these features WORKING TOGETHER.

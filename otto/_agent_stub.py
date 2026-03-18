@@ -10,6 +10,7 @@ class ClaudeAgentOptions:
     model: str | None = None
     resume: str | None = None
     max_turns: int | None = None
+    mcp_servers: dict[str, Any] | None = None
 
 
 @dataclass

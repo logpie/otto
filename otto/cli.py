@@ -169,6 +169,7 @@ def add(prompt, verify, max_retries, import_file, no_rubric):
 
     if import_file:
         _import_tasks(Path(import_file), tasks_path)
+        click.echo(f"\n  {_D}Run 'otto arch' to analyze codebase and establish shared conventions{_0}")
         return
 
     if not prompt:
@@ -208,7 +209,9 @@ def add(prompt, verify, max_retries, import_file, no_rubric):
 @click.option("--dry-run", is_flag=True, help="Show what would run without executing")
 @click.option("--no-integration", is_flag=True, help="Skip post-run integration tests")
 @click.option("--no-parallel", is_flag=True, help="Force serial execution (full streaming output per task)")
-def run(prompt, dry_run, no_integration, no_parallel):
+@click.option("--no-architect", is_flag=True, help="Skip architect agent (no codebase analysis)")
+@click.option("--no-pilot", is_flag=True, help="Use classic pipeline instead of LLM pilot")
+def run(prompt, dry_run, no_integration, no_parallel, no_architect, no_pilot):
     """Run pending tasks (or a one-off task if prompt given)."""
     from otto.runner import run_all, run_task
 
@@ -222,6 +225,8 @@ def run(prompt, dry_run, no_integration, no_parallel):
         config["no_integration"] = True
     if no_parallel:
         config["max_parallel"] = 1
+    if no_architect:
+        config["no_architect"] = True
 
     if dry_run:
         tasks_path = project_dir / "tasks.yaml"
@@ -267,8 +272,111 @@ def run(prompt, dry_run, no_integration, no_parallel):
             lock_fh.close()
     else:
         tasks_path = project_dir / "tasks.yaml"
-        exit_code = asyncio.run(run_all(config, tasks_path, project_dir))
+
+        # Use pilot by default for multi-task runs, fall back to classic pipeline.
+        # Preflight: check mcp is importable before committing to pilot mode.
+        use_pilot = not no_pilot
+        if use_pilot:
+            try:
+                import importlib
+                importlib.import_module("mcp")
+                from otto.pilot import run_piloted
+                exit_code = asyncio.run(run_piloted(config, tasks_path, project_dir))
+            except ImportError:
+                click.echo("Pilot unavailable (missing mcp library) — using classic pipeline", err=True)
+                exit_code = asyncio.run(run_all(config, tasks_path, project_dir))
+            except Exception as e:
+                err_msg = str(e)
+                if "500" in err_msg or "API" in err_msg or "Internal server error" in err_msg:
+                    click.echo(f"\n{_Y}⚠ Pilot hit API error — retrying with classic pipeline{_0}", err=True)
+                else:
+                    click.echo(f"\n{_Y}⚠ Pilot failed ({err_msg[:80]}) — falling back to classic pipeline{_0}", err=True)
+                exit_code = asyncio.run(run_all(config, tasks_path, project_dir))
+        else:
+            exit_code = asyncio.run(run_all(config, tasks_path, project_dir))
         sys.exit(exit_code)
+
+
+@main.command(context_settings=CONTEXT_SETTINGS)
+@click.option("--show", is_flag=True, help="Print summary of current architect docs")
+@click.option("--clean", is_flag=True, help="Delete otto_arch/")
+def arch(show, clean):
+    """Analyze codebase and establish shared conventions for agents."""
+    import shutil
+
+    project_dir = Path.cwd()
+    arch_dir = project_dir / "otto_arch"
+
+    if clean:
+        import fcntl
+        _require_git()
+        lock_path = git_meta_dir(project_dir) / "otto.lock"
+        lock_path.touch()
+        lock_fh = open(lock_path, "r")
+        try:
+            fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            click.echo("Cannot clean architect docs while otto is running", err=True)
+            sys.exit(2)
+        try:
+            if arch_dir.exists():
+                shutil.rmtree(arch_dir)
+                click.echo(f"{_G}✓{_0} Deleted otto_arch/")
+            else:
+                click.echo(f"{_D}No otto_arch/ to clean{_0}")
+        finally:
+            fcntl.flock(lock_fh, fcntl.LOCK_UN)
+            lock_fh.close()
+        return
+
+    if show:
+        if not arch_dir.exists():
+            click.echo(f"{_D}No otto_arch/ found. Run 'otto arch' to create.{_0}")
+            return
+        for f in sorted(arch_dir.iterdir()):
+            if f.name.startswith("."):
+                continue
+            click.echo(f"\n{_B}{'─' * 40}{_0}")
+            click.echo(f"{_B}  {f.name}{_0}")
+            click.echo(f"{_B}{'─' * 40}{_0}")
+            click.echo(f.read_text())
+        return
+
+    # Acquire process lock — prevent concurrent arch + run
+    import fcntl
+    _require_git()
+    lock_path = git_meta_dir(project_dir) / "otto.lock"
+    lock_path.touch()
+    lock_fh = open(lock_path, "r")
+    try:
+        fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        click.echo("Cannot run architect while otto is running", err=True)
+        sys.exit(2)
+
+    try:
+        tasks_path = project_dir / "tasks.yaml"
+        from otto.tasks import load_tasks
+        tasks = load_tasks(tasks_path) if tasks_path.exists() else []
+        pending = [t for t in tasks if t.get("status") == "pending"]
+
+        action = "Updating" if arch_dir.exists() else "Analyzing codebase"
+        click.echo(f"{_D}{action}...{_0}")
+
+        from otto.architect import run_architect_agent
+        result = asyncio.run(run_architect_agent(pending, project_dir))
+        if result:
+            click.echo(f"{_G}✓{_0} Architecture docs ready in {_B}otto_arch/{_0}")
+            for f in sorted(result.iterdir()):
+                if f.name.startswith("."):
+                    continue
+                click.echo(f"  {_D}-{_0} {f.name}")
+        else:
+            click.echo(f"{_R}✗{_0} Architect agent failed", err=True)
+            sys.exit(1)
+    finally:
+        fcntl.flock(lock_fh, fcntl.LOCK_UN)
+        lock_fh.close()
 
 
 @main.command(context_settings=CONTEXT_SETTINGS)
@@ -607,11 +715,15 @@ def reset(yes, hard):
             if branch:
                 subprocess.run(["git", "branch", "-D", branch], capture_output=True)
 
-        # Clean logs
+        # Clean logs and architect docs (hard only)
         import shutil
         log_dir = project_dir / "otto_logs"
         if log_dir.exists():
             shutil.rmtree(log_dir)
+        if hard:
+            arch_dir = project_dir / "otto_arch"
+            if arch_dir.exists():
+                shutil.rmtree(arch_dir)
 
         # Clean testgen artifacts (use git_meta_dir for linked worktree support)
         testgen_dir = git_meta_dir(project_dir) / "otto"
@@ -643,3 +755,179 @@ def reset(yes, hard):
     finally:
         fcntl.flock(lock_fh, fcntl.LOCK_UN)
         lock_fh.close()
+
+
+# ---------------------------------------------------------------------------
+# Benchmark subcommands
+# ---------------------------------------------------------------------------
+
+@main.group(context_settings=CONTEXT_SETTINGS)
+def bench():
+    """Benchmark system — measure and compare pipeline effectiveness."""
+    pass
+
+
+def _get_bench_dir() -> Path:
+    """Locate the bench/ directory (in the otto repo root)."""
+    # Walk up from CWD or use the otto package location
+    otto_root = Path(__file__).parent.parent
+    bench_dir = otto_root / "bench"
+    if not bench_dir.exists():
+        click.echo("Error: bench/ directory not found.", err=True)
+        sys.exit(2)
+    return bench_dir
+
+
+def _get_runner(name: str):
+    """Import and instantiate a runner by name."""
+    import importlib.util
+
+    bench_dir = _get_bench_dir()
+    runner_files = {
+        "otto": "otto_runner.py",
+        "bare-cc": "bare_cc_runner.py",
+        "ralph": "ralph_runner.py",
+        "self-test": "self_test_runner.py",
+    }
+    runner_classes = {
+        "otto": "OttoRunner",
+        "bare-cc": "BareClaudeRunner",
+        "ralph": "RalphRunner",
+        "self-test": "SelfTestRunner",
+    }
+
+    if name not in runner_files:
+        click.echo(f"Unknown runner: {name}. Available: {', '.join(runner_files)}", err=True)
+        sys.exit(2)
+
+    runner_path = bench_dir / "runners" / runner_files[name]
+    if not runner_path.exists():
+        click.echo(f"Runner file not found: {runner_path}", err=True)
+        sys.exit(2)
+
+    spec = importlib.util.spec_from_file_location(f"bench_runner_{name}", runner_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    cls = getattr(mod, runner_classes[name])
+    return cls()
+
+
+@bench.command("run", context_settings=CONTEXT_SETTINGS)
+@click.option("--task", "task_names", multiple=True, help="Run specific task(s) by name")
+@click.option("--runner", "runner_name", default="otto", help="Runner to use (otto, bare-cc, ralph, self-test)")
+@click.option("--label", default="", help="Label for this run (for comparison)")
+@click.option("--difficulty", type=click.Choice(["easy", "medium", "hard"]), help="Filter by difficulty")
+@click.option("--suite", "suite_file", default="suite.yaml", help="Suite file (default: suite.yaml)")
+def bench_run(task_names, runner_name, label, difficulty, suite_file):
+    """Run benchmark tasks and save results."""
+    from otto.bench import filter_tasks, load_suite, run_bench, save_results
+
+    bench_dir = _get_bench_dir()
+    suite_path = bench_dir / suite_file
+
+    if not suite_path.exists():
+        click.echo(f"Error: {suite_path} not found.", err=True)
+        sys.exit(2)
+
+    tasks = load_suite(suite_path)
+    if not tasks:
+        click.echo("No tasks found in suite.", err=True)
+        sys.exit(2)
+
+    # Apply filters
+    tasks = filter_tasks(
+        tasks,
+        difficulty=difficulty,
+        names=list(task_names) if task_names else None,
+    )
+    if not tasks:
+        click.echo("No tasks match the given filters.", err=True)
+        sys.exit(2)
+
+    runner = _get_runner(runner_name)
+    click.echo(f"{_B}Otto Bench{_0} — {len(tasks)} tasks, runner: {_C}{runner_name}{_0}")
+    if label:
+        click.echo(f"  Label: {label}")
+    click.echo()
+
+    run = asyncio.run(run_bench(bench_dir, tasks, runner, label=label))
+
+    # Save results
+    results_dir = bench_dir / "results"
+    out_path = save_results(run, results_dir)
+
+    # Print summary
+    s = run.summary
+    click.echo(f"\n{'━' * 50}")
+    click.echo(f"{_B}Results:{_0} {out_path.name}")
+    click.echo(f"  Success: {_G}{s['passed']}{_0}/{s['total']}  ({s['success_rate'] * 100:.1f}%)")
+    click.echo(f"  Cost:    ${s['total_cost']:.2f}  (${s['cost_per_success']:.2f}/success)")
+    click.echo(f"  Time:    {s['total_time_s']:.0f}s  ({s['time_per_success_s']:.0f}s/success)")
+    if s["mean_mutation_score"] > 0:
+        click.echo(f"  Mutation: {s['mean_mutation_score']:.3f}")
+
+
+@bench.command("compare", context_settings=CONTEXT_SETTINGS)
+@click.argument("baseline")
+@click.argument("current")
+def bench_compare(baseline, current):
+    """Compare two benchmark runs.
+
+    Arguments are result filenames or labels. Searches bench/results/ for matches.
+    """
+    from otto.bench import compare_runs, load_results, list_results
+
+    bench_dir = _get_bench_dir()
+    results_dir = bench_dir / "results"
+
+    def _find_result(query: str) -> Path:
+        """Find a result file by filename or label."""
+        # Try exact filename
+        exact = results_dir / query
+        if exact.exists():
+            return exact
+        # Try with .json suffix
+        with_ext = results_dir / f"{query}.json"
+        if with_ext.exists():
+            return with_ext
+        # Search by label
+        for name, run in list_results(results_dir):
+            if run.label == query or run.run_id == query:
+                return results_dir / name
+        click.echo(f"Result not found: {query}", err=True)
+        sys.exit(2)
+
+    baseline_path = _find_result(baseline)
+    current_path = _find_result(current)
+
+    baseline_run = load_results(baseline_path)
+    current_run = load_results(current_path)
+
+    click.echo(compare_runs(baseline_run, current_run))
+
+
+@bench.command("history", context_settings=CONTEXT_SETTINGS)
+@click.option("--limit", "-n", default=20, help="Number of runs to show")
+def bench_history(limit):
+    """Show recent benchmark run history."""
+    from otto.bench import list_results
+
+    bench_dir = _get_bench_dir()
+    results_dir = bench_dir / "results"
+
+    runs = list_results(results_dir)
+    if not runs:
+        click.echo(f"{_D}No benchmark results found.{_0}")
+        return
+
+    click.echo(f"{_B}{'Run ID':24}  {'Runner':10}  {'Label':20}  {'Pass':>6}  {'Cost':>8}  {'Time':>8}{_0}")
+    click.echo(f"{_D}{'─' * 90}{_0}")
+
+    for name, run in runs[:limit]:
+        s = run.summary
+        sr = s["success_rate"] * 100
+        click.echo(
+            f"{run.run_id:24}  {run.runner:10}  {run.label:20}  "
+            f"{s['passed']:>2}/{s['total']:<2} {sr:>3.0f}%  "
+            f"${s['total_cost']:>6.2f}  {s['total_time_s']:>6.0f}s"
+        )
