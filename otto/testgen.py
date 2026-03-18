@@ -429,8 +429,9 @@ Your working directory is: {tmp_dir}
 Write the test file to: {tmp_dir}/{test_rel}
 
 IMPORTANT: Everything you need is in the SPEC and PROJECT CONTEXT above.
-Do NOT read files or explore — start writing the test file IMMEDIATELY.
-Only read files if validation fails and you need to debug an import issue.
+Start writing the test file IMMEDIATELY — do NOT explore broadly.
+During self-review, if you need to verify specific details (exact function
+signatures, enum values, flag names), you may read the relevant source file.
 
 Requirements for tests:
 - Test the public interface only (CLI via subprocess, library via imports)
