@@ -786,6 +786,11 @@ async def run_task(
 
             if validation.status == "collection_error":
                 _log_warn(f"Generated tests have errors — regenerating once")
+                if not parallel_mode and validation.error_output:
+                    # Show the actual error so it can be debugged
+                    err_lines = validation.error_output.strip().splitlines()
+                    for line in err_lines[-5:]:
+                        print(f"    {_DIM}{line}{_RESET}", flush=True)
                 test_file_path_val.unlink()
                 test_file_path_val, regen_logs = await run_testgen_agent(rubric, key, blackbox_ctx, effective_dir, quiet=parallel_mode)
                 testgen_logs.extend(regen_logs)
@@ -793,6 +798,10 @@ async def run_task(
                     validation = validate_generated_tests(test_file_path_val, "pytest", effective_dir)
                     if validation.status == "collection_error":
                         _log_warn("Regenerated tests still broken — skipping rubric tests")
+                        if not parallel_mode and validation.error_output:
+                            err_lines = validation.error_output.strip().splitlines()
+                            for line in err_lines[-5:]:
+                                print(f"    {_DIM}{line}{_RESET}", flush=True)
                         test_file_path_val.unlink()
                         test_file_path_val = None
 

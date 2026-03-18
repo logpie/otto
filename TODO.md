@@ -46,6 +46,9 @@
 - [ ] **Run time reporting**: `otto status` only shows coding time (2m54s) but full run was 10m34s. Missing: architect, testgen, integration gate, pilot overhead. Should track per-phase timing and show total run time in `otto status` summary.
 
 ### Medium Priority
+- [ ] **Refactor: testgen.py has 4 near-duplicate functions** — `run_testgen_agent`, `run_holistic_testgen`, `generate_tests`, `generate_integration_tests` share 80% of their code (agent setup, streaming, validation, file handling). Two real patterns: (1) pre-impl TDD from rubric, (2) post-impl integration. Consolidate into a shared `_run_testgen_core()` with mode/config params.
+- [ ] **Refactor: runner.py is 2300 lines** — doing too much (task execution, architect phase, dep injection, holistic testgen loop, cross-task review, reconciliation, parallel worktree management). Split into: `runner.py` (core `run_task()` loop), `pipeline.py` (orchestration phases for `run_all()`), and move cross-task review + integration gate into their own module.
+- [ ] **Refactor: pilot.py MCP script is embedded string** — 500 lines of Python inside an f-string with double-brace escaping. Extract to `otto/pilot_mcp_server.py` as a real module, pass config via env vars or temp JSON file instead of baking into the script.
 - [ ] **BUG: `reset --hard` destroys user commits**: Currently uses `git reset --hard` to parent of oldest otto commit, which nukes interleaved user commits (e.g., `features.md`). Should use `git revert` on otto commits only, or at minimum only reset otto-prefixed commits while preserving user history.
 - [ ] **Task history**: `otto add -f` wipes all tasks — no way to see past runs. Add `otto history` or archive old tasks before re-import so devs can review prior results/costs.
 - [ ] **Review file caps**: `_MAX_STUB_FILES` and similar caps may be too conservative now that architect provides context. Check if they can be raised or removed.
@@ -56,7 +59,9 @@
 - [ ] **Retry UX**: `otto retry` without `--force` for stale tasks, cascade to blocked dependents, `--run` flag to combine retry+run. See `docs/superpowers/plans/2026-03-15-retry-ux.md`.
 
 ### Low Priority
-- [ ] **`--fast` mode**: Toggle `claude -p` one-shot for rubric/testgen instead of agentic. 5-10x faster and cheaper but lower quality (~70% vs ~95% reliability). Useful for prototyping and simple projects.
+- [ ] **`--fast` mode**: Two approaches (benchmarked: `claude -p` with tools is same speed as Agent SDK — both ~68s for rubric gen due to per-tool API round-trips):
+  - **Option A (reduce tool calls)**: Pre-load context into prompt, tell agent "start writing immediately." Cuts 12 tool calls to 3-4. Expected: ~25s instead of ~68s. Keeps self-validation.
+  - **Option B (true one-shot)**: `claude -p --tools "" --max-turns 1` — no tools at all, single text response. ~5s but ~70% reliability (original v1 approach, failed ~30% of the time). Only for prototyping.
 - [x] **Parallel tasks**: Run independent tasks concurrently in git worktrees. `depends_on` field, topological ordering, blocked status, `--no-parallel` flag.
 - [ ] **Parallel TUI**: `rich.Live` panels with per-task workzone boxes for parallel execution. Keypress toggles for compact/panel/focus modes. See `docs/superpowers/plans/2026-03-15-parallel-tui.md`.
 - [ ] **Environment tests**: Verify project works in a clean environment — fresh install, no cached state.
