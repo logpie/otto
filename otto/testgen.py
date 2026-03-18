@@ -442,6 +442,13 @@ Requirements for tests:
 - Think like a devil's advocate — catch lazy/buggy implementations
 - NO trivial tests. Use pytest.mark.parametrize where appropriate.
 
+CRITICAL IMPORT RULE:
+- For NEW functions/classes that don't exist yet: import INSIDE each test function, not at module level.
+  Example: def test_search(): from bookmarks import search_bookmarks
+- For EXISTING functions (listed in project context): import at module level is fine.
+- This ensures pytest can collect the tests even before the feature is implemented.
+- Module-level imports of non-existent names cause collection errors which break the pipeline.
+
 Steps:
 1. WRITE the test file immediately (don't explore first)
 2. VALIDATE: python -c "import ast; ast.parse(open('<test_file>').read()); print('OK')"
@@ -745,6 +752,13 @@ CRITICAL RULES:
 - Think like a devil's advocate — catch lazy/buggy implementations
 - NO trivial tests. Use pytest.mark.parametrize where appropriate.
 
+CRITICAL IMPORT RULE:
+- For NEW functions/classes that don't exist yet: import INSIDE each test function, not at module level.
+  Example: def test_search(): from bookmarks import search_bookmarks
+- For EXISTING functions (listed in project context): import at module level is fine.
+- This ensures pytest can collect the tests even before the feature is implemented.
+- Module-level imports of non-existent names cause collection errors which break the pipeline.
+
 Steps:
 1. WRITE conftest.py with shared fixtures
 2. WRITE each test file
@@ -870,6 +884,13 @@ Rules — "test like a user":
 - Mocks/fakes ONLY if the project already provides test fixtures for them
 - Do NOT grep source code for strings — test actual behavior
 - The tests should be runnable with the standard test command for {framework}
+
+CRITICAL IMPORT RULE:
+- For NEW functions/classes that don't exist yet: import INSIDE each test function, not at module level.
+  Example: def test_search(): from bookmarks import search_bookmarks
+- For EXISTING functions (listed in project context): import at module level is fine.
+- This ensures pytest can collect the tests even before the feature is implemented.
+- Module-level imports of non-existent names cause collection errors which break the pipeline.
 
 Follow these steps:
 1. Write the test file
@@ -1007,6 +1028,13 @@ Rules — "test like a user":
 - Libraries/APIs: import and call the public interface as a consumer would.
 - Tests must be hermetic and deterministic — no external network calls
 - The tests should be runnable with the standard test command for {framework}
+
+CRITICAL IMPORT RULE:
+- For NEW functions/classes that were just implemented: import INSIDE each test function, not at module level.
+  Example: def test_search(): from bookmarks import search_bookmarks
+- For EXISTING functions (already in the codebase before this run): import at module level is fine.
+- This ensures pytest can collect the tests even if run before all features are merged.
+- Module-level imports of non-existent names cause collection errors which break the pipeline.
 
 Follow these steps:
 1. Write the test file
