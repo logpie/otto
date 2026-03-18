@@ -1963,6 +1963,7 @@ async def run_all(
                     if on_id not in deps:
                         deps.append(on_id)
                         update_task(tasks_file, task["key"], depends_on=deps)
+                        task["depends_on"] = deps  # keep in-memory dict in sync
                         injected += 1
             if injected:
                 print(f"  {_DIM}Injected {injected} dependencies from file-plan.md{_RESET}", flush=True)

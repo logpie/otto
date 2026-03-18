@@ -106,11 +106,12 @@ class TestFilePlanDependencyInjection:
             "    reason: both modify models/user.py\n"
         ))
 
-        # Parse the file plan
+        # Parse the file plan — includes explicit deps + auto-detected overlaps
         deps = parse_file_plan(tmp_git_repo)
-        assert len(deps) == 2
         assert (t2["id"], t1["id"]) in deps
         assert (t3["id"], t1["id"]) in deps
+        # Auto-detection also chains t3→t2 (both share models/user.py)
+        assert (t3["id"], t2["id"]) in deps
 
         # Simulate runner's dependency injection logic (from run_all)
         tasks = load_tasks(tasks_path)
@@ -123,15 +124,19 @@ class TestFilePlanDependencyInjection:
                 if on_id not in existing_deps:
                     existing_deps.append(on_id)
                     update_task(tasks_path, task["key"], depends_on=existing_deps)
+                    task["depends_on"] = existing_deps
                     injected += 1
 
-        assert injected == 2
+        assert injected == 3  # 2 explicit + 1 auto-detected overlap
 
         # Verify tasks.yaml was updated
         final_tasks = load_tasks(tasks_path)
         tasks_by_id = {t["id"]: t for t in final_tasks}
         assert tasks_by_id[t2["id"]].get("depends_on") == [t1["id"]]
-        assert tasks_by_id[t3["id"]].get("depends_on") == [t1["id"]]
+        # t3 depends on both t1 (explicit) and t2 (auto-detected file overlap)
+        t3_deps = tasks_by_id[t3["id"]].get("depends_on")
+        assert t1["id"] in t3_deps
+        assert t2["id"] in t3_deps
         assert tasks_by_id[t1["id"]].get("depends_on") is None
 
     def test_injection_skips_already_declared_deps(self, tmp_git_repo):
@@ -164,6 +169,7 @@ class TestFilePlanDependencyInjection:
                 if on_id not in existing_deps:
                     existing_deps.append(on_id)
                     update_task(tasks_path, task["key"], depends_on=existing_deps)
+                    task["depends_on"] = existing_deps
                     injected += 1
 
         assert injected == 0
@@ -194,6 +200,7 @@ class TestFilePlanDependencyInjection:
                 if on_id not in existing_deps:
                     existing_deps.append(on_id)
                     update_task(tasks_path, task["key"], depends_on=existing_deps)
+                    task["depends_on"] = existing_deps
                     injected += 1
 
         assert injected == 0
@@ -597,7 +604,7 @@ class TestEndToEndFilePlanInjection:
             "    reason: both modify models.py\n"
         ))
 
-        # Parse + inject (mirrors run_all logic)
+        # Parse + inject (mirrors run_all logic — must keep in-memory in sync)
         deps = parse_file_plan(tmp_git_repo)
         tasks = load_tasks(tasks_path)
         pending_by_id = {t["id"]: t for t in tasks}
@@ -608,6 +615,7 @@ class TestEndToEndFilePlanInjection:
                 if on_id not in existing:
                     existing.append(on_id)
                     update_task(tasks_path, task["key"], depends_on=existing)
+                    task["depends_on"] = existing
 
         # Verify final state
         final = load_tasks(tasks_path)
@@ -617,8 +625,9 @@ class TestEndToEndFilePlanInjection:
         assert by_id[id1].get("depends_on") is None
         # Task 2 (CLI) depends on task 1
         assert by_id[id2]["depends_on"] == [id1]
-        # Task 3 (API) depends on task 1
-        assert by_id[id3]["depends_on"] == [id1]
+        # Task 3 (API) depends on task 1 + auto-detected overlap with task 2 (models.py)
+        assert id1 in by_id[id3]["depends_on"]
+        assert id2 in by_id[id3]["depends_on"]
         # All still pending
         assert all(by_id[tid]["status"] == "pending" for tid in [id1, id2, id3])
 

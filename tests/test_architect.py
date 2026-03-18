@@ -209,7 +209,59 @@ class TestParseFilePlan:
         deps = parse_file_plan(arch_dir)
         assert (2, 1) in deps
         assert (3, 2) in deps
-        assert len(deps) == 2
+        # Auto-detection also adds (3,1) since tasks 1 and 3 share cli.py
+        # and only (3,2) was explicitly declared, not (3,1)
+        assert (3, 1) in deps
+
+    def test_auto_detects_file_overlap(self, arch_dir):
+        """Tasks sharing predicted files but no declared dep get auto-chained."""
+        (arch_dir / "otto_arch" / "file-plan.md").write_text(
+            "tasks:\n"
+            "  - id: 1\n"
+            "    predicted_files: [models.py]\n"
+            "  - id: 2\n"
+            "    predicted_files: [cli.py, models.py]\n"
+            "  - id: 3\n"
+            "    predicted_files: [cli.py]\n"
+            "recommended_dependencies:\n"
+            "  - from: 2\n"
+            "    depends_on: 1\n"
+            "    reason: both modify models.py\n"
+        )
+        deps = parse_file_plan(arch_dir)
+        # 2→1 is explicit. 3→2 should be auto-injected (both have cli.py)
+        assert (2, 1) in deps
+        assert (3, 2) in deps
+
+    def test_no_auto_dep_when_no_overlap(self, arch_dir):
+        """Tasks with no shared files get no auto-injected deps."""
+        (arch_dir / "otto_arch" / "file-plan.md").write_text(
+            "tasks:\n"
+            "  - id: 1\n"
+            "    predicted_files: [models.py]\n"
+            "  - id: 2\n"
+            "    predicted_files: [cli.py]\n"
+            "  - id: 3\n"
+            "    predicted_files: [api.py]\n"
+        )
+        deps = parse_file_plan(arch_dir)
+        assert deps == []  # no overlap, no deps
+
+    def test_auto_dep_skips_already_connected(self, arch_dir):
+        """Don't double-inject deps for pairs that already have one."""
+        (arch_dir / "otto_arch" / "file-plan.md").write_text(
+            "tasks:\n"
+            "  - id: 1\n"
+            "    predicted_files: [cli.py]\n"
+            "  - id: 2\n"
+            "    predicted_files: [cli.py]\n"
+            "recommended_dependencies:\n"
+            "  - from: 2\n"
+            "    depends_on: 1\n"
+            "    reason: both modify cli.py\n"
+        )
+        deps = parse_file_plan(arch_dir)
+        assert deps == [(2, 1)]  # only the explicit one, no duplicate
 
     def test_handles_yaml_on_as_boolean_true(self, arch_dir):
         """YAML parses bare 'on:' as boolean True. parse_file_plan handles this."""

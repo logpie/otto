@@ -228,6 +228,38 @@ def parse_file_plan(project_dir: Path) -> list[tuple[int, int]]:
         if isinstance(from_id, int) and isinstance(on_id, int):
             deps.append((from_id, on_id))
 
+    # Deterministic overlap detection: if two tasks share predicted files
+    # but have no dependency between them, chain them to prevent merge conflicts.
+    # This catches cases the architect missed (e.g., both modify cli.py but
+    # architect said "independent").
+    task_files: dict[int, set[str]] = {}
+    for task_entry in data.get("tasks") or []:
+        if not isinstance(task_entry, dict):
+            continue
+        tid = task_entry.get("id")
+        files = task_entry.get("predicted_files") or []
+        if isinstance(tid, int) and isinstance(files, list):
+            task_files[tid] = {str(f) for f in files}
+
+    # Build set of already-connected pairs (in either direction)
+    connected = set()
+    for a, b in deps:
+        connected.add((a, b))
+        connected.add((b, a))
+
+    # Check all task pairs for file overlap
+    task_ids = sorted(task_files.keys())
+    for i, t1 in enumerate(task_ids):
+        for t2 in task_ids[i + 1:]:
+            if (t1, t2) in connected or (t2, t1) in connected:
+                continue
+            overlap = task_files[t1] & task_files[t2]
+            if overlap:
+                # Chain: later task depends on earlier
+                deps.append((t2, t1))
+                connected.add((t2, t1))
+                connected.add((t1, t2))
+
     return deps
 
 
