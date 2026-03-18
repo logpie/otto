@@ -143,23 +143,24 @@ def parse_markdown_tasks(md_file: Path, project_dir: Path) -> list[dict]:
 
 
 async def _run_markdown_agent(md_file: Path, project_dir: Path) -> list[dict]:
-    """Run the markdown parsing agent."""
+    """Run the markdown parsing agent with pre-loaded context (adaptive mode)."""
     md_content = md_file.read_text()
     output_file = Path(tempfile.mktemp(suffix=".json", prefix="otto_tasks_"))
+
+    # Pre-load project context
+    from otto.testgen import build_blackbox_context
+    blackbox_ctx = build_blackbox_context(project_dir, task_hint=md_content[:500])
 
     agent_prompt = f"""You are a senior QA engineer and technical PM. Break this feature document into coding tasks.
 
 DOCUMENT:
 {md_content}
 
-PROJECT DIRECTORY: {project_dir}
+PROJECT CONTEXT (current source — start from this):
+{blackbox_ctx}
 
-BEFORE writing tasks:
-1. Read at most 3-5 source files most relevant to the document
-2. If there's a CLI, run --help (one command)
-3. Write the tasks — don't explore further
-
-Then write a JSON array to: {output_file}
+Write a JSON array to: {output_file}
+If you need to verify specific details during self-review, you may read individual files — but don't explore broadly.
 
 Each element should have:
 - "prompt": a clear, actionable description of what to implement
