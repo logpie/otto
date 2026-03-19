@@ -1,7 +1,6 @@
 """Otto runner — core execution loop with branch management and verification."""
 
 import asyncio
-import hashlib
 import os
 import shutil
 import subprocess
@@ -33,7 +32,7 @@ from otto.config import git_meta_dir, detect_test_command
 from otto.display import _truncate_at_word
 from otto.tasks import load_tasks, update_task
 from otto.testgen import detect_test_framework, test_file_path
-from otto.verify import VerifyResult, run_tier1, run_verification, _subprocess_env
+from otto.verify import VerifyResult, run_verification, _subprocess_env
 
 
 
@@ -148,65 +147,6 @@ def _restore_workspace_state(
     subprocess.run(cmd, cwd=project_dir, capture_output=True)
     _remove_otto_created_untracked(project_dir, pre_existing_untracked)
 
-
-def _file_sha256(path: Path) -> str:
-    """Return a stable hash for tamper checks."""
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def _list_worktree_changes(worktree_dir: Path) -> tuple[set[str], set[str]]:
-    """Return tracked and untracked paths changed from HEAD in a worktree."""
-    tracked = subprocess.run(
-        ["git", "diff", "--name-only", "HEAD"],
-        cwd=worktree_dir, capture_output=True, text=True, check=True,
-    )
-    tracked_paths = {line for line in tracked.stdout.splitlines() if line}
-    untracked_paths = _snapshot_untracked(worktree_dir)
-    return tracked_paths, untracked_paths
-
-
-def _copy_changed_paths_from_worktree(
-    source_dir: Path,
-    dest_dir: Path,
-    tracked_paths: set[str],
-    untracked_paths: set[str],
-    pre_existing_untracked: set[str] | None = None,
-) -> set[str]:
-    """Copy a verified worktree diff back onto the main checkout."""
-    changed_paths = tracked_paths | untracked_paths
-    preserve = pre_existing_untracked or set()
-
-    for rel_path in sorted(changed_paths):
-        source = source_dir / rel_path
-        dest = dest_dir / rel_path
-
-        if rel_path in untracked_paths and rel_path in preserve:
-            raise RuntimeError(
-                f"refusing to overwrite pre-existing untracked file: {rel_path}"
-            )
-
-        if source.exists() or source.is_symlink():
-            if dest.exists() or dest.is_symlink():
-                if dest.is_dir() and not dest.is_symlink():
-                    shutil.rmtree(dest, ignore_errors=True)
-                else:
-                    dest.unlink(missing_ok=True)
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, dest, follow_symlinks=False)
-        else:
-            _remove_path(dest, dest_dir)
-
-    return changed_paths
-
-
-def _run_integration_gate_in_worktree(
-    worktree_dir: Path,
-    test_command: str | None,
-    timeout: int,
-) -> VerifyResult:
-    """Run the integration gate against a mutable worktree checkout."""
-    tier = run_tier1(worktree_dir, test_command, timeout)
-    return VerifyResult(passed=tier.passed or tier.skipped, tiers=[tier])
 
 
 def create_task_branch(
@@ -797,11 +737,15 @@ APPROACH:
    - Any gotchas for future tasks
 
 GRIND:
+- You are running AUTONOMOUSLY. Do NOT ask questions or wait for input.
+  Make the best decision yourself and keep going.
 - If your first approach doesn't meet a hard constraint, don't give up —
   rethink the architecture.
 - List at least 3 alternative approaches before concluding anything is infeasible.
 - NEVER meet a constraint by removing the feature that was hard to optimize.
 - NEVER weaken the spec.
+- Create a .gitignore if the project needs one (e.g., node_modules/, __pycache__/,
+  .venv/, build/, dist/). Only tracked files get committed.
 
 {learnings_section}
 {task_notes_section}
@@ -923,11 +867,6 @@ GRIND:
                 )
                 continue
 
-            # Note: tamper detection removed. The coding agent is now trusted to
-            # fix test bugs (broken imports, wrong stdlib usage) but not weaken
-            # assertions. The spec items in the prompt serve as the ground truth —
-            # if the agent weakens tests, re-running testgen from spec produces fresh ones.
-
             # Check if agent made any changes
             commit_base = tdd_commit_sha if tdd_commit_sha else base_sha
             diff_check = subprocess.run(
@@ -942,7 +881,15 @@ GRIND:
             no_changes = diff_check.returncode == 0 and not new_untracked
 
             if no_changes and not tdd_commit_sha:
-                # No code changes and no TDD tests — nothing to commit
+                if spec:
+                    # Task has spec items but agent made no changes — suspicious.
+                    # Don't auto-pass; treat as failure so pilot can retry.
+                    if not parallel_mode:
+                        _log_warn("Agent made no changes despite spec requirements — retrying")
+                    last_error = "Agent produced no code changes. The spec requirements have not been implemented."
+                    continue
+
+                # No spec and no changes — genuinely nothing to do
                 if not parallel_mode:
                     print(f"  {_DIM}No changes needed{_RESET}", flush=True)
                 if not parallel_mode:

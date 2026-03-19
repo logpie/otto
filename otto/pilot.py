@@ -177,9 +177,7 @@ def _print_pilot_tool_call(block) -> None:
         print(f"  {icon} {_BOLD}{label}{_RESET}", flush=True)
 
     # Start spinner for long-running primary tools
-    if tool_name in ("run_holistic_testgen", "run_per_task_testgen",
-                      "run_coding_agent", "run_coding_agents",
-                      "run_integration_gate_tool", "run_architect_tool"):
+    if tool_name in ("run_coding_agent",):
         _active_spinner = _Spinner(label)
         _active_spinner.start()
 
@@ -461,7 +459,8 @@ AVAILABLE TOOLS:
 
 RULES:
 - PLAN FIRST — never call run_coding_agent before planning
-- Do NOT use Edit, Write, Bash, or Read to modify project files directly
+- Use Read, Glob, Grep, Bash freely to explore the codebase and verify results
+- Do NOT modify project files directly — let the coding agent do that
 - Never retry with the same approach twice
 - Track progress: call save_run_state after major decisions
 - After all tasks pass or are aborted, call finish_run

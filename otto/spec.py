@@ -52,31 +52,15 @@ def generate_spec(prompt: str, project_dir: Path) -> list[str]:
 async def _run_spec_agent(prompt: str, project_dir: Path) -> list[str]:
     """Run the spec generation agent with pre-loaded context (adaptive mode).
 
-    Pre-loads project context (API stubs, file tree, CLI help, existing tests)
-    so the agent can start writing immediately. The agent retains permission
-    to read specific files during self-review if it needs to verify details.
-
-    Benchmarked: 2x faster than exploration-first approach, same quality.
+    The agent has full tool access to explore the project as needed.
     """
     spec_file = Path(tempfile.mktemp(suffix=".txt", prefix="otto_spec_"))
-
-    # Pre-load project context (always fresh from current source)
-    from otto.testgen import build_blackbox_context
-    blackbox_ctx = build_blackbox_context(project_dir, task_hint=prompt)
-
-    # Include architect conventions if available (supplementary, may be stale)
-    from otto.architect import load_design_context
-    design_ctx = load_design_context(project_dir, role="coding")
-    design_section = ""
-    if design_ctx:
-        design_section = f"\n\nDESIGN CONVENTIONS (from architect — may be stale, verify against source if unsure):\n{design_ctx}\n"
 
     agent_prompt = f"""You are a senior engineer writing the acceptance spec for a coding task.
 
 TASK: {prompt}
 
-PROJECT CONTEXT (current source — start from this):
-{blackbox_ctx}{design_section}
+You are working in {project_dir}. Explore the codebase as needed to understand what exists.
 
 Write the acceptance spec to: {spec_file}
 
@@ -149,24 +133,18 @@ def parse_markdown_tasks(md_file: Path, project_dir: Path) -> list[dict]:
 
 
 async def _run_markdown_agent(md_file: Path, project_dir: Path) -> list[dict]:
-    """Run the markdown parsing agent with pre-loaded context (adaptive mode)."""
+    """Run the markdown parsing agent."""
     md_content = md_file.read_text()
     output_file = Path(tempfile.mktemp(suffix=".json", prefix="otto_tasks_"))
-
-    # Pre-load project context
-    from otto.testgen import build_blackbox_context
-    blackbox_ctx = build_blackbox_context(project_dir, task_hint=md_content[:500])
 
     agent_prompt = f"""You are a senior engineer breaking a feature document into coding tasks.
 
 DOCUMENT:
 {md_content}
 
-PROJECT CONTEXT (current source — start from this):
-{blackbox_ctx}
+You are working in {project_dir}. Explore the codebase as needed to understand what exists.
 
 Write a JSON array to: {output_file}
-If you need to verify specific details during self-review, you may read individual files — but don't explore broadly.
 
 Each element should have:
 - "prompt": a clear, actionable description of what to implement

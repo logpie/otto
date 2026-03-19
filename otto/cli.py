@@ -165,7 +165,18 @@ def _print_imported_tasks(tasks: list) -> None:
 @click.option("--no-spec", is_flag=True, help="Skip spec generation")
 def add(prompt, verify, max_retries, import_file, no_spec):
     """Add a task to the queue (or import from file with -f)."""
-    tasks_path = Path.cwd() / "tasks.yaml"
+    _require_git()
+    project_dir = Path.cwd()
+
+    # Auto-init if otto.yaml doesn't exist
+    config_path = project_dir / "otto.yaml"
+    if not config_path.exists():
+        create_config(project_dir)
+        config = load_config(config_path)
+        click.echo(f"{_G}✓{_0} Auto-initialized otto  {_D}(default_branch: {config['default_branch']}, max_retries: {config['max_retries']}){_0}")
+        click.echo(f"  {_D}Tip: commit otto.yaml and customize settings if needed{_0}")
+
+    tasks_path = project_dir / "tasks.yaml"
 
     if import_file:
         _import_tasks(Path(import_file), tasks_path)
@@ -213,11 +224,12 @@ def run(prompt, dry_run, no_architect, tdd):
     """Run pending tasks (or a one-off task if prompt given)."""
     from otto.runner import run_task
 
+    _require_git()
     project_dir = Path.cwd()
     config_path = project_dir / "otto.yaml"
     if not config_path.exists():
-        click.echo("Error: otto.yaml not found. Run 'otto init' first.", err=True)
-        sys.exit(2)
+        create_config(project_dir)
+        click.echo(f"{_G}✓{_0} Auto-initialized otto")
     config = load_config(config_path)
     if no_architect:
         config["no_architect"] = True
