@@ -316,6 +316,8 @@ Some tasks produce visual output (GUI, charts, styling) that can't be verified b
 
 ### Phase 2: Strengthen coding agent
 
+**Key principle: the coding agent optimizes for the spec, uses tests as feedback.** Tests are tools the agent writes and runs to validate its own approach. The spec is the goal. When they conflict, the spec wins.
+
 **`otto/runner.py` — rewrite coding agent prompt:**
 ```
 {task prompt}
