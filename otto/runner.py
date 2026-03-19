@@ -957,14 +957,21 @@ async def run_task(
                     f"{design_ctx}\n"
                 )
 
+            # Include spec items if available
+            spec_section = ""
+            if rubric:
+                spec_items = "\n".join(f"  {i+1}. {item}" for i, item in enumerate(rubric))
+                spec_section = f"\n\nACCEPTANCE SPEC (these are the hard requirements — meet ALL of them):\n{spec_items}\n"
+
             agent_prompt = (
                 f"{base_prompt}\n\n"
                 f"You are working in {effective_dir}. Do NOT create git commits.\n\n"
                 f"RELEVANT SOURCE FILES (already read for you):\n"
                 f"{source_context}"
-                f"{design_section}\n\n"
+                f"{design_section}"
+                f"{spec_section}\n\n"
                 f"APPROACH:\n"
-                f"1. PLAN first — read the spec and current code. Can you meet ALL requirements\n"
+                f"1. PLAN first — read the spec and current code. Can you meet ALL spec requirements\n"
                 f"   with the current architecture? If not, briefly note what needs to change.\n"
                 f"2. IMPLEMENT your plan.\n"
                 f"3. VERIFY — run the acceptance tests yourself to check your work.\n"
