@@ -166,12 +166,24 @@ Most items should be [verifiable]. Only use [visual] for genuinely subjective cr
 error handling, API contracts — all [verifiable].
 </output_rules>
 
+<ux_consistency>
+When the task adds a new feature to an existing app:
+1. Identify existing UX patterns (selection, navigation, state management).
+2. Ensure new features are CONSISTENT with those patterns.
+   Example: if the app has a selection mechanism (dots, tabs, list),
+   any action (compare, delete, edit) should respect the current selection.
+3. Add spec items for consistency if the user's description implies it.
+   "Compare forecast" implies "compare what I'm looking at" — not hardcoded indices.
+</ux_consistency>
+
 <compliance_check>
 MANDATORY before writing output — do this in your thinking:
 1. Re-read the user's task description.
 2. List every explicit constraint (numbers, thresholds, "must"/"never"/"always").
 3. For each, confirm it appears in your spec EQUALLY or MORE strict.
 4. If any constraint was softened, fix it before writing the file.
+5. Check: does the new feature interact with existing UX patterns?
+   If so, is there a spec item ensuring consistency?
 </compliance_check>"""
 
     agent_prompt = f"""TASK: {prompt}

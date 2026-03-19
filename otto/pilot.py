@@ -442,10 +442,23 @@ For APIs:
 - Curl all endpoints with real payloads
 - Try error cases: bad input, missing fields, unauthorized
 
+TEST MULTI-STEP FLOWS (most bugs hide here):
+- If the app has selection + action: does the action respect the current selection?
+  (e.g., select item #3, click delete — does it delete #3 or #1?)
+- If features interact: test them together, not just in isolation
+  (e.g., add 3 cities, select the 3rd, compare — which cities are compared?)
+- Test the full lifecycle: create → view → modify → delete, not just create
+
+REGRESSION CHECK (quick — test existing features too):
+- After adding a new feature, try 2-3 existing features to verify they still work
+- Focus on features that share state or UI with the new feature
+- Click every button visible on the page at least once
+
 Focus on things unit tests CAN'T catch:
 - Wrong API results (correct code but wrong data, like "New Jersey" → Trinidad)
 - Display/formatting issues visible only in real output
-- UX problems: confusing flow, missing feedback, unclear errors
+- UX consistency: does the new feature work the way existing features set expectations?
+- State bugs: does selection persist across actions? Does the right item get modified?
 - Integration issues: features that work in isolation but break together
 
 DOCUMENT your findings — write a behavioral test report:
