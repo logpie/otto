@@ -84,11 +84,19 @@ class TestDetectTestCommand:
         result = detect_test_command(tmp_git_repo)
         assert result is None
 
-    def test_returns_none_when_ambiguous(self, tmp_git_repo):
+    def test_chains_multiple_frameworks(self, tmp_git_repo):
+        """Mixed-language project: npm test + pytest chained with &&."""
         (tmp_git_repo / "tests").mkdir()
         (tmp_git_repo / "tests" / "test_example.py").write_text("def test_x(): pass\n")
         pkg = {"scripts": {"test": "jest"}}
         (tmp_git_repo / "package.json").write_text(json.dumps(pkg))
+        result = detect_test_command(tmp_git_repo)
+        assert result == "npm test && pytest"
+
+    def test_empty_tests_dir_no_pytest(self, tmp_git_repo):
+        """tests/ dir with no Python test files shouldn't trigger pytest."""
+        (tmp_git_repo / "tests").mkdir()
+        (tmp_git_repo / "tests" / "helper.js").write_text("module.exports = {}")
         result = detect_test_command(tmp_git_repo)
         assert result is None
 

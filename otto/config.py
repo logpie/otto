@@ -71,15 +71,15 @@ def load_config(config_path: Path) -> dict[str, Any]:
 
 
 def detect_test_command(project_dir: Path) -> str | None:
-    """Auto-detect the project's test command. Returns None if ambiguous or not found."""
+    """Auto-detect the project's test command.
+
+    If multiple test frameworks detected (e.g., npm test + pytest for a React
+    project with Python e2e tests), chains them with &&.
+    Returns None only if no framework detected.
+    """
     candidates = []
 
-    # pytest
-    tests_dir = project_dir / "tests"
-    if tests_dir.is_dir() or (project_dir / "test").is_dir():
-        candidates.append("pytest")
-
-    # npm test
+    # npm/node test (check first — JS projects often also have tests/ dir)
     pkg_json = project_dir / "package.json"
     if pkg_json.exists():
         try:
@@ -88,6 +88,20 @@ def detect_test_command(project_dir: Path) -> str | None:
                 candidates.append("npm test")
         except (json.JSONDecodeError, KeyError):
             pass
+
+    # pytest
+    tests_dir = project_dir / "tests"
+    test_dir = project_dir / "test"
+    has_py_tests = False
+    if tests_dir.is_dir():
+        has_py_tests = any(tests_dir.glob("test_*.py")) or any(tests_dir.glob("*_test.py"))
+    if test_dir.is_dir() and not has_py_tests:
+        has_py_tests = any(test_dir.glob("test_*.py")) or any(test_dir.glob("*_test.py"))
+    # Also check root-level test files
+    if not has_py_tests:
+        has_py_tests = any(project_dir.glob("test_*.py"))
+    if has_py_tests:
+        candidates.append("pytest")
 
     # go test
     if (project_dir / "go.mod").exists():
@@ -102,9 +116,10 @@ def detect_test_command(project_dir: Path) -> str | None:
     if makefile.exists() and "test:" in makefile.read_text():
         candidates.append("make test")
 
-    if len(candidates) == 1:
-        return candidates[0]
-    return None  # Ambiguous or not found
+    if not candidates:
+        return None
+    # Chain all detected commands — all must pass
+    return " && ".join(candidates)
 
 
 def detect_default_branch(project_dir: Path) -> str:
