@@ -48,21 +48,27 @@ screenshot, let the LLM judge with iterative hill-climbing.
 Spec items (from spec gen)
 │
 ├── Verifiable (has_test_strategy: true)
-│   → Coding agent MUST write a test for each
-│   → Verification checks test exists and passes
-│   → Hard gate: no test = no pass
-│   → If test fails after 3+ different approaches:
-│     coding agent escalates with structured report
-│     pilot judges: genuine impossibility or lazy excuse?
-│     → Genuine: accept with documented gap
-│     → Lazy: retry with "try harder" feedback
+│   ├── Binary ("search returns results")
+│   │   → Test must pass. No gradient. Retry until it works or escalate.
+│   │
+│   └── Gradient ("<300ms latency", "< 10MB memory")
+│       → Grind toward target. Always try to hit it exactly.
+│       → If infeasible after 3+ architecturally different approaches:
+│         report best achieved + why target is unreachable + what was tried.
+│         USER decides what's acceptable, not the agent.
 │
 └── Non-verifiable (has_test_strategy: false)
     → Coding agent implements best-effort
     → Tier 4 (behavioral): browse app, screenshot, LLM judges
-    → Hill-climbing: screenshot → feedback → retry (max 3 rounds)
-    → Advisory: pilot reviews, bounded refinement
+    → Iterative refinement: screenshot → concrete feedback → retry
+    → Max 3 rounds. Agent always tries to improve, never declares "good enough"
+    → Pilot reports what was achieved. User decides acceptance.
 ```
+
+**Anti-reward-hacking principle:** Neither the coding agent nor the pilot ever declares
+"close enough" or "good enough." They always try to hit the exact target. When they
+can't, they report the gap with full transparency. The user decides acceptance.
+This prevents agents from finding thresholds where they can stop trying.
 
 ---
 
@@ -251,35 +257,60 @@ For NON-VERIFIABLE items:
 
 ---
 
-## Phase 5: Hill-Climbing for Non-Verifiable Specs
+## Phase 5: Iterative Refinement for Non-Verifiable Specs
 
 ### What changes
 
-For non-verifiable specs, instead of pass/fail, the pilot does iterative refinement — screenshot, judge, give feedback, retry.
+For non-verifiable specs, the pilot gives concrete visual feedback and the coding
+agent iterates. Each round must improve on something specific.
 
 ### How it works
 
 ```
 Round 1: Coding agent implements
-  → Screenshot → Pilot judges: "gradient is too dark, text hard to read"
-  → Retry with visual feedback
+  → Screenshot → Pilot: "gradient is too dark, text hard to read"
+  → Retry with specific visual feedback
 
 Round 2: Coding agent fixes
-  → Screenshot → Pilot judges: "gradient looks good, but missing blur effect on cards"
-  → Retry with visual feedback
+  → Screenshot → Pilot: "gradient improved, but missing blur effect on cards"
+  → Retry with specific visual feedback
 
 Round 3: Coding agent fixes
-  → Screenshot → Pilot judges: "looks great, matches Apple Weather style"
-  → Pass
+  → Screenshot → Pilot reports to user:
+    "3 rounds completed. Current state: gradient backgrounds working,
+     blur effect on cards, transitions present. Screenshots attached."
+    User decides if acceptable.
 ```
 
-This is hill-climbing: each iteration improves based on concrete visual feedback. The pilot acts like a design reviewer doing visual QA.
+Each round must have **concrete, actionable feedback** — not "make it better" but
+"the gradient is too dark, use lighter colors for day mode." The pilot acts like
+a design reviewer: specific critique, not vague judgment.
 
 ### Limits
 
-- Max 3 visual refinement rounds (avoid infinite loops on subjective items)
-- Only for non-verifiable items — verifiable items are pass/fail via tests
-- Advisory: if after 3 rounds it's "close enough", pass with a note
+- Max 3 refinement rounds (avoid infinite loops)
+- Each round must identify a specific issue to fix (not "try harder")
+- After max rounds: pilot reports what was achieved with screenshots
+- **User decides acceptance** — the agent never declares "good enough"
+
+### Also applies to gradient verifiable specs
+
+For verifiable specs with a gradient (e.g., "<300ms"), the same iterative approach
+applies to the implementation:
+```
+Approach 1: Caching → achieved 350ms
+Approach 2: Cache + parallel fetch → achieved 280ms → PASS
+```
+Or if target unreachable:
+```
+Approach 1: Caching → 350ms
+Approach 2: Cache + prefetch → 320ms
+Approach 3: Cache + prefetch + stale-while-revalidate → 310ms
+→ Report: "Best achieved: 310ms. Target: 300ms. Gap: 10ms.
+   Tried: caching, prefetch, stale-while-revalidate.
+   Remaining bottleneck: geocoding API cold start (network physics)."
+   User decides.
+```
 
 ### Files
 
@@ -310,7 +341,7 @@ Phases 4-5 build on 3 and are mostly prompt changes.
 
 2. **Playwright over MCP chrome-devtools for v1.** Self-contained, no external config needed. The coding agent can install playwright as a dev dependency and write tests that run in CI too. MCP chrome-devtools is better for interactive debugging but harder to automate in verification.
 
-3. **Non-verifiable items are advisory, not gating.** Subjective quality can't be a hard gate — it would cause infinite retry loops. The pilot hill-climbs toward "good enough" with a bounded number of rounds.
+3. **Agents never declare "good enough."** Neither coding agent nor pilot judges acceptance. They always try to hit the exact target. When they can't, they report what was achieved + what was tried + why the gap exists. The user decides. This prevents reward hacking — no threshold where agents get to stop trying.
 
 4. **Backward compatible spec format.** Plain string specs (old format) still work. New format is opt-in via dict items with `text`/`verifiable`/`test_hint` fields.
 
