@@ -488,7 +488,21 @@ When `otto run --tdd` is passed:
 
 Default (no `--tdd`): coding agent writes all tests. No separate testgen step.
 
-### Phase 9: Visual verification (future)
+### Phase 9: Coding agent subagents (future)
+
+The Agent SDK supports subagents via `ClaudeAgentOptions.agents` — a dict of
+named `AgentDefinition(description, prompt, tools, model)`. The coding agent
+can spawn subagents within its session to parallelize work:
+
+- Research subagent: investigate an API, read docs, report findings
+- Test writer subagent: write tests in parallel while coding agent implements
+- Exploration subagent: search the codebase for patterns while coding agent plans
+
+This extends the GRIND principle — the coding agent can explore multiple
+approaches simultaneously instead of serially. Not needed for initial v3
+but the SDK already supports it.
+
+### Phase 10: Visual verification (future)
 
 Not in initial v3 implementation. Design for later:
 - Screenshot capture via Playwright or tkinter after GUI task completes

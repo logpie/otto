@@ -61,6 +61,7 @@
 - [ ] **Retry UX**: `otto retry` without `--force` for stale tasks, cascade to blocked dependents, `--run` flag to combine retry+run. See `docs/superpowers/plans/2026-03-15-retry-ux.md`.
 
 ### Low Priority
+- [ ] **Coding agent subagents**: Agent SDK supports `ClaudeAgentOptions.agents` — dict of named `AgentDefinition(description, prompt, tools, model)`. The coding agent can spawn subagents to parallelize within a task: research subagent to investigate APIs, test writer to write tests in parallel, exploration subagent to search codebase. Extends GRIND — explore multiple approaches simultaneously instead of serially.
 - [ ] **`--fast` mode**: Two approaches (benchmarked: `claude -p` with tools is same speed as Agent SDK — both ~68s for rubric gen due to per-tool API round-trips):
   - **Option A (reduce tool calls)**: Pre-load context into prompt, tell agent "start writing immediately." Cuts 12 tool calls to 3-4. Expected: ~25s instead of ~68s. Keeps self-validation.
   - **Option B (true one-shot)**: `claude -p --tools "" --max-turns 1` — no tools at all, single text response. ~5s but ~70% reliability (original v1 approach, failed ~30% of the time). Only for prototyping.
