@@ -495,7 +495,7 @@ An interactive CC session has much more. Close the gaps:
 
 | Gap | Fix | Priority |
 |-----|-----|----------|
-| `max_turns=20` too low for grinding | Increase to 100+ or use `max_budget_usd` instead | **Critical** |
+| `max_turns=20` too low for grinding | Set to 500 (safety net), use `max_budget_usd` as real limit | **Critical** |
 | No MCP servers | Inherit user's MCP config from CC settings | **High** |
 | No CLAUDE.md / settings | Pass `setting_sources=["user", "project"]` | **High** |
 | No env variables | Pass `env` with user's shell env (API keys, PATH) | **High** |
@@ -506,9 +506,11 @@ An interactive CC session has much more. Close the gaps:
 | No fallback_model | Set `fallback_model` for rate limit resilience | Future |
 | No file checkpointing | Enable `enable_file_checkpointing` for recovery | Future |
 
-The critical fix is `max_turns` — 20 turns is not enough for a strong agent that plans,
-implements, writes tests, runs them, iterates, and tries alternative approaches. An
-interactive CC session runs for hundreds of turns. The agent should have room to grind.
+The critical fix: `max_turns=500` as safety net, `max_budget_usd` from config as the
+real limit (e.g., `otto.yaml: max_cost_per_task: 5.0`). Turn count is a poor proxy —
+a file read and a 500-line code generation shouldn't count the same. Cost aligns with
+what the user actually cares about. The agent grinds until it succeeds or hits the
+cost cap. The pilot monitors progress and aborts on doom-loops.
 
 ### Phase 10: Coding agent subagents (future)
 
