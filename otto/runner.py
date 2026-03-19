@@ -981,6 +981,12 @@ Before you finish, verify against the spec:
                 pre_existing_untracked,
             )
 
+            # Re-detect test command after agent may have created the project
+            if not config.get("test_command"):
+                detected = detect_test_command(effective_dir)
+                if detected:
+                    test_command = detected
+
             # Run verification in disposable worktree
             verify_result = run_verification(
                 project_dir=effective_dir,
