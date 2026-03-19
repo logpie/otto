@@ -463,6 +463,9 @@ DOCUMENT your findings — write a behavioral test report:
 - Include screenshots paths if taken
 
 Save the report to otto_logs/<task_key>/behavioral-test.md
+Also print a summary to the user:
+  ✓ Behavioral: <what worked>
+  ✗ Behavioral: <what broke>
 
 If you find bugs:
 - Retry run_coding_agent with the specific bug as hint

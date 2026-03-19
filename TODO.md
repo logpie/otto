@@ -39,12 +39,13 @@
 - [ ] **Pilot UX polish**: v3 pilot output already has noise filtering, spinners, diffs, and timing. Remaining:
   - Expand on failure only: compact single-line per task on success, multi-line with test output + diff on failure
 - [ ] **Pilot speed optimization**: Overhead is ~3-5 min per run (ToolSearch, reasoning between tools). Investigate: (1) pre-load MCP tools to avoid ToolSearch, (2) reduce pilot reasoning turns, (3) batch save_run_state.
+- [ ] **Pilot structured system prompt**: If pilot starts dodging responsibilities (skipping compliance checks, not doing behavioral testing), apply the same structured system_prompt treatment as spec/coding agents (XML tags, anti-examples, compliance self-check). Currently not needed — pilot follows instructions well. Monitor for: over-exploration before simple tasks, skipping behavioral testing, declaring tasks passed without checking.
 - [ ] **Run time reporting**: `otto status` only shows coding time, not total run time. Should track per-phase timing.
 - [x] **Coding agent CC parity**: max_turns=200 and effort="high" (both configurable in otto.yaml), setting_sources=["project"] for CLAUDE.md, env=os.environ for API keys/PATH. See v3 design Phase 9.
 
 ### Medium Priority
-- [ ] **Rename rubric → spec throughout** — "rubric" means grading checklist (evaluative, after the fact). What we actually have is acceptance criteria / specs (prescriptive, before implementation). Rename: `rubric.py` → `spec.py`, `generate_rubric()` → `generate_spec()`, `--no-rubric` → `--no-spec`, tasks.yaml `rubric:` → `spec:`. Clear naming makes the system easier to understand.
-- [ ] **Spec generation: extract hard constraints from user prompt** — user writes "< 300ms latency, hard constraint" but the rubric agent dilutes it to "cached lookups < 300ms." The agent should extract explicit user constraints first (numbers, thresholds, "must"/"never"/"hard constraint"), preserve them verbatim as top-priority criteria, then add 3-5 supporting criteria. No new flags — just smarter prompt. Keeps total to 5-8 criteria max, reduces bloat/duplication.
+- [x] **Rename rubric → spec throughout** — Done. `rubric.py` → `spec.py`, `generate_rubric()` → `generate_spec()`, `--no-rubric` → `--no-spec`, tasks.yaml `rubric:` → `spec:`.
+- [x] **Spec generation: extract hard constraints** — Done. Structured system prompt with XML tags, anti-examples, compliance self-check. Spec agent no longer softens constraints.
 - [ ] **Refactor: testgen.py cleanup** — only used via `--tdd` now, but still has 4 near-duplicate functions. Consolidate into a shared `_run_testgen_core()`.
 - [x] **Refactor: runner.py is 2300 lines** — v3 reduced to ~1140 lines. `run_all()`, cross-task review, reconciliation, integration gate all removed. Only `run_task()` + git utilities remain.
 - [ ] **Refactor: pilot.py MCP script is embedded string** — ~400 lines of Python inside an f-string with double-brace escaping. Extract to `otto/pilot_mcp_server.py` as a real module, pass config via env vars or temp JSON file instead of baking into the script.
