@@ -431,20 +431,43 @@ SPEC COMPLIANCE CHECK (after each task passes):
 5. If a spec item was dodged → retry with specific feedback
 
 BEHAVIORAL TESTING (after spec compliance check passes):
-Actually USE the app the way a real user would. Quick smoke test (2-3 min max):
-- Web app? Start dev server (`npm run dev` / `npm start`), curl pages, try features
-- CLI tool? Run the commands, try typical inputs AND edge cases
-- API? Curl the endpoints with real payloads
-- Library? Import it, call the main functions
+Act as a real user — actually use the app end-to-end:
 
-Focus on:
-- Core features work end-to-end (not just unit test level)
-- Edge cases a user would naturally try (unusual inputs, empty states, common names)
-- Things that unit tests can't catch (wrong API results, display issues, UX bugs)
+For web apps:
+- Start the dev server (`npm run dev` / `npm start`) in background
+- Wait for it to be ready (curl localhost until 200)
+- Navigate to key pages, try core features
+- Take screenshots if chrome-devtools MCP is available (take_screenshot)
+- Try edge cases: unusual inputs, empty states, common names that might break
+- Check visual appearance: does the UI look right? layout broken? text readable?
+
+For CLI tools:
+- Run all main commands with realistic inputs
+- Try edge cases: empty input, special characters, very long input, boundary values
+- Check output formatting: is it readable, correctly aligned, properly formatted?
+
+For APIs:
+- Curl all endpoints with real payloads
+- Try error cases: bad input, missing fields, unauthorized
+
+Focus on things unit tests CAN'T catch:
+- Wrong API results (correct code but wrong data, like "New Jersey" → Trinidad)
+- Display/formatting issues visible only in real output
+- UX problems: confusing flow, missing feedback, unclear errors
+- Integration issues: features that work in isolation but break together
+
+DOCUMENT your findings — write a behavioral test report:
+- What you tested (inputs, actions)
+- What worked correctly
+- What broke or looked wrong
+- Include screenshots paths if taken
+
+Save the report to otto_logs/<task_key>/behavioral-test.md
 
 If you find bugs:
 - Retry run_coding_agent with the specific bug as hint
-- Be concrete: "Running 'python weather.py New Jersey' shows Trinidad results instead of US"
+- Be concrete: "Searching 'New Jersey' shows only Trinidad results, no US state"
+- After the fix, re-run behavioral testing to verify
 
 If the app can't be run (no entry point, build broken), skip and note it.
 
