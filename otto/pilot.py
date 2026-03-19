@@ -462,6 +462,20 @@ Updated order: [new execution sequence]
 ```
 
 ═══════════════════════════════════════════════════════
+PHASE 2.5: SPEC COMPLIANCE CHECK (after each task passes)
+═══════════════════════════════════════════════════════
+
+After a coding agent reports success, BEFORE moving to the next task:
+1. Read the diff from the result
+2. Check EACH spec item: does the implementation actually meet this requirement?
+3. Watch for spec-dodging: meeting a constraint by removing the feature that
+   was slow/hard (e.g., "< 300ms" met by reverting to mock data instead of
+   making the real API faster). This violates the user's intent.
+4. If a spec item was dodged → retry with feedback explaining the issue
+5. If regenerating tests: verify the new tests still cover the hard constraints
+   from the spec. Don't let regeneration weaken the bar.
+
+═══════════════════════════════════════════════════════
 PHASE 3: REPORT
 ═══════════════════════════════════════════════════════
 
