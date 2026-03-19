@@ -1194,7 +1194,8 @@ async def run_piloted(
                 capture_output=True, timeout=config["verify_timeout"],
                 env=_subprocess_env(),
             )
-            if result.returncode != 0:
+            # Exit code 5 = "no tests collected" (empty test suite) — not a failure
+            if result.returncode not in (0, 5):
                 print(f"  {_RED}✗ Baseline tests failing — fix before running otto{_RESET}", flush=True)
                 return 2
 
