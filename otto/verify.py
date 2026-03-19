@@ -1,6 +1,7 @@
 """Otto verification — tiered verification in disposable worktree."""
 
 import os
+import signal
 import shutil
 import subprocess
 import sys
@@ -49,21 +50,66 @@ class VerifyResult:
         return "\n\n".join(parts)
 
 
+def _terminate_process_group(proc: subprocess.Popen[str]) -> tuple[str, str]:
+    """Terminate a timed-out subprocess group and collect any remaining output."""
+    if proc.poll() is None:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    try:
+        return proc.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        if proc.poll() is None:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        return proc.communicate()
+
+
+def _run_shell_command(
+    command: str,
+    workdir: Path,
+    timeout: int,
+    executable: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run a shell command and kill its process group on timeout."""
+    proc = subprocess.Popen(
+        command,
+        shell=True,
+        cwd=workdir,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        executable=executable,
+        start_new_session=True,
+        env=_subprocess_env(),
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        stdout, stderr = _terminate_process_group(proc)
+        raise subprocess.TimeoutExpired(
+            command,
+            timeout,
+            output=(exc.output or "") + stdout,
+            stderr=(exc.stderr or "") + stderr,
+        ) from None
+    return subprocess.CompletedProcess(
+        args=command,
+        returncode=proc.returncode,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
 def run_tier1(workdir: Path, test_command: str | None, timeout: int) -> TierResult:
     """Run existing test suite."""
     if not test_command:
         return TierResult(tier="existing_tests", passed=True, skipped=True)
     try:
-        result = subprocess.run(
-            test_command,
-            shell=True,
-            cwd=workdir,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            start_new_session=True,  # own process group for clean kill
-            env=_subprocess_env(),
-        )
+        result = _run_shell_command(test_command, workdir, timeout)
         return TierResult(
             tier="existing_tests",
             passed=result.returncode == 0,
@@ -136,15 +182,7 @@ def run_tier2(
                 cmd = f"{test_command} {rel_path}"
             else:
                 cmd = f"pytest {rel_path} -v"
-        result = subprocess.run(
-            cmd,
-            shell=True,
-            cwd=workdir,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=_subprocess_env(),
-        )
+        result = _run_shell_command(cmd, workdir, timeout)
         return TierResult(
             tier="generated_tests",
             passed=result.returncode == 0,
@@ -163,16 +201,11 @@ def run_tier3(workdir: Path, verify_cmd: str | None, timeout: int) -> TierResult
     if not verify_cmd:
         return TierResult(tier="custom_verify", passed=True, skipped=True)
     try:
-        result = subprocess.run(
+        result = _run_shell_command(
             verify_cmd,
-            shell=True,
-            cwd=workdir,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
+            workdir,
+            timeout,
             executable="/bin/bash",
-            start_new_session=True,  # own process group for clean kill
-            env=_subprocess_env(),
         )
         return TierResult(
             tier="custom_verify",

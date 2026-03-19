@@ -1,8 +1,9 @@
 """Tests for otto.verify module."""
 
+import signal
 import subprocess
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
@@ -37,6 +38,28 @@ class TestRunTier1:
         result = run_tier1(tmp_git_repo, None, timeout=60)
         assert result.passed  # Skip = not a failure
         assert result.skipped
+
+    @patch("otto.verify.os.killpg")
+    @patch("otto.verify.subprocess.Popen")
+    def test_timeout_kills_process_group(self, mock_popen, mock_killpg, tmp_git_repo):
+        proc = MagicMock()
+        proc.pid = 4321
+        proc.poll.return_value = None
+        proc.communicate.side_effect = [
+            subprocess.TimeoutExpired("pytest", 1),
+            subprocess.TimeoutExpired("pytest", 5),
+            ("", ""),
+        ]
+        mock_popen.return_value = proc
+
+        result = run_tier1(tmp_git_repo, "pytest", timeout=1)
+
+        assert not result.passed
+        assert "timeout" in result.output.lower()
+        assert mock_killpg.call_args_list == [
+            call(4321, signal.SIGTERM),
+            call(4321, signal.SIGKILL),
+        ]
 
 
 class TestRunTier2:
@@ -76,6 +99,25 @@ class TestRunTier3:
         result = run_tier3(tmp_git_repo, "sleep 10", timeout=1)
         assert not result.passed
         assert "timeout" in result.output.lower()
+
+    @patch("otto.verify.os.killpg")
+    @patch("otto.verify.subprocess.Popen")
+    def test_timeout_uses_bash_and_terminates_process_group(self, mock_popen, mock_killpg, tmp_git_repo):
+        proc = MagicMock()
+        proc.pid = 9876
+        proc.poll.return_value = None
+        proc.communicate.side_effect = [
+            subprocess.TimeoutExpired("sleep 10", 1),
+            ("", ""),
+        ]
+        mock_popen.return_value = proc
+
+        result = run_tier3(tmp_git_repo, "sleep 10", timeout=1)
+
+        assert not result.passed
+        assert "timeout" in result.output.lower()
+        assert mock_popen.call_args.kwargs["executable"] == "/bin/bash"
+        assert mock_killpg.call_args_list == [call(9876, signal.SIGTERM)]
 
 
 class TestRunVerification:

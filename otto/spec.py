@@ -114,7 +114,8 @@ async def _run_spec_agent(prompt: str, project_dir: Path) -> list:
     Uses a structured system prompt for constraint faithfulness,
     with a compliance self-check step before output.
     """
-    spec_file = Path(tempfile.mktemp(suffix=".txt", prefix="otto_spec_"))
+    with tempfile.NamedTemporaryFile(suffix=".txt", prefix="otto_spec_", delete=False) as temp_file:
+        spec_file = Path(temp_file.name)
 
     system_prompt = """\
 <role>
@@ -265,7 +266,8 @@ def parse_markdown_tasks(md_file: Path, project_dir: Path) -> list[dict]:
 async def _run_markdown_agent(md_file: Path, project_dir: Path) -> list[dict]:
     """Run the markdown parsing agent."""
     md_content = md_file.read_text()
-    output_file = Path(tempfile.mktemp(suffix=".json", prefix="otto_tasks_"))
+    with tempfile.NamedTemporaryFile(suffix=".json", prefix="otto_tasks_", delete=False) as temp_file:
+        output_file = Path(temp_file.name)
 
     agent_prompt = f"""You are a senior engineer breaking a feature document into coding tasks.
 
@@ -312,11 +314,10 @@ Example: [{{"prompt": "Add search", "spec": ["search works", "case-insensitive"]
     except Exception as e:
         raise ValueError(f"Failed to parse markdown tasks: {e}") from e
 
-    if not output_file.exists():
-        raise ValueError("Agent did not write the output file")
-
     output = output_file.read_text().strip()
     output_file.unlink()
+    if not output:
+        raise ValueError("Agent did not write the output file")
 
     # Extract JSON from markdown fences if present
     fence_match = re.search(r"```(?:json)?\n(.*?)```", output, re.DOTALL)

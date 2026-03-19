@@ -1,8 +1,10 @@
 # tests/test_manager.py
+import asyncio
 import json
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 
 @pytest.fixture
@@ -60,16 +62,7 @@ def test_verify_script_endpoints_removed(app_with_tmp):
 
 
 def test_sse_endpoint_returns_event_stream(tmp_path):
-    """SSE endpoint should return text/event-stream content type.
-
-    Uses a real uvicorn server because Starlette's TestClient buffers the entire
-    response before returning, which hangs on infinite SSE generators.
-    """
-    import threading
-    import time
-    import httpx
-    import uvicorn
-
+    """SSE endpoint should return text/event-stream content type and payloads."""
     from manager import create_app
     tasks_file = tmp_path / "tasks.json"
     tasks_file.write_text("[]")
@@ -82,37 +75,41 @@ def test_sse_endpoint_returns_event_stream(tmp_path):
     sse_app = create_app(
         base_dir=tmp_path, tasks_file=tasks_file, logs_dir=logs_dir
     )
+    events_route = next(
+        route for route in sse_app.routes if getattr(route, "path", None) == "/api/events"
+    )
+    scope = {
+        "type": "http",
+        "http_version": "1.1",
+        "method": "GET",
+        "path": "/api/events",
+        "raw_path": b"/api/events",
+        "root_path": "",
+        "scheme": "http",
+        "query_string": b"",
+        "headers": [],
+        "client": ("testclient", 123),
+        "server": ("testserver", 80),
+        "app": sse_app,
+    }
 
-    # Start uvicorn on a free port
-    port = 18421
-    config = uvicorn.Config(sse_app, host="127.0.0.1", port=port, log_level="error")
-    server = uvicorn.Server(config)
-    server.install_signal_handlers = lambda: None
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
+    async def get_first_event():
+        response = await events_route.endpoint(Request(scope))
+        first_chunk = await anext(response.body_iterator)
+        await response.body_iterator.aclose()
+        return response, first_chunk
 
-    # Wait for server to be ready
-    for _ in range(20):
-        try:
-            httpx.get(f"http://127.0.0.1:{port}/api/tasks", timeout=1)
+    response, first_chunk = asyncio.run(get_first_event())
+
+    assert "text/event-stream" in response.headers["content-type"]
+    for line in first_chunk.splitlines():
+        if line.startswith("data:"):
+            data = json.loads(line[5:].strip())
+            assert "tasks" in data
+            assert "workers" in data
             break
-        except Exception:
-            time.sleep(0.1)
-
-    try:
-        with httpx.stream("GET", f"http://127.0.0.1:{port}/api/events", timeout=5) as resp:
-            assert resp.status_code == 200
-            assert "text/event-stream" in resp.headers["content-type"]
-            # Read first event
-            for line in resp.iter_lines():
-                if line.startswith("data:"):
-                    data = json.loads(line[5:].strip())
-                    assert "tasks" in data
-                    assert "workers" in data
-                    break
-    finally:
-        server.should_exit = True
-        thread.join(timeout=3)
+    else:
+        pytest.fail("SSE stream did not yield a data event")
 
 
 def test_full_flow_smoke(app_with_tmp):

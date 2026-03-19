@@ -109,3 +109,25 @@ class TestEndToEnd:
             capture_output=True, text=True,
         ).stdout
         assert "otto/" not in branches
+
+    @patch("otto.runner.create_task_branch", side_effect=RuntimeError("branch boom"))
+    def test_setup_exception_marks_task_failed(
+        self, mock_create_branch, tmp_git_repo
+    ):
+        """Setup failures should not leave the task stuck in running."""
+        create_config(tmp_git_repo)
+        _commit_otto_config(tmp_git_repo)
+
+        config = load_config(tmp_git_repo / "otto.yaml")
+        config["max_retries"] = 0
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        add_task(tasks_path, "Task that fails during setup", spec=["it works"])
+
+        task = load_tasks(tasks_path)[0]
+        success = asyncio.run(run_task(task, config, tmp_git_repo, tasks_path))
+
+        assert success is False
+        failed_task = load_tasks(tasks_path)[0]
+        assert failed_task["status"] == "failed"
+        assert failed_task["error_code"] == "internal_error"
+        assert "branch boom" in failed_task["error"]

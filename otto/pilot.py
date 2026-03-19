@@ -8,6 +8,7 @@ analyzes failures, and makes strategic decisions like a tech lead.
 import json
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -976,8 +977,14 @@ async def run_piloted(
 
         # Write MCP server script to temp file
         mcp_script = _build_mcp_server_script(config, tasks_file, project_dir)
-        mcp_script_path = Path(tempfile.mktemp(suffix=".py", prefix="otto_pilot_mcp_"))
-        mcp_script_path.write_text(mcp_script)
+        with tempfile.NamedTemporaryFile(
+            "w",
+            suffix=".py",
+            prefix="otto_pilot_mcp_",
+            delete=False,
+        ) as temp_file:
+            temp_file.write(mcp_script)
+            mcp_script_path = Path(temp_file.name)
 
         run_start = time.monotonic()
 

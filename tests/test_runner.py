@@ -8,6 +8,9 @@ import pytest
 import yaml
 
 from otto.runner import (
+    _restore_workspace_state,
+    _setup_task_worktree,
+    _teardown_task_worktree,
     check_clean_tree,
     create_task_branch,
     build_candidate_commit,
@@ -151,6 +154,36 @@ class TestCleanupBranch:
         assert "otto/abc123def456" not in branches
 
 
+class TestWorkspaceCleanup:
+    @patch("otto.runner._log_warn")
+    @patch("otto.runner.subprocess.run")
+    def test_restore_workspace_logs_warning_on_git_reset_failure(self, mock_run, mock_warn, tmp_git_repo):
+        mock_run.return_value = MagicMock(returncode=1, stderr="reset failed", stdout="")
+
+        _restore_workspace_state(tmp_git_repo)
+
+        mock_warn.assert_called_once()
+        assert "git reset --hard" in mock_warn.call_args.args[0]
+
+
+class TestTaskWorktree:
+    def test_teardown_removes_worktree_branch(self, tmp_git_repo):
+        base_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=tmp_git_repo, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        wt_dir = _setup_task_worktree(tmp_git_repo, "abc123def456", base_sha)
+        _teardown_task_worktree(tmp_git_repo, "abc123def456")
+
+        assert not wt_dir.exists()
+        branches = subprocess.run(
+            ["git", "branch"],
+            cwd=tmp_git_repo, capture_output=True, text=True, check=True,
+        ).stdout
+        assert "otto/abc123def456" not in branches
+
+
 class TestTamperDetection:
     def test_detects_modified_test_file(self, tmp_git_repo):
         test_file = tmp_git_repo / "tests" / "test_otto_abc.py"
@@ -182,5 +215,4 @@ class TestTamperDetection:
             capture_output=True, text=True,
         ).stdout.strip()
         assert restored_sha == original_sha
-
 
