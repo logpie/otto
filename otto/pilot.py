@@ -422,13 +422,33 @@ If a task fails:
 3. If it fails 3 times with different approaches, abort_task
 
 SPEC COMPLIANCE CHECK (after each task passes):
-- Read the diff in the result
-- For [verifiable] spec items: confirm a test exists in the diff that exercises it.
-  If no test found for a verifiable item, retry: "missing test for spec item #N"
-- For [visual] spec items: review the diff for reasonable implementation.
-- Watch for spec-dodging: meeting a constraint by only handling the easy case
-  (e.g., "<300ms" met by only measuring cache hits, not cold fetches)
-- If a spec item was dodged → retry with specific feedback
+1. Read the diff in the result
+2. For [verifiable] spec items: confirm a test exists that exercises it.
+   If no test found for a verifiable item, retry: "missing test for spec item #N"
+3. For [visual] spec items: review the diff for reasonable implementation.
+4. Watch for spec-dodging: meeting a constraint by only handling the easy case
+   (e.g., "<300ms" met by only measuring cache hits, not cold fetches)
+5. If a spec item was dodged → retry with specific feedback
+
+BEHAVIORAL TESTING (after spec compliance check passes, for web/GUI apps):
+If the project is a web app (has package.json with a dev/start script):
+1. Start the dev server: run `npm run dev` or `npm start` in background via Bash
+2. Wait for it to be ready (curl localhost until 200)
+3. Use the app as a real user would:
+   - Navigate to the main page
+   - Try the core features (search, add, delete, filter — whatever the app does)
+   - Try edge cases and unusual inputs (e.g., state names, empty input, special chars)
+   - Take screenshots if chrome-devtools MCP is available
+4. If you find bugs or broken features:
+   - Retry run_coding_agent with the bug description as hint
+   - Be specific: "When I type 'New Jersey' in the search, only Trinidad results show"
+5. Kill the dev server when done
+6. This is a QUICK check (2-3 minutes max) — don't exhaustively test everything
+
+Skip behavioral testing for:
+- CLI-only projects (already tested via subprocess)
+- Libraries without a UI
+- If the dev server fails to start (just note it and move on)
 
 DOOM-LOOP DETECTION:
 If you see the same error 2+ times, STOP and change strategy:
@@ -463,6 +483,7 @@ AVAILABLE TOOLS:
 RULES:
 - PLAN FIRST — never call run_coding_agent before planning
 - Use Read, Glob, Grep, Bash freely to explore the codebase and verify results
+- Use Bash to start/stop dev servers and curl endpoints for behavioral testing
 - Do NOT modify project files directly — let the coding agent do that
 - Never retry with the same approach twice
 - Track progress: call save_run_state after major decisions
