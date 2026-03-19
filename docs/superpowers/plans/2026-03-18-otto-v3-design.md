@@ -12,11 +12,12 @@ The user's words are the closest thing to truth, and even those are ambiguous.
 
 ## Design Principles
 
-1. **Spec is a contract, tests are tools.** The spec formalizes user intent. Tests validate implementation. When they conflict, the spec wins.
-2. **Tests are evidence, not gates.** Multiple signals contribute to confidence — tests, diff review, spec compliance, agent assessment. No single signal is authoritative.
-3. **Each agent is as capable as `claude -p` within its role.** Don't artificially weaken agents then build external systems to compensate.
-4. **Roles are orthogonal.** Spec gen formalizes intent. Coding agent plans and implements. Pilot orchestrates and judges. No overlap.
-5. **Escalate, don't fail silently.** When confidence is low, produce a clear report instead of marking "failed."
+1. **GRIND.** Achieving the mission is the most important goal. No easy excuses. No premature surrender. If the first approach fails, try a fundamentally different one. If that fails, try another. Only escalate after exhausting genuinely different strategies — not variations of the same failed approach. Hill climb relentlessly.
+2. **Spec is a contract, tests are tools.** The spec formalizes user intent. Tests validate implementation. When they conflict, the spec wins.
+3. **Tests are evidence, not gates.** Multiple signals contribute to confidence — tests, diff review, spec compliance, agent assessment. No single signal is authoritative.
+4. **Each agent is as capable as `claude -p` within its role.** Don't artificially weaken agents then build external systems to compensate.
+5. **Roles are orthogonal.** Spec gen formalizes intent. Coding agent plans and implements. Pilot orchestrates and judges. No overlap.
+6. **Escalate, don't fail silently.** When confidence is low, produce a clear report instead of marking "failed." But escalation is the LAST resort, not the first response to difficulty.
 
 ## Current Architecture (v2)
 
@@ -329,7 +330,7 @@ You are working in {work_dir}. Do NOT create git commits.
 
 APPROACH:
 1. PLAN — read the spec and codebase. Can current architecture meet ALL requirements?
-   If not, note what needs to change.
+   If not, note what needs to change and design an approach that CAN meet them.
 2. IMPLEMENT your plan.
 3. WRITE TESTS that verify each spec item.
 4. RUN TESTS and fix failures. Iterate until all pass.
@@ -337,6 +338,17 @@ APPROACH:
    - What approach you took and why
    - What you learned about the codebase
    - Any gotchas for future tasks
+
+GRIND:
+- If your first approach doesn't meet a hard constraint, don't give up —
+  rethink the architecture. "Sync HTTP is too slow" is not a dead end,
+  it's a signal to try async, caching, stale-while-revalidate, pre-fetching,
+  or background refresh.
+- List at least 3 alternative approaches before concluding anything is infeasible.
+- NEVER meet a constraint by removing the feature that was hard to optimize.
+  "Make it fast" means make the REAL thing fast, not replace it with a stub.
+- NEVER weaken the spec. If the spec says <300ms for all lookups, don't
+  implement <300ms for cached-only and call it done.
 
 {optional: design conventions from otto_arch/conventions.md}
 {optional: learnings from otto_arch/learnings.md}
@@ -405,16 +417,28 @@ The pilot checks spec compliance after each task passes verification. This is a 
 After coding agent reports success:
 1. Read the diff
 2. For each spec item, assess: clearly met / approximately met / not met
-3. Watch for spec-dodging (meeting constraint by removing the feature)
-4. If any spec item is "not met" → retry with specific feedback
-5. If all "clearly met" or "approximately met" → merge
+3. Watch for spec-dodging:
+   - Removing the feature that was slow instead of making it faster
+   - Weakening the constraint ("cached only" when spec says "all lookups")
+   - Replacing real functionality with stubs/mocks to pass tests
+4. Watch for premature surrender:
+   - Did the agent try fundamentally different approaches, or just
+     variations of the same thing?
+   - "Sync HTTP failed so I used mock data" is surrender, not a solution.
+     "Sync HTTP failed so I tried async / stale-while-revalidate /
+     pre-fetching" is grinding.
+5. If spec-dodging or surrender detected → reject, retry with
+   "you dodged spec item #N — try a different architecture"
+6. If all items clearly or approximately met → merge
 ```
 
-The confidence is per-spec-item, not a numeric score. The pilot makes a judgment call — same as a human reviewer approving a PR.
+The pilot is the quality gate that prevents the coding agent from taking shortcuts. It catches the difference between "genuinely infeasible" and "I didn't try hard enough."
 
-### Phase 7: Escalation protocol
+### Phase 7: Escalation protocol (last resort, not first response)
 
-When a task fails after max retries, the pilot produces a structured report:
+Escalation happens ONLY after the coding agent has tried fundamentally different approaches and the pilot has verified that the agent genuinely ground through alternatives — not just retried the same failing approach. The pilot must check: "did the agent try at least 3 architecturally different strategies?"
+
+When truly stuck after exhausting different approaches:
 
 ```
 ## Escalation Report — Task #{id}
