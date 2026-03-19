@@ -726,12 +726,13 @@ RELEVANT SOURCE FILES (already read for you):
 {source_context}
 {spec_section}
 
-APPROACH:
+APPROACH (red-green TDD):
 1. PLAN — read the spec and codebase. Can current architecture meet ALL requirements?
    If not, note what needs to change and design an approach that CAN meet them.
-2. IMPLEMENT your plan.
-3. WRITE TESTS that verify each spec item — test the hardest case, not just the happy path.
-4. RUN TESTS and fix failures. Iterate until all pass.
+2. WRITE TESTS FIRST for each [verifiable] spec item. Test the hardest case.
+   Run them — they should FAIL (red). If they pass, your tests are too weak.
+3. IMPLEMENT until all tests pass (green).
+4. RUN ALL TESTS (yours + existing). Fix any regressions.
 5. VERIFY — re-read each spec item. For each, ask: does my implementation handle the
    hardest case? If a spec says "<300ms", does it work for cold fetches, not just cache hits?
 6. Write notes to otto_arch/task-notes/{key}.md:
