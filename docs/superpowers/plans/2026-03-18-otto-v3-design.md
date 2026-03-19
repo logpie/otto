@@ -50,7 +50,7 @@ User prompt → spec gen → spec items
 v3 is simpler than v2 — it removes agents and pipeline stages, not adds them.
 
 ```
-User prompt → spec gen (independent PM voice, optional)
+User prompt → spec gen (independent PM voice)
                   ↓
               spec items (the contract) + verification intents
                   ↓
@@ -84,12 +84,13 @@ User prompt → spec gen (independent PM voice, optional)
 
 ### What's kept / refined
 
-**1. Spec gen (independent PM voice)**
+**1. Spec gen (independent PM voice — always runs)**
 - Formalizes user intent without implementation bias
 - Extracts hard constraints, preserves them verbatim
+- Generates verification intents alongside spec items
 - The contract that coding agent and pilot both reference
 - Benchmarked: "spec" framing produces 2x faster, better constraint preservation than "rubric"
-- Optional for simple tasks, valuable when user prompt is casual/ambiguous
+- Needed because coding agent has implementation bias — it might soften specs toward what's easy to build
 
 **2. Coding agent (strong, autonomous)**
 - Plans before coding ("can current architecture meet all requirements?")
