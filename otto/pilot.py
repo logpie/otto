@@ -996,6 +996,8 @@ async def run_piloted(
                                 args.append("--isolated")
                             if "--headless" not in args:
                                 args.append("--headless")
+                            if not any(a.startswith("--viewport") for a in args):
+                                args.extend(["--viewport", "1280x720"])
                             srv["args"] = args
                         all_mcp_servers[name] = srv
                 except (json.JSONDecodeError, OSError):
@@ -1008,6 +1010,7 @@ async def run_piloted(
                 mcp_servers=all_mcp_servers,
                 setting_sources=["user", "project"],
                 env=_subprocess_env(),
+                max_buffer_size=10 * 1024 * 1024,  # 10MB — screenshots can be large
             )
             if config.get("model"):
                 agent_opts.model = config["model"]
@@ -1120,9 +1123,20 @@ async def run_piloted(
                             _print_pilot_tool_result(block)
                             _last_tool_name = None
 
+        except Exception as pilot_err:
+            # Pilot agent crashed (e.g., buffer overflow from large screenshot)
+            # Still proceed to summary — tasks may have passed before the crash
+            if _active_spinner:
+                _active_spinner.stop()
+                _active_spinner = None
+            print(f"\n  {_YELLOW}⚠ Pilot agent error: {pilot_err}{_RESET}", flush=True)
+            print(f"  {_DIM}Proceeding to summary — completed tasks are still merged.{_RESET}", flush=True)
         finally:
             # Clean up
-            _debug_fh.close()
+            try:
+                _debug_fh.close()
+            except Exception:
+                pass
             if mcp_script_path.exists():
                 mcp_script_path.unlink()
 

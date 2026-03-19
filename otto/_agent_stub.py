@@ -16,6 +16,7 @@ class ClaudeAgentOptions:
     setting_sources: list[str] | None = None
     effort: str | None = None
     agents: dict[str, Any] | None = None
+    max_buffer_size: int | None = None
 
 
 @dataclass
