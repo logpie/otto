@@ -371,10 +371,12 @@ Execution phase:
 - Calls `run_coding_agent` for each task (respecting dependency order)
 - After each task: reads diff, checks spec compliance
 - Decides: merge / retry with feedback / escalate
-- **Doom-loop detection**: tracks test pass rates across attempts. If same
-  tests fail twice with same approach, the pilot warns the agent to change
-  strategy fundamentally — not just tweak the same code. The hint shifts
-  from "fix this test" to "you're stuck, try async instead of sync."
+- **Doom-loop detection**: tracks progress signals across attempts — test pass
+  rates, diff size, spec items met, verify output. If the same failures repeat
+  or no measurable progress between attempts, the pilot warns the agent to
+  change strategy fundamentally. Works even without tests — pilot compares
+  diffs and spec compliance across attempts. The hint shifts from "fix this"
+  to "you're stuck on the same approach, try a different architecture."
 
 Retry with session resume:
 - When coding agent hits max_turns, save session_id and resume
