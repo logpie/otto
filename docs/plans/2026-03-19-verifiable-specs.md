@@ -70,6 +70,11 @@ Spec items (from spec gen)
 can't, they report the gap with full transparency. The user decides acceptance.
 This prevents agents from finding thresholds where they can stop trying.
 
+**Fast path stays fast:** All the complexity (gradient grinding, visual refinement,
+escalation) only triggers on failure. If tests pass on first try and the diff looks
+right, none of it runs. Easy task → implement, pass, merge in 60 seconds. The system's
+complexity budget scales with task difficulty, not with its own sophistication.
+
 ---
 
 ## Phase 1: Spec Classification
