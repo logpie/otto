@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import re
 import tempfile
 from pathlib import Path
@@ -199,6 +200,8 @@ Steps:
             cwd=str(project_dir),
             max_turns=10,
             system_prompt=system_prompt,
+            setting_sources=["user", "project"],
+            env=dict(os.environ),
         )
 
         async for message in query(prompt=agent_prompt, options=agent_opts):

@@ -1,6 +1,7 @@
 """Otto architect — codebase analysis agent that produces shared conventions for downstream agents."""
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -116,6 +117,8 @@ Rules:
             permission_mode="bypassPermissions",
             cwd=str(project_dir),
             max_turns=15,
+            setting_sources=["user", "project"],
+            env=dict(os.environ),
         )
 
         async for message in query(prompt=prompt, options=agent_opts):
