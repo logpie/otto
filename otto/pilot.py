@@ -975,6 +975,8 @@ async def run_piloted(
                 cwd=str(project_dir),
                 max_turns=100,
                 mcp_servers={"otto-pilot": mcp_server_config},
+                setting_sources=["user", "project"],
+                env=_subprocess_env(),
             )
             if config.get("model"):
                 agent_opts.model = config["model"]
