@@ -61,6 +61,7 @@
 - [ ] **Retry UX**: `otto retry` without `--force` for stale tasks, cascade to blocked dependents, `--run` flag to combine retry+run. See `docs/superpowers/plans/2026-03-15-retry-ux.md`.
 
 ### Low Priority
+- [ ] **Coding agent CC parity**: Currently only passes 3 options to Agent SDK (permission_mode, cwd, max_turns=20). Interactive CC sessions have: MCP servers, CLAUDE.md/settings, env vars, high effort, 1M context, subagents, add_dirs, fallback_model. Critical gaps: max_turns too low for grinding (need 100+), no MCP inheritance, no CLAUDE.md, no env vars (API keys).
 - [ ] **Coding agent subagents**: Agent SDK supports `ClaudeAgentOptions.agents` — dict of named `AgentDefinition(description, prompt, tools, model)`. The coding agent can spawn subagents to parallelize within a task: research subagent to investigate APIs, test writer to write tests in parallel, exploration subagent to search codebase. Extends GRIND — explore multiple approaches simultaneously instead of serially.
 - [ ] **`--fast` mode**: Two approaches (benchmarked: `claude -p` with tools is same speed as Agent SDK — both ~68s for rubric gen due to per-tool API round-trips):
   - **Option A (reduce tool calls)**: Pre-load context into prompt, tell agent "start writing immediately." Cuts 12 tool calls to 3-4. Expected: ~25s instead of ~68s. Keeps self-validation.

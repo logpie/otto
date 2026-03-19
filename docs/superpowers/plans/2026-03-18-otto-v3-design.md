@@ -488,7 +488,29 @@ When `otto run --tdd` is passed:
 
 Default (no `--tdd`): coding agent writes all tests. No separate testgen step.
 
-### Phase 9: Coding agent subagents (future)
+### Phase 9: Coding agent parity with interactive CC
+
+The coding agent currently only sets 3 options: `permission_mode`, `cwd`, `max_turns`.
+An interactive CC session has much more. Close the gaps:
+
+| Gap | Fix | Priority |
+|-----|-----|----------|
+| `max_turns=20` too low for grinding | Increase to 100+ or use `max_budget_usd` instead | **Critical** |
+| No MCP servers | Inherit user's MCP config from CC settings | **High** |
+| No CLAUDE.md / settings | Pass `setting_sources=["user", "project"]` | **High** |
+| No env variables | Pass `env` with user's shell env (API keys, PATH) | **High** |
+| No thinking/effort | Set `effort="high"` for complex tasks | **Medium** |
+| No 1M context beta | Enable `betas=["context-1m-2025-08-07"]` for large codebases | **Medium** |
+| No subagents | Pass `agents` dict for research/test/explore parallelism | Future |
+| No add_dirs | Pass `add_dirs` for monorepo access | Future |
+| No fallback_model | Set `fallback_model` for rate limit resilience | Future |
+| No file checkpointing | Enable `enable_file_checkpointing` for recovery | Future |
+
+The critical fix is `max_turns` — 20 turns is not enough for a strong agent that plans,
+implements, writes tests, runs them, iterates, and tries alternative approaches. An
+interactive CC session runs for hundreds of turns. The agent should have room to grind.
+
+### Phase 10: Coding agent subagents (future)
 
 The Agent SDK supports subagents via `ClaudeAgentOptions.agents` — a dict of
 named `AgentDefinition(description, prompt, tools, model)`. The coding agent
