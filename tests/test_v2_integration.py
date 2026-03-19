@@ -371,15 +371,15 @@ class TestPilotPromptBuilder:
         assert "merge_task" in prompt
         assert "run_coding_agent" in prompt
 
-    def test_prompt_includes_design_context_when_available(self, tmp_git_repo):
+    def test_prompt_does_not_include_stale_architect_docs(self, tmp_git_repo):
+        """Pilot prompt should NOT include architect docs (agents explore codebase directly)."""
         from otto.pilot import _build_pilot_prompt
 
-        # Create architect docs
+        # Create architect docs — these should NOT appear in the pilot prompt
         arch_dir = tmp_git_repo / "otto_arch"
         arch_dir.mkdir()
         (arch_dir / "codebase.md").write_text("# Codebase\nModule map here.")
         (arch_dir / "task-decisions.md").write_text("# Decisions\nUse click for CLI.")
-        (arch_dir / "file-plan.md").write_text("# File Plan\nTask 1 modifies cli.py.")
 
         tasks = [{"id": 1, "key": "abc123", "prompt": "Do something"}]
         config = {"max_retries": 3, "test_command": None, "max_parallel": 3,
@@ -387,9 +387,8 @@ class TestPilotPromptBuilder:
 
         prompt = _build_pilot_prompt(tasks, config, tmp_git_repo)
 
-        assert "ARCHITECT DOCS" in prompt
-        assert "Module map" in prompt
-        assert "Use click" in prompt
+        assert "ARCHITECT DOCS" not in prompt
+        assert "Module map" not in prompt
 
     def test_prompt_handles_empty_task_list(self, tmp_git_repo):
         from otto.pilot import _build_pilot_prompt

@@ -372,8 +372,6 @@ def _build_pilot_prompt(
     project_dir: Path,
 ) -> str:
     """Build the system prompt for the pilot agent."""
-    from otto.architect import load_design_context
-
     task_summaries = []
     for t in tasks:
         deps = t.get("depends_on") or []
@@ -384,11 +382,6 @@ def _build_pilot_prompt(
             f"  #{t['id']} ({t['key']}): {t['prompt'][:80]}{deps_str}{spec_str}"
         )
 
-    design_summary = load_design_context(project_dir, role="pilot")
-    design_section = ""
-    if design_summary:
-        design_section = f"\n\nARCHITECT DOCS SUMMARY:\n{design_summary}\n"
-
     return f"""You are a tech lead managing coding agents. You drive execution
 by calling the tools available to you.
 
@@ -397,7 +390,6 @@ CONFIG: max_retries={config.get('max_retries', 3)}, test_command={config.get('te
 
 PENDING TASKS:
 {chr(10).join(task_summaries)}
-{design_section}
 
 ═══════════════════════════════════════════════════════
 PHASE 1: PLAN (mandatory — do this BEFORE calling any execution tools)

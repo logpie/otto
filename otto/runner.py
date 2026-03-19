@@ -692,17 +692,6 @@ async def run_task(
             from otto.testgen import get_relevant_file_contents
             source_context = get_relevant_file_contents(effective_dir, task_hint=prompt)
 
-            # Include architect design context if available
-            from otto.architect import load_design_context
-            design_ctx = load_design_context(project_dir, role="coding")
-
-            design_section = ""
-            if design_ctx:
-                design_section = (
-                    f"\n\nDESIGN CONVENTIONS (follow these — other tasks depend on them):\n"
-                    f"{design_ctx}\n"
-                )
-
             # Include spec items if available — classified as verifiable or visual
             spec_section = ""
             if spec:
@@ -735,7 +724,6 @@ You are working in {effective_dir}. Do NOT create git commits.
 
 RELEVANT SOURCE FILES (already read for you):
 {source_context}
-{design_section}
 {spec_section}
 
 APPROACH:
