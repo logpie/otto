@@ -396,9 +396,67 @@ This is the regression gate. The coding agent's own tests are committed to the p
 **New in pilot:** read learnings for cross-task context
 **Files:** `otto_arch/learnings.md`, `otto_arch/task-notes/{key}.md`
 
-### Phase 6: Escalation protocol
+### Phase 6: Spec compliance + confidence scoring
 
-**New in pilot:** when task fails after max retries, produce structured report instead of marking "failed"
+The pilot checks spec compliance after each task passes verification. This is a prompt instruction, not new code:
+
+**Pilot prompt addition:**
+```
+After coding agent reports success:
+1. Read the diff
+2. For each spec item, assess: clearly met / approximately met / not met
+3. Watch for spec-dodging (meeting constraint by removing the feature)
+4. If any spec item is "not met" → retry with specific feedback
+5. If all "clearly met" or "approximately met" → merge
+```
+
+The confidence is per-spec-item, not a numeric score. The pilot makes a judgment call — same as a human reviewer approving a PR.
+
+### Phase 7: Escalation protocol
+
+When a task fails after max retries, the pilot produces a structured report:
+
+```
+## Escalation Report — Task #{id}
+
+### What was built
+{diff summary}
+
+### Spec compliance
+- ✓ Item 1: clearly met
+- ~ Item 2: approximately met (used mock data instead of real API)
+- ✗ Item 3: not met (300ms constraint impossible with sync HTTP)
+
+### What was tried
+- Attempt 1: synchronous fetch → 650ms (too slow)
+- Attempt 2: added caching → cached is <300ms, uncached still >500ms
+- Attempt 3: tried async → import errors in test environment
+
+### Recommended options
+A. Accept with known limitation (uncached >300ms)
+B. Restructure to async architecture (multi-task change)
+C. Use stale-while-revalidate pattern (show cached, refresh in background)
+```
+
+This replaces the current binary "failed — max retries exhausted" with actionable information.
+
+### Phase 8: Optional testgen (`--tdd` mode)
+
+When `otto run --tdd` is passed:
+- Testgen agent runs before coding agent (same as v2)
+- Generated tests are committed and serve as additional constraint
+- Coding agent still writes its own tests too
+- Pilot compliance check still applies
+
+Default (no `--tdd`): coding agent writes all tests. No separate testgen step.
+
+### Phase 9: Visual verification (future)
+
+Not in initial v3 implementation. Design for later:
+- Screenshot capture via Playwright or tkinter after GUI task completes
+- LLM-based visual comparison against user description
+- Pilot includes visual assessment in spec compliance check
+- Coding agent can use browser MCP tools for web app verification
 
 ### What stays unchanged
 
