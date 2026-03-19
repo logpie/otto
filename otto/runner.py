@@ -959,36 +959,40 @@ async def run_task(
 
             agent_prompt = (
                 f"{base_prompt}\n\n"
-                f"You are working in {effective_dir}. Do NOT create git commits. "
-                f"Do NOT write tests — acceptance tests will be generated separately.\n\n"
-                f"RELEVANT SOURCE FILES (already read for you — start coding immediately):\n"
+                f"You are working in {effective_dir}. Do NOT create git commits.\n\n"
+                f"RELEVANT SOURCE FILES (already read for you):\n"
                 f"{source_context}"
-                f"{design_section}"
+                f"{design_section}\n\n"
+                f"APPROACH:\n"
+                f"1. PLAN first — read the spec and current code. Can you meet ALL requirements\n"
+                f"   with the current architecture? If not, briefly note what needs to change.\n"
+                f"2. IMPLEMENT your plan.\n"
+                f"3. VERIFY — run the acceptance tests yourself to check your work.\n"
+                f"4. ITERATE — if tests fail, read the output and fix. Don't guess blindly.\n"
             )
         else:
             agent_prompt = (
                 f"Verification failed. Fix the issue.\n\n"
                 f"{last_error}\n\n"
                 f"Original task: {prompt}\n\n"
-                f"You are working in {effective_dir}. Do NOT create git commits. "
-                f"Do NOT write tests — acceptance tests will be generated separately. "
-                f"You may edit any file in the project to make all tests pass."
+                f"You are working in {effective_dir}. Do NOT create git commits.\n"
+                f"Read the failing tests carefully. Is it a code bug or a test bug?\n"
+                f"- Code bug: fix your implementation.\n"
+                f"- Test bug (broken import, wrong stdlib usage): fix the test.\n"
+                f"- Impossible constraint: explain why and implement the best feasible approach."
             )
 
-        # Tell the coding agent about adversarial test file (do NOT modify it)
+        # Tell the coding agent about test files and permissions
         if test_file_path_val:
             agent_prompt += (
-                f"\n\nACCEPTANCE TESTS: {test_file_path_val.relative_to(effective_dir)} contains YOUR adversarial tests. "
-                f"Do NOT modify this file.\n"
-                f"Other test files in tests/ are from previous tasks. If your changes intentionally\n"
-                f"break them (e.g., you changed an API contract), you MAY update their assertions\n"
-                f"to match the new behavior. Do NOT delete tests — only update assertions.\n\n"
-                f"IMPORTANT: Implement ONLY what the task description asks for. "
-                f"If a test seems to require functionality beyond the spec (e.g., a non-standard "
-                f"algorithm extension), implement the STANDARD behavior and let that test fail. "
-                f"Do NOT invent non-standard features, workarounds, or hacks to pass a suspicious test. "
-                f"A correct standard implementation that fails one questionable test is better than "
-                f"a corrupted implementation that passes all tests."
+                f"\n\nACCEPTANCE TESTS: {test_file_path_val.relative_to(effective_dir)}\n"
+                f"- You may FIX bugs in this file (broken imports, syntax errors, wrong stdlib usage).\n"
+                f"- You may NOT weaken assertions (change thresholds, remove checks, add skip/xfail).\n"
+                f"- If a test seems impossible to pass, explain why rather than hacking around it.\n\n"
+                f"Other test files in tests/ are from previous tasks.\n"
+                f"- If your changes intentionally break them, update their assertions.\n"
+                f"- Do NOT delete tests — only update assertions.\n\n"
+                f"You may also write additional tests to validate your approach."
             )
 
         # Warn coding agent if architect flagged this as a contract-breaking task

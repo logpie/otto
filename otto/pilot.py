@@ -469,9 +469,11 @@ After all tasks complete or are aborted, call finish_run with a summary.
 
 RULES:
 - PLAN FIRST — never call run_coding_agent before outputting your execution plan
-- run_coding_agent runs ONE attempt. If it fails, read_verify_output to understand why,
-  then retry with a targeted hint. Don't let it burn multiple retries blindly.
-- If a task fails, ALWAYS read_verify_output before deciding to retry
+- The coding agent handles its own retries internally (plans, codes, tests, iterates).
+  You receive pass/fail after it finishes. If it fails, read_verify_output to decide:
+  retry with a strategic hint, regenerate tests, or abort.
+- Do NOT use Edit, Write, Bash, or Read to modify project files directly.
+  You are an orchestrator, not a coder. Use only the otto MCP tools.
 - Never retry with the same approach twice — analyze what went wrong first
 - If a task fails 3 times with different approaches, abort it with abort_task
 - Track progress: call save_run_state(phase, notes) after every major decision
@@ -713,12 +715,9 @@ async def run_coding_agent(task_key: str, hint: str = "") -> str:
         cwd=PROJECT_DIR, capture_output=True, text=True,
     ).stdout.strip()
 
-    # Pilot controls retries — run single attempt, pilot decides retry strategy
-    single_attempt_task = dict(task)
-    single_attempt_task["max_retries"] = 0
-
+    # Coding agent handles its own retries (plans, codes, tests, iterates)
     success = await run_task(
-        single_attempt_task, CONFIG, PROJECT_DIR, TASKS_FILE,
+        task, CONFIG, PROJECT_DIR, TASKS_FILE,
         pre_generated_test=pre_test,
         sibling_test_files=sibling_tests or None,
     )

@@ -197,4 +197,4 @@ class TestRubricEndToEnd:
         # Agent prompt should include acceptance tests instruction
         assert len(captured_prompts) >= 1
         assert "ACCEPTANCE TESTS" in captured_prompts[0]
-        assert "Do NOT modify this file" in captured_prompts[0]
+        assert "ACCEPTANCE TESTS" in captured_prompts[0]
