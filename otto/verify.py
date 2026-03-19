@@ -21,6 +21,8 @@ def _subprocess_env() -> dict:
     existing = env.get("PATH", "")
     if venv_bin not in existing.split(os.pathsep):
         env["PATH"] = venv_bin + os.pathsep + existing
+    # Prevent git from hanging on prompts in unattended mode
+    env["GIT_TERMINAL_PROMPT"] = "0"
     return env
 
 

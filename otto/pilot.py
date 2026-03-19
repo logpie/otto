@@ -627,7 +627,22 @@ async def run_coding_agent(task_key: str, hint: str = "") -> str:
         cwd=PROJECT_DIR, capture_output=True, text=True,
     ).stdout.strip()
 
-    success = await run_task(task, CONFIG, PROJECT_DIR, TASKS_FILE)
+    try:
+        success = await run_task(task, CONFIG, PROJECT_DIR, TASKS_FILE)
+    except Exception as exc:
+        # Runner crashed — mark task failed, return structured error
+        try:
+            update_task(TASKS_FILE, task_key, status="failed",
+                        error=f"runner crashed: {{str(exc)[:200]}}")
+        except Exception:
+            pass
+        error_data = {{
+            "success": False, "status": "failed",
+            "cost_usd": 0, "error": f"runner crashed: {{str(exc)[:200]}}",
+            "diff": "", "verify_output": "",
+        }}
+        _emit_result("run_coding_agent", error_data)
+        return json.dumps(error_data)
 
     diff_summary = _build_diff_summary(PROJECT_DIR, pre_sha)
 
@@ -1147,6 +1162,12 @@ async def run_piloted(
         for t in final_tasks:
             if t.get("status") in ("passed", "failed", "blocked"):
                 results.append((t, t.get("status") == "passed"))
+                total_cost += t.get("cost_usd", 0.0)
+            elif t.get("status") == "running":
+                # Task stuck in "running" — pilot crashed mid-task
+                update_task(tasks_file, t["key"], status="failed",
+                            error="pilot crashed during execution")
+                results.append((t, False))
                 total_cost += t.get("cost_usd", 0.0)
 
         # Print summary
