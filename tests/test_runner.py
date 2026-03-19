@@ -13,7 +13,6 @@ from otto.runner import (
     build_candidate_commit,
     merge_to_default,
     cleanup_branch,
-    run_task,
 )
 
 

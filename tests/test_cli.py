@@ -33,18 +33,18 @@ class TestInit:
 class TestAdd:
     def test_adds_task(self, runner, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
-        result = runner.invoke(main, ["add", "--no-rubric", "Build a login page"])
+        result = runner.invoke(main, ["add", "--no-spec", "Build a login page"])
         assert result.exit_code == 0
         assert "Added task" in result.output
 
     def test_adds_with_verify(self, runner, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
-        result = runner.invoke(main, ["add", "--no-rubric", "Optimize", "--verify", "python bench.py"])
+        result = runner.invoke(main, ["add", "--no-spec", "Optimize", "--verify", "python bench.py"])
         assert result.exit_code == 0
         tasks = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())["tasks"]
         assert tasks[0]["verify"] == "python bench.py"
 
-    @patch("otto.cli.generate_rubric")
+    @patch("otto.cli.generate_spec")
     def test_imports_from_file(self, mock_gen, runner, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
         mock_gen.return_value = []
@@ -67,7 +67,7 @@ class TestAdd:
 class TestRetry:
     def test_resets_failed_task(self, runner, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
-        runner.invoke(main, ["add", "--no-rubric", "Some task"])
+        runner.invoke(main, ["add", "--no-spec", "Some task"])
         # Manually set to failed
         tasks = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())
         tasks["tasks"][0]["status"] = "failed"
@@ -80,7 +80,7 @@ class TestRetry:
     def test_clears_error_code_on_retry(self, runner, tmp_git_repo, monkeypatch):
         """Retry must clear error_code so diverged tasks can re-run."""
         monkeypatch.chdir(tmp_git_repo)
-        runner.invoke(main, ["add", "--no-rubric", "Some task"])
+        runner.invoke(main, ["add", "--no-spec", "Some task"])
         tasks = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())
         tasks["tasks"][0]["status"] = "failed"
         tasks["tasks"][0]["error_code"] = "merge_diverged"
@@ -93,7 +93,7 @@ class TestRetry:
 
     def test_rejects_non_failed_task(self, runner, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
-        runner.invoke(main, ["add", "--no-rubric", "Some task"])
+        runner.invoke(main, ["add", "--no-spec", "Some task"])
         result = runner.invoke(main, ["retry", "1"])
         assert result.exit_code != 0
 
@@ -103,7 +103,7 @@ class TestRun:
         monkeypatch.chdir(tmp_git_repo)
         from otto.config import create_config
         create_config(tmp_git_repo)
-        runner.invoke(main, ["add", "--no-rubric", "Task 1"])
+        runner.invoke(main, ["add", "--no-spec", "Task 1"])
         result = runner.invoke(main, ["run", "--dry-run"])
         assert result.exit_code == 0
         assert "Pending tasks: 1" in result.output
@@ -118,7 +118,7 @@ class TestStatus:
 
     def test_shows_task_table(self, runner, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
-        runner.invoke(main, ["add", "--no-rubric", "First task"])
+        runner.invoke(main, ["add", "--no-spec", "First task"])
         result = runner.invoke(main, ["status"])
         assert "First task" in result.output
         assert "pending" in result.output
@@ -127,14 +127,14 @@ class TestStatus:
 class TestReset:
     def test_resets_all_tasks(self, runner, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
-        runner.invoke(main, ["add", "--no-rubric", "Task 1"])
+        runner.invoke(main, ["add", "--no-spec", "Task 1"])
         result = runner.invoke(main, ["reset", "--yes"])
         assert result.exit_code == 0
 
 
-class TestAddRubric:
-    @patch("otto.cli.generate_rubric")
-    def test_add_generates_rubric(self, mock_gen, runner, tmp_git_repo, monkeypatch):
+class TestAddSpec:
+    @patch("otto.cli.generate_spec")
+    def test_add_generates_spec(self, mock_gen, runner, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
         mock_gen.return_value = ["criterion 1", "criterion 2"]
         result = runner.invoke(main, ["add", "Add search"])
@@ -142,20 +142,20 @@ class TestAddRubric:
         assert "Spec" in result.output
         assert "criterion 1" in result.output
         tasks = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())
-        assert tasks["tasks"][0]["rubric"] == ["criterion 1", "criterion 2"]
+        assert tasks["tasks"][0]["spec"] == ["criterion 1", "criterion 2"]
 
-    @patch("otto.cli.generate_rubric")
-    def test_add_no_rubric_flag(self, mock_gen, runner, tmp_git_repo, monkeypatch):
+    @patch("otto.cli.generate_spec")
+    def test_add_no_spec_flag(self, mock_gen, runner, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
-        result = runner.invoke(main, ["add", "--no-rubric", "Fix typo"])
+        result = runner.invoke(main, ["add", "--no-spec", "Fix typo"])
         assert result.exit_code == 0
         mock_gen.assert_not_called()
         tasks = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())
-        assert "rubric" not in tasks["tasks"][0]
+        assert "spec" not in tasks["tasks"][0]
 
-    @patch("otto.cli.generate_rubric")
-    def test_add_empty_rubric_aborts(self, mock_gen, runner, tmp_git_repo, monkeypatch):
-        """Empty rubric gen should abort — no ghost task created."""
+    @patch("otto.cli.generate_spec")
+    def test_add_empty_spec_aborts(self, mock_gen, runner, tmp_git_repo, monkeypatch):
+        """Empty spec gen should abort — no ghost task created."""
         monkeypatch.chdir(tmp_git_repo)
         mock_gen.return_value = []
         result = runner.invoke(main, ["add", "Fix typo"])
@@ -165,7 +165,7 @@ class TestAddRubric:
 
 
 class TestAddImport:
-    @patch("otto.cli.generate_rubric")
+    @patch("otto.cli.generate_spec")
     def test_import_txt(self, mock_gen, runner, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
         mock_gen.return_value = ["auto criterion"]
@@ -176,13 +176,13 @@ class TestAddImport:
         tasks = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())
         assert len(tasks["tasks"]) == 2
         assert tasks["tasks"][0]["prompt"] == "Add search"
-        assert tasks["tasks"][0]["rubric"] == ["auto criterion"]
+        assert tasks["tasks"][0]["spec"] == ["auto criterion"]
 
     @patch("otto.cli.parse_markdown_tasks")
     def test_import_md(self, mock_parse, runner, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
         mock_parse.return_value = [
-            {"prompt": "Add search", "rubric": ["criterion 1"]},
+            {"prompt": "Add search", "spec": ["criterion 1"]},
         ]
         md_file = tmp_git_repo / "features.md"
         md_file.write_text("# Search\nAdd search.\n")
@@ -190,24 +190,24 @@ class TestAddImport:
         assert result.exit_code == 0
         tasks = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())
         assert len(tasks["tasks"]) == 1
-        assert tasks["tasks"][0]["rubric"] == ["criterion 1"]
+        assert tasks["tasks"][0]["spec"] == ["criterion 1"]
 
-    @patch("otto.cli.generate_rubric")
-    def test_import_yaml_preserves_rubric(self, mock_gen, runner, tmp_git_repo, monkeypatch):
+    @patch("otto.cli.generate_spec")
+    def test_import_yaml_preserves_spec(self, mock_gen, runner, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
         yaml_file = tmp_git_repo / "import.yaml"
         yaml_file.write_text(yaml.dump({
             "tasks": [
-                {"prompt": "Task with rubric", "rubric": ["existing criterion"]},
-                {"prompt": "Task without rubric"},
+                {"prompt": "Task with spec", "spec": ["existing criterion"]},
+                {"prompt": "Task without spec"},
             ]
         }))
         mock_gen.return_value = ["auto criterion"]
         result = runner.invoke(main, ["add", "-f", str(yaml_file)])
         assert result.exit_code == 0
         tasks = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())
-        assert tasks["tasks"][0]["rubric"] == ["existing criterion"]
-        # Only called for task without rubric
+        assert tasks["tasks"][0]["spec"] == ["existing criterion"]
+        # Only called for task without spec
         mock_gen.assert_called_once()
 
 
@@ -215,7 +215,7 @@ class TestDiffAndShow:
     def test_show_displays_task(self, runner, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
         from otto.tasks import add_task
-        add_task(tmp_git_repo / "tasks.yaml", "Test task", rubric=["criterion 1"])
+        add_task(tmp_git_repo / "tasks.yaml", "Test task", spec=["criterion 1"])
         result = runner.invoke(main, ["show", "1"])
         assert result.exit_code == 0
         assert "Test task" in result.output
@@ -227,16 +227,16 @@ class TestDiffAndShow:
         assert result.exit_code != 0
 
 
-class TestStatusRubric:
-    def test_shows_rubric_count(self, runner, tmp_git_repo, monkeypatch):
+class TestStatusSpec:
+    def test_shows_spec_count(self, runner, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
         from otto.tasks import add_task
-        add_task(tmp_git_repo / "tasks.yaml", "Task with rubric",
-                 rubric=["c1", "c2", "c3"])
-        add_task(tmp_git_repo / "tasks.yaml", "Task without rubric")
+        add_task(tmp_git_repo / "tasks.yaml", "Task with spec",
+                 spec=["c1", "c2", "c3"])
+        add_task(tmp_git_repo / "tasks.yaml", "Task without spec")
         result = runner.invoke(main, ["status"])
         assert result.exit_code == 0
-        # Should show rubric count column
+        # Should show spec count column
         assert "Spec" in result.output
 
 

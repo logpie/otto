@@ -83,13 +83,6 @@ class TestPilotToolCallDisplay:
         assert "hint" in output
         assert "fix the import" in output
 
-    def test_parallel_tool_shows_task_count(self):
-        block = FakeToolUseBlock(name="mcp__otto-pilot__run_coding_agents",
-                                  input={"task_keys": ["a", "b", "c"]})
-        output = capture_output(_print_pilot_tool_call, block)
-        assert "3 tasks" in output
-        assert "parallel" in output.lower()
-
     def test_noise_tool_suppressed(self):
         block = FakeToolUseBlock(name="mcp__otto-pilot__save_run_state",
                                   input={"phase": "test"})
@@ -107,18 +100,6 @@ class TestPilotToolCallDisplay:
         assert "Loading task state" in output
         # Should NOT have separator line
         assert "─" * 50 not in output
-
-    def test_integration_gate_is_primary(self):
-        block = FakeToolUseBlock(name="mcp__otto-pilot__run_integration_gate_tool", input={})
-        output = capture_output(_print_pilot_tool_call, block)
-        assert "Integration gate" in output
-        assert "─" in output  # has separator (primary)
-
-    def test_holistic_testgen_shows_count(self):
-        block = FakeToolUseBlock(name="mcp__otto-pilot__run_holistic_testgen",
-                                  input={"task_keys": ["x", "y"]})
-        output = capture_output(_print_pilot_tool_call, block)
-        assert "2 tasks" in output
 
     def test_unknown_tool_shows_name(self):
         block = FakeToolUseBlock(name="mcp__otto-pilot__some_new_tool", input={})
@@ -201,41 +182,12 @@ class TestPilotToolResultDisplay:
         assert "def456" in output
         assert "merge conflict" in output
 
-    def test_holistic_testgen_result(self):
-        result = json.dumps({
-            "key1": "/path/to/tests/test_otto_key1.py",
-            "key2": "/path/to/tests/test_otto_key2.py",
-            "key3": None,
-        })
-        block = FakeToolResultBlock(content=result)
-        output = capture_output(_print_pilot_tool_result, block)
-        assert "2/3" in output  # 2 non-null out of 3
-        assert "test files generated" in output
-
-    def test_integration_gate_passed(self):
-        result = json.dumps({"passed": True, "skipped": False})
-        block = FakeToolResultBlock(content=result)
-        output = capture_output(_print_pilot_tool_result, block)
-        assert "passed" in output
-
-    def test_integration_gate_failed(self):
-        result = json.dumps({"passed": False, "skipped": False})
-        block = FakeToolResultBlock(content=result)
-        output = capture_output(_print_pilot_tool_result, block)
-        assert "FAILED" in output
-
-    def test_integration_gate_skipped(self):
-        result = json.dumps({"passed": None, "skipped": True})
-        block = FakeToolResultBlock(content=result)
-        output = capture_output(_print_pilot_tool_result, block)
-        assert "skipped" in output
-
     def test_task_state_list(self):
         result = json.dumps([
             {"id": 1, "status": "pending", "depends_on": [],
-             "rubric_count": 10, "prompt": "Add search command"},
+             "spec_count": 10, "prompt": "Add search command"},
             {"id": 2, "status": "pending", "depends_on": [1],
-             "rubric_count": 13, "prompt": "Add tag/untag commands"},
+             "spec_count": 13, "prompt": "Add tag/untag commands"},
         ])
         block = FakeToolResultBlock(content=result)
         output = capture_output(_print_pilot_tool_result, block)
@@ -283,19 +235,6 @@ class TestPilotToolResultDisplay:
         block = FakeToolResultBlock(content="x" * 500)
         output = capture_output(_print_pilot_tool_result, block)
         assert "..." in output
-
-    def test_holistic_testgen_result_with_tool_key(self):
-        """Side-channel results include a 'tool' key — should be stripped before matching."""
-        result = json.dumps({
-            "tool": "run_holistic_testgen",
-            "key1": "/path/to/tests/test_otto_key1.py",
-            "key2": "/path/to/tests/test_otto_key2.py",
-            "key3": None,
-        })
-        block = FakeToolResultBlock(content=result)
-        output = capture_output(_print_pilot_tool_result, block)
-        assert "2/3" in output
-        assert "test files generated" in output
 
     def test_single_task_result_with_tool_key(self):
         """Side-channel single task result includes 'tool' key — should parse correctly."""

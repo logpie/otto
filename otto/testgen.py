@@ -385,7 +385,7 @@ def build_blackbox_context(project_dir: Path, task_hint: str = "") -> str:
 
 
 async def run_testgen_agent(
-    rubric: list[str],
+    spec: list[str],
     key: str,
     blackbox_context: str,
     project_dir: Path,
@@ -404,14 +404,14 @@ async def run_testgen_agent(
 
     Returns (path to the copied test file or None, list of log lines).
     """
-    rubric_text = "\n".join(f"{i + 1}. {item}" for i, item in enumerate(rubric))
+    spec_text = "\n".join(f"{i + 1}. {item}" for i, item in enumerate(spec))
     test_rel = f"tests/test_otto_{key}.py"
     tmp_dir = tempfile.mkdtemp(prefix="otto_testgen_")
     log_lines: list[str] = []
 
     # Include architect design context if available
     from otto.architect import load_design_context
-    design_ctx = load_design_context(project_dir, role="testgen")
+    design_ctx = load_design_context(project_dir, role="coding")
     design_section = ""
     if design_ctx:
         design_section = f"\n\nTEST CONVENTIONS AND DATA MODEL (follow these):\n{design_ctx}\n"
@@ -419,7 +419,7 @@ async def run_testgen_agent(
     prompt = f"""You are an engineer writing acceptance tests that verify a spec is met.
 
 SPEC:
-{rubric_text}
+{spec_text}
 
 TASK DESCRIPTION:
 {task_spec if task_spec else "(not provided)"}
@@ -731,14 +731,14 @@ async def run_holistic_testgen(
 
     task_sections = []
     for i, t in enumerate(tasks, 1):
-        rubric = t.get("rubric", [])
-        rubric_text = "\n".join(f"   - {item}" for item in rubric)
+        spec = t.get("spec", [])
+        spec_text = "\n".join(f"   - {item}" for item in spec)
         task_sections.append(
             f"{i}. Task #{t.get('id', '?')} (key: {t['key']}): {t['prompt']}\n"
-            f"   Rubric:\n{rubric_text}"
+            f"   Spec:\n{spec_text}"
         )
 
-    design_ctx = load_design_context(project_dir, role="testgen")
+    design_ctx = load_design_context(project_dir, role="coding")
     design_section = ""
     if design_ctx:
         design_section = f"\n\nTEST CONVENTIONS AND DATA MODEL (follow these):\n{design_ctx}\n"
@@ -993,9 +993,9 @@ async def generate_integration_tests(
     task_sections = []
     for i, task in enumerate(tasks, 1):
         section = f"FEATURE {i}: {task['prompt']}"
-        rubric = task.get("rubric", [])
-        if rubric:
-            section += "\nRubric:\n" + "\n".join(f"  - {r}" for r in rubric)
+        spec = task.get("spec", [])
+        if spec:
+            section += "\nSpec:\n" + "\n".join(f"  - {r}" for r in spec)
         task_sections.append(section)
 
     example_section = ""

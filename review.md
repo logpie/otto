@@ -1,3 +1,51 @@
+# Implementation Gate — 2026-03-19 — Rename rubric → spec throughout codebase
+
+## Round 1 — Codex
+- [NOTE] Stale `rubric` references in docs (README.md, architecture docs, TODO.md) — deferred (non-runtime)
+- APPROVED. No runtime issues found.
+
+---
+
+# Implementation Gate — 2026-03-19 — Phase 9+10: Coding agent CC parity + subagents
+
+## Round 1 — Codex
+- [CRITICAL] AgentDefinition import can break SDK fallback (whole import falls to stub) — fixed: split into separate try/except
+- [CRITICAL] env + setting_sources exposes secrets to repo-controlled instructions — rejected: otto's threat model is user's own repos, same as `claude -p`
+- [IMPORTANT] Subagents not actually read-only (Bash in tool list) — fixed: removed Bash from subagent tools
+- [NOTE] Agent env inconsistent with verify subprocess env — fixed: using `_subprocess_env()`
+
+## Round 2 — Codex
+- [CRITICAL] Secret exposure still present via `_subprocess_env()` — rejected: same reasoning, full env needed for agent to function
+- [IMPORTANT] Bash still in subagent tools — fixed (already applied in round 1 response)
+- [IMPORTANT] SDK version compatibility for tools param — fixed: wrapped in try/except TypeError
+
+## Round 3 — Codex
+- [IMPORTANT] `agent_opts.agents` assignment can also fail on old SDKs — fixed: widened to except (TypeError, AttributeError, Exception)
+
+## Round 4 — Codex
+- [NOTE] Broad exception swallows unrelated errors — fixed: narrowed to (TypeError, AttributeError, ValueError)
+- APPROVED
+
+---
+
+# Implementation Gate — 2026-03-19 — Otto v3 Refactoring (simplify to reliability harness)
+
+## Round 1 — Codex
+- [CRITICAL] Dirty-tree protection disabled — `check_clean_tree` only called from deleted `run_all()` — fixed: added calls to `run_piloted()` and one-off CLI path
+- [IMPORTANT] `--tdd` with one-off prompt silently does nothing (no rubric) — fixed: added warning
+- [IMPORTANT] TDD tests lost on agent error reset (reset drops TDD commit) — fixed: added `tdd_commit_sha` for retry preservation
+- [IMPORTANT] TDD accepts non-adversarial outputs (`no_tests`, `all_pass`) — fixed: reject both
+- [IMPORTANT] Dangling `role="testgen"` in testgen.py (role removed from architect) — fixed: changed to `role="coding"`
+- [NOTE] CLI ImportError too broad — fixed: separated mcp check from pilot import
+
+## Round 2 — Codex
+- [IMPORTANT] False-pass path: no agent changes after TDD → early success without verification — fixed: guard with `and not tdd_commit_sha`
+
+## Round 3 — Codex
+- APPROVED. No new issues.
+
+---
+
 # Implementation Gate — 2026-03-16 — Architect phase + parallel test contamination fix
 
 ## Round 1 — Codex

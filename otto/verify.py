@@ -218,7 +218,7 @@ def run_verification(
                 if excl.exists():
                     excl.unlink()
 
-        # Run all tests (existing + rubric-generated) in one pass
+        # Run all tests (existing + spec-generated) in one pass
         t1 = run_tier1(worktree_path, test_command, timeout)
         tiers.append(t1)
         if not t1.passed and not t1.skipped:

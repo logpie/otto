@@ -7,7 +7,7 @@ from pathlib import Path
 import click
 
 from otto.config import create_config, git_meta_dir, load_config
-from otto.rubric import generate_rubric, parse_markdown_tasks
+from otto.spec import generate_spec, parse_markdown_tasks
 from otto.tasks import add_task, add_tasks, delete_task, load_tasks, reset_all_tasks, save_tasks, update_task
 
 
@@ -66,7 +66,7 @@ def init():
 
 
 def _import_tasks(import_path: Path, tasks_path: Path) -> None:
-    """Import tasks from .md, .txt, or .yaml files with rubric generation.
+    """Import tasks from .md, .txt, or .yaml files with spec generation.
 
     Replaces any existing tasks — the import file is the source of truth.
     """
@@ -86,8 +86,8 @@ def _import_tasks(import_path: Path, tasks_path: Path) -> None:
         batch = []
         for t in parsed:
             item = {"prompt": t["prompt"]}
-            if t.get("rubric"):
-                item["rubric"] = t["rubric"]
+            if t.get("spec"):
+                item["spec"] = t["spec"]
             if t.get("verify"):
                 item["verify"] = t["verify"]
             if t.get("max_retries") is not None:
@@ -105,11 +105,11 @@ def _import_tasks(import_path: Path, tasks_path: Path) -> None:
         batch = []
         for i, line in enumerate(lines, 1):
             click.echo(f"[{i}/{len(lines)}] Generating spec for: {line[:50]}...")
-            rubric_items = generate_rubric(line, project_dir)
+            spec_items = generate_spec(line, project_dir)
             item = {"prompt": line}
-            if rubric_items:
-                item["rubric"] = rubric_items
-                click.echo(f"  {len(rubric_items)} criteria generated")
+            if spec_items:
+                item["spec"] = spec_items
+                click.echo(f"  {len(spec_items)} criteria generated")
             else:
                 click.echo(f"  no spec generated")
             batch.append(item)
@@ -124,15 +124,15 @@ def _import_tasks(import_path: Path, tasks_path: Path) -> None:
         batch = []
         for i, t in enumerate(imported, 1):
             item = {"prompt": t["prompt"]}
-            if t.get("rubric"):
-                item["rubric"] = t["rubric"]
-                click.echo(f"[{i}/{len(imported)}] {t['prompt'][:50]} — {len(t['rubric'])} spec items (from file)")
+            if t.get("spec"):
+                item["spec"] = t["spec"]
+                click.echo(f"[{i}/{len(imported)}] {t['prompt'][:50]} — {len(t['spec'])} spec items (from file)")
             else:
                 click.echo(f"[{i}/{len(imported)}] Generating spec for: {t['prompt'][:50]}...")
-                rubric_items = generate_rubric(t["prompt"], project_dir)
-                if rubric_items:
-                    item["rubric"] = rubric_items
-                    click.echo(f"  {len(rubric_items)} criteria generated")
+                spec_items = generate_spec(t["prompt"], project_dir)
+                if spec_items:
+                    item["spec"] = spec_items
+                    click.echo(f"  {len(spec_items)} criteria generated")
                 else:
                     click.echo(f"  no spec generated")
             if t.get("verify"):
@@ -146,12 +146,12 @@ def _import_tasks(import_path: Path, tasks_path: Path) -> None:
 
 
 def _print_imported_tasks(tasks: list) -> None:
-    """Print summary of imported tasks with rubric details."""
+    """Print summary of imported tasks with spec details."""
     for task in tasks:
-        rubric = task.get("rubric", [])
+        spec = task.get("spec", [])
         click.echo(f"  {_G}✓{_0} {_B}#{task['id']}{_0} {task['prompt'][:80]}")
-        if rubric:
-            for item in rubric:
+        if spec:
+            for item in spec:
                 click.echo(f"       {_D}-{_0} {item}")
     click.echo(f"\n{_G}✓{_0} Imported {_B}{len(tasks)}{_0} tasks. Review specs in tasks.yaml before running.")
 
@@ -162,8 +162,8 @@ def _print_imported_tasks(tasks: list) -> None:
 @click.option("--max-retries", default=None, type=int, help="Max retry attempts")
 @click.option("-f", "--file", "import_file", default=None, type=click.Path(exists=True),
               help="Import tasks from a file (.yaml, .md, .txt)")
-@click.option("--no-rubric", is_flag=True, help="Skip spec generation")
-def add(prompt, verify, max_retries, import_file, no_rubric):
+@click.option("--no-spec", is_flag=True, help="Skip spec generation")
+def add(prompt, verify, max_retries, import_file, no_spec):
     """Add a task to the queue (or import from file with -f)."""
     tasks_path = Path.cwd() / "tasks.yaml"
 
@@ -176,44 +176,42 @@ def add(prompt, verify, max_retries, import_file, no_rubric):
         click.echo("Error: provide a prompt or use -f to import", err=True)
         sys.exit(2)
 
-    # Generate rubric unless --no-rubric
-    rubric = None
-    if no_rubric:
+    # Generate spec unless --no-spec
+    spec = None
+    if no_spec:
         click.echo(f"{_Y}{_B}⚠ WARNING:{_0} {_Y}No spec → no adversarial tests → no verification gate.{_0}")
         click.echo(f"  {_Y}The coding agent's output will be merged with zero quality checks.{_0}")
-    if not no_rubric:
+    if not no_spec:
         click.echo(f"{_D}Generating spec...{_0}")
         try:
-            rubric_items = generate_rubric(prompt, Path.cwd())
+            spec_items = generate_spec(prompt, Path.cwd())
         except Exception as e:
             click.echo(f"{_R}✗{_0} Spec generation failed: {e}", err=True)
-            click.echo(f"{_D}Task not created. Fix the issue or use --no-rubric.{_0}", err=True)
+            click.echo(f"{_D}Task not created. Fix the issue or use --no-spec.{_0}", err=True)
             sys.exit(1)
-        if rubric_items:
-            rubric = rubric_items
-            click.echo(f"{_G}✓{_0} Spec ({_B}{len(rubric_items)}{_0} criteria):")
-            for item in rubric_items:
+        if spec_items:
+            spec = spec_items
+            click.echo(f"{_G}✓{_0} Spec ({_B}{len(spec_items)}{_0} criteria):")
+            for item in spec_items:
                 click.echo(f"  {_D}-{_0} {item}")
         else:
             click.echo(f"{_Y}⚠{_0} Spec generation returned empty — task not created.", err=True)
-            click.echo(f"{_D}Retry or use --no-rubric to skip spec generation.{_0}", err=True)
+            click.echo(f"{_D}Retry or use --no-spec to skip spec generation.{_0}", err=True)
             sys.exit(1)
 
     task = add_task(tasks_path, prompt, verify=verify, max_retries=max_retries,
-                    rubric=rubric)
+                    spec=spec)
     click.echo(f"{_G}✓{_0} Added task {_B}#{task['id']}{_0} {_D}({task['key']}){_0}: {prompt}")
 
 
 @main.command(context_settings=CONTEXT_SETTINGS)
 @click.argument("prompt", required=False)
 @click.option("--dry-run", is_flag=True, help="Show what would run without executing")
-@click.option("--no-integration", is_flag=True, help="Skip post-run integration tests")
-@click.option("--no-parallel", is_flag=True, help="Force serial execution (full streaming output per task)")
 @click.option("--no-architect", is_flag=True, help="Skip architect agent (no codebase analysis)")
-@click.option("--no-pilot", is_flag=True, help="Use classic pipeline instead of LLM pilot")
-def run(prompt, dry_run, no_integration, no_parallel, no_architect, no_pilot):
+@click.option("--tdd", is_flag=True, help="Generate adversarial tests before coding (optional)")
+def run(prompt, dry_run, no_architect, tdd):
     """Run pending tasks (or a one-off task if prompt given)."""
-    from otto.runner import run_all, run_task
+    from otto.runner import run_task
 
     project_dir = Path.cwd()
     config_path = project_dir / "otto.yaml"
@@ -221,12 +219,10 @@ def run(prompt, dry_run, no_integration, no_parallel, no_architect, no_pilot):
         click.echo("Error: otto.yaml not found. Run 'otto init' first.", err=True)
         sys.exit(2)
     config = load_config(config_path)
-    if no_integration:
-        config["no_integration"] = True
-    if no_parallel:
-        config["max_parallel"] = 1
     if no_architect:
         config["no_architect"] = True
+    if tdd:
+        config["tdd"] = True
 
     if dry_run:
         tasks_path = project_dir / "tasks.yaml"
@@ -246,6 +242,9 @@ def run(prompt, dry_run, no_integration, no_parallel, no_architect, no_pilot):
         import os
         import time
 
+        if tdd:
+            click.echo(f"{_Y}⚠{_0} --tdd ignored for one-off prompts (no spec). Use 'otto add' + 'otto run --tdd'.", err=True)
+
         lock_path = git_meta_dir(project_dir) / "otto.lock"
         lock_path.touch()
         lock_fh = open(lock_path, "r")
@@ -256,6 +255,12 @@ def run(prompt, dry_run, no_integration, no_parallel, no_architect, no_pilot):
             sys.exit(2)
 
         try:
+            # Dirty-tree protection
+            from otto.runner import check_clean_tree
+            if not check_clean_tree(project_dir):
+                click.echo(f"{_R}✗{_0} Working tree is dirty — fix before running otto", err=True)
+                sys.exit(2)
+
             key = f"adhoc-{int(time.time())}-{os.getpid()}"
             task = {
                 "id": 0,
@@ -272,28 +277,15 @@ def run(prompt, dry_run, no_integration, no_parallel, no_architect, no_pilot):
             lock_fh.close()
     else:
         tasks_path = project_dir / "tasks.yaml"
-
-        # Use pilot by default for multi-task runs, fall back to classic pipeline.
-        # Preflight: check mcp is importable before committing to pilot mode.
-        use_pilot = not no_pilot
-        if use_pilot:
-            try:
-                import importlib
-                importlib.import_module("mcp")
-                from otto.pilot import run_piloted
-                exit_code = asyncio.run(run_piloted(config, tasks_path, project_dir))
-            except ImportError:
-                click.echo("Pilot unavailable (missing mcp library) — using classic pipeline", err=True)
-                exit_code = asyncio.run(run_all(config, tasks_path, project_dir))
-            except Exception as e:
-                err_msg = str(e)
-                if "500" in err_msg or "API" in err_msg or "Internal server error" in err_msg:
-                    click.echo(f"\n{_Y}⚠ Pilot hit API error — retrying with classic pipeline{_0}", err=True)
-                else:
-                    click.echo(f"\n{_Y}⚠ Pilot failed ({err_msg[:80]}) — falling back to classic pipeline{_0}", err=True)
-                exit_code = asyncio.run(run_all(config, tasks_path, project_dir))
-        else:
-            exit_code = asyncio.run(run_all(config, tasks_path, project_dir))
+        # Preflight: check mcp is importable
+        try:
+            import importlib
+            importlib.import_module("mcp")
+        except ImportError:
+            click.echo("Error: mcp library required. Install with: pip install mcp", err=True)
+            sys.exit(2)
+        from otto.pilot import run_piloted
+        exit_code = asyncio.run(run_piloted(config, tasks_path, project_dir))
         sys.exit(exit_code)
 
 
@@ -411,7 +403,7 @@ def status():
     click.echo(f"{_D}{'─' * 94}{_0}")
     for t in tasks:
         status_str = t.get("status", "?")
-        rubric_count = len(t.get("rubric", []))
+        spec_count = len(t.get("spec", []))
         deps = t.get("depends_on") or []
         deps_str = str(len(deps)) if deps else ""
         cost = t.get("cost_usd", 0.0)
@@ -429,7 +421,7 @@ def status():
             status_styled = f"{_D}{status_str:10}{_0}"
         click.echo(
             f"{t.get('id', '?'):>4}  {status_styled}  {t.get('attempts', 0):>3}  "
-            f"{deps_str:>4}  {rubric_count:>6}  {cost_str:>7}  {dur_str:>6}  {t['prompt'][:50]}"
+            f"{deps_str:>4}  {spec_count:>6}  {cost_str:>7}  {dur_str:>6}  {t['prompt'][:50]}"
         )
         # Show error for failed/blocked tasks
         if status_str in ("failed", "blocked") and t.get("error"):
@@ -610,10 +602,10 @@ def show(task_id):
                 click.echo(f"  {_D}Deps:{_0}     {', '.join(f'#{d}' for d in deps)}")
             click.echo(f"\n  {_D}Prompt:{_0}")
             click.echo(f"  {t['prompt']}")
-            rubric = t.get("rubric", [])
-            if rubric:
-                click.echo(f"\n  {_D}Spec ({len(rubric)}):{_0}")
-                for i, item in enumerate(rubric, 1):
+            spec = t.get("spec", [])
+            if spec:
+                click.echo(f"\n  {_D}Spec ({len(spec)}):{_0}")
+                for i, item in enumerate(spec, 1):
                     click.echo(f"    {i}. {item}")
             if t.get("feedback"):
                 click.echo(f"\n  {_D}Feedback:{_0} {t['feedback']}")

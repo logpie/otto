@@ -47,24 +47,6 @@ class TestLoadDesignContext:
         assert "Test Patterns" not in ctx
         assert "Module map" not in ctx
 
-    def test_testgen_role_gets_correct_files(self, arch_dir):
-        ctx = load_design_context(arch_dir, "testgen")
-        assert "Test Patterns" in ctx
-        assert "Data Model" in ctx
-        assert "Conventions" in ctx
-        # Should NOT include interfaces or task-decisions
-        assert "Interfaces" not in ctx
-        assert "Task Decisions" not in ctx
-
-    def test_integration_role_gets_correct_files(self, arch_dir):
-        ctx = load_design_context(arch_dir, "integration")
-        assert "Codebase" in ctx
-        assert "Interfaces" in ctx
-        assert "Test Patterns" in ctx
-        # Should NOT include conventions or data-model
-        assert "Conventions" not in ctx
-        assert "Data Model" not in ctx
-
     def test_unknown_role_returns_empty(self, arch_dir):
         assert load_design_context(arch_dir, "unknown_role") == ""
 

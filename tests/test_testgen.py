@@ -99,8 +99,8 @@ class TestGenerateIntegrationTests:
     def test_generates_integration_file(self, mock_query, tmp_git_repo):
         """Agent writes integration test file to the testgen dir."""
         tasks = [
-            {"prompt": "Add search feature", "rubric": ["search works"]},
-            {"prompt": "Add favorites", "rubric": ["favorites persist"]},
+            {"prompt": "Add search feature", "spec": ["search works"]},
+            {"prompt": "Add favorites", "spec": ["favorites persist"]},
         ]
 
         async def fake_query(*, prompt, options=None):
@@ -195,7 +195,7 @@ class TestRunTestgenAgent:
 
         result, log_lines, _cost = asyncio.run(
             run_testgen_agent(
-                rubric=["search is case-insensitive"],
+                spec=["search is case-insensitive"],
                 key="testkey",
                 blackbox_context="FILE TREE:\napp.py",
                 project_dir=tmp_git_repo,
@@ -219,7 +219,7 @@ class TestRunTestgenAgent:
 
         result, log_lines, _cost = asyncio.run(
             run_testgen_agent(
-                rubric=["search works"],
+                spec=["search works"],
                 key="badkey",
                 blackbox_context="FILE TREE:\napp.py",
                 project_dir=tmp_git_repo,

@@ -14,6 +14,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "default_branch": "main",
     "verify_timeout": 300,
     "max_parallel": 3,
+    "max_turns": 200,
+    "effort": "high",
 }
 
 

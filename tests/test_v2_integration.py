@@ -257,8 +257,8 @@ class TestHolisticTestgen:
         from otto.testgen import run_holistic_testgen, build_blackbox_context
 
         tasks = [
-            {"id": 1, "key": "aaa111bbb222", "prompt": "Add search", "rubric": ["search works"]},
-            {"id": 2, "key": "ccc333ddd444", "prompt": "Add filter", "rubric": ["filter works"]},
+            {"id": 1, "key": "aaa111bbb222", "prompt": "Add search", "spec": ["search works"]},
+            {"id": 2, "key": "ccc333ddd444", "prompt": "Add filter", "spec": ["filter works"]},
         ]
 
         ctx = build_blackbox_context(tmp_git_repo, task_hint="search filter")
@@ -276,7 +276,7 @@ class TestHolisticTestgen:
         import tempfile
 
         tasks = [
-            {"id": 1, "key": "test111key22", "prompt": "Task 1", "rubric": ["criteria"]},
+            {"id": 1, "key": "test111key22", "prompt": "Task 1", "spec": ["criteria"]},
         ]
 
         ctx = build_blackbox_context(tmp_git_repo)
@@ -305,7 +305,7 @@ class TestHolisticTestgen:
         (arch_dir / "conventions.md").write_text("# Conventions\nSnake case.")
 
         tasks = [
-            {"id": 1, "key": "designctx123", "prompt": "Add feature", "rubric": ["it works"]},
+            {"id": 1, "key": "designctx123", "prompt": "Add feature", "spec": ["it works"]},
         ]
         ctx = build_blackbox_context(tmp_git_repo)
 
@@ -327,12 +327,12 @@ class TestPilotPromptBuilder:
 
         tasks = [
             {"id": 1, "key": "aaa111", "prompt": "Implement search feature",
-             "rubric": ["search is case-insensitive", "search returns results"],
+             "spec": ["search is case-insensitive", "search returns results"],
              "depends_on": []},
             {"id": 2, "key": "bbb222", "prompt": "Implement filter feature",
-             "rubric": ["filter by date works"],
+             "spec": ["filter by date works"],
              "depends_on": [1]},
-            {"id": 3, "key": "ccc333", "prompt": "Add no-rubric task"},
+            {"id": 3, "key": "ccc333", "prompt": "Add no-spec task"},
         ]
 
         config = {
@@ -358,19 +358,18 @@ class TestPilotPromptBuilder:
         # Dependencies shown
         assert "depends_on: [1]" in prompt
 
-        # Rubric counts
-        assert "2 rubric items" in prompt
-        assert "1 rubric items" in prompt
-        assert "no rubric" in prompt
+        # Spec counts
+        assert "2 spec items" in prompt
+        assert "1 spec items" in prompt
+        assert "no spec" in prompt
 
         # Config values
         assert "max_retries=3" in prompt
         assert "test_command=pytest" in prompt
 
         # Strategy guidance
-        assert "run_holistic_testgen" in prompt
-        assert "run_verify" in prompt
         assert "merge_task" in prompt
+        assert "run_coding_agent" in prompt
 
     def test_prompt_includes_design_context_when_available(self, tmp_git_repo):
         from otto.pilot import _build_pilot_prompt
@@ -431,11 +430,10 @@ class TestMcpServerScript:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         }
         expected_tools = {
-            "get_run_state", "run_holistic_testgen", "run_per_task_testgen",
-            "run_coding_agent", "run_coding_agents", "run_verify",
-            "read_verify_output", "merge_task", "update_task_status",
-            "run_integration_gate_tool", "run_architect_tool",
+            "get_run_state", "run_coding_agent",
+            "read_verify_output", "merge_task",
             "abort_task", "save_run_state", "finish_run",
+            "write_task_notes", "write_learning",
         }
         assert expected_tools.issubset(func_names), (
             f"Missing tools: {expected_tools - func_names}"
@@ -494,7 +492,7 @@ class TestRunPiloted:
         config["test_command"] = "true"
 
         tasks_path = tmp_git_repo / "tasks.yaml"
-        add_task(tasks_path, "Test task", rubric=["it works"])
+        add_task(tasks_path, "Test task", spec=["it works"])
 
         exit_code = await run_piloted(config, tasks_path, tmp_git_repo)
         # Stub agent does nothing, so task stays pending -> pilot reports failure
@@ -504,68 +502,6 @@ class TestRunPiloted:
 
 # ===========================================================================
 # Phase 4: Cross-task review
-# ===========================================================================
-
-class TestCrossTaskReview:
-    """Integration: _review_cross_task_changes handles edge cases correctly."""
-
-    @pytest.mark.asyncio
-    @patch("otto.runner.query", new=_stub_query)
-    async def test_no_otto_commits_returns_false(self, tmp_git_repo):
-        """When there are no otto commits in the repo, review should return False."""
-        from otto.runner import _review_cross_task_changes
-
-        config = {"test_command": "true", "verify_timeout": 300, "default_branch": "main"}
-        tasks = [
-            {"id": 1, "prompt": "Task 1"},
-            {"id": 2, "prompt": "Task 2"},
-        ]
-
-        result = await _review_cross_task_changes(tasks, tmp_git_repo, config)
-        assert result is False
-
-    @pytest.mark.asyncio
-    @patch("otto.runner.query", new=_stub_query)
-    async def test_empty_diff_returns_false(self, tmp_git_repo):
-        """When otto commits exist but the stub agent makes no changes,
-        review should return False."""
-        from otto.runner import _review_cross_task_changes
-
-        _commit_file(tmp_git_repo, "dummy.txt", "content", "otto: dummy commit")
-
-        config = {"test_command": "true", "verify_timeout": 300, "default_branch": "main"}
-        tasks = [
-            {"id": 1, "prompt": "Task 1"},
-            {"id": 2, "prompt": "Task 2"},
-        ]
-
-        result = await _review_cross_task_changes(tasks, tmp_git_repo, config)
-        assert result is False
-
-    @pytest.mark.asyncio
-    @patch("otto.runner.query", new=_stub_query)
-    async def test_with_real_otto_commits(self, tmp_git_repo):
-        """When multiple otto commits exist with changes, the function should
-        find the first otto commit, compute diff, and call the agent."""
-        from otto.runner import _review_cross_task_changes
-
-        # Create multiple otto commits
-        _commit_file(tmp_git_repo, "feature_a.py", "def a(): pass", "otto: add feature A (#1)")
-        _commit_file(tmp_git_repo, "feature_b.py", "def b(): pass", "otto: add feature B (#2)")
-
-        config = {"test_command": None, "verify_timeout": 300, "default_branch": "main"}
-        tasks = [
-            {"id": 1, "prompt": "Add feature A"},
-            {"id": 2, "prompt": "Add feature B"},
-        ]
-
-        # Stub agent does nothing -> no edits -> returns False
-        result = await _review_cross_task_changes(tasks, tmp_git_repo, config)
-        assert result is False
-
-
-# ===========================================================================
-# Phase 5: End-to-end integration
 # ===========================================================================
 
 class TestEndToEndFilePlanInjection:
@@ -578,9 +514,9 @@ class TestEndToEndFilePlanInjection:
 
         # Add tasks with the batch API
         batch = [
-            {"prompt": "Create data models", "rubric": ["models work"]},
-            {"prompt": "Create CLI", "rubric": ["cli works"]},
-            {"prompt": "Create API", "rubric": ["api works"]},
+            {"prompt": "Create data models", "spec": ["models work"]},
+            {"prompt": "Create CLI", "spec": ["cli works"]},
+            {"prompt": "Create API", "spec": ["api works"]},
         ]
         created = add_tasks(tasks_path, batch)
         assert len(created) == 3
@@ -654,130 +590,11 @@ class TestEndToEndFilePlanInjection:
         assert "Click for CLI" in coding_ctx
         assert "Don't modify __init__.py" in coding_ctx
 
-        # Testgen role gets test-patterns, data-model, conventions
-        testgen_ctx = load_design_context(tmp_git_repo, "testgen")
-        assert "pytest + tmp_path" in testgen_ctx
-        assert "SQLite" in testgen_ctx
-        assert "PEP8" in testgen_ctx
-
         # Pilot role gets codebase, task-decisions, file-plan
         pilot_ctx = load_design_context(tmp_git_repo, "pilot")
         assert "Main app is app.py" in pilot_ctx
         assert "Click for CLI" in pilot_ctx
         assert "All tasks use app.py" in pilot_ctx
-
-
-class TestReconciliationWithFilePlan:
-    """Integration: reconciliation detects hidden dependencies not in file-plan."""
-
-    def test_reconciliation_detects_overlapping_changed_files(self, tmp_git_repo):
-        """Two tasks that both modify the same file should get a depends_on added
-        during reconciliation, even if the file-plan didn't predict it."""
-        from otto.runner import _reconcile_dependencies
-
-        tasks_path = tmp_git_repo / "tasks.yaml"
-        t1 = add_task(tasks_path, "Add logging")
-        t2 = add_task(tasks_path, "Add metrics")
-
-        # Simulate both tasks having passed and changed the same file
-        update_task(tasks_path, t1["key"], status="passed",
-                    changed_files=["app.py", "utils.py"])
-        update_task(tasks_path, t2["key"], status="passed",
-                    changed_files=["app.py", "metrics.py"])
-
-        # Create a minimal source file for import graph analysis
-        (tmp_git_repo / "app.py").write_text("# main app\n")
-        (tmp_git_repo / "utils.py").write_text("# utils\n")
-        (tmp_git_repo / "metrics.py").write_text("# metrics\n")
-        subprocess.run(["git", "add", "."], cwd=tmp_git_repo, capture_output=True)
-        subprocess.run(["git", "commit", "-m", "add files"], cwd=tmp_git_repo, capture_output=True)
-
-        # Run reconciliation
-        ripple_risks = _reconcile_dependencies(tasks_path, tmp_git_repo)
-
-        # Check that depends_on was updated for the later task
-        final = load_tasks(tasks_path)
-        by_id = {t["id"]: t for t in final}
-        t2_deps = by_id[t2["id"]].get("depends_on") or []
-        assert t1["id"] in t2_deps
-
-
-class TestTopologicalOrderWithInjectedDeps:
-    """Integration: verify that injected deps create correct topological ordering."""
-
-    def test_topological_sort_respects_injected_deps(self, tmp_git_repo):
-        """After injecting deps from file-plan, the topological sort should
-        produce a valid execution order."""
-        import graphlib
-
-        tasks_path = tmp_git_repo / "tasks.yaml"
-        t1 = add_task(tasks_path, "Foundation task")
-        t2 = add_task(tasks_path, "Depends on foundation")
-        t3 = add_task(tasks_path, "Also depends on foundation")
-
-        # Inject deps
-        update_task(tasks_path, t2["key"], depends_on=[t1["id"]])
-        update_task(tasks_path, t3["key"], depends_on=[t1["id"]])
-
-        # Build topological sorter (mirrors run_all logic)
-        tasks = load_tasks(tasks_path)
-        pending = [t for t in tasks if t["status"] == "pending"]
-        pending_ids = {t["id"] for t in pending}
-
-        ts = graphlib.TopologicalSorter()
-        for t in pending:
-            deps = t.get("depends_on") or []
-            pending_deps = [d for d in deps if d in pending_ids]
-            ts.add(t["id"], *pending_deps)
-
-        ts.prepare()
-        order = []
-        while ts.is_active():
-            ready = list(ts.get_ready())
-            order.append(set(ready))
-            for r in ready:
-                ts.done(r)
-
-        # First batch should be just task 1 (no deps)
-        assert order[0] == {t1["id"]}
-        # Second batch should be tasks 2 and 3 (can run in parallel)
-        assert order[1] == {t2["id"], t3["id"]}
-
-    def test_chain_dependency_produces_serial_order(self, tmp_git_repo):
-        """3->2->1 chain should produce strictly serial execution."""
-        import graphlib
-
-        tasks_path = tmp_git_repo / "tasks.yaml"
-        t1 = add_task(tasks_path, "Step 1")
-        t2 = add_task(tasks_path, "Step 2")
-        t3 = add_task(tasks_path, "Step 3")
-
-        update_task(tasks_path, t2["key"], depends_on=[t1["id"]])
-        update_task(tasks_path, t3["key"], depends_on=[t2["id"]])
-
-        tasks = load_tasks(tasks_path)
-        pending = [t for t in tasks if t["status"] == "pending"]
-        pending_ids = {t["id"] for t in pending}
-
-        ts = graphlib.TopologicalSorter()
-        for t in pending:
-            deps = t.get("depends_on") or []
-            pending_deps = [d for d in deps if d in pending_ids]
-            ts.add(t["id"], *pending_deps)
-
-        ts.prepare()
-        order = []
-        while ts.is_active():
-            ready = list(ts.get_ready())
-            order.append(set(ready))
-            for r in ready:
-                ts.done(r)
-
-        # Strictly serial: each batch has exactly 1 task
-        assert len(order) == 3
-        assert order[0] == {t1["id"]}
-        assert order[1] == {t2["id"]}
-        assert order[2] == {t3["id"]}
 
 
 class TestGitMetaDirIntegration:

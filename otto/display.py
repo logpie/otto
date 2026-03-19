@@ -9,7 +9,7 @@ _DIM = "\033[2m"
 _RESET = "\033[0m"
 
 # Temp dir patterns to strip from displayed paths
-_TEMP_DIR_PATTERNS = re.compile(r".*/otto_(?:testgen|rubric)_[^/]+/")
+_TEMP_DIR_PATTERNS = re.compile(r".*/otto_(?:testgen|spec)_[^/]+/")
 
 
 def _truncate_at_word(text: str, max_len: int) -> str:

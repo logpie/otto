@@ -79,26 +79,26 @@ class TestUpdateTask:
             update_task(path, "nonexistent123", status="running")
 
 
-class TestAddTaskRubric:
-    def test_add_task_with_rubric(self, tmp_git_repo):
+class TestAddTaskSpec:
+    def test_add_task_with_spec(self, tmp_git_repo):
         tasks_path = tmp_git_repo / "tasks.yaml"
-        task = add_task(tasks_path, "Add search", rubric=["search is case-insensitive", "no matches returns empty list"])
-        assert task["rubric"] == ["search is case-insensitive", "no matches returns empty list"]
+        task = add_task(tasks_path, "Add search", spec=["search is case-insensitive", "no matches returns empty list"])
+        assert task["spec"] == ["search is case-insensitive", "no matches returns empty list"]
         tasks = load_tasks(tasks_path)
-        assert tasks[0]["rubric"] == ["search is case-insensitive", "no matches returns empty list"]
+        assert tasks[0]["spec"] == ["search is case-insensitive", "no matches returns empty list"]
 
-    def test_add_task_without_rubric(self, tmp_git_repo):
+    def test_add_task_without_spec(self, tmp_git_repo):
         tasks_path = tmp_git_repo / "tasks.yaml"
         task = add_task(tasks_path, "Fix typo")
-        assert "rubric" not in task
+        assert "spec" not in task
 
 
 class TestAddTasksBatch:
     def test_add_tasks_batch(self, tmp_git_repo):
         tasks_path = tmp_git_repo / "tasks.yaml"
         batch = [
-            {"prompt": "Task A", "rubric": ["criterion 1"]},
-            {"prompt": "Task B", "rubric": ["criterion 2"]},
+            {"prompt": "Task A", "spec": ["criterion 1"]},
+            {"prompt": "Task B", "spec": ["criterion 2"]},
             {"prompt": "Task C"},
         ]
         results = add_tasks(tasks_path, batch)
@@ -108,9 +108,9 @@ class TestAddTasksBatch:
         assert results[2]["id"] == 3
         tasks = load_tasks(tasks_path)
         assert len(tasks) == 3
-        assert tasks[0]["rubric"] == ["criterion 1"]
-        assert tasks[1]["rubric"] == ["criterion 2"]
-        assert "rubric" not in tasks[2]
+        assert tasks[0]["spec"] == ["criterion 1"]
+        assert tasks[1]["spec"] == ["criterion 2"]
+        assert "spec" not in tasks[2]
 
     def test_add_tasks_appends_to_existing(self, tmp_git_repo):
         tasks_path = tmp_git_repo / "tasks.yaml"

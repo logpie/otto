@@ -11,6 +11,10 @@ class ClaudeAgentOptions:
     resume: str | None = None
     max_turns: int | None = None
     mcp_servers: dict[str, Any] | None = None
+    env: dict[str, str] | None = None
+    setting_sources: list[str] | None = None
+    effort: str | None = None
+    agents: dict[str, Any] | None = None
 
 
 @dataclass

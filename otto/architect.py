@@ -19,9 +19,7 @@ from otto.display import print_agent_tool
 
 # Files each role receives from otto_arch/
 _ROLE_FILES: dict[str, list[str]] = {
-    "testgen": ["test-patterns.md", "data-model.md", "conventions.md"],
     "coding": ["conventions.md", "data-model.md", "interfaces.md", "task-decisions.md", "gotchas.md"],
-    "integration": ["codebase.md", "interfaces.md", "test-patterns.md"],
     "pilot": ["codebase.md", "task-decisions.md", "file-plan.md"],
 }
 
@@ -164,7 +162,7 @@ Rules:
 def load_design_context(project_dir: Path, role: str) -> str:
     """Load and concatenate relevant otto_arch/ files for a given role.
 
-    role: one of "testgen", "coding", "integration"
+    role: one of "coding", "pilot"
     Returns combined string or empty string if otto_arch/ doesn't exist.
     """
     arch_dir = project_dir / "otto_arch"

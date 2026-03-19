@@ -1,4 +1,4 @@
-"""Otto rubric generation — agentic rubric generation + markdown parsing."""
+"""Otto spec generation — agentic spec generation + markdown parsing."""
 
 import asyncio
 import json
@@ -22,8 +22,8 @@ from otto.display import print_agent_tool
 _LIST_PREFIX_RE = re.compile(r"^\s*(?:\d+[.)]\s*|[-*]\s+)")
 
 
-def _parse_rubric_output(text: str) -> list[str]:
-    """Parse LLM output into a list of rubric criteria strings.
+def _parse_spec_output(text: str) -> list[str]:
+    """Parse LLM output into a list of spec criteria strings.
 
     Strips numbering (1. , 1) ) and bullets (- , * ) prefixes.
     Skips empty lines.
@@ -36,21 +36,21 @@ def _parse_rubric_output(text: str) -> list[str]:
     return criteria
 
 
-def generate_rubric(prompt: str, project_dir: Path) -> list[str]:
-    """Generate a rubric for a single task using an agentic QA engineer.
+def generate_spec(prompt: str, project_dir: Path) -> list[str]:
+    """Generate a spec for a single task using an agentic QA engineer.
 
     The agent explores the project (reads source files, runs CLI --help,
     checks existing tests) then writes acceptance criteria grounded in
     what it actually observed.
 
-    Returns a list of rubric criterion strings, or empty list on failure.
+    Returns a list of spec criterion strings, or empty list on failure.
     """
-    rubric, _cost = asyncio.run(_run_rubric_agent(prompt, project_dir))
-    return rubric
+    spec, _cost = asyncio.run(_run_spec_agent(prompt, project_dir))
+    return spec
 
 
-async def _run_rubric_agent(prompt: str, project_dir: Path) -> list[str]:
-    """Run the rubric generation agent with pre-loaded context (adaptive mode).
+async def _run_spec_agent(prompt: str, project_dir: Path) -> list[str]:
+    """Run the spec generation agent with pre-loaded context (adaptive mode).
 
     Pre-loads project context (API stubs, file tree, CLI help, existing tests)
     so the agent can start writing immediately. The agent retains permission
@@ -58,7 +58,7 @@ async def _run_rubric_agent(prompt: str, project_dir: Path) -> list[str]:
 
     Benchmarked: 2x faster than exploration-first approach, same quality.
     """
-    rubric_file = Path(tempfile.mktemp(suffix=".txt", prefix="otto_rubric_"))
+    spec_file = Path(tempfile.mktemp(suffix=".txt", prefix="otto_spec_"))
 
     # Pre-load project context (always fresh from current source)
     from otto.testgen import build_blackbox_context
@@ -78,7 +78,7 @@ TASK: {prompt}
 PROJECT CONTEXT (current source — start from this):
 {blackbox_ctx}{design_section}
 
-Write the acceptance spec to: {rubric_file}
+Write the acceptance spec to: {spec_file}
 
 Steps:
 1. EXTRACT hard requirements from the task description first.
@@ -102,9 +102,9 @@ Prioritize: hard constraints first, then supporting requirements.
 
 Total: 5-8 items. No bikeshedding (formatting details, unit labels, value ranges).
 
-Write ONLY a numbered list to {rubric_file}. One criterion per line. No prose."""
+Write ONLY a numbered list to {spec_file}. One criterion per line. No prose."""
 
-    rubric_cost = 0.0
+    spec_cost = 0.0
     try:
         agent_opts = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
@@ -116,7 +116,7 @@ Write ONLY a numbered list to {rubric_file}. One criterion per line. No prose.""
             if isinstance(message, ResultMessage):
                 raw_cost = getattr(message, "total_cost_usd", None)
                 if isinstance(raw_cost, (int, float)):
-                    rubric_cost = float(raw_cost)
+                    spec_cost = float(raw_cost)
             elif AssistantMessage and isinstance(message, AssistantMessage):
                 for block in message.content:
                     if TextBlock and isinstance(block, TextBlock) and block.text:
@@ -124,23 +124,23 @@ Write ONLY a numbered list to {rubric_file}. One criterion per line. No prose.""
                     elif ToolUseBlock and isinstance(block, ToolUseBlock):
                         print_agent_tool(block)
     except Exception as e:
-        print(f"  rubric agent error: {e}", flush=True)
-        return [], rubric_cost
+        print(f"  spec agent error: {e}", flush=True)
+        return [], spec_cost
 
-    # Read the rubric file
-    if rubric_file.exists():
-        text = rubric_file.read_text()
-        rubric_file.unlink()
-        return _parse_rubric_output(text), rubric_cost
+    # Read the spec file
+    if spec_file.exists():
+        text = spec_file.read_text()
+        spec_file.unlink()
+        return _parse_spec_output(text), spec_cost
 
-    return [], rubric_cost
+    return [], spec_cost
 
 
 def parse_markdown_tasks(md_file: Path, project_dir: Path) -> list[dict]:
     """Parse a markdown file into structured tasks using an agentic PM.
 
     The agent explores the project, reads the markdown, and outputs a JSON
-    array of tasks with prompts and rubrics.
+    array of tasks with prompts and specs.
 
     Returns list of task dicts.
     Raises ValueError on parse failure or invalid task structure.
@@ -170,22 +170,22 @@ If you need to verify specific details during self-review, you may read individu
 
 Each element should have:
 - "prompt": a clear, actionable description of what to implement
-- "rubric": 5-10 concrete, testable acceptance criteria
+- "spec": 5-10 concrete, testable acceptance criteria
 - "depends_on": indices (0-based) of tasks this one requires, or [] if independent.
   Task B depends on A if B needs code/APIs/data that A creates.
   When unsure, include the dependency (safe default).
 
 RULES:
 - Each task is a complete, self-contained unit of work
-- Do NOT create separate tasks for writing tests — test expectations belong in the rubric
+- Do NOT create separate tasks for writing tests — test expectations belong in the spec
 - One heading/section = one task
-- Rubric items describe BEHAVIOR, not implementation details
+- Spec items describe BEHAVIOR, not implementation details
 - Include: happy path, error handling, negative ("does NOT"), edge cases
 - Reference actual class/function names you found in the project
 - If a task modifies existing functionality, include regression criteria
 
 Write ONLY a valid JSON array to {output_file}. No prose.
-Example: [{{"prompt": "Add search", "rubric": ["search works", "case-insensitive"], "depends_on": []}}, {{"prompt": "Add search filters", "rubric": ["filters work"], "depends_on": [0]}}]"""
+Example: [{{"prompt": "Add search", "spec": ["search works", "case-insensitive"], "depends_on": []}}, {{"prompt": "Add search filters", "spec": ["filters work"], "depends_on": [0]}}]"""
 
     try:
         agent_opts = ClaudeAgentOptions(

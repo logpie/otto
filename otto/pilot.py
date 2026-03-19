@@ -47,35 +47,20 @@ _CYAN = "\033[36m"
 _BOLD = "\033[1m"
 
 # Tool categories for display tiering
-_PRIMARY_TOOLS = {
-    "run_holistic_testgen", "run_per_task_testgen",
-    "run_coding_agent", "run_coding_agents",
-    "run_integration_gate_tool", "run_architect_tool",
-    "finish_run",
-}
-_SECONDARY_TOOLS = {
-    "get_run_state", "run_verify", "read_verify_output",
-    "merge_task", "update_task_status", "abort_task",
-}
-_NOISE_TOOLS = {
-    "save_run_state", "ToolSearch",
-}
+_PRIMARY_TOOLS = {"run_coding_agent", "finish_run"}
+_SECONDARY_TOOLS = {"get_run_state", "read_verify_output", "merge_task", "abort_task"}
+_NOISE_TOOLS = {"save_run_state", "ToolSearch", "write_task_notes", "write_learning"}
 
 _TOOL_DISPLAY = {
     "get_run_state": ("📋", "Loading task state"),
-    "run_holistic_testgen": ("🧪", "Generating tests (holistic)"),
-    "run_per_task_testgen": ("🧪", "Generating tests (per-task)"),
     "run_coding_agent": ("🔨", "Coding"),
-    "run_coding_agents": ("⚡", "Coding (parallel)"),
-    "run_verify": ("🔍", "Verifying"),
     "read_verify_output": ("📖", "Reading verify output"),
     "merge_task": ("🔀", "Merging"),
-    "update_task_status": ("📝", "Updating status"),
-    "run_integration_gate_tool": ("🔗", "Integration gate"),
-    "run_architect_tool": ("🏗️", "Re-running architect"),
     "abort_task": ("❌", "Aborting"),
     "save_run_state": ("💾", "Saving state"),
     "finish_run": ("🏁", "Done"),
+    "write_task_notes": ("📝", "Writing task notes"),
+    "write_learning": ("📝", "Recording learning"),
 }
 
 
@@ -170,9 +155,7 @@ def _print_pilot_tool_call(block) -> None:
     display_key = f"{tool_name}:{detail}"
     if display_key == _last_displayed_tool:
         # Still start a spinner for long-running tools (the previous one was stopped above)
-        if tool_name in ("run_holistic_testgen", "run_per_task_testgen",
-                          "run_coding_agent", "run_coding_agents",
-                          "run_integration_gate_tool", "run_architect_tool"):
+        if tool_name in ("run_coding_agent",):
             _active_spinner = _Spinner(label)
             _active_spinner.start()
         return
@@ -328,7 +311,7 @@ def _print_pilot_tool_result(block) -> None:
                 status = t.get("status", "?")
                 deps = t.get("depends_on", [])
                 deps_str = f" → #{', #'.join(str(d) for d in deps)}" if deps else ""
-                rubric_count = t.get("rubric_count", 0)
+                spec_count = t.get("spec_count", 0)
                 status_icon = {
                     "pending": f"{_DIM}○{_RESET}",
                     "running": f"{_CYAN}◉{_RESET}",
@@ -338,7 +321,7 @@ def _print_pilot_tool_result(block) -> None:
                 }.get(status, "?")
                 print(
                     f"    {status_icon} #{t.get('id', '?')} "
-                    f"{_DIM}[{rubric_count} rubric{deps_str}]{_RESET}  "
+                    f"{_DIM}[{spec_count} spec{deps_str}]{_RESET}  "
                     f"{t.get('prompt', '')[:55]}",
                     flush=True,
                 )
@@ -397,10 +380,10 @@ def _build_pilot_prompt(
     for t in tasks:
         deps = t.get("depends_on") or []
         deps_str = f" (depends_on: {deps})" if deps else ""
-        rubric = t.get("rubric", [])
-        rubric_str = f" [{len(rubric)} rubric items]" if rubric else " [no rubric]"
+        spec = t.get("spec", [])
+        spec_str = f" [{len(spec)} spec items]" if spec else " [no spec]"
         task_summaries.append(
-            f"  #{t['id']} ({t['key']}): {t['prompt'][:80]}{deps_str}{rubric_str}"
+            f"  #{t['id']} ({t['key']}): {t['prompt'][:80]}{deps_str}{spec_str}"
         )
 
     design_summary = load_design_context(project_dir, role="pilot")
@@ -408,11 +391,11 @@ def _build_pilot_prompt(
     if design_summary:
         design_section = f"\n\nARCHITECT DOCS SUMMARY:\n{design_summary}\n"
 
-    return f"""You are a tech lead managing a team of coding agents. You drive execution
-by calling the tools available to you. Each tool wraps an internal otto function.
+    return f"""You are a tech lead managing coding agents. You drive execution
+by calling the tools available to you.
 
 PROJECT DIR: {project_dir}
-CONFIG: max_retries={config.get('max_retries', 3)}, test_command={config.get('test_command')}, max_parallel={config.get('max_parallel', 3)}
+CONFIG: max_retries={config.get('max_retries', 3)}, test_command={config.get('test_command')}
 
 PENDING TASKS:
 {chr(10).join(task_summaries)}
@@ -422,58 +405,35 @@ PENDING TASKS:
 PHASE 1: PLAN (mandatory — do this BEFORE calling any execution tools)
 ═══════════════════════════════════════════════════════
 
-After calling get_run_state, output your execution plan in this exact format:
-
-```
-── EXECUTION PLAN ──────────────────────────────────────
-Testgen: holistic (all {len(tasks)} tasks)
-Execution order:
-  Group 1 (parallel): #X, #Y — no shared files
-  Group 2 (serial):   #Z — depends on #X
-Estimated steps: N testgen + M coding + integration gate
-Risk assessment: [any concerns about task overlap, complexity]
-────────────────────────────────────────────────────────
-```
-
-Consider:
-- Which tasks share files? (check depends_on, read task prompts for clues like "modify cli.py")
-- If tasks might modify the same file but have no declared depends_on, run them SERIALLY to be safe
-- Order: simpler/independent tasks first, complex/dependent tasks later
-- For 5+ tasks: identify critical path, parallelize only truly independent work
+After calling get_run_state, plan execution order:
+- Respect depends_on — run dependencies first
+- Run simpler/independent tasks first
+- Tasks that share files should run serially
 
 ═══════════════════════════════════════════════════════
-PHASE 2: EXECUTE (follow your plan, adapt when needed)
+PHASE 2: EXECUTE
 ═══════════════════════════════════════════════════════
 
-1. Generate tests: run_holistic_testgen for consistency. Fall back to run_per_task_testgen if holistic fails.
-2. Run coding: follow your execution plan. run_coding_agents for parallel groups, run_coding_agent for serial.
-3. run_coding_agent / run_coding_agents handle the FULL lifecycle: testgen → code → verify → retry → merge.
-4. If a task fails: read_verify_output, analyze, retry with targeted hint.
-5. After all pass: run_integration_gate.
+For each task: run_coding_agent. The coding agent handles the FULL lifecycle:
+- Reads codebase, plans approach, implements, writes tests, iterates until passing
+- On success: code is committed and merged automatically
 
-When something unexpected happens (failure, merge conflict, test bug), output:
+If a task fails:
+1. read_verify_output to understand why
+2. Retry with run_coding_agent and a targeted hint
+3. If it fails 3 times with different approaches, abort_task
 
-```
-── PLAN UPDATE ─────────────────────────────────────────
-What happened: [describe the failure]
-Decision: [what you're doing differently]
-Updated order: [new execution sequence]
-────────────────────────────────────────────────────────
-```
+SPEC COMPLIANCE CHECK (after each task passes):
+- Read the diff in the result
+- Check EACH spec item: does the implementation actually meet this requirement?
+- Watch for spec-dodging: meeting a constraint by removing the hard feature
+- If a spec item was dodged → retry with feedback explaining the issue
 
-═══════════════════════════════════════════════════════
-PHASE 2.5: SPEC COMPLIANCE CHECK (after each task passes)
-═══════════════════════════════════════════════════════
-
-After a coding agent reports success, BEFORE moving to the next task:
-1. Read the diff from the result
-2. Check EACH spec item: does the implementation actually meet this requirement?
-3. Watch for spec-dodging: meeting a constraint by removing the feature that
-   was slow/hard (e.g., "< 300ms" met by reverting to mock data instead of
-   making the real API faster). This violates the user's intent.
-4. If a spec item was dodged → retry with feedback explaining the issue
-5. If regenerating tests: verify the new tests still cover the hard constraints
-   from the spec. Don't let regeneration weaken the bar.
+DOOM-LOOP DETECTION:
+If you see the same error 2+ times, STOP and change strategy:
+- Different error each time = progress (keep going)
+- Same error repeating = doom loop (change approach or abort)
+- After 3 total failures on a task, abort with structured report
 
 ═══════════════════════════════════════════════════════
 PHASE 3: REPORT
@@ -481,36 +441,32 @@ PHASE 3: REPORT
 
 After all tasks complete or are aborted, call finish_run with a summary.
 
-RULES:
-- PLAN FIRST — never call run_coding_agent before outputting your execution plan
-- The coding agent handles its own retries internally (plans, codes, tests, iterates).
-  You receive pass/fail after it finishes. If it fails, read_verify_output to decide:
-  retry with a strategic hint, regenerate tests, or abort.
-- Do NOT use Edit, Write, Bash, or Read to modify project files directly.
-  You are an orchestrator, not a coder. Use only the otto MCP tools.
-- Never retry with the same approach twice — analyze what went wrong first
-- If a task fails 3 times with different approaches, abort it with abort_task
-- Track progress: call save_run_state(phase, notes) after every major decision
-- When tasks might share files but have no explicit depends_on, default to SERIAL execution
-- After all tasks pass or are aborted, call finish_run to complete
+ESCALATION PROTOCOL (when aborting a task):
+Write a structured report as the abort reason:
+- What was attempted (approaches tried)
+- Why each approach failed
+- What would need to change to make it work
+- Suggested next steps for a human
 
 AVAILABLE TOOLS:
 - get_run_state: Get current status of all tasks
-- run_holistic_testgen: Generate tests for multiple tasks at once
-- run_per_task_testgen: Generate tests for a single task (fallback)
-- run_coding_agent: Run FULL lifecycle for one task (code → verify → merge). Optional hint for retries.
-- run_coding_agents: Run FULL lifecycle for multiple tasks in parallel (with merge)
-- read_verify_output: Read verification output summary for a failed task
-- run_integration_gate: Run cross-feature integration tests
-- run_architect: Re-run architect to refresh conventions
-- abort_task: Give up on a task with a reason
-- save_run_state(phase, notes): Persist state for context recovery (auto-populates task details)
-- finish_run: Signal that the run is complete
-- merge_task: [Advanced] Manual merge with rebase retry
-- run_verify: [Advanced] Manual verification in disposable worktree
-- update_task_status: [Advanced] Manually update task status
+- run_coding_agent: Run FULL lifecycle for one task. Optional hint for retries.
+- read_verify_output: Read verification output for a failed task
+- merge_task: Manual merge with rebase retry
+- abort_task: Give up on a task with structured reason
+- save_run_state: Persist state for session recovery
+- write_task_notes: Write notes about a task for future attempts
+- write_learning: Record a cross-task learning
+- finish_run: Signal run complete
 
-Start by calling get_run_state, then output your execution plan.
+RULES:
+- PLAN FIRST — never call run_coding_agent before planning
+- Do NOT use Edit, Write, Bash, or Read to modify project files directly
+- Never retry with the same approach twice
+- Track progress: call save_run_state after major decisions
+- After all tasks pass or are aborted, call finish_run
+
+Start by calling get_run_state, then plan your execution order.
 """
 
 
@@ -533,7 +489,6 @@ def _build_mcp_server_script(
 """Otto pilot MCP server — exposes otto functions as tools for the pilot agent."""
 import asyncio
 import json
-import shutil
 import subprocess
 import sys
 import time
@@ -546,20 +501,12 @@ CONFIG = json.loads({repr(config_json)})
 TASKS_FILE = Path({repr(str(tasks_file))})
 PROJECT_DIR = Path({repr(str(project_dir))})
 
-# Capture run-start SHA for scoped cross-task review diffs
+# Capture run-start SHA for scoped diffs
 _start_result = subprocess.run(
     ["git", "rev-parse", "HEAD"],
     cwd=PROJECT_DIR, capture_output=True, text=True,
 )
 RUN_START_SHA = _start_result.stdout.strip() if _start_result.returncode == 0 else None
-
-# Track which test files were generated in THIS run (not stale from prior runs)
-_CURRENT_RUN_TESTS: set[str] = set()
-
-# Track pilot-level retry attempts and accumulated cost per task
-# (run_task resets these in tasks.yaml, so we accumulate across calls here)
-_PILOT_ATTEMPTS: dict[str, int] = {{}}
-_PILOT_COST: dict[str, float] = {{}}
 
 # Side-channel for tool results — the display loop reads this file
 _RESULTS_FILE = PROJECT_DIR / "otto_logs" / "pilot_results.jsonl"
@@ -598,7 +545,7 @@ def get_run_state() -> str:
             "status": t.get("status"),
             "attempts": t.get("attempts", 0),
             "depends_on": t.get("depends_on") or [],
-            "rubric_count": len(t.get("rubric", [])),
+            "spec_count": len(t.get("spec", [])),
             "cost_usd": t.get("cost_usd", 0),
             "error": t.get("error"),
         }})
@@ -606,93 +553,8 @@ def get_run_state() -> str:
 
 
 @mcp.tool()
-async def run_holistic_testgen(task_keys: list[str]) -> str:
-    """Generate tests for multiple tasks at once using holistic testgen.
-    Returns JSON mapping task_key to test file path (or null if failed)."""
-    from otto.tasks import load_tasks
-    from otto.testgen import build_blackbox_context, run_holistic_testgen as _holistic
-
-    tasks = load_tasks(TASKS_FILE)
-    selected = [t for t in tasks if t.get("key") in task_keys and t.get("rubric")]
-    if not selected:
-        return json.dumps({{"error": "no tasks with rubrics found for given keys"}})
-
-    all_hints = " ".join(
-        t["prompt"] + " " + " ".join(t.get("rubric", []))
-        for t in selected
-    )
-    ctx = build_blackbox_context(PROJECT_DIR, task_hint=all_hints)
-    results = await _holistic(selected, PROJECT_DIR, ctx, quiet=True)
-
-    # Copy generated files from .git/otto/testgen/ into tests/ and commit
-    # so run_coding_agent can find them and worktrees include them.
-    import shutil as _shutil
-    committed_any = False
-
-    # Commit conftest.py first if holistic testgen created it
-    conftest = PROJECT_DIR / "tests" / "conftest.py"
-    if conftest.exists():
-        subprocess.run(
-            ["git", "add", str(conftest.relative_to(PROJECT_DIR))],
-            cwd=PROJECT_DIR, capture_output=True,
-        )
-        committed_any = True
-
-    for key, path in results.items():
-        if path and path.exists():
-            dest = PROJECT_DIR / "tests" / path.name
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            _shutil.copy2(str(path), str(dest))
-            results[key] = dest
-            _CURRENT_RUN_TESTS.add(key)
-            subprocess.run(
-                ["git", "add", str(dest.relative_to(PROJECT_DIR))],
-                cwd=PROJECT_DIR, capture_output=True,
-            )
-            committed_any = True
-
-    if committed_any:
-        subprocess.run(
-            ["git", "commit", "-m", "otto: holistic testgen (pilot)"],
-            cwd=PROJECT_DIR, capture_output=True,
-        )
-
-    # Validate test quality
-    from otto.test_validation import validate_test_quality
-    for key, path in results.items():
-        if path and Path(str(path)).exists():
-            qw = validate_test_quality(Path(str(path)), PROJECT_DIR)
-            qe = [w for w in qw if w.severity == "error"]
-            if qe:
-                _emit_result("test_quality_warning", {{"key": key, "errors": [str(w) for w in qe]}})
-
-    emit_data = {{k: str(v) if v else None for k, v in results.items()}}
-    _emit_result("run_holistic_testgen", emit_data)
-    return json.dumps(emit_data)
-
-
-@mcp.tool()
-async def run_per_task_testgen(task_key: str) -> str:
-    """Generate tests for a single task. Returns test file path or null."""
-    from otto.tasks import load_tasks
-    from otto.testgen import build_blackbox_context, run_testgen_agent
-
-    tasks = load_tasks(TASKS_FILE)
-    task = next((t for t in tasks if t.get("key") == task_key), None)
-    if not task or not task.get("rubric"):
-        return json.dumps({{"error": f"task {{task_key}} not found or has no rubric"}})
-
-    rubric = task["rubric"]
-    hint = task["prompt"] + "\\n" + "\\n".join(rubric)
-    ctx = build_blackbox_context(PROJECT_DIR, task_hint=hint)
-    path, _, _tg_cost = await run_testgen_agent(rubric, task_key, ctx, PROJECT_DIR, quiet=True)
-    return json.dumps({{"test_file": str(path) if path else None}})
-
-
-@mcp.tool()
 async def run_coding_agent(task_key: str, hint: str = "") -> str:
-    """Run a coding agent for one task. Optional hint for retry guidance.
-    Returns JSON with success status and cost."""
+    """Run a coding agent for one task. Optional hint for retry guidance."""
     from otto.runner import run_task
     from otto.tasks import load_tasks, update_task
 
@@ -705,41 +567,15 @@ async def run_coding_agent(task_key: str, hint: str = "") -> str:
         update_task(TASKS_FILE, task_key, feedback=hint)
         task["feedback"] = hint
 
-    # Track pilot-level attempts (run_task resets attempts in tasks.yaml)
-    _PILOT_ATTEMPTS[task_key] = _PILOT_ATTEMPTS.get(task_key, 0) + 1
-
-    # Use pre-generated holistic test only if it was generated in THIS run
-    pre_test = None
-    if task_key in _CURRENT_RUN_TESTS:
-        test_file = PROJECT_DIR / "tests" / f"test_otto_{{task_key}}.py"
-        if test_file.exists():
-            pre_test = test_file
-
-    # Build sibling test exclusion list — other tasks' tests that can't pass yet
-    from pathlib import Path as _Path
-    sibling_tests = []
-    for other_key in _CURRENT_RUN_TESTS:
-        if other_key != task_key:
-            sibling_path = _Path("tests") / f"test_otto_{{other_key}}.py"
-            sibling_tests.append(sibling_path)
-
-    # Capture pre-task SHA for diff
     pre_sha = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=PROJECT_DIR, capture_output=True, text=True,
     ).stdout.strip()
 
-    # Coding agent handles its own retries (plans, codes, tests, iterates)
-    success = await run_task(
-        task, CONFIG, PROJECT_DIR, TASKS_FILE,
-        pre_generated_test=pre_test,
-        sibling_test_files=sibling_tests or None,
-    )
+    success = await run_task(task, CONFIG, PROJECT_DIR, TASKS_FILE)
 
-    # Build diff summary
     diff_summary = _build_diff_summary(PROJECT_DIR, pre_sha)
 
-    # Read verify output for failures
     verify_snippet = ""
     if not success:
         log_dir = PROJECT_DIR / "otto_logs" / task_key
@@ -747,137 +583,22 @@ async def run_coding_agent(task_key: str, hint: str = "") -> str:
             verify_logs = sorted(log_dir.glob("attempt-*-verify.log"), reverse=True)
             if verify_logs:
                 content = verify_logs[0].read_text()
-                # Extract last 20 lines (most useful part)
                 lines = content.strip().splitlines()
                 verify_snippet = "\\n".join(lines[-20:])
 
-    # Reload to get updated cost/status
     tasks = load_tasks(TASKS_FILE)
     updated = next((t for t in tasks if t.get("key") == task_key), {{}})
-
-    # Accumulate cost across pilot-level retries (run_task resets cost each call)
-    new_cost = updated.get("cost_usd", 0)
-    _PILOT_COST[task_key] = _PILOT_COST.get(task_key, 0) + new_cost
-    accumulated_cost = _PILOT_COST[task_key]
-    pilot_attempts = _PILOT_ATTEMPTS[task_key]
-
-    # Write back accumulated cost and pilot-level attempts
-    update_task(TASKS_FILE, task_key,
-                cost_usd=accumulated_cost, attempts=pilot_attempts)
 
     result_data = {{
         "success": success,
         "status": updated.get("status"),
-        "cost_usd": accumulated_cost,
+        "cost_usd": updated.get("cost_usd", 0),
         "error": updated.get("error"),
         "diff": diff_summary,
         "verify_output": verify_snippet,
     }}
     _emit_result("run_coding_agent", result_data)
     return json.dumps(result_data)
-
-
-@mcp.tool()
-async def run_coding_agents(task_keys: list[str]) -> str:
-    """Run coding agents for multiple tasks in parallel.
-    Returns JSON with per-task results."""
-    from otto.runner import run_task, _setup_task_worktree, _teardown_task_worktree, merge_to_default
-    from otto.tasks import load_tasks, update_task
-
-    tasks = load_tasks(TASKS_FILE)
-    selected = [t for t in tasks if t.get("key") in task_keys]
-
-    default_branch = CONFIG.get("default_branch", "main")
-
-    # Ensure we're on the default branch before creating worktrees
-    subprocess.run(
-        ["git", "checkout", default_branch],
-        cwd=PROJECT_DIR, capture_output=True,
-    )
-
-    base_sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=PROJECT_DIR, capture_output=True, text=True, check=True,
-    ).stdout.strip()
-
-    # Build pre-generated test map and sibling exclusions
-    pre_tests = {{}}
-    for t in selected:
-        key = t.get("key")
-        if key in _CURRENT_RUN_TESTS:
-            tf = PROJECT_DIR / "tests" / f"test_otto_{{key}}.py"
-            if tf.exists():
-                pre_tests[key] = tf
-
-    async def _run_one(t, wt_dir, pre_test, siblings):
-        # Pilot controls retries — run single attempt, pilot decides retry strategy
-        single_attempt_t = dict(t)
-        single_attempt_t["max_retries"] = 0
-        success = await run_task(
-            single_attempt_t, CONFIG, PROJECT_DIR, TASKS_FILE,
-            work_dir=wt_dir,
-            pre_generated_test=pre_test,
-            sibling_test_files=siblings,
-        )
-        return {{"success": success, "status": "passed" if success else "failed"}}
-
-    results = {{}}
-    coros = []
-    for t in selected:
-        key = t.get("key")
-        wt_dir = _setup_task_worktree(PROJECT_DIR, key, base_sha)
-        # Remap pre-generated test into worktree
-        wt_pre_test = None
-        if key in pre_tests:
-            rel = pre_tests[key].relative_to(PROJECT_DIR)
-            wt_test_path = wt_dir / rel
-            if wt_test_path.exists():
-                wt_pre_test = wt_test_path
-        # Build sibling test file list for exclusion
-        sibling_paths = [
-            p.relative_to(PROJECT_DIR)
-            for k, p in pre_tests.items()
-            if k != key
-        ]
-        coros.append(_run_one(t, wt_dir, wt_pre_test, sibling_paths or None))
-
-    parallel_results = await asyncio.gather(*coros, return_exceptions=True)
-
-    # Sequential merge for successful tasks (same pattern as runner.run_all)
-    for i, result in enumerate(parallel_results):
-        t = selected[i]
-        _teardown_task_worktree(PROJECT_DIR, t["key"])
-        if isinstance(result, Exception):
-            results[t["key"]] = {{"success": False, "error": str(result)}}
-        else:
-            if result.get("success"):
-                # Merge with rebase retry
-                merged = _merge_task_branch_to_default(
-                    PROJECT_DIR, t["key"], default_branch,
-                )
-                if not merged:
-                    update_task(TASKS_FILE, t["key"],
-                                status="failed",
-                                error="merge conflict after parallel execution")
-                    results[t["key"]] = {{"success": False, "error": "merge conflict"}}
-                else:
-                    results[t["key"]] = result
-            else:
-                results[t["key"]] = result
-        # Clean up worktree branch if merge didn't delete it
-        subprocess.run(
-            ["git", "branch", "-D", f"otto/{{t['key']}}"],
-            cwd=PROJECT_DIR, capture_output=True,
-        )
-
-    # Ensure we're back on the default branch after merging
-    subprocess.run(
-        ["git", "checkout", default_branch],
-        cwd=PROJECT_DIR, capture_output=True,
-    )
-
-    _emit_result("run_coding_agents", results)
-    return json.dumps(results)
 
 
 def _build_diff_summary(project_dir, pre_sha, max_lines_per_file=20, max_files=5):
@@ -974,38 +695,6 @@ def _merge_task_branch_to_default(project_dir, key, default_branch):
 
 
 @mcp.tool()
-def run_verify(task_key: str) -> str:
-    """Run verification for a task in a disposable worktree.
-    Returns JSON with pass/fail and tier results."""
-    from otto.verify import run_verification
-    from otto.tasks import load_tasks
-
-    tasks = load_tasks(TASKS_FILE)
-    task = next((t for t in tasks if t.get("key") == task_key), None)
-    if not task:
-        return json.dumps({{"error": f"task {{task_key}} not found"}})
-
-    candidate_sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=PROJECT_DIR, capture_output=True, text=True, check=True,
-    ).stdout.strip()
-
-    result = run_verification(
-        project_dir=PROJECT_DIR,
-        candidate_sha=candidate_sha,
-        test_command=CONFIG.get("test_command"),
-        verify_cmd=task.get("verify"),
-        timeout=CONFIG.get("verify_timeout", 300),
-    )
-    tiers = [
-        {{"tier": t.tier, "passed": t.passed, "skipped": t.skipped,
-         "output_preview": t.output[:500] if t.output else ""}}
-        for t in result.tiers
-    ]
-    return json.dumps({{"passed": result.passed, "tiers": tiers}})
-
-
-@mcp.tool()
 def read_verify_output(task_key: str) -> str:
     """Read verification output summary for a task. Returns the last verify log."""
     log_dir = PROJECT_DIR / "otto_logs" / task_key
@@ -1031,64 +720,6 @@ def merge_task(task_key: str) -> str:
     default_branch = CONFIG.get("default_branch", "main")
     success = _merge_task_branch_to_default(PROJECT_DIR, task_key, default_branch)
     return json.dumps({{"success": success}})
-
-
-@mcp.tool()
-def update_task_status(task_key: str, status: str, error: str = "") -> str:
-    """Update a task's status and optional error message."""
-    from otto.tasks import update_task
-    updates = {{"status": status}}
-    if error:
-        updates["error"] = error
-    update_task(TASKS_FILE, task_key, **updates)
-    return json.dumps({{"ok": True}})
-
-
-@mcp.tool()
-async def run_integration_gate_tool() -> str:
-    """Run cross-feature integration tests on all passed tasks.
-    Returns JSON with pass/fail status."""
-    from otto.runner import _run_integration_gate
-    from otto.tasks import load_tasks
-
-    tasks = load_tasks(TASKS_FILE)
-    passed = [t for t in tasks if t.get("status") == "passed"]
-    if len(passed) < 2:
-        return json.dumps({{"skipped": True, "reason": "fewer than 2 passed tasks"}})
-
-    # Retry once on API/transient errors
-    try:
-        result = await _run_integration_gate(
-            passed, CONFIG, PROJECT_DIR, run_start_sha=RUN_START_SHA,
-        )
-    except Exception as exc:
-        import traceback
-        print(f"Integration gate error (retrying in 5s): {{exc}}", file=sys.stderr)
-        traceback.print_exc(file=sys.stderr)
-        await asyncio.sleep(5)
-        try:
-            result = await _run_integration_gate(
-                passed, CONFIG, PROJECT_DIR, run_start_sha=RUN_START_SHA,
-            )
-        except Exception as exc2:
-            print(f"Integration gate retry also failed: {{exc2}}", file=sys.stderr)
-            return json.dumps({{"passed": False, "skipped": False, "error": str(exc2)}})
-
-    gate_data = {{"passed": result, "skipped": result is None}}
-    _emit_result("run_integration_gate_tool", gate_data)
-    return json.dumps(gate_data)
-
-
-@mcp.tool()
-async def run_architect_tool() -> str:
-    """Re-run the architect agent to refresh conventions and docs."""
-    from otto.architect import run_architect_agent
-    from otto.tasks import load_tasks
-
-    tasks = load_tasks(TASKS_FILE)
-    pending = [t for t in tasks if t.get("status") in ("pending", "running")]
-    result = await run_architect_agent(pending, PROJECT_DIR, quiet=True)
-    return json.dumps({{"success": result is not None}})
 
 
 @mcp.tool()
@@ -1131,6 +762,26 @@ def save_run_state(phase: str, notes: str = "") -> str:
     state_dir = PROJECT_DIR / "otto_arch"
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "run-state.json").write_text(json.dumps(state, indent=2))
+    return json.dumps({{"ok": True}})
+
+
+@mcp.tool()
+def write_task_notes(task_key: str, notes: str) -> str:
+    """Write notes about a task for future attempts."""
+    notes_dir = PROJECT_DIR / "otto_arch" / "task-notes"
+    notes_dir.mkdir(parents=True, exist_ok=True)
+    (notes_dir / f"{{task_key}}.md").write_text(notes)
+    return json.dumps({{"ok": True}})
+
+
+@mcp.tool()
+def write_learning(learning: str) -> str:
+    """Record a cross-task learning."""
+    learnings_file = PROJECT_DIR / "otto_arch" / "learnings.md"
+    learnings_file.parent.mkdir(parents=True, exist_ok=True)
+    content = learnings_file.read_text() if learnings_file.exists() else "# Learnings\\n\\n"
+    content += f"- {{learning}}\\n"
+    learnings_file.write_text(content)
     return json.dumps({{"ok": True}})
 
 
@@ -1198,6 +849,12 @@ async def run_piloted(
             cwd=project_dir, capture_output=True,
         )
 
+        # Dirty-tree protection — stash or abort
+        from otto.runner import check_clean_tree
+        if not check_clean_tree(project_dir):
+            print(f"{_RED}✗ Working tree is dirty — fix before running otto{_RESET}", flush=True)
+            return 2
+
         # Baseline check
         test_command = config.get("test_command")
         if test_command:
@@ -1227,58 +884,9 @@ async def run_piloted(
             print(f"{_DIM}No pending tasks{_RESET}", flush=True)
             return 0
 
-        # Architect phase
+        # Inject dependencies from file-plan.md if otto_arch exists
         if not config.get("no_architect", False) and len(pending) >= 2:
-            from otto.architect import run_architect_agent, is_stale, parse_file_plan
-            arch_dir = project_dir / "otto_arch"
-
-            should_run = not arch_dir.exists()
-            if arch_dir.exists() and is_stale(project_dir):
-                should_run = True
-            # Always run if file-plan.md is missing (needed for dependency injection)
-            if arch_dir.exists() and not (arch_dir / "file-plan.md").exists():
-                should_run = True
-
-            if should_run:
-                print(flush=True)
-                _log_info("Architect — analyzing codebase")
-                arch_spinner = _Spinner("Architect analyzing")
-                arch_spinner.start()
-                try:
-                    arch_path = await run_architect_agent(pending, project_dir, quiet=True)
-                    arch_time = arch_spinner.stop()
-                    if arch_path:
-                        # Show summary of what was produced
-                        produced = sorted(f.name for f in arch_path.iterdir() if not f.name.startswith("."))
-                        print(f"  {_GREEN}✓{_RESET} Architecture docs ready  {_DIM}{arch_time}{_RESET}", flush=True)
-                        print(f"    {_DIM}{', '.join(produced)}{_RESET}", flush=True)
-                        has_file_plan = "file-plan.md" in produced
-                        if has_file_plan:
-                            # Show file-plan summary
-                            fp_content = (arch_path / "file-plan.md").read_text()
-                            shared_files = set()
-                            for line in fp_content.splitlines():
-                                stripped = line.strip()
-                                if stripped.startswith("- ") and "/" in stripped:
-                                    shared_files.add(stripped.lstrip("- ").strip())
-                            if shared_files:
-                                print(f"    {_DIM}Predicted shared files: {', '.join(sorted(shared_files)[:5])}{_RESET}", flush=True)
-                        # Commit conftest.py if generated
-                        conftest = project_dir / "tests" / "conftest.py"
-                        if conftest.exists():
-                            subprocess.run(
-                                ["git", "add", str(conftest.relative_to(project_dir))],
-                                cwd=project_dir, capture_output=True,
-                            )
-                            subprocess.run(
-                                ["git", "commit", "-m", "otto: architect conftest.py"],
-                                cwd=project_dir, capture_output=True,
-                            )
-                except Exception as e:
-                    arch_spinner.stop()
-                    _log_warn(f"Architect failed: {e} — continuing")
-
-            # Inject dependencies from file-plan.md
+            from otto.architect import parse_file_plan
             arch_deps = parse_file_plan(project_dir)
             if arch_deps:
                 tasks = load_tasks(tasks_file)
@@ -1326,7 +934,7 @@ async def run_piloted(
 
             print(flush=True)
             _log_info("Pilot taking control — LLM-driven execution")
-            print(f"  {_DIM}The pilot will drive testgen → coding → verify → merge{_RESET}", flush=True)
+            print(f"  {_DIM}The pilot will drive coding → verify → merge{_RESET}", flush=True)
             print(flush=True)
 
             # Run pilot agent — three-tier output display
