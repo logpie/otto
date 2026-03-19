@@ -703,11 +703,20 @@ async def run_task(
                     f"{design_ctx}\n"
                 )
 
-            # Include spec items if available
+            # Include spec items if available — classified as verifiable or visual
             spec_section = ""
             if spec:
-                spec_items = "\n".join(f"  {i+1}. {item}" for i, item in enumerate(spec))
-                spec_section = f"\n\nACCEPTANCE SPEC (these are the hard requirements — meet ALL of them):\n{spec_items}\n"
+                from otto.tasks import spec_text, spec_is_verifiable, spec_test_hint
+                spec_lines = []
+                for i, item in enumerate(spec):
+                    text = spec_text(item)
+                    if spec_is_verifiable(item):
+                        hint = spec_test_hint(item)
+                        hint_str = f"\n     Test hint: {hint}" if hint else ""
+                        spec_lines.append(f"  {i+1}. [verifiable] {text}{hint_str}")
+                    else:
+                        spec_lines.append(f"  {i+1}. [visual] {text}")
+                spec_section = f"\n\nACCEPTANCE SPEC (meet ALL of them):\n" + "\n".join(spec_lines) + "\n"
 
             # Persistent memory
             learnings_file = project_dir / "otto_arch" / "learnings.md"
@@ -818,9 +827,12 @@ BETTER: Cache + prefetch + parallel requests + stale-while-revalidate.
 <completion_check>
 Before you finish, verify against the spec:
 1. Re-read each spec item.
-2. For each, identify the HARDEST case (not the easiest).
-3. Confirm your implementation handles that case.
-4. If any item is only partially met, keep working or document the gap.
+2. For each [verifiable] item: name the specific test that proves it.
+   If no test exists for a verifiable item, write one now.
+3. For each [verifiable] item: test the HARDEST case, not the easiest.
+4. For [visual] items: implement your best judgment, no test required.
+5. If any verifiable item can't be met after trying 3+ different approaches,
+   document what was tried in task notes. Do not silently skip it.
 </completion_check>"""
 
                 agent_opts = ClaudeAgentOptions(

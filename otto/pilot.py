@@ -423,9 +423,12 @@ If a task fails:
 
 SPEC COMPLIANCE CHECK (after each task passes):
 - Read the diff in the result
-- Check EACH spec item: does the implementation actually meet this requirement?
-- Watch for spec-dodging: meeting a constraint by removing the hard feature
-- If a spec item was dodged → retry with feedback explaining the issue
+- For [verifiable] spec items: confirm a test exists in the diff that exercises it.
+  If no test found for a verifiable item, retry: "missing test for spec item #N"
+- For [visual] spec items: review the diff for reasonable implementation.
+- Watch for spec-dodging: meeting a constraint by only handling the easy case
+  (e.g., "<300ms" met by only measuring cache hits, not cold fetches)
+- If a spec item was dodged → retry with specific feedback
 
 DOOM-LOOP DETECTION:
 If you see the same error 2+ times, STOP and change strategy:

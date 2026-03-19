@@ -12,22 +12,56 @@ class TestParseSpecOutput:
     def test_numbered_list(self):
         text = "1. criterion one\n2. criterion two\n3. criterion three"
         result = _parse_spec_output(text)
-        assert result == ["criterion one", "criterion two", "criterion three"]
+        assert len(result) == 3
+        assert result[0] == {"text": "criterion one", "verifiable": True}
+        assert result[2] == {"text": "criterion three", "verifiable": True}
 
     def test_bullet_list(self):
         text = "- criterion one\n- criterion two"
         result = _parse_spec_output(text)
-        assert result == ["criterion one", "criterion two"]
+        assert len(result) == 2
+        assert result[0]["text"] == "criterion one"
 
     def test_mixed_format(self):
         text = "1) first\n* second\n- third"
         result = _parse_spec_output(text)
-        assert result == ["first", "second", "third"]
+        assert len(result) == 3
+        assert result[0]["text"] == "first"
+        assert result[2]["text"] == "third"
 
     def test_skips_empty_lines(self):
         text = "1. first\n\n2. second\n\n"
         result = _parse_spec_output(text)
-        assert result == ["first", "second"]
+        assert len(result) == 2
+
+    def test_verifiable_tag(self):
+        text = "[verifiable] search is case-insensitive | hint: test mixed case"
+        result = _parse_spec_output(text)
+        assert len(result) == 1
+        assert result[0]["text"] == "search is case-insensitive"
+        assert result[0]["verifiable"] is True
+        assert result[0]["test_hint"] == "test mixed case"
+
+    def test_visual_tag(self):
+        text = "[visual] Apple Weather-style gradient backgrounds"
+        result = _parse_spec_output(text)
+        assert len(result) == 1
+        assert result[0]["text"] == "Apple Weather-style gradient backgrounds"
+        assert result[0]["verifiable"] is False
+        assert "test_hint" not in result[0]
+
+    def test_mixed_classified(self):
+        text = (
+            "1. [verifiable] latency <300ms | hint: measure and assert\n"
+            "2. [visual] smooth transitions\n"
+            "3. plain criterion without tag"
+        )
+        result = _parse_spec_output(text)
+        assert len(result) == 3
+        assert result[0]["verifiable"] is True
+        assert result[0]["test_hint"] == "measure and assert"
+        assert result[1]["verifiable"] is False
+        assert result[2]["verifiable"] is True  # default
 
 
 class TestGenerateSpec:
@@ -51,7 +85,7 @@ class TestGenerateSpec:
         mock_query.side_effect = fake_query
         spec = generate_spec("Add search", tmp_path)
         assert len(spec) == 3
-        assert "case-insensitive" in spec[0]
+        assert "case-insensitive" in spec[0]["text"]
 
     @patch("otto.spec.query")
     def test_returns_empty_on_failure(self, mock_query, tmp_path):

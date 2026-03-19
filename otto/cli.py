@@ -202,9 +202,16 @@ def add(prompt, verify, max_retries, import_file, no_spec):
             sys.exit(1)
         if spec_items:
             spec = spec_items
-            click.echo(f"{_G}✓{_0} Spec ({_B}{len(spec_items)}{_0} criteria):")
+            from otto.tasks import spec_text, spec_is_verifiable
+            verifiable_count = sum(1 for i in spec_items if spec_is_verifiable(i))
+            visual_count = len(spec_items) - verifiable_count
+            label = f"{verifiable_count} verifiable"
+            if visual_count:
+                label += f", {visual_count} visual"
+            click.echo(f"{_G}✓{_0} Spec ({_B}{len(spec_items)}{_0} criteria — {label}):")
             for item in spec_items:
-                click.echo(f"  {_D}-{_0} {item}")
+                tag = f"{_G}✓{_0}" if spec_is_verifiable(item) else f"{_C}◉{_0}"
+                click.echo(f"  {tag} {spec_text(item)}")
         else:
             click.echo(f"{_Y}⚠{_0} Spec generation returned empty — task not created.", err=True)
             click.echo(f"{_D}Retry or use --no-spec to skip spec generation.{_0}", err=True)

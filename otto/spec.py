@@ -49,34 +49,65 @@ def _write_log(path: Path, lines: list[str]) -> None:
 _LIST_PREFIX_RE = re.compile(r"^\s*(?:\d+[.)]\s*|[-*]\s+)")
 
 
-def _parse_spec_output(text: str) -> list[str]:
-    """Parse LLM output into a list of spec criteria strings.
+def _parse_spec_output(text: str) -> list:
+    """Parse LLM output into a list of spec items.
 
-    Strips numbering (1. , 1) ) and bullets (- , * ) prefixes.
-    Skips empty lines.
+    Each item is either a plain string (backward compat) or a dict with
+    {text, verifiable, test_hint}.
+
+    Format per line (after stripping numbering):
+      [verifiable] description text | hint: test strategy
+      [visual] description text
+      plain description text  (treated as verifiable, no hint)
     """
-    criteria = []
+    _VERIFIABLE_RE = re.compile(r"^\[verifiable\]\s*", re.IGNORECASE)
+    _VISUAL_RE = re.compile(r"^\[visual\]\s*", re.IGNORECASE)
+    _HINT_RE = re.compile(r"\s*\|\s*hint:\s*", re.IGNORECASE)
+
+    items = []
     for line in text.splitlines():
         stripped = _LIST_PREFIX_RE.sub("", line).strip()
+        if not stripped:
+            continue
+
+        # Check for [visual] prefix
+        if _VISUAL_RE.match(stripped):
+            text_part = _VISUAL_RE.sub("", stripped).strip()
+            if text_part:
+                items.append({"text": text_part, "verifiable": False})
+            continue
+
+        # Check for [verifiable] prefix
+        if _VERIFIABLE_RE.match(stripped):
+            stripped = _VERIFIABLE_RE.sub("", stripped).strip()
+
+        # Check for | hint: suffix
+        hint = ""
+        hint_match = _HINT_RE.split(stripped, maxsplit=1)
+        if len(hint_match) == 2:
+            stripped = hint_match[0].strip()
+            hint = hint_match[1].strip()
+
         if stripped:
-            criteria.append(stripped)
-    return criteria
+            item: dict = {"text": stripped, "verifiable": True}
+            if hint:
+                item["test_hint"] = hint
+            items.append(item)
+
+    return items
 
 
-def generate_spec(prompt: str, project_dir: Path) -> list[str]:
+def generate_spec(prompt: str, project_dir: Path) -> list:
     """Generate a spec for a single task using an agentic QA engineer.
 
-    The agent explores the project (reads source files, runs CLI --help,
-    checks existing tests) then writes acceptance criteria grounded in
-    what it actually observed.
-
-    Returns a list of spec criterion strings, or empty list on failure.
+    Returns a list of spec items (dicts with text/verifiable/test_hint),
+    or empty list on failure.
     """
     spec, _cost = asyncio.run(_run_spec_agent(prompt, project_dir))
     return spec
 
 
-async def _run_spec_agent(prompt: str, project_dir: Path) -> list[str]:
+async def _run_spec_agent(prompt: str, project_dir: Path) -> list:
     """Run the spec generation agent.
 
     Uses a structured system prompt for constraint faithfulness,
@@ -114,10 +145,24 @@ WHY:  Preserves the exact threshold, only clarifies how to measure it.
 </constraint_rules>
 
 <output_rules>
-- 5-8 testable acceptance criteria. Hard constraints first, then supporting requirements.
+- 5-8 acceptance criteria. Hard constraints first, then supporting requirements.
 - Each item describes BEHAVIOR, not implementation. Focus on what must be true, not how.
 - No bikeshedding (formatting, unit labels, value ranges unless user specified them).
-- Write a numbered list. One criterion per line. No prose.
+
+CLASSIFY each item:
+- [verifiable] — can be proven by an automated test (measurable, binary, functional).
+  Add "| hint: how to test it" after the description.
+- [visual] — subjective, requires human/LLM judgment (style, UX, aesthetics).
+
+FORMAT per line:
+  [verifiable] Search is case-insensitive | hint: search "HELLO" and "hello", verify same results
+  [verifiable] E2E latency is under 300ms | hint: measure from fetch start to render, assert <300
+  [visual] UI uses Apple Weather-style gradient backgrounds
+  [verifiable] python -m bookmarks works as entry point | hint: subprocess run, assert exit code 0
+
+Most items should be [verifiable]. Only use [visual] for genuinely subjective criteria
+(appearance, style, "feels smooth"). Performance thresholds, functional behavior,
+error handling, API contracts — all [verifiable].
 </output_rules>
 
 <compliance_check>

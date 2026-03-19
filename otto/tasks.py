@@ -12,6 +12,27 @@ from typing import Any
 import yaml
 
 
+def spec_text(item) -> str:
+    """Extract text from a spec item (either plain string or dict with 'text' key)."""
+    if isinstance(item, dict):
+        return item.get("text", "")
+    return str(item)
+
+
+def spec_is_verifiable(item) -> bool:
+    """Check if a spec item is verifiable (default True for plain strings)."""
+    if isinstance(item, dict):
+        return item.get("verifiable", True)
+    return True
+
+
+def spec_test_hint(item) -> str:
+    """Get the test hint for a spec item, or empty string."""
+    if isinstance(item, dict):
+        return item.get("test_hint", "")
+    return ""
+
+
 def generate_key(existing_keys: set[str]) -> str:
     """Generate a unique 12-char hex key."""
     while True:
@@ -64,7 +85,7 @@ def add_task(
     prompt: str,
     verify: str | None = None,
     max_retries: int | None = None,
-    spec: list[str] | None = None,
+    spec: list | None = None,
 ) -> dict[str, Any]:
     """Add a new task to tasks.yaml. Thread-safe via flock."""
     def _add(tasks):
