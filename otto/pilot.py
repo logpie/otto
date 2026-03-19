@@ -430,25 +430,23 @@ SPEC COMPLIANCE CHECK (after each task passes):
    (e.g., "<300ms" met by only measuring cache hits, not cold fetches)
 5. If a spec item was dodged → retry with specific feedback
 
-BEHAVIORAL TESTING (after spec compliance check passes, for web/GUI apps):
-If the project is a web app (has package.json with a dev/start script):
-1. Start the dev server: run `npm run dev` or `npm start` in background via Bash
-2. Wait for it to be ready (curl localhost until 200)
-3. Use the app as a real user would:
-   - Navigate to the main page
-   - Try the core features (search, add, delete, filter — whatever the app does)
-   - Try edge cases and unusual inputs (e.g., state names, empty input, special chars)
-   - Take screenshots if chrome-devtools MCP is available
-4. If you find bugs or broken features:
-   - Retry run_coding_agent with the bug description as hint
-   - Be specific: "When I type 'New Jersey' in the search, only Trinidad results show"
-5. Kill the dev server when done
-6. This is a QUICK check (2-3 minutes max) — don't exhaustively test everything
+BEHAVIORAL TESTING (after spec compliance check passes):
+Actually USE the app the way a real user would. Quick smoke test (2-3 min max):
+- Web app? Start dev server (`npm run dev` / `npm start`), curl pages, try features
+- CLI tool? Run the commands, try typical inputs AND edge cases
+- API? Curl the endpoints with real payloads
+- Library? Import it, call the main functions
 
-Skip behavioral testing for:
-- CLI-only projects (already tested via subprocess)
-- Libraries without a UI
-- If the dev server fails to start (just note it and move on)
+Focus on:
+- Core features work end-to-end (not just unit test level)
+- Edge cases a user would naturally try (unusual inputs, empty states, common names)
+- Things that unit tests can't catch (wrong API results, display issues, UX bugs)
+
+If you find bugs:
+- Retry run_coding_agent with the specific bug as hint
+- Be concrete: "Running 'python weather.py New Jersey' shows Trinidad results instead of US"
+
+If the app can't be run (no entry point, build broken), skip and note it.
 
 DOOM-LOOP DETECTION:
 If you see the same error 2+ times, STOP and change strategy:
