@@ -22,11 +22,15 @@ except ImportError:
     ToolUseBlock = None  # type: ignore[assignment,misc]
     ToolResultBlock = None  # type: ignore[assignment,misc]
 
-# Optional: AgentDefinition for subagents (may not exist in older SDK versions)
+# Optional imports (may not exist in older SDK versions)
 try:
     from claude_agent_sdk.types import AgentDefinition
 except (ImportError, AttributeError):
     AgentDefinition = None  # type: ignore[assignment,misc]
+try:
+    from claude_agent_sdk.types import ThinkingBlock
+except (ImportError, AttributeError):
+    ThinkingBlock = None  # type: ignore[assignment,misc]
 
 from otto.config import git_meta_dir, detect_test_command
 from otto.display import _truncate_at_word
@@ -729,23 +733,19 @@ APPROACH:
 1. PLAN — read the spec and codebase. Can current architecture meet ALL requirements?
    If not, note what needs to change and design an approach that CAN meet them.
 2. IMPLEMENT your plan.
-3. WRITE TESTS that verify each spec item.
+3. WRITE TESTS that verify each spec item — test the hardest case, not just the happy path.
 4. RUN TESTS and fix failures. Iterate until all pass.
-5. Write notes to otto_arch/task-notes/{key}.md:
+5. VERIFY — re-read each spec item. For each, ask: does my implementation handle the
+   hardest case? If a spec says "<300ms", does it work for cold fetches, not just cache hits?
+6. Write notes to otto_arch/task-notes/{key}.md:
    - What approach you took and why
    - What you learned about the codebase
    - Any gotchas for future tasks
+   - Any spec items that couldn't be fully met and why
 
-GRIND:
-- You are running AUTONOMOUSLY. Do NOT ask questions or wait for input.
-  Make the best decision yourself and keep going.
-- If your first approach doesn't meet a hard constraint, don't give up —
-  rethink the architecture.
-- List at least 3 alternative approaches before concluding anything is infeasible.
-- NEVER meet a constraint by removing the feature that was hard to optimize.
-- NEVER weaken the spec.
-- Create a .gitignore if the project needs one (e.g., node_modules/, __pycache__/,
-  .venv/, build/, dist/). Only tracked files get committed.
+If your first approach doesn't meet a hard constraint, don't give up —
+rethink the architecture. Try at least 3 different approaches before
+concluding anything is infeasible.
 
 {learnings_section}
 {task_notes_section}
@@ -777,6 +777,52 @@ GRIND:
         # Run agent + build candidate + verify — catch infrastructure failures
         try:
             try:
+                _coding_system_prompt = """\
+<role>
+You are an autonomous coding agent. You implement features, fix bugs, and write tests.
+Your work is verified externally — you must meet the acceptance spec exactly.
+</role>
+
+<spec_rules>
+SPEC COMPLIANCE — your highest priority:
+- The acceptance spec is the contract. Meet EVERY item, not just the easy ones.
+- A spec item like "<300ms latency" means ALL requests, not just cached/warm ones.
+  If you only optimize the fast path, you haven't met the spec.
+- When you think a constraint is met, test the HARDEST case, not the easiest.
+  If "<300ms" works for cache hits but not cold fetches, it's not met.
+- If a constraint is genuinely impossible (e.g., network latency to external API),
+  implement the best feasible approach AND write a note explaining what was tried
+  and why the hard limit can't be met. Do not silently declare success.
+
+SPEC-DODGING (never do this):
+- Meeting a performance constraint by only measuring the fast path
+- Meeting a feature constraint by stubbing/mocking instead of implementing
+- Meeting a constraint by removing the thing that was hard to optimize
+- Declaring a constraint met when only some cases pass
+
+<example type="violation">
+Spec: "e2e latency <300ms"
+BAD: Add caching, measure cache hits at <1ms, declare spec met.
+WHY: Cold fetches still take 500ms+. Only the easy case was solved.
+BETTER: Cache + prefetch + parallel requests + stale-while-revalidate.
+         If still >300ms on cold fetch, explain what was tried in task notes.
+</example>
+</spec_rules>
+
+<autonomy>
+- You are running AUTONOMOUSLY. Do NOT ask questions or wait for input.
+- Make decisions yourself. If unsure, pick the best option and document why.
+- Create a .gitignore if the project needs one (node_modules/, __pycache__/, etc.)
+</autonomy>
+
+<completion_check>
+Before you finish, verify against the spec:
+1. Re-read each spec item.
+2. For each, identify the HARDEST case (not the easiest).
+3. Confirm your implementation handles that case.
+4. If any item is only partially met, keep working or document the gap.
+</completion_check>"""
+
                 agent_opts = ClaudeAgentOptions(
                     permission_mode="bypassPermissions",
                     cwd=str(effective_dir),
@@ -784,6 +830,7 @@ GRIND:
                     setting_sources=["user", "project"],
                     env=_subprocess_env(),
                     effort=config.get("effort", "high"),
+                    system_prompt=_coding_system_prompt,
                 )
                 if config.get("model"):
                     agent_opts.model = config["model"]
@@ -818,7 +865,11 @@ GRIND:
                         result_msg = message
                     elif AssistantMessage and isinstance(message, AssistantMessage):
                         for block in message.content:
-                            if TextBlock and isinstance(block, TextBlock) and block.text:
+                            if ThinkingBlock and isinstance(block, ThinkingBlock):
+                                thinking = getattr(block, "thinking", "")
+                                if thinking:
+                                    agent_log_lines.append(f"[thinking] {thinking}")
+                            elif TextBlock and isinstance(block, TextBlock) and block.text:
                                 if not parallel_mode:
                                     print(block.text, flush=True)
                                 agent_log_lines.append(block.text)

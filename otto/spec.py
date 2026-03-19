@@ -15,7 +15,34 @@ except ImportError:
     TextBlock = None  # type: ignore[assignment,misc]
     ToolUseBlock = None  # type: ignore[assignment,misc]
 
+try:
+    from claude_agent_sdk.types import ThinkingBlock
+except (ImportError, AttributeError):
+    ThinkingBlock = None  # type: ignore[assignment,misc]
+
 from otto.display import print_agent_tool
+
+
+def _tool_use_summary(block) -> str:
+    """One-line summary of a tool use for logging."""
+    inputs = block.input or {}
+    name = block.name
+    if name in ("Read", "Glob", "Grep"):
+        return inputs.get("file_path") or inputs.get("path") or inputs.get("pattern") or ""
+    elif name in ("Edit", "Write"):
+        return inputs.get("file_path") or ""
+    elif name == "Bash":
+        cmd = inputs.get("command") or ""
+        return cmd[:120]
+    return ""
+
+
+def _write_log(path: Path, lines: list[str]) -> None:
+    """Write log lines to file (best-effort)."""
+    try:
+        path.write_text("\n".join(lines))
+    except OSError:
+        pass
 
 
 # Regex to strip numbered ("1. ", "1) ") or bullet ("- ", "* ") prefixes
@@ -50,50 +77,83 @@ def generate_spec(prompt: str, project_dir: Path) -> list[str]:
 
 
 async def _run_spec_agent(prompt: str, project_dir: Path) -> list[str]:
-    """Run the spec generation agent with pre-loaded context (adaptive mode).
+    """Run the spec generation agent.
 
-    The agent has full tool access to explore the project as needed.
+    Uses a structured system prompt for constraint faithfulness,
+    with a compliance self-check step before output.
     """
     spec_file = Path(tempfile.mktemp(suffix=".txt", prefix="otto_spec_"))
 
-    agent_prompt = f"""You are a senior engineer writing the acceptance spec for a coding task.
+    system_prompt = """\
+<role>
+You generate acceptance specs from task descriptions. Your output becomes
+the contract the coding agent must satisfy. If you weaken a requirement,
+the implementation will pass verification but fail the user's actual need.
+</role>
 
-TASK: {prompt}
+<constraint_rules>
+CONSTRAINT PRESERVATION — your highest priority:
+- Reproduce every user constraint EXACTLY as stated. No qualifiers, no conditions, no exceptions.
+- "<300ms" means "<300ms" — not "cached <300ms", not "aim for <300ms", not "<300ms under normal conditions".
+- If a constraint seems unrealistic, include it verbatim AND add a separate [CONCERN] note.
+  Do NOT silently weaken it into something achievable.
+- Weakening includes adding: "where possible", "ideally", "in most cases", "for typical scenarios",
+  "under normal conditions", "for cached requests", or ANY conditional the user did not use.
 
-You are working in {project_dir}. Explore the codebase as needed to understand what exists.
+<example type="violation">
+User: "API response time must be under 200ms"
+BAD:  "API response time should be under 200ms for cached requests"
+WHY:  Added "for cached requests" — the user said ALL requests.
+</example>
+
+<example type="correct">
+User: "API response time must be under 200ms"
+GOOD: "API response time is under 200ms end-to-end, measured from request initiation to data rendered"
+WHY:  Preserves the exact threshold, only clarifies how to measure it.
+</example>
+</constraint_rules>
+
+<output_rules>
+- 5-8 testable acceptance criteria. Hard constraints first, then supporting requirements.
+- Each item describes BEHAVIOR, not implementation. Focus on what must be true, not how.
+- No bikeshedding (formatting, unit labels, value ranges unless user specified them).
+- Write a numbered list. One criterion per line. No prose.
+</output_rules>
+
+<compliance_check>
+MANDATORY before writing output — do this in your thinking:
+1. Re-read the user's task description.
+2. List every explicit constraint (numbers, thresholds, "must"/"never"/"always").
+3. For each, confirm it appears in your spec EQUALLY or MORE strict.
+4. If any constraint was softened, fix it before writing the file.
+</compliance_check>"""
+
+    agent_prompt = f"""TASK: {prompt}
+
+You are working in {project_dir}. Explore the codebase as needed.
 
 Write the acceptance spec to: {spec_file}
 
 Steps:
-1. EXTRACT hard requirements from the task description first.
-   Look for: numbers, thresholds, "must", "always", "never", "hard constraint",
-   specific behaviors the user explicitly stated.
-   These become your top-priority spec items — preserve them faithfully.
-   Do NOT weaken them (e.g., don't change "all lookups < 300ms" to "cached lookups < 300ms").
-2. WRITE the spec — hard requirements first, then supporting requirements.
-3. SELF-REVIEW: Read your spec back and ask:
-   - Did I preserve the user's hard requirements verbatim?
-   - Are any items duplicating the same behavior? Merge them.
-   - Am I unsure about how something works? Read the specific file to verify.
-   - Missing: error handling, edge cases, regression? Add briefly.
+1. EXPLORE: Read the relevant source files to understand what exists.
+2. EXTRACT: Identify every hard requirement from the task (numbers, thresholds, "must"/"never").
+3. WRITE: Generate acceptance criteria — hard constraints first, verbatim.
+4. VERIFY: Re-read the task description. Confirm every constraint is preserved exactly.
+   If anything was softened, fix it now.
+5. OUTPUT: Write the final numbered list to the file."""
 
-Write the SPEC — what must be true when this task is done.
-Each item is a testable requirement, not a grading checkbox.
-Prioritize: hard constraints first, then supporting requirements.
-
-- BAD: "reads a TSV file (label\\ttext per line)" — too prescriptive about format
-- GOOD: "accepts a file with labeled examples and trains successfully" — describes behavior
-
-Total: 5-8 items. No bikeshedding (formatting details, unit labels, value ranges).
-
-Write ONLY a numbered list to {spec_file}. One criterion per line. No prose."""
+    # Persistent log for debugging
+    log_dir = project_dir / "otto_logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_lines: list[str] = []
 
     spec_cost = 0.0
     try:
         agent_opts = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
             cwd=str(project_dir),
-            max_turns=8,  # adaptive: typically 2-4 turns (write, review, rewrite)
+            max_turns=10,
+            system_prompt=system_prompt,
         )
 
         async for message in query(prompt=agent_prompt, options=agent_opts):
@@ -103,13 +163,23 @@ Write ONLY a numbered list to {spec_file}. One criterion per line. No prose."""
                     spec_cost = float(raw_cost)
             elif AssistantMessage and isinstance(message, AssistantMessage):
                 for block in message.content:
-                    if TextBlock and isinstance(block, TextBlock) and block.text:
+                    if ThinkingBlock and isinstance(block, ThinkingBlock):
+                        thinking = getattr(block, "thinking", "")
+                        if thinking:
+                            log_lines.append(f"[thinking] {thinking}")
+                    elif TextBlock and isinstance(block, TextBlock) and block.text:
                         print(block.text, flush=True)
+                        log_lines.append(block.text)
                     elif ToolUseBlock and isinstance(block, ToolUseBlock):
                         print_agent_tool(block)
+                        log_lines.append(f"● {block.name}  {_tool_use_summary(block)}")
     except Exception as e:
         print(f"  spec agent error: {e}", flush=True)
+        log_lines.append(f"ERROR: {e}")
+        _write_log(log_dir / "spec-agent.log", log_lines)
         return [], spec_cost
+
+    _write_log(log_dir / "spec-agent.log", log_lines)
 
     # Read the spec file
     if spec_file.exists():

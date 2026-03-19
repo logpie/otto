@@ -10,6 +10,7 @@ class ClaudeAgentOptions:
     model: str | None = None
     resume: str | None = None
     max_turns: int | None = None
+    system_prompt: str | dict[str, Any] | None = None
     mcp_servers: dict[str, Any] | None = None
     env: dict[str, str] | None = None
     setting_sources: list[str] | None = None
