@@ -1082,20 +1082,10 @@ async def run_task(
                 )
                 continue
 
-            # Tamper check: ensure coding agent didn't modify the test file
-            if test_file_sha and test_file_path_val:
-                current = subprocess.run(
-                    ["git", "hash-object", str(test_file_path_val)],
-                    capture_output=True, text=True, cwd=effective_dir,
-                ).stdout.strip()
-                if current != test_file_sha:
-                    subprocess.run(
-                        ["git", "checkout", test_commit_sha, "--",
-                         str(test_file_path_val.relative_to(effective_dir))],
-                        cwd=effective_dir, capture_output=True,
-                    )
-                    if not parallel_mode:
-                        print(f"  {_YELLOW}⚠ Test file tampered by coding agent — restored{_RESET}", flush=True)
+            # Note: tamper detection removed. The coding agent is now trusted to
+            # fix test bugs (broken imports, wrong stdlib usage) but not weaken
+            # assertions. The spec items in the prompt serve as the ground truth —
+            # if the agent weakens tests, re-running testgen from spec produces fresh ones.
 
             # Check if agent made any changes (compare against appropriate base)
             commit_base = test_commit_sha if test_commit_sha else base_sha
