@@ -47,70 +47,76 @@ User prompt → spec gen → spec items
 
 ## v3 Architecture
 
+v3 is simpler than v2 — it removes agents and pipeline stages, not adds them.
+
 ```
-User prompt → spec gen (independent PM voice)
+User prompt → spec gen (independent PM voice, optional)
                   ↓
               spec items (the contract)
                   ↓
-              coding agent (strong, autonomous)
-                  ↓ plans, codes, self-tests, iterates
-              implementation + agent assessment
+              pilot (orchestrator — ordering, parallelism, merge decisions)
                   ↓
-              verification (multiple signals → confidence score)
-                  ├─ mechanical: test suite pass/fail
-                  ├─ semantic: pilot spec compliance check
-                  ├─ architectural: does the approach make sense?
-                  └─ regression: existing tests still pass?
+              coding agent (strong, autonomous — plans, codes, self-tests)
                   ↓
-              pilot decision
-                  ├─ high confidence → merge
-                  ├─ medium confidence → retry with feedback
-                  └─ low confidence → escalation report
+              verification (existing test suite in clean worktree)
+                  ↓
+              pilot checks spec compliance on diff
+                  ├─ confident → merge
+                  ├─ not confident → retry with feedback
+                  └─ stuck → escalation report
 ```
 
-### Key Changes from v2
+### What's removed from v2 (simpler, not more complex)
 
-**1. Coding agent is strong and autonomous**
+| Removed | Why | Savings |
+|---------|-----|---------|
+| Testgen as mandatory step | Coding agent writes own tests — its strongest self-correction tool | ~200 lines orchestration |
+| Tamper detection | Coding agent trusted to fix test bugs, spec is the real contract | 15 lines + tamper-revert bugs |
+| "Don't write tests" constraint | Artificially weakened the coding agent | Prompt complexity + workarounds |
+| Holistic testgen (required) | Optional at most — coding agent handles its own tests | ~150 lines parallel loop |
+| Test diagnosis agent | No adversarial tests = no test bugs to diagnose | ~50 lines |
+| Pilot coding directly | Pilot orchestrates, never codes | Role boundary violation removed |
+| Single-attempt mode | Agent handles own retries with full context | Pilot micromanagement removed |
+| Separate review agent | Pilot does cross-task review + spec compliance — one role, not two | Removes an agent |
+
+### What's kept / refined
+
+**1. Spec gen (independent PM voice)**
+- Formalizes user intent without implementation bias
+- Extracts hard constraints, preserves them verbatim
+- The contract that coding agent and pilot both reference
+- Benchmarked: "spec" framing produces 2x faster, better constraint preservation than "rubric"
+- Optional for simple tasks, valuable when user prompt is casual/ambiguous
+
+**2. Coding agent (strong, autonomous)**
 - Plans before coding ("can current architecture meet all requirements?")
 - Writes its own tests to validate approach
 - Can fix test bugs (broken imports, wrong stdlib) but not weaken assertions
 - Handles retries internally with full context
-- Optimizes for the spec, uses tests as feedback
-- Reports its own assessment: what it built, what it's confident about, what's uncertain
+- Receives spec items directly — optimizes for the spec, uses tests as feedback
 
-**2. Tests are weighted evidence, not binary gates**
-- Test results are one signal among many
-- Pilot weighs: test pass rate, spec compliance, diff quality, agent assessment
-- A task with 95% tests passing and clear spec compliance can merge
-- A task with 100% tests passing but spec-dodging gets rejected
+**3. Pilot (orchestrator — no coding, no micromanaging)**
+- Decides task ordering and parallelism
+- Checks spec compliance on diff after coding agent passes
+- Cross-task consistency review (no separate review agent needed)
+- Escalates when stuck instead of failing silently
+- Does NOT use Edit/Write/Bash — only orchestration tools
 
-**3. Testgen becomes optional**
-- Default: coding agent writes its own tests as part of implementation
-- `--tdd` mode: testgen runs first, provides independent cross-check
-- Both modes: pilot does spec compliance check on the diff
+**4. Verification (simple, not layered)**
+- Coding agent's own tests (written during implementation)
+- Existing test suite in clean worktree (catches regressions)
+- Custom verify command (user-provided, optional)
+- Pilot spec compliance check (semantic, on the diff)
 
-**4. Confidence-based decisions instead of binary pass/fail**
-- Per spec item: "clearly met" / "approximately met" / "not met" / "unclear"
-- Overall: "high confidence" / "medium" / "low"
-- High → merge automatically (safe for 24/7 unattended)
-- Medium → merge with notes (flag for future review)
-- Low → escalation report (needs human input)
-
-**5. Escalation protocol**
+**5. Escalation instead of silent failure**
 - When confidence is too low after max retries
-- System produces a structured report:
-  - What was built (diff summary)
-  - What spec items are met (with evidence)
-  - What couldn't be resolved (with explanation)
-  - Proposed options (A, B, C)
-- This is the difference between "task failed" and "here's where I need help"
-- Critical for 24/7 unattended operation — the user wakes up to a clear report, not a mystery failure
+- Structured report: what was built, what's met, what needs input
+- Critical for 24/7 unattended — user wakes up to clarity, not mystery
 
-**6. Spec gen remains independent**
-- Formalizes user intent without implementation bias
-- Extracts hard constraints, preserves them verbatim
-- The contract that everyone (coding agent, pilot, verification) references
-- Does NOT change during implementation (user must amend)
+**6. Testgen (optional, not default)**
+- `--tdd` mode: testgen runs first, provides independent cross-check
+- Default: coding agent writes own tests as part of implementation
+- Both modes: pilot does spec compliance check
 
 ## Progressive Verification
 
