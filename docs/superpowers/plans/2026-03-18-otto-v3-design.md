@@ -298,10 +298,127 @@ Some tasks produce visual output (GUI, charts, styling) that can't be verified b
 - Human-in-the-loop for visual sign-off
 - Approximate verification: "the tkinter window renders without errors" (testable) vs "the gradient looks good" (visual review)
 
-## Implementation Sequence
+## Implementation Plan
 
-1. **Coding agent prompt refinement** — "optimize for spec, tests are feedback"
-2. **Confidence scoring in verification** — per-spec-item assessment
-3. **Escalation protocol** — structured report when confidence is low
-4. **Optional testgen** — `--tdd` flag, default is agent writes own tests
-5. **Visual verification** — screenshot + LLM review for GUI tasks
+### Phase 1: Simplify (remove v2 complexity)
+
+**Files to delete or gut:**
+- `otto/architect.py` — delete agent, keep `parse_file_plan()` and `load_design_context()` as utilities
+- `otto/test_validation.py` — delete (no generated tests to validate in default mode)
+- Testgen orchestration in `otto/runner.py` — remove the 200-line testgen-before-coding flow
+- Tamper detection in `otto/runner.py` — already removed
+- Test diagnosis (`_diagnose_test_bug`) in `otto/runner.py` — remove
+- Holistic testgen loop in `otto/runner.py` `run_all()` — remove
+
+**Files to simplify:**
+- `otto/testgen.py` — keep `run_testgen_agent()` for `--tdd` mode, remove the rest (holistic, generate_tests, generate_integration_tests)
+- `otto/runner.py` — `run_task()` becomes much simpler: create branch → run coding agent → external verify → pass/fail. No testgen, no tamper check, no test diagnosis.
+
+### Phase 2: Strengthen coding agent
+
+**`otto/runner.py` — rewrite coding agent prompt:**
+```
+{task prompt}
+
+ACCEPTANCE SPEC:
+{spec items}
+
+You are working in {work_dir}. Do NOT create git commits.
+
+APPROACH:
+1. PLAN — read the spec and codebase. Can current architecture meet ALL requirements?
+   If not, note what needs to change.
+2. IMPLEMENT your plan.
+3. WRITE TESTS that verify each spec item.
+4. RUN TESTS and fix failures. Iterate until all pass.
+5. Write notes to otto_arch/task-notes/{key}.md:
+   - What approach you took and why
+   - What you learned about the codebase
+   - Any gotchas for future tasks
+
+{optional: design conventions from otto_arch/conventions.md}
+{optional: learnings from otto_arch/learnings.md}
+{optional: previous task notes from otto_arch/task-notes/}
+{optional: failure feedback from previous attempt}
+{optional: relevant source context — pre-loaded}
+```
+
+### Phase 3: Pilot as planner + orchestrator
+
+**`otto/pilot.py` — rewrite pilot prompt:**
+
+Planning phase (absorbs architect):
+- Pilot reads codebase structure (file tree, key modules)
+- Analyzes file overlaps across tasks
+- Writes `otto_arch/file-plan.md` and `otto_arch/conventions.md`
+- Outputs execution plan
+
+Execution phase:
+- Calls `run_coding_agent` for each task (respecting dependency order)
+- After each task: reads diff, checks spec compliance
+- Decides: merge / retry with feedback / escalate
+
+Post-run:
+- Cross-task consistency review on combined diff
+- Escalation report if any tasks have low confidence
+
+**Pilot MCP tools (simplified):**
+- `get_run_state` — current task statuses
+- `run_coding_agent(task_key, hint?)` — runs full task lifecycle
+- `read_verify_output(task_key)` — see what failed
+- `merge_task(task_key)` — merge to main
+- `abort_task(task_key, reason)` — give up with explanation
+- `save_run_state(phase, notes)` — persist state
+- `finish_run(summary)` — done
+
+Removed MCP tools:
+- `run_holistic_testgen` — no mandatory testgen
+- `run_per_task_testgen` — only in `--tdd` mode
+- `run_coding_agents` (parallel) — pilot calls `run_coding_agent` individually, runner handles worktrees
+- `run_integration_gate_tool` — pilot does review directly
+- `run_architect_tool` — pilot does planning directly
+- `run_verify` — coding agent verifies internally
+
+### Phase 4: External verification
+
+**`otto/verify.py` — keep but simplify:**
+- Run existing test suite in clean disposable worktree (unchanged)
+- Run custom verify command if configured (unchanged)
+- Return pass/fail + output (unchanged)
+
+This is the regression gate. The coding agent's own tests are committed to the project and run as part of the test suite. No separate "generated test" vs "project test" distinction.
+
+### Phase 5: Persistent memory
+
+**New in coding agent prompt:** read/write learnings and task notes
+**New in pilot:** read learnings for cross-task context
+**Files:** `otto_arch/learnings.md`, `otto_arch/task-notes/{key}.md`
+
+### Phase 6: Escalation protocol
+
+**New in pilot:** when task fails after max retries, produce structured report instead of marking "failed"
+
+### What stays unchanged
+
+- `otto/cli.py` — CLI commands (add, run, status, etc.)
+- `otto/rubric.py` — spec gen (renamed prompt, same code)
+- `otto/tasks.py` — task CRUD
+- `otto/config.py` — configuration
+- `otto/display.py` — output helpers
+- Branch management (create_task_branch, merge_to_default, cleanup_branch)
+- Worktree management (_setup_task_worktree, _teardown_task_worktree)
+- Git safety (check_clean_tree, snapshot_untracked, auto-stash)
+- Process locking
+- Signal handling
+
+### Verification criteria
+
+1. `python -m pytest tests/ -x -q` passes (update tests for new architecture)
+2. `otto run` on taskflow project: 3 tasks, all pass, coding agent writes own tests
+3. `otto run` on weather project: single task with performance constraint, agent plans approach
+4. Coding agent can fix test bugs without tamper detection blocking it
+5. Pilot detects spec-dodging on diff review
+6. Task notes persist across retries
+7. `otto run --tdd` still generates tests before coding (backward compat)
+8. Parallel tasks work with worktrees (file-plan deps injected by pilot)
+9. Escalation report produced when task is infeasible
