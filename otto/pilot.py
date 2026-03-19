@@ -962,11 +962,23 @@ async def run_piloted(
                 "args": [str(mcp_script_path)],
             }
 
+            # Merge otto-pilot MCP with user's MCP servers from ~/.claude.json
+            all_mcp_servers = {"otto-pilot": mcp_server_config}
+            user_claude_json = Path.home() / ".claude.json"
+            if user_claude_json.exists():
+                try:
+                    user_config = json.loads(user_claude_json.read_text())
+                    for name, srv in user_config.get("mcpServers", {}).items():
+                        if name != "otto-pilot":  # don't override our own
+                            all_mcp_servers[name] = srv
+                except (json.JSONDecodeError, OSError):
+                    pass
+
             agent_opts = ClaudeAgentOptions(
                 permission_mode="bypassPermissions",
                 cwd=str(project_dir),
                 max_turns=100,
-                mcp_servers={"otto-pilot": mcp_server_config},
+                mcp_servers=all_mcp_servers,
                 setting_sources=["user", "project"],
                 env=_subprocess_env(),
             )
