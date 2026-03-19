@@ -111,7 +111,23 @@ def detect_test_command(project_dir: Path) -> str | None:
     if (project_dir / "Cargo.toml").exists():
         candidates.append("cargo test")
 
-    # make test
+    # maven
+    if (project_dir / "pom.xml").exists():
+        candidates.append("mvn test")
+
+    # gradle
+    if (project_dir / "build.gradle").exists() or (project_dir / "build.gradle.kts").exists():
+        candidates.append("gradle test")
+
+    # ruby
+    if (project_dir / "Gemfile").exists() and (project_dir / "Rakefile").exists():
+        candidates.append("bundle exec rake test")
+
+    # cmake / ctest
+    if (project_dir / "CMakeLists.txt").exists():
+        candidates.append("cmake --build build --target test")
+
+    # make test (generic fallback)
     makefile = project_dir / "Makefile"
     if makefile.exists() and "test:" in makefile.read_text():
         candidates.append("make test")
