@@ -104,14 +104,14 @@ def _import_tasks(import_path: Path, tasks_path: Path) -> None:
         click.echo(f"Found {len(lines)} tasks in {import_path.name}.\n")
         batch = []
         for i, line in enumerate(lines, 1):
-            click.echo(f"[{i}/{len(lines)}] Generating rubric for: {line[:50]}...")
+            click.echo(f"[{i}/{len(lines)}] Generating spec for: {line[:50]}...")
             rubric_items = generate_rubric(line, project_dir)
             item = {"prompt": line}
             if rubric_items:
                 item["rubric"] = rubric_items
                 click.echo(f"  {len(rubric_items)} criteria generated")
             else:
-                click.echo(f"  no rubric generated")
+                click.echo(f"  no spec generated")
             batch.append(item)
         click.echo()
         results = add_tasks(tasks_path, batch)
@@ -126,15 +126,15 @@ def _import_tasks(import_path: Path, tasks_path: Path) -> None:
             item = {"prompt": t["prompt"]}
             if t.get("rubric"):
                 item["rubric"] = t["rubric"]
-                click.echo(f"[{i}/{len(imported)}] {t['prompt'][:50]} — {len(t['rubric'])} rubric items (from file)")
+                click.echo(f"[{i}/{len(imported)}] {t['prompt'][:50]} — {len(t['rubric'])} spec items (from file)")
             else:
-                click.echo(f"[{i}/{len(imported)}] Generating rubric for: {t['prompt'][:50]}...")
+                click.echo(f"[{i}/{len(imported)}] Generating spec for: {t['prompt'][:50]}...")
                 rubric_items = generate_rubric(t["prompt"], project_dir)
                 if rubric_items:
                     item["rubric"] = rubric_items
                     click.echo(f"  {len(rubric_items)} criteria generated")
                 else:
-                    click.echo(f"  no rubric generated")
+                    click.echo(f"  no spec generated")
             if t.get("verify"):
                 item["verify"] = t["verify"]
             if t.get("max_retries") is not None:
@@ -153,7 +153,7 @@ def _print_imported_tasks(tasks: list) -> None:
         if rubric:
             for item in rubric:
                 click.echo(f"       {_D}-{_0} {item}")
-    click.echo(f"\n{_G}✓{_0} Imported {_B}{len(tasks)}{_0} tasks. Review rubrics in tasks.yaml before running.")
+    click.echo(f"\n{_G}✓{_0} Imported {_B}{len(tasks)}{_0} tasks. Review specs in tasks.yaml before running.")
 
 
 @main.command(context_settings=CONTEXT_SETTINGS)
@@ -162,7 +162,7 @@ def _print_imported_tasks(tasks: list) -> None:
 @click.option("--max-retries", default=None, type=int, help="Max retry attempts")
 @click.option("-f", "--file", "import_file", default=None, type=click.Path(exists=True),
               help="Import tasks from a file (.yaml, .md, .txt)")
-@click.option("--no-rubric", is_flag=True, help="Skip rubric generation")
+@click.option("--no-rubric", is_flag=True, help="Skip spec generation")
 def add(prompt, verify, max_retries, import_file, no_rubric):
     """Add a task to the queue (or import from file with -f)."""
     tasks_path = Path.cwd() / "tasks.yaml"
@@ -179,24 +179,24 @@ def add(prompt, verify, max_retries, import_file, no_rubric):
     # Generate rubric unless --no-rubric
     rubric = None
     if no_rubric:
-        click.echo(f"{_Y}{_B}⚠ WARNING:{_0} {_Y}No rubric → no adversarial tests → no verification gate.{_0}")
+        click.echo(f"{_Y}{_B}⚠ WARNING:{_0} {_Y}No spec → no adversarial tests → no verification gate.{_0}")
         click.echo(f"  {_Y}The coding agent's output will be merged with zero quality checks.{_0}")
     if not no_rubric:
-        click.echo(f"{_D}Generating rubric...{_0}")
+        click.echo(f"{_D}Generating spec...{_0}")
         try:
             rubric_items = generate_rubric(prompt, Path.cwd())
         except Exception as e:
-            click.echo(f"{_R}✗{_0} Rubric generation failed: {e}", err=True)
+            click.echo(f"{_R}✗{_0} Spec generation failed: {e}", err=True)
             click.echo(f"{_D}Task not created. Fix the issue or use --no-rubric.{_0}", err=True)
             sys.exit(1)
         if rubric_items:
             rubric = rubric_items
-            click.echo(f"{_G}✓{_0} Rubric ({_B}{len(rubric_items)}{_0} criteria):")
+            click.echo(f"{_G}✓{_0} Spec ({_B}{len(rubric_items)}{_0} criteria):")
             for item in rubric_items:
                 click.echo(f"  {_D}-{_0} {item}")
         else:
-            click.echo(f"{_Y}⚠{_0} Rubric generation returned empty — task not created.", err=True)
-            click.echo(f"{_D}Retry or use --no-rubric to skip rubric generation.{_0}", err=True)
+            click.echo(f"{_Y}⚠{_0} Spec generation returned empty — task not created.", err=True)
+            click.echo(f"{_D}Retry or use --no-rubric to skip spec generation.{_0}", err=True)
             sys.exit(1)
 
     task = add_task(tasks_path, prompt, verify=verify, max_retries=max_retries,
@@ -407,7 +407,7 @@ def status():
                 click.echo(f"{_Y}⚠ Task #{t['id']} stuck in 'running' (otto crashed?) — will auto-recover on next 'otto run'{_0}")
             click.echo()
 
-    click.echo(f"{_B}{'ID':>4}  {'Status':10}  {'Att':>3}  {'Deps':>4}  {'Rubric':>6}  {'Cost':>7}  {'Time':>6}  Prompt{_0}")
+    click.echo(f"{_B}{'ID':>4}  {'Status':10}  {'Att':>3}  {'Deps':>4}  {'Spec':>6}  {'Cost':>7}  {'Time':>6}  Prompt{_0}")
     click.echo(f"{_D}{'─' * 94}{_0}")
     for t in tasks:
         status_str = t.get("status", "?")
@@ -612,7 +612,7 @@ def show(task_id):
             click.echo(f"  {t['prompt']}")
             rubric = t.get("rubric", [])
             if rubric:
-                click.echo(f"\n  {_D}Rubric ({len(rubric)}):{_0}")
+                click.echo(f"\n  {_D}Spec ({len(rubric)}):{_0}")
                 for i, item in enumerate(rubric, 1):
                     click.echo(f"    {i}. {item}")
             if t.get("feedback"):

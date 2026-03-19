@@ -37,7 +37,7 @@ class TestGenerateRubric:
         async def fake_query(*, prompt, options=None):
             # Extract the rubric file path from the prompt
             import re
-            match = re.search(r'criteria to: (.+\.txt)', prompt)
+            match = re.search(r'(?:criteria|spec) to: (.+\.txt)', prompt)
             if match:
                 rubric_path = Path(match.group(1))
                 rubric_path.write_text(

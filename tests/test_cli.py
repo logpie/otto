@@ -139,7 +139,7 @@ class TestAddRubric:
         mock_gen.return_value = ["criterion 1", "criterion 2"]
         result = runner.invoke(main, ["add", "Add search"])
         assert result.exit_code == 0
-        assert "Rubric" in result.output
+        assert "Spec" in result.output
         assert "criterion 1" in result.output
         tasks = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())
         assert tasks["tasks"][0]["rubric"] == ["criterion 1", "criterion 2"]
@@ -237,7 +237,7 @@ class TestStatusRubric:
         result = runner.invoke(main, ["status"])
         assert result.exit_code == 0
         # Should show rubric count column
-        assert "Rubric" in result.output
+        assert "Spec" in result.output
 
 
 class TestStatusCost:

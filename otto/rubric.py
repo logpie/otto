@@ -71,36 +71,36 @@ async def _run_rubric_agent(prompt: str, project_dir: Path) -> list[str]:
     if design_ctx:
         design_section = f"\n\nDESIGN CONVENTIONS (from architect — may be stale, verify against source if unsure):\n{design_ctx}\n"
 
-    agent_prompt = f"""You are a senior QA engineer writing acceptance criteria for a coding task.
+    agent_prompt = f"""You are a senior engineer writing the acceptance spec for a coding task.
 
 TASK: {prompt}
 
 PROJECT CONTEXT (current source — start from this):
 {blackbox_ctx}{design_section}
 
-Write acceptance criteria to: {rubric_file}
+Write the acceptance spec to: {rubric_file}
 
 Steps:
-1. WRITE the criteria file immediately — the context above should be sufficient.
-2. SELF-REVIEW: Read your criteria back and ask:
-   - Are any criteria about implementation details instead of user behavior? Rewrite them.
-   - Are any criteria trivial (would pass with a broken implementation)? Strengthen them.
-   - Did I miss error handling, edge cases, or anti-patterns? Add them.
-   - Am I unsure about how something works (exact flag names, enum values, error behavior)?
-     If so, read the specific file to verify — but only what you need, not broad exploration.
-3. Check coverage — ensure at least one criterion for each:
-   happy path, error handling, edge cases, negative/anti-pattern, regression
-4. REWRITE the file with all improvements.
-Do NOT finish until self-review is done.
+1. EXTRACT hard requirements from the task description first.
+   Look for: numbers, thresholds, "must", "always", "never", "hard constraint",
+   specific behaviors the user explicitly stated.
+   These become your top-priority spec items — preserve them faithfully.
+   Do NOT weaken them (e.g., don't change "all lookups < 300ms" to "cached lookups < 300ms").
+2. WRITE the spec — hard requirements first, then supporting requirements.
+3. SELF-REVIEW: Read your spec back and ask:
+   - Did I preserve the user's hard requirements verbatim?
+   - Are any items duplicating the same behavior? Merge them.
+   - Am I unsure about how something works? Read the specific file to verify.
+   - Missing: error handling, edge cases, regression? Add briefly.
 
-Write criteria about BEHAVIOR the user experiences, not implementation details.
+Write the SPEC — what must be true when this task is done.
+Each item is a testable requirement, not a grading checkbox.
+Prioritize: hard constraints first, then supporting requirements.
+
 - BAD: "reads a TSV file (label\\ttext per line)" — too prescriptive about format
 - GOOD: "accepts a file with labeled examples and trains successfully" — describes behavior
 
-Scale by complexity:
-- Simple tasks (typo, rename): 3-5 criteria
-- Medium tasks (new method, CLI command): 6-10 criteria
-- Complex tasks (new feature with multiple components): 10-12 criteria
+Total: 5-8 items. No bikeshedding (formatting details, unit labels, value ranges).
 
 Write ONLY a numbered list to {rubric_file}. One criterion per line. No prose."""
 
