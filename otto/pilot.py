@@ -464,6 +464,9 @@ If you find bugs:
 - Be concrete: "Searching 'New Jersey' shows only Trinidad results, no US state"
 - After the fix, re-run behavioral testing to verify
 
+CLEANUP: Kill any dev servers or background processes you started when done.
+Use `kill <pid>` or `pkill -f "next dev"` / `pkill -f "serve.py"` etc.
+
 If the app can't be run (no entry point, build broken), skip and note it.
 
 DOOM-LOOP DETECTION:
