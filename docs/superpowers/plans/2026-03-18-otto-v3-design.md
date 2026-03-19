@@ -52,13 +52,15 @@ v3 is simpler than v2 — it removes agents and pipeline stages, not adds them.
 ```
 User prompt → spec gen (independent PM voice, optional)
                   ↓
-              spec items (the contract)
+              spec items (the contract) + verification intents
                   ↓
-              pilot (orchestrator — ordering, parallelism, merge decisions)
+              pilot (explores codebase, plans, orchestrates)
+                  ├─ analyzes file overlaps → injects dependencies
+                  ├─ decides execution order (serial/parallel)
                   ↓
               coding agent (strong, autonomous — plans, codes, self-tests)
                   ↓
-              verification (existing test suite in clean worktree)
+              verification (verifiers generated from spec intents)
                   ↓
               pilot checks spec compliance on diff
                   ├─ confident → merge
@@ -70,6 +72,7 @@ User prompt → spec gen (independent PM voice, optional)
 
 | Removed | Why | Savings |
 |---------|-----|---------|
+| Architect agent | Pilot explores codebase and does file-plan analysis as part of planning | One fewer agent |
 | Testgen as mandatory step | Coding agent writes own tests — its strongest self-correction tool | ~200 lines orchestration |
 | Tamper detection | Coding agent trusted to fix test bugs, spec is the real contract | 15 lines + tamper-revert bugs |
 | "Don't write tests" constraint | Artificially weakened the coding agent | Prompt complexity + workarounds |
@@ -95,18 +98,38 @@ User prompt → spec gen (independent PM voice, optional)
 - Handles retries internally with full context
 - Receives spec items directly — optimizes for the spec, uses tests as feedback
 
-**3. Pilot (orchestrator — no coding, no micromanaging)**
-- Decides task ordering and parallelism
+**3. Pilot (orchestrator + codebase-aware planner)**
+- Explores codebase to understand structure (Read, Glob, Grep — but NOT Edit/Write)
+- Analyzes file overlaps across tasks → injects serial dependencies (absorbs architect's file-plan role)
+- Writes/updates conventions.md as a living doc (absorbs architect's conventions role)
 - Checks spec compliance on diff after coding agent passes
-- Cross-task consistency review (no separate review agent needed)
+- Cross-task consistency review on combined diff
 - Escalates when stuck instead of failing silently
-- Does NOT use Edit/Write/Bash — only orchestration tools
+- Does NOT write implementation code — only orchestration + planning artifacts
 
-**4. Verification (simple, not layered)**
-- Coding agent's own tests (written during implementation)
-- Existing test suite in clean worktree (catches regressions)
-- Custom verify command (user-provided, optional)
-- Pilot spec compliance check (semantic, on the diff)
+**4. Verification (natural language verifiers)**
+
+Users express verification intent in natural language as part of the task prompt:
+```
+"make sure the API responds with valid JSON on /health"
+"the search should return results within 300ms"
+"the login page should show email and password fields"
+```
+
+Spec gen formalizes these into spec items. Each spec item gets a verification approach
+generated automatically — the user never writes YAML or test commands:
+
+| User says | Verification generated |
+|-----------|----------------------|
+| "API returns JSON on /health" | `curl -s localhost:8080/health \| python -m json.tool` |
+| "latency < 300ms" | `time.perf_counter()` measurement in test |
+| "login page shows form" | Playwright: navigate + check for input elements |
+| "export CSV has correct headers" | Read file + validate header row |
+| "GUI shows weather data" | Screenshot + LLM visual check (future) |
+
+The coding agent generates executable verifiers as part of its test-writing.
+The pilot runs them as part of spec compliance review. New verifier types
+(browser, visual, API) extend naturally without changing otto's architecture.
 
 **5. Escalation instead of silent failure**
 - When confidence is too low after max retries
@@ -120,16 +143,19 @@ User prompt → spec gen (independent PM voice, optional)
 
 ## Progressive Verification
 
-Not every task needs the same level of scrutiny:
+Not every task needs the same level of scrutiny. The pilot decides based on spec requirements:
 
-| Task Complexity | Verification Level | Cost |
-|----------------|-------------------|------|
-| Simple (add CLI command) | Agent self-tests + mechanical verification | Low |
-| Medium (new feature) | + spec compliance check | Medium |
-| Complex (architectural change) | + integration tests + escalation readiness | Higher |
-| Visual/GUI | Approximate (can't verify visually yet) | Report-based |
+| Spec requirement | Verifier type | Generated how |
+|-----------------|--------------|---------------|
+| "function returns correct result" | Unit test | Coding agent writes pytest |
+| "CLI command works" | Subprocess test | Coding agent writes subprocess.run test |
+| "API responds correctly" | HTTP check | Coding agent generates curl/requests test |
+| "completes in < 300ms" | Timing test | Coding agent wraps with perf_counter |
+| "page shows login form" | Browser test | Playwright script (generated by agent) |
+| "GUI looks like mockup" | Visual test | Screenshot + LLM comparison (future) |
+| "data exports correctly" | Output diff | Compare output file against expected |
 
-The pilot decides verification level based on task complexity and spec requirements.
+All verifier types work the same way: the coding agent generates them as executable tests during implementation. No special infrastructure per type — just different test patterns.
 
 ## Persistent Project Memory
 
@@ -156,9 +182,9 @@ otto_arch/
 
 | File | Written by | Read by | When |
 |------|-----------|---------|------|
-| conventions.md | Architect agent | All coding agents | Start of each task |
-| file-plan.md | Architect agent | Runner (dep injection) | Before task execution |
-| learnings.md | Coding agents (append) | All coding agents | Start of each task |
+| conventions.md | Pilot (during planning) | All coding agents | Start of each task |
+| file-plan.md | Pilot (during planning) | Runner (dep injection) | Before task execution |
+| learnings.md | Coding agents (append) | Pilot + all coding agents | Start of each task |
 | task-notes/{key}.md | Coding agent for that task | Same agent on retry, future tasks | Start of task, between retries |
 
 ### How it helps different scenarios
