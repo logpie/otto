@@ -969,8 +969,19 @@ async def run_piloted(
                 try:
                     user_config = json.loads(user_claude_json.read_text())
                     for name, srv in user_config.get("mcpServers", {}).items():
-                        if name != "otto-pilot":  # don't override our own
-                            all_mcp_servers[name] = srv
+                        if name == "otto-pilot":
+                            continue  # don't override our own
+                        # Chrome-devtools: use --isolated --headless to avoid
+                        # conflicts with user's browser and other CC sessions
+                        if name == "chrome-devtools":
+                            srv = dict(srv)
+                            args = list(srv.get("args", []))
+                            if "--isolated" not in args:
+                                args.append("--isolated")
+                            if "--headless" not in args:
+                                args.append("--headless")
+                            srv["args"] = args
+                        all_mcp_servers[name] = srv
                 except (json.JSONDecodeError, OSError):
                     pass
 
