@@ -45,7 +45,8 @@ def generate_rubric(prompt: str, project_dir: Path) -> list[str]:
 
     Returns a list of rubric criterion strings, or empty list on failure.
     """
-    return asyncio.run(_run_rubric_agent(prompt, project_dir))
+    rubric, _cost = asyncio.run(_run_rubric_agent(prompt, project_dir))
+    return rubric
 
 
 async def _run_rubric_agent(prompt: str, project_dir: Path) -> list[str]:
@@ -103,6 +104,7 @@ Scale by complexity:
 
 Write ONLY a numbered list to {rubric_file}. One criterion per line. No prose."""
 
+    rubric_cost = 0.0
     try:
         agent_opts = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
@@ -111,7 +113,11 @@ Write ONLY a numbered list to {rubric_file}. One criterion per line. No prose.""
         )
 
         async for message in query(prompt=agent_prompt, options=agent_opts):
-            if AssistantMessage and isinstance(message, AssistantMessage):
+            if isinstance(message, ResultMessage):
+                raw_cost = getattr(message, "total_cost_usd", None)
+                if isinstance(raw_cost, (int, float)):
+                    rubric_cost = float(raw_cost)
+            elif AssistantMessage and isinstance(message, AssistantMessage):
                 for block in message.content:
                     if TextBlock and isinstance(block, TextBlock) and block.text:
                         print(block.text, flush=True)
@@ -119,15 +125,15 @@ Write ONLY a numbered list to {rubric_file}. One criterion per line. No prose.""
                         print_agent_tool(block)
     except Exception as e:
         print(f"  rubric agent error: {e}", flush=True)
-        return []
+        return [], rubric_cost
 
     # Read the rubric file
     if rubric_file.exists():
         text = rubric_file.read_text()
         rubric_file.unlink()
-        return _parse_rubric_output(text)
+        return _parse_rubric_output(text), rubric_cost
 
-    return []
+    return [], rubric_cost
 
 
 def parse_markdown_tasks(md_file: Path, project_dir: Path) -> list[dict]:

@@ -391,7 +391,8 @@ async def run_testgen_agent(
     project_dir: Path,
     framework: str = "pytest",
     quiet: bool = False,
-) -> tuple[Path | None, list[str]]:
+    task_spec: str = "",
+) -> tuple[Path | None, list[str], float]:
     """Run adversarial testgen agent in an isolated temp directory.
 
     The agent receives blackbox_context (public stubs, file tree) as a string
@@ -419,7 +420,10 @@ async def run_testgen_agent(
 You have NOT seen the implementation — it hasn't been written yet.
 Your job is to write tests that will CATCH BUGS, not confirm correctness.
 
-SPEC (acceptance criteria):
+TASK DESCRIPTION (original spec — test ALL requirements):
+{task_spec if task_spec else "(not provided)"}
+
+ACCEPTANCE CRITERIA (derived from spec — ensure coverage):
 {rubric_text}
 
 PROJECT CONTEXT (public interface only — all context you need is here):
@@ -463,6 +467,22 @@ Steps:
         # Create tests/ subdirectory in temp dir
         (Path(tmp_dir) / "tests").mkdir(parents=True, exist_ok=True)
 
+        # Copy source files into temp dir so pytest --collect-only can resolve imports.
+        # This doesn't break adversarial isolation — the agent's prompt only has stubs,
+        # and we tell it not to read files. The copies just let pytest validate imports.
+        import shutil as _shutil
+        for src_file in project_dir.glob("*.py"):
+            if not src_file.name.startswith("test_"):
+                _shutil.copy2(str(src_file), str(Path(tmp_dir) / src_file.name))
+        # Also copy tests/__init__.py and conftest.py if they exist
+        src_tests = project_dir / "tests"
+        if src_tests.is_dir():
+            dst_tests = Path(tmp_dir) / "tests"
+            for init_file in ["__init__.py", "conftest.py"]:
+                src_init = src_tests / init_file
+                if src_init.exists():
+                    _shutil.copy2(str(src_init), str(dst_tests / init_file))
+
         agent_opts = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
             cwd=tmp_dir,
@@ -470,11 +490,16 @@ Steps:
         )
 
         # Stream agent messages
+        testgen_cost = 0.0
         async for message in query(prompt=prompt, options=agent_opts):
             if isinstance(message, ResultMessage):
-                pass  # Final result
+                raw_cost = getattr(message, "total_cost_usd", None)
+                if isinstance(raw_cost, (int, float)):
+                    testgen_cost = float(raw_cost)
             elif hasattr(message, "session_id") and hasattr(message, "is_error"):
-                pass  # Duck-type ResultMessage
+                raw_cost = getattr(message, "total_cost_usd", None)
+                if isinstance(raw_cost, (int, float)):
+                    testgen_cost = float(raw_cost)
             elif hasattr(message, "content"):
                 for block in message.content:
                     if TextBlock and isinstance(block, TextBlock) and block.text:
@@ -488,20 +513,20 @@ Steps:
         # Check if test file was written in temp dir
         test_file_in_tmp = Path(tmp_dir) / test_rel
         if not test_file_in_tmp.exists():
-            return None, log_lines
+            return None, log_lines, testgen_cost
 
         # Validate syntax before copying
         try:
             ast.parse(test_file_in_tmp.read_text())
         except SyntaxError as e:
             print(f"  testgen: generated test has syntax error: {e}", flush=True)
-            return None, log_lines
+            return None, log_lines, testgen_cost
 
         # Copy to project dir
         dest = project_dir / test_rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(str(test_file_in_tmp), str(dest))
-        return dest, log_lines
+        return dest, log_lines, testgen_cost
 
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -773,6 +798,19 @@ Steps:
     results: dict[str, Path | None] = {}
     try:
         (Path(tmp_dir) / "tests").mkdir(parents=True, exist_ok=True)
+
+        # Copy source files so pytest --collect-only can resolve imports
+        import shutil as _shutil
+        for src_file in project_dir.glob("*.py"):
+            if not src_file.name.startswith("test_"):
+                _shutil.copy2(str(src_file), str(Path(tmp_dir) / src_file.name))
+        src_tests = project_dir / "tests"
+        if src_tests.is_dir():
+            dst_tests = Path(tmp_dir) / "tests"
+            for init_file in ["__init__.py", "conftest.py"]:
+                src_init = src_tests / init_file
+                if src_init.exists():
+                    _shutil.copy2(str(src_init), str(dst_tests / init_file))
 
         agent_opts = ClaudeAgentOptions(
             permission_mode="bypassPermissions",

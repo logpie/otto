@@ -193,7 +193,7 @@ class TestRunTestgenAgent:
 
         mock_query.side_effect = fake_query
 
-        result, log_lines = asyncio.run(
+        result, log_lines, _cost = asyncio.run(
             run_testgen_agent(
                 rubric=["search is case-insensitive"],
                 key="testkey",
@@ -217,7 +217,7 @@ class TestRunTestgenAgent:
 
         mock_query.side_effect = fake_query
 
-        result, log_lines = asyncio.run(
+        result, log_lines, _cost = asyncio.run(
             run_testgen_agent(
                 rubric=["search works"],
                 key="badkey",

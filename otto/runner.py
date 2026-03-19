@@ -756,6 +756,8 @@ async def run_task(
             print(f"  {_YELLOW}No test command, no verify command — agent output will be merged unchecked.{_RESET}", flush=True)
         print(f"  {_DIM}Use 'otto add' without --no-rubric to enable adversarial TDD.{_RESET}\n", flush=True)
 
+    testgen_cost = 0.0  # accumulated across testgen attempts
+
     if rubric and pre_generated_test:
         # Testgen was run sequentially before parallel coding — use pre-generated test
         test_file_path_val = pre_generated_test
@@ -777,7 +779,8 @@ async def run_task(
             print(f"  {_DIM}Testgen agent writing adversarial tests ({len(rubric)} criteria)...{_RESET}", flush=True)
         t0 = time.monotonic()
         testgen_logs: list[str] = []
-        test_file_path_val, testgen_logs = await run_testgen_agent(rubric, key, blackbox_ctx, effective_dir, quiet=parallel_mode)
+        test_file_path_val, testgen_logs, _tg_cost_i = await run_testgen_agent(rubric, key, blackbox_ctx, effective_dir, quiet=parallel_mode, task_spec=prompt)
+        testgen_cost += _tg_cost_i
         timings["testgen_agent"] = time.monotonic() - t0
 
         if test_file_path_val:
@@ -792,7 +795,8 @@ async def run_task(
                     for line in err_lines[-5:]:
                         print(f"    {_DIM}{line}{_RESET}", flush=True)
                 test_file_path_val.unlink()
-                test_file_path_val, regen_logs = await run_testgen_agent(rubric, key, blackbox_ctx, effective_dir, quiet=parallel_mode)
+                test_file_path_val, regen_logs, _tg_cost_i = await run_testgen_agent(rubric, key, blackbox_ctx, effective_dir, quiet=parallel_mode, task_spec=prompt)
+                testgen_cost += _tg_cost_i
                 testgen_logs.extend(regen_logs)
                 if test_file_path_val:
                     validation = validate_generated_tests(test_file_path_val, "pytest", effective_dir)
@@ -825,7 +829,8 @@ async def run_task(
                         print(f"\n  {_YELLOW}{_BOLD}⚠⚠⚠ WARNING: All rubric tests PASS before implementation — tests may be too weak{_RESET}", flush=True)
                         print(f"  {_DIM}Regenerating tests...{_RESET}", flush=True)
                     test_file_path_val.unlink()
-                    test_file_path_val, regen_logs = await run_testgen_agent(rubric, key, blackbox_ctx, effective_dir, quiet=parallel_mode)
+                    test_file_path_val, regen_logs, _tg_cost_i = await run_testgen_agent(rubric, key, blackbox_ctx, effective_dir, quiet=parallel_mode, task_spec=prompt)
+                    testgen_cost += _tg_cost_i
                     testgen_logs.extend(regen_logs)
                     if test_file_path_val:
                         validation = validate_generated_tests(test_file_path_val, "pytest", effective_dir)
@@ -858,9 +863,10 @@ async def run_task(
                 from otto.testgen import build_blackbox_context, run_testgen_agent, validate_generated_tests
                 task_hint = prompt + "\n" + "\n".join(rubric) + "\n\n" + quality_feedback
                 regen_ctx = build_blackbox_context(effective_dir, task_hint=task_hint)
-                test_file_path_val, _ = await run_testgen_agent(
+                test_file_path_val, _, _tg_cost_i = await run_testgen_agent(
                     rubric, key, regen_ctx, effective_dir, quiet=parallel_mode,
                 )
+                testgen_cost += _tg_cost_i
                 if test_file_path_val:
                     validation = validate_generated_tests(test_file_path_val, "pytest", effective_dir)
                     if validation.status == "collection_error":
@@ -920,7 +926,7 @@ async def run_task(
 
     session_id = None
     last_error = None  # verification failure output for retry feedback
-    total_cost = 0.0  # accumulated cost across retries
+    total_cost = testgen_cost  # start with testgen cost, add coding agent cost per attempt
     for attempt in range(max_retries + 1):
         attempt_num = attempt + 1
         if not parallel_mode:
@@ -972,14 +978,24 @@ async def run_task(
         # Tell the coding agent about adversarial test file (do NOT modify it)
         if test_file_path_val:
             agent_prompt += (
-                f"\n\nACCEPTANCE TESTS: {test_file_path_val.relative_to(effective_dir)} contains tests you must pass. "
-                f"Do NOT modify this file — these are adversarial tests you must satisfy.\n\n"
+                f"\n\nACCEPTANCE TESTS: {test_file_path_val.relative_to(effective_dir)} contains YOUR adversarial tests. "
+                f"Do NOT modify this file.\n"
+                f"Other test files in tests/ are from previous tasks. If your changes intentionally\n"
+                f"break them (e.g., you changed an API contract), you MAY update their assertions\n"
+                f"to match the new behavior. Do NOT delete tests — only update assertions.\n\n"
                 f"IMPORTANT: Implement ONLY what the task description asks for. "
                 f"If a test seems to require functionality beyond the spec (e.g., a non-standard "
                 f"algorithm extension), implement the STANDARD behavior and let that test fail. "
                 f"Do NOT invent non-standard features, workarounds, or hacks to pass a suspicious test. "
                 f"A correct standard implementation that fails one questionable test is better than "
                 f"a corrupted implementation that passes all tests."
+            )
+
+        # Warn coding agent if architect flagged this as a contract-breaking task
+        if design_ctx and "CONTRACT CHANGE" in design_ctx:
+            agent_prompt += (
+                "\n\n⚠ This task may break existing tests by changing the API contract.\n"
+                "If baseline tests fail because of your intentional changes, update their assertions."
             )
 
         # Run agent + build candidate + verify — catch infrastructure failures
@@ -1314,9 +1330,10 @@ async def run_task(
                         test_file_path_val.unlink()
                     from otto.testgen import build_blackbox_context, run_testgen_agent, validate_generated_tests
                     blackbox_ctx = build_blackbox_context(effective_dir, task_hint=task_hint)
-                    test_file_path_val, testgen_logs = await run_testgen_agent(
+                    test_file_path_val, testgen_logs, _tg_cost_i = await run_testgen_agent(
                         rubric, key, blackbox_ctx, effective_dir, quiet=parallel_mode
                     )
+                    testgen_cost += _tg_cost_i
                     if test_file_path_val:
                         validation = validate_generated_tests(test_file_path_val, "pytest", effective_dir)
                         if validation.status == "tdd_ok":
@@ -1963,7 +1980,6 @@ async def run_all(
                     if on_id not in deps:
                         deps.append(on_id)
                         update_task(tasks_file, task["key"], depends_on=deps)
-                        task["depends_on"] = deps  # keep in-memory dict in sync
                         injected += 1
             if injected:
                 print(f"  {_DIM}Injected {injected} dependencies from file-plan.md{_RESET}", flush=True)
@@ -2164,9 +2180,10 @@ async def run_all(
                             print(f"  {_DIM}[#{t['id']}] Holistic test failed — per-task fallback...{_RESET}", flush=True)
                             task_hint = t["prompt"] + "\n" + "\n".join(t.get("rubric", []))
                             task_ctx = build_blackbox_context(project_dir, task_hint=task_hint)
-                            test_path, _ = await run_testgen_agent(
+                            test_path, _, _tg_cost_i = await run_testgen_agent(
                                 t["rubric"], key, task_ctx, project_dir, quiet=True,
                             )
+                            testgen_cost += _tg_cost_i
                             if test_path:
                                 validation = validate_generated_tests(test_path, "pytest", project_dir)
                                 if validation.status == "collection_error":
@@ -2187,9 +2204,10 @@ async def run_all(
                                 test_path.unlink(missing_ok=True)
                                 task_hint = t["prompt"] + "\n" + "\n".join(t.get("rubric", [])) + "\n\nFix these test issues:\n" + feedback
                                 task_ctx = build_blackbox_context(project_dir, task_hint=task_hint)
-                                test_path, _ = await run_testgen_agent(
+                                test_path, _, _tg_cost_i = await run_testgen_agent(
                                     t["rubric"], key, task_ctx, project_dir, quiet=True,
                                 )
+                                testgen_cost += _tg_cost_i
                                 if test_path:
                                     validation = validate_generated_tests(test_path, "pytest", project_dir)
                                     if validation.status == "collection_error":

@@ -87,6 +87,9 @@ Write these files:
 - test-patterns.md: test framework, fixtures, CLI test approach, shared helpers
   Include a ```conftest.py fenced block with shared test fixtures
 - task-decisions.md: per-task design decisions for the tasks listed above
+  - In task-decisions.md, for each task that CHANGES existing behavior (replaces mock with real API,
+    changes function signatures, removes features), add a ⚠ CONTRACT CHANGE warning explaining
+    what existing tests may break and why.
 - gotchas.md: anti-patterns, known pitfalls to avoid
 - file-plan.md: predict which files each task will modify (exact paths).
   If multiple tasks modify the same file, recommend depends_on to chain them serially.

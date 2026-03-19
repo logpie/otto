@@ -469,6 +469,8 @@ After all tasks complete or are aborted, call finish_run with a summary.
 
 RULES:
 - PLAN FIRST — never call run_coding_agent before outputting your execution plan
+- run_coding_agent runs ONE attempt. If it fails, read_verify_output to understand why,
+  then retry with a targeted hint. Don't let it burn multiple retries blindly.
 - If a task fails, ALWAYS read_verify_output before deciding to retry
 - Never retry with the same approach twice — analyze what went wrong first
 - If a task fails 3 times with different approaches, abort it with abort_task
@@ -667,7 +669,7 @@ async def run_per_task_testgen(task_key: str) -> str:
     rubric = task["rubric"]
     hint = task["prompt"] + "\\n" + "\\n".join(rubric)
     ctx = build_blackbox_context(PROJECT_DIR, task_hint=hint)
-    path, _ = await run_testgen_agent(rubric, task_key, ctx, PROJECT_DIR, quiet=True)
+    path, _, _tg_cost = await run_testgen_agent(rubric, task_key, ctx, PROJECT_DIR, quiet=True)
     return json.dumps({{"test_file": str(path) if path else None}})
 
 
@@ -711,8 +713,12 @@ async def run_coding_agent(task_key: str, hint: str = "") -> str:
         cwd=PROJECT_DIR, capture_output=True, text=True,
     ).stdout.strip()
 
+    # Pilot controls retries — run single attempt, pilot decides retry strategy
+    single_attempt_task = dict(task)
+    single_attempt_task["max_retries"] = 0
+
     success = await run_task(
-        task, CONFIG, PROJECT_DIR, TASKS_FILE,
+        single_attempt_task, CONFIG, PROJECT_DIR, TASKS_FILE,
         pre_generated_test=pre_test,
         sibling_test_files=sibling_tests or None,
     )
@@ -791,8 +797,11 @@ async def run_coding_agents(task_keys: list[str]) -> str:
                 pre_tests[key] = tf
 
     async def _run_one(t, wt_dir, pre_test, siblings):
+        # Pilot controls retries — run single attempt, pilot decides retry strategy
+        single_attempt_t = dict(t)
+        single_attempt_t["max_retries"] = 0
         success = await run_task(
-            t, CONFIG, PROJECT_DIR, TASKS_FILE,
+            single_attempt_t, CONFIG, PROJECT_DIR, TASKS_FILE,
             work_dir=wt_dir,
             pre_generated_test=pre_test,
             sibling_test_files=siblings,
@@ -1269,7 +1278,6 @@ async def run_piloted(
                         if on_id not in deps:
                             deps.append(on_id)
                             update_task(tasks_file, task["key"], depends_on=deps)
-                            task["depends_on"] = deps  # keep in-memory in sync
                             injected += 1
                 if injected:
                     print(f"  {_DIM}Injected {injected} dependencies from file-plan.md{_RESET}", flush=True)

@@ -54,7 +54,7 @@ class TestEndToEnd:
         # Mock testgen to skip (returns no test file)
         mock_blackbox.return_value = ""
         async def fake_testgen(*args, **kwargs):
-            return None, []
+            return None, [], 0.0
         mock_testgen_agent.side_effect = fake_testgen
 
         async def fake_query(*, prompt, options=None):
@@ -101,7 +101,7 @@ class TestEndToEnd:
         # Mock testgen to skip (returns no test file)
         mock_blackbox.return_value = ""
         async def fake_testgen(*args, **kwargs):
-            return None, []
+            return None, [], 0.0
         mock_testgen_agent.side_effect = fake_testgen
 
         async def fake_query(*, prompt, options=None):
@@ -172,7 +172,7 @@ class TestRubricEndToEnd:
         async def fake_testgen_agent(rubric, key, ctx, project_dir, **kw):
             test_file.parent.mkdir(parents=True, exist_ok=True)
             test_file.write_text("def test_search():\n    assert True\n")
-            return test_file, []
+            return test_file, [], 0.0
 
         mock_testgen_agent.side_effect = fake_testgen_agent
 
