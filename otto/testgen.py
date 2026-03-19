@@ -416,15 +416,13 @@ async def run_testgen_agent(
     if design_ctx:
         design_section = f"\n\nTEST CONVENTIONS AND DATA MODEL (follow these):\n{design_ctx}\n"
 
-    prompt = f"""You are a QA engineer writing black-box tests from a specification.
-You have NOT seen the implementation — it hasn't been written yet.
-Your job is to write tests that will CATCH BUGS, not confirm correctness.
+    prompt = f"""You are an engineer writing acceptance tests that verify a spec is met.
 
-TASK DESCRIPTION (original spec — test ALL requirements):
-{task_spec if task_spec else "(not provided)"}
-
-ACCEPTANCE CRITERIA (derived from spec — ensure coverage):
+SPEC:
 {rubric_text}
+
+TASK DESCRIPTION:
+{task_spec if task_spec else "(not provided)"}
 
 PROJECT CONTEXT (public interface only — all context you need is here):
 {blackbox_context}{design_section}
@@ -437,14 +435,14 @@ Start writing the test file IMMEDIATELY — do NOT explore broadly.
 During self-review, if you need to verify specific details (exact function
 signatures, enum values, flag names), you may read the relevant source file.
 
-Requirements for tests:
-- Test the public interface only (CLI via subprocess, library via imports)
-- Be designed to FAIL on the current codebase (the feature doesn't exist yet)
-- Be independent and hermetic (use tmp_path, no shared state)
-- Use subprocess.run() for CLI testing, not CliRunner
-- Include negative tests (what should NOT happen)
-- Test full user workflows and data persistence
-- Think like a devil's advocate — catch lazy/buggy implementations
+Requirements:
+- Test EXACTLY what the spec says — no more, no less.
+- Each spec item should have at least one test that directly verifies it.
+- Test the public interface (CLI via subprocess, library via imports).
+- Use subprocess.run() for CLI testing, not CliRunner.
+- Tests should fail before implementation and pass after correct implementation.
+- Be independent and hermetic (use tmp_path, no shared state).
+- Do NOT invent requirements beyond the spec.
 - NO trivial tests. Use pytest.mark.parametrize where appropriate.
 
 CRITICAL IMPORT RULE:
@@ -752,11 +750,9 @@ async def run_holistic_testgen(
     for t in tasks:
         test_files_list.append(f"- tests/test_otto_{t['key']}.py — tests for task #{t.get('id', '?')}")
 
-    prompt = f"""You are a QA engineer writing adversarial tests for ALL features at once.
-You have NOT seen the implementation — it hasn't been written yet.
-Your job is to write tests that will CATCH BUGS, not confirm correctness.
+    prompt = f"""You are an engineer writing acceptance tests for ALL features at once.
 
-TASKS:
+TASKS (each with its spec):
 {chr(10).join(task_sections)}
 
 PROJECT CONTEXT (public interface only — all context you need is here):
@@ -767,15 +763,16 @@ Write these files in {tmp_dir}:
 - tests/conftest.py — shared fixtures for ALL test files
 {chr(10).join(test_files_list)}
 
-CRITICAL RULES:
-- Use CONSISTENT conventions across all test files
+RULES:
+- Test EXACTLY what each spec says — no more, no less.
+- Each spec item should have at least one test that directly verifies it.
+- Use CONSISTENT conventions across all test files.
 - Share fixtures via conftest.py. Each file must be independently runnable.
-- Test the public interface only (CLI via subprocess, library via imports)
-- Be designed to FAIL on the current codebase (features don't exist yet)
-- Be independent and hermetic (use tmp_path, no shared state)
-- Use subprocess.run() for CLI testing, not CliRunner
-- Include negative tests (what should NOT happen)
-- Think like a devil's advocate — catch lazy/buggy implementations
+- Test the public interface (CLI via subprocess, library via imports).
+- Use subprocess.run() for CLI testing, not CliRunner.
+- Tests should fail before implementation and pass after correct implementation.
+- Be independent and hermetic (use tmp_path, no shared state).
+- Do NOT invent requirements beyond the spec.
 - NO trivial tests. Use pytest.mark.parametrize where appropriate.
 
 CRITICAL IMPORT RULE:
