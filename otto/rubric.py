@@ -157,7 +157,7 @@ async def _run_markdown_agent(md_file: Path, project_dir: Path) -> list[dict]:
     from otto.testgen import build_blackbox_context
     blackbox_ctx = build_blackbox_context(project_dir, task_hint=md_content[:500])
 
-    agent_prompt = f"""You are a senior QA engineer and technical PM. Break this feature document into coding tasks.
+    agent_prompt = f"""You are a senior engineer breaking a feature document into coding tasks.
 
 DOCUMENT:
 {md_content}

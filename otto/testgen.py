@@ -899,7 +899,7 @@ EXISTING TESTS (for reference on fixtures/helpers — do NOT copy how they invok
 {existing_tests}
 """
 
-    prompt = f"""You are a QA engineer writing integration tests for a coding task.
+    prompt = f"""You are an engineer writing acceptance tests for a coding task.
 
 TASK: {task_prompt}
 
@@ -1027,7 +1027,7 @@ EXISTING TESTS (for reference on fixtures/helpers — do NOT copy how they invok
     if integ_design_ctx:
         integ_design_section = f"\n\nARCHITECTURE AND TEST CONVENTIONS (follow these):\n{integ_design_ctx}\n"
 
-    prompt = f"""You are a QA engineer writing cross-feature integration tests.
+    prompt = f"""You are an engineer writing cross-feature acceptance tests.
 
 The following features were implemented:
 
