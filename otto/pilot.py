@@ -80,10 +80,11 @@ class _Spinner:
         self._last_progress_line = ""
 
     def _read_progress(self):
-        """Read latest line from coding agent progress file."""
+        """Read new lines from coding agent progress file and print them."""
         if not self._progress_file:
             return
         try:
+            import sys as _sys
             from pathlib import Path
             p = Path(self._progress_file)
             if not p.exists():
@@ -93,8 +94,12 @@ class _Spinner:
                 new_lines = f.readlines()
                 self._last_progress_pos = f.tell()
             for line in new_lines:
-                line = line.strip()
+                line = line.rstrip()
                 if line:
+                    # Clear spinner, print progress line, spinner will redraw
+                    _sys.stdout.write(f"\r{' ' * 80}\r")
+                    _sys.stdout.write(f"  {_DIM}  {line[:78]}{_RESET}\n")
+                    _sys.stdout.flush()
                     self._last_progress_line = line
         except OSError:
             pass
@@ -117,14 +122,6 @@ class _Spinner:
                 # Check for coding agent progress every ~2 seconds
                 if idx % 13 == 0:
                     self._read_progress()
-
-                # Show progress line if available
-                if self._last_progress_line and self._last_progress_line != last_printed:
-                    # Clear spinner line and print progress
-                    _sys.stdout.write(f"\r{' ' * 80}\r")
-                    preview = self._last_progress_line[:70]
-                    _sys.stdout.write(f"  {_DIM}  {preview}{_RESET}\n")
-                    last_printed = self._last_progress_line
 
                 _sys.stdout.write(f"\r  {_DIM}{frame} {self._label} ({time_str}){_RESET}  ")
                 _sys.stdout.flush()

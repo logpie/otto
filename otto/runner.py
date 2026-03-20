@@ -892,6 +892,7 @@ Before you finish, verify against the spec:
                             # Duck-type check for ResultMessage (mocks, stub)
                             result_msg = message
                         elif AssistantMessage and isinstance(message, AssistantMessage):
+                            progress_file = log_dir / "progress.txt"
                             for block in message.content:
                                 if ThinkingBlock and isinstance(block, ThinkingBlock):
                                     thinking = getattr(block, "thinking", "")
@@ -901,14 +902,22 @@ Before you finish, verify against the spec:
                                     if not parallel_mode:
                                         print(block.text, flush=True)
                                     agent_log_lines.append(block.text)
+                                    # Write reasoning to progress file
+                                    try:
+                                        with open(progress_file, "a") as pf:
+                                            # Show first line of reasoning
+                                            first_line = block.text.strip().split("\n")[0]
+                                            if first_line:
+                                                pf.write(first_line + "\n")
+                                    except OSError:
+                                        pass
                                 elif ToolUseBlock and isinstance(block, ToolUseBlock):
                                     if not parallel_mode:
                                         _print_tool_use(block)
                                     summary_line = f"● {block.name}  {_tool_use_summary(block)}"
                                     agent_log_lines.append(summary_line)
-                                    # Write progress for pilot spinner display
+                                    # Write tool call to progress file
                                     try:
-                                        progress_file = log_dir / "progress.txt"
                                         with open(progress_file, "a") as pf:
                                             pf.write(summary_line + "\n")
                                     except OSError:
@@ -920,6 +929,13 @@ Before you finish, verify against the spec:
                                     if content.strip():
                                         prefix = "ERROR: " if block.is_error else ""
                                         agent_log_lines.append(f"  {prefix}{content[:500]}")
+                                        # Write errors to progress (important for user to see)
+                                        if block.is_error:
+                                            try:
+                                                with open(progress_file, "a") as pf:
+                                                    pf.write(f"  ERROR: {content[:200]}\n")
+                                            except OSError:
+                                                pass
 
                     # Persist agent log
                     try:
