@@ -48,7 +48,7 @@ _CYAN = "\033[36m"
 _BOLD = "\033[1m"
 
 # Tool categories for display tiering
-_PRIMARY_TOOLS = {"run_coding_agent", "finish_run"}
+_PRIMARY_TOOLS = {"run_coding_agent", "run_qa_agent", "finish_run"}
 _SECONDARY_TOOLS = {"get_run_state", "read_verify_output", "merge_task", "abort_task"}
 _NOISE_TOOLS = {"save_run_state", "ToolSearch", "write_task_notes", "write_learning"}
 
@@ -62,6 +62,7 @@ _TOOL_DISPLAY = {
     "finish_run": ("🏁", "Done"),
     "write_task_notes": ("📝", "Writing task notes"),
     "write_learning": ("📝", "Recording learning"),
+    "run_qa_agent": ("🔍", "QA Testing"),
 }
 
 
@@ -774,6 +775,101 @@ def write_learning(learning: str) -> str:
 
 
 @mcp.tool()
+async def run_qa_agent(task_key: str, spec_items: str, diff_summary: str) -> str:
+    """Run an adversarial QA agent that tries to BREAK the implementation.
+    Pass the spec items and diff summary. Returns findings report."""
+    from otto.tasks import load_tasks
+    import os
+
+    tasks = load_tasks(TASKS_FILE)
+    task = next((t for t in tasks if t.get("key") == task_key), None)
+    if not task:
+        return json.dumps({{"error": f"task {{task_key}} not found"}})
+
+    qa_system_prompt = \"\"\"You are an adversarial QA tester. Your ONLY job is to find ways the
+implementation does NOT meet the spec. You get rewarded for finding bugs.
+
+Rules:
+- Test the HARDEST cases first. If the spec says "<200ms on cold start",
+  clear ALL caches and measure. Don't test the warm path.
+- Test in layers: curl/API first (fast), browser second (slow).
+  If curl shows a violation, report immediately — no browser needed.
+- For each spec item, try to find the ONE case that breaks it.
+- Report exactly what you tested, what you expected, and what happened.
+- If everything genuinely passes the hardest cases, say so honestly.
+- Do NOT assume the implementation is correct. Verify everything.
+\"\"\"
+
+    qa_prompt = f\"\"\"SPEC ITEMS TO VERIFY:
+{{spec_items}}
+
+DIFF SUMMARY:
+{{diff_summary}}
+
+TASK: {{task.get("prompt", "")}}
+
+You are working in {{PROJECT_DIR}}.
+
+Steps:
+1. Start the dev server if needed
+2. CURL first: test API endpoints, check responses, measure timing
+3. BROWSER second (if curl passes): interact with the app, click everything
+4. For EACH spec item: find the hardest test case and try it
+5. Write findings to {{PROJECT_DIR}}/otto_logs/{{task_key}}/qa-report.md
+6. Kill any dev servers you started (by PID)
+
+Report format:
+- PASS: spec item met, with evidence (what you tested)
+- FAIL: spec item NOT met, with evidence (expected vs actual)
+- CONCERN: technically passes but might be gaming the spec
+\"\"\"
+
+    try:
+        from claude_agent_sdk import ClaudeAgentOptions as _QAOpts, query as _qa_query
+        from claude_agent_sdk.types import ResultMessage as _QAResult
+
+        qa_opts = _QAOpts(
+            permission_mode="bypassPermissions",
+            cwd=str(PROJECT_DIR),
+            max_turns=50,
+            system_prompt=qa_system_prompt,
+            env=dict(os.environ),
+            setting_sources=["user", "project"],
+        )
+
+        qa_log = []
+        async for message in _qa_query(prompt=qa_prompt, options=qa_opts):
+            if hasattr(message, "content"):
+                for block in message.content:
+                    if hasattr(block, "text") and block.text:
+                        qa_log.append(block.text)
+                    elif hasattr(block, "name"):
+                        qa_log.append(f"● {{block.name}}")
+
+        # Read QA report if written
+        qa_report_path = PROJECT_DIR / "otto_logs" / task_key / "qa-report.md"
+        report = ""
+        if qa_report_path.exists():
+            report = qa_report_path.read_text()
+        else:
+            report = "\\n".join(qa_log[-20:])  # fallback: last 20 lines of QA output
+
+        # Check for failures
+        has_fail = "FAIL" in report.upper() and "FAIL" in report
+
+        result = {{
+            "passed": not has_fail,
+            "report": report[:5000],
+            "has_failures": has_fail,
+        }}
+        _emit_result("run_qa_agent", result)
+        return json.dumps(result)
+
+    except Exception as e:
+        return json.dumps({{"error": f"QA agent failed: {{str(e)[:200]}}", "passed": True}})
+
+
+@mcp.tool()
 def finish_run(summary: str) -> str:
     """Signal that the run is complete. Pass a summary of what happened."""
     return json.dumps({{"done": True, "summary": summary}})
@@ -947,9 +1043,8 @@ async def run_piloted(
 
             _pilot_system_prompt = """\
 <role>
-You are a tech lead managing coding agents. You orchestrate task execution,
-verify quality, and test the app like a real user. Your behavioral testing
-is the last line of defense — bugs you miss ship to the user.
+You are a tech lead managing coding agents. You orchestrate task execution
+and verify quality. A separate QA agent handles adversarial testing.
 </role>
 
 <workflow>
@@ -961,71 +1056,28 @@ PHASE 2: EXECUTE
 - run_coding_agent for each task (it handles implement + test + verify)
 - On failure: read_verify_output, retry with targeted hint, abort after 3 tries
 
-PHASE 3: SPEC COMPLIANCE — BE ADVERSARIAL (after each task passes)
-Your job is to TRY TO BREAK the implementation, not confirm it works.
-- For each spec item: find the HARDEST case that could violate it
-- "<200ms on cold start" → what if you clear ALL caches (client AND server)?
-- "works offline" → actually disable the network and try
-- "all requests <300ms" → try a city that was never cached
-- If the implementation only passes the easy case, it's spec-dodging — RETRY
-- For [verifiable] items: confirm a test exists AND test the hard case yourself
+PHASE 3: SPEC COMPLIANCE (after each task passes)
+- Read the diff from the result
+- For [verifiable] items: confirm a test exists in the diff
 - For [visual] items: review diff for reasonable implementation
+- Note any concerns about spec-dodging for the QA agent
 
-PHASE 4: BEHAVIORAL TESTING (after compliance passes)
-Test in layers — fast first, browser last. Stop early on failure:
-1. API/curl: start dev server, curl endpoints, verify responses.
-   If curl shows the spec isn't met, STOP and retry immediately.
-   No browser testing needed — you already found the failure.
-2. CLI: run commands with real inputs, check output.
-3. Browser: chrome-devtools MCP for visual + interaction testing.
-   Only do this AFTER curl/API tests pass.
+PHASE 4: QA AGENT (after compliance passes)
+- Call run_qa_agent with the spec items and diff summary
+- The QA agent adversarially tests the app (curl first, browser second)
+- It tries to BREAK the implementation, not confirm it works
+- If QA finds failures → retry run_coding_agent with the QA findings as hint
+- If QA passes → task is done
 
 PHASE 5: REPORT
 - finish_run with summary
-- Kill ONLY dev servers YOU started (track the PID from your Bash command).
-  Do NOT use pkill/killall — it kills the user's own dev servers too.
-  Use `kill <pid>` with the specific PID you launched.
 </workflow>
-
-<behavioral_testing_rules>
-CRITICAL — these are non-negotiable:
-
-1. CLICK EVERY INTERACTIVE ELEMENT on the page at least once.
-   Buttons, links, toggles, inputs — if it's clickable, click it.
-   This catches bugs like "current location button is broken" that
-   would otherwise ship undetected.
-
-2. TEST MULTI-STEP FLOWS, not just single actions.
-   Add items → select one → perform action → verify the RIGHT item was affected.
-   Most bugs hide in state interactions between features.
-
-3. REGRESSION CHECK existing features after adding new ones.
-   The new feature may work perfectly while breaking something unrelated.
-   Spend 1-2 minutes trying features you DIDN'T just build.
-
-4. Document EVERY element you tested in the behavioral report.
-   If an element isn't in the report, you didn't test it.
-
-<example type="violation">
-Task: "Add temperature toggle"
-BAD: Tested toggle only. Didn't click location pin, compare button, search.
-Result: Location pin was broken for 3 tasks before anyone noticed.
-</example>
-
-<example type="correct">
-Task: "Add temperature toggle"
-GOOD: Tested toggle. Also clicked: search (works), location pin (works),
-      compare (works), dot navigation (works), location drawer (works).
-Result: Full confidence nothing is broken.
-</example>
-</behavioral_testing_rules>
 
 <completion_check>
 Before calling finish_run, verify:
-1. Every task has passed or been properly aborted with a report
-2. Behavioral test report written to otto_logs/<key>/behavioral-test.md
-3. The report lists every interactive element and whether it was tested
-4. Dev servers YOU started killed (by PID, not pkill)
+1. Every task has passed both coding verification AND QA agent testing
+2. QA report exists at otto_logs/<key>/qa-report.md
+3. No unresolved FAIL findings from the QA agent
 </completion_check>"""
 
             agent_opts = ClaudeAgentOptions(
