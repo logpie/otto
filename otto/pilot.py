@@ -396,10 +396,15 @@ PENDING TASKS:
 PHASE 1: PLAN (mandatory — do this BEFORE calling any execution tools)
 ═══════════════════════════════════════════════════════
 
-After calling get_run_state, plan execution order:
-- Respect depends_on — run dependencies first
-- Run simpler/independent tasks first
-- Tasks that share files should run serially
+Steps:
+1. Call get_run_state to see pending tasks
+2. Run `git log --oneline -10` to understand project history and recent changes
+3. Decide what you need to know for the pending tasks — read only what's relevant,
+   don't read every file in the project. The coding agent does its own exploration.
+4. Plan execution order:
+   - Respect depends_on — run dependencies first
+   - Run simpler/independent tasks first
+   - Tasks that share files should run serially
 
 ═══════════════════════════════════════════════════════
 PHASE 2: EXECUTE
