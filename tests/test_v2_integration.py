@@ -367,9 +367,8 @@ class TestPilotPromptBuilder:
         assert "max_retries=3" in prompt
         assert "test_command=pytest" in prompt
 
-        # Strategy guidance
-        assert "merge_task" in prompt
-        assert "run_coding_agent" in prompt
+        # Strategy guidance (now in system_prompt, user prompt is lean)
+        assert "get_run_state" in prompt or "git log" in prompt
 
     def test_prompt_does_not_include_stale_architect_docs(self, tmp_git_repo):
         """Pilot prompt should NOT include architect docs (agents explore codebase directly)."""
