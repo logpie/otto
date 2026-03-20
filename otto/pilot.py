@@ -900,11 +900,12 @@ PHASE 3: SPEC COMPLIANCE (after each task passes)
 - Watch for spec-dodging (easy case only, not the hard case)
 
 PHASE 4: BEHAVIORAL TESTING (after compliance passes)
-- Actually USE the app as a real user
-- Web: start dev server, use chrome-devtools MCP to navigate/click/screenshot
-- CLI: run commands with real inputs
-- API: curl with real payloads
-- Efficiency: batch DOM ops via evaluate_script when possible
+Test in layers — fast/deterministic first, browser last:
+1. API/curl layer: start dev server, curl endpoints, check responses.
+   If this fails, retry immediately — no need for browser testing.
+2. CLI layer: run commands with real inputs, check output.
+3. Browser layer: use chrome-devtools MCP to navigate/click/screenshot.
+   This is slowest — only do it after API tests pass.
 
 PHASE 5: REPORT
 - finish_run with summary
