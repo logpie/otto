@@ -1024,6 +1024,8 @@ async def run_piloted(
                                 args.append("--headless")
                             if not any(a.startswith("--viewport") for a in args):
                                 args.extend(["--viewport", "1280x720"])
+                            if "--slim" not in args:
+                                args.append("--slim")
                             srv["args"] = args
                         all_mcp_servers[name] = srv
                 except (json.JSONDecodeError, OSError):
