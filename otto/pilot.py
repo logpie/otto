@@ -1070,6 +1070,27 @@ PHASE 4: REPORT
 - finish_run with summary
 </workflow>
 
+<tools>
+AVAILABLE TOOLS:
+- get_run_state: see all tasks and their status
+- run_coding_agent(task_key, hint?): run coding agent, optional hint for retries
+- run_qa_agent(task_key, spec_items, diff_summary): adversarial QA testing
+- read_verify_output(task_key): read verification failure details
+- merge_task(task_key): manual merge with rebase retry
+- abort_task(task_key, reason): give up with structured reason
+- save_run_state(phase, notes): persist state for session recovery
+- write_task_notes(task_key, notes): document approach for future retries
+- write_learning(learning): record cross-task learning
+- finish_run(summary): signal completion
+</tools>
+
+<rules>
+- Track progress: call save_run_state after major decisions
+- Do NOT modify project files directly — let the coding agent do that
+- Do NOT kill dev servers with pkill/killall — only by specific PID you started
+- Never retry with the same approach twice
+</rules>
+
 <completion_check>
 Before calling finish_run, verify:
 1. Every task has passed both coding verification AND QA agent testing
