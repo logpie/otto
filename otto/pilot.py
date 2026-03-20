@@ -1054,7 +1054,10 @@ PHASE 1: PLAN
 
 PHASE 2: EXECUTE
 - run_coding_agent for each task (it handles implement + test + verify)
-- On failure: read_verify_output, retry with targeted hint, abort after 3 tries
+- On failure: read_verify_output, retry with targeted hint
+- Same error twice = doom loop → change strategy fundamentally, not just tweak
+- After 3 total failures on a task, abort_task with structured escalation:
+  what was tried, why it failed, what would need to change, next steps for human
 
 PHASE 3: QA AGENT (after coding agent passes)
 - Call run_qa_agent with the spec items and diff summary
