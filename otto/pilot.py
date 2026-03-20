@@ -398,9 +398,8 @@ PHASE 1: PLAN (mandatory — do this BEFORE calling any execution tools)
 
 Steps:
 1. Call get_run_state to see pending tasks
-2. Run `git log --oneline -10` to understand project history and recent changes
-3. Decide what you need to know for the pending tasks — read only what's relevant,
-   don't read every file in the project. The coding agent does its own exploration.
+2. Run `git log --oneline` to understand project history and recent changes
+3. Read what you need to plan — the coding agent does its own deep exploration
 4. Plan execution order:
    - Respect depends_on — run dependencies first
    - Run simpler/independent tasks first
