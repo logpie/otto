@@ -137,7 +137,7 @@ def _print_pilot_tool_call(block) -> None:
     tool_name = name.replace("mcp__otto-pilot__", "")
     icon, label = _TOOL_DISPLAY.get(tool_name, ("●", tool_name))
 
-    # Build detail string
+    # Build detail string based on tool type
     detail = ""
     if "task_key" in inputs:
         detail = f"task {inputs['task_key'][:8]}"
@@ -147,6 +147,23 @@ def _print_pilot_tool_call(block) -> None:
     if inputs.get("hint"):
         hint_preview = str(inputs["hint"])[:60]
         detail += f' — hint: "{hint_preview}"'
+    # Show file paths and commands for common tools
+    if not detail:
+        if name in ("Read", "Glob", "Grep"):
+            detail = inputs.get("file_path") or inputs.get("path") or inputs.get("pattern") or ""
+        elif name in ("Edit", "Write"):
+            detail = inputs.get("file_path") or ""
+        elif name == "Bash":
+            cmd = inputs.get("command") or ""
+            detail = cmd[:80]
+        elif name.startswith("mcp__chrome-devtools__"):
+            # Show chrome-devtools action details
+            if inputs.get("url"):
+                detail = inputs["url"]
+            elif inputs.get("uid"):
+                detail = f"element {inputs['uid']}"
+            elif inputs.get("value"):
+                detail = f'"{inputs["value"][:40]}"'
 
     # Tier 3: suppress noise tools entirely
     if tool_name in _NOISE_TOOLS or name == "ToolSearch":
@@ -170,17 +187,23 @@ def _print_pilot_tool_call(block) -> None:
             print(f"  {_DIM}{icon} {label}{_RESET}", flush=True)
         return
 
-    # Tier 1: primary tools — prominent with separator, start spinner
-    print(f"\n  {_DIM}{'─' * 50}{_RESET}", flush=True)
-    if detail:
-        print(f"  {icon} {_BOLD}{label}{_RESET}  {_DIM}{detail}{_RESET}", flush=True)
-    else:
-        print(f"  {icon} {_BOLD}{label}{_RESET}", flush=True)
+    # Tier 1: otto primary tools — prominent with separator, start spinner
+    if tool_name in _PRIMARY_TOOLS:
+        print(f"\n  {_DIM}{'─' * 50}{_RESET}", flush=True)
+        if detail:
+            print(f"  {icon} {_BOLD}{label}{_RESET}  {_DIM}{detail}{_RESET}", flush=True)
+        else:
+            print(f"  {icon} {_BOLD}{label}{_RESET}", flush=True)
+        if tool_name in ("run_coding_agent",):
+            _active_spinner = _Spinner(label)
+            _active_spinner.start()
+        return
 
-    # Start spinner for long-running primary tools
-    if tool_name in ("run_coding_agent",):
-        _active_spinner = _Spinner(label)
-        _active_spinner.start()
+    # Default: show tool with detail, dimmed (Read, Bash, Grep, chrome-devtools, etc.)
+    if detail:
+        print(f"  {_DIM}{icon} {label}  {detail}{_RESET}", flush=True)
+    else:
+        print(f"  {_DIM}{icon} {label}{_RESET}", flush=True)
 
 
 def _print_pilot_tool_result(block) -> None:
@@ -905,12 +928,13 @@ Your job is to TRY TO BREAK the implementation, not confirm it works.
 - For [visual] items: review diff for reasonable implementation
 
 PHASE 4: BEHAVIORAL TESTING (after compliance passes)
-Test in layers — fast/deterministic first, browser last:
-1. API/curl layer: start dev server, curl endpoints, check responses.
-   If this fails, retry immediately — no need for browser testing.
-2. CLI layer: run commands with real inputs, check output.
-3. Browser layer: use chrome-devtools MCP to navigate/click/screenshot.
-   This is slowest — only do it after API tests pass.
+Test in layers — fast first, browser last. Stop early on failure:
+1. API/curl: start dev server, curl endpoints, verify responses.
+   If curl shows the spec isn't met, STOP and retry immediately.
+   No browser testing needed — you already found the failure.
+2. CLI: run commands with real inputs, check output.
+3. Browser: chrome-devtools MCP for visual + interaction testing.
+   Only do this AFTER curl/API tests pass.
 
 PHASE 5: REPORT
 - finish_run with summary
