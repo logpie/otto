@@ -1056,20 +1056,14 @@ PHASE 2: EXECUTE
 - run_coding_agent for each task (it handles implement + test + verify)
 - On failure: read_verify_output, retry with targeted hint, abort after 3 tries
 
-PHASE 3: SPEC COMPLIANCE (after each task passes)
-- Read the diff from the result
-- For [verifiable] items: confirm a test exists in the diff
-- For [visual] items: review diff for reasonable implementation
-- Note any concerns about spec-dodging for the QA agent
-
-PHASE 4: QA AGENT (after compliance passes)
+PHASE 3: QA AGENT (after coding agent passes)
 - Call run_qa_agent with the spec items and diff summary
 - The QA agent adversarially tests the app (curl first, browser second)
 - It tries to BREAK the implementation, not confirm it works
 - If QA finds failures → retry run_coding_agent with the QA findings as hint
 - If QA passes → task is done
 
-PHASE 5: REPORT
+PHASE 4: REPORT
 - finish_run with summary
 </workflow>
 
