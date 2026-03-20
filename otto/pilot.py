@@ -430,6 +430,11 @@ SPEC COMPLIANCE CHECK (after each task passes):
 BEHAVIORAL TESTING (after spec compliance check passes):
 Act as a real user — actually use the app end-to-end:
 
+EFFICIENCY TIP: When using chrome-devtools, you can batch multiple DOM interactions
+in a single evaluate_script call instead of separate click/fill/snapshot calls:
+  evaluate_script("document.querySelector('#btn').click(); return document.querySelector('#result').textContent")
+This is much faster than separate tool calls for each action.
+
 For web apps:
 - Start the dev server (`npm run dev` / `npm start`) in background
 - Wait for it to be ready (curl localhost until 200)
