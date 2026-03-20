@@ -904,7 +904,15 @@ Before you finish, verify against the spec:
                                 elif ToolUseBlock and isinstance(block, ToolUseBlock):
                                     if not parallel_mode:
                                         _print_tool_use(block)
-                                    agent_log_lines.append(f"● {block.name}  {_tool_use_summary(block)}")
+                                    summary_line = f"● {block.name}  {_tool_use_summary(block)}"
+                                    agent_log_lines.append(summary_line)
+                                    # Write progress for pilot spinner display
+                                    try:
+                                        progress_file = log_dir / "progress.txt"
+                                        with open(progress_file, "a") as pf:
+                                            pf.write(summary_line + "\n")
+                                    except OSError:
+                                        pass
                                 elif ToolResultBlock and isinstance(block, ToolResultBlock):
                                     if not parallel_mode:
                                         _print_tool_result(block)
