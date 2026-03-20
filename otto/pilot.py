@@ -859,17 +859,20 @@ async def run_piloted(
                     for name, srv in user_config.get("mcpServers", {}).items():
                         if name == "otto-pilot":
                             continue  # don't override our own
-                        # Chrome-devtools: use --isolated --headless to avoid
-                        # conflicts with user's browser and other CC sessions
+                        # Chrome-devtools: use dedicated otto profile + headless
+                        # to avoid conflicts with user's browser. Reuse the same
+                        # profile across runs to avoid accumulating macOS
+                        # code_sign_clone copies (~1.9G each).
                         if name == "chrome-devtools":
                             srv = dict(srv)
                             args = list(srv.get("args", []))
-                            if "--isolated" not in args:
-                                args.append("--isolated")
                             if "--headless" not in args:
                                 args.append("--headless")
                             if not any(a.startswith("--viewport") for a in args):
                                 args.extend(["--viewport", "1280x720"])
+                            if not any(a.startswith("--userDataDir") for a in args):
+                                otto_chrome_profile = str(Path.home() / ".cache" / "otto" / "chrome-profile")
+                                args.extend(["--userDataDir", otto_chrome_profile])
                             srv["args"] = args
                         all_mcp_servers[name] = srv
                 except (json.JSONDecodeError, OSError):
@@ -905,7 +908,9 @@ PHASE 4: BEHAVIORAL TESTING (after compliance passes)
 
 PHASE 5: REPORT
 - finish_run with summary
-- Kill dev servers (pkill -f "next dev" etc.)
+- Kill ONLY dev servers YOU started (track the PID from your Bash command).
+  Do NOT use pkill/killall — it kills the user's own dev servers too.
+  Use `kill <pid>` with the specific PID you launched.
 </workflow>
 
 <behavioral_testing_rules>
@@ -946,7 +951,7 @@ Before calling finish_run, verify:
 1. Every task has passed or been properly aborted with a report
 2. Behavioral test report written to otto_logs/<key>/behavioral-test.md
 3. The report lists every interactive element and whether it was tested
-4. Dev servers killed, no leftover processes
+4. Dev servers YOU started killed (by PID, not pkill)
 </completion_check>"""
 
             agent_opts = ClaudeAgentOptions(
