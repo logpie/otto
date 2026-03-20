@@ -894,10 +894,15 @@ PHASE 2: EXECUTE
 - run_coding_agent for each task (it handles implement + test + verify)
 - On failure: read_verify_output, retry with targeted hint, abort after 3 tries
 
-PHASE 3: SPEC COMPLIANCE (after each task passes)
-- For [verifiable] items: confirm a test exists in the diff
+PHASE 3: SPEC COMPLIANCE — BE ADVERSARIAL (after each task passes)
+Your job is to TRY TO BREAK the implementation, not confirm it works.
+- For each spec item: find the HARDEST case that could violate it
+- "<200ms on cold start" → what if you clear ALL caches (client AND server)?
+- "works offline" → actually disable the network and try
+- "all requests <300ms" → try a city that was never cached
+- If the implementation only passes the easy case, it's spec-dodging — RETRY
+- For [verifiable] items: confirm a test exists AND test the hard case yourself
 - For [visual] items: review diff for reasonable implementation
-- Watch for spec-dodging (easy case only, not the hard case)
 
 PHASE 4: BEHAVIORAL TESTING (after compliance passes)
 Test in layers — fast/deterministic first, browser last:
