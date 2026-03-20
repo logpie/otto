@@ -52,6 +52,7 @@
 - [ ] **BUG: `reset --hard` destroys user commits**: Currently uses `git reset --hard` to parent of oldest otto commit, which nukes interleaved user commits (e.g., `features.md`). Should use `git revert` on otto commits only, or at minimum only reset otto-prefixed commits while preserving user history.
 - [ ] **Task history**: `otto add -f` wipes all tasks — no way to see past runs. Add `otto history` or archive old tasks before re-import so devs can review prior results/costs.
 - [ ] **Retry UX**: `otto retry` without `--force` for stale tasks, cascade to blocked dependents, `--run` flag to combine retry+run. See `docs/superpowers/plans/2026-03-15-retry-ux.md`.
+- [ ] **`otto retry --respec`**: Regenerate spec when retrying a task. Currently `otto retry` keeps the old spec, which may have been the problem (e.g., softened constraints from old spec agent). Also consider `otto spec <id>` to regenerate spec for any task without resetting status.
 
 ### Low Priority
 - [x] **Coding agent subagents**: Added `researcher` (haiku, read-only investigation) and `explorer` (haiku, codebase search) subagents via AgentDefinition. Coding agent can spawn these to parallelize exploration within a task.
