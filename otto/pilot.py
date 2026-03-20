@@ -380,7 +380,7 @@ def _build_pilot_prompt(
         spec = t.get("spec", [])
         spec_str = f" [{len(spec)} spec items]" if spec else " [no spec]"
         task_summaries.append(
-            f"  #{t['id']} ({t['key']}): {t['prompt'][:80]}{deps_str}{spec_str}"
+            f"  #{t['id']} ({t['key']}): {t['prompt']}{deps_str}{spec_str}"
         )
 
     return f"""You are a tech lead managing coding agents. You drive execution
@@ -606,7 +606,7 @@ def get_run_state() -> str:
         summary.append({{
             "id": t.get("id"),
             "key": t.get("key"),
-            "prompt": t.get("prompt", "")[:80],
+            "prompt": t.get("prompt", ""),
             "status": t.get("status"),
             "attempts": t.get("attempts", 0),
             "depends_on": t.get("depends_on") or [],
@@ -788,8 +788,8 @@ def read_verify_output(task_key: str) -> str:
 
     content = verify_logs[0].read_text()
     # Return truncated summary
-    if len(content) > 2000:
-        content = content[:2000] + "\\n... (truncated)"
+    if len(content) > 10000:
+        content = content[:10000] + "\\n... (truncated)"
     return content
 
 
@@ -834,7 +834,7 @@ def save_run_state(phase: str, notes: str = "") -> str:
                 "cost_usd": t.get("cost_usd", 0),
                 "error": t.get("error"),
                 "depends_on": t.get("depends_on") or [],
-                "prompt": t.get("prompt", "")[:100],
+                "prompt": t.get("prompt", ""),
             }}
             for t in tasks
         }},
