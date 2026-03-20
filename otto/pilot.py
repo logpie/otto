@@ -372,26 +372,8 @@ def _build_pilot_prompt(
     config: dict,
     project_dir: Path,
 ) -> str:
-    """Build the system prompt for the pilot agent."""
-    task_summaries = []
-    for t in tasks:
-        deps = t.get("depends_on") or []
-        deps_str = f" (depends_on: {deps})" if deps else ""
-        spec = t.get("spec", [])
-        spec_str = f" [{len(spec)} spec items]" if spec else " [no spec]"
-        task_summaries.append(
-            f"  #{t['id']} ({t['key']}): {t['prompt']}{deps_str}{spec_str}"
-        )
-
-    return f"""PROJECT DIR: {project_dir}
-CONFIG: max_retries={config.get('max_retries', 3)}, test_command={config.get('test_command')}
-
-PENDING TASKS:
-{chr(10).join(task_summaries)}
-
-Start by calling get_run_state and running `git log --oneline` for project context.
-Then plan and execute.
-"""
+    """Build the user prompt for the pilot agent. Kept lean — rules are in system_prompt."""
+    return "Start by calling get_run_state and running `git log --oneline` for project context. Then plan and execute."
 
 
 # ---------------------------------------------------------------------------

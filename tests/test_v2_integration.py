@@ -322,53 +322,30 @@ class TestHolisticTestgen:
 class TestPilotPromptBuilder:
     """Integration: _build_pilot_prompt produces valid prompts with all task info."""
 
-    def test_prompt_contains_all_task_info(self, tmp_git_repo):
+    def test_prompt_is_a_start_instruction(self, tmp_git_repo):
+        """User prompt is lean — just a start instruction. All rules are in system_prompt."""
         from otto.pilot import _build_pilot_prompt
 
         tasks = [
             {"id": 1, "key": "aaa111", "prompt": "Implement search feature",
              "spec": ["search is case-insensitive", "search returns results"],
              "depends_on": []},
-            {"id": 2, "key": "bbb222", "prompt": "Implement filter feature",
-             "spec": ["filter by date works"],
-             "depends_on": [1]},
-            {"id": 3, "key": "ccc333", "prompt": "Add no-spec task"},
         ]
 
         config = {
             "max_retries": 3,
             "test_command": "pytest",
-            "max_parallel": 2,
             "default_branch": "main",
             "verify_timeout": 300,
         }
 
         prompt = _build_pilot_prompt(tasks, config, tmp_git_repo)
 
-        # All task IDs present
-        assert "#1" in prompt
-        assert "#2" in prompt
-        assert "#3" in prompt
-
-        # Task keys present
-        assert "aaa111" in prompt
-        assert "bbb222" in prompt
-        assert "ccc333" in prompt
-
-        # Dependencies shown
-        assert "depends_on: [1]" in prompt
-
-        # Spec counts
-        assert "2 spec items" in prompt
-        assert "1 spec items" in prompt
-        assert "no spec" in prompt
-
-        # Config values
-        assert "max_retries=3" in prompt
-        assert "test_command=pytest" in prompt
-
-        # Strategy guidance (now in system_prompt, user prompt is lean)
-        assert "get_run_state" in prompt or "git log" in prompt
+        # User prompt is just a start instruction
+        assert "get_run_state" in prompt
+        assert "git log" in prompt
+        # Should NOT contain behavioral rules (those are in system_prompt)
+        assert "BEHAVIORAL" not in prompt
 
     def test_prompt_does_not_include_stale_architect_docs(self, tmp_git_repo):
         """Pilot prompt should NOT include architect docs (agents explore codebase directly)."""
@@ -396,8 +373,8 @@ class TestPilotPromptBuilder:
                   "default_branch": "main", "verify_timeout": 300}
 
         prompt = _build_pilot_prompt([], config, tmp_git_repo)
-        assert "PENDING TASKS" in prompt
-        # Should not crash, just have empty task list
+        # Should not crash with empty task list
+        assert isinstance(prompt, str)
 
 
 class TestMcpServerScript:
