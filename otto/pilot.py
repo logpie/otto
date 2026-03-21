@@ -30,7 +30,14 @@ from otto.runner import (
     _DIM, _GREEN, _RED, _YELLOW, _RESET,
     _log_info, _log_warn,
     _print_summary, _subprocess_env,
+    CODING_SYSTEM_PROMPT, QA_SYSTEM_PROMPT,
 )
+
+# Optional import — may not exist in older SDK versions
+try:
+    from claude_agent_sdk.types import AgentDefinition
+except (ImportError, AttributeError):
+    AgentDefinition = None  # type: ignore[assignment,misc]
 from otto.tasks import load_tasks, update_task
 
 
@@ -48,13 +55,14 @@ _CYAN = "\033[36m"
 _BOLD = "\033[1m"
 
 # Tool categories for display tiering
-_PRIMARY_TOOLS = {"run_coding_agent", "run_qa_agent", "finish_run"}
+_PRIMARY_TOOLS = {"prepare_task", "verify_task", "finish_run"}
 _SECONDARY_TOOLS = {"get_run_state", "read_verify_output", "merge_task", "abort_task"}
 _NOISE_TOOLS = {"save_run_state", "ToolSearch", "write_task_notes", "write_learning"}
 
 _TOOL_DISPLAY = {
     "get_run_state": ("📋", "Loading task state"),
-    "run_coding_agent": ("🔨", "Coding"),
+    "prepare_task": ("🔧", "Preparing task"),
+    "verify_task": ("✅", "Verifying task"),
     "read_verify_output": ("📖", "Reading verify output"),
     "merge_task": ("🔀", "Merging"),
     "abort_task": ("❌", "Aborting"),
@@ -62,7 +70,6 @@ _TOOL_DISPLAY = {
     "finish_run": ("🏁", "Done"),
     "write_task_notes": ("📝", "Writing task notes"),
     "write_learning": ("📝", "Recording learning"),
-    "run_qa_agent": ("🔍", "QA Testing"),
 }
 
 
@@ -208,7 +215,7 @@ def _print_pilot_tool_call(block) -> None:
     display_key = f"{tool_name}:{detail}"
     if display_key == _last_displayed_tool:
         # Still start a spinner for long-running tools (the previous one was stopped above)
-        if tool_name in ("run_coding_agent",):
+        if tool_name in ("prepare_task", "verify_task"):
             _active_spinner = _Spinner(label)
             _active_spinner.start()
         return
@@ -229,7 +236,7 @@ def _print_pilot_tool_call(block) -> None:
             print(f"  {icon} {_BOLD}{label}{_RESET}  {_DIM}{detail}{_RESET}", flush=True)
         else:
             print(f"  {icon} {_BOLD}{label}{_RESET}", flush=True)
-        if tool_name in ("run_coding_agent",):
+        if tool_name in ("prepare_task", "verify_task"):
             # Show coding agent progress via progress file
             task_key = inputs.get("task_key", "")
             progress_path = None
@@ -294,7 +301,7 @@ def _print_pilot_tool_result(block) -> None:
             # Strip the side-channel "tool" key before pattern matching —
             # _emit_result adds it but it breaks heuristic checks downstream
             data.pop("tool", None)
-            # Single task result (from run_coding_agent)
+            # Legacy single task result (has success + status keys)
             if "success" in data and "status" in data:
                 icon = f"{_GREEN}✓{_RESET}" if data["success"] else f"{_RED}✗{_RESET}"
                 parts = []
@@ -461,7 +468,6 @@ def _build_mcp_server_script(
     config_json = json.dumps(config)
     return f'''#!/usr/bin/env python3
 """Otto pilot MCP server — exposes otto functions as tools for the pilot agent."""
-import asyncio
 import json
 import subprocess
 import sys
@@ -527,9 +533,11 @@ def get_run_state() -> str:
 
 
 @mcp.tool()
-async def run_coding_agent(task_key: str, hint: str = "") -> str:
-    """Run a coding agent for one task. Optional hint for retry guidance."""
-    from otto.runner import run_task
+def prepare_task(task_key: str, hint: str = "") -> str:
+    """Prepare a task for coding: create git branch, build prompt with spec/context.
+    Returns JSON with work_dir, prompt, system_prompt for the coding subagent.
+    Call this BEFORE dispatching the coding-agent subagent."""
+    from otto.runner import prepare_task as _prepare
     from otto.tasks import load_tasks, update_task
 
     tasks = load_tasks(TASKS_FILE)
@@ -541,53 +549,52 @@ async def run_coding_agent(task_key: str, hint: str = "") -> str:
         update_task(TASKS_FILE, task_key, feedback=hint)
         task["feedback"] = hint
 
-    pre_sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=PROJECT_DIR, capture_output=True, text=True,
-    ).stdout.strip()
-
     try:
-        success = await run_task(task, CONFIG, PROJECT_DIR, TASKS_FILE)
+        result = _prepare(task, CONFIG, PROJECT_DIR, TASKS_FILE, hint=hint if hint else None)
+        _emit_result("prepare_task", result)
+        return json.dumps(result)
     except Exception as exc:
-        # Runner crashed — mark task failed, return structured error
-        try:
-            update_task(TASKS_FILE, task_key, status="failed",
-                        error=f"runner crashed: {{str(exc)[:200]}}")
-        except Exception:
-            pass
-        error_data = {{
-            "success": False, "status": "failed",
-            "cost_usd": 0, "error": f"runner crashed: {{str(exc)[:200]}}",
-            "diff": "", "verify_output": "",
-        }}
-        _emit_result("run_coding_agent", error_data)
+        error_data = {{"error": f"prepare failed: {{str(exc)[:200]}}"}}
+        _emit_result("prepare_task", error_data)
         return json.dumps(error_data)
 
-    diff_summary = _build_diff_summary(PROJECT_DIR, pre_sha)
 
-    verify_snippet = ""
-    if not success:
+@mcp.tool()
+def verify_task(task_key: str, pre_untracked: str = "[]") -> str:
+    """Verify task implementation: run tests in disposable worktree.
+    Does NOT merge — call merge_task after QA passes.
+    Call this AFTER the coding subagent finishes.
+    Pass pre_untracked from prepare_task result (JSON array of file paths).
+    Returns JSON with passed, error, diff_summary."""
+    from otto.runner import verify_task as _verify
+    from otto.tasks import load_tasks as _lt, update_task as _ut
+
+    # Increment attempt counter (used by abort_task guardrail)
+    _tasks = _lt(TASKS_FILE)
+    _task = next((t for t in _tasks if t.get("key") == task_key), None)
+    if _task:
+        _ut(TASKS_FILE, task_key, attempts=_task.get("attempts", 0) + 1)
+
+    # Parse pre_untracked list from prepare_task result
+    try:
+        pre_list = json.loads(pre_untracked) if pre_untracked else None
+    except (json.JSONDecodeError, TypeError):
+        pre_list = None
+
+    try:
+        result = _verify(task_key, CONFIG, PROJECT_DIR, TASKS_FILE,
+                         pre_untracked=pre_list, auto_merge=False)
+        # Write verify log for read_verify_output tool
         log_dir = PROJECT_DIR / "otto_logs" / task_key
-        if log_dir.exists():
-            verify_logs = sorted(log_dir.glob("attempt-*-verify.log"), reverse=True)
-            if verify_logs:
-                content = verify_logs[0].read_text()
-                lines = content.strip().splitlines()
-                verify_snippet = "\\n".join(lines[-20:])
-
-    tasks = load_tasks(TASKS_FILE)
-    updated = next((t for t in tasks if t.get("key") == task_key), {{}})
-
-    result_data = {{
-        "success": success,
-        "status": updated.get("status"),
-        "cost_usd": updated.get("cost_usd", 0),
-        "error": updated.get("error"),
-        "diff": diff_summary,
-        "verify_output": verify_snippet,
-    }}
-    _emit_result("run_coding_agent", result_data)
-    return json.dumps(result_data)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_content = result.get("error", "") or "PASSED"
+        (log_dir / "verify.log").write_text(log_content)
+        _emit_result("verify_task", result)
+        return json.dumps(result)
+    except Exception as exc:
+        error_data = {{"passed": False, "error": f"verify failed: {{str(exc)[:200]}}", "diff_summary": ""}}
+        _emit_result("verify_task", error_data)
+        return json.dumps(error_data)
 
 
 def _build_diff_summary(project_dir, pre_sha, max_lines_per_file=20, max_files=5):
@@ -705,16 +712,34 @@ def read_verify_output(task_key: str) -> str:
 @mcp.tool()
 def merge_task(task_key: str) -> str:
     """Merge a verified task branch to the default branch (with rebase retry).
-    Returns JSON with success status."""
+    Updates task status to passed on success. Returns JSON with success status."""
+    from otto.tasks import update_task
     default_branch = CONFIG.get("default_branch", "main")
     success = _merge_task_branch_to_default(PROJECT_DIR, task_key, default_branch)
+    if success:
+        update_task(TASKS_FILE, task_key, status="passed")
     return json.dumps({{"success": success}})
 
 
 @mcp.tool()
 def abort_task(task_key: str, reason: str) -> str:
-    """Abort a task with a reason. Marks it as failed."""
-    from otto.tasks import update_task
+    """Abort a task with a reason. Marks it as failed.
+    Will REFUSE if fewer than 3 attempts have been made — you must try harder."""
+    from otto.tasks import load_tasks, update_task
+
+    MIN_ATTEMPTS = CONFIG.get("max_retries", 3)
+    tasks = load_tasks(TASKS_FILE)
+    task = next((t for t in tasks if t.get("key") == task_key), None)
+    if task:
+        attempts = task.get("attempts", 0)
+        if attempts < MIN_ATTEMPTS:
+            return json.dumps({{
+                "refused": True,
+                "error": f"Cannot abort — only {{attempts}} attempts made (minimum {{MIN_ATTEMPTS}}). "
+                         f"Try a different approach: different algorithm, different library, "
+                         f"research online for solutions, study similar repos for inspiration.",
+            }})
+
     update_task(TASKS_FILE, task_key, status="failed", error=f"aborted: {{reason}}")
     return json.dumps({{"ok": True}})
 
@@ -772,101 +797,6 @@ def write_learning(learning: str) -> str:
     content += f"- {{learning}}\\n"
     learnings_file.write_text(content)
     return json.dumps({{"ok": True}})
-
-
-@mcp.tool()
-async def run_qa_agent(task_key: str, spec_items: str, diff_summary: str) -> str:
-    """Run an adversarial QA agent that tries to BREAK the implementation.
-    Pass the spec items and diff summary. Returns findings report."""
-    from otto.tasks import load_tasks
-    import os
-
-    tasks = load_tasks(TASKS_FILE)
-    task = next((t for t in tasks if t.get("key") == task_key), None)
-    if not task:
-        return json.dumps({{"error": f"task {{task_key}} not found"}})
-
-    qa_system_prompt = \"\"\"You are an adversarial QA tester. Your ONLY job is to find ways the
-implementation does NOT meet the spec. You get rewarded for finding bugs.
-
-Rules:
-- Test the HARDEST cases first. If the spec says "<200ms on cold start",
-  clear ALL caches and measure. Don't test the warm path.
-- Test in layers: curl/API first (fast), browser second (slow).
-  If curl shows a violation, report immediately — no browser needed.
-- For each spec item, try to find the ONE case that breaks it.
-- Report exactly what you tested, what you expected, and what happened.
-- If everything genuinely passes the hardest cases, say so honestly.
-- Do NOT assume the implementation is correct. Verify everything.
-\"\"\"
-
-    qa_prompt = f\"\"\"SPEC ITEMS TO VERIFY:
-{{spec_items}}
-
-DIFF SUMMARY:
-{{diff_summary}}
-
-TASK: {{task.get("prompt", "")}}
-
-You are working in {{PROJECT_DIR}}.
-
-Steps:
-1. Start the dev server if needed
-2. CURL first: test API endpoints, check responses, measure timing
-3. BROWSER second (if curl passes): interact with the app, click everything
-4. For EACH spec item: find the hardest test case and try it
-5. Write findings to {{PROJECT_DIR}}/otto_logs/{{task_key}}/qa-report.md
-6. Kill any dev servers you started (by PID)
-
-Report format:
-- PASS: spec item met, with evidence (what you tested)
-- FAIL: spec item NOT met, with evidence (expected vs actual)
-- CONCERN: technically passes but might be gaming the spec
-\"\"\"
-
-    try:
-        from claude_agent_sdk import ClaudeAgentOptions as _QAOpts, query as _qa_query
-        from claude_agent_sdk.types import ResultMessage as _QAResult
-
-        qa_opts = _QAOpts(
-            permission_mode="bypassPermissions",
-            cwd=str(PROJECT_DIR),
-            max_turns=50,
-            system_prompt=qa_system_prompt,
-            env=dict(os.environ),
-            setting_sources=["user", "project"],
-        )
-
-        qa_log = []
-        async for message in _qa_query(prompt=qa_prompt, options=qa_opts):
-            if hasattr(message, "content"):
-                for block in message.content:
-                    if hasattr(block, "text") and block.text:
-                        qa_log.append(block.text)
-                    elif hasattr(block, "name"):
-                        qa_log.append(f"● {{block.name}}")
-
-        # Read QA report if written
-        qa_report_path = PROJECT_DIR / "otto_logs" / task_key / "qa-report.md"
-        report = ""
-        if qa_report_path.exists():
-            report = qa_report_path.read_text()
-        else:
-            report = "\\n".join(qa_log[-20:])  # fallback: last 20 lines of QA output
-
-        # Check for failures
-        has_fail = "FAIL" in report.upper() and "FAIL" in report
-
-        result = {{
-            "passed": not has_fail,
-            "report": report[:5000],
-            "has_failures": has_fail,
-        }}
-        _emit_result("run_qa_agent", result)
-        return json.dumps(result)
-
-    except Exception as e:
-        return json.dumps({{"error": f"QA agent failed: {{str(e)[:200]}}", "passed": True}})
 
 
 @mcp.tool()
@@ -939,19 +869,38 @@ async def run_piloted(
             print(f"{_RED}✗ Working tree is dirty — fix before running otto{_RESET}", flush=True)
             return 2
 
-        # Baseline check
+        # Baseline check — verify existing tests pass before otto modifies anything.
+        # Greenfield projects (no tests) and projects with pre-existing failures
+        # are handled gracefully: failures are recorded so verification can
+        # distinguish otto-introduced regressions from pre-existing ones.
         test_command = config.get("test_command")
+        baseline_failures = None  # None = clean, str = recorded failure output
         if test_command:
             _log_info("Running baseline check...")
-            result = subprocess.run(
-                test_command, shell=True, cwd=project_dir,
-                capture_output=True, timeout=config["verify_timeout"],
-                env=_subprocess_env(),
-            )
-            # Exit code 5 = "no tests collected" (empty test suite) — not a failure
-            if result.returncode not in (0, 5):
-                print(f"  {_RED}✗ Baseline tests failing — fix before running otto{_RESET}", flush=True)
-                return 2
+            baseline_env = _subprocess_env()
+            # CI=true disables interactive test runners (CRA/Jest watch mode)
+            baseline_env["CI"] = "true"
+            try:
+                result = subprocess.run(
+                    test_command, shell=True, cwd=project_dir,
+                    capture_output=True, timeout=config["verify_timeout"],
+                    env=baseline_env,
+                )
+            except subprocess.TimeoutExpired:
+                # Test runner hung (e.g., interactive watch mode).
+                # Record as baseline issue and proceed — the coding agent
+                # will set up proper test infrastructure.
+                print(f"  {_YELLOW}⚠ Baseline tests timed out (interactive runner?) — proceeding{_RESET}", flush=True)
+                baseline_failures = "baseline: test command timed out"
+                result = None
+            if result is not None:
+                # Exit code 5 = "no tests collected" (empty test suite) — not a failure
+                if result.returncode not in (0, 5):
+                    # Record baseline failures but don't block — the coding agent
+                    # will work on top of whatever state the project is in.
+                    stderr_tail = (result.stderr or b"").decode(errors="replace")[-500:]
+                    baseline_failures = f"baseline: exit {result.returncode}\n{stderr_tail}"
+                    print(f"  {_YELLOW}⚠ Baseline tests failing — recorded, proceeding{_RESET}", flush=True)
 
         # Recover stale "running" tasks
         tasks = load_tasks(tasks_file)
@@ -1044,7 +993,7 @@ async def run_piloted(
             _pilot_system_prompt = """\
 <role>
 You are a tech lead managing coding agents. You orchestrate task execution
-and verify quality. A separate QA agent handles adversarial testing.
+and verify quality. You dispatch native subagents for coding and QA.
 </role>
 
 <workflow>
@@ -1052,29 +1001,52 @@ PHASE 1: PLAN
 - get_run_state → git log → read what you need → plan execution order
 - Respect depends_on. The coding agent does its own deep exploration.
 
-PHASE 2: EXECUTE
-- run_coding_agent for each task (it handles implement + test + verify)
-- On failure: read_verify_output, retry with targeted hint
-- Same error twice = doom loop → change strategy fundamentally, not just tweak
-- After 3 total failures on a task, abort_task with structured escalation:
-  what was tried, why it failed, what would need to change, next steps for human
+PHASE 2: EXECUTE (for each task)
+Step 1: prepare_task(key) → get {{prompt, work_dir, system_prompt, base_sha, pre_untracked}}
+Step 2: Dispatch coding-agent subagent with the prompt from step 1
+Step 3: verify_task(key, pre_untracked) → get {{passed, error, diff_summary}}
+        NOTE: verify does NOT merge. It leaves the squash commit on the task branch.
+Step 4: If failed → GRIND:
+        - Read the error carefully. Give a targeted, specific hint — not generic advice.
+        - Different error from last time? Good — making progress. Keep going.
+        - Same error repeating? Doom loop. Change strategy fundamentally:
+          different algorithm, different library, different architecture.
+        - Before retrying a hard failure, dispatch Agent(researcher, "how to ...") first.
+          Feed the research findings into the coding-agent's retry prompt.
+        - Think you're stuck? List 3 alternative approaches you haven't tried.
+        - abort_task will REFUSE if fewer than 3 verify attempts have been made.
+          You must genuinely try before giving up.
 
-PHASE 3: QA AGENT (after coding agent passes)
-- Call run_qa_agent with the spec items and diff summary
+PHASE 3: QA (after verification passes, BEFORE merge)
+- Dispatch qa-agent subagent with the spec items and diff summary
 - The QA agent adversarially tests the app (curl first, browser second)
-- It tries to BREAK the implementation, not confirm it works
-- If QA finds failures → retry run_coding_agent with the QA findings as hint
-- If QA passes → task is done
+- If QA finds failures → dispatch coding-agent with QA findings, then verify again
+  Same retry judgment as Phase 2: read the signal, decide intelligently.
+- If QA passes → merge_task(key) to merge to default branch
 
 PHASE 4: REPORT
 - finish_run with summary
 </workflow>
 
+<subagents>
+You have three native subagents available via the Agent tool:
+- coding-agent: Implements code changes. Use after prepare_task returns the prompt.
+  Pass the prompt from prepare_task as the subagent's task.
+- qa-agent: Adversarial QA tester. Tries to BREAK the implementation.
+  Pass spec items and diff summary as its task.
+- researcher: Searches the web, reads docs, studies similar repos.
+  Two patterns:
+  1. Serial (after failure): research first, feed findings into retry prompt.
+  2. Parallel (hard task): dispatch researcher alongside coding-agent.
+     If coding succeeds, ignore research. If it fails, findings are ready.
+  Example: Agent(researcher, "how to achieve <200ms LCP in Next.js with React hydration")
+</subagents>
+
 <tools>
-AVAILABLE TOOLS:
+MCP TOOLS:
 - get_run_state: see all tasks and their status
-- run_coding_agent(task_key, hint?): run coding agent, optional hint for retries
-- run_qa_agent(task_key, spec_items, diff_summary): adversarial QA testing
+- prepare_task(task_key, hint?): create branch, build coding prompt. Call BEFORE coding-agent.
+- verify_task(task_key, pre_untracked): run tests (no merge). Call AFTER coding-agent finishes.
 - read_verify_output(task_key): read verification failure details
 - merge_task(task_key): manual merge with rebase retry
 - abort_task(task_key, reason): give up with structured reason
@@ -1093,9 +1065,8 @@ AVAILABLE TOOLS:
 
 <completion_check>
 Before calling finish_run, verify:
-1. Every task has passed both coding verification AND QA agent testing
-2. QA report exists at otto_logs/<key>/qa-report.md
-3. No unresolved FAIL findings from the QA agent
+1. Every task has passed both coding verification AND QA testing
+2. No unresolved failures
 </completion_check>"""
 
             agent_opts = ClaudeAgentOptions(
@@ -1105,11 +1076,34 @@ Before calling finish_run, verify:
                 mcp_servers=all_mcp_servers,
                 setting_sources=["user", "project"],
                 env=_subprocess_env(),
+                effort=config.get("effort", "high"),
                 max_buffer_size=10 * 1024 * 1024,  # 10MB — screenshots can be large
                 system_prompt=_pilot_system_prompt,
             )
             if config.get("model"):
                 agent_opts.model = config["model"]
+
+            # Add native subagents for coding and QA (managed by Claude binary,
+            # clean lifecycle — no orphaned processes or inherited FD hangs)
+            if AgentDefinition:
+                try:
+                    agent_opts.agents = {
+                        "coding-agent": AgentDefinition(
+                            description="Implement code changes for a task. Use after prepare_task returns the prompt.",
+                            prompt=CODING_SYSTEM_PROMPT,
+                        ),
+                        "qa-agent": AgentDefinition(
+                            description="Adversarial QA tester. Tries to BREAK the implementation.",
+                            prompt=QA_SYSTEM_PROMPT,
+                        ),
+                        "researcher": AgentDefinition(
+                            description="Research a technical topic: search the web, read docs, study similar repos. Use BEFORE retrying a failed coding task, or in parallel with coding on hard tasks.",
+                            prompt="You are a research assistant. Search the web, read documentation, and study reference implementations. Report concrete findings: code patterns, API usage examples, library recommendations. Be specific — include URLs, code snippets, and exact function signatures.",
+                            model=config.get("researcher_model", "sonnet"),
+                        ),
+                    }
+                except (TypeError, AttributeError, ValueError):
+                    pass  # SDK version doesn't support subagents — skip
 
             print(flush=True)
             _log_info("Pilot taking control — LLM-driven execution")

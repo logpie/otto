@@ -24,7 +24,58 @@ def _subprocess_env() -> dict:
         env["PATH"] = venv_bin + os.pathsep + existing
     # Prevent git from hanging on prompts in unattended mode
     env["GIT_TERMINAL_PROMPT"] = "0"
+    # CI=true disables interactive test runners (CRA/Jest watch mode)
+    # and enables deterministic output in many frameworks
+    env["CI"] = "true"
+    # Allow Agent SDK to spawn Claude inside a Claude Code session (e.g. otto
+    # invoked from Claude Code).  Without this, the nested session is rejected.
+    # Agent SDK merges os.environ with user env, so we must explicitly unset it
+    # (pop alone doesn't help since os.environ is read separately by the SDK).
+    env.pop("CLAUDECODE", None)
+    env["CLAUDECODE"] = ""
     return env
+
+
+def _install_deps(worktree_path: Path, timeout: int) -> None:
+    """Auto-detect and install project dependencies in the verify worktree.
+
+    Checks for common dependency manifests and runs the appropriate installer.
+    Best-effort — failures are logged but don't block verification.
+    """
+    env = _subprocess_env()
+
+    # Python: requirements.txt
+    if (worktree_path / "requirements.txt").exists():
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-q",
+             "-r", str(worktree_path / "requirements.txt")],
+            cwd=worktree_path, capture_output=True, timeout=timeout,
+            env=env,
+        )
+
+    # Python: pyproject.toml with [project] or [build-system]
+    if (worktree_path / "pyproject.toml").exists():
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-q", "-e", "."],
+            cwd=worktree_path, capture_output=True, timeout=timeout,
+            env=env,
+        )
+
+    # Python: setup.py
+    if (worktree_path / "setup.py").exists() and not (worktree_path / "pyproject.toml").exists():
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-q", "-e", "."],
+            cwd=worktree_path, capture_output=True, timeout=timeout,
+            env=env,
+        )
+
+    # Node.js: package.json with node_modules missing
+    if (worktree_path / "package.json").exists() and not (worktree_path / "node_modules").exists():
+        subprocess.run(
+            ["npm", "install", "--no-audit", "--no-fund"],
+            cwd=worktree_path, capture_output=True, timeout=timeout,
+            env=env,
+        )
 
 
 @dataclass
@@ -252,6 +303,10 @@ def run_verification(
                 excl = worktree_path / rel_path
                 if excl.exists():
                     excl.unlink()
+
+        # Install project dependencies in the disposable worktree.
+        # Without this, projects using third-party libs fail verification.
+        _install_deps(worktree_path, timeout)
 
         # Run all tests (existing + spec-generated) in one pass
         t1 = run_tier1(worktree_path, test_command, timeout)

@@ -1,0 +1,23 @@
+{
+  "timestamp": "2026-03-21T00:34:04",
+  "otto_branch": "native-subagents",
+  "otto_commit": "b740fcf",
+  "projects": {
+    "fibonacci": {
+      "tasks": 1,
+      "passed": 0,
+      "failed": 1,
+      "time_seconds": 357,
+      "cost_usd": 0.000.00,
+      "status": "FAIL"
+    }
+},
+  "summary": {
+    "total_tasks": 1,
+    "total_passed": 0,
+    "total_failed": 1,
+    "total_time_seconds": 357,
+    "total_cost_usd": 0.00,
+    "pass_rate": 0.00
+  }
+}

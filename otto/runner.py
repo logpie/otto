@@ -542,6 +542,415 @@ def _print_tool_result(block) -> None:
             print(f"    {_DIM}{lines[-1]}{_RESET}", flush=True)
 
 
+CODING_SYSTEM_PROMPT = """\
+<role>
+You are an autonomous coding agent. You implement features, fix bugs, and write tests.
+Your work is verified externally — you must meet the acceptance spec exactly.
+</role>
+
+<spec_rules>
+SPEC COMPLIANCE — your highest priority:
+- The acceptance spec is the contract. Meet EVERY item, not just the easy ones.
+- A spec item like "<300ms latency" means ALL requests, not just cached/warm ones.
+  If you only optimize the fast path, you haven't met the spec.
+- When you think a constraint is met, test the HARDEST case, not the easiest.
+  If "<300ms" works for cache hits but not cold fetches, it's not met.
+- If a constraint is genuinely impossible (e.g., network latency to external API),
+  implement the best feasible approach AND write a note explaining what was tried
+  and why the hard limit can't be met. Do not silently declare success.
+
+SPEC-DODGING (never do this):
+- Meeting a performance constraint by only measuring the fast path
+- Meeting a feature constraint by stubbing/mocking instead of implementing
+- Meeting a constraint by removing the thing that was hard to optimize
+- Declaring a constraint met when only some cases pass
+
+<example type="violation">
+Spec: "e2e latency <300ms"
+BAD: Add caching, measure cache hits at <1ms, declare spec met.
+WHY: Cold fetches still take 500ms+. Only the easy case was solved.
+BETTER: Cache + prefetch + parallel requests + stale-while-revalidate.
+         If still >300ms on cold fetch, explain what was tried in task notes.
+</example>
+</spec_rules>
+
+<autonomy>
+- You are running AUTONOMOUSLY. Do NOT ask questions or wait for input.
+- Make decisions yourself. If unsure, pick the best option and document why.
+- Create a .gitignore if the project needs one (node_modules/, __pycache__/, etc.)
+</autonomy>
+
+<completion_check>
+Before you finish, verify against the spec:
+1. Re-read each spec item.
+2. For each [verifiable] item: name the specific test that proves it.
+   If no test exists for a verifiable item, write one now.
+3. For each [verifiable] item: test the HARDEST case, not the easiest.
+4. For [visual] items: implement your best judgment, no test required.
+5. If any verifiable item can't be met after trying 3+ different approaches,
+   document what was tried in task notes. Do not silently skip it.
+</completion_check>"""
+
+QA_SYSTEM_PROMPT = """\
+You are an adversarial QA tester. Your ONLY job is to find ways the
+implementation does NOT meet the spec. You get rewarded for finding bugs.
+
+Rules:
+- Test the HARDEST cases first. If the spec says "<200ms on cold start",
+  clear ALL caches and measure. Don't test the warm path.
+- Test in layers: curl/API first (fast), browser second (slow).
+  If curl shows a violation, report immediately — no browser needed.
+- For each spec item, try to find the ONE case that breaks it.
+- Report exactly what you tested, what you expected, and what happened.
+- If everything genuinely passes the hardest cases, say so honestly.
+- Do NOT assume the implementation is correct. Verify everything."""
+
+
+def _build_coding_prompt(
+    task: dict[str, Any],
+    config: dict[str, Any],
+    project_dir: Path,
+    effective_dir: Path,
+    hint: str | None = None,
+) -> str:
+    """Build the initial coding agent prompt with spec, source context, and learnings.
+
+    Extracted from run_task() so prepare_task() and run_task() share the same logic.
+    """
+    prompt = task["prompt"]
+    key = task["key"]
+    spec = task.get("spec")
+    feedback = task.get("feedback", "")
+    if hint:
+        feedback = hint
+
+    base_prompt = prompt
+    if feedback:
+        base_prompt = f"{prompt}\n\nIMPORTANT feedback from the user:\n{feedback}"
+
+    # Include relevant source files in the prompt
+    from otto.testgen import get_relevant_file_contents
+    source_context = get_relevant_file_contents(effective_dir, task_hint=prompt)
+
+    # Include spec items if available — classified as verifiable or visual
+    spec_section = ""
+    if spec:
+        from otto.tasks import spec_text, spec_is_verifiable, spec_test_hint
+        spec_lines = []
+        for i, item in enumerate(spec):
+            text = spec_text(item)
+            if spec_is_verifiable(item):
+                hint_val = spec_test_hint(item)
+                hint_str = f"\n     Test hint: {hint_val}" if hint_val else ""
+                spec_lines.append(f"  {i+1}. [verifiable] {text}{hint_str}")
+            else:
+                spec_lines.append(f"  {i+1}. [visual] {text}")
+        spec_section = f"\n\nACCEPTANCE SPEC (meet ALL of them):\n" + "\n".join(spec_lines) + "\n"
+
+    # Persistent memory
+    learnings_file = project_dir / "otto_arch" / "learnings.md"
+    learnings_section = ""
+    if learnings_file.exists():
+        learnings_section = f"\nLEARNINGS (from previous tasks):\n{learnings_file.read_text()}\n"
+
+    task_notes_path = project_dir / "otto_arch" / "task-notes" / f"{key}.md"
+    task_notes_section = ""
+    if task_notes_path.exists():
+        task_notes_section = f"\nTASK NOTES (from previous attempts):\n{task_notes_path.read_text()}\n"
+
+    agent_prompt = f"""{base_prompt}
+
+You are working in {effective_dir}. Do NOT create git commits.
+
+RELEVANT SOURCE FILES (already read for you):
+{source_context}
+{spec_section}
+
+APPROACH (red-green TDD):
+1. PLAN — read the spec and codebase. Can current architecture meet ALL requirements?
+   If not, note what needs to change and design an approach that CAN meet them.
+2. WRITE TESTS FIRST for each [verifiable] spec item. Test the hardest case.
+   Run them — they should FAIL (red). If they pass, your tests are too weak.
+3. IMPLEMENT until all tests pass (green).
+4. RUN ALL TESTS (yours + existing). Fix any regressions.
+5. VERIFY — re-read each spec item. For each, ask: does my implementation handle the
+   hardest case? If a spec says "<300ms", does it work for cold fetches, not just cache hits?
+6. Write notes to otto_arch/task-notes/{key}.md:
+   - What approach you took and why
+   - What you learned about the codebase
+   - Any gotchas for future tasks
+   - Any spec items that couldn't be fully met and why
+
+If your first approach doesn't meet a hard constraint, don't give up —
+rethink the architecture. Try at least 3 different approaches before
+concluding anything is infeasible.
+
+{learnings_section}
+{task_notes_section}
+"""
+    return agent_prompt
+
+
+def prepare_task(
+    task: dict[str, Any],
+    config: dict[str, Any],
+    project_dir: Path,
+    tasks_file: Path | None,
+    hint: str | None = None,
+) -> dict[str, Any]:
+    """Prepare a task for coding: create git branch, build prompt with spec/context.
+
+    Returns a dict with:
+        work_dir: str — directory for the coding agent to work in
+        prompt: str — full coding prompt with spec, source context, learnings
+        system_prompt: str — coding agent system prompt
+        base_sha: str — SHA of the base commit for later verification
+
+    This is the "setup" half of run_task(), extracted for the native subagent
+    architecture where the pilot dispatches a coding subagent directly.
+    """
+    key = task["key"]
+    default_branch = config["default_branch"]
+
+    if tasks_file:
+        update_task(tasks_file, key, status="running", attempts=0)
+
+    try:
+        # Create branch
+        base_sha = create_task_branch(project_dir, key, default_branch, task=task)
+
+        # Snapshot untracked files BEFORE coding — verify_task needs this to
+        # distinguish agent-created files from pre-existing ones.
+        pre_untracked = list(_snapshot_untracked(project_dir) or [])
+
+        # Auto-detect test_command if spec exists but no test_command configured
+        spec = task.get("spec")
+        test_command = config.get("test_command")
+        if spec and not test_command:
+            detected = detect_test_command(project_dir)
+            test_command = detected if detected else "pytest"
+
+        # Build the coding agent prompt
+        agent_prompt = _build_coding_prompt(
+            task, config, project_dir, project_dir, hint=hint,
+        )
+
+        return {
+            "work_dir": str(project_dir),
+            "prompt": agent_prompt,
+            "system_prompt": CODING_SYSTEM_PROMPT,
+            "base_sha": base_sha,
+            "pre_untracked": pre_untracked,
+        }
+    except Exception as exc:
+        # Cleanup on failure — don't strand task in "running"
+        if tasks_file:
+            update_task(tasks_file, key, status="failed",
+                        error=f"prepare failed: {str(exc)[:200]}")
+        subprocess.run(["git", "checkout", default_branch],
+                       cwd=project_dir, capture_output=True)
+        raise
+
+
+def verify_task(
+    task_key: str,
+    config: dict[str, Any],
+    project_dir: Path,
+    tasks_file: Path | None,
+    pre_untracked: list[str] | None = None,
+    auto_merge: bool = True,
+) -> dict[str, Any]:
+    """Verify task implementation: build candidate, run tests, optionally merge.
+
+    Call this AFTER the coding subagent finishes.
+
+    Args:
+        pre_untracked: untracked files snapshot from prepare_task(). Required to
+            correctly distinguish agent-created files from pre-existing ones.
+        auto_merge: if True (default), merge to default branch on success.
+            Set to False to leave the squash commit on the task branch —
+            useful when QA testing should happen before merge.
+
+    Returns a dict with:
+        passed: bool — whether verification passed
+        error: str|None — failure details if not passed
+        diff_summary: str — summary of changes made
+
+    This is the "verify + merge" half of run_task(), extracted for the native
+    subagent architecture.
+    """
+    key = task_key
+    default_branch = config["default_branch"]
+    test_command = config.get("test_command")
+    verify_cmd = None
+    timeout = config["verify_timeout"]
+
+    # Load task to get verify_cmd, spec, and other metadata
+    task = None
+    if tasks_file:
+        tasks = load_tasks(tasks_file)
+        task = next((t for t in tasks if t.get("key") == key), None)
+        if task:
+            verify_cmd = task.get("verify")
+
+    # Use pre-agent untracked snapshot from prepare_task, not a fresh one
+    pre_existing_untracked = set(pre_untracked) if pre_untracked else set()
+
+    # Ensure we're on the correct task branch (prepare_task for another task
+    # may have switched branches since we last ran).
+    expected_branch = f"otto/{key}"
+    current_branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=project_dir, capture_output=True, text=True,
+    ).stdout.strip()
+    if current_branch != expected_branch:
+        checkout = subprocess.run(
+            ["git", "checkout", expected_branch],
+            cwd=project_dir, capture_output=True,
+        )
+        if checkout.returncode != 0:
+            return {
+                "passed": False,
+                "error": f"Branch {expected_branch} not found. Call prepare_task first.",
+                "diff_summary": "",
+            }
+
+    base_sha = subprocess.run(
+        ["git", "merge-base", default_branch, "HEAD"],
+        cwd=project_dir, capture_output=True, text=True,
+    ).stdout.strip()
+    if not base_sha:
+        base_sha = subprocess.run(
+            ["git", "rev-parse", f"{default_branch}"],
+            cwd=project_dir, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+    # Check if agent made any changes
+    diff_check = subprocess.run(
+        ["git", "diff", "--quiet", base_sha],
+        cwd=project_dir, capture_output=True,
+    )
+    untracked_check = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard"],
+        cwd=project_dir, capture_output=True, text=True,
+    )
+    new_untracked = {f for f in untracked_check.stdout.strip().splitlines() if f} - pre_existing_untracked
+    no_changes = diff_check.returncode == 0 and not new_untracked
+
+    if no_changes:
+        has_spec = task and task.get("spec")
+        if has_spec:
+            # No changes on a task with spec = agent didn't do anything. Fail so pilot retries.
+            return {"passed": False, "error": "No code changes detected — agent may have failed silently", "diff_summary": ""}
+        # No spec + no changes = nothing to do, pass
+        subprocess.run(["git", "checkout", default_branch], cwd=project_dir, capture_output=True)
+        cleanup_branch(project_dir, key, default_branch)
+        if tasks_file:
+            update_task(tasks_file, key, status="passed")
+        return {"passed": True, "error": None, "diff_summary": "No changes needed"}
+
+    # Build candidate commit
+    candidate_sha = build_candidate_commit(
+        project_dir, base_sha, None, pre_existing_untracked,
+    )
+
+    # Re-detect test command after agent may have created the project
+    if not config.get("test_command"):
+        detected = detect_test_command(project_dir)
+        if detected:
+            test_command = detected
+
+    # Run verification in disposable worktree
+    verify_result = run_verification(
+        project_dir=project_dir,
+        candidate_sha=candidate_sha,
+        test_command=test_command,
+        verify_cmd=verify_cmd,
+        timeout=timeout,
+    )
+
+    if verify_result.passed:
+        # Squash all branch commits into a single commit
+        try:
+            subprocess.run(
+                ["git", "reset", "--mixed", base_sha],
+                cwd=project_dir, capture_output=True, check=True,
+            )
+            subprocess.run(
+                ["git", "add", "-u"],
+                cwd=project_dir, capture_output=True, check=True,
+            )
+            untracked_final = subprocess.run(
+                ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+                cwd=project_dir, capture_output=True, text=True,
+            )
+            skip = pre_existing_untracked or set()
+            for f in untracked_final.stdout.split("\0"):
+                if f and f not in skip:
+                    subprocess.run(
+                        ["git", "add", "--", f],
+                        cwd=project_dir, capture_output=True,
+                    )
+
+            # Get task prompt for commit message
+            commit_msg = f"otto: task {key}"
+            if tasks_file:
+                tasks = load_tasks(tasks_file)
+                task = next((t for t in tasks if t.get("key") == key), None)
+                if task:
+                    commit_msg = f"otto: {task['prompt'][:60]} (#{task.get('id', '?')})"
+
+            subprocess.run(
+                ["git", "commit", "-m", commit_msg],
+                cwd=project_dir, capture_output=True, text=True, check=True,
+            )
+        except (subprocess.CalledProcessError, Exception) as e:
+            stderr = getattr(e, "stderr", str(e))
+            _restore_workspace_state(project_dir, pre_existing_untracked=pre_existing_untracked)
+            subprocess.run(["git", "checkout", default_branch], cwd=project_dir, capture_output=True)
+            cleanup_branch(project_dir, key, default_branch)
+            if tasks_file:
+                update_task(tasks_file, key, status="failed",
+                            error=f"squash commit failed: {stderr}",
+                            error_code="internal_error")
+            return {"passed": False, "error": f"squash commit failed: {stderr}", "diff_summary": ""}
+
+        # Build diff summary from the squash commit
+        diff_stat = subprocess.run(
+            ["git", "diff", "--stat", base_sha, "HEAD"],
+            cwd=project_dir, capture_output=True, text=True,
+        )
+        diff_summary = diff_stat.stdout.strip() if diff_stat.returncode == 0 else ""
+
+        if not auto_merge:
+            # Leave squash commit on task branch — caller will merge after QA
+            return {"passed": True, "error": None, "diff_summary": diff_summary}
+
+        # Merge to default branch
+        if merge_to_default(project_dir, key, default_branch):
+            if tasks_file:
+                update_task(tasks_file, key, status="passed")
+            return {"passed": True, "error": None, "diff_summary": diff_summary}
+        else:
+            if tasks_file:
+                update_task(tasks_file, key, status="failed",
+                            error=f"branch diverged — otto/{key} preserved",
+                            error_code="merge_diverged")
+            return {
+                "passed": False,
+                "error": f"branch diverged — otto/{key} preserved, manual rebase needed",
+                "diff_summary": "",
+            }
+
+    # Verification failed — reset working tree for retry
+    subprocess.run(
+        ["git", "reset", "--mixed", base_sha],
+        cwd=project_dir, capture_output=True,
+    )
+    failure_output = verify_result.failure_output or "verification failed"
+    return {"passed": False, "error": failure_output, "diff_summary": ""}
+
+
 def _setup_task_worktree(project_dir: Path, key: str, base_sha: str) -> Path:
     """Create an isolated git worktree for parallel task execution."""
     wt_dir = project_dir / ".worktrees" / f"otto-{key}"
@@ -709,72 +1118,10 @@ async def run_task(
                 update_task(tasks_file, key, attempts=attempt_num)
 
             # Build agent prompt — include relevant source files so agent doesn't need to explore
-            feedback = task.get("feedback", "")
             if attempt == 0 or last_error is None:
-                base_prompt = prompt
-                if feedback:
-                    base_prompt = f"{prompt}\n\nIMPORTANT feedback from the user:\n{feedback}"
-
-                # Include relevant source files in the prompt
-                from otto.testgen import get_relevant_file_contents
-                source_context = get_relevant_file_contents(effective_dir, task_hint=prompt)
-
-                # Include spec items if available — classified as verifiable or visual
-                spec_section = ""
-                if spec:
-                    from otto.tasks import spec_text, spec_is_verifiable, spec_test_hint
-                    spec_lines = []
-                    for i, item in enumerate(spec):
-                        text = spec_text(item)
-                        if spec_is_verifiable(item):
-                            hint = spec_test_hint(item)
-                            hint_str = f"\n     Test hint: {hint}" if hint else ""
-                            spec_lines.append(f"  {i+1}. [verifiable] {text}{hint_str}")
-                        else:
-                            spec_lines.append(f"  {i+1}. [visual] {text}")
-                    spec_section = f"\n\nACCEPTANCE SPEC (meet ALL of them):\n" + "\n".join(spec_lines) + "\n"
-
-                # Persistent memory
-                learnings_file = project_dir / "otto_arch" / "learnings.md"
-                learnings_section = ""
-                if learnings_file.exists():
-                    learnings_section = f"\nLEARNINGS (from previous tasks):\n{learnings_file.read_text()}\n"
-
-                task_notes_path = project_dir / "otto_arch" / "task-notes" / f"{key}.md"
-                task_notes_section = ""
-                if task_notes_path.exists():
-                    task_notes_section = f"\nTASK NOTES (from previous attempts):\n{task_notes_path.read_text()}\n"
-
-                agent_prompt = f"""{base_prompt}
-
-You are working in {effective_dir}. Do NOT create git commits.
-
-RELEVANT SOURCE FILES (already read for you):
-{source_context}
-{spec_section}
-
-APPROACH (red-green TDD):
-1. PLAN — read the spec and codebase. Can current architecture meet ALL requirements?
-   If not, note what needs to change and design an approach that CAN meet them.
-2. WRITE TESTS FIRST for each [verifiable] spec item. Test the hardest case.
-   Run them — they should FAIL (red). If they pass, your tests are too weak.
-3. IMPLEMENT until all tests pass (green).
-4. RUN ALL TESTS (yours + existing). Fix any regressions.
-5. VERIFY — re-read each spec item. For each, ask: does my implementation handle the
-   hardest case? If a spec says "<300ms", does it work for cold fetches, not just cache hits?
-6. Write notes to otto_arch/task-notes/{key}.md:
-   - What approach you took and why
-   - What you learned about the codebase
-   - Any gotchas for future tasks
-   - Any spec items that couldn't be fully met and why
-
-If your first approach doesn't meet a hard constraint, don't give up —
-rethink the architecture. Try at least 3 different approaches before
-concluding anything is infeasible.
-
-{learnings_section}
-{task_notes_section}
-"""
+                agent_prompt = _build_coding_prompt(
+                    task, config, project_dir, effective_dir,
+                )
                 # TDD mode: tell coding agent about pre-generated test files
                 if test_file_path_val and test_file_path_val.exists():
                     agent_prompt += (
@@ -802,55 +1149,6 @@ concluding anything is infeasible.
             # Run agent + build candidate + verify — catch infrastructure failures
             try:
                 try:
-                    _coding_system_prompt = """\
-<role>
-You are an autonomous coding agent. You implement features, fix bugs, and write tests.
-Your work is verified externally — you must meet the acceptance spec exactly.
-</role>
-
-<spec_rules>
-SPEC COMPLIANCE — your highest priority:
-- The acceptance spec is the contract. Meet EVERY item, not just the easy ones.
-- A spec item like "<300ms latency" means ALL requests, not just cached/warm ones.
-  If you only optimize the fast path, you haven't met the spec.
-- When you think a constraint is met, test the HARDEST case, not the easiest.
-  If "<300ms" works for cache hits but not cold fetches, it's not met.
-- If a constraint is genuinely impossible (e.g., network latency to external API),
-  implement the best feasible approach AND write a note explaining what was tried
-  and why the hard limit can't be met. Do not silently declare success.
-
-SPEC-DODGING (never do this):
-- Meeting a performance constraint by only measuring the fast path
-- Meeting a feature constraint by stubbing/mocking instead of implementing
-- Meeting a constraint by removing the thing that was hard to optimize
-- Declaring a constraint met when only some cases pass
-
-<example type="violation">
-Spec: "e2e latency <300ms"
-BAD: Add caching, measure cache hits at <1ms, declare spec met.
-WHY: Cold fetches still take 500ms+. Only the easy case was solved.
-BETTER: Cache + prefetch + parallel requests + stale-while-revalidate.
-         If still >300ms on cold fetch, explain what was tried in task notes.
-</example>
-</spec_rules>
-
-<autonomy>
-- You are running AUTONOMOUSLY. Do NOT ask questions or wait for input.
-- Make decisions yourself. If unsure, pick the best option and document why.
-- Create a .gitignore if the project needs one (node_modules/, __pycache__/, etc.)
-</autonomy>
-
-<completion_check>
-Before you finish, verify against the spec:
-1. Re-read each spec item.
-2. For each [verifiable] item: name the specific test that proves it.
-   If no test exists for a verifiable item, write one now.
-3. For each [verifiable] item: test the HARDEST case, not the easiest.
-4. For [visual] items: implement your best judgment, no test required.
-5. If any verifiable item can't be met after trying 3+ different approaches,
-   document what was tried in task notes. Do not silently skip it.
-</completion_check>"""
-
                     agent_opts = ClaudeAgentOptions(
                         permission_mode="bypassPermissions",
                         cwd=str(effective_dir),
@@ -858,7 +1156,7 @@ Before you finish, verify against the spec:
                         setting_sources=["user", "project"],
                         env=_subprocess_env(),
                         effort=config.get("effort", "high"),
-                        system_prompt=_coding_system_prompt,
+                        system_prompt=CODING_SYSTEM_PROMPT,
                     )
                     if config.get("model"):
                         agent_opts.model = config["model"]

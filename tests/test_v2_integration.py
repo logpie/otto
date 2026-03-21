@@ -405,7 +405,7 @@ class TestMcpServerScript:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         }
         expected_tools = {
-            "get_run_state", "run_coding_agent",
+            "get_run_state", "prepare_task", "verify_task",
             "read_verify_output", "merge_task",
             "abort_task", "save_run_state", "finish_run",
             "write_task_notes", "write_learning",
