@@ -30,7 +30,6 @@ from otto.runner import (
     _DIM, _GREEN, _RED, _YELLOW, _RESET,
     _log_info, _log_warn,
     _print_summary, _subprocess_env,
-    CODING_SYSTEM_PROMPT, QA_SYSTEM_PROMPT,
 )
 
 # Optional import — may not exist in older SDK versions
@@ -55,16 +54,14 @@ _CYAN = "\033[36m"
 _BOLD = "\033[1m"
 
 # Tool categories for display tiering
-_PRIMARY_TOOLS = {"prepare_task", "verify_task", "finish_run"}
-_SECONDARY_TOOLS = {"get_run_state", "read_verify_output", "merge_task", "abort_task"}
+_PRIMARY_TOOLS = {"run_task_with_qa", "finish_run"}
+_SECONDARY_TOOLS = {"get_run_state", "read_verify_output", "abort_task"}
 _NOISE_TOOLS = {"save_run_state", "ToolSearch", "write_task_notes", "write_learning"}
 
 _TOOL_DISPLAY = {
     "get_run_state": ("📋", "Loading task state"),
-    "prepare_task": ("🔧", "Preparing task"),
-    "verify_task": ("✅", "Verifying task"),
+    "run_task_with_qa": ("🚀", "Running task"),
     "read_verify_output": ("📖", "Reading verify output"),
-    "merge_task": ("🔀", "Merging"),
     "abort_task": ("❌", "Aborting"),
     "save_run_state": ("💾", "Saving state"),
     "finish_run": ("🏁", "Done"),
@@ -215,7 +212,7 @@ def _print_pilot_tool_call(block) -> None:
     display_key = f"{tool_name}:{detail}"
     if display_key == _last_displayed_tool:
         # Still start a spinner for long-running tools (the previous one was stopped above)
-        if tool_name in ("prepare_task", "verify_task"):
+        if tool_name == "run_task_with_qa":
             _active_spinner = _Spinner(label)
             _active_spinner.start()
         return
@@ -236,7 +233,7 @@ def _print_pilot_tool_call(block) -> None:
             print(f"  {icon} {_BOLD}{label}{_RESET}  {_DIM}{detail}{_RESET}", flush=True)
         else:
             print(f"  {icon} {_BOLD}{label}{_RESET}", flush=True)
-        if tool_name in ("prepare_task", "verify_task"):
+        if tool_name == "run_task_with_qa":
             # Show coding agent progress via progress file
             task_key = inputs.get("task_key", "")
             progress_path = None
@@ -533,11 +530,11 @@ def get_run_state() -> str:
 
 
 @mcp.tool()
-def prepare_task(task_key: str, hint: str = "") -> str:
-    """Prepare a task for coding: create git branch, build prompt with spec/context.
-    Returns JSON with work_dir, prompt, system_prompt for the coding subagent.
-    Call this BEFORE dispatching the coding-agent subagent."""
-    from otto.runner import prepare_task as _prepare
+async def run_task_with_qa(task_key: str, hint: str = "") -> str:
+    """Run full task loop: prepare -> code -> verify -> QA -> merge.
+    The coding agent grinds until verification passes (up to max_retries).
+    Then QA agent adversarially tests. Merges only after both pass."""
+    from otto.runner import run_task_with_qa as _run
     from otto.tasks import load_tasks, update_task
 
     tasks = load_tasks(TASKS_FILE)
@@ -550,144 +547,22 @@ def prepare_task(task_key: str, hint: str = "") -> str:
         task["feedback"] = hint
 
     try:
-        result = _prepare(task, CONFIG, PROJECT_DIR, TASKS_FILE, hint=hint if hint else None)
-        _emit_result("prepare_task", result)
+        result = await _run(task, CONFIG, PROJECT_DIR, TASKS_FILE, hint=hint or None)
+        _emit_result("run_task_with_qa", result)
         return json.dumps(result)
     except Exception as exc:
-        error_data = {{"error": f"prepare failed: {{str(exc)[:200]}}"}}
-        _emit_result("prepare_task", error_data)
+        error_data = {{
+            "success": False, "status": "failed",
+            "cost_usd": 0, "error": f"task crashed: {{str(exc)[:200]}}",
+            "diff_summary": "", "qa_report": "",
+        }}
+        try:
+            update_task(TASKS_FILE, task_key, status="failed",
+                        error=f"crashed: {{str(exc)[:200]}}")
+        except Exception:
+            pass
+        _emit_result("run_task_with_qa", error_data)
         return json.dumps(error_data)
-
-
-@mcp.tool()
-def verify_task(task_key: str, pre_untracked: str = "[]") -> str:
-    """Verify task implementation: run tests in disposable worktree.
-    Does NOT merge — call merge_task after QA passes.
-    Call this AFTER the coding subagent finishes.
-    Pass pre_untracked from prepare_task result (JSON array of file paths).
-    Returns JSON with passed, error, diff_summary."""
-    from otto.runner import verify_task as _verify
-    from otto.tasks import load_tasks as _lt, update_task as _ut
-
-    # Increment attempt counter (used by abort_task guardrail)
-    _tasks = _lt(TASKS_FILE)
-    _task = next((t for t in _tasks if t.get("key") == task_key), None)
-    if _task:
-        _ut(TASKS_FILE, task_key, attempts=_task.get("attempts", 0) + 1)
-
-    # Parse pre_untracked list from prepare_task result
-    try:
-        pre_list = json.loads(pre_untracked) if pre_untracked else None
-    except (json.JSONDecodeError, TypeError):
-        pre_list = None
-
-    try:
-        result = _verify(task_key, CONFIG, PROJECT_DIR, TASKS_FILE,
-                         pre_untracked=pre_list, auto_merge=False)
-        # Write verify log for read_verify_output tool
-        log_dir = PROJECT_DIR / "otto_logs" / task_key
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_content = result.get("error", "") or "PASSED"
-        (log_dir / "verify.log").write_text(log_content)
-        _emit_result("verify_task", result)
-        return json.dumps(result)
-    except Exception as exc:
-        error_data = {{"passed": False, "error": f"verify failed: {{str(exc)[:200]}}", "diff_summary": ""}}
-        _emit_result("verify_task", error_data)
-        return json.dumps(error_data)
-
-
-def _build_diff_summary(project_dir, pre_sha, max_lines_per_file=20, max_files=5):
-    """Build a code diff summary with actual +/- lines, like CC TUI.
-
-    Shows the real code changes per file, truncated for readability.
-    Skips test files generated by otto (already known to the user).
-    """
-    # Get list of changed files (excluding otto test files)
-    stat_result = subprocess.run(
-        ["git", "diff", "--stat", pre_sha, "HEAD"],
-        cwd=project_dir, capture_output=True, text=True,
-    )
-    stat_line = ""
-    if stat_result.returncode == 0:
-        for line in stat_result.stdout.strip().splitlines():
-            if "changed" in line and ("insertion" in line or "deletion" in line):
-                stat_line = line.strip()
-
-    # Get actual diff
-    result = subprocess.run(
-        ["git", "diff", pre_sha, "HEAD", "--", "*.py",
-         ":!tests/test_otto_*", ":!tests/conftest.py"],
-        cwd=project_dir, capture_output=True, text=True,
-    )
-    if result.returncode != 0 or not result.stdout.strip():
-        return stat_line
-
-    # Parse diff into per-file sections
-    output_lines = []
-    current_file = None
-    file_lines = []
-    file_count = 0
-
-    for line in result.stdout.splitlines():
-        if line.startswith("diff --git"):
-            # Flush previous file
-            if current_file and file_lines:
-                if file_count < max_files:
-                    output_lines.append(f"  {{current_file}}")
-                    output_lines.extend(file_lines[:max_lines_per_file])
-                    if len(file_lines) > max_lines_per_file:
-                        output_lines.append(f"    ... ({{len(file_lines) - max_lines_per_file}} more lines)")
-                    output_lines.append("")
-                file_count += 1
-            # Start new file
-            parts = line.split(" b/", 1)
-            current_file = parts[1] if len(parts) > 1 else "?"
-            file_lines = []
-        elif line.startswith("@@"):
-            # Hunk header — show as context
-            file_lines.append(f"    {{line}}")
-        elif line.startswith("+") and not line.startswith("+++"):
-            file_lines.append(f"    \\033[32m{{line}}\\033[0m")
-        elif line.startswith("-") and not line.startswith("---"):
-            file_lines.append(f"    \\033[31m{{line}}\\033[0m")
-
-    # Flush last file
-    if current_file and file_lines:
-        if file_count < max_files:
-            output_lines.append(f"  {{current_file}}")
-            output_lines.extend(file_lines[:max_lines_per_file])
-            if len(file_lines) > max_lines_per_file:
-                output_lines.append(f"    ... ({{len(file_lines) - max_lines_per_file}} more lines)")
-        file_count += 1
-
-    if file_count > max_files:
-        output_lines.append(f"  ... and {{file_count - max_files}} more files")
-
-    if stat_line:
-        output_lines.append(f"  {{stat_line}}")
-
-    return "\\n".join(output_lines)
-
-
-def _merge_task_branch_to_default(project_dir, key, default_branch):
-    """Merge a task branch to default with rebase retry (mirrors runner._merge_task_branch)."""
-    from otto.runner import merge_to_default
-    if merge_to_default(project_dir, key, default_branch):
-        return True
-    # ff-only failed (main advanced from earlier merge) — try rebase
-    branch_name = f"otto/{{key}}"
-    rebase = subprocess.run(
-        ["git", "rebase", default_branch, branch_name],
-        cwd=project_dir, capture_output=True,
-    )
-    if rebase.returncode != 0:
-        subprocess.run(
-            ["git", "rebase", "--abort"],
-            cwd=project_dir, capture_output=True,
-        )
-        return False
-    return merge_to_default(project_dir, key, default_branch)
 
 
 @mcp.tool()
@@ -707,18 +582,6 @@ def read_verify_output(task_key: str) -> str:
     if len(content) > 10000:
         content = content[:10000] + "\\n... (truncated)"
     return content
-
-
-@mcp.tool()
-def merge_task(task_key: str) -> str:
-    """Merge a verified task branch to the default branch (with rebase retry).
-    Updates task status to passed on success. Returns JSON with success status."""
-    from otto.tasks import update_task
-    default_branch = CONFIG.get("default_branch", "main")
-    success = _merge_task_branch_to_default(PROJECT_DIR, task_key, default_branch)
-    if success:
-        update_task(TASKS_FILE, task_key, status="passed")
-    return json.dumps({{"success": success}})
 
 
 @mcp.tool()
@@ -993,7 +856,9 @@ async def run_piloted(
             _pilot_system_prompt = """\
 <role>
 You are a tech lead managing coding agents. You orchestrate task execution
-and verify quality. You dispatch native subagents for coding and QA.
+and make strategic decisions. The coding, verification, QA, and merge steps
+are handled automatically by run_task_with_qa — you decide WHAT to run,
+in WHAT ORDER, and with what HINTS.
 </role>
 
 <workflow>
@@ -1002,54 +867,42 @@ PHASE 1: PLAN
 - Respect depends_on. The coding agent does its own deep exploration.
 
 PHASE 2: EXECUTE (for each task)
-Step 1: prepare_task(key) → get {{prompt, work_dir, system_prompt, base_sha, pre_untracked}}
-Step 2: Dispatch coding-agent subagent with the prompt from step 1
-Step 3: verify_task(key, pre_untracked) → get {{passed, error, diff_summary}}
-        NOTE: verify does NOT merge. It leaves the squash commit on the task branch.
-Step 4: If failed → GRIND:
-        - Read the error carefully. Give a targeted, specific hint — not generic advice.
-        - Different error from last time? Good — making progress. Keep going.
-        - Same error repeating? Doom loop. Change strategy fundamentally:
-          different algorithm, different library, different architecture.
-        - Before retrying a hard failure, dispatch Agent(researcher, "how to ...") first.
-          Feed the research findings into the coding-agent's retry prompt.
-        - Think you're stuck? List 3 alternative approaches you haven't tried.
-        - abort_task will REFUSE if fewer than 3 verify attempts have been made.
-          You must genuinely try before giving up.
+- Optional: dispatch Agent(researcher) in background for hard tasks
+- run_task_with_qa(key) → full deterministic loop:
+  prepare → code → verify → QA → merge (all automatic)
+- Returns {{success, status, cost_usd, error, diff_summary, qa_report}}
+- If failed: decide retry strategy:
+  - Read the error carefully. Give a targeted, specific hint — not generic advice.
+  - Different error from last time? Good — making progress. Keep going.
+  - Same error repeating? Doom loop. Change strategy fundamentally:
+    different algorithm, different library, different architecture.
+  - Before retrying a hard failure, dispatch Agent(researcher, "how to ...") first.
+    Feed the research findings into the hint parameter.
+  - Think you're stuck? List 3 alternative approaches you haven't tried.
+  - abort_task will REFUSE if fewer than 3 attempts have been made.
+    You must genuinely try before giving up.
+  - run_task_with_qa(key, hint="specific guidance based on failure analysis")
 
-PHASE 3: QA (after verification passes, BEFORE merge)
-- Dispatch qa-agent subagent with the spec items and diff summary
-- The QA agent adversarially tests the app (curl first, browser second)
-- If QA finds failures → dispatch coding-agent with QA findings, then verify again
-  Same retry judgment as Phase 2: read the signal, decide intelligently.
-- If QA passes → merge_task(key) to merge to default branch
-
-PHASE 4: REPORT
+PHASE 3: REPORT
 - finish_run with summary
 </workflow>
 
 <subagents>
-You have three native subagents available via the Agent tool:
-- coding-agent: Implements code changes. Use after prepare_task returns the prompt.
-  Pass the prompt from prepare_task as the subagent's task.
-- qa-agent: Adversarial QA tester. Tries to BREAK the implementation.
-  Pass spec items and diff summary as its task.
+You have one native subagent available via the Agent tool:
 - researcher: Searches the web, reads docs, studies similar repos.
   Two patterns:
-  1. Serial (after failure): research first, feed findings into retry prompt.
-  2. Parallel (hard task): dispatch researcher alongside coding-agent.
-     If coding succeeds, ignore research. If it fails, findings are ready.
+  1. Serial (after failure): research first, feed findings into retry hint.
+  2. Parallel (hard task): dispatch researcher alongside run_task_with_qa.
+     If task succeeds, ignore research. If it fails, findings are ready.
   Example: Agent(researcher, "how to achieve <200ms LCP in Next.js with React hydration")
 </subagents>
 
 <tools>
 MCP TOOLS:
 - get_run_state: see all tasks and their status
-- prepare_task(task_key, hint?): create branch, build coding prompt. Call BEFORE coding-agent.
-- verify_task(task_key, pre_untracked): run tests (no merge). Call AFTER coding-agent finishes.
-- read_verify_output(task_key): read verification failure details
-- merge_task(task_key): manual merge with rebase retry
-- abort_task(task_key, reason): give up with structured reason
+- run_task_with_qa(task_key, hint?): run full task loop (prepare → code → verify → QA → merge)
+- read_verify_output(task_key): read verification failure details for crafting retry hints
+- abort_task(task_key, reason): give up with structured reason (min-retry guardrail)
 - save_run_state(phase, notes): persist state for session recovery
 - write_task_notes(task_key, notes): document approach for future retries
 - write_learning(learning): record cross-task learning
@@ -1060,13 +913,13 @@ MCP TOOLS:
 - Track progress: call save_run_state after major decisions
 - Do NOT modify project files directly — let the coding agent do that
 - Do NOT kill dev servers with pkill/killall — only by specific PID you started
-- Never retry with the same approach twice
+- Never retry with the same approach twice — always provide a different hint
 </rules>
 
 <completion_check>
 Before calling finish_run, verify:
-1. Every task has passed both coding verification AND QA testing
-2. No unresolved failures
+1. Every task has been run through run_task_with_qa
+2. No unresolved failures (all either passed or properly aborted)
 </completion_check>"""
 
             agent_opts = ClaudeAgentOptions(
@@ -1083,19 +936,11 @@ Before calling finish_run, verify:
             if config.get("model"):
                 agent_opts.model = config["model"]
 
-            # Add native subagents for coding and QA (managed by Claude binary,
-            # clean lifecycle — no orphaned processes or inherited FD hangs)
+            # Add native subagent for research (coding and QA are now internal
+            # to run_task_with_qa — no longer pilot subagents)
             if AgentDefinition:
                 try:
                     agent_opts.agents = {
-                        "coding-agent": AgentDefinition(
-                            description="Implement code changes for a task. Use after prepare_task returns the prompt.",
-                            prompt=CODING_SYSTEM_PROMPT,
-                        ),
-                        "qa-agent": AgentDefinition(
-                            description="Adversarial QA tester. Tries to BREAK the implementation.",
-                            prompt=QA_SYSTEM_PROMPT,
-                        ),
                         "researcher": AgentDefinition(
                             description="Research a technical topic: search the web, read docs, study similar repos. Use BEFORE retrying a failed coding task, or in parallel with coding on hard tasks.",
                             prompt="You are a research assistant. Search the web, read documentation, and study reference implementations. Report concrete findings: code patterns, API usage examples, library recommendations. Be specific — include URLs, code snippets, and exact function signatures.",

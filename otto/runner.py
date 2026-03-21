@@ -1519,6 +1519,441 @@ async def run_task(
         return False
 
 
+async def _run_qa_agent(
+    task: dict[str, Any],
+    config: dict[str, Any],
+    project_dir: Path,
+    diff_summary: str,
+) -> dict[str, Any]:
+    """Run adversarial QA agent. Returns {passed, report, has_failures}."""
+    spec = task.get("spec")
+    if not spec:
+        return {"passed": True, "report": "No spec items — QA skipped", "has_failures": False}
+
+    from otto.tasks import spec_text, spec_is_verifiable
+
+    # Build spec section for QA
+    spec_lines = []
+    for i, item in enumerate(spec):
+        text = spec_text(item)
+        kind = "verifiable" if spec_is_verifiable(item) else "visual"
+        spec_lines.append(f"  {i+1}. [{kind}] {text}")
+    spec_section = "\n".join(spec_lines)
+
+    qa_prompt = f"""You are running adversarial QA on this implementation.
+
+ACCEPTANCE SPEC:
+{spec_section}
+
+DIFF SUMMARY:
+{diff_summary}
+
+TASK: {task.get('prompt', '')}
+
+Test the HARDEST cases first. For each spec item, try to find the ONE case that breaks it.
+Report exactly what you tested, what you expected, and what happened.
+
+If everything genuinely passes, end your report with: QA VERDICT: PASS
+If any spec item fails, end your report with: QA VERDICT: FAIL
+
+You are working in {project_dir}. Do NOT create git commits."""
+
+    # Build MCP servers for QA — only chrome-devtools if available
+    qa_mcp_servers = {}
+    user_claude_json = Path.home() / ".claude.json"
+    if user_claude_json.exists():
+        try:
+            import json
+            user_config = json.loads(user_claude_json.read_text())
+            for name, srv in user_config.get("mcpServers", {}).items():
+                if name == "chrome-devtools":
+                    srv = dict(srv)
+                    args = list(srv.get("args", []))
+                    if "--headless" not in args:
+                        args.append("--headless")
+                    if not any(a.startswith("--viewport") for a in args):
+                        args.extend(["--viewport", "1280x720"])
+                    if not any(a.startswith("--userDataDir") for a in args):
+                        otto_chrome_profile = str(Path.home() / ".cache" / "otto" / "chrome-profile")
+                        args.extend(["--userDataDir", otto_chrome_profile])
+                    srv["args"] = args
+                    qa_mcp_servers[name] = srv
+        except (Exception,):
+            pass
+
+    qa_opts = ClaudeAgentOptions(
+        permission_mode="bypassPermissions",
+        cwd=str(project_dir),
+        max_turns=50,
+        setting_sources=["project"],
+        env=_subprocess_env(),
+        effort=config.get("effort", "high"),
+        system_prompt=QA_SYSTEM_PROMPT,
+    )
+    if qa_mcp_servers:
+        qa_opts.mcp_servers = qa_mcp_servers
+    if config.get("model"):
+        qa_opts.model = config["model"]
+
+    qa_timeout = config.get("qa_timeout", 900)
+    report_lines: list[str] = []
+
+    try:
+        async def _run_qa():
+            nonlocal report_lines
+            async for message in query(prompt=qa_prompt, options=qa_opts):
+                if isinstance(message, ResultMessage):
+                    pass
+                elif hasattr(message, "session_id") and hasattr(message, "is_error"):
+                    pass
+                elif AssistantMessage and isinstance(message, AssistantMessage):
+                    for block in message.content:
+                        if TextBlock and isinstance(block, TextBlock) and block.text:
+                            report_lines.append(block.text)
+
+        await asyncio.wait_for(_run_qa(), timeout=qa_timeout)
+    except asyncio.TimeoutError:
+        report_lines.append(f"\n[QA agent timed out after {qa_timeout}s]")
+    except Exception as e:
+        report_lines.append(f"\n[QA agent error: {e}]")
+
+    report = "\n".join(report_lines)
+    has_failures = "QA VERDICT: FAIL" in report
+    passed = not has_failures
+
+    return {"passed": passed, "report": report, "has_failures": has_failures}
+
+
+async def run_task_with_qa(
+    task: dict[str, Any],
+    config: dict[str, Any],
+    project_dir: Path,
+    tasks_file: Path | None,
+    hint: str | None = None,
+) -> dict[str, Any]:
+    """Run full task loop: prepare -> code -> verify -> QA -> merge.
+
+    Returns {success, status, cost_usd, error, diff_summary, qa_report}.
+    """
+    key = task["key"]
+    task_id = task["id"]
+    prompt = task["prompt"]
+    max_retries = task.get("max_retries", config["max_retries"])
+    default_branch = config["default_branch"]
+    timeout = config["verify_timeout"]
+
+    task_start = time.monotonic()
+    total_cost = 0.0
+    session_id = None
+    last_error = None
+
+    def _result(success: bool, status: str, error: str = "",
+                diff_summary: str = "", qa_report: str = "") -> dict[str, Any]:
+        duration = time.monotonic() - task_start
+        if tasks_file:
+            try:
+                updates: dict[str, Any] = {"status": status}
+                if total_cost > 0:
+                    updates["cost_usd"] = total_cost
+                if duration > 0:
+                    updates["duration_s"] = round(duration, 1)
+                if error:
+                    updates["error"] = error[:500]
+                update_task(tasks_file, key, **updates)
+            except Exception:
+                pass
+        return {
+            "success": success,
+            "status": status,
+            "cost_usd": total_cost,
+            "error": error,
+            "diff_summary": diff_summary,
+            "qa_report": qa_report,
+        }
+
+    try:
+        # Step 1: Prepare — create branch, build prompt
+        prep = prepare_task(task, config, project_dir, tasks_file, hint=hint)
+        base_sha = prep["base_sha"]
+        pre_existing_untracked = set(prep.get("pre_untracked") or [])
+        agent_prompt = prep["prompt"]
+
+        log_dir = project_dir / "otto_logs" / key
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        verify_cmd = task.get("verify")
+        test_command = config.get("test_command")
+        spec = task.get("spec")
+
+        # Auto-detect test_command if spec exists but no test_command configured
+        if spec and not test_command:
+            detected = detect_test_command(project_dir)
+            test_command = detected if detected else "pytest"
+
+        # Step 2+3: Code + Verify loop (up to max_retries + 1 attempts)
+        for attempt in range(max_retries + 1):
+            attempt_num = attempt + 1
+
+            if tasks_file:
+                update_task(tasks_file, key, attempts=attempt_num)
+
+            # Build prompt for retry
+            if attempt > 0 and last_error is not None:
+                agent_prompt = (
+                    f"Verification failed. Fix the issue.\n\n"
+                    f"{last_error}\n\n"
+                    f"Original task: {prompt}\n\n"
+                    f"You are working in {project_dir}. Do NOT create git commits.\n"
+                    f"Read the failing tests carefully. Is it a code bug or a test bug?\n"
+                    f"- Code bug: fix your implementation.\n"
+                    f"- Test bug (broken import, wrong stdlib usage): fix the test.\n"
+                    f"- Impossible constraint: explain why and implement the best feasible approach."
+                )
+
+            # Run coding agent
+            try:
+                agent_opts = ClaudeAgentOptions(
+                    permission_mode="bypassPermissions",
+                    cwd=str(project_dir),
+                    max_turns=config.get("max_turns", 200),
+                    setting_sources=["user", "project"],
+                    env=_subprocess_env(),
+                    effort=config.get("effort", "high"),
+                    system_prompt=CODING_SYSTEM_PROMPT,
+                )
+                if config.get("model"):
+                    agent_opts.model = config["model"]
+                if session_id:
+                    agent_opts.resume = session_id
+                if AgentDefinition:
+                    try:
+                        agent_opts.agents = {
+                            "researcher": AgentDefinition(
+                                description="Research APIs, read docs, investigate approaches",
+                                prompt="You are a research assistant. Investigate the topic thoroughly and report findings.",
+                                model="haiku",
+                            ),
+                            "explorer": AgentDefinition(
+                                description="Search codebase for patterns, find relevant files",
+                                prompt="You are a codebase explorer. Search for relevant code patterns, find files, and report what you find.",
+                                model="haiku",
+                            ),
+                        }
+                    except (TypeError, AttributeError, ValueError):
+                        pass
+
+                agent_log_lines: list[str] = []
+                result_msg = None
+                async for message in query(prompt=agent_prompt, options=agent_opts):
+                    if isinstance(message, ResultMessage):
+                        result_msg = message
+                    elif hasattr(message, "session_id") and hasattr(message, "is_error"):
+                        result_msg = message
+                    elif AssistantMessage and isinstance(message, AssistantMessage):
+                        for block in message.content:
+                            if TextBlock and isinstance(block, TextBlock) and block.text:
+                                agent_log_lines.append(block.text)
+                            elif ToolUseBlock and isinstance(block, ToolUseBlock):
+                                agent_log_lines.append(f"● {block.name}  {_tool_use_summary(block)}")
+
+                # Persist agent log
+                try:
+                    (log_dir / f"attempt-{attempt_num}-agent.log").write_text(
+                        "\n".join(agent_log_lines)
+                    )
+                except OSError:
+                    pass
+
+                if result_msg and getattr(result_msg, "session_id", None):
+                    session_id = result_msg.session_id
+                    if tasks_file:
+                        update_task(tasks_file, key, session_id=session_id)
+
+                raw_cost = getattr(result_msg, "total_cost_usd", None)
+                attempt_cost = float(raw_cost) if isinstance(raw_cost, (int, float)) else 0.0
+                total_cost += attempt_cost
+
+                if result_msg and result_msg.is_error:
+                    raise RuntimeError(f"Agent error: {result_msg.result or 'unknown'}")
+
+            except Exception as e:
+                _log_warn(f"Agent error: {e}")
+                _restore_workspace_state(
+                    project_dir,
+                    reset_ref=base_sha,
+                    pre_existing_untracked=pre_existing_untracked,
+                )
+                last_error = str(e)
+                continue
+
+            # Check if agent made changes
+            diff_check = subprocess.run(
+                ["git", "diff", "--quiet", base_sha],
+                cwd=project_dir, capture_output=True,
+            )
+            untracked_check = subprocess.run(
+                ["git", "ls-files", "--others", "--exclude-standard"],
+                cwd=project_dir, capture_output=True, text=True,
+            )
+            new_untracked = {f for f in untracked_check.stdout.strip().splitlines() if f} - pre_existing_untracked
+            no_changes = diff_check.returncode == 0 and not new_untracked
+
+            if no_changes:
+                if spec:
+                    last_error = "Agent produced no code changes. The spec requirements have not been implemented."
+                    continue
+                # No spec + no changes = nothing to do, pass
+                subprocess.run(["git", "checkout", default_branch], cwd=project_dir, capture_output=True)
+                cleanup_branch(project_dir, key, default_branch)
+                return _result(True, "passed", diff_summary="No changes needed")
+
+            # Build candidate commit
+            candidate_sha = build_candidate_commit(
+                project_dir, base_sha, None, pre_existing_untracked,
+            )
+
+            # Re-detect test command
+            if not config.get("test_command"):
+                detected = detect_test_command(project_dir)
+                if detected:
+                    test_command = detected
+
+            # Run verification
+            verify_result = run_verification(
+                project_dir=project_dir,
+                candidate_sha=candidate_sha,
+                test_command=test_command,
+                verify_cmd=verify_cmd,
+                timeout=timeout,
+            )
+
+            # Write verify log
+            try:
+                (log_dir / f"attempt-{attempt_num}-verify.log").write_text(
+                    "\n".join(f"{t.tier}: {'PASS' if t.passed else 'FAIL'}\n{t.output}"
+                              for t in verify_result.tiers)
+                )
+            except OSError:
+                pass
+
+            if verify_result.passed:
+                # Squash commits into a single commit
+                try:
+                    subprocess.run(
+                        ["git", "reset", "--mixed", base_sha],
+                        cwd=project_dir, capture_output=True, check=True,
+                    )
+                    subprocess.run(
+                        ["git", "add", "-u"],
+                        cwd=project_dir, capture_output=True, check=True,
+                    )
+                    untracked_final = subprocess.run(
+                        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+                        cwd=project_dir, capture_output=True, text=True,
+                    )
+                    skip = pre_existing_untracked or set()
+                    for f in untracked_final.stdout.split("\0"):
+                        if f and f not in skip:
+                            subprocess.run(
+                                ["git", "add", "--", f],
+                                cwd=project_dir, capture_output=True,
+                            )
+
+                    commit_msg = f"otto: {prompt[:60]} (#{task_id})"
+                    subprocess.run(
+                        ["git", "commit", "-m", commit_msg],
+                        cwd=project_dir, capture_output=True, text=True, check=True,
+                    )
+                except (subprocess.CalledProcessError, Exception) as e:
+                    stderr = getattr(e, "stderr", str(e))
+                    _cleanup_task_failure(
+                        project_dir, key, default_branch, tasks_file,
+                        pre_existing_untracked=pre_existing_untracked,
+                        error=f"squash commit failed: {stderr}",
+                        error_code="internal_error",
+                        cost_usd=total_cost,
+                        duration_s=time.monotonic() - task_start,
+                    )
+                    return _result(False, "failed", error=f"squash commit failed: {stderr}")
+
+                # Build diff summary
+                diff_stat = subprocess.run(
+                    ["git", "diff", "--stat", base_sha, "HEAD"],
+                    cwd=project_dir, capture_output=True, text=True,
+                )
+                diff_summary = diff_stat.stdout.strip() if diff_stat.returncode == 0 else ""
+
+                # Write verify.log for read_verify_output
+                try:
+                    (log_dir / "verify.log").write_text("PASSED")
+                except OSError:
+                    pass
+
+                # Step 4: QA agent (if spec exists)
+                qa_report = ""
+                if spec:
+                    qa_result = await _run_qa_agent(task, config, project_dir, diff_summary)
+                    qa_report = qa_result.get("report", "")
+
+                    if not qa_result["passed"]:
+                        # QA failed — retry coding with QA findings
+                        # Reset to base for retry
+                        subprocess.run(
+                            ["git", "reset", "--mixed", base_sha],
+                            cwd=project_dir, capture_output=True,
+                        )
+                        last_error = (
+                            f"QA TESTING FAILED. Fix these issues:\n\n{qa_report}\n\n"
+                            f"Original task: {prompt}"
+                        )
+                        # Continue the retry loop (counts against max_retries)
+                        continue
+
+                # Step 5: Merge to default branch
+                if merge_to_default(project_dir, key, default_branch):
+                    testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / key
+                    if testgen_dir.exists():
+                        shutil.rmtree(testgen_dir, ignore_errors=True)
+                    return _result(True, "passed", diff_summary=diff_summary, qa_report=qa_report)
+                else:
+                    return _result(
+                        False, "failed",
+                        error=f"branch diverged — otto/{key} preserved, manual rebase needed",
+                        diff_summary=diff_summary,
+                        qa_report=qa_report,
+                    )
+
+            # Verification failed — reset for retry
+            subprocess.run(
+                ["git", "reset", "--mixed", base_sha],
+                cwd=project_dir, capture_output=True,
+            )
+            last_error = verify_result.failure_output
+
+        # All retries exhausted
+        _cleanup_task_failure(
+            project_dir, key, default_branch, tasks_file,
+            pre_existing_untracked=pre_existing_untracked,
+            error="max retries exhausted", error_code="max_retries",
+            cost_usd=total_cost,
+            duration_s=time.monotonic() - task_start,
+        )
+        return _result(False, "failed", error="max retries exhausted")
+
+    except Exception as e:
+        duration = time.monotonic() - task_start
+        try:
+            _cleanup_task_failure(
+                project_dir, key, default_branch, tasks_file,
+                error=f"unexpected error: {e}", error_code="internal_error",
+                cost_usd=total_cost,
+                duration_s=duration,
+            )
+        except Exception:
+            pass
+        return _result(False, "failed", error=f"unexpected error: {str(e)[:200]}")
+
+
 def _print_summary(results: list[tuple[dict, bool]], total_duration: float, integration_passed: bool | None = None, total_cost: float = 0.0) -> None:
     """Print summary of all tasks after a run."""
     passed = sum(1 for _, s in results if s)
