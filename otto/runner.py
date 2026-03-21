@@ -1894,14 +1894,22 @@ async def run_task_with_qa(
                                 agent_log_lines.append(block.text)
                             elif ToolUseBlock and isinstance(block, ToolUseBlock):
                                 agent_log_lines.append(f"● {block.name}  {_tool_use_summary(block)}")
-                                # Emit significant tool calls for display
-                                # Skip noise: git, ls, cat, head, find, tree — agent exploring
+                                # Emit tool calls for display — show what the agent is doing
                                 if block.name in ("Write", "Edit"):
+                                    # Always show file creation/modification
                                     emit("agent_tool", name=block.name,
                                          detail=_tool_use_summary(block)[:80])
+                                elif block.name == "Read":
+                                    # Show file reads (shortened path) so user sees agent is active
+                                    path = _tool_use_summary(block)[:80]
+                                    # Only show source files, not config/lock files
+                                    if any(ext in path for ext in
+                                           [".py", ".ts", ".tsx", ".js", ".jsx", ".rs", ".go"]):
+                                        emit("agent_tool", name="Read",
+                                             detail=path.split("/")[-1] if "/" in path else path)
                                 elif block.name == "Bash":
                                     cmd = _tool_use_summary(block)[:80]
-                                    # Only show test runs and build commands, not exploration
+                                    # Show test/build commands, not exploration (git, ls, cat)
                                     if any(kw in cmd.lower() for kw in
                                            ["test", "pytest", "jest", "npm run", "build",
                                             "npx next", "make", "cargo"]):
