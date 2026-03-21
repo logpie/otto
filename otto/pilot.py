@@ -212,6 +212,10 @@ class _PhaseDisplay:
                 self._printed_tool_count = 0
                 # Reset printed state for this phase (supports retries)
                 self._printed_phases.discard(name)
+                # Print phase header immediately so tools appear under it
+                import sys as _s
+                _s.stdout.write(f"\r\033[2K  {_CYAN}{_PHASE_ACTIVE} {name}{_RESET}\n")
+                _s.stdout.flush()
 
     def add_tool(self, name: str, detail: str = ""):
         """Record an agent tool call. Thread-safe."""
