@@ -34,7 +34,7 @@ except (ImportError, AttributeError):
     ThinkingBlock = None  # type: ignore[assignment,misc]
 
 from otto.config import git_meta_dir, detect_test_command
-from otto.display import _truncate_at_word
+from otto.display import _truncate_at_word, console, format_cost, format_duration
 from otto.tasks import load_tasks, update_task
 from otto.testgen import detect_test_framework, test_file_path
 from otto.verify import VerifyResult, run_verification, _subprocess_env
@@ -77,7 +77,7 @@ def check_clean_tree(project_dir: Path) -> bool:
             cwd=project_dir, capture_output=True, text=True,
         )
         if stash.returncode == 0 and "No local changes" not in stash.stdout:
-            print(f"  {_DIM}Auto-stashed uncommitted changes{_RESET}", flush=True)
+            console.print("  Auto-stashed uncommitted changes", style="dim")
             return True
         return False
 
@@ -383,7 +383,8 @@ def _cleanup_task_failure(
             pass
 
 
-# ANSI color codes
+# Legacy ANSI color codes — kept for backward compatibility with imports.
+# New code should use console.print() with Rich styles instead.
 _DIM = "\033[2m"
 _BOLD = "\033[1m"
 _CYAN = "\033[36m"
@@ -392,78 +393,60 @@ _RED = "\033[31m"
 _YELLOW = "\033[33m"
 _RESET = "\033[0m"
 
+# Aliases from display module
+_format_duration = format_duration
+_format_cost = format_cost
+
 
 def _log_info(msg: str) -> None:
-    print(f"{_DIM}{'─' * 60}{_RESET}", flush=True)
-    print(f"  {msg}", flush=True)
+    console.print("\u2500" * 60, style="dim")
+    console.print(f"  {msg}")
 
 
 def _log_task_start(task_id: int, key: str, attempt: int, max_attempts: int, prompt: str) -> None:
-    print(flush=True)
-    print(f"{_BOLD}{'━' * 60}{_RESET}", flush=True)
-    print(f"{_BOLD}  Task #{task_id}{_RESET}  {prompt[:80]}", flush=True)
-    print(f"  {_DIM}attempt {attempt}/{max_attempts}  ·  key {key}{_RESET}", flush=True)
-    print(f"{_BOLD}{'━' * 60}{_RESET}", flush=True)
-
-
-def _format_duration(seconds: float) -> str:
-    if seconds < 60:
-        return f"{seconds:.0f}s"
-    minutes = int(seconds // 60)
-    secs = int(seconds % 60)
-    return f"{minutes}m{secs}s"
-
-
-def _format_cost(cost: float) -> str:
-    if cost < 0.01:
-        return f"${cost:.4f}"
-    return f"${cost:.2f}"
+    console.print()
+    console.print("\u2501" * 60, style="bold")
+    console.print(f"[bold]  Task #{task_id}[/bold]  {prompt[:80]}")
+    console.print(f"  attempt {attempt}/{max_attempts}  \u00b7  key {key}", style="dim")
+    console.print("\u2501" * 60, style="bold")
 
 
 def _log_pass(task_id: int, branch: str, duration: float | None = None, cost: float = 0.0) -> None:
     dur = f" in {_format_duration(duration)}" if duration else ""
     cost_str = f" ({_format_cost(cost)})" if cost > 0 else ""
-    print(f"\n  {_GREEN}{_BOLD}✓ Task #{task_id} PASSED{_RESET} {_DIM}— merged to {branch}{dur}{cost_str}{_RESET}", flush=True)
+    console.print(f"\n  [green bold]\u2713 Task #{task_id} PASSED[/green bold] [dim]\u2014 merged to {branch}{dur}{cost_str}[/dim]")
 
 
 def _log_fail(task_id: int, reason: str, duration: float | None = None, cost: float = 0.0) -> None:
     dur = f" in {_format_duration(duration)}" if duration else ""
     cost_str = f" ({_format_cost(cost)})" if cost > 0 else ""
-    print(f"\n  {_RED}{_BOLD}✗ Task #{task_id} FAILED{_RESET} {_DIM}— {reason}{dur}{cost_str}{_RESET}", flush=True)
+    console.print(f"\n  [red bold]\u2717 Task #{task_id} FAILED[/red bold] [dim]\u2014 {reason}{dur}{cost_str}[/dim]")
 
 
 def _log_warn(msg: str) -> None:
-    print(f"  {_YELLOW}⚠ {msg}{_RESET}", flush=True)
+    console.print(f"  [yellow]Warning: {msg}[/yellow]")
 
 
 def _log_verify(tiers: list) -> None:
     """Print verification results inline with test counts."""
     import re as _re
-    print(f"\n  {_DIM}{'─' * 50}{_RESET}", flush=True)
+    console.print(f"\n  {'─' * 50}", style="dim")
     for t in tiers:
         if t.skipped:
             continue
-        icon = f"{_GREEN}✓{_RESET}" if t.passed else f"{_RED}✗{_RESET}"
-        # Extract test count from output if available
+        icon = "[green]\u2713[/green]" if t.passed else "[red]\u2717[/red]"
         count_str = ""
         if t.output:
             match = _re.search(r"(\d+) passed", t.output)
             if match:
-                count_str = f" {_DIM}({match.group(1)} tests){_RESET}"
-        print(f"  {icon} {t.tier}{count_str}", flush=True)
-
-
-_GREEN_DIM = "\033[32;2m"
-_RED_DIM = "\033[31;2m"
+                count_str = f" [dim]({match.group(1)} tests)[/dim]"
+        console.print(f"  {icon} {t.tier}{count_str}")
 
 
 def _print_tool_use(block) -> None:
     """Print a tool use block like the Claude TUI."""
     name = block.name
     inputs = block.input or {}
-
-    # Format like: ● Read  bookmarks/store.py
-    label = f"{_CYAN}{_BOLD}● {name}{_RESET}"
 
     # Show key argument inline based on tool type
     detail = ""
@@ -476,9 +459,9 @@ def _print_tool_use(block) -> None:
         detail = _truncate_at_word(cmd, 80)
 
     if detail:
-        print(f"  {label}  {_DIM}{detail}{_RESET}", flush=True)
+        console.print(f"  [bold cyan]\u25cf {name}[/bold cyan]  [dim]{detail}[/dim]")
     else:
-        print(f"  {label}", flush=True)
+        console.print(f"  [bold cyan]\u25cf {name}[/bold cyan]")
 
     # Show edit diff for Edit tool
     if name == "Edit":
@@ -486,13 +469,13 @@ def _print_tool_use(block) -> None:
         new = inputs.get("new_string", "")
         if old or new:
             for line in old.splitlines()[:3]:
-                print(f"    {_RED_DIM}- {line}{_RESET}", flush=True)
+                console.print(f"    [dim red]- {line}[/dim red]")
             if old.count("\n") > 3:
-                print(f"    {_DIM}  ... ({old.count(chr(10)) - 3} more lines){_RESET}", flush=True)
+                console.print(f"    ... ({old.count(chr(10)) - 3} more lines)", style="dim")
             for line in new.splitlines()[:3]:
-                print(f"    {_GREEN_DIM}+ {line}{_RESET}", flush=True)
+                console.print(f"    [dim green]+ {line}[/dim green]")
             if new.count("\n") > 3:
-                print(f"    {_DIM}  ... ({new.count(chr(10)) - 3} more lines){_RESET}", flush=True)
+                console.print(f"    ... ({new.count(chr(10)) - 3} more lines)", style="dim")
 
     # Show content preview for Write tool
     elif name == "Write":
@@ -500,9 +483,9 @@ def _print_tool_use(block) -> None:
         if content:
             lines = content.splitlines()
             for line in lines[:3]:
-                print(f"    {_GREEN_DIM}+ {line}{_RESET}", flush=True)
+                console.print(f"    [dim green]+ {line}[/dim green]")
             if len(lines) > 3:
-                print(f"    {_DIM}  ... ({len(lines) - 3} more lines){_RESET}", flush=True)
+                console.print(f"    ... ({len(lines) - 3} more lines)", style="dim")
 
 
 def _tool_use_summary(block) -> str:
@@ -526,21 +509,19 @@ def _print_tool_result(block) -> None:
         return
     if block.is_error:
         lines = content.strip().splitlines()
-        # Show last few lines of error (most useful part)
         shown = lines[-5:] if len(lines) > 5 else lines
         for line in shown:
-            print(f"    {_RED}{line}{_RESET}", flush=True)
+            console.print(f"    {line}", style="red")
     else:
         lines = content.strip().splitlines()
         if len(lines) <= 3:
             for line in lines:
-                print(f"    {_DIM}{line}{_RESET}", flush=True)
+                console.print(f"    {line}", style="dim")
         else:
-            # Show first 2 + last line with count
-            print(f"    {_DIM}{lines[0]}{_RESET}", flush=True)
-            print(f"    {_DIM}{lines[1]}{_RESET}", flush=True)
-            print(f"    {_DIM}... ({len(lines) - 3} more lines){_RESET}", flush=True)
-            print(f"    {_DIM}{lines[-1]}{_RESET}", flush=True)
+            console.print(f"    {lines[0]}", style="dim")
+            console.print(f"    {lines[1]}", style="dim")
+            console.print(f"    ... ({len(lines) - 3} more lines)", style="dim")
+            console.print(f"    {lines[-1]}", style="dim")
 
 
 CODING_SYSTEM_PROMPT = """\
@@ -1059,9 +1040,9 @@ async def run_task(
     def _tprint(msg: str = "", **kwargs) -> None:
         """Print with task prefix in parallel mode."""
         if _task_tag:
-            print(f"  {_DIM}{_task_tag}{_RESET} {msg}", flush=True)
+            console.print(f"  [dim]{_task_tag}[/dim] {msg}")
         else:
-            print(msg, flush=True)
+            console.print(msg)
 
     if tasks_file:
         update_task(tasks_file, key, status="running", attempts=0)
@@ -1094,13 +1075,13 @@ async def run_task(
 
         # Print task header before testgen (so testgen output is under the right task)
         if parallel_mode:
-            _tprint(f"{_BOLD}Task #{task_id}{_RESET}  {prompt[:60]}  {_DIM}started{_RESET}")
+            _tprint(f"[bold]Task #{task_id}[/bold]  {prompt[:60]}  [dim]started[/dim]")
         else:
-            print(flush=True)
-            print(f"{_BOLD}{'━' * 60}{_RESET}", flush=True)
-            print(f"{_BOLD}  Task #{task_id}{_RESET}  {prompt[:80]}", flush=True)
-            print(f"  {_DIM}key {key}{_RESET}", flush=True)
-            print(f"{_BOLD}{'━' * 60}{_RESET}", flush=True)
+            console.print()
+            console.print("\u2501" * 60, style="bold")
+            console.print(f"[bold]  Task #{task_id}[/bold]  {prompt[:80]}")
+            console.print(f"  key {key}", style="dim")
+            console.print("\u2501" * 60, style="bold")
 
         # Timing for profiling
         timings: dict[str, float] = {}
@@ -1113,7 +1094,7 @@ async def run_task(
         if config.get("tdd", False) and spec:
             from otto.testgen import build_blackbox_context, run_testgen_agent, validate_generated_tests
             if not parallel_mode:
-                print(f"  {_DIM}TDD mode: generating adversarial tests ({len(spec)} criteria)...{_RESET}", flush=True)
+                console.print(f"  TDD mode: generating adversarial tests ({len(spec)} criteria)...", style="dim")
             task_hint = prompt + "\n" + "\n".join(spec)
             blackbox_ctx = build_blackbox_context(effective_dir, task_hint=task_hint)
             test_file_path_val, _, _tg_cost = await run_testgen_agent(
@@ -1142,12 +1123,12 @@ async def run_task(
                         capture_output=True, text=True, check=True,
                     ).stdout.strip()
                     if not parallel_mode:
-                        print(f"  {_GREEN}✓{_RESET} {_DIM}TDD tests ready ({validation.failed} failing, {validation.passed} passing){_RESET}", flush=True)
+                        console.print(f"  [green]\u2713[/green] [dim]TDD tests ready ({validation.failed} failing, {validation.passed} passing)[/dim]")
 
         for attempt in range(max_retries + 1):
             attempt_num = attempt + 1
             if not parallel_mode:
-                print(f"\n  {_DIM}attempt {attempt_num}/{max_retries + 1}{_RESET}", flush=True)
+                console.print(f"\n  attempt {attempt_num}/{max_retries + 1}", style="dim")
 
             if tasks_file:
                 update_task(tasks_file, key, attempts=attempt_num)
@@ -1233,7 +1214,7 @@ async def run_task(
                                         agent_log_lines.append(f"[thinking] {thinking}")
                                 elif TextBlock and isinstance(block, TextBlock) and block.text:
                                     if not parallel_mode:
-                                        print(block.text, flush=True)
+                                        console.print(block.text)
                                     agent_log_lines.append(block.text)
                                     # Write reasoning to progress file
                                     try:
@@ -1327,7 +1308,7 @@ async def run_task(
 
                     # No spec and no changes — genuinely nothing to do
                     if not parallel_mode:
-                        print(f"  {_DIM}No changes needed{_RESET}", flush=True)
+                        console.print("  No changes needed", style="dim")
                     if not parallel_mode:
                         subprocess.run(["git", "checkout", default_branch], cwd=project_dir, capture_output=True)
                         cleanup_branch(project_dir, key, default_branch)
@@ -1451,7 +1432,7 @@ async def run_task(
                                     duration_s=round(time.monotonic() - task_start, 1))
                     return False
                 if not parallel_mode:
-                    print(flush=True)
+                    console.print()
 
                 # In parallel mode, caller handles merge — just return success
                 if parallel_mode:
@@ -2235,13 +2216,13 @@ def _print_summary(
     failed = len(results) - passed
 
     cost_str = f"  {_format_cost(total_cost)}" if total_cost > 0 else ""
-    print(flush=True)
-    print(f"{_BOLD}{'━' * 60}{_RESET}", flush=True)
-    print(f"{_BOLD}  Run complete{_RESET}  {_DIM}{_format_duration(total_duration)}{cost_str}{_RESET}", flush=True)
-    print(f"{_BOLD}{'━' * 60}{_RESET}", flush=True)
+    console.print()
+    console.print("\u2501" * 60, style="bold")
+    console.print(f"[bold]  Run complete[/bold]  [dim]{_format_duration(total_duration)}{cost_str}[/dim]")
+    console.print("\u2501" * 60, style="bold")
 
     for task, success in results:
-        icon = f"{_GREEN}✓{_RESET}" if success else f"{_RED}✗{_RESET}"
+        icon = "[green]\u2713[/green]" if success else "[red]\u2717[/red]"
         task_key = task.get("key", "")
         task_cost = task.get("cost_usd", 0.0)
         task_duration = task.get("duration_s", 0.0)
@@ -2253,7 +2234,6 @@ def _print_summary(
         if task_progress and task_key in task_progress:
             events = task_progress[task_key]
             # Prefer phase_timings from the final run_task_with_qa result
-            # (accurate per-task timing), falling back to progress events.
             phase_times: dict[str, float] = {}
             result_evt = None
             for evt in events:
@@ -2264,8 +2244,6 @@ def _print_summary(
                     k: float(v) for k, v in result_evt["phase_timings"].items() if v
                 }
             else:
-                # Fallback: accumulate from progress events (less accurate
-                # when events from previous runs leak into the JSONL)
                 for evt in events:
                     if evt.get("event") == "phase" and evt.get("status") in ("done", "fail"):
                         pname = evt.get("name", "")
@@ -2277,18 +2255,18 @@ def _print_summary(
                     phase_parts.append(f"{_format_duration(phase_times[pname])} {pname}")
 
         # Build the main status line
-        dur_str = f"  {_DIM}{_format_duration(task_duration)}{_RESET}" if task_duration else ""
-        cost_part = f"  {_DIM}{_format_cost(task_cost)}{_RESET}" if task_cost > 0 else ""
-        print(f"  {icon} {_BOLD}#{task['id']}{_RESET}  {task['prompt'][:60]}{dur_str}{cost_part}", flush=True)
+        dur_str = f"  [dim]{_format_duration(task_duration)}[/dim]" if task_duration else ""
+        cost_part = f"  [dim]{_format_cost(task_cost)}[/dim]" if task_cost > 0 else ""
+        console.print(f"  {icon} [bold]#{task['id']}[/bold]  {task['prompt'][:60]}{dur_str}{cost_part}")
 
         # Show phase timing breakdown on the next line
         if phase_parts:
-            print(f"       {_DIM}{' · '.join(phase_parts)}{_RESET}", flush=True)
+            sep = " \u00b7 "
+            console.print(f"       {sep.join(phase_parts)}", style="dim")
 
         # Show diff summary from task metadata if available
         diff_summary = task.get("diff_summary", "")
         if diff_summary:
-            # Extract just the file list from git diff --stat output
             diff_files = []
             for line in diff_summary.splitlines():
                 line = line.strip()
@@ -2299,17 +2277,17 @@ def _print_summary(
                 files_str = "  ".join(diff_files[:5])
                 if len(diff_files) > 5:
                     files_str += f"  (+{len(diff_files) - 5} more)"
-                print(f"       {_DIM}{files_str}{_RESET}", flush=True)
+                console.print(f"       {files_str}", style="dim")
 
-    print(flush=True)
+    console.print()
     if failed == 0:
-        print(f"  {_GREEN}{_BOLD}{passed}/{len(results)} tasks passed{_RESET}", flush=True)
+        console.print(f"  [green bold]{passed}/{len(results)} tasks passed[/green bold]")
     else:
-        print(f"  {_GREEN}{passed} passed{_RESET}  {_RED}{failed} failed{_RESET}  {_DIM}of {len(results)} tasks{_RESET}", flush=True)
+        console.print(f"  [green]{passed} passed[/green]  [red]{failed} failed[/red]  [dim]of {len(results)} tasks[/dim]")
 
     if integration_passed is not None:
-        icon = f"{_GREEN}✓{_RESET}" if integration_passed else f"{_RED}✗{_RESET}"
+        icon = "[green]\u2713[/green]" if integration_passed else "[red]\u2717[/red]"
         label = "passed" if integration_passed else "FAILED"
-        print(f"  {icon} Integration gate {label}", flush=True)
+        console.print(f"  {icon} Integration gate {label}")
 
-    print(flush=True)
+    console.print()

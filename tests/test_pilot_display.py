@@ -1,8 +1,8 @@
 """Tests for pilot display functions — verify tool calls and results render correctly.
 
 These tests exercise _print_pilot_tool_call and _print_pilot_tool_result with
-synthetic block objects that mimic what the Agent SDK streams. Captures stdout
-and verifies the output contains expected content.
+synthetic block objects that mimic what the Agent SDK streams. Captures Rich
+console output and verifies the output contains expected content.
 """
 
 import io
@@ -12,13 +12,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
+from rich.console import Console
 
 from otto.pilot import (
     _print_pilot_tool_call,
     _print_pilot_tool_result,
-    _Spinner,
-    _active_spinner,
 )
+from otto.display import TaskDisplay
 
 
 # ---------------------------------------------------------------------------
@@ -51,13 +51,26 @@ class FakeToolResultBlock:
 # ---------------------------------------------------------------------------
 
 def capture_output(func, *args, **kwargs) -> str:
-    """Capture stdout from a function call."""
-    old = sys.stdout
-    sys.stdout = buf = io.StringIO()
+    """Capture Rich console output from a function call.
+
+    Temporarily replaces the module-level console with one that writes
+    to a StringIO buffer, then restores the original.
+    """
+    import otto.display as display_mod
+    import otto.pilot as pilot_mod
+
+    buf = io.StringIO()
+    test_console = Console(file=buf, highlight=False, color_system=None)
+
+    old_display_console = display_mod.console
+    old_pilot_console = pilot_mod.console
+    display_mod.console = test_console
+    pilot_mod.console = test_console
     try:
         func(*args, **kwargs)
     finally:
-        sys.stdout = old
+        display_mod.console = old_display_console
+        pilot_mod.console = old_pilot_console
     return buf.getvalue()
 
 
@@ -74,7 +87,7 @@ class TestPilotToolCallDisplay:
         output = capture_output(_print_pilot_tool_call, block)
         assert "Running task" in output
         assert "abc123de" in output  # truncated key
-        assert "─" in output  # separator
+        assert "\u2500" in output  # separator (─)
 
     def test_primary_tool_with_hint(self):
         block = FakeToolUseBlock(name="mcp__otto-pilot__run_task_with_qa",
@@ -87,10 +100,7 @@ class TestPilotToolCallDisplay:
         block = FakeToolUseBlock(name="mcp__otto-pilot__save_run_state",
                                   input={"phase": "test"})
         output = capture_output(_print_pilot_tool_call, block)
-        # Strip ANSI escape codes before checking
-        import re
-        clean = re.sub(r'\033\[[^m]*[mKJ]', '', output).strip()
-        assert clean == ""  # completely suppressed
+        assert output.strip() == ""  # completely suppressed
 
     def test_toolsearch_suppressed(self):
         block = FakeToolUseBlock(name="ToolSearch", input={})
@@ -102,7 +112,7 @@ class TestPilotToolCallDisplay:
         output = capture_output(_print_pilot_tool_call, block)
         assert "Loading task state" in output
         # Should NOT have separator line
-        assert "─" * 50 not in output
+        assert "\u2500" * 50 not in output
 
     def test_unknown_tool_shows_name(self):
         block = FakeToolUseBlock(name="mcp__otto-pilot__some_new_tool", input={})
@@ -143,8 +153,8 @@ class TestPilotToolResultDisplay:
         diff_text = (
             "  taskflow/cli.py\\n"
             "    @@ -10,3 +10,15 @@\\n"
-            "    \\033[32m+def search(ctx, query):\\033[0m\\n"
-            "    \\033[32m+    store = ctx.obj['store']\\033[0m\\n"
+            "    +def search(ctx, query):\\n"
+            "    +    store = ctx.obj['store']\\n"
             "  1 file changed, 12 insertions(+)"
         )
         result = json.dumps({
@@ -254,21 +264,44 @@ class TestPilotToolResultDisplay:
 
 
 # ---------------------------------------------------------------------------
-# Spinner tests
+# TaskDisplay tests
 # ---------------------------------------------------------------------------
 
-class TestSpinner:
+class TestTaskDisplay:
     def test_start_stop_returns_elapsed(self):
-        s = _Spinner("test")
-        s.start()
+        buf = io.StringIO()
+        test_console = Console(file=buf, highlight=False, color_system=None)
+        td = TaskDisplay(test_console)
+        td.start()
         import time
         time.sleep(0.3)
-        elapsed = s.stop()
+        elapsed = td.stop()
         # Should be a string like "0s" or "1s"
         assert "s" in elapsed
 
     def test_stop_without_start(self):
-        s = _Spinner("test")
-        s._start_time = 0  # prevent division issues
-        elapsed = s.stop()
+        buf = io.StringIO()
+        test_console = Console(file=buf, highlight=False, color_system=None)
+        td = TaskDisplay(test_console)
+        td._start_time = 0  # prevent division issues
+        elapsed = td.stop()
         assert isinstance(elapsed, str)
+
+    def test_phase_updates_recorded(self):
+        buf = io.StringIO()
+        test_console = Console(file=buf, highlight=False, color_system=None)
+        td = TaskDisplay(test_console)
+        td.update_phase("coding", "running")
+        td.update_phase("coding", "done", time_s=10.0)
+        assert td._phases["coding"]["status"] == "done"
+        assert td._phases["coding"]["time_s"] == 10.0
+
+    def test_tool_lines_tracked(self):
+        buf = io.StringIO()
+        test_console = Console(file=buf, highlight=False, color_system=None)
+        td = TaskDisplay(test_console)
+        td.add_tool(name="Write", detail="alerts.ts")
+        td.add_tool(name="Edit", detail="WeatherApp.tsx")
+        assert len(td._tools) == 2
+        assert "Write" in td._tools[0]
+        assert "Edit" in td._tools[1]
