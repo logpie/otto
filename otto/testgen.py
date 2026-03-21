@@ -192,21 +192,14 @@ def get_relevant_file_contents(project_dir: Path, task_hint: str = "") -> str:
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return ""
 
-    # Include-by-exclusion: treat everything as source, skip known noise.
-    # This works for any language without maintaining an extension whitelist.
-    _BINARY_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg", ".webp",
-                    ".woff", ".woff2", ".ttf", ".eot", ".otf",
-                    ".pdf", ".zip", ".tar", ".gz", ".br",
-                    ".mp3", ".mp4", ".wav", ".ogg", ".webm",
-                    ".pyc", ".pyo", ".o", ".so", ".dylib", ".dll", ".exe",
-                    ".lock", ".map"}
-    _SKIP_EXTS = _BINARY_EXTS | {".md", ".txt", ".log", ".LICENSE"}
-    _SKIP_DIRS = {"node_modules", ".next", "dist", "build", "__pycache__", ".git",
+    # Trust git: if it's tracked, it's probably relevant.
+    # Only skip: generated dirs, lock files, test files, and binary/huge files.
+    _SKIP_DIRS = {"node_modules", ".next", "dist", "build", "__pycache__",
                   "coverage", ".venv", "venv", "vendor", "target", ".cache",
                   ".turbo", ".vercel", ".output"}
-    _SKIP_NAMES = {"__init__.py", "conftest.py", "package-lock.json",
-                   "yarn.lock", "pnpm-lock.yaml", "Cargo.lock", "go.sum"}
-    _SKIP_PREFIXES = {"test_", "spec_"}
+    _SKIP_NAMES = {"package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+                   "Cargo.lock", "go.sum"}  # lock files are huge noise
+    _MAX_FILE_SIZE = 50_000  # skip files >50KB (likely generated/minified)
 
     source_files: list[str] = []
     for rel in file_tree.splitlines():
@@ -214,21 +207,30 @@ def get_relevant_file_contents(project_dir: Path, task_hint: str = "") -> str:
         if not rel:
             continue
         p = Path(rel)
-        if p.suffix in _SKIP_EXTS or not p.suffix:
-            continue
         if p.name in _SKIP_NAMES:
-            continue
-        if any(p.name.startswith(pfx) for pfx in _SKIP_PREFIXES):
-            continue
-        if p.name.endswith((".test.ts", ".test.tsx", ".test.js", ".test.jsx", ".spec.ts", ".spec.tsx")):
             continue
         if any(skip in p.parts for skip in _SKIP_DIRS):
             continue
-        # Skip __tests__ directories
-        if "__tests__" in p.parts or "tests" in p.parts:
+        # Skip test files — agent writes its own
+        if p.name.startswith(("test_", "spec_")):
             continue
-        if (project_dir / rel).is_file():
-            source_files.append(rel)
+        if p.name.endswith((".test.ts", ".test.tsx", ".test.js", ".test.jsx",
+                            ".spec.ts", ".spec.tsx")):
+            continue
+        if "__tests__" in p.parts:
+            continue
+        full = project_dir / rel
+        if not full.is_file():
+            continue
+        # Skip binary/huge files by size
+        try:
+            if full.stat().st_size > _MAX_FILE_SIZE:
+                continue
+            # Quick binary check: try reading as UTF-8
+            full.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        source_files.append(rel)
 
     if not source_files:
         return ""
