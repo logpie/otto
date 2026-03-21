@@ -1895,9 +1895,17 @@ async def run_task_with_qa(
                             elif ToolUseBlock and isinstance(block, ToolUseBlock):
                                 agent_log_lines.append(f"● {block.name}  {_tool_use_summary(block)}")
                                 # Emit significant tool calls for display
-                                if block.name in ("Write", "Edit", "Bash"):
+                                # Skip noise: git, ls, cat, head, find, tree — agent exploring
+                                if block.name in ("Write", "Edit"):
                                     emit("agent_tool", name=block.name,
                                          detail=_tool_use_summary(block)[:80])
+                                elif block.name == "Bash":
+                                    cmd = _tool_use_summary(block)[:80]
+                                    # Only show test runs and build commands, not exploration
+                                    if any(kw in cmd.lower() for kw in
+                                           ["test", "pytest", "jest", "npm run", "build",
+                                            "npx next", "make", "cargo"]):
+                                        emit("agent_tool", name=block.name, detail=cmd)
                             elif ToolResultBlock and isinstance(block, ToolResultBlock):
                                 # Extract test results from Bash output
                                 content = str(getattr(block, "content", ""))

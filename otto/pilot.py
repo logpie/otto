@@ -209,6 +209,7 @@ class _PhaseDisplay:
                 self._current_phase = name
                 # Clear stale tools from previous phase
                 self._recent_tools.clear()
+                self._printed_tool_count = 0
                 # Reset printed state for this phase (supports retries)
                 self._printed_phases.discard(name)
 
