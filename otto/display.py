@@ -129,8 +129,9 @@ class TaskDisplay:
         self._live = Live(
             self._render(),
             console=self._console,
-            refresh_per_second=4,
+            refresh_per_second=2,
             transient=True,  # clear live display when stopped
+            get_renderable=self._render,  # Rich calls this on each refresh cycle
         )
         self._live.start()
 

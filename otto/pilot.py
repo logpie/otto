@@ -1087,7 +1087,7 @@ Before calling finish_run, verify:
                                     pass
                     except OSError:
                         pass
-                    time.sleep(0.5)
+                    time.sleep(0.2)
 
             _bg_thread = threading.Thread(target=_bg_read_results, daemon=True)
             _bg_thread.start()
