@@ -1592,28 +1592,29 @@ If any spec item fails, end your report with: QA VERDICT: FAIL
 
 You are working in {project_dir}. Do NOT create git commits."""
 
-    # Build MCP servers for QA — only chrome-devtools if available
+    # Only give QA chrome-devtools if the spec has visual items that need browser
+    has_visual_specs = any(not spec_is_verifiable(item) for item in spec)
     qa_mcp_servers = {}
-    user_claude_json = Path.home() / ".claude.json"
-    if user_claude_json.exists():
-        try:
-            import json
-            user_config = json.loads(user_claude_json.read_text())
-            for name, srv in user_config.get("mcpServers", {}).items():
-                if name == "chrome-devtools":
-                    srv = dict(srv)
-                    args = list(srv.get("args", []))
-                    if "--headless" not in args:
-                        args.append("--headless")
-                    if not any(a.startswith("--viewport") for a in args):
-                        args.extend(["--viewport", "1280x720"])
-                    if not any(a.startswith("--userDataDir") for a in args):
-                        otto_chrome_profile = str(Path.home() / ".cache" / "otto" / "chrome-profile")
-                        args.extend(["--userDataDir", otto_chrome_profile])
-                    srv["args"] = args
-                    qa_mcp_servers[name] = srv
-        except (Exception,):
-            pass
+    if has_visual_specs:
+        user_claude_json = Path.home() / ".claude.json"
+        if user_claude_json.exists():
+            try:
+                user_config = json.loads(user_claude_json.read_text())
+                for name, srv in user_config.get("mcpServers", {}).items():
+                    if name == "chrome-devtools":
+                        srv = dict(srv)
+                        args = list(srv.get("args", []))
+                        if "--headless" not in args:
+                            args.append("--headless")
+                        if not any(a.startswith("--viewport") for a in args):
+                            args.extend(["--viewport", "1280x720"])
+                        if not any(a.startswith("--userDataDir") for a in args):
+                            otto_chrome_profile = str(Path.home() / ".cache" / "otto" / "chrome-profile")
+                            args.extend(["--userDataDir", otto_chrome_profile])
+                        srv["args"] = args
+                        qa_mcp_servers[name] = srv
+            except (Exception,):
+                pass
 
     qa_opts = ClaudeAgentOptions(
         permission_mode="bypassPermissions",
