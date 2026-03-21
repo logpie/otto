@@ -1253,6 +1253,10 @@ Before calling finish_run, verify:
 
             def _bg_read_results():
                 nonlocal _results_read_pos
+                try:
+                    _dlog("INIT", "background JSONL reader started")
+                except Exception:
+                    pass
                 while _bg_reader_running:
                     try:
                         if _results_file.exists():
@@ -1325,9 +1329,10 @@ Before calling finish_run, verify:
                             or (ToolResultBlock and isinstance(block, ToolResultBlock))
                         )
                         if not is_tool_block:
-                            if _active_phase_display:
-                                _active_phase_display.stop()
-                                _active_phase_display = None
+                            # Stop plain spinner on non-tool blocks, but keep
+                            # _active_phase_display alive — it should persist
+                            # through ThinkingBlocks/TextBlocks until the tool
+                            # result arrives (run_task_with_qa takes minutes).
                             if _active_spinner:
                                 _active_spinner.stop()
                                 _active_spinner = None
