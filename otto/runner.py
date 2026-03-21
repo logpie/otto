@@ -1800,10 +1800,24 @@ async def run_task_with_qa(
 
         # Check if implementation already exists on main (retried passed task)
         # Do this BEFORE launching the coding agent to avoid wasting 60-90s exploring
-        already_merged = subprocess.run(
-            ["git", "diff", "--quiet", f"{default_branch}..HEAD"],
-            cwd=project_dir, capture_output=True,
-        ).returncode == 0  # 0 = no diff = branch same as main
+        # Only applies when the branch has no commits beyond base (HEAD == base_sha)
+        # AND main already has the implementation (verify tests pass on main)
+        head_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=project_dir, capture_output=True, text=True,
+        ).stdout.strip()
+        branch_is_fresh = (head_sha == base_sha)
+        already_merged = False
+        if branch_is_fresh and spec and test_command:
+            # Branch has no work — check if main already passes verification
+            try:
+                vr = subprocess.run(
+                    test_command, shell=True, cwd=project_dir,
+                    capture_output=True, timeout=60,
+                )
+                already_merged = (vr.returncode == 0)
+            except subprocess.TimeoutExpired:
+                pass  # timeout → skip optimization, run normally
 
         if already_merged and spec:
             _log_warn("Implementation already exists on main — task was previously completed")
