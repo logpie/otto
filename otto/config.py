@@ -173,14 +173,30 @@ def create_config(project_dir: Path) -> Path:
     """Create otto.yaml with auto-detected settings. Updates .git/info/exclude."""
     default_branch = detect_default_branch(project_dir)
 
+    # Auto-detect test command
+    test_command = detect_test_command(project_dir)
+
     config = {
-        "max_retries": DEFAULT_CONFIG["max_retries"],
         "default_branch": default_branch,
+        "max_retries": DEFAULT_CONFIG["max_retries"],
         "verify_timeout": DEFAULT_CONFIG["verify_timeout"],
     }
+    # Only include optional keys if they differ from defaults,
+    # so the generated file is clean but discoverable via comments.
+    if test_command:
+        config["test_command"] = test_command
 
+    # Write config with comments showing all available options
     config_path = project_dir / "otto.yaml"
-    config_path.write_text(yaml.dump(config, default_flow_style=False, sort_keys=False))
+    lines = yaml.dump(config, default_flow_style=False, sort_keys=False).rstrip()
+    lines += "\n\n# Other options (uncomment to customize):\n"
+    lines += f"# test_command: pytest          # auto-detected if not set\n"
+    lines += f"# model: null                   # override Claude model (e.g. sonnet)\n"
+    lines += f"# max_turns: 200                # max agent turns per task\n"
+    lines += f"# effort: high                  # agent thinking effort (low/medium/high/max)\n"
+    lines += f"# max_parallel: 3               # max parallel tasks (future)\n"
+    lines += f"# researcher_model: sonnet       # model for research subagent (sonnet/haiku/opus)\n"
+    config_path.write_text(lines + "\n")
 
     # Update .git/info/exclude for runtime files (use git_meta_dir for linked worktrees)
     exclude_path = git_meta_dir(project_dir) / "info" / "exclude"

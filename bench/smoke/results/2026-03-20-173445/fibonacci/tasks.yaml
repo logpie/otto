@@ -1,0 +1,36 @@
+tasks:
+- id: 1
+  key: e180340afdd0
+  prompt: Create a Python function in calc.py that computes fibonacci numbers. Include
+    tests.
+  status: failed
+  spec:
+  - text: A file named calc.py exists in the project root and contains a callable
+      Python function that computes fibonacci numbers
+    verifiable: true
+    test_hint: import the function from calc and call it; assert it is callable
+  - text: 'The fibonacci function returns correct values for the standard sequence:
+      fib(0)=0, fib(1)=1, fib(2)=1, fib(5)=5, fib(10)=55'
+    verifiable: true
+    test_hint: call the function with each input and assert against expected output
+  - text: 'The fibonacci function handles edge cases: negative input raises an exception
+      or returns a clearly defined sentinel value (not a wrong fibonacci number)'
+    verifiable: true
+    test_hint: call with -1, assert raises ValueError/TypeError or returns documented
+      sentinel
+  - text: A test file exists (e.g., test_calc.py) that imports from calc.py and contains
+      test cases for the fibonacci function
+    verifiable: true
+    test_hint: glob for test_*.py or *_test.py, read file, confirm it imports from
+      calc and has test functions
+  - text: All tests pass when run via pytest (or python -m unittest) with exit code
+      0
+    verifiable: true
+    test_hint: run `python -m pytest` or `python -m unittest discover`, assert exit
+      code 0
+  - text: The fibonacci function works for at least moderately large inputs (n=30
+      returns 832040) without error
+    verifiable: true
+    test_hint: call fib(30), assert result == 832040 and completes without exception
+  attempts: 1
+  error: pilot crashed during execution

@@ -69,15 +69,15 @@ class TestPilotToolCallDisplay:
     """Test _print_pilot_tool_call with various tool types."""
 
     def test_primary_tool_shows_bold_with_separator(self):
-        block = FakeToolUseBlock(name="mcp__otto-pilot__run_coding_agent",
+        block = FakeToolUseBlock(name="mcp__otto-pilot__prepare_task",
                                   input={"task_key": "abc123def456"})
         output = capture_output(_print_pilot_tool_call, block)
-        assert "Coding" in output
+        assert "Preparing task" in output
         assert "abc123de" in output  # truncated key
         assert "─" in output  # separator
 
     def test_primary_tool_with_hint(self):
-        block = FakeToolUseBlock(name="mcp__otto-pilot__run_coding_agent",
+        block = FakeToolUseBlock(name="mcp__otto-pilot__prepare_task",
                                   input={"task_key": "abc123", "hint": "fix the import"})
         output = capture_output(_print_pilot_tool_call, block)
         assert "hint" in output
@@ -239,7 +239,7 @@ class TestPilotToolResultDisplay:
     def test_single_task_result_with_tool_key(self):
         """Side-channel single task result includes 'tool' key — should parse correctly."""
         result = json.dumps({
-            "tool": "run_coding_agent",
+            "tool": "verify_task",
             "success": True, "status": "passed",
             "cost_usd": 0.42, "error": None,
             "diff": "", "verify_output": "",

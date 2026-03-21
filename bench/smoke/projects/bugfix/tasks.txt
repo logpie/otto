@@ -1,0 +1,1 @@
+Fix the bugs in calc.py: divide should raise ValueError on zero, average should return 0.0 for empty list. Add comprehensive tests for all edge cases.
