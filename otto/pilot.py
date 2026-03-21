@@ -1265,6 +1265,14 @@ Before calling finish_run, verify:
                 while _bg_reader_running:
                     try:
                         if _results_file.exists():
+                            # Detect file truncation (MCP server clears file on start)
+                            try:
+                                file_size = _results_file.stat().st_size
+                                if file_size < _results_read_pos:
+                                    _results_read_pos = 0
+                                    _carry = ""
+                            except OSError:
+                                pass
                             with open(_results_file) as rf:
                                 rf.seek(_results_read_pos)
                                 raw = rf.read()
