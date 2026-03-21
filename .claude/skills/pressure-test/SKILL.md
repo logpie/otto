@@ -9,90 +9,74 @@ Heavy-duty validation that simulates real users building real projects. NOT a qu
 
 ## When to Use
 
+**Full pressure test:**
 - After architecture changes, NOT after trivial fixes
 - Before releases
 - When the user says "pressure test"
 - Periodically for regression detection
 
+**Bad cases regression (fast mode):**
+- After fixing an otto bug — verify the fix helps on the cases that exposed it
+- Before releases — quick confidence check on known trouble spots
+- Daily — more signal than smoke tests, much faster than full pressure
+
 **NOT for quick validation** — use `bench/smoke/run.sh` for that.
+
+**For regression runs** — use `bench/bad-cases.yaml` to re-run only previously failed cases. Fast, targeted signal.
 
 ## Difference from E2E Tests
 
-| | E2E / Smoke Test | Pressure Test |
-|---|---|---|
-| Projects | 4 simple | 30+ complex |
-| Time | ~20 min | 4-10 hours |
-| Depth | Pass/fail only | Full log analysis, timing profiling, display audit |
-| Projects | Fibonacci, bugfix | JWT auth, WebSocket chat, data pipelines, concurrency |
-| Signal | "Does it work?" | "Where does it break under stress?" |
-| Output | results.json | 200+ line analysis report |
+| | E2E / Smoke Test | Bad Cases Regression | Pressure Test |
+|---|---|---|---|
+| Projects | 4 simple | Only prior failures | 30+ complex |
+| Time | ~20 min | 30-90 min | 4-10 hours |
+| Depth | Pass/fail only | Pass/fail + log check | Full log analysis, timing profiling, display audit |
+| Projects | Fibonacci, bugfix | Whatever broke last time | JWT auth, WebSocket chat, data pipelines, concurrency |
+| Signal | "Does it work?" | "Did we fix what broke?" | "Where does it break under stress?" |
+| Output | results.json | Updated bad-cases.yaml | 200+ line analysis report |
 
-## Project Complexity Requirements
+## Canonical Project Set
 
-Simple projects (fibonacci, hello world) give NO useful signal. Every project must:
+**28 projects, 34 tasks** checked into `bench/pressure/projects/`. Same format as smoke tests: each project has `setup.sh` + `tasks.txt`. See `bench/pressure/README.md` for the full inventory.
 
-- Require **multiple files** (not a single function)
-- Have **non-trivial dependencies** (requests, express, SQLAlchemy, not just stdlib)
-- Include **edge cases in the spec** (error handling, concurrency, validation)
-- Take a competent human **15+ minutes** to implement manually
-- Test a **different otto capability** than other projects in the same category
+**DO NOT generate projects on the fly.** Use the canonical set. This ensures:
+- Reproducible runs (same inputs → comparable results)
+- Real-repo projects pinned at specific commits
+- Bad cases can reference projects by name across runs
 
-### Example: Bad vs Good
+### Categories
 
-```
-BAD:  "Create a function that adds two numbers"
-      → trivial, no deps, no edge cases, tests nothing
+| Category | Count | Languages | Key signals |
+|----------|-------|-----------|-------------|
+| Python greenfield | 5 | Python | Threading, SQLite, parsing, data pipelines |
+| Node.js greenfield | 5 | JS | Express, WebSocket, streams, queues |
+| TypeScript greenfield | 4 | TS | Generics, type inference, monads, DI |
+| Bug fix (synthetic) | 3 | Python, JS | 6 bugs each, pre-seeded broken code |
+| Bug fix (real repos) | 3 | Python, JS | cachetools, node-semver, python-box |
+| Feature add (real repos) | 3 | Python, TS | tinydb, radash, citty |
+| Multi-task | 2 | Python, JS | 3 sequential tasks each |
+| Edge cases | 3 | Python, JS, TS | Empty repo, large spec, conflicting tasks |
 
-GOOD: "Build a thread-safe rate limiter using token bucket algorithm.
-       Support sliding window, configurable burst. Must handle 1000
-       concurrent goroutines without race conditions. Include tests
-       with concurrent access patterns."
-      → multiple files, concurrency, edge cases, real-world complexity
-```
+### Real-Repo Projects
 
-## Project Categories (minimum 3 each for 30-project run)
+These clone from GitHub at a pinned commit SHA. The task is a real bug fix or feature that was actually implemented — we pin to the commit before it happened.
 
-### 1. Python — Real Applications
-- CLI tools with SQLite persistence, argument parsing, subcommands
-- Data pipelines with CSV/JSON parsing, validation, transformation
-- Libraries with thread safety, concurrency, complex algorithms
-- Web scrapers with error handling, rate limiting, retry logic
+| Project | Repo | Commit | Task type |
+|---------|------|--------|-----------|
+| real-cachetools-bugfix | tkem/cachetools | 3b3167a | Cache stampede threading bug |
+| real-semver-bugfix | npm/node-semver | 2677f2a | Prerelease parsing regex |
+| real-box-bugfix | cdgriffith/Box | 91cc956 | box_dots get() regression |
+| real-tinydb-feature | msiemens/tinydb | 9394412 | persist_empty tables |
+| real-radash-feature | sodiray/radash | 32a3de4 | inRange() utility |
+| real-citty-feature | unjs/citty | 69252d4 | Subcommand aliases |
 
-### 2. Node.js — Production-Style APIs
-- Express/Fastify with JWT auth, middleware, error handling
-- WebSocket servers with rooms, reconnection, message queues
-- File handling APIs with validation, streaming, cleanup
-- Task queues with priorities, retries, dead letter handling
+### Adding New Projects
 
-### 3. TypeScript — Type-Safe Libraries
-- Schema validators with generics, custom rules, error messages
-- State management with computed values, middleware, subscriptions
-- Utility libraries with proper type inference, overloads
-
-### 4. Bug Fix — Pre-Seeded Broken Code
-Write 50-100 lines of buggy code with 3+ distinct bugs:
-- Logic errors (off-by-one, wrong comparison)
-- Missing error handling (division by zero, null access)
-- Concurrency bugs (race conditions, missing locks)
-- Edge case failures (empty input, boundary values)
-
-### 5. Multi-Task — Sequential Dependencies
-3+ tasks that build on each other. Each task should be substantial:
-- Task 1: Core data model + CRUD + tests
-- Task 2: Business logic layer using task 1's model
-- Task 3: API/CLI interface using task 2's logic
-
-### 6. Edge Cases — Stress Otto's Internals
-- **Greenfield**: completely empty repo, complex task
-- **Large spec**: 15+ acceptance criteria, some visual
-- **Conflicting tasks**: 3 tasks modifying same file
-- **Performance constraint**: measurable requirement (sorting speed, response time)
-- **Failing baseline**: project with pre-existing test failures
-
-### 7. Real-World Mixed
-- Flask/FastAPI + database + HTML templates
-- CLI tools that parse real formats (git logs, JSON APIs)
-- Full-stack: backend API + frontend that calls it
+To add a project to the canonical set:
+1. Create `bench/pressure/projects/<name>/setup.sh` + `tasks.txt`
+2. For real repos: pin at a specific commit SHA, copy source into working repo
+3. Update `bench/pressure/README.md`
+4. Run it once manually to verify setup works
 
 ## Logging and Traceability
 
@@ -238,6 +222,101 @@ Real bugs caught vs false positives. QA time as % of total. Value assessment.
 
 ### Recommendations
 Top 5 actionable improvements ranked by impact.
+
+### Bad Cases Update
+After writing the report, update `bench/bad-cases.yaml` — add new failures, increment pass streaks, graduate stable cases. This is NOT optional — the bad cases file is the durable output that makes the next run faster.
+
+## Bad Cases Collector
+
+Failed and problematic projects are accumulated into `bench/bad-cases.yaml` as a persistent regression suite. This turns expensive pressure test failures into fast, targeted signal.
+
+### What Gets Collected
+
+Add a case to `bench/bad-cases.yaml` when a project:
+- **Fails** — coding, verify, QA, timeout, or crash
+- **Is flaky** — passes sometimes, fails others
+- **Is abnormally slow** — 2x+ slower than similar-category projects
+- **Exposes an otto bug** — even if the project itself passes after a fix
+
+Do NOT collect cases that fail due to one-off infra issues (network timeout, disk full).
+
+### Format
+
+```yaml
+# bench/bad-cases.yaml
+# Accumulated from pressure test runs. Used for fast regression testing.
+# Cases graduate out after 3 consecutive passes.
+
+cases:
+  - name: thread-safe-rate-limiter
+    category: python
+    date_added: "2026-03-21"
+    failure_type: coding_fail  # coding_fail | verify_fail | qa_fail | timeout | crash | flaky | slow | otto_bug
+    description: "Race condition in token bucket — agent didn't add locking"
+    pass_streak: 0  # incremented on pass, reset to 0 on fail, graduated at 3
+    spec: |
+      Build a thread-safe rate limiter using token bucket algorithm.
+      Support sliding window, configurable burst. Must handle 1000
+      concurrent threads without race conditions. Include tests
+      with concurrent access patterns.
+    tasks: 1  # number of tasks
+    last_run: "2026-03-21"
+    last_result: fail
+
+  - name: websocket-chat-server
+    category: nodejs
+    date_added: "2026-03-21"
+    failure_type: slow
+    description: "Took 25min vs 10min avg — agent kept rewriting auth middleware"
+    pass_streak: 1
+    spec: |
+      ...
+    tasks: 1
+    last_run: "2026-03-21"
+    last_result: pass
+```
+
+### During Pressure Test
+
+After each project completes:
+
+1. **If failed/problematic**: Check if already in `bad-cases.yaml`
+   - If exists: reset `pass_streak` to 0, update `last_run`, `last_result`, `description`
+   - If new: append entry with full spec, category, failure type
+2. **If passed cleanly**: Check if in `bad-cases.yaml`
+   - If exists: increment `pass_streak`, update `last_run`, `last_result`
+   - If `pass_streak >= 3`: graduate — move to `graduated` section (keep for history, don't re-run)
+
+### Running Bad Cases Only (Regression Mode)
+
+For quick regression after a fix:
+
+```bash
+# Parse bad-cases.yaml and run only non-graduated cases
+# Same setup/teardown as pressure test, but skip project generation —
+# specs come from the yaml file
+```
+
+Run this:
+- After fixing an otto bug (verify the fix actually helps)
+- Before releases (fast confidence check)
+- As a daily smoke-ish test (more signal than `bench/smoke`, much faster than full pressure)
+
+### Graduation
+
+Cases graduate after **3 consecutive passes** — meaning the fix stuck across multiple runs, not just one lucky pass. Graduated cases move to a `graduated:` section in the same file:
+
+```yaml
+graduated:
+  - name: thread-safe-rate-limiter
+    category: python
+    date_added: "2026-03-21"
+    date_graduated: "2026-04-02"
+    original_failure: "Race condition in token bucket"
+    total_runs: 7
+```
+
+This keeps history without cluttering active regression runs.
 
 ## Common Pitfalls
 
