@@ -658,7 +658,7 @@ def _render_status_table(tasks: list[dict], show_phase: bool = False) -> str:
                 phases = live.get("phases", {})
                 _icons = {"done": f"{_G}✓{_0}", "fail": f"{_R}✗{_0}",
                           "running": f"{_C}●{_0}", "pending": f"{_D}◦{_0}"}
-                for pname in ["prepare", "coding", "verify", "qa", "merge"]:
+                for pname in ["prepare", "coding", "test", "qa", "merge"]:
                     pdata = phases.get(pname, {})
                     pstatus = pdata.get("status", "pending")
                     icon = _icons.get(pstatus, "◦")
@@ -1125,7 +1125,7 @@ def show(task_id):
                 events = _load_progress_events(log_dir) if log_dir.exists() else []
                 timings = _extract_phase_timings(events)
                 if timings:
-                    phase_order = ["prepare", "coding", "verify", "qa", "merge"]
+                    phase_order = ["prepare", "coding", "test", "qa", "merge"]
                     parts = []
                     for p in phase_order:
                         pt = timings.get(p, 0.0)

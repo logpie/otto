@@ -1718,7 +1718,7 @@ async def run_task_with_qa(
     _live_state_file = project_dir / "otto_logs" / "live-state.json"
     _live_phases: dict[str, dict] = {
         p: {"status": "pending", "time_s": 0.0}
-        for p in ["prepare", "coding", "verify", "qa", "merge"]
+        for p in ["prepare", "coding", "test", "qa", "merge"]
     }
     _live_tools: list[str] = []
 
@@ -1973,7 +1973,7 @@ async def run_task_with_qa(
                     test_command = detected
 
             # Run verification
-            emit("phase", name="verify", status="running")
+            emit("phase", name="test", status="running")
             verify_start = time.monotonic()
             verify_result = run_verification(
                 project_dir=project_dir,
@@ -1983,7 +1983,7 @@ async def run_task_with_qa(
                 timeout=timeout,
             )
             verify_elapsed = round(time.monotonic() - verify_start, 1)
-            phase_timings["verify"] = phase_timings.get("verify", 0) + verify_elapsed
+            phase_timings["test"] = phase_timings.get("test", 0) + verify_elapsed
 
             # Write verify log
             try:
@@ -2008,7 +2008,7 @@ async def run_task_with_qa(
                                 break
 
             if verify_result.passed:
-                emit("phase", name="verify", status="done", time_s=verify_elapsed,
+                emit("phase", name="test", status="done", time_s=verify_elapsed,
                      detail=verify_detail)
 
                 # Squash commits into a single commit
@@ -2122,7 +2122,7 @@ async def run_task_with_qa(
 
             # Verification failed — reset for retry
             verify_err = verify_result.failure_output or "verification failed"
-            emit("phase", name="verify", status="fail", time_s=verify_elapsed,
+            emit("phase", name="test", status="fail", time_s=verify_elapsed,
                  error=verify_err[:80], detail=verify_detail)
             subprocess.run(
                 ["git", "reset", "--mixed", base_sha],

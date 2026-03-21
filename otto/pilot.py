@@ -172,7 +172,7 @@ class _PhaseDisplay:
     """
 
     _FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-    _PHASE_ORDER = ["prepare", "coding", "verify", "qa", "merge"]
+    _PHASE_ORDER = ["prepare", "coding", "test", "qa", "merge"]
 
     def __init__(self, task_label: str):
         self._task_label = task_label
