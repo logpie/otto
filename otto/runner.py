@@ -1882,6 +1882,19 @@ async def run_task_with_qa(
                                 if block.name in ("Write", "Edit", "Bash"):
                                     emit("agent_tool", name=block.name,
                                          detail=_tool_use_summary(block)[:80])
+                            elif ToolResultBlock and isinstance(block, ToolResultBlock):
+                                # Extract test results from Bash output
+                                content = str(getattr(block, "content", ""))
+                                if content and any(kw in content.lower() for kw in
+                                                   ["passed", "failed", "error", "tests:"]):
+                                    for line in reversed(content.splitlines()):
+                                        ls = line.strip()
+                                        if any(kw in ls.lower() for kw in
+                                               ["passed", "failed", "tests:", "test suites:"]):
+                                            if any(c.isdigit() for c in ls):
+                                                emit("agent_tool", name="test",
+                                                     detail=ls[:70])
+                                                break
 
                 # Persist agent log
                 try:
@@ -1981,16 +1994,20 @@ async def run_task_with_qa(
             except OSError:
                 pass
 
-            if verify_result.passed:
-                # Extract test info from verify output
-                verify_detail = ""
-                for tier in verify_result.tiers:
-                    if tier.passed and tier.output:
-                        # Look for test count patterns
-                        for line in tier.output.splitlines():
-                            if "passed" in line.lower() and any(c.isdigit() for c in line):
-                                verify_detail = line.strip()[:60]
+            # Extract test summary from verify output for display
+            verify_detail = ""
+            for tier in verify_result.tiers:
+                if tier.output:
+                    for line in reversed(tier.output.splitlines()):
+                        ls = line.strip()
+                        # Match common test result patterns
+                        if any(kw in ls.lower() for kw in
+                               ["passed", "failed", "error", "tests:", "test suites:"]):
+                            if any(c.isdigit() for c in ls):
+                                verify_detail = ls[:70]
                                 break
+
+            if verify_result.passed:
                 emit("phase", name="verify", status="done", time_s=verify_elapsed,
                      detail=verify_detail)
 
@@ -2106,7 +2123,7 @@ async def run_task_with_qa(
             # Verification failed — reset for retry
             verify_err = verify_result.failure_output or "verification failed"
             emit("phase", name="verify", status="fail", time_s=verify_elapsed,
-                 error=verify_err[:80])
+                 error=verify_err[:80], detail=verify_detail)
             subprocess.run(
                 ["git", "reset", "--mixed", base_sha],
                 cwd=project_dir, capture_output=True,
