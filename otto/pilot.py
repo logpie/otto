@@ -233,8 +233,8 @@ class _PhaseDisplay:
         import sys as _sys
         self._running = True
         self._start_time = time.monotonic()
-        self._printed_phases: set[str] = set()  # phases already printed as done/fail
-        self._last_finding = ""  # last QA finding printed
+        self._printed_phases: set[str] = set()
+        self._printed_tool_count = 0  # how many tool/finding items we've printed
 
         def _render():
             idx = 0
@@ -246,8 +246,7 @@ class _PhaseDisplay:
                 time_str = f"{mins}:{secs:02d}" if mins else f"{secs}s"
 
                 with self._lock:
-                    has_events = self._has_events
-                    # Print completed/failed phases once (log-style, no overwrite)
+                    # 1. Print completed/failed phases once
                     for pname in self._PHASE_ORDER:
                         if pname in self._printed_phases:
                             continue
@@ -267,7 +266,6 @@ class _PhaseDisplay:
                                 if detail:
                                     extras.append(detail[:50])
                                 info = "  ".join(extras)
-                                # Clear spinner line then print
                                 _sys.stdout.write(f"\r\033[2K  {_GREEN}{_PHASE_DONE} {pname:<10}{_RESET}{_DIM}  {info}{_RESET}\n")
                             elif pstatus == "fail":
                                 err = pdata.get("error", "")[:50]
@@ -275,29 +273,27 @@ class _PhaseDisplay:
                                 _sys.stdout.write(f"\r\033[2K  {_RED}{_PHASE_FAIL} {pname:<10}{_RESET}{_DIM}  {dur}  {err}{_RESET}\n")
                             _sys.stdout.flush()
 
-                    # Print new QA findings once
-                    if self._recent_tools:
-                        latest = self._recent_tools[-1]
-                        if latest != self._last_finding and any(
-                            m in latest for m in ["PASS", "FAIL", "CONCERN",
-                                                  "✅", "❌", "⚠", "Spec", "spec"]
-                        ):
-                            self._last_finding = latest
-                            _sys.stdout.write(f"\r\033[2K      {_DIM}{latest[:72]}{_RESET}\n")
-                            _sys.stdout.flush()
-
-                    # Show spinner for active phase on same line (overwrite with \r)
-                    active = None
-                    for pname in self._PHASE_ORDER:
-                        if self._phases[pname]["status"] == "running":
-                            active = pname
-                    if active:
-                        cost = self._phases[active].get("cost", 0)
-                        cost_str = f"  ${cost:.2f}" if cost else ""
-                        _sys.stdout.write(
-                            f"\r  {_DIM}{frame} {active} ({time_str}){cost_str}{_RESET}  "
-                        )
+                    # 2. Print new tool calls / findings since last check
+                    new_items = self._recent_tools[self._printed_tool_count:]
+                    if new_items:
+                        self._printed_tool_count = len(self._recent_tools)
+                        for item in new_items:
+                            _sys.stdout.write(f"\r\033[2K      {_DIM}{item[:72]}{_RESET}\n")
                         _sys.stdout.flush()
+
+                    # 3. Spinner — only update every 1s, not every 150ms
+                    if idx % 7 == 0:  # ~1s at 150ms sleep
+                        active = None
+                        for pname in self._PHASE_ORDER:
+                            if self._phases[pname]["status"] == "running":
+                                active = pname
+                        if active:
+                            cost = self._phases[active].get("cost", 0)
+                            cost_str = f"  ${cost:.2f}" if cost else ""
+                            _sys.stdout.write(
+                                f"\r  {_DIM}{frame} {active} ({time_str}){cost_str}{_RESET}  "
+                            )
+                            _sys.stdout.flush()
 
                 idx += 1
                 time.sleep(0.15)
