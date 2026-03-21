@@ -1641,22 +1641,22 @@ You are working in {project_dir}. Do NOT create git commits."""
                     for block in message.content:
                         if TextBlock and isinstance(block, TextBlock) and block.text:
                             report_lines.append(block.text)
-                        # Emit QA tool calls for display
-                        elif ToolUseBlock and isinstance(block, ToolUseBlock):
-                            name = block.name
-                            inputs = block.input or {}
-                            detail = ""
-                            if name == "Bash":
-                                detail = str(inputs.get("command", ""))[:60]
-                            elif name == "Read":
-                                detail = str(inputs.get("file_path", ""))[-50:]
-                            elif name in ("Write", "Edit"):
-                                detail = str(inputs.get("file_path", ""))[-50:]
+                            # Extract QA findings for live display
                             if on_progress:
-                                try:
-                                    on_progress("agent_tool", {"name": name, "detail": detail})
-                                except Exception:
-                                    pass
+                                for line in block.text.splitlines():
+                                    line_s = line.strip()
+                                    if not line_s:
+                                        continue
+                                    # Look for spec result patterns
+                                    if any(marker in line_s for marker in
+                                           ["PASS", "FAIL", "CONCERN",
+                                            "✅", "❌", "⚠",
+                                            "Spec ", "spec "]):
+                                        # Clean up and emit as QA finding
+                                        try:
+                                            on_progress("qa_finding", {"text": line_s[:80]})
+                                        except Exception:
+                                            pass
 
         await asyncio.wait_for(_run_qa(), timeout=qa_timeout)
         qa_completed = True
