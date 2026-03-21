@@ -642,21 +642,55 @@ def _render_status_table(tasks: list[dict], show_phase: bool = False) -> str:
         summary += f"  {_D}— {', '.join(extras)}{_0}"
     lines.append(f"  {summary}")
 
-    # Show current phase from run-state.json if available
+    # Show live task progress from live-state.json if available
     if show_phase:
-        state_file = Path.cwd() / "otto_arch" / "run-state.json"
-        if state_file.exists():
+        live_file = Path.cwd() / "otto_logs" / "live-state.json"
+        if live_file.exists():
             try:
-                state = json.loads(state_file.read_text())
-                phase = state.get("phase", "")
-                notes = state.get("notes", "")
-                if phase:
-                    phase_str = f"  {_C}Phase:{_0} {phase}"
-                    if notes:
-                        phase_str += f"  {_D}({notes[:60]}){_0}"
-                    lines.append(phase_str)
+                live = json.loads(live_file.read_text())
+                tid = live.get("task_id", "?")
+                prompt = live.get("prompt", "")[:50]
+                elapsed = live.get("elapsed_s", 0)
+                cost = live.get("cost_usd", 0)
+                elapsed_str = _format_duration(elapsed)
+                lines.append("")
+                lines.append(f"  {_C}▸ Task #{tid}:{_0} {prompt}")
+                phases = live.get("phases", {})
+                _icons = {"done": f"{_G}✓{_0}", "fail": f"{_R}✗{_0}",
+                          "running": f"{_C}●{_0}", "pending": f"{_D}◦{_0}"}
+                for pname in ["prepare", "coding", "verify", "qa", "merge"]:
+                    pdata = phases.get(pname, {})
+                    pstatus = pdata.get("status", "pending")
+                    icon = _icons.get(pstatus, "◦")
+                    ptime = pdata.get("time_s", 0)
+                    extra = ""
+                    if pstatus == "running":
+                        extra = f"  {_D}{elapsed_str}{_0}"
+                    elif pstatus == "done" and ptime:
+                        extra = f"  {_D}{ptime:.0f}s{_0}"
+                    elif pstatus == "fail":
+                        err = pdata.get("error", "")[:40]
+                        extra = f"  {_R}{err}{_0}"
+                    lines.append(f"    {icon} {pname:<10}{extra}")
+                # Show recent tools
+                tools = live.get("recent_tools", [])
+                for tool_line in tools[-3:]:
+                    lines.append(f"        {_D}{tool_line[:60]}{_0}")
+                if cost > 0:
+                    lines.append(f"    {_D}${cost:.2f} so far{_0}")
             except (json.JSONDecodeError, OSError):
                 pass
+        else:
+            # Fallback: check run-state.json for high-level phase
+            state_file = Path.cwd() / "otto_arch" / "run-state.json"
+            if state_file.exists():
+                try:
+                    state = json.loads(state_file.read_text())
+                    phase = state.get("phase", "")
+                    if phase:
+                        lines.append(f"  {_C}Phase:{_0} {phase}")
+                except (json.JSONDecodeError, OSError):
+                    pass
 
     return "\n".join(lines)
 

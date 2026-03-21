@@ -1,6 +1,7 @@
 """Otto runner — core execution loop with branch management and verification."""
 
 import asyncio
+import json
 import os
 import shutil
 import subprocess
@@ -1683,6 +1684,13 @@ async def run_task_with_qa(
     session_id = None
     last_error = None
     phase_timings: dict[str, float] = {}  # phase_name -> elapsed seconds
+    # Live state for otto status -w (read from another terminal)
+    _live_state_file = project_dir / "otto_logs" / "live-state.json"
+    _live_phases: dict[str, dict] = {
+        p: {"status": "pending", "time_s": 0.0}
+        for p in ["prepare", "coding", "verify", "qa", "merge"]
+    }
+    _live_tools: list[str] = []
 
     def emit(event: str, **data: Any) -> None:
         if on_progress:
@@ -1690,9 +1698,41 @@ async def run_task_with_qa(
                 on_progress(event, data)
             except Exception:
                 pass
+        # Update live state file for otto status -w
+        try:
+            if event == "phase":
+                name = data.get("name", "")
+                if name in _live_phases:
+                    _live_phases[name]["status"] = data.get("status", "")
+                    if data.get("time_s"):
+                        _live_phases[name]["time_s"] = data["time_s"]
+                    if data.get("error"):
+                        _live_phases[name]["error"] = data["error"][:100]
+            elif event == "agent_tool":
+                detail = data.get("detail", "")
+                tool_name = data.get("name", "")
+                _live_tools.append(f"{tool_name}  {detail}" if detail else tool_name)
+                if len(_live_tools) > 4:
+                    _live_tools[:] = _live_tools[-4:]
+            _live_state_file.write_text(json.dumps({
+                "task_key": key, "task_id": task_id,
+                "prompt": prompt[:80],
+                "elapsed_s": round(time.monotonic() - task_start, 1),
+                "cost_usd": total_cost,
+                "phases": _live_phases,
+                "recent_tools": list(_live_tools),
+            }))
+        except Exception:
+            pass
 
     def _result(success: bool, status: str, error: str = "",
                 diff_summary: str = "", qa_report: str = "") -> dict[str, Any]:
+        # Clean up live state file
+        try:
+            if _live_state_file.exists():
+                _live_state_file.unlink()
+        except OSError:
+            pass
         duration = time.monotonic() - task_start
         if tasks_file:
             try:
