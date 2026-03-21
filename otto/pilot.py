@@ -360,20 +360,24 @@ def _process_progress_event(data: dict) -> None:
     if task_key:
         _task_progress.setdefault(task_key, []).append(data)
 
-    # Route to active phase display
-    if _active_phase_display:
-        if event_type == "phase":
-            _active_phase_display.update_phase(
-                name=data.get("name", ""),
-                status=data.get("status", ""),
-                time_s=data.get("time_s", 0.0),
-                error=data.get("error", ""),
-            )
-        elif event_type == "agent_tool":
-            _active_phase_display.add_tool(
-                name=data.get("name", ""),
-                detail=data.get("detail", ""),
-            )
+    # Route to active phase display (capture local ref to avoid TOCTOU race)
+    display = _active_phase_display
+    if display:
+        try:
+            if event_type == "phase":
+                display.update_phase(
+                    name=data.get("name", ""),
+                    status=data.get("status", ""),
+                    time_s=data.get("time_s", 0.0),
+                    error=data.get("error", ""),
+                )
+            elif event_type == "agent_tool":
+                display.add_tool(
+                    name=data.get("name", ""),
+                    detail=data.get("detail", ""),
+                )
+        except (AttributeError, RuntimeError):
+            pass  # display was stopped between check and use
 
 
 def _print_pilot_tool_call(block) -> None:
@@ -1253,6 +1257,7 @@ Before calling finish_run, verify:
 
             def _bg_read_results():
                 nonlocal _results_read_pos
+                _carry = ""  # buffer for partial lines
                 try:
                     _dlog("INIT", "background JSONL reader started")
                 except Exception:
@@ -1262,8 +1267,19 @@ Before calling finish_run, verify:
                         if _results_file.exists():
                             with open(_results_file) as rf:
                                 rf.seek(_results_read_pos)
-                                new_lines = rf.readlines()
-                                _results_read_pos = rf.tell()
+                                raw = rf.read()
+                            new_lines: list[str] = []
+                            if raw:
+                                raw = _carry + raw
+                                if raw.endswith("\n"):
+                                    new_lines = raw.splitlines()
+                                    _carry = ""
+                                    _results_read_pos += len(raw.encode())
+                                else:
+                                    parts = raw.rsplit("\n", 1)
+                                    new_lines = parts[0].splitlines() if len(parts) > 1 else []
+                                    _carry = parts[-1]
+                                    _results_read_pos += len(raw.encode()) - len(_carry.encode())
                             for rline in new_lines:
                                 rline = rline.strip()
                                 if not rline:

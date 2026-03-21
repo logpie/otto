@@ -1642,16 +1642,29 @@ You are working in {project_dir}. Do NOT create git commits."""
                             report_lines.append(block.text)
 
         await asyncio.wait_for(_run_qa(), timeout=qa_timeout)
+        qa_completed = True
     except asyncio.TimeoutError:
         report_lines.append(f"\n[QA agent timed out after {qa_timeout}s]")
+        qa_completed = False
     except Exception as e:
         report_lines.append(f"\n[QA agent error: {e}]")
+        qa_completed = False
 
     report = "\n".join(report_lines)
-    has_failures = "QA VERDICT: FAIL" in report
-    passed = not has_failures
+    # Explicit FAIL in report = definitely failed
+    has_explicit_fail = "QA VERDICT: FAIL" in report or "FAIL" in report.upper().split("QA VERDICT")[-1] if "QA VERDICT" in report else False
+    # QA must complete AND have an explicit PASS verdict to be considered passing
+    has_explicit_pass = "QA VERDICT: PASS" in report
+    if has_explicit_fail:
+        passed = False
+    elif not qa_completed:
+        passed = False  # timeout/error = inconclusive, not pass
+    elif not has_explicit_pass and not report_lines:
+        passed = False  # empty output = inconclusive
+    else:
+        passed = not has_explicit_fail
 
-    return {"passed": passed, "report": report, "has_failures": has_failures}
+    return {"passed": passed, "report": report, "has_failures": not passed}
 
 
 async def run_task_with_qa(
@@ -2009,6 +2022,12 @@ async def run_task_with_qa(
                     qa_elapsed = round(time.monotonic() - qa_start, 1)
                     phase_timings["qa"] = phase_timings.get("qa", 0) + qa_elapsed
                     qa_report = qa_result.get("report", "")
+
+                    # Persist QA report for otto show/logs
+                    try:
+                        (log_dir / "qa-report.md").write_text(qa_report or "No QA output")
+                    except OSError:
+                        pass
 
                     if not qa_result["passed"]:
                         emit("phase", name="qa", status="fail", time_s=qa_elapsed,
