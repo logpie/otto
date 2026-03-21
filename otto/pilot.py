@@ -695,15 +695,26 @@ async def run_piloted(
 
     default_branch = config["default_branch"]
 
-    # Acquire process lock
+    # Acquire process lock (advisory flock — automatically released on process exit)
     lock_path = git_meta_dir(project_dir) / "otto.lock"
     lock_path.touch()
     lock_fh = open(lock_path, "r")
     try:
         fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
+        # Check if the lock holder is actually alive (stale lock detection)
+        # flock is advisory — if the holder died, the lock is released by the OS.
+        # If we get BlockingIOError, another process genuinely holds it.
         print(f"{_RED}Another otto process is running{_RESET}", flush=True)
         return 2
+
+    # Clean up stale task lock files from crashed runs
+    tasks_lock = project_dir / ".tasks.lock"
+    if tasks_lock.exists():
+        try:
+            tasks_lock.unlink()
+        except OSError:
+            pass
 
     # Signal handling
     interrupted = False
