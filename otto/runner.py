@@ -703,9 +703,14 @@ APPROACH — start writing code immediately:
    Run them — they should FAIL (red). If they pass, your tests are too weak.
 3. IMPLEMENT until all tests pass (green).
 4. RUN ALL TESTS (yours + existing). Fix any regressions.
-5. VERIFY — re-read each spec item. For each, ask: does my implementation handle the
-   hardest case? If a spec says "<300ms", does it work for cold fetches, not just cache hits?
+5. Re-read each spec item — does your code handle the hardest case?
 6. Write notes to otto_arch/task-notes/{key}.md:
+
+IMPORTANT — stay in your lane:
+- Write code and unit/integration tests. Run them with the test runner.
+- Do NOT start dev servers, do NOT curl endpoints, do NOT do browser testing.
+  A separate QA agent handles live testing after you're done.
+- Do NOT re-explore files already shown above.
    - What approach you took and why
    - What you learned about the codebase
    - Any gotchas for future tasks
@@ -1954,7 +1959,12 @@ async def run_task_with_qa(
 
             if no_changes:
                 if spec:
-                    last_error = "Agent produced no code changes. The spec requirements have not been implemented."
+                    last_error = (
+                        "No NEW code changes detected vs the branch base. "
+                        "If the implementation already exists from a previous attempt, "
+                        "you still need to modify or add something — even if it's just tests. "
+                        "Check git diff to see what's already there, then add what's missing."
+                    )
                     continue
                 # No spec + no changes = nothing to do, pass
                 subprocess.run(["git", "checkout", default_branch], cwd=project_dir, capture_output=True)
