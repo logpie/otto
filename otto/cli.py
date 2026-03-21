@@ -779,6 +779,22 @@ def retry(task_id, feedback, force):
                     f"Task #{task_id} is '{t.get('status')}', not 'failed'. Use --force to override.", err=True
                 )
                 sys.exit(1)
+            # Warn if retrying a task whose code is already merged to main
+            if t.get("status") == "passed":
+                import subprocess as _sp
+                commit_check = _sp.run(
+                    ["git", "log", "--oneline", "--all", f"--grep=(#{task_id})"],
+                    capture_output=True, text=True,
+                )
+                if commit_check.stdout.strip():
+                    click.echo(
+                        f"{_Y}⚠ Task #{task_id} was already merged to main. "
+                        f"The coding agent will see no diff and may waste time.{_0}"
+                    )
+                    click.echo(
+                        f"  {_D}Consider: otto add 'new task' instead of retrying a completed one.{_0}"
+                    )
+
             updates: dict = {
                 "status": "pending", "attempts": 0,
                 "session_id": None, "error": None, "error_code": None,
