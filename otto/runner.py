@@ -34,7 +34,7 @@ except (ImportError, AttributeError):
     ThinkingBlock = None  # type: ignore[assignment,misc]
 
 from otto.config import git_meta_dir, detect_test_command
-from otto.display import _truncate_at_word, console, format_cost, format_duration
+from otto.display import _truncate_at_word, console, format_cost, format_duration, rich_escape
 from otto.tasks import load_tasks, update_task
 from otto.testgen import detect_test_framework, test_file_path
 from otto.verify import VerifyResult, run_verification, _subprocess_env
@@ -406,7 +406,7 @@ def _log_info(msg: str) -> None:
 def _log_task_start(task_id: int, key: str, attempt: int, max_attempts: int, prompt: str) -> None:
     console.print()
     console.print("\u2501" * 60, style="bold")
-    console.print(f"[bold]  Task #{task_id}[/bold]  {prompt[:80]}")
+    console.print(f"[bold]  Task #{task_id}[/bold]  {rich_escape(prompt[:80])}")
     console.print(f"  attempt {attempt}/{max_attempts}  \u00b7  key {key}", style="dim")
     console.print("\u2501" * 60, style="bold")
 
@@ -420,11 +420,11 @@ def _log_pass(task_id: int, branch: str, duration: float | None = None, cost: fl
 def _log_fail(task_id: int, reason: str, duration: float | None = None, cost: float = 0.0) -> None:
     dur = f" in {_format_duration(duration)}" if duration else ""
     cost_str = f" ({_format_cost(cost)})" if cost > 0 else ""
-    console.print(f"\n  [red bold]\u2717 Task #{task_id} FAILED[/red bold] [dim]\u2014 {reason}{dur}{cost_str}[/dim]")
+    console.print(f"\n  [red bold]\u2717 Task #{task_id} FAILED[/red bold] [dim]\u2014 {rich_escape(reason)}{dur}{cost_str}[/dim]")
 
 
 def _log_warn(msg: str) -> None:
-    console.print(f"  [yellow]Warning: {msg}[/yellow]")
+    console.print(f"  [yellow]Warning: {rich_escape(msg)}[/yellow]")
 
 
 def _log_verify(tiers: list) -> None:
@@ -459,7 +459,7 @@ def _print_tool_use(block) -> None:
         detail = _truncate_at_word(cmd, 80)
 
     if detail:
-        console.print(f"  [bold cyan]\u25cf {name}[/bold cyan]  [dim]{detail}[/dim]")
+        console.print(f"  [bold cyan]\u25cf {name}[/bold cyan]  [dim]{rich_escape(detail)}[/dim]")
     else:
         console.print(f"  [bold cyan]\u25cf {name}[/bold cyan]")
 
@@ -469,11 +469,11 @@ def _print_tool_use(block) -> None:
         new = inputs.get("new_string", "")
         if old or new:
             for line in old.splitlines()[:3]:
-                console.print(f"    [dim red]- {line}[/dim red]")
+                console.print(f"    - {rich_escape(line)}", style="dim red")
             if old.count("\n") > 3:
                 console.print(f"    ... ({old.count(chr(10)) - 3} more lines)", style="dim")
             for line in new.splitlines()[:3]:
-                console.print(f"    [dim green]+ {line}[/dim green]")
+                console.print(f"    + {rich_escape(line)}", style="dim green")
             if new.count("\n") > 3:
                 console.print(f"    ... ({new.count(chr(10)) - 3} more lines)", style="dim")
 
@@ -483,7 +483,7 @@ def _print_tool_use(block) -> None:
         if content:
             lines = content.splitlines()
             for line in lines[:3]:
-                console.print(f"    [dim green]+ {line}[/dim green]")
+                console.print(f"    + {rich_escape(line)}", style="dim green")
             if len(lines) > 3:
                 console.print(f"    ... ({len(lines) - 3} more lines)", style="dim")
 
@@ -511,17 +511,17 @@ def _print_tool_result(block) -> None:
         lines = content.strip().splitlines()
         shown = lines[-5:] if len(lines) > 5 else lines
         for line in shown:
-            console.print(f"    {line}", style="red")
+            console.print(f"    {rich_escape(line)}", style="red")
     else:
         lines = content.strip().splitlines()
         if len(lines) <= 3:
             for line in lines:
-                console.print(f"    {line}", style="dim")
+                console.print(f"    {rich_escape(line)}", style="dim")
         else:
-            console.print(f"    {lines[0]}", style="dim")
-            console.print(f"    {lines[1]}", style="dim")
+            console.print(f"    {rich_escape(lines[0])}", style="dim")
+            console.print(f"    {rich_escape(lines[1])}", style="dim")
             console.print(f"    ... ({len(lines) - 3} more lines)", style="dim")
-            console.print(f"    {lines[-1]}", style="dim")
+            console.print(f"    {rich_escape(lines[-1])}", style="dim")
 
 
 CODING_SYSTEM_PROMPT = """\
@@ -1075,11 +1075,11 @@ async def run_task(
 
         # Print task header before testgen (so testgen output is under the right task)
         if parallel_mode:
-            _tprint(f"[bold]Task #{task_id}[/bold]  {prompt[:60]}  [dim]started[/dim]")
+            _tprint(f"[bold]Task #{task_id}[/bold]  {rich_escape(prompt[:60])}  [dim]started[/dim]")
         else:
             console.print()
             console.print("\u2501" * 60, style="bold")
-            console.print(f"[bold]  Task #{task_id}[/bold]  {prompt[:80]}")
+            console.print(f"[bold]  Task #{task_id}[/bold]  {rich_escape(prompt[:80])}")
             console.print(f"  key {key}", style="dim")
             console.print("\u2501" * 60, style="bold")
 
@@ -1798,35 +1798,38 @@ async def run_task_with_qa(
         phase_timings["prepare"] = prep_elapsed
         emit("phase", name="prepare", status="done", time_s=prep_elapsed)
 
-        # Check if implementation already exists on main (retried passed task)
-        # Do this BEFORE launching the coding agent to avoid wasting 60-90s exploring
-        # Only applies when the branch has no commits beyond base (HEAD == base_sha)
-        # AND main already has the implementation (verify tests pass on main)
-        head_sha = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=project_dir, capture_output=True, text=True,
-        ).stdout.strip()
-        branch_is_fresh = (head_sha == base_sha)
-        already_merged = False
-        if branch_is_fresh and spec and test_command:
-            # Branch has no work — check if main already passes verification
-            try:
-                vr = subprocess.run(
-                    test_command, shell=True, cwd=project_dir,
-                    capture_output=True, timeout=60,
-                )
-                already_merged = (vr.returncode == 0)
-            except subprocess.TimeoutExpired:
-                pass  # timeout → skip optimization, run normally
-
-        if already_merged and spec:
-            _log_warn("Implementation already exists on main — task was previously completed")
-            emit("phase", name="coding", status="done", time_s=0,
-                 detail="already implemented")
-            subprocess.run(["git", "checkout", default_branch], cwd=project_dir, capture_output=True)
-            cleanup_branch(project_dir, key, default_branch)
-            return _result(True, "passed",
-                           diff_summary="Already implemented (from previous run)")
+        # Check if this task was previously passed (retried via `otto retry --force`)
+        # Only skip if ALL conditions hold:
+        #   1. tasks.yaml records status="passed" (prior successful run)
+        #   2. Merge commit SHA recorded from prior run
+        #   3. Task fingerprint matches (prompt+spec hasn't changed since pass)
+        #   4. Branch has no new commits (HEAD == base_sha, agent hasn't started)
+        #   5. The merge commit is still reachable on default branch
+        import hashlib
+        _task_fp = hashlib.sha256(
+            (prompt + str(spec or "")).encode()
+        ).hexdigest()[:16]
+        merged_sha = task.get("merged_sha", "")
+        merged_fp = task.get("task_fingerprint", "")
+        if task.get("status") == "passed" and merged_sha and merged_fp == _task_fp:
+            head_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=project_dir, capture_output=True, text=True,
+            ).stdout.strip()
+            if head_sha == base_sha:
+                # Verify the merge commit is still reachable
+                reachable = subprocess.run(
+                    ["git", "merge-base", "--is-ancestor", merged_sha, default_branch],
+                    cwd=project_dir, capture_output=True,
+                ).returncode == 0
+                if reachable:
+                    _log_warn("Task was previously passed — skipping (use otto reset to re-run)")
+                    emit("phase", name="coding", status="done", time_s=0,
+                         detail="already implemented")
+                    subprocess.run(["git", "checkout", default_branch], cwd=project_dir, capture_output=True)
+                    cleanup_branch(project_dir, key, default_branch)
+                    return _result(True, "passed",
+                                   diff_summary="Already implemented (from previous run)")
 
         # Step 2+3: Code + Verify + QA loop
         # Both coding retries AND QA-triggered retries count against max_retries.
@@ -1997,18 +2000,6 @@ async def run_task_with_qa(
 
             if no_changes:
                 if spec:
-                    # Check if implementation already exists on main (retried passed task)
-                    main_has_code = subprocess.run(
-                        ["git", "diff", "--quiet", f"{default_branch}..HEAD"],
-                        cwd=project_dir, capture_output=True,
-                    ).returncode == 0  # 0 = no diff = branch same as main
-                    if main_has_code:
-                        # Code already merged from previous run — don't force agent to pad diff
-                        _log_warn("Implementation already exists on main — task was previously completed")
-                        subprocess.run(["git", "checkout", default_branch], cwd=project_dir, capture_output=True)
-                        cleanup_branch(project_dir, key, default_branch)
-                        return _result(True, "passed",
-                                       diff_summary="Already implemented (from previous run)")
                     last_error = (
                         "No code changes detected. The spec has not been implemented yet. "
                         "Read the spec carefully and implement it. Do NOT add unnecessary "
@@ -2164,6 +2155,18 @@ async def run_task_with_qa(
                     merge_elapsed = round(time.monotonic() - merge_start, 1)
                     phase_timings["merge"] = merge_elapsed
                     emit("phase", name="merge", status="done", time_s=merge_elapsed)
+                    # Record merge commit SHA + task fingerprint for already-merged detection on retry
+                    try:
+                        _merged_sha = subprocess.run(
+                            ["git", "rev-parse", "HEAD"],
+                            cwd=project_dir, capture_output=True, text=True,
+                        ).stdout.strip()
+                        if tasks_file and _merged_sha:
+                            update_task(tasks_file, key,
+                                        merged_sha=_merged_sha,
+                                        task_fingerprint=_task_fp)
+                    except Exception:
+                        pass
                     testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / key
                     if testgen_dir.exists():
                         shutil.rmtree(testgen_dir, ignore_errors=True)
@@ -2271,7 +2274,7 @@ def _print_summary(
         # Build the main status line
         dur_str = f"  [dim]{_format_duration(task_duration)}[/dim]" if task_duration else ""
         cost_part = f"  [dim]{_format_cost(task_cost)}[/dim]" if task_cost > 0 else ""
-        console.print(f"  {icon} [bold]#{task['id']}[/bold]  {task['prompt'][:60]}{dur_str}{cost_part}")
+        console.print(f"  {icon} [bold]#{task['id']}[/bold]  {rich_escape(task['prompt'][:60])}{dur_str}{cost_part}")
 
         # Show phase timing breakdown on the next line
         if phase_parts:

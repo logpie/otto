@@ -13,6 +13,7 @@ import time
 from typing import Any
 
 from rich.console import Console, Group
+from rich.markup import escape as rich_escape
 from rich.text import Text
 from rich.spinner import Spinner
 from rich.live import Live
@@ -154,19 +155,30 @@ class TaskDisplay:
         """Update a phase's state. Thread-safe."""
         with self._lock:
             if name in self._phases:
-                self._phases[name]["status"] = status
-                if time_s:
+                if status == "running":
+                    # Reset all fields when entering running to prevent stale
+                    # data from a previous attempt leaking into the display
+                    self._phases[name] = {"status": "running", "time_s": 0.0}
+                    self._current_phase = name
+                    self._tools.clear()
+                else:
+                    self._phases[name]["status"] = status
+                    # Always assign values (not truthiness-gated) so zeros
+                    # and empty strings properly clear previous values
                     self._phases[name]["time_s"] = time_s
-                if error:
-                    self._phases[name]["error"] = error
-                if detail:
-                    self._phases[name]["detail"] = detail
-                if kwargs.get("cost"):
-                    self._phases[name]["cost"] = kwargs["cost"]
-            if status == "running":
-                self._current_phase = name
-                # Clear tools from previous phase
-                self._tools.clear()
+                    if error:
+                        self._phases[name]["error"] = error
+                    elif "error" in self._phases[name]:
+                        del self._phases[name]["error"]
+                    if detail:
+                        self._phases[name]["detail"] = detail
+                    elif "detail" in self._phases[name]:
+                        del self._phases[name]["detail"]
+                    cost = kwargs.get("cost", 0)
+                    if cost:
+                        self._phases[name]["cost"] = cost
+                    elif "cost" in self._phases[name]:
+                        del self._phases[name]["cost"]
         self._refresh()
 
     def add_tool(self, line: str = "", name: str = "", detail: str = "") -> None:

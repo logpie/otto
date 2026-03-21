@@ -26,7 +26,7 @@ except ImportError:
     ToolResultBlock = None
 
 from otto.config import git_meta_dir
-from otto.display import TaskDisplay, console
+from otto.display import TaskDisplay, console, rich_escape
 from otto.runner import (
     _log_info, _log_warn,
     _print_summary, _subprocess_env,
@@ -68,6 +68,7 @@ _TOOL_DISPLAY = {
 
 # Active task display (module-level so tool call/result handlers can manage it)
 _active_display: TaskDisplay | None = None
+_active_task_key: str | None = None  # task key associated with _active_display
 
 # Track last-displayed tool call to avoid duplicate headers
 _last_displayed_tool: str | None = None
@@ -93,8 +94,9 @@ def _process_progress_event(data: dict) -> None:
         _task_progress.setdefault(task_key, []).append(data)
 
     # Route to active display (capture local ref to avoid TOCTOU race)
+    # Only route events matching the active task to prevent cross-task pollution
     display = _active_display
-    if display:
+    if display and (_active_task_key is None or task_key == _active_task_key):
         try:
             if event_type == "phase":
                 display.update_phase(
@@ -118,12 +120,13 @@ def _process_progress_event(data: dict) -> None:
 
 def _print_pilot_tool_call(block) -> None:
     """Print a pilot tool call with tiered display."""
-    global _active_display, _last_displayed_tool
+    global _active_display, _active_task_key, _last_displayed_tool
 
     # Always stop any existing display before printing anything
     if _active_display:
         _active_display.stop()
         _active_display = None
+        _active_task_key = None
 
     name = block.name
     inputs = block.input or {}
@@ -169,6 +172,7 @@ def _print_pilot_tool_call(block) -> None:
         # Still start a task display for long-running tools (the previous one was stopped above)
         if tool_name == "run_task_with_qa":
             _active_display = TaskDisplay(console)
+            _active_task_key = inputs.get("task_key", "")
             _active_display.start()
         return
     _last_displayed_tool = display_key
@@ -177,7 +181,7 @@ def _print_pilot_tool_call(block) -> None:
     if tool_name in _SECONDARY_TOOLS:
         line = f"  {icon} {label}"
         if detail:
-            line += f"  {detail}"
+            line += f"  {rich_escape(detail)}"
         console.print(line, style="dim")
         return
 
@@ -186,30 +190,32 @@ def _print_pilot_tool_call(block) -> None:
         console.print()
         console.print(f"  {'─' * 50}", style="dim")
         if detail:
-            console.print(f"  {icon} [bold]{label}[/bold]  [dim]{detail}[/dim]")
+            console.print(f"  {icon} [bold]{label}[/bold]  [dim]{rich_escape(detail)}[/dim]")
         else:
             console.print(f"  {icon} [bold]{label}[/bold]")
         if tool_name == "run_task_with_qa":
             _active_display = TaskDisplay(console)
+            _active_task_key = inputs.get("task_key", "")
             _active_display.start()
         return
 
     # Default: show tool with detail, dimmed (Read, Bash, Grep, chrome-devtools, etc.)
     line = f"  {icon} {label}"
     if detail:
-        line += f"  {detail}"
+        line += f"  {rich_escape(detail)}"
     console.print(line, style="dim")
 
 
 def _print_pilot_tool_result(block) -> None:
     """Print a pilot tool result with structured parsing."""
-    global _active_display, _last_displayed_tool
+    global _active_display, _active_task_key, _last_displayed_tool
 
     # Stop task display if active
     elapsed_str = ""
     if _active_display:
         elapsed_str = _active_display.stop()
         _active_display = None
+        _active_task_key = None
 
     # Reset last-displayed tool so the next call shows its header
     _last_displayed_tool = None
@@ -257,7 +263,7 @@ def _print_pilot_tool_result(block) -> None:
                 if elapsed_str:
                     parts.append(elapsed_str)
                 if data.get("error"):
-                    parts.append(f"[red]{data['error'][:80]}[/red]")
+                    parts.append(f"[red]{rich_escape(data['error'][:80])}[/red]")
                 detail = " \u00b7 ".join(parts)
                 console.print(f"    {icon} {detail}")
                 # Show code diff if present
@@ -265,16 +271,16 @@ def _print_pilot_tool_result(block) -> None:
                 if diff:
                     for dline in diff.split("\\n"):
                         if dline.strip():
-                            console.print(f"  {dline}")
+                            console.print(f"  {rich_escape(dline)}")
                 # Show verify output on failure
                 verify_out = data.get("verify_output", "")
                 if verify_out and not data["success"]:
                     console.print(f"    {'─' * 40}", style="dim")
                     for vline in verify_out.split("\\n")[-10:]:
                         if "FAILED" in vline or "ERROR" in vline or "error" in vline.lower():
-                            console.print(f"    {vline}", style="red")
+                            console.print(f"    {rich_escape(vline)}", style="red")
                         elif vline.strip():
-                            console.print(f"    {vline}", style="dim")
+                            console.print(f"    {rich_escape(vline)}", style="dim")
                 return
 
             # Multi-task results (from run_coding_agents)
@@ -292,7 +298,7 @@ def _print_pilot_tool_result(block) -> None:
                             else:
                                 r_icon = "[red]\u2717[/red]"
                             error = result.get("error", "")
-                            err_str = f" \u2014 [red]{error[:60]}[/red]" if error else ""
+                            err_str = f" \u2014 [red]{rich_escape(error[:60])}[/red]" if error else ""
                             console.print(f"    {r_icon} {key[:8]}{err_str}")
                     return
 
@@ -348,7 +354,7 @@ def _print_pilot_tool_result(block) -> None:
                 console.print(
                     f"    {s_icon} #{t.get('id', '?')} "
                     f"[dim]\\[{spec_count} spec{deps_str}][/dim]  "
-                    f"{t.get('prompt', '')[:55]}"
+                    f"{rich_escape(t.get('prompt', '')[:55])}"
                 )
             return
     except (json.JSONDecodeError, TypeError, KeyError):
@@ -358,11 +364,11 @@ def _print_pilot_tool_result(block) -> None:
     if block.is_error:
         lines = content.strip().splitlines()
         for line in lines[-5:]:
-            console.print(f"    {line}", style="red")
+            console.print(f"    {rich_escape(line)}", style="red")
     elif len(content) > 300:
-        console.print(f"    {content[:300]}...", style="dim")
+        console.print(f"    {rich_escape(content[:300])}...", style="dim")
     else:
-        console.print(f"    {content}", style="dim")
+        console.print(f"    {rich_escape(content)}", style="dim")
 
 
 # ---------------------------------------------------------------------------
