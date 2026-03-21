@@ -1993,7 +1993,7 @@ async def run_task_with_qa(
                         ["git", "diff", "--quiet", f"{default_branch}..HEAD"],
                         cwd=project_dir, capture_output=True,
                     ).returncode == 0  # 0 = no diff = branch same as main
-                    if main_has_code and attempt > 0:
+                    if main_has_code:
                         # Code already merged from previous run — don't force agent to pad diff
                         _log_warn("Implementation already exists on main — task was previously completed")
                         subprocess.run(["git", "checkout", default_branch], cwd=project_dir, capture_output=True)
@@ -2238,13 +2238,18 @@ def _print_summary(
         qa_summary = ""
         if task_progress and task_key in task_progress:
             events = task_progress[task_key]
-            # Collect per-phase timings from "done" or "fail" phase events
+            # Collect per-phase timings — use LAST timing per phase
+            # (retries produce multiple "coding done" events, show only final)
+            phase_times: dict[str, float] = {}
             for evt in events:
                 if evt.get("event") == "phase" and evt.get("status") in ("done", "fail"):
                     pname = evt.get("name", "")
-                    ptime = evt.get("time_s", "")
+                    ptime = evt.get("time_s", 0)
                     if pname and ptime:
-                        phase_parts.append(f"{_format_duration(ptime)} {pname}")
+                        phase_times[pname] = phase_times.get(pname, 0) + float(ptime)
+            for pname in ["prepare", "coding", "test", "qa", "merge"]:
+                if pname in phase_times:
+                    phase_parts.append(f"{_format_duration(phase_times[pname])} {pname}")
 
         # Build the main status line
         dur_str = f"  {_DIM}{_format_duration(task_duration)}{_RESET}" if task_duration else ""
