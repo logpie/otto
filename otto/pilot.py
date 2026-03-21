@@ -219,16 +219,12 @@ class _PhaseDisplay:
             self._has_events = True
             line = f"{name}  {detail}" if detail else name
             self._recent_tools.append(line)
-            if len(self._recent_tools) > 3:
-                self._recent_tools = self._recent_tools[-3:]
 
     def add_finding(self, text: str):
-        """Record a QA finding. Thread-safe. Replaces tool display during QA."""
+        """Record a QA finding. Thread-safe."""
         with self._lock:
             self._has_events = True
             self._recent_tools.append(text)
-            if len(self._recent_tools) > 5:
-                self._recent_tools = self._recent_tools[-5:]
 
     def start(self):
         import sys as _sys
