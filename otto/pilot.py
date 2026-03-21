@@ -191,7 +191,7 @@ class _PhaseDisplay:
         self._lines_printed = 0  # how many display lines we printed
 
     def update_phase(self, name: str, status: str, time_s: float = 0.0,
-                     error: str = "", **kwargs):
+                     error: str = "", detail: str = "", **kwargs):
         """Update a phase's state. Thread-safe."""
         with self._lock:
             self._has_events = True
@@ -201,8 +201,14 @@ class _PhaseDisplay:
                     self._phases[name]["time_s"] = time_s
                 if error:
                     self._phases[name]["error"] = error
+                if detail:
+                    self._phases[name]["detail"] = detail
+                if kwargs.get("cost"):
+                    self._phases[name]["cost"] = kwargs["cost"]
             if status == "running":
                 self._current_phase = name
+                # Clear stale tools from previous phase
+                self._recent_tools.clear()
 
     def add_tool(self, name: str, detail: str = ""):
         """Record an agent tool call. Thread-safe."""
@@ -258,17 +264,26 @@ class _PhaseDisplay:
                 ptime = pdata.get("time_s", 0.0)
 
                 if pstatus == "pending":
-                    # Only show pending phases that will come (skip if past phases are done)
                     lines.append(f"  {_DIM}  {pname:<10}{_RESET}")
                 elif pstatus == "running":
-                    lines.append(f"  {_CYAN}{_PHASE_ACTIVE} {pname:<10}{_RESET} {_DIM}{frame} ({time_str}){_RESET}")
+                    cost = pdata.get("cost", 0)
+                    cost_str = f"  ${cost:.2f}" if cost else ""
+                    lines.append(f"  {_CYAN}{_PHASE_ACTIVE} {pname:<10}{_RESET} {_DIM}{frame} ({time_str}){cost_str}{_RESET}")
                 elif pstatus == "done":
-                    dur = f"  {ptime:.0f}s" if ptime else ""
-                    lines.append(f"  {_GREEN}{_PHASE_DONE} {pname:<10}{_RESET}{_DIM}{dur}{_RESET}")
+                    dur = f"{ptime:.0f}s" if ptime else ""
+                    detail = pdata.get("detail", "")
+                    cost = pdata.get("cost", 0)
+                    extras = [dur] if dur else []
+                    if cost:
+                        extras.append(f"${cost:.2f}")
+                    if detail:
+                        extras.append(detail[:50])
+                    extras_str = "  ".join(extras)
+                    lines.append(f"  {_GREEN}{_PHASE_DONE} {pname:<10}{_RESET}{_DIM}  {extras_str}{_RESET}")
                 elif pstatus == "fail":
                     err = pdata.get("error", "")[:50]
-                    dur = f"  {ptime:.0f}s" if ptime else ""
-                    lines.append(f"  {_RED}{_PHASE_FAIL} {pname:<10}{_RESET}{_DIM}{dur}  {err}{_RESET}")
+                    dur = f"{ptime:.0f}s" if ptime else ""
+                    lines.append(f"  {_RED}{_PHASE_FAIL} {pname:<10}{_RESET}{_DIM}  {dur}  {err}{_RESET}")
 
             # Show recent tools under current active phase
             if self._recent_tools:
@@ -370,6 +385,8 @@ def _process_progress_event(data: dict) -> None:
                     status=data.get("status", ""),
                     time_s=data.get("time_s", 0.0),
                     error=data.get("error", ""),
+                    detail=data.get("detail", ""),
+                    cost=data.get("cost", 0),
                 )
             elif event_type == "agent_tool":
                 display.add_tool(

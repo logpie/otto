@@ -1554,6 +1554,7 @@ async def _run_qa_agent(
     config: dict[str, Any],
     project_dir: Path,
     diff_summary: str,
+    on_progress: Any = None,
 ) -> dict[str, Any]:
     """Run adversarial QA agent. Returns {passed, report, has_failures}."""
     spec = task.get("spec")
@@ -1640,6 +1641,22 @@ You are working in {project_dir}. Do NOT create git commits."""
                     for block in message.content:
                         if TextBlock and isinstance(block, TextBlock) and block.text:
                             report_lines.append(block.text)
+                        # Emit QA tool calls for display
+                        elif ToolUseBlock and isinstance(block, ToolUseBlock):
+                            name = block.name
+                            inputs = block.input or {}
+                            detail = ""
+                            if name == "Bash":
+                                detail = str(inputs.get("command", ""))[:60]
+                            elif name == "Read":
+                                detail = str(inputs.get("file_path", ""))[-50:]
+                            elif name in ("Write", "Edit"):
+                                detail = str(inputs.get("file_path", ""))[-50:]
+                            if on_progress:
+                                try:
+                                    on_progress("agent_tool", {"name": name, "detail": detail})
+                                except Exception:
+                                    pass
 
         await asyncio.wait_for(_run_qa(), timeout=qa_timeout)
         qa_completed = True
@@ -1885,8 +1902,14 @@ async def run_task_with_qa(
 
                 coding_elapsed = round(time.monotonic() - coding_start, 1)
                 phase_timings["coding"] = phase_timings.get("coding", 0) + coding_elapsed
+                # Get diff stat for display
+                diff_stat_result = subprocess.run(
+                    ["git", "diff", "--shortstat", base_sha],
+                    cwd=project_dir, capture_output=True, text=True,
+                )
+                diff_detail = diff_stat_result.stdout.strip() if diff_stat_result.returncode == 0 else ""
                 emit("phase", name="coding", status="done", time_s=coding_elapsed,
-                     cost=attempt_cost, attempt=attempt_num)
+                     cost=attempt_cost, attempt=attempt_num, detail=diff_detail)
 
                 if result_msg and result_msg.is_error:
                     raise RuntimeError(f"Agent error: {result_msg.result or 'unknown'}")
@@ -1959,7 +1982,17 @@ async def run_task_with_qa(
                 pass
 
             if verify_result.passed:
-                emit("phase", name="verify", status="done", time_s=verify_elapsed)
+                # Extract test info from verify output
+                verify_detail = ""
+                for tier in verify_result.tiers:
+                    if tier.passed and tier.output:
+                        # Look for test count patterns
+                        for line in tier.output.splitlines():
+                            if "passed" in line.lower() and any(c.isdigit() for c in line):
+                                verify_detail = line.strip()[:60]
+                                break
+                emit("phase", name="verify", status="done", time_s=verify_elapsed,
+                     detail=verify_detail)
 
                 # Squash commits into a single commit
                 try:
@@ -2018,7 +2051,8 @@ async def run_task_with_qa(
                 if spec:
                     emit("phase", name="qa", status="running")
                     qa_start = time.monotonic()
-                    qa_result = await _run_qa_agent(task, config, project_dir, diff_summary)
+                    qa_result = await _run_qa_agent(task, config, project_dir, diff_summary,
+                                                      on_progress=on_progress)
                     qa_elapsed = round(time.monotonic() - qa_start, 1)
                     phase_timings["qa"] = phase_timings.get("qa", 0) + qa_elapsed
                     qa_report = qa_result.get("report", "")
