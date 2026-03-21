@@ -691,13 +691,13 @@ def _build_coding_prompt(
 
 You are working in {effective_dir}. Do NOT create git commits.
 
-RELEVANT SOURCE FILES (already read for you):
+RELEVANT SOURCE FILES (pre-loaded — do NOT re-read these):
 {source_context}
 {spec_section}
 
-APPROACH (red-green TDD):
-1. PLAN — read the spec and codebase. Can current architecture meet ALL requirements?
-   If not, note what needs to change and design an approach that CAN meet them.
+APPROACH — start writing code immediately:
+1. You already have the source files above. Do NOT re-read them.
+   Only read additional files if you need something not shown above.
 2. WRITE TESTS FIRST for each [verifiable] spec item. Test the hardest case.
    Run them — they should FAIL (red). If they pass, your tests are too weak.
 3. IMPLEMENT until all tests pass (green).

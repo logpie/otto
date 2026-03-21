@@ -192,13 +192,30 @@ def get_relevant_file_contents(project_dir: Path, task_hint: str = "") -> str:
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return ""
 
+    _SOURCE_EXTS = {".py", ".ts", ".tsx", ".js", ".jsx", ".rb", ".go", ".rs"}
+    _SKIP_DIRS = {"node_modules", ".next", "dist", "build", "__pycache__", ".git", "coverage"}
+    _SKIP_NAMES = {"__init__.py", "conftest.py", "jest.config.js", "next.config.ts",
+                   "next.config.js", "tsconfig.json", "package-lock.json"}
+    _SKIP_PREFIXES = {"test_", "spec_"}  # test files — agent writes its own
+
     source_files: list[str] = []
     for rel in file_tree.splitlines():
         rel = rel.strip()
-        if not rel.endswith(".py"):
+        if not rel:
             continue
-        bn = Path(rel).name
-        if bn in ("__init__.py", "conftest.py"):
+        p = Path(rel)
+        if p.suffix not in _SOURCE_EXTS:
+            continue
+        if p.name in _SKIP_NAMES:
+            continue
+        if any(p.name.startswith(pfx) for pfx in _SKIP_PREFIXES):
+            continue
+        if p.name.endswith((".test.ts", ".test.tsx", ".test.js", ".test.jsx", ".spec.ts", ".spec.tsx")):
+            continue
+        if any(skip in p.parts for skip in _SKIP_DIRS):
+            continue
+        # Skip __tests__ directories
+        if "__tests__" in p.parts or "tests" in p.parts:
             continue
         if (project_dir / rel).is_file():
             source_files.append(rel)
