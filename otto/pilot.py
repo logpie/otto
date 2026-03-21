@@ -231,6 +231,8 @@ class _PhaseDisplay:
         import sys as _sys
         self._running = True
         self._start_time = time.monotonic()
+        self._printed_phases: set[str] = set()  # phases already printed as done/fail
+        self._last_finding = ""  # last QA finding printed
 
         def _render():
             idx = 0
@@ -243,70 +245,62 @@ class _PhaseDisplay:
 
                 with self._lock:
                     has_events = self._has_events
+                    # Print completed/failed phases once (log-style, no overwrite)
+                    for pname in self._PHASE_ORDER:
+                        if pname in self._printed_phases:
+                            continue
+                        pdata = self._phases[pname]
+                        pstatus = pdata["status"]
+                        if pstatus in ("done", "fail"):
+                            self._printed_phases.add(pname)
+                            ptime = pdata.get("time_s", 0.0)
+                            detail = pdata.get("detail", "")
+                            cost = pdata.get("cost", 0)
+                            if pstatus == "done":
+                                extras = []
+                                if ptime:
+                                    extras.append(f"{ptime:.0f}s")
+                                if cost:
+                                    extras.append(f"${cost:.2f}")
+                                if detail:
+                                    extras.append(detail[:50])
+                                info = "  ".join(extras)
+                                # Clear spinner line then print
+                                _sys.stdout.write(f"\r\033[2K  {_GREEN}{_PHASE_DONE} {pname:<10}{_RESET}{_DIM}  {info}{_RESET}\n")
+                            elif pstatus == "fail":
+                                err = pdata.get("error", "")[:50]
+                                dur = f"{ptime:.0f}s" if ptime else ""
+                                _sys.stdout.write(f"\r\033[2K  {_RED}{_PHASE_FAIL} {pname:<10}{_RESET}{_DIM}  {dur}  {err}{_RESET}\n")
+                            _sys.stdout.flush()
 
-                if not has_events:
-                    # Fallback: plain spinner until events arrive
-                    _sys.stdout.write(
-                        f"\r  {_DIM}{frame} {self._task_label} ({time_str}){_RESET}  "
-                    )
-                    _sys.stdout.flush()
-                else:
-                    # Phase-aware display: erase previous lines and redraw
-                    self._render_phases(_sys, frame, time_str)
+                    # Print new QA findings once
+                    if self._recent_tools:
+                        latest = self._recent_tools[-1]
+                        if latest != self._last_finding and any(
+                            m in latest for m in ["PASS", "FAIL", "✅", "❌", "Spec", "spec"]
+                        ):
+                            self._last_finding = latest
+                            _sys.stdout.write(f"\r\033[2K      {_DIM}{latest[:72]}{_RESET}\n")
+                            _sys.stdout.flush()
+
+                    # Show spinner for active phase on same line (overwrite with \r)
+                    active = None
+                    for pname in self._PHASE_ORDER:
+                        if self._phases[pname]["status"] == "running":
+                            active = pname
+                    if active:
+                        cost = self._phases[active].get("cost", 0)
+                        cost_str = f"  ${cost:.2f}" if cost else ""
+                        _sys.stdout.write(
+                            f"\r  {_DIM}{frame} {active} ({time_str}){cost_str}{_RESET}  "
+                        )
+                        _sys.stdout.flush()
 
                 idx += 1
                 time.sleep(0.15)
 
         self._thread = threading.Thread(target=_render, daemon=True)
         self._thread.start()
-
-    def _render_phases(self, _sys, frame: str, time_str: str):
-        """Render the phase progress view, overwriting previous output."""
-        lines: list[str] = []
-
-        with self._lock:
-            for pname in self._PHASE_ORDER:
-                pdata = self._phases[pname]
-                pstatus = pdata["status"]
-                ptime = pdata.get("time_s", 0.0)
-
-                if pstatus == "pending":
-                    lines.append(f"  {_DIM}  {pname:<10}{_RESET}")
-                elif pstatus == "running":
-                    cost = pdata.get("cost", 0)
-                    cost_str = f"  ${cost:.2f}" if cost else ""
-                    lines.append(f"  {_CYAN}{_PHASE_ACTIVE} {pname:<10}{_RESET} {_DIM}{frame} ({time_str}){cost_str}{_RESET}")
-                elif pstatus == "done":
-                    dur = f"{ptime:.0f}s" if ptime else ""
-                    detail = pdata.get("detail", "")
-                    cost = pdata.get("cost", 0)
-                    extras = [dur] if dur else []
-                    if cost:
-                        extras.append(f"${cost:.2f}")
-                    if detail:
-                        extras.append(detail[:50])
-                    extras_str = "  ".join(extras)
-                    lines.append(f"  {_GREEN}{_PHASE_DONE} {pname:<10}{_RESET}{_DIM}  {extras_str}{_RESET}")
-                elif pstatus == "fail":
-                    err = pdata.get("error", "")[:50]
-                    dur = f"{ptime:.0f}s" if ptime else ""
-                    lines.append(f"  {_RED}{_PHASE_FAIL} {pname:<10}{_RESET}{_DIM}  {dur}  {err}{_RESET}")
-
-            # Show recent tools under current active phase
-            if self._recent_tools:
-                for tline in self._recent_tools:
-                    lines.append(f"      {_DIM}{tline[:72]}{_RESET}")
-
-        # Move cursor up to overwrite previous display
-        if self._lines_printed > 0:
-            _sys.stdout.write(f"\033[{self._lines_printed}A\r")
-
-        for line in lines:
-            # Clear line and print
-            _sys.stdout.write(f"\033[2K{line}\n")
-
-        self._lines_printed = len(lines)
-        _sys.stdout.flush()
 
     def stop(self) -> str:
         self._running = False
@@ -318,35 +312,35 @@ class _PhaseDisplay:
         time_str = f"{mins}m{secs:02d}s" if mins else f"{secs}s"
 
         import sys as _sys
-        if self._has_events and self._lines_printed > 0:
-            # Final render: overwrite with completed state
-            _sys.stdout.write(f"\033[{self._lines_printed}A\r")
+        # Print any remaining phases that weren't printed yet
+        with self._lock:
             for pname in self._PHASE_ORDER:
+                if pname in self._printed_phases:
+                    continue
                 pdata = self._phases[pname]
                 pstatus = pdata["status"]
                 ptime = pdata.get("time_s", 0.0)
                 if pstatus == "done":
-                    dur = f"  {ptime:.0f}s" if ptime else ""
-                    _sys.stdout.write(f"\033[2K  {_GREEN}{_PHASE_DONE} {pname:<10}{_RESET}{_DIM}{dur}{_RESET}\n")
+                    detail = pdata.get("detail", "")
+                    cost = pdata.get("cost", 0)
+                    extras = []
+                    if ptime:
+                        extras.append(f"{ptime:.0f}s")
+                    if cost:
+                        extras.append(f"${cost:.2f}")
+                    if detail:
+                        extras.append(detail[:50])
+                    info = "  ".join(extras)
+                    _sys.stdout.write(f"\r\033[2K  {_GREEN}{_PHASE_DONE} {pname:<10}{_RESET}{_DIM}  {info}{_RESET}\n")
                 elif pstatus == "fail":
                     err = pdata.get("error", "")[:50]
-                    dur = f"  {ptime:.0f}s" if ptime else ""
-                    _sys.stdout.write(f"\033[2K  {_RED}{_PHASE_FAIL} {pname:<10}{_RESET}{_DIM}{dur}  {err}{_RESET}\n")
+                    dur = f"{ptime:.0f}s" if ptime else ""
+                    _sys.stdout.write(f"\r\033[2K  {_RED}{_PHASE_FAIL} {pname:<10}{_RESET}{_DIM}  {dur}  {err}{_RESET}\n")
                 elif pstatus == "running":
-                    # Phase was still running when stopped — show as interrupted
-                    _sys.stdout.write(f"\033[2K  {_YELLOW}○ {pname:<10}{_RESET}{_DIM}interrupted{_RESET}\n")
-                else:
-                    _sys.stdout.write(f"\033[2K\n")
-            # Clear any leftover tool lines
-            leftover = self._lines_printed - len(self._PHASE_ORDER)
-            for _ in range(max(0, leftover)):
-                _sys.stdout.write(f"\033[2K\n")
-            _sys.stdout.flush()
-            self._lines_printed = 0
-        else:
-            # Plain spinner fallback — just clear the line
-            _sys.stdout.write(f"\r{' ' * 80}\r")
-            _sys.stdout.flush()
+                    _sys.stdout.write(f"\r\033[2K  {_YELLOW}○ {pname:<10}{_RESET}{_DIM}interrupted{_RESET}\n")
+        # Clear spinner line
+        _sys.stdout.write(f"\r\033[2K")
+        _sys.stdout.flush()
 
         return time_str
 

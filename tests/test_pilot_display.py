@@ -87,7 +87,10 @@ class TestPilotToolCallDisplay:
         block = FakeToolUseBlock(name="mcp__otto-pilot__save_run_state",
                                   input={"phase": "test"})
         output = capture_output(_print_pilot_tool_call, block)
-        assert output.strip() == ""  # completely suppressed
+        # Strip ANSI escape codes before checking
+        import re
+        clean = re.sub(r'\033\[[^m]*[mKJ]', '', output).strip()
+        assert clean == ""  # completely suppressed
 
     def test_toolsearch_suppressed(self):
         block = FakeToolUseBlock(name="ToolSearch", input={})
