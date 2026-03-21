@@ -200,9 +200,7 @@ def get_relevant_file_contents(project_dir: Path, task_hint: str = "") -> str:
                     ".mp3", ".mp4", ".wav", ".ogg", ".webm",
                     ".pyc", ".pyo", ".o", ".so", ".dylib", ".dll", ".exe",
                     ".lock", ".map"}
-    _DATA_EXTS = {".json", ".yaml", ".yml", ".toml", ".xml", ".csv",
-                  ".env", ".ini", ".cfg", ".conf"}
-    _SKIP_EXTS = _BINARY_EXTS | _DATA_EXTS | {".md", ".txt", ".log", ".LICENSE"}
+    _SKIP_EXTS = _BINARY_EXTS | {".md", ".txt", ".log", ".LICENSE"}
     _SKIP_DIRS = {"node_modules", ".next", "dist", "build", "__pycache__", ".git",
                   "coverage", ".venv", "venv", "vendor", "target", ".cache",
                   ".turbo", ".vercel", ".output"}
