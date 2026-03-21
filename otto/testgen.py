@@ -192,11 +192,23 @@ def get_relevant_file_contents(project_dir: Path, task_hint: str = "") -> str:
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return ""
 
-    _SOURCE_EXTS = {".py", ".ts", ".tsx", ".js", ".jsx", ".rb", ".go", ".rs"}
-    _SKIP_DIRS = {"node_modules", ".next", "dist", "build", "__pycache__", ".git", "coverage"}
-    _SKIP_NAMES = {"__init__.py", "conftest.py", "jest.config.js", "next.config.ts",
-                   "next.config.js", "tsconfig.json", "package-lock.json"}
-    _SKIP_PREFIXES = {"test_", "spec_"}  # test files — agent writes its own
+    # Include-by-exclusion: treat everything as source, skip known noise.
+    # This works for any language without maintaining an extension whitelist.
+    _BINARY_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg", ".webp",
+                    ".woff", ".woff2", ".ttf", ".eot", ".otf",
+                    ".pdf", ".zip", ".tar", ".gz", ".br",
+                    ".mp3", ".mp4", ".wav", ".ogg", ".webm",
+                    ".pyc", ".pyo", ".o", ".so", ".dylib", ".dll", ".exe",
+                    ".lock", ".map"}
+    _DATA_EXTS = {".json", ".yaml", ".yml", ".toml", ".xml", ".csv",
+                  ".env", ".ini", ".cfg", ".conf"}
+    _SKIP_EXTS = _BINARY_EXTS | _DATA_EXTS | {".md", ".txt", ".log", ".LICENSE"}
+    _SKIP_DIRS = {"node_modules", ".next", "dist", "build", "__pycache__", ".git",
+                  "coverage", ".venv", "venv", "vendor", "target", ".cache",
+                  ".turbo", ".vercel", ".output"}
+    _SKIP_NAMES = {"__init__.py", "conftest.py", "package-lock.json",
+                   "yarn.lock", "pnpm-lock.yaml", "Cargo.lock", "go.sum"}
+    _SKIP_PREFIXES = {"test_", "spec_"}
 
     source_files: list[str] = []
     for rel in file_tree.splitlines():
@@ -204,7 +216,7 @@ def get_relevant_file_contents(project_dir: Path, task_hint: str = "") -> str:
         if not rel:
             continue
         p = Path(rel)
-        if p.suffix not in _SOURCE_EXTS:
+        if p.suffix in _SKIP_EXTS or not p.suffix:
             continue
         if p.name in _SKIP_NAMES:
             continue
