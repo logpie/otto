@@ -1819,6 +1819,22 @@ async def run_task_with_qa(
         phase_timings["prepare"] = prep_elapsed
         emit("phase", name="prepare", status="done", time_s=prep_elapsed)
 
+        # Check if implementation already exists on main (retried passed task)
+        # Do this BEFORE launching the coding agent to avoid wasting 60-90s exploring
+        already_merged = subprocess.run(
+            ["git", "diff", "--quiet", f"{default_branch}..HEAD"],
+            cwd=project_dir, capture_output=True,
+        ).returncode == 0  # 0 = no diff = branch same as main
+
+        if already_merged and spec:
+            _log_warn("Implementation already exists on main — task was previously completed")
+            emit("phase", name="coding", status="done", time_s=0,
+                 detail="already implemented")
+            subprocess.run(["git", "checkout", default_branch], cwd=project_dir, capture_output=True)
+            cleanup_branch(project_dir, key, default_branch)
+            return _result(True, "passed",
+                           diff_summary="Already implemented (from previous run)")
+
         # Step 2+3: Code + Verify + QA loop
         # Both coding retries AND QA-triggered retries count against max_retries.
         # Overall time budget prevents unbounded cycles.
@@ -1911,10 +1927,10 @@ async def run_task_with_qa(
                                              detail=path.split("/")[-1] if "/" in path else path)
                                 elif block.name == "Bash":
                                     cmd = _tool_use_summary(block)[:80]
-                                    # Show test/build commands, not exploration (git, ls, cat)
-                                    if any(kw in cmd.lower() for kw in
-                                           ["test", "pytest", "jest", "npm run", "build",
-                                            "npx next", "make", "cargo"]):
+                                    # Show test/build commands only — must START with the runner
+                                    cmd_start = cmd.lstrip().split()[0] if cmd.strip() else ""
+                                    if cmd_start in ("pytest", "python", "npx", "npm", "jest",
+                                                     "make", "cargo", "go", "ruby", "dotnet"):
                                         emit("agent_tool", name=block.name, detail=cmd)
                             elif ToolResultBlock and isinstance(block, ToolResultBlock):
                                 # Extract test results from Bash output
