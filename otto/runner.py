@@ -1774,9 +1774,7 @@ async def run_task_with_qa(
         duration = time.monotonic() - task_start
         if tasks_file:
             try:
-                updates: dict[str, Any] = {"status": status}
-                if total_cost > 0:
-                    updates["cost_usd"] = total_cost
+                updates: dict[str, Any] = {"status": status, "cost_usd": total_cost}
                 if duration > 0:
                     updates["duration_s"] = round(duration, 1)
                 if error:
