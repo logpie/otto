@@ -1710,6 +1710,7 @@ async def run_task_with_qa(
     task_id = task["id"]
     prompt = task["prompt"]
     max_retries = task.get("max_retries", config["max_retries"])
+    max_task_time = config.get("max_task_time", 900)  # 15 min default
     default_branch = config["default_branch"]
     timeout = config["verify_timeout"]
 
@@ -1717,6 +1718,7 @@ async def run_task_with_qa(
     total_cost = 0.0
     session_id = None
     last_error = None
+    total_attempts = 0  # counts both coding retries AND QA-triggered retries
     phase_timings: dict[str, float] = {}  # phase_name -> elapsed seconds
     # Live state for otto status -w (read from another terminal)
     _live_state_file = project_dir / "otto_logs" / "live-state.json"
@@ -1815,12 +1817,22 @@ async def run_task_with_qa(
         phase_timings["prepare"] = prep_elapsed
         emit("phase", name="prepare", status="done", time_s=prep_elapsed)
 
-        # Step 2+3: Code + Verify loop (up to max_retries + 1 attempts)
+        # Step 2+3: Code + Verify + QA loop
+        # Both coding retries AND QA-triggered retries count against max_retries.
+        # Overall time budget prevents unbounded cycles.
         for attempt in range(max_retries + 1):
             attempt_num = attempt + 1
+            total_attempts += 1
+
+            # Time budget check — prevent unbounded QA-retry cycles
+            elapsed = time.monotonic() - task_start
+            if elapsed > max_task_time and attempt > 0:
+                return _result(False, "failed",
+                               error=f"time budget exceeded ({int(elapsed)}s > {max_task_time}s) "
+                                     f"after {total_attempts} attempts")
 
             if tasks_file:
-                update_task(tasks_file, key, attempts=attempt_num)
+                update_task(tasks_file, key, attempts=total_attempts)
 
             # Build prompt for retry
             if attempt > 0 and last_error is not None:
