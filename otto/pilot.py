@@ -212,10 +212,10 @@ class _PhaseDisplay:
                 self._printed_tool_count = 0
                 # Reset printed state for this phase (supports retries)
                 self._printed_phases.discard(name)
-                # Print phase header immediately so tools appear under it
-                import sys as _s
-                _s.stdout.write(f"\r\033[2K  {_CYAN}{_PHASE_ACTIVE} {name}{_RESET}\n")
-                _s.stdout.flush()
+                # Mark that the running header hasn't been printed yet —
+                # the render loop will print it AFTER all completed phases,
+                # preventing out-of-order display when events arrive in batches.
+                self._printed_running.discard(name)
 
     def add_tool(self, name: str, detail: str = ""):
         """Record an agent tool call. Thread-safe."""
@@ -235,6 +235,7 @@ class _PhaseDisplay:
         self._running = True
         self._start_time = time.monotonic()
         self._printed_phases: set[str] = set()
+        self._printed_running: set[str] = set()  # phases whose "running" header was printed
         self._printed_tool_count = 0  # how many tool/finding items we've printed
 
         def _render():
@@ -273,6 +274,13 @@ class _PhaseDisplay:
                                 dur = f"{ptime:.0f}s" if ptime else ""
                                 _sys.stdout.write(f"\r\033[2K  {_RED}{_PHASE_FAIL} {pname:<10}{_RESET}{_DIM}  {dur}  {err}{_RESET}\n")
                             _sys.stdout.flush()
+
+                    # 1b. Print the active phase's "running" header once,
+                    # AFTER all completed phases have been printed above.
+                    if self._current_phase and self._current_phase not in self._printed_running:
+                        self._printed_running.add(self._current_phase)
+                        _sys.stdout.write(f"\r\033[2K  {_CYAN}{_PHASE_ACTIVE} {self._current_phase}{_RESET}\n")
+                        _sys.stdout.flush()
 
                     # 2. Print new tool calls / findings since last check
                     new_items = self._recent_tools[self._printed_tool_count:]
@@ -1094,6 +1102,9 @@ async def run_piloted(
             # Build pilot prompt
             tasks = load_tasks(tasks_file)
             pending = [t for t in tasks if t.get("status") == "pending"]
+            # Track which task keys are being attempted this run — used for
+            # scoping the post-run summary (cost, results, phase timing).
+            pending_keys = {t["key"] for t in pending}
             pilot_prompt = _build_pilot_prompt(pending, config, project_dir)
 
             # Configure MCP server
@@ -1339,6 +1350,22 @@ Before calling finish_run, verify:
                                             aname = rdata.get("name", "")
                                             adetail = rdata.get("detail", "")[:60]
                                             _dlog("EXEC", f"agent: {aname} {adetail}")
+                                    elif tool == "run_task_with_qa":
+                                        # Capture final result with phase_timings
+                                        # for accurate per-task timing in summary
+                                        tk = rdata.get("task_key", "")
+                                        if not tk:
+                                            # Result doesn't have task_key at top level;
+                                            # infer from the last progress event's key
+                                            for evts in reversed(list(_task_progress.values())):
+                                                if evts:
+                                                    tk = evts[-1].get("task_key", "")
+                                                    if tk:
+                                                        break
+                                        if tk:
+                                            _task_progress.setdefault(tk, []).append(
+                                                {"_result": True, **rdata}
+                                            )
                                     # Non-progress events (final results) are
                                     # still displayed via _print_pilot_tool_result
                                     # when the SDK delivers the ToolResultBlock.
@@ -1502,11 +1529,15 @@ Before calling finish_run, verify:
             if mcp_script_path.exists():
                 mcp_script_path.unlink()
 
-        # Post-run: calculate results from final task states
+        # Post-run: calculate results only for tasks attempted this run
         final_tasks = load_tasks(tasks_file)
         results: list[tuple[dict, bool]] = []
         total_cost = 0.0
         for t in final_tasks:
+            task_key = t.get("key", "")
+            # Only include tasks that were pending at run start
+            if task_key not in pending_keys:
+                continue
             if t.get("status") in ("passed", "failed", "blocked"):
                 results.append((t, t.get("status") == "passed"))
                 total_cost += t.get("cost_usd", 0.0)
@@ -1516,6 +1547,9 @@ Before calling finish_run, verify:
                             error="pilot crashed during execution")
                 results.append((t, False))
                 total_cost += t.get("cost_usd", 0.0)
+            elif t.get("status") == "pending":
+                # Task was pending at start but never attempted (e.g., blocked)
+                results.append((t, False))
 
         # Print summary with per-phase timing from progress events
         run_duration = time.monotonic() - run_start

@@ -2238,15 +2238,26 @@ def _print_summary(
         qa_summary = ""
         if task_progress and task_key in task_progress:
             events = task_progress[task_key]
-            # Collect per-phase timings — use LAST timing per phase
-            # (retries produce multiple "coding done" events, show only final)
+            # Prefer phase_timings from the final run_task_with_qa result
+            # (accurate per-task timing), falling back to progress events.
             phase_times: dict[str, float] = {}
+            result_evt = None
             for evt in events:
-                if evt.get("event") == "phase" and evt.get("status") in ("done", "fail"):
-                    pname = evt.get("name", "")
-                    ptime = evt.get("time_s", 0)
-                    if pname and ptime:
-                        phase_times[pname] = phase_times.get(pname, 0) + float(ptime)
+                if evt.get("_result") and "phase_timings" in evt:
+                    result_evt = evt
+            if result_evt:
+                phase_times = {
+                    k: float(v) for k, v in result_evt["phase_timings"].items() if v
+                }
+            else:
+                # Fallback: accumulate from progress events (less accurate
+                # when events from previous runs leak into the JSONL)
+                for evt in events:
+                    if evt.get("event") == "phase" and evt.get("status") in ("done", "fail"):
+                        pname = evt.get("name", "")
+                        ptime = evt.get("time_s", 0)
+                        if pname and ptime:
+                            phase_times[pname] = phase_times.get(pname, 0) + float(ptime)
             for pname in ["prepare", "coding", "test", "qa", "merge"]:
                 if pname in phase_times:
                     phase_parts.append(f"{_format_duration(phase_times[pname])} {pname}")
