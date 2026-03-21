@@ -249,8 +249,11 @@ class TaskDisplay:
 
                 parts.append(line)
 
-                # Show tool lines under the active phase
-                if pstatus == "running" and self._tools:
+                # Show tool lines under active or just-completed phase
+                is_active = pstatus == "running"
+                is_latest_done = (pstatus in ("done", "fail")
+                                  and phase == self._current_phase)
+                if (is_active or is_latest_done) and self._tools:
                     for tool_line in self._tools:
                         tl = Text()
                         tl.append(f"      {tool_line[:72]}", style="dim")
