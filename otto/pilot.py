@@ -731,11 +731,35 @@ async def run_piloted(
     old_sigterm = signal.signal(signal.SIGTERM, _signal_handler)
 
     try:
-        # Ensure we're on the default branch before starting
-        subprocess.run(
+        # Ensure we're on the default branch before starting.
+        # If checkout fails (dirty tracked files, stale branch), force-clean first.
+        checkout = subprocess.run(
             ["git", "checkout", default_branch],
-            cwd=project_dir, capture_output=True,
+            cwd=project_dir, capture_output=True, text=True,
         )
+        if checkout.returncode != 0:
+            # Checkout failed — likely dirty tracked files from a killed run.
+            # Try stashing, then checkout again.
+            subprocess.run(
+                ["git", "stash", "--include-untracked"],
+                cwd=project_dir, capture_output=True,
+            )
+            retry = subprocess.run(
+                ["git", "checkout", default_branch],
+                cwd=project_dir, capture_output=True, text=True,
+            )
+            if retry.returncode != 0:
+                print(f"{_RED}✗ Cannot checkout {default_branch}: {retry.stderr.strip()}{_RESET}", flush=True)
+                return 2
+
+        # Verify we're actually on the right branch
+        actual = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=project_dir, capture_output=True, text=True,
+        ).stdout.strip()
+        if actual != default_branch:
+            print(f"{_RED}✗ Expected branch {default_branch}, on {actual}{_RESET}", flush=True)
+            return 2
 
         # Dirty-tree protection — stash or abort
         from otto.runner import check_clean_tree
