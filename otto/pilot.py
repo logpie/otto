@@ -209,6 +209,8 @@ class _PhaseDisplay:
                 self._current_phase = name
                 # Clear stale tools from previous phase
                 self._recent_tools.clear()
+                # Reset printed state for this phase (supports retries)
+                self._printed_phases.discard(name)
 
     def add_tool(self, name: str, detail: str = ""):
         """Record an agent tool call. Thread-safe."""
@@ -277,7 +279,8 @@ class _PhaseDisplay:
                     if self._recent_tools:
                         latest = self._recent_tools[-1]
                         if latest != self._last_finding and any(
-                            m in latest for m in ["PASS", "FAIL", "✅", "❌", "Spec", "spec"]
+                            m in latest for m in ["PASS", "FAIL", "CONCERN",
+                                                  "✅", "❌", "⚠", "Spec", "spec"]
                         ):
                             self._last_finding = latest
                             _sys.stdout.write(f"\r\033[2K      {_DIM}{latest[:72]}{_RESET}\n")
@@ -1278,6 +1281,7 @@ Before calling finish_run, verify:
             def _bg_read_results():
                 nonlocal _results_read_pos
                 _carry = ""  # buffer for partial lines
+                _last_inode = 0  # track file identity for replacement detection
                 try:
                     _dlog("INIT", "background JSONL reader started")
                 except Exception:
@@ -1285,12 +1289,14 @@ Before calling finish_run, verify:
                 while _bg_reader_running:
                     try:
                         if _results_file.exists():
-                            # Detect file truncation (MCP server clears file on start)
+                            # Detect file replacement/truncation
                             try:
-                                file_size = _results_file.stat().st_size
-                                if file_size < _results_read_pos:
+                                st = _results_file.stat()
+                                # File replaced (new inode) or truncated (smaller)
+                                if st.st_ino != _last_inode or st.st_size < _results_read_pos:
                                     _results_read_pos = 0
                                     _carry = ""
+                                _last_inode = st.st_ino
                             except OSError:
                                 pass
                             with open(_results_file) as rf:
