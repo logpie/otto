@@ -1659,10 +1659,17 @@ async def run_task_with_qa(
     project_dir: Path,
     tasks_file: Path | None,
     hint: str | None = None,
+    on_progress: Any | None = None,
 ) -> dict[str, Any]:
     """Run full task loop: prepare -> code -> verify -> QA -> merge.
 
-    Returns {success, status, cost_usd, error, diff_summary, qa_report}.
+    Args:
+        on_progress: Optional callback ``(event_type: str, data: dict) -> None``
+            called at key execution points. Event types:
+            - ``"phase"``  — phase start/end (name, status, time_s, cost, error)
+            - ``"agent_tool"`` — significant tool call from coding/QA agent (name, detail)
+
+    Returns {success, status, cost_usd, error, diff_summary, qa_report, phase_timings}.
     """
     key = task["key"]
     task_id = task["id"]
@@ -1675,6 +1682,14 @@ async def run_task_with_qa(
     total_cost = 0.0
     session_id = None
     last_error = None
+    phase_timings: dict[str, float] = {}  # phase_name -> elapsed seconds
+
+    def emit(event: str, **data: Any) -> None:
+        if on_progress:
+            try:
+                on_progress(event, data)
+            except Exception:
+                pass
 
     def _result(success: bool, status: str, error: str = "",
                 diff_summary: str = "", qa_report: str = "") -> dict[str, Any]:
@@ -1698,10 +1713,13 @@ async def run_task_with_qa(
             "error": error,
             "diff_summary": diff_summary,
             "qa_report": qa_report,
+            "phase_timings": phase_timings,
         }
 
     try:
         # Step 1: Prepare — create branch, build prompt
+        emit("phase", name="prepare", status="running")
+        prep_start = time.monotonic()
         prep = prepare_task(task, config, project_dir, tasks_file, hint=hint)
         base_sha = prep["base_sha"]
         pre_existing_untracked = set(prep.get("pre_untracked") or [])
@@ -1718,6 +1736,10 @@ async def run_task_with_qa(
         if spec and not test_command:
             detected = detect_test_command(project_dir)
             test_command = detected if detected else "pytest"
+
+        prep_elapsed = round(time.monotonic() - prep_start, 1)
+        phase_timings["prepare"] = prep_elapsed
+        emit("phase", name="prepare", status="done", time_s=prep_elapsed)
 
         # Step 2+3: Code + Verify loop (up to max_retries + 1 attempts)
         for attempt in range(max_retries + 1):
@@ -1740,6 +1762,8 @@ async def run_task_with_qa(
                 )
 
             # Run coding agent
+            emit("phase", name="coding", status="running", attempt=attempt_num)
+            coding_start = time.monotonic()
             try:
                 agent_opts = ClaudeAgentOptions(
                     permission_mode="bypassPermissions",
@@ -1784,6 +1808,10 @@ async def run_task_with_qa(
                                 agent_log_lines.append(block.text)
                             elif ToolUseBlock and isinstance(block, ToolUseBlock):
                                 agent_log_lines.append(f"● {block.name}  {_tool_use_summary(block)}")
+                                # Emit significant tool calls for display
+                                if block.name in ("Write", "Edit", "Bash"):
+                                    emit("agent_tool", name=block.name,
+                                         detail=_tool_use_summary(block)[:80])
 
                 # Persist agent log
                 try:
@@ -1802,10 +1830,18 @@ async def run_task_with_qa(
                 attempt_cost = float(raw_cost) if isinstance(raw_cost, (int, float)) else 0.0
                 total_cost += attempt_cost
 
+                coding_elapsed = round(time.monotonic() - coding_start, 1)
+                phase_timings["coding"] = phase_timings.get("coding", 0) + coding_elapsed
+                emit("phase", name="coding", status="done", time_s=coding_elapsed,
+                     cost=attempt_cost, attempt=attempt_num)
+
                 if result_msg and result_msg.is_error:
                     raise RuntimeError(f"Agent error: {result_msg.result or 'unknown'}")
 
             except Exception as e:
+                coding_elapsed = round(time.monotonic() - coding_start, 1)
+                emit("phase", name="coding", status="fail", time_s=coding_elapsed,
+                     error=str(e)[:80], attempt=attempt_num)
                 _log_warn(f"Agent error: {e}")
                 _restore_workspace_state(
                     project_dir,
@@ -1848,6 +1884,8 @@ async def run_task_with_qa(
                     test_command = detected
 
             # Run verification
+            emit("phase", name="verify", status="running")
+            verify_start = time.monotonic()
             verify_result = run_verification(
                 project_dir=project_dir,
                 candidate_sha=candidate_sha,
@@ -1855,6 +1893,8 @@ async def run_task_with_qa(
                 verify_cmd=verify_cmd,
                 timeout=timeout,
             )
+            verify_elapsed = round(time.monotonic() - verify_start, 1)
+            phase_timings["verify"] = phase_timings.get("verify", 0) + verify_elapsed
 
             # Write verify log
             try:
@@ -1866,6 +1906,8 @@ async def run_task_with_qa(
                 pass
 
             if verify_result.passed:
+                emit("phase", name="verify", status="done", time_s=verify_elapsed)
+
                 # Squash commits into a single commit
                 try:
                     subprocess.run(
@@ -1921,10 +1963,16 @@ async def run_task_with_qa(
                 # Step 4: QA agent (if spec exists)
                 qa_report = ""
                 if spec:
+                    emit("phase", name="qa", status="running")
+                    qa_start = time.monotonic()
                     qa_result = await _run_qa_agent(task, config, project_dir, diff_summary)
+                    qa_elapsed = round(time.monotonic() - qa_start, 1)
+                    phase_timings["qa"] = phase_timings.get("qa", 0) + qa_elapsed
                     qa_report = qa_result.get("report", "")
 
                     if not qa_result["passed"]:
+                        emit("phase", name="qa", status="fail", time_s=qa_elapsed,
+                             error="QA verdict: FAIL")
                         # QA failed — retry coding with QA findings
                         # Reset to base for retry
                         subprocess.run(
@@ -1937,14 +1985,24 @@ async def run_task_with_qa(
                         )
                         # Continue the retry loop (counts against max_retries)
                         continue
+                    else:
+                        emit("phase", name="qa", status="done", time_s=qa_elapsed)
 
                 # Step 5: Merge to default branch
+                emit("phase", name="merge", status="running")
+                merge_start = time.monotonic()
                 if merge_to_default(project_dir, key, default_branch):
+                    merge_elapsed = round(time.monotonic() - merge_start, 1)
+                    phase_timings["merge"] = merge_elapsed
+                    emit("phase", name="merge", status="done", time_s=merge_elapsed)
                     testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / key
                     if testgen_dir.exists():
                         shutil.rmtree(testgen_dir, ignore_errors=True)
                     return _result(True, "passed", diff_summary=diff_summary, qa_report=qa_report)
                 else:
+                    merge_elapsed = round(time.monotonic() - merge_start, 1)
+                    emit("phase", name="merge", status="fail", time_s=merge_elapsed,
+                         error="branch diverged")
                     return _result(
                         False, "failed",
                         error=f"branch diverged — otto/{key} preserved, manual rebase needed",
@@ -1953,6 +2011,9 @@ async def run_task_with_qa(
                     )
 
             # Verification failed — reset for retry
+            verify_err = verify_result.failure_output or "verification failed"
+            emit("phase", name="verify", status="fail", time_s=verify_elapsed,
+                 error=verify_err[:80])
             subprocess.run(
                 ["git", "reset", "--mixed", base_sha],
                 cwd=project_dir, capture_output=True,
@@ -1983,8 +2044,19 @@ async def run_task_with_qa(
         return _result(False, "failed", error=f"unexpected error: {str(e)[:200]}")
 
 
-def _print_summary(results: list[tuple[dict, bool]], total_duration: float, integration_passed: bool | None = None, total_cost: float = 0.0) -> None:
-    """Print summary of all tasks after a run."""
+def _print_summary(
+    results: list[tuple[dict, bool]],
+    total_duration: float,
+    integration_passed: bool | None = None,
+    total_cost: float = 0.0,
+    task_progress: dict[str, list[dict]] | None = None,
+) -> None:
+    """Print summary of all tasks after a run.
+
+    Args:
+        task_progress: Optional mapping of task_key -> list of progress events
+            collected during the run. Used to display per-phase timing breakdowns.
+    """
     passed = sum(1 for _, s in results if s)
     failed = len(results) - passed
 
@@ -1996,7 +2068,48 @@ def _print_summary(results: list[tuple[dict, bool]], total_duration: float, inte
 
     for task, success in results:
         icon = f"{_GREEN}✓{_RESET}" if success else f"{_RED}✗{_RESET}"
-        print(f"  {icon} {_BOLD}#{task['id']}{_RESET}  {task['prompt'][:80]}", flush=True)
+        task_key = task.get("key", "")
+        task_cost = task.get("cost_usd", 0.0)
+        task_duration = task.get("duration_s", 0.0)
+
+        # Build per-phase timing string from progress events
+        phase_parts: list[str] = []
+        file_changes: list[str] = []
+        qa_summary = ""
+        if task_progress and task_key in task_progress:
+            events = task_progress[task_key]
+            # Collect per-phase timings from "done" or "fail" phase events
+            for evt in events:
+                if evt.get("event") == "phase" and evt.get("status") in ("done", "fail"):
+                    pname = evt.get("name", "")
+                    ptime = evt.get("time_s", "")
+                    if pname and ptime:
+                        phase_parts.append(f"{_format_duration(ptime)} {pname}")
+
+        # Build the main status line
+        dur_str = f"  {_DIM}{_format_duration(task_duration)}{_RESET}" if task_duration else ""
+        cost_part = f"  {_DIM}{_format_cost(task_cost)}{_RESET}" if task_cost > 0 else ""
+        print(f"  {icon} {_BOLD}#{task['id']}{_RESET}  {task['prompt'][:60]}{dur_str}{cost_part}", flush=True)
+
+        # Show phase timing breakdown on the next line
+        if phase_parts:
+            print(f"       {_DIM}{' · '.join(phase_parts)}{_RESET}", flush=True)
+
+        # Show diff summary from task metadata if available
+        diff_summary = task.get("diff_summary", "")
+        if diff_summary:
+            # Extract just the file list from git diff --stat output
+            diff_files = []
+            for line in diff_summary.splitlines():
+                line = line.strip()
+                if "|" in line:
+                    fname = line.split("|")[0].strip()
+                    diff_files.append(fname)
+            if diff_files:
+                files_str = "  ".join(diff_files[:5])
+                if len(diff_files) > 5:
+                    files_str += f"  (+{len(diff_files) - 5} more)"
+                print(f"       {_DIM}{files_str}{_RESET}", flush=True)
 
     print(flush=True)
     if failed == 0:

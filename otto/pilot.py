@@ -78,7 +78,7 @@ class _Spinner:
     def __init__(self, label: str, progress_file: str | None = None):
         self._label = label
         self._running = False
-        self._thread = None
+        self._thread: threading.Thread | None = None
         self._start_time = 0.0
         self._progress_file = progress_file
         self._last_progress_pos = 0
@@ -116,7 +116,6 @@ class _Spinner:
 
         def _spin():
             idx = 0
-            last_printed = ""
             while self._running:
                 elapsed = time.monotonic() - self._start_time
                 frame = self._FRAMES[idx % len(self._FRAMES)]
@@ -151,20 +150,240 @@ class _Spinner:
         return time_str
 
 
+# Phase display names and icons
+_PHASE_ICONS = {
+    "prepare": "◦",
+    "coding": "◦",
+    "verify": "◦",
+    "qa": "◦",
+    "merge": "◦",
+}
+_PHASE_DONE = "✓"
+_PHASE_FAIL = "✗"
+_PHASE_ACTIVE = "●"
+
+
+class _PhaseDisplay:
+    """Phase-aware progress display for run_task_with_qa.
+
+    Replaces the plain spinner with a phase progress view that updates
+    in-place. Falls back to a plain spinner if no progress events arrive
+    within a few seconds.
+    """
+
+    _FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    _PHASE_ORDER = ["prepare", "coding", "verify", "qa", "merge"]
+
+    def __init__(self, task_label: str):
+        self._task_label = task_label
+        self._running = False
+        self._thread: threading.Thread | None = None
+        self._start_time = 0.0
+        self._lock = threading.Lock()
+        # Phase state: status can be "pending", "running", "done", "fail"
+        self._phases: dict[str, dict] = {
+            p: {"status": "pending", "time_s": 0.0}
+            for p in self._PHASE_ORDER
+        }
+        self._current_phase: str | None = None
+        self._recent_tools: list[str] = []  # last N agent tool lines
+        self._has_events = False  # any progress events received?
+        self._lines_printed = 0  # how many display lines we printed
+
+    def update_phase(self, name: str, status: str, time_s: float = 0.0,
+                     error: str = "", **kwargs):
+        """Update a phase's state. Thread-safe."""
+        with self._lock:
+            self._has_events = True
+            if name in self._phases:
+                self._phases[name]["status"] = status
+                if time_s:
+                    self._phases[name]["time_s"] = time_s
+                if error:
+                    self._phases[name]["error"] = error
+            if status == "running":
+                self._current_phase = name
+
+    def add_tool(self, name: str, detail: str = ""):
+        """Record an agent tool call. Thread-safe."""
+        with self._lock:
+            self._has_events = True
+            line = f"{name}  {detail}" if detail else name
+            self._recent_tools.append(line)
+            # Keep only last 3
+            if len(self._recent_tools) > 3:
+                self._recent_tools = self._recent_tools[-3:]
+
+    def start(self):
+        import sys as _sys
+        self._running = True
+        self._start_time = time.monotonic()
+
+        def _render():
+            idx = 0
+            while self._running:
+                elapsed = time.monotonic() - self._start_time
+                frame = self._FRAMES[idx % len(self._FRAMES)]
+                mins = int(elapsed // 60)
+                secs = int(elapsed % 60)
+                time_str = f"{mins}:{secs:02d}" if mins else f"{secs}s"
+
+                with self._lock:
+                    has_events = self._has_events
+
+                if not has_events:
+                    # Fallback: plain spinner until events arrive
+                    _sys.stdout.write(
+                        f"\r  {_DIM}{frame} {self._task_label} ({time_str}){_RESET}  "
+                    )
+                    _sys.stdout.flush()
+                else:
+                    # Phase-aware display: erase previous lines and redraw
+                    self._render_phases(_sys, frame, time_str)
+
+                idx += 1
+                time.sleep(0.15)
+
+        self._thread = threading.Thread(target=_render, daemon=True)
+        self._thread.start()
+
+    def _render_phases(self, _sys, frame: str, time_str: str):
+        """Render the phase progress view, overwriting previous output."""
+        lines: list[str] = []
+
+        with self._lock:
+            for pname in self._PHASE_ORDER:
+                pdata = self._phases[pname]
+                pstatus = pdata["status"]
+                ptime = pdata.get("time_s", 0.0)
+
+                if pstatus == "pending":
+                    # Only show pending phases that will come (skip if past phases are done)
+                    lines.append(f"  {_DIM}  {pname:<10}{_RESET}")
+                elif pstatus == "running":
+                    lines.append(f"  {_CYAN}{_PHASE_ACTIVE} {pname:<10}{_RESET} {_DIM}{frame} ({time_str}){_RESET}")
+                elif pstatus == "done":
+                    dur = f"  {ptime:.0f}s" if ptime else ""
+                    lines.append(f"  {_GREEN}{_PHASE_DONE} {pname:<10}{_RESET}{_DIM}{dur}{_RESET}")
+                elif pstatus == "fail":
+                    err = pdata.get("error", "")[:50]
+                    dur = f"  {ptime:.0f}s" if ptime else ""
+                    lines.append(f"  {_RED}{_PHASE_FAIL} {pname:<10}{_RESET}{_DIM}{dur}  {err}{_RESET}")
+
+            # Show recent tools under current active phase
+            if self._recent_tools:
+                for tline in self._recent_tools:
+                    lines.append(f"      {_DIM}{tline[:72]}{_RESET}")
+
+        # Move cursor up to overwrite previous display
+        if self._lines_printed > 0:
+            _sys.stdout.write(f"\033[{self._lines_printed}A\r")
+
+        for line in lines:
+            # Clear line and print
+            _sys.stdout.write(f"\033[2K{line}\n")
+
+        self._lines_printed = len(lines)
+        _sys.stdout.flush()
+
+    def stop(self) -> str:
+        self._running = False
+        if self._thread:
+            self._thread.join(timeout=1)
+        elapsed = time.monotonic() - self._start_time
+        mins = int(elapsed // 60)
+        secs = int(elapsed % 60)
+        time_str = f"{mins}m{secs:02d}s" if mins else f"{secs}s"
+
+        import sys as _sys
+        if self._has_events and self._lines_printed > 0:
+            # Final render: overwrite with completed state
+            _sys.stdout.write(f"\033[{self._lines_printed}A\r")
+            for pname in self._PHASE_ORDER:
+                pdata = self._phases[pname]
+                pstatus = pdata["status"]
+                ptime = pdata.get("time_s", 0.0)
+                if pstatus == "done":
+                    dur = f"  {ptime:.0f}s" if ptime else ""
+                    _sys.stdout.write(f"\033[2K  {_GREEN}{_PHASE_DONE} {pname:<10}{_RESET}{_DIM}{dur}{_RESET}\n")
+                elif pstatus == "fail":
+                    err = pdata.get("error", "")[:50]
+                    dur = f"  {ptime:.0f}s" if ptime else ""
+                    _sys.stdout.write(f"\033[2K  {_RED}{_PHASE_FAIL} {pname:<10}{_RESET}{_DIM}{dur}  {err}{_RESET}\n")
+                elif pstatus == "running":
+                    # Phase was still running when stopped — show as interrupted
+                    _sys.stdout.write(f"\033[2K  {_YELLOW}○ {pname:<10}{_RESET}{_DIM}interrupted{_RESET}\n")
+                else:
+                    _sys.stdout.write(f"\033[2K\n")
+            # Clear any leftover tool lines
+            leftover = self._lines_printed - len(self._PHASE_ORDER)
+            for _ in range(max(0, leftover)):
+                _sys.stdout.write(f"\033[2K\n")
+            _sys.stdout.flush()
+            self._lines_printed = 0
+        else:
+            # Plain spinner fallback — just clear the line
+            _sys.stdout.write(f"\r{' ' * 80}\r")
+            _sys.stdout.flush()
+
+        return time_str
+
+
 # Active spinner (module-level so tool call/result can manage it)
 _active_spinner: _Spinner | None = None
+
+# Active phase display — replaces spinner for run_task_with_qa calls
+_active_phase_display: _PhaseDisplay | None = None
 
 # Track last-displayed tool call to avoid duplicate headers
 # (e.g., when the pilot retries a tool or when side-channel processing
 # triggers a new ToolUseBlock for the same tool+task)
 _last_displayed_tool: str | None = None
 
+# Accumulated progress events per task key (for summary display)
+_task_progress: dict[str, list[dict]] = {}
+
+
+def _process_progress_event(data: dict) -> None:
+    """Process a progress event from the JSONL side-channel.
+
+    Routes phase/agent_tool events to the active _PhaseDisplay and
+    accumulates them in _task_progress for the post-run summary.
+    """
+    event_type = data.get("event")
+    task_key = data.get("task_key", "")
+
+    if not event_type:
+        return
+
+    # Accumulate for summary
+    if task_key:
+        _task_progress.setdefault(task_key, []).append(data)
+
+    # Route to active phase display
+    if _active_phase_display:
+        if event_type == "phase":
+            _active_phase_display.update_phase(
+                name=data.get("name", ""),
+                status=data.get("status", ""),
+                time_s=data.get("time_s", 0.0),
+                error=data.get("error", ""),
+            )
+        elif event_type == "agent_tool":
+            _active_phase_display.add_tool(
+                name=data.get("name", ""),
+                detail=data.get("detail", ""),
+            )
+
 
 def _print_pilot_tool_call(block) -> None:
     """Print a pilot tool call with tiered display."""
-    global _active_spinner, _last_displayed_tool
+    global _active_spinner, _active_phase_display, _last_displayed_tool
 
-    # Always stop any existing spinner before printing anything
+    # Always stop any existing spinner/phase display before printing anything
+    if _active_phase_display:
+        _active_phase_display.stop()
+        _active_phase_display = None
     if _active_spinner:
         _active_spinner.stop()
         _active_spinner = None
@@ -211,10 +430,11 @@ def _print_pilot_tool_call(block) -> None:
     # Deduplicate: if the same tool+detail was just displayed, skip the header
     display_key = f"{tool_name}:{detail}"
     if display_key == _last_displayed_tool:
-        # Still start a spinner for long-running tools (the previous one was stopped above)
+        # Still start a phase display for long-running tools (the previous one was stopped above)
         if tool_name == "run_task_with_qa":
-            _active_spinner = _Spinner(label)
-            _active_spinner.start()
+            task_key = inputs.get("task_key", "")
+            _active_phase_display = _PhaseDisplay(f"{label}  {detail}")
+            _active_phase_display.start()
         return
     _last_displayed_tool = display_key
 
@@ -226,7 +446,7 @@ def _print_pilot_tool_call(block) -> None:
             print(f"  {_DIM}{icon} {label}{_RESET}", flush=True)
         return
 
-    # Tier 1: otto primary tools — prominent with separator, start spinner
+    # Tier 1: otto primary tools — prominent with separator, start phase display
     if tool_name in _PRIMARY_TOOLS:
         print(f"\n  {_DIM}{'─' * 50}{_RESET}", flush=True)
         if detail:
@@ -234,18 +454,9 @@ def _print_pilot_tool_call(block) -> None:
         else:
             print(f"  {icon} {_BOLD}{label}{_RESET}", flush=True)
         if tool_name == "run_task_with_qa":
-            # Show coding agent progress via progress file
-            task_key = inputs.get("task_key", "")
-            progress_path = None
-            if task_key:
-                from pathlib import Path as _Path
-                progress_path = str(_Path.cwd() / "otto_logs" / task_key / "progress.txt")
-                try:
-                    _Path(progress_path).unlink(missing_ok=True)
-                except OSError:
-                    pass
-            _active_spinner = _Spinner(label, progress_file=progress_path)
-            _active_spinner.start()
+            # Use phase-aware display instead of plain spinner
+            _active_phase_display = _PhaseDisplay(f"{label}  {detail}")
+            _active_phase_display.start()
         return
 
     # Default: show tool with detail, dimmed (Read, Bash, Grep, chrome-devtools, etc.)
@@ -257,11 +468,14 @@ def _print_pilot_tool_call(block) -> None:
 
 def _print_pilot_tool_result(block) -> None:
     """Print a pilot tool result with structured parsing."""
-    global _active_spinner, _last_displayed_tool
+    global _active_spinner, _active_phase_display, _last_displayed_tool
 
-    # Stop spinner if active
+    # Stop phase display or spinner if active
     elapsed_str = ""
-    if _active_spinner:
+    if _active_phase_display:
+        elapsed_str = _active_phase_display.stop()
+        _active_phase_display = None
+    elif _active_spinner:
         elapsed_str = _active_spinner.stop()
         _active_spinner = None
 
@@ -546,8 +760,12 @@ async def run_task_with_qa(task_key: str, hint: str = "") -> str:
         update_task(TASKS_FILE, task_key, feedback=hint)
         task["feedback"] = hint
 
+    def _on_progress(event, data):
+        _emit_result("progress", {{"event": event, "task_key": task_key, **data}})
+
     try:
-        result = await _run(task, CONFIG, PROJECT_DIR, TASKS_FILE, hint=hint or None)
+        result = await _run(task, CONFIG, PROJECT_DIR, TASKS_FILE,
+                            hint=hint or None, on_progress=_on_progress)
         _emit_result("run_task_with_qa", result)
         return json.dumps(result)
     except Exception as exc:
@@ -1001,12 +1219,54 @@ Before calling finish_run, verify:
             _debug_log.parent.mkdir(parents=True, exist_ok=True)
             _debug_fh = open(_debug_log, "w")
 
+            # Clear progress tracking from previous runs
+            _task_progress.clear()
+
+            # Background JSONL reader — polls the side-channel file every 500ms
+            # to pick up progress events while the pilot agent is blocked on
+            # run_task_with_qa (which is a single long MCP call).
+            _bg_reader_running = True
+
+            def _bg_read_results():
+                nonlocal _results_read_pos
+                while _bg_reader_running:
+                    try:
+                        if _results_file.exists():
+                            with open(_results_file) as rf:
+                                rf.seek(_results_read_pos)
+                                new_lines = rf.readlines()
+                                _results_read_pos = rf.tell()
+                            for rline in new_lines:
+                                rline = rline.strip()
+                                if not rline:
+                                    continue
+                                try:
+                                    rdata = json.loads(rline)
+                                    tool = rdata.get("tool", "")
+                                    if tool == "progress":
+                                        # Route to phase display
+                                        _process_progress_event(rdata)
+                                    # Non-progress events (final results) are
+                                    # still displayed via _print_pilot_tool_result
+                                    # when the SDK delivers the ToolResultBlock.
+                                except json.JSONDecodeError:
+                                    pass
+                    except OSError:
+                        pass
+                    time.sleep(0.5)
+
+            _bg_thread = threading.Thread(target=_bg_read_results, daemon=True)
+            _bg_thread.start()
+
             async for message in query(prompt=pilot_prompt, options=agent_opts):
                 if isinstance(message, ResultMessage):
                     _debug_fh.write(f"[ResultMessage] is_error={getattr(message, 'is_error', '?')}\n")
                     _debug_fh.flush()
-                    # Stop any active spinner on completion
-                    global _active_spinner
+                    # Stop any active spinner/phase display on completion
+                    global _active_spinner, _active_phase_display
+                    if _active_phase_display:
+                        _active_phase_display.stop()
+                        _active_phase_display = None
                     if _active_spinner:
                         _active_spinner.stop()
                         _active_spinner = None
@@ -1025,46 +1285,22 @@ Before calling finish_run, verify:
                         _debug_fh.write("\n")
                         _debug_fh.flush()
 
-                        # Catch-all: stop spinner for any block type that isn't
-                        # ToolUseBlock or ToolResultBlock (e.g., ThinkingBlock).
-                        # ToolUseBlock and ToolResultBlock handle spinner
-                        # themselves in their display functions.
+                        # Catch-all: stop spinner/phase display for any block
+                        # type that isn't ToolUseBlock or ToolResultBlock
+                        # (e.g., ThinkingBlock). Those handle spinner themselves.
                         is_tool_block = (
                             (ToolUseBlock and isinstance(block, ToolUseBlock))
                             or (ToolResultBlock and isinstance(block, ToolResultBlock))
                         )
-                        if not is_tool_block and _active_spinner:
-                            _active_spinner.stop()
-                            _active_spinner = None
+                        if not is_tool_block:
+                            if _active_phase_display:
+                                _active_phase_display.stop()
+                                _active_phase_display = None
+                            if _active_spinner:
+                                _active_spinner.stop()
+                                _active_spinner = None
 
                         if TextBlock and isinstance(block, TextBlock) and block.text:
-                            # (spinner already stopped by catch-all above)
-
-                            # Check side-channel for tool results
-                            if _results_file.exists():
-                                try:
-                                    with open(_results_file) as rf:
-                                        rf.seek(_results_read_pos)
-                                        new_lines = rf.readlines()
-                                        _results_read_pos = rf.tell()
-                                    for rline in new_lines:
-                                        rline = rline.strip()
-                                        if rline:
-                                            try:
-                                                rdata = json.loads(rline)
-                                                # Create a fake result block and display it
-                                                class _FakeResult:
-                                                    def __init__(self, content, is_error=False):
-                                                        self.content = content
-                                                        self.is_error = is_error
-                                                _print_pilot_tool_result(
-                                                    _FakeResult(json.dumps(rdata))
-                                                )
-                                            except json.JSONDecodeError:
-                                                pass
-                                except OSError:
-                                    pass
-
                             text = block.text.strip()
                             if not text:
                                 continue
@@ -1093,15 +1329,27 @@ Before calling finish_run, verify:
                             _print_pilot_tool_result(block)
                             _last_tool_name = None
 
+            # Stop background reader
+            _bg_reader_running = False
+            _bg_thread.join(timeout=2)
+
         except Exception as pilot_err:
             # Pilot agent crashed (e.g., buffer overflow from large screenshot)
             # Still proceed to summary — tasks may have passed before the crash
+            if _active_phase_display:
+                _active_phase_display.stop()
+                _active_phase_display = None
             if _active_spinner:
                 _active_spinner.stop()
                 _active_spinner = None
             print(f"\n  {_YELLOW}⚠ Pilot agent error: {pilot_err}{_RESET}", flush=True)
             print(f"  {_DIM}Proceeding to summary — completed tasks are still merged.{_RESET}", flush=True)
         finally:
+            # Stop background reader if still running
+            try:
+                _bg_reader_running = False  # noqa: F841 — may not exist if we errored early
+            except NameError:
+                pass
             # Clean up
             try:
                 _debug_fh.close()
@@ -1125,8 +1373,9 @@ Before calling finish_run, verify:
                 results.append((t, False))
                 total_cost += t.get("cost_usd", 0.0)
 
-        # Print summary
-        _print_summary(results, time.monotonic() - run_start, total_cost=total_cost)
+        # Print summary with per-phase timing from progress events
+        _print_summary(results, time.monotonic() - run_start,
+                       total_cost=total_cost, task_progress=_task_progress)
 
         any_failed = any(not s for _, s in results)
         return 1 if any_failed else 0
