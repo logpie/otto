@@ -226,6 +226,198 @@ class TestDiffAndShow:
         result = runner.invoke(main, ["show", "999"])
         assert result.exit_code != 0
 
+    def test_show_with_phase_timings(self, runner, tmp_git_repo, monkeypatch):
+        """Show should display per-phase timing from progress events."""
+        import json
+        monkeypatch.chdir(tmp_git_repo)
+        from otto.tasks import add_task, load_tasks, update_task
+        add_task(tmp_git_repo / "tasks.yaml", "Timed task", spec=["c1"])
+        tasks = load_tasks(tmp_git_repo / "tasks.yaml")
+        key = tasks[0]["key"]
+        update_task(tmp_git_repo / "tasks.yaml", key,
+                    status="passed", duration_s=120.0, cost_usd=0.50)
+
+        # Create progress events
+        log_dir = tmp_git_repo / "otto_logs"
+        log_dir.mkdir()
+        results_file = log_dir / "pilot_results.jsonl"
+        events = [
+            {"tool": "progress", "event": "phase", "task_key": key,
+             "name": "prepare", "status": "done", "time_s": 2.0},
+            {"tool": "progress", "event": "phase", "task_key": key,
+             "name": "coding", "status": "done", "time_s": 45.0},
+            {"tool": "progress", "event": "phase", "task_key": key,
+             "name": "verify", "status": "done", "time_s": 10.0},
+            {"tool": "progress", "event": "phase", "task_key": key,
+             "name": "qa", "status": "done", "time_s": 60.0},
+            {"tool": "progress", "event": "phase", "task_key": key,
+             "name": "merge", "status": "done", "time_s": 3.0},
+        ]
+        results_file.write_text("\n".join(json.dumps(e) for e in events) + "\n")
+
+        # Create task log dir
+        task_log = log_dir / key
+        task_log.mkdir()
+
+        result = runner.invoke(main, ["show", "1"])
+        assert result.exit_code == 0
+        assert "2m00s" in result.output  # total duration
+        assert "prepare" in result.output
+        assert "coding" in result.output
+        assert "$0.50" in result.output
+
+    def test_show_with_verify_logs(self, runner, tmp_git_repo, monkeypatch):
+        """Show should display verify summary from log files."""
+        monkeypatch.chdir(tmp_git_repo)
+        from otto.tasks import add_task, load_tasks, update_task
+        add_task(tmp_git_repo / "tasks.yaml", "Verify task")
+        tasks = load_tasks(tmp_git_repo / "tasks.yaml")
+        key = tasks[0]["key"]
+        update_task(tmp_git_repo / "tasks.yaml", key, status="passed")
+
+        log_dir = tmp_git_repo / "otto_logs" / key
+        log_dir.mkdir(parents=True)
+        (log_dir / "verify.log").write_text("PASSED")
+
+        result = runner.invoke(main, ["show", "1"])
+        assert result.exit_code == 0
+        assert "PASSED" in result.output
+
+    def test_show_with_agent_log(self, runner, tmp_git_repo, monkeypatch):
+        """Show should display agent log highlights."""
+        monkeypatch.chdir(tmp_git_repo)
+        from otto.tasks import add_task, load_tasks, update_task
+        add_task(tmp_git_repo / "tasks.yaml", "Agent task")
+        tasks = load_tasks(tmp_git_repo / "tasks.yaml")
+        key = tasks[0]["key"]
+        update_task(tmp_git_repo / "tasks.yaml", key, status="passed")
+
+        log_dir = tmp_git_repo / "otto_logs" / key
+        log_dir.mkdir(parents=True)
+        agent_log = "\n".join([f"line {i}" for i in range(20)])
+        (log_dir / "attempt-1-agent.log").write_text(agent_log)
+
+        result = runner.invoke(main, ["show", "1"])
+        assert result.exit_code == 0
+        assert "Agent log" in result.output
+        assert "line 0" in result.output  # first line shown
+
+
+class TestHistory:
+    def test_no_history(self, runner, tmp_git_repo, monkeypatch):
+        monkeypatch.chdir(tmp_git_repo)
+        result = runner.invoke(main, ["history"])
+        assert result.exit_code == 0
+        assert "No run history" in result.output
+
+    def test_shows_history_entries(self, runner, tmp_git_repo, monkeypatch):
+        import json
+        monkeypatch.chdir(tmp_git_repo)
+        history_dir = tmp_git_repo / "otto_logs"
+        history_dir.mkdir()
+        history_file = history_dir / "run-history.jsonl"
+        entries = [
+            {"timestamp": "2026-03-20T23:00:00", "tasks_total": 3,
+             "tasks_passed": 2, "tasks_failed": 1, "cost_usd": 1.50,
+             "time_s": 300.0, "commit": "abc123", "failure_summary": "task #5 failed: timeout"},
+            {"timestamp": "2026-03-20T22:00:00", "tasks_total": 1,
+             "tasks_passed": 1, "tasks_failed": 0, "cost_usd": 0.19,
+             "time_s": 120.0, "commit": "def456", "failure_summary": ""},
+        ]
+        history_file.write_text("\n".join(json.dumps(e) for e in entries) + "\n")
+
+        result = runner.invoke(main, ["history"])
+        assert result.exit_code == 0
+        assert "2026-03-20" in result.output
+        assert "$1.50" in result.output
+        assert "$0.19" in result.output
+
+    def test_history_limit(self, runner, tmp_git_repo, monkeypatch):
+        import json
+        monkeypatch.chdir(tmp_git_repo)
+        history_dir = tmp_git_repo / "otto_logs"
+        history_dir.mkdir()
+        history_file = history_dir / "run-history.jsonl"
+        entries = [
+            {"timestamp": f"2026-03-{20+i:02d}T10:00:00", "tasks_total": 1,
+             "tasks_passed": 1, "tasks_failed": 0, "cost_usd": 0.1,
+             "time_s": 60.0}
+            for i in range(5)
+        ]
+        history_file.write_text("\n".join(json.dumps(e) for e in entries) + "\n")
+
+        result = runner.invoke(main, ["history", "-n", "2"])
+        assert result.exit_code == 0
+        # Should only show 2 most recent
+        assert "2026-03-24" in result.output
+        assert "2026-03-23" in result.output
+
+
+class TestLogs:
+    def test_logs_no_task(self, runner, tmp_git_repo, monkeypatch):
+        monkeypatch.chdir(tmp_git_repo)
+        result = runner.invoke(main, ["logs", "999"])
+        assert result.exit_code != 0
+
+    def test_logs_no_logs(self, runner, tmp_git_repo, monkeypatch):
+        monkeypatch.chdir(tmp_git_repo)
+        from otto.tasks import add_task
+        add_task(tmp_git_repo / "tasks.yaml", "Task")
+        result = runner.invoke(main, ["logs", "1"])
+        assert result.exit_code == 0
+        assert "No logs" in result.output
+
+    def test_logs_raw_mode(self, runner, tmp_git_repo, monkeypatch):
+        monkeypatch.chdir(tmp_git_repo)
+        from otto.tasks import add_task, load_tasks
+        add_task(tmp_git_repo / "tasks.yaml", "Task")
+        tasks = load_tasks(tmp_git_repo / "tasks.yaml")
+        key = tasks[0]["key"]
+        log_dir = tmp_git_repo / "otto_logs" / key
+        log_dir.mkdir(parents=True)
+        (log_dir / "verify.log").write_text("PASSED")
+        (log_dir / "attempt-1-agent.log").write_text("tool call here")
+
+        result = runner.invoke(main, ["logs", "--raw", "1"])
+        assert result.exit_code == 0
+        assert "verify.log" in result.output
+        assert "PASSED" in result.output
+        assert "agent.log" in result.output
+        assert "tool call here" in result.output
+
+    def test_logs_structured_mode(self, runner, tmp_git_repo, monkeypatch):
+        monkeypatch.chdir(tmp_git_repo)
+        from otto.tasks import add_task, load_tasks
+        add_task(tmp_git_repo / "tasks.yaml", "Task")
+        tasks = load_tasks(tmp_git_repo / "tasks.yaml")
+        key = tasks[0]["key"]
+        log_dir = tmp_git_repo / "otto_logs" / key
+        log_dir.mkdir(parents=True)
+        (log_dir / "attempt-1-verify.log").write_text(
+            "test_command: PASS\nOutput here\n12 passed"
+        )
+        (log_dir / "attempt-1-agent.log").write_text(
+            "thinking about things\n"
+            "● Write  src/main.py\n"
+            "● Bash  python test.py\n"
+            "done reasoning\n"
+        )
+
+        result = runner.invoke(main, ["logs", "1"])
+        assert result.exit_code == 0
+        assert "Verification" in result.output
+        assert "PASS" in result.output
+        assert "Agent Activity" in result.output
+        assert "2 tool calls" in result.output
+
+
+class TestStatusWatch:
+    def test_status_watch_help(self, runner, tmp_git_repo, monkeypatch):
+        """Watch flag should be recognized."""
+        monkeypatch.chdir(tmp_git_repo)
+        result = runner.invoke(main, ["status", "--help"])
+        assert "--watch" in result.output
+
 
 class TestStatusSpec:
     def test_shows_spec_count(self, runner, tmp_git_repo, monkeypatch):

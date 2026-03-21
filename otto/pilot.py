@@ -1214,10 +1214,34 @@ Before calling finish_run, verify:
             # Side-channel result file from MCP tools
             _results_file = project_dir / "otto_logs" / "pilot_results.jsonl"
             _results_read_pos = 0  # track how far we've read
-            # Debug log to diagnose block types
+            # Structured debug log with timestamps and phases
             _debug_log = project_dir / "otto_logs" / "pilot_debug.log"
             _debug_log.parent.mkdir(parents=True, exist_ok=True)
             _debug_fh = open(_debug_log, "w")
+            _current_debug_phase = "INIT"
+
+            def _dlog(phase: str, msg: str) -> None:
+                """Write a timestamped structured line to the debug log."""
+                nonlocal _current_debug_phase
+                _current_debug_phase = phase
+                ts = time.strftime("%H:%M:%S")
+                _debug_fh.write(f"[{ts}] [{phase}] {msg}\n")
+                _debug_fh.flush()
+
+            # Log initial state
+            _dlog("INIT", f"pilot started — {len(pending)} pending tasks")
+            try:
+                git_head = subprocess.run(
+                    ["git", "rev-parse", "--short", "HEAD"],
+                    cwd=project_dir, capture_output=True, text=True,
+                )
+                git_branch = subprocess.run(
+                    ["git", "branch", "--show-current"],
+                    cwd=project_dir, capture_output=True, text=True,
+                )
+                _dlog("INIT", f"git branch={git_branch.stdout.strip()} HEAD={git_head.stdout.strip()}")
+            except Exception:
+                pass
 
             # Clear progress tracking from previous runs
             _task_progress.clear()
@@ -1246,6 +1270,24 @@ Before calling finish_run, verify:
                                     if tool == "progress":
                                         # Route to phase display
                                         _process_progress_event(rdata)
+                                        # Also write structured debug log for progress events
+                                        evt = rdata.get("event", "")
+                                        task_key = rdata.get("task_key", "")[:8]
+                                        if evt == "phase":
+                                            pname = rdata.get("name", "")
+                                            pstatus = rdata.get("status", "")
+                                            ptime = rdata.get("time_s", 0)
+                                            perr = rdata.get("error", "")[:60]
+                                            if pstatus == "running":
+                                                _dlog("EXEC", f"{pname} started — task={task_key}")
+                                            elif pstatus == "done":
+                                                _dlog("EXEC", f"{pname} done — {ptime:.0f}s task={task_key}")
+                                            elif pstatus == "fail":
+                                                _dlog("EXEC", f"{pname} FAILED — {ptime:.0f}s {perr} task={task_key}")
+                                        elif evt == "agent_tool":
+                                            aname = rdata.get("name", "")
+                                            adetail = rdata.get("detail", "")[:60]
+                                            _dlog("EXEC", f"agent: {aname} {adetail}")
                                     # Non-progress events (final results) are
                                     # still displayed via _print_pilot_tool_result
                                     # when the SDK delivers the ToolResultBlock.
@@ -1260,8 +1302,7 @@ Before calling finish_run, verify:
 
             async for message in query(prompt=pilot_prompt, options=agent_opts):
                 if isinstance(message, ResultMessage):
-                    _debug_fh.write(f"[ResultMessage] is_error={getattr(message, 'is_error', '?')}\n")
-                    _debug_fh.flush()
+                    _dlog("DONE", f"ResultMessage is_error={getattr(message, 'is_error', '?')}")
                     # Stop any active spinner/phase display on completion
                     global _active_spinner, _active_phase_display
                     if _active_phase_display:
@@ -1275,15 +1316,6 @@ Before calling finish_run, verify:
                 elif AssistantMessage and isinstance(message, AssistantMessage):
                     for block in message.content:
                         block_type = type(block).__name__
-                        _debug_fh.write(f"[{block_type}] ")
-                        if hasattr(block, "name"):
-                            _debug_fh.write(f"name={block.name} ")
-                        if hasattr(block, "content"):
-                            c = block.content
-                            preview = str(c)[:200] if c else "None"
-                            _debug_fh.write(f"content_type={type(c).__name__} preview={preview}")
-                        _debug_fh.write("\n")
-                        _debug_fh.flush()
 
                         # Catch-all: stop spinner/phase display for any block
                         # type that isn't ToolUseBlock or ToolResultBlock
@@ -1305,6 +1337,9 @@ Before calling finish_run, verify:
                             if not text:
                                 continue
 
+                            # Log pilot reasoning
+                            _dlog(_current_debug_phase, f"text: {text[:120]}")
+
                             # Skip code fences and raw JSON
                             if text.startswith("```") or text.startswith("{"):
                                 continue
@@ -1324,8 +1359,61 @@ Before calling finish_run, verify:
 
                         elif ToolUseBlock and isinstance(block, ToolUseBlock):
                             _last_tool_name = block.name
+                            # Structured debug log for tool calls
+                            tool_name = block.name.replace("mcp__otto-pilot__", "")
+                            inputs = block.input or {}
+                            detail_parts = []
+                            if "task_key" in inputs:
+                                detail_parts.append(f"task={inputs['task_key'][:8]}")
+                            if inputs.get("hint"):
+                                detail_parts.append(f'hint="{str(inputs["hint"])[:50]}"')
+                            if "phase" in inputs:
+                                detail_parts.append(f"phase={inputs['phase']}")
+                            detail = " ".join(detail_parts)
+                            # Determine debug phase from tool name
+                            if tool_name in ("get_run_state", "save_run_state"):
+                                _dlog("PLAN", f"{tool_name} {detail}")
+                            elif tool_name in ("run_task_with_qa", "abort_task"):
+                                _dlog("EXEC", f"{tool_name} {detail}")
+                            elif tool_name == "finish_run":
+                                _dlog("REPORT", f"{tool_name} {detail}")
+                            else:
+                                _dlog(_current_debug_phase, f"{tool_name} {detail}")
                             _print_pilot_tool_call(block)
                         elif ToolResultBlock and isinstance(block, ToolResultBlock):
+                            # Log tool result summary
+                            raw = block.content
+                            result_preview = ""
+                            if isinstance(raw, str):
+                                result_preview = raw[:100]
+                            elif isinstance(raw, list):
+                                parts = []
+                                for item in raw:
+                                    if isinstance(item, str):
+                                        parts.append(item)
+                                    elif hasattr(item, "text"):
+                                        parts.append(item.text)
+                                result_preview = " ".join(parts)[:100]
+                            if block.is_error:
+                                _dlog(_current_debug_phase, f"ERROR: {result_preview}")
+                            else:
+                                # Parse JSON for structured summary
+                                try:
+                                    rdata = json.loads(result_preview if len(result_preview) < 100 else str(raw)[:200])
+                                    if isinstance(rdata, dict):
+                                        if "success" in rdata:
+                                            s = "PASSED" if rdata["success"] else "FAILED"
+                                            cost = rdata.get("cost_usd", 0)
+                                            err = rdata.get("error", "")[:50]
+                                            _dlog(_current_debug_phase, f"result: {s} cost=${cost:.2f} {err}")
+                                        elif "done" in rdata:
+                                            _dlog("REPORT", "run complete")
+                                        else:
+                                            _dlog(_current_debug_phase, f"result: {result_preview}")
+                                    else:
+                                        _dlog(_current_debug_phase, f"result: {result_preview}")
+                                except (json.JSONDecodeError, TypeError):
+                                    _dlog(_current_debug_phase, f"result: {result_preview}")
                             _print_pilot_tool_result(block)
                             _last_tool_name = None
 
@@ -1342,6 +1430,10 @@ Before calling finish_run, verify:
             if _active_spinner:
                 _active_spinner.stop()
                 _active_spinner = None
+            try:
+                _dlog("ERROR", f"pilot crashed: {pilot_err}")
+            except Exception:
+                pass
             print(f"\n  {_YELLOW}⚠ Pilot agent error: {pilot_err}{_RESET}", flush=True)
             print(f"  {_DIM}Proceeding to summary — completed tasks are still merged.{_RESET}", flush=True)
         finally:
@@ -1374,8 +1466,51 @@ Before calling finish_run, verify:
                 total_cost += t.get("cost_usd", 0.0)
 
         # Print summary with per-phase timing from progress events
-        _print_summary(results, time.monotonic() - run_start,
+        run_duration = time.monotonic() - run_start
+        _print_summary(results, run_duration,
                        total_cost=total_cost, task_progress=_task_progress)
+
+        # Record run history
+        try:
+            history_file = project_dir / "otto_logs" / "run-history.jsonl"
+            history_file.parent.mkdir(parents=True, exist_ok=True)
+            tasks_passed = sum(1 for _, s in results if s)
+            tasks_failed = sum(1 for _, s in results if not s)
+            # Get failure summary for history display
+            failure_summary = ""
+            if tasks_failed > 0:
+                failed_tasks = [(t, s) for t, s in results if not s]
+                if len(failed_tasks) == 1:
+                    ft = failed_tasks[0][0]
+                    failure_summary = f"task #{ft.get('id', '?')} failed: {ft.get('error', 'unknown')[:40]}"
+                else:
+                    failure_summary = f"{tasks_failed} tasks failed"
+            # Get current commit SHA
+            commit_sha = ""
+            try:
+                sha_result = subprocess.run(
+                    ["git", "rev-parse", "--short", "HEAD"],
+                    cwd=project_dir, capture_output=True, text=True,
+                )
+                if sha_result.returncode == 0:
+                    commit_sha = sha_result.stdout.strip()
+            except Exception:
+                pass
+            from datetime import datetime as _dt
+            entry = {
+                "timestamp": _dt.now().isoformat(timespec="seconds"),
+                "tasks_total": len(results),
+                "tasks_passed": tasks_passed,
+                "tasks_failed": tasks_failed,
+                "cost_usd": round(total_cost, 4),
+                "time_s": round(run_duration, 1),
+                "commit": commit_sha,
+                "failure_summary": failure_summary,
+            }
+            with open(history_file, "a") as hf:
+                hf.write(json.dumps(entry) + "\n")
+        except Exception:
+            pass  # Non-critical — don't fail the run for history recording
 
         any_failed = any(not s for _, s in results)
         return 1 if any_failed else 0

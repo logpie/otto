@@ -1,7 +1,10 @@
 """Otto CLI — entrypoint for all otto commands."""
 
 import asyncio
+import json
 import sys
+import time
+from datetime import datetime
 from pathlib import Path
 
 import click
@@ -19,7 +22,7 @@ def _format_duration(seconds: float) -> str:
         return f"{seconds:.0f}s"
     minutes = int(seconds // 60)
     secs = int(seconds % 60)
-    return f"{minutes}m{secs}s"
+    return f"{minutes}m{secs:02d}s"
 
 # ANSI styling
 _B = "\033[1m"       # bold
@@ -29,6 +32,192 @@ _Y = "\033[33m"      # yellow
 _C = "\033[36m"      # cyan
 _R = "\033[31m"      # red
 _0 = "\033[0m"       # reset
+
+
+def _format_cost(cost: float) -> str:
+    """Format cost for display."""
+    if cost < 0.01:
+        return f"${cost:.4f}"
+    return f"${cost:.2f}"
+
+
+# ---------------------------------------------------------------------------
+# Log parsing helpers (shared by show/logs commands)
+# ---------------------------------------------------------------------------
+
+def _load_progress_events(log_dir: Path) -> list[dict]:
+    """Load progress events from pilot_results.jsonl that match this task key."""
+    results_file = log_dir.parent / "pilot_results.jsonl"
+    task_key = log_dir.name
+    events = []
+    if not results_file.exists():
+        return events
+    try:
+        for line in results_file.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+                if data.get("task_key") == task_key:
+                    events.append(data)
+            except json.JSONDecodeError:
+                continue
+    except OSError:
+        pass
+    return events
+
+
+def _extract_phase_timings(events: list[dict]) -> dict[str, float]:
+    """Extract per-phase timings from progress events."""
+    timings: dict[str, float] = {}
+    for evt in events:
+        if evt.get("event") == "phase" and evt.get("status") in ("done", "fail"):
+            name = evt.get("name", "")
+            time_s = evt.get("time_s", 0.0)
+            if name and time_s:
+                timings[name] = timings.get(name, 0) + time_s
+    return timings
+
+
+def _parse_qa_report(log_dir: Path, events: list[dict]) -> dict:
+    """Parse QA report from file or progress events.
+
+    Returns dict with keys: exists, passed, total, summary_lines.
+    """
+    result = {"exists": False, "passed": 0, "total": 0, "summary_lines": []}
+
+    # Try qa-report.md file first
+    qa_file = log_dir / "qa-report.md"
+    if qa_file.exists():
+        result["exists"] = True
+        content = qa_file.read_text()
+        lines = content.strip().splitlines()
+        # Extract pass/fail counts from markdown checkboxes or verdict lines
+        passed = 0
+        total = 0
+        summary = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("- [x]") or stripped.startswith("- [X]"):
+                total += 1
+                passed += 1
+            elif stripped.startswith("- [ ]"):
+                total += 1
+            # Capture layer summaries
+            if stripped.lower().startswith("layer") or stripped.lower().startswith("## layer"):
+                summary.append(stripped.lstrip("#").strip())
+            # Capture verdict line
+            if "verdict" in stripped.lower() or "result" in stripped.lower():
+                summary.append(stripped.lstrip("#").strip())
+        result["passed"] = passed
+        result["total"] = total
+        result["summary_lines"] = summary[:5]
+        return result
+
+    # Fall back to progress events for qa_report field
+    for evt in reversed(events):
+        if evt.get("tool") == "run_task_with_qa":
+            qa_text = evt.get("qa_report", "")
+            if qa_text:
+                result["exists"] = True
+                # Parse pass/fail from the report text
+                passed = 0
+                total = 0
+                summary = []
+                for line in qa_text.splitlines():
+                    stripped = line.strip()
+                    if stripped.startswith("- [x]") or stripped.startswith("- [X]"):
+                        total += 1
+                        passed += 1
+                    elif stripped.startswith("- [ ]"):
+                        total += 1
+                    if "PASS" in stripped.upper() and ("/" in stripped or "of" in stripped):
+                        summary.append(stripped)
+                    if stripped.lower().startswith("layer") or stripped.lower().startswith("## layer"):
+                        summary.append(stripped.lstrip("#").strip())
+                result["passed"] = passed
+                result["total"] = total
+                result["summary_lines"] = summary[:5]
+            break
+
+    return result
+
+
+def _get_diff_stat(task_id: int, project_dir: Path) -> list[str]:
+    """Get diff --stat lines for a task's commit."""
+    import subprocess
+    result = subprocess.run(
+        ["git", "log", "--oneline", "--all", f"--grep=(#{task_id})"],
+        capture_output=True, text=True, cwd=project_dir,
+    )
+    if not result.stdout.strip():
+        return []
+    sha = result.stdout.strip().splitlines()[0].split()[0]
+    stat = subprocess.run(
+        ["git", "diff", "--stat", f"{sha}~1", sha],
+        capture_output=True, text=True, cwd=project_dir,
+    )
+    if stat.returncode != 0:
+        return []
+    return [l.strip() for l in stat.stdout.strip().splitlines() if l.strip()]
+
+
+def _get_agent_log_highlights(log_dir: Path) -> tuple[list[str], list[str]]:
+    """Get first and last few lines of the most recent agent log.
+
+    Returns (first_lines, last_lines).
+    """
+    logs = sorted(log_dir.glob("attempt-*-agent.log"), reverse=True)
+    if not logs:
+        return ([], [])
+    try:
+        content = logs[0].read_text()
+    except OSError:
+        return ([], [])
+    lines = [l for l in content.splitlines() if l.strip()]
+    if not lines:
+        return ([], [])
+    first = lines[:3]
+    last = lines[-3:] if len(lines) > 6 else []
+    return (first, last)
+
+
+def _get_verify_summary(log_dir: Path) -> str:
+    """Get a one-line verify summary from the most recent verify log."""
+    # Check verify.log first (written on pass)
+    verify_file = log_dir / "verify.log"
+    if verify_file.exists():
+        content = verify_file.read_text().strip()
+        if content == "PASSED":
+            return f"{_G}PASSED{_0}"
+
+    # Check attempt verify logs
+    logs = sorted(log_dir.glob("attempt-*-verify.log"), reverse=True)
+    if not logs:
+        return ""
+    try:
+        content = logs[0].read_text()
+    except OSError:
+        return ""
+
+    # Parse tier results
+    passed = content.count(": PASS")
+    failed = content.count(": FAIL")
+    total = passed + failed
+    if total == 0:
+        return ""
+
+    # Count tests if available (look for "N passed" or "N tests")
+    import re
+    test_count = ""
+    m = re.search(r"(\d+)\s+passed", content)
+    if m:
+        test_count = f" ({m.group(1)} tests)"
+
+    if failed == 0:
+        return f"{_G}PASSED{_0}{_D}{test_count}{_0}"
+    return f"{_R}FAILED{_0}{_D} ({passed}/{total} tiers){test_count}{_0}"
 
 
 def _require_git():
@@ -390,10 +579,94 @@ def arch(show, clean):
         lock_fh.close()
 
 
+def _render_status_table(tasks: list[dict], show_phase: bool = False) -> str:
+    """Render the status table as a string (reusable by status and watch mode)."""
+    lines: list[str] = []
+
+    lines.append(f"{_B}{'ID':>4}  {'Status':10}  {'Att':>3}  {'Deps':>4}  {'Spec':>6}  {'Cost':>7}  {'Time':>6}  Prompt{_0}")
+    lines.append(f"{_D}{'─' * 94}{_0}")
+    for t in tasks:
+        status_str = t.get("status", "?")
+        spec_count = len(t.get("spec", []))
+        deps = t.get("depends_on") or []
+        deps_str = str(len(deps)) if deps else ""
+        cost = t.get("cost_usd", 0.0)
+        cost_str = f"${cost:.2f}" if cost else ""
+        dur = t.get("duration_s", 0.0)
+        dur_str = _format_duration(dur) if dur else ""
+        # Color status
+        if status_str == "passed":
+            status_styled = f"{_G}{status_str:10}{_0}"
+        elif status_str in ("failed", "blocked"):
+            status_styled = f"{_R}{status_str:10}{_0}"
+        elif status_str == "running":
+            status_styled = f"{_C}{status_str:10}{_0}"
+        else:
+            status_styled = f"{_D}{status_str:10}{_0}"
+        lines.append(
+            f"{t.get('id', '?'):>4}  {status_styled}  {t.get('attempts', 0):>3}  "
+            f"{deps_str:>4}  {spec_count:>6}  {cost_str:>7}  {dur_str:>6}  {t['prompt'][:50]}"
+        )
+        # Show error for failed/blocked tasks
+        if status_str in ("failed", "blocked") and t.get("error"):
+            lines.append(f"        {_R}↳ {t['error'][:70]}{_0}")
+
+    # Summary
+    counts: dict[str, int] = {}
+    total_cost = 0.0
+    total_dur = 0.0
+    for t in tasks:
+        s = t.get("status", "?")
+        counts[s] = counts.get(s, 0) + 1
+        total_cost += t.get("cost_usd", 0.0)
+        total_dur += t.get("duration_s", 0.0)
+    lines.append(f"{_D}{'─' * 94}{_0}")
+    parts = []
+    if counts.get("passed"):
+        parts.append(f"{_G}{counts['passed']} passed{_0}")
+    if counts.get("failed"):
+        parts.append(f"{_R}{counts['failed']} failed{_0}")
+    if counts.get("blocked"):
+        parts.append(f"{_R}{counts['blocked']} blocked{_0}")
+    if counts.get("pending"):
+        parts.append(f"{_D}{counts['pending']} pending{_0}")
+    if counts.get("running"):
+        parts.append(f"{_C}{counts['running']} running{_0}")
+    summary = ", ".join(parts)
+    extras = []
+    if total_cost > 0:
+        extras.append(f"${total_cost:.2f}")
+    if total_dur > 0:
+        extras.append(_format_duration(total_dur))
+    if extras:
+        summary += f"  {_D}— {', '.join(extras)}{_0}"
+    lines.append(f"  {summary}")
+
+    # Show current phase from run-state.json if available
+    if show_phase:
+        state_file = Path.cwd() / "otto_arch" / "run-state.json"
+        if state_file.exists():
+            try:
+                state = json.loads(state_file.read_text())
+                phase = state.get("phase", "")
+                notes = state.get("notes", "")
+                if phase:
+                    phase_str = f"  {_C}Phase:{_0} {phase}"
+                    if notes:
+                        phase_str += f"  {_D}({notes[:60]}){_0}"
+                    lines.append(phase_str)
+            except (json.JSONDecodeError, OSError):
+                pass
+
+    return "\n".join(lines)
+
+
 @main.command(context_settings=CONTEXT_SETTINGS)
-def status():
+@click.option("-w", "--watch", is_flag=True, help="Auto-refresh every 2 seconds")
+def status(watch):
     """Show task status."""
     import fcntl
+
     tasks_path = Path.cwd() / "tasks.yaml"
     tasks = load_tasks(tasks_path)
     if not tasks:
@@ -418,64 +691,39 @@ def status():
                 click.echo(f"{_Y}⚠ Task #{t['id']} stuck in 'running' (otto crashed?) — will auto-recover on next 'otto run'{_0}")
             click.echo()
 
-    click.echo(f"{_B}{'ID':>4}  {'Status':10}  {'Att':>3}  {'Deps':>4}  {'Spec':>6}  {'Cost':>7}  {'Time':>6}  Prompt{_0}")
-    click.echo(f"{_D}{'─' * 94}{_0}")
-    for t in tasks:
-        status_str = t.get("status", "?")
-        spec_count = len(t.get("spec", []))
-        deps = t.get("depends_on") or []
-        deps_str = str(len(deps)) if deps else ""
-        cost = t.get("cost_usd", 0.0)
-        cost_str = f"${cost:.2f}" if cost else ""
-        dur = t.get("duration_s", 0.0)
-        dur_str = _format_duration(dur) if dur else ""
-        # Color status
-        if status_str == "passed":
-            status_styled = f"{_G}{status_str:10}{_0}"
-        elif status_str in ("failed", "blocked"):
-            status_styled = f"{_R}{status_str:10}{_0}"
-        elif status_str == "running":
-            status_styled = f"{_C}{status_str:10}{_0}"
-        else:
-            status_styled = f"{_D}{status_str:10}{_0}"
-        click.echo(
-            f"{t.get('id', '?'):>4}  {status_styled}  {t.get('attempts', 0):>3}  "
-            f"{deps_str:>4}  {spec_count:>6}  {cost_str:>7}  {dur_str:>6}  {t['prompt'][:50]}"
-        )
-        # Show error for failed/blocked tasks
-        if status_str in ("failed", "blocked") and t.get("error"):
-            click.echo(f"        {_R}↳ {t['error'][:70]}{_0}")
+    if watch:
+        _watch_status(tasks_path)
+        return
 
-    # Summary
-    counts = {}
-    total_cost = 0.0
-    total_dur = 0.0
-    for t in tasks:
-        s = t.get("status", "?")
-        counts[s] = counts.get(s, 0) + 1
-        total_cost += t.get("cost_usd", 0.0)
-        total_dur += t.get("duration_s", 0.0)
-    click.echo(f"{_D}{'─' * 94}{_0}")
-    parts = []
-    if counts.get("passed"):
-        parts.append(f"{_G}{counts['passed']} passed{_0}")
-    if counts.get("failed"):
-        parts.append(f"{_R}{counts['failed']} failed{_0}")
-    if counts.get("blocked"):
-        parts.append(f"{_R}{counts['blocked']} blocked{_0}")
-    if counts.get("pending"):
-        parts.append(f"{_D}{counts['pending']} pending{_0}")
-    if counts.get("running"):
-        parts.append(f"{_C}{counts['running']} running{_0}")
-    summary = ", ".join(parts)
-    extras = []
-    if total_cost > 0:
-        extras.append(f"${total_cost:.2f}")
-    if total_dur > 0:
-        extras.append(_format_duration(total_dur))
-    if extras:
-        summary += f"  {_D}— {', '.join(extras)}{_0}"
-    click.echo(f"  {summary}")
+    click.echo(_render_status_table(tasks, show_phase=True))
+
+
+def _watch_status(tasks_path: Path) -> None:
+    """Auto-refresh status display every 2 seconds."""
+    last_line_count = 0
+    try:
+        while True:
+            tasks = load_tasks(tasks_path)
+            output = _render_status_table(tasks, show_phase=True)
+            output_lines = output.splitlines()
+
+            # Move cursor up to overwrite previous display
+            if last_line_count > 0:
+                sys.stdout.write(f"\033[{last_line_count}A\r")
+
+            for line in output_lines:
+                sys.stdout.write(f"\033[2K{line}\n")
+
+            # Clear any leftover lines from previous render
+            if len(output_lines) < last_line_count:
+                for _ in range(last_line_count - len(output_lines)):
+                    sys.stdout.write("\033[2K\n")
+
+            last_line_count = max(len(output_lines), last_line_count)
+            sys.stdout.flush()
+            time.sleep(2)
+    except KeyboardInterrupt:
+        click.echo(f"\n{_D}Stopped.{_0}")
 
 
 @main.command(context_settings=CONTEXT_SETTINGS)
@@ -562,24 +810,226 @@ def delete(task_id):
 
 @main.command(context_settings=CONTEXT_SETTINGS)
 @click.argument("task_id", type=int)
-def logs(task_id):
-    """Show logs for a task."""
+@click.option("--raw", is_flag=True, help="Dump all log files without formatting")
+@click.option("-f", "--follow", is_flag=True, help="Tail logs in real-time (useful during runs)")
+def logs(task_id, raw, follow):
+    """Show structured logs for a task."""
+    import re
+
     tasks_path = Path.cwd() / "tasks.yaml"
     tasks = load_tasks(tasks_path)
+    target = None
     for t in tasks:
         if t.get("id") == task_id:
-            log_dir = Path.cwd() / "otto_logs" / t["key"]
-            if not log_dir.exists():
-                click.echo(f"{_D}No logs for task #{task_id}{_0}")
-                return
-            for log_file in sorted(log_dir.iterdir()):
+            target = t
+            break
+    if not target:
+        click.echo(f"Task #{task_id} not found", err=True)
+        sys.exit(1)
+
+    log_dir = Path.cwd() / "otto_logs" / target["key"]
+    if not log_dir.exists():
+        click.echo(f"{_D}No logs for task #{task_id}{_0}")
+        return
+
+    # Follow mode: tail the most recent agent log
+    if follow:
+        _tail_logs(log_dir, task_id)
+        return
+
+    # Raw mode: dump everything (old behavior)
+    if raw:
+        for log_file in sorted(log_dir.iterdir()):
+            if log_file.is_file():
                 click.echo(f"\n{_B}{'━' * 40}{_0}")
                 click.echo(f"{_B}  {log_file.name}{_0}")
                 click.echo(f"{_B}{'━' * 40}{_0}")
-                click.echo(log_file.read_text())
-            return
-    click.echo(f"Task #{task_id} not found", err=True)
-    sys.exit(1)
+                try:
+                    content = log_file.read_text()
+                    click.echo(content)
+                except (OSError, UnicodeDecodeError):
+                    click.echo(f"  {_D}(binary or unreadable){_0}")
+        return
+
+    # Structured mode: show sections with formatting
+    click.echo(f"\n{_B}Logs for Task #{task_id}{_0}  {_D}({target['key']}){_0}")
+
+    # 1. Verify logs — show result only
+    verify_logs = sorted(log_dir.glob("attempt-*-verify.log"))
+    if verify_logs:
+        click.echo(f"\n{_B}  Verification{_0}")
+        for vlog in verify_logs:
+            attempt = vlog.stem.split("-")[1] if "-" in vlog.stem else "?"
+            try:
+                content = vlog.read_text()
+                passed = content.count(": PASS")
+                failed = content.count(": FAIL")
+                # Extract test count
+                test_count = ""
+                m = re.search(r"(\d+)\s+passed", content)
+                if m:
+                    test_count = f" ({m.group(1)} tests)"
+                if failed == 0 and passed > 0:
+                    click.echo(f"    {_G}Attempt {attempt}: PASS{_0}{_D}{test_count}{_0}")
+                elif failed > 0:
+                    click.echo(f"    {_R}Attempt {attempt}: FAIL{_0}{_D} ({passed}/{passed+failed} tiers){test_count}{_0}")
+                    # Show failure lines
+                    for line in content.splitlines():
+                        if ": FAIL" in line:
+                            click.echo(f"      {_R}{line.strip()[:100]}{_0}")
+                else:
+                    click.echo(f"    {_D}Attempt {attempt}: {content[:80]}{_0}")
+            except OSError:
+                click.echo(f"    {_D}Attempt {attempt}: (unreadable){_0}")
+
+    # Also check verify.log (written on final pass)
+    verify_file = log_dir / "verify.log"
+    if verify_file.exists() and not verify_logs:
+        try:
+            content = verify_file.read_text().strip()
+            if content == "PASSED":
+                click.echo(f"\n{_B}  Verification{_0}")
+                click.echo(f"    {_G}PASSED{_0}")
+        except OSError:
+            pass
+
+    # 2. Agent logs — show tool calls only
+    agent_logs = sorted(log_dir.glob("attempt-*-agent.log"))
+    if agent_logs:
+        click.echo(f"\n{_B}  Agent Activity{_0}")
+        for alog in agent_logs:
+            attempt = alog.stem.split("-")[1] if "-" in alog.stem else "?"
+            try:
+                content = alog.read_text()
+                lines = content.splitlines()
+                # Filter to tool calls (lines starting with bullet)
+                tool_lines = [l for l in lines if l.strip().startswith("●") or l.strip().startswith("*")]
+                if tool_lines:
+                    click.echo(f"    {_D}Attempt {attempt} — {len(tool_lines)} tool calls:{_0}")
+                    for tl in tool_lines[:10]:
+                        click.echo(f"      {_D}{tl.strip()[:90]}{_0}")
+                    if len(tool_lines) > 10:
+                        click.echo(f"      {_D}... ({len(tool_lines) - 10} more){_0}")
+                else:
+                    # No structured tool calls, show first/last few lines
+                    click.echo(f"    {_D}Attempt {attempt} — {len(lines)} lines:{_0}")
+                    for l in lines[:3]:
+                        click.echo(f"      {_D}{l[:90]}{_0}")
+                    if len(lines) > 6:
+                        click.echo(f"      {_D}...{_0}")
+                        for l in lines[-3:]:
+                            click.echo(f"      {_D}{l[:90]}{_0}")
+            except OSError:
+                click.echo(f"    {_D}Attempt {attempt}: (unreadable){_0}")
+
+    # 3. QA report
+    qa_file = log_dir / "qa-report.md"
+    if qa_file.exists():
+        click.echo(f"\n{_B}  QA Report{_0}")
+        try:
+            content = qa_file.read_text()
+            # Show formatted (truncated to ~30 lines)
+            lines = content.strip().splitlines()
+            for line in lines[:30]:
+                click.echo(f"    {line}")
+            if len(lines) > 30:
+                click.echo(f"    {_D}... ({len(lines) - 30} more lines){_0}")
+        except OSError:
+            click.echo(f"    {_D}(unreadable){_0}")
+
+    # 4. Pilot debug log (if present)
+    debug_log = log_dir.parent / "pilot_debug.log"
+    if debug_log.exists():
+        try:
+            content = debug_log.read_text()
+            if content.strip():
+                click.echo(f"\n{_B}  Pilot Debug{_0}  {_D}(use --raw for full output){_0}")
+                lines = content.strip().splitlines()
+                click.echo(f"    {_D}{len(lines)} lines — last 5:{_0}")
+                for line in lines[-5:]:
+                    click.echo(f"    {_D}{line[:100]}{_0}")
+        except OSError:
+            pass
+
+    click.echo()
+
+
+def _tail_logs(log_dir: Path, task_id: int) -> None:
+    """Tail the most recent agent log and progress events in real-time."""
+    import select
+
+    click.echo(f"{_B}Tailing logs for task #{task_id}{_0}  {_D}(Ctrl+C to stop){_0}\n")
+
+    # Files to watch
+    results_file = log_dir.parent / "pilot_results.jsonl"
+    results_pos = results_file.stat().st_size if results_file.exists() else 0
+
+    # Find latest agent log or wait for one
+    agent_pos = 0
+    last_agent_log = None
+
+    try:
+        while True:
+            # Check for new agent logs
+            agent_logs = sorted(log_dir.glob("attempt-*-agent.log"))
+            if agent_logs and agent_logs[-1] != last_agent_log:
+                last_agent_log = agent_logs[-1]
+                agent_pos = 0
+
+            # Read new agent log content
+            if last_agent_log and last_agent_log.exists():
+                try:
+                    with open(last_agent_log) as f:
+                        f.seek(agent_pos)
+                        new = f.read()
+                        agent_pos = f.tell()
+                    if new:
+                        for line in new.splitlines():
+                            if line.strip():
+                                click.echo(f"  {_D}{line[:120]}{_0}")
+                except OSError:
+                    pass
+
+            # Read new progress events
+            if results_file.exists():
+                try:
+                    with open(results_file) as f:
+                        f.seek(results_pos)
+                        new_lines = f.readlines()
+                        results_pos = f.tell()
+                    task_key = log_dir.name
+                    for rline in new_lines:
+                        rline = rline.strip()
+                        if not rline:
+                            continue
+                        try:
+                            data = json.loads(rline)
+                            if data.get("task_key") != task_key:
+                                continue
+                            evt = data.get("event", "")
+                            if evt == "phase":
+                                name = data.get("name", "")
+                                status = data.get("status", "")
+                                time_s = data.get("time_s", 0)
+                                if status == "running":
+                                    click.echo(f"  {_C}{name}{_0} started")
+                                elif status == "done":
+                                    click.echo(f"  {_G}{name}{_0} done  {_D}{_format_duration(time_s)}{_0}")
+                                elif status == "fail":
+                                    err = data.get("error", "")[:60]
+                                    click.echo(f"  {_R}{name}{_0} failed  {_D}{err}{_0}")
+                            elif evt == "agent_tool":
+                                name = data.get("name", "")
+                                detail = data.get("detail", "")[:60]
+                                click.echo(f"    {_D}{name}  {detail}{_0}")
+                        except json.JSONDecodeError:
+                            pass
+                except OSError:
+                    pass
+
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        click.echo(f"\n{_D}Stopped.{_0}")
 
 
 @main.command(context_settings=CONTEXT_SETTINGS)
@@ -604,48 +1054,155 @@ def diff(task_id):
 @main.command(context_settings=CONTEXT_SETTINGS)
 @click.argument("task_id", type=int)
 def show(task_id):
-    """Show details for a task."""
+    """Show rich details for a task including timing, QA, and diff."""
+    import subprocess
+    from otto.tasks import spec_text, spec_is_verifiable
+
     tasks_path = Path.cwd() / "tasks.yaml"
+    project_dir = Path.cwd()
     tasks = load_tasks(tasks_path)
     for t in tasks:
         if t.get("id") == task_id:
-            # Print styled details
-            click.echo(f"{_B}Task #{task_id}{_0}  {_D}({t.get('key', '?')}){_0}")
-            click.echo(f"  {_D}Status:{_0}   {t.get('status', '?')}")
+            key = t.get("key", "?")
+            status = t.get("status", "?")
+            log_dir = project_dir / "otto_logs" / key
+
+            # Color the status
+            status_color = {
+                "passed": _G, "failed": _R, "blocked": _R,
+                "running": _C, "pending": _D,
+            }.get(status, "")
+            status_styled = f"{status_color}{status}{_0}"
+
+            # Header
+            click.echo(f"\n{_B}Task #{task_id}{_0}  {_D}({key}){_0}")
+            click.echo(f"  {_D}Status:{_0}   {status_styled}")
             click.echo(f"  {_D}Attempts:{_0} {t.get('attempts', 0)}")
+
             cost = t.get("cost_usd", 0.0)
             if cost:
-                click.echo(f"  {_D}Cost:{_0}     ${cost:.2f}")
+                click.echo(f"  {_D}Cost:{_0}     {_format_cost(cost)}")
+
+            # Duration + per-phase timing
+            dur = t.get("duration_s", 0.0)
+            if dur:
+                dur_str = _format_duration(dur)
+                # Try to get per-phase breakdown
+                events = _load_progress_events(log_dir) if log_dir.exists() else []
+                timings = _extract_phase_timings(events)
+                if timings:
+                    phase_order = ["prepare", "coding", "verify", "qa", "merge"]
+                    parts = []
+                    for p in phase_order:
+                        pt = timings.get(p, 0.0)
+                        parts.append(f"{_format_duration(pt)} {p}")
+                    click.echo(f"  {_D}Time:{_0}     {dur_str}  {_D}({' + '.join(parts)}){_0}")
+                else:
+                    click.echo(f"  {_D}Time:{_0}     {dur_str}")
+
             deps = t.get("depends_on") or []
             if deps:
                 click.echo(f"  {_D}Deps:{_0}     {', '.join(f'#{d}' for d in deps)}")
-            click.echo(f"\n  {_D}Prompt:{_0}")
-            click.echo(f"  {t['prompt']}")
+
+            # Prompt
+            click.echo(f"\n  {_D}Prompt:{_0} {t['prompt']}")
+
+            # Spec with pass/fail indicators
             spec = t.get("spec", [])
             if spec:
-                click.echo(f"\n  {_D}Spec ({len(spec)}):{_0}")
+                verifiable = sum(1 for i in spec if spec_is_verifiable(i))
+                visual = len(spec) - verifiable
+                label = f"{verifiable} verifiable"
+                if visual:
+                    label += f", {visual} visual"
+                click.echo(f"\n  {_D}Spec ({len(spec)} criteria — {label}):{_0}")
                 for i, item in enumerate(spec, 1):
-                    click.echo(f"    {i}. {item}")
+                    text = spec_text(item)
+                    tag = f"{_G}[v]{_0}" if spec_is_verifiable(item) else f"{_C}[~]{_0}"
+                    click.echo(f"    {i}. {tag} {text}")
+
+            # Diff summary (files changed)
+            diff_lines = _get_diff_stat(task_id, project_dir)
+            if diff_lines:
+                click.echo(f"\n  {_D}Files changed:{_0}")
+                # Show individual file lines (not the summary line)
+                for dl in diff_lines:
+                    if "|" in dl:
+                        click.echo(f"    {_D}{dl}{_0}")
+                    elif "changed" in dl or "insertion" in dl or "deletion" in dl:
+                        click.echo(f"    {_D}{dl}{_0}")
+
+            # QA report summary
+            if log_dir.exists():
+                events = _load_progress_events(log_dir)
+                qa = _parse_qa_report(log_dir, events)
+                if qa["exists"]:
+                    if qa["total"] > 0:
+                        qa_icon = _G if qa["passed"] == qa["total"] else _R
+                        click.echo(f"\n  {_D}QA:{_0} {qa_icon}{qa['passed']}/{qa['total']} specs passed{_0}")
+                    for line in qa["summary_lines"]:
+                        click.echo(f"    {_D}{line}{_0}")
+
+                # Verify summary
+                verify_str = _get_verify_summary(log_dir)
+                if verify_str:
+                    click.echo(f"\n  {_D}Verify:{_0} {verify_str}")
+
+                # Agent log highlights
+                first_lines, last_lines = _get_agent_log_highlights(log_dir)
+                if first_lines:
+                    click.echo(f"\n  {_D}Agent log (latest attempt):{_0}")
+                    for line in first_lines:
+                        click.echo(f"    {_D}{line[:90]}{_0}")
+                    if last_lines:
+                        click.echo(f"    {_D}...{_0}")
+                        for line in last_lines:
+                            click.echo(f"    {_D}{line[:90]}{_0}")
+
+            # Feedback
             if t.get("feedback"):
                 click.echo(f"\n  {_D}Feedback:{_0} {t['feedback']}")
+
+            # Error (full context for failed tasks)
             if t.get("error"):
                 click.echo(f"\n  {_R}Error:{_0} {t['error']}")
-            # Find commit
-            import subprocess
+
+            # Last error from verify/agent logs
+            if status == "failed" and log_dir.exists():
+                # Show last few lines from the most recent verify log
+                verify_logs = sorted(log_dir.glob("attempt-*-verify.log"), reverse=True)
+                if verify_logs:
+                    try:
+                        verify_content = verify_logs[0].read_text()
+                        fail_lines = [
+                            l for l in verify_content.splitlines()
+                            if any(kw in l.upper() for kw in ["FAIL", "ERROR", "ASSERT"])
+                        ]
+                        if fail_lines:
+                            click.echo(f"\n  {_D}Last verify errors:{_0}")
+                            for fl in fail_lines[-5:]:
+                                click.echo(f"    {_R}{fl[:100]}{_0}")
+                    except OSError:
+                        pass
+
+            # Commit
             result = subprocess.run(
                 ["git", "log", "--oneline", "--all", f"--grep=(#{task_id})"],
-                capture_output=True, text=True,
+                capture_output=True, text=True, cwd=project_dir,
             )
             if result.stdout.strip():
                 click.echo(f"\n  {_D}Commit:{_0} {result.stdout.strip().splitlines()[0]}")
-            # Check for test file
-            test_file = Path.cwd() / "tests" / f"test_otto_{t['key']}.py"
+
+            # Test file
+            test_file = project_dir / "tests" / f"test_otto_{key}.py"
             if test_file.exists():
-                click.echo(f"  {_D}Test file:{_0} {test_file.relative_to(Path.cwd())}")
-            # Check for logs
-            log_dir = Path.cwd() / "otto_logs" / t["key"]
+                click.echo(f"  {_D}Test file:{_0} {test_file.relative_to(project_dir)}")
+
+            # Logs dir
             if log_dir.exists():
-                click.echo(f"  {_D}Logs:{_0} {log_dir.relative_to(Path.cwd())}/")
+                click.echo(f"  {_D}Logs:{_0}     {log_dir.relative_to(project_dir)}/")
+
+            click.echo()
             return
     click.echo(f"Task #{task_id} not found", err=True)
     sys.exit(1)
@@ -766,6 +1323,84 @@ def reset(yes, hard):
     finally:
         fcntl.flock(lock_fh, fcntl.LOCK_UN)
         lock_fh.close()
+
+
+# ---------------------------------------------------------------------------
+# Run history
+# ---------------------------------------------------------------------------
+
+HISTORY_FILE = "otto_logs/run-history.jsonl"
+
+
+@main.command(context_settings=CONTEXT_SETTINGS)
+@click.option("-n", "--limit", "limit_", default=20, help="Number of runs to show")
+def history(limit_):
+    """Show past run history."""
+    project_dir = Path.cwd()
+    history_path = project_dir / HISTORY_FILE
+
+    if not history_path.exists():
+        click.echo(f"{_D}No run history found. History is recorded after each 'otto run'.{_0}")
+        return
+
+    entries = []
+    try:
+        for line in history_path.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    except OSError:
+        click.echo(f"{_R}Error reading history file{_0}", err=True)
+        sys.exit(1)
+
+    if not entries:
+        click.echo(f"{_D}No run history found.{_0}")
+        return
+
+    # Show most recent first
+    entries.reverse()
+    entries = entries[:limit_]
+
+    click.echo(f"\n  {_B}{'Date':20}  {'Tasks':>6}  {'Pass':>5}  {'Fail':>5}  {'Cost':>8}  {'Time':>8}{_0}")
+    click.echo(f"  {_D}{'─' * 66}{_0}")
+
+    for entry in entries:
+        ts = entry.get("timestamp", "?")
+        # Format timestamp
+        try:
+            dt = datetime.fromisoformat(ts)
+            ts_str = dt.strftime("%Y-%m-%d %H:%M")
+        except (ValueError, TypeError):
+            ts_str = str(ts)[:16]
+
+        total = entry.get("tasks_total", 0)
+        passed = entry.get("tasks_passed", 0)
+        failed = entry.get("tasks_failed", 0)
+        cost = entry.get("cost_usd", 0.0)
+        time_s = entry.get("time_s", 0.0)
+
+        tasks_str = f"{passed + failed}/{total}" if total else "0"
+        pass_color = _G if passed > 0 else _D
+        fail_color = _R if failed > 0 else _D
+        cost_str = _format_cost(cost) if cost > 0 else ""
+        time_str = _format_duration(time_s) if time_s > 0 else ""
+
+        # Failure detail
+        fail_detail = ""
+        if failed > 0 and entry.get("failure_summary"):
+            fail_detail = f"  {_R}({entry['failure_summary'][:50]}){_0}"
+
+        click.echo(
+            f"  {ts_str:20}  {tasks_str:>6}  "
+            f"{pass_color}{passed:>5}{_0}  {fail_color}{failed:>5}{_0}  "
+            f"{cost_str:>8}  {time_str:>8}{fail_detail}"
+        )
+
+    click.echo()
 
 
 # ---------------------------------------------------------------------------
