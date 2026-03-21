@@ -1961,12 +1961,16 @@ async def run_task_with_qa(
 
                 coding_elapsed = round(time.monotonic() - coding_start, 1)
                 phase_timings["coding"] = phase_timings.get("coding", 0) + coding_elapsed
-                # Get diff stat for display — compare branch tip to base (total work)
-                diff_stat_result = subprocess.run(
-                    ["git", "diff", "--shortstat", base_sha, "HEAD"],
-                    cwd=project_dir, capture_output=True, text=True,
-                )
-                diff_detail = diff_stat_result.stdout.strip() if diff_stat_result.returncode == 0 else ""
+                # Get diff stat for display — try committed changes first, fall back to working tree
+                diff_detail = ""
+                for diff_cmd in (
+                    ["git", "diff", "--shortstat", base_sha, "HEAD"],  # committed changes
+                    ["git", "diff", "--shortstat", base_sha],           # uncommitted changes
+                ):
+                    r = subprocess.run(diff_cmd, cwd=project_dir, capture_output=True, text=True)
+                    if r.returncode == 0 and r.stdout.strip():
+                        diff_detail = r.stdout.strip()
+                        break
                 emit("phase", name="coding", status="done", time_s=coding_elapsed,
                      cost=attempt_cost, attempt=attempt_num, detail=diff_detail)
 
