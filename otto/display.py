@@ -120,6 +120,7 @@ class TaskDisplay:
             for p in PHASE_ORDER
         }
         self._tools: list[str] = []  # recent tool/finding lines
+        self._phase_tools: dict[str, list[str]] = {}  # phase -> all tool lines (for final render)
         self._current_phase: str | None = None
         self._max_tools = 8  # show last N tool lines
 
@@ -189,9 +190,12 @@ class TaskDisplay:
                 line = f"{name}  {detail}" if detail else name
             if line:
                 self._tools.append(line)
-                # Trim to max
+                # Trim live display to max
                 if len(self._tools) > self._max_tools:
                     self._tools = self._tools[-self._max_tools:]
+                # Also record in per-phase history for final render
+                if self._current_phase:
+                    self._phase_tools.setdefault(self._current_phase, []).append(line)
         self._refresh()
 
     def add_finding(self, text: str) -> None:
@@ -304,6 +308,39 @@ class TaskDisplay:
                     line.append("  interrupted", style="dim")
 
                 parts.append(line)
+
+                # Show condensed tool/finding summary under completed phases
+                phase_history = self._phase_tools.get(phase, [])
+                if phase_history and pstatus in ("done", "fail"):
+                    # For coding: show unique files written/edited
+                    if phase == "coding":
+                        files = []
+                        for tl in phase_history:
+                            if tl.startswith("Write") or tl.startswith("Edit"):
+                                fname = tl.split("  ", 1)[-1].rsplit("/", 1)[-1]
+                                if fname and fname not in files:
+                                    files.append(fname)
+                        if files:
+                            summary = "  ".join(files[:6])
+                            if len(files) > 6:
+                                summary += f"  (+{len(files) - 6})"
+                            tl = Text()
+                            tl.append(f"      {summary}", style="dim")
+                            parts.append(tl)
+                    # For QA: show verdict and finding count
+                    elif phase == "qa" and phase_history:
+                        verdict_lines = [l for l in phase_history if "VERDICT" in l or "PASS" in l[:10] or "FAIL" in l[:10]]
+                        finding_count = sum(1 for l in phase_history if l.startswith("###"))
+                        if finding_count:
+                            summary = f"{finding_count} specs checked"
+                            verdict = next((l for l in phase_history if "VERDICT" in l), "")
+                            if "PASS" in verdict:
+                                summary += " — all passed"
+                            elif "FAIL" in verdict:
+                                summary += " — issues found"
+                            tl = Text()
+                            tl.append(f"      {summary}", style="dim")
+                            parts.append(tl)
 
             return Group(*parts) if has_content else None
 

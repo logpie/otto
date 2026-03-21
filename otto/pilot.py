@@ -763,6 +763,13 @@ async def run_piloted(
                     stderr_tail = (result.stderr or b"").decode(errors="replace")[-500:]
                     baseline_failures = f"baseline: exit {result.returncode}\n{stderr_tail}"
                     console.print("  [yellow]Warning: Baseline tests failing -- recorded, proceeding[/yellow]")
+                elif result.returncode == 0:
+                    # Extract test count if available
+                    import re as _re
+                    stdout_text = (result.stdout or b"").decode(errors="replace")
+                    match = _re.search(r"(\d+) passed", stdout_text)
+                    count = f" ({match.group(1)} tests)" if match else ""
+                    console.print(f"  [green]\u2713[/green] Baseline passing{count}", style="dim")
 
         # Recover stale "running" tasks
         tasks = load_tasks(tasks_file)
@@ -1128,8 +1135,16 @@ Before calling finish_run, verify:
                             # Log pilot reasoning
                             _dlog(_current_debug_phase, f"text: {text[:120]}")
 
-                            # Skip code fences and raw JSON
+                            # Skip code fences, raw JSON, and low-value narration
                             if text.startswith("```") or text.startswith("{"):
+                                continue
+                            # Suppress common filler phrases
+                            _lower = text.lower()
+                            if any(filler in _lower for filler in [
+                                "let me", "i'll ", "i will ", "now let me",
+                                "let me save", "let me get", "let me check",
+                                "in parallel", "save the run state",
+                            ]):
                                 continue
 
                             # Tier 1: Execution plan — prominent cyan

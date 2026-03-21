@@ -1961,9 +1961,9 @@ async def run_task_with_qa(
 
                 coding_elapsed = round(time.monotonic() - coding_start, 1)
                 phase_timings["coding"] = phase_timings.get("coding", 0) + coding_elapsed
-                # Get diff stat for display
+                # Get diff stat for display — compare branch tip to base (total work)
                 diff_stat_result = subprocess.run(
-                    ["git", "diff", "--shortstat", base_sha],
+                    ["git", "diff", "--shortstat", base_sha, "HEAD"],
                     cwd=project_dir, capture_output=True, text=True,
                 )
                 diff_detail = diff_stat_result.stdout.strip() if diff_stat_result.returncode == 0 else ""
