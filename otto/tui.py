@@ -67,8 +67,9 @@ class ProgressEvent(Message):
 
 class RunComplete(Message):
     """The run has finished."""
-    def __init__(self, summary: str = "") -> None:
+    def __init__(self, exit_code: int = 0, summary: str = "") -> None:
         super().__init__()
+        self.exit_code = exit_code
         self.summary = summary
 
 
@@ -375,12 +376,21 @@ class OttoRunApp(App):
         Binding("q", "quit", "Quit", show=True),
     ]
 
-    def __init__(self, tasks: list[dict] | None = None, **kwargs) -> None:
+    def __init__(self, tasks: list[dict] | None = None,
+                 config: dict | None = None,
+                 tasks_path: Any = None,
+                 project_dir: Any = None,
+                 **kwargs) -> None:
         super().__init__(**kwargs)
         self._tasks = tasks or []
         self._panels: dict[str, TaskPanel] = {}
         self._active_task_key: str | None = None
         self._summary_lines: list[str] = []
+        # Pilot integration
+        self._config = config
+        self._tasks_path = tasks_path
+        self._project_dir = project_dir
+        self._exit_code: int = 0
 
     def compose(self) -> ComposeResult:
         # Header
@@ -472,6 +482,29 @@ class OttoRunApp(App):
         except (KeyError, Exception):
             pass  # panel not found or widget error
 
+    def on_mount(self) -> None:
+        """Start the pilot agent when the app mounts (if config is provided)."""
+        if self._config is not None:
+            self.run_pilot()
+
+    @work(thread=True)
+    def run_pilot(self) -> None:
+        """Run the pilot agent in a background thread."""
+        import asyncio
+        from otto.pilot import _run_pilot_core
+
+        loop = asyncio.new_event_loop()
+        try:
+            exit_code = loop.run_until_complete(
+                _run_pilot_core(self._config, self._tasks_path, self._project_dir,
+                                tui_app=self)
+            )
+        except Exception:
+            exit_code = 2
+        finally:
+            loop.close()
+        self.post_message(RunComplete(exit_code=exit_code))
+
     @on(ProgressEvent)
     def on_progress_event(self, event: ProgressEvent) -> None:
         """Handle progress events posted from background threads."""
@@ -480,4 +513,5 @@ class OttoRunApp(App):
     @on(RunComplete)
     def on_run_complete(self, event: RunComplete) -> None:
         """Run finished — exit the TUI."""
+        self._exit_code = event.exit_code
         self.exit(result=event.summary)
