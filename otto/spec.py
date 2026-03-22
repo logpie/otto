@@ -229,7 +229,7 @@ Steps:
                         if thinking:
                             log_lines.append(f"[thinking] {thinking}")
                     elif TextBlock and isinstance(block, TextBlock) and block.text:
-                        print(block.text, flush=True)
+                        # Don't print spec agent narration — log only
                         log_lines.append(block.text)
                     elif ToolUseBlock and isinstance(block, ToolUseBlock):
                         print_agent_tool(block, quiet=True)

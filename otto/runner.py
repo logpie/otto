@@ -1650,7 +1650,9 @@ You are working in {project_dir}. Do NOT create git commits."""
                                 try:
                                     detail = _tool_use_summary(block)[:60]
                                     if block.name == "Bash":
-                                        on_progress("agent_tool", {"name": "Bash", "detail": detail})
+                                        # Skip python -c one-liners (inline verification noise)
+                                        if " -c " not in detail and detail.strip().split()[0] not in ("test",):
+                                            on_progress("agent_tool", {"name": "Bash", "detail": detail})
                                     elif block.name in ("Read", "Glob"):
                                         fname = detail.rsplit("/", 1)[-1] if "/" in detail else detail
                                         on_progress("agent_tool", {"name": "Read", "detail": fname})
@@ -1944,6 +1946,11 @@ async def run_task_with_qa(
                                 agent_log_lines.append(f"● {block.name}  {_tool_use_summary(block)}")
                                 # Emit rich tool calls — include content for display
                                 if block.name in ("Write", "Edit"):
+                                    # Skip empty file creates (e.g., __init__.py)
+                                    if block.name == "Write":
+                                        content = _last_block_inputs.get("content", "")
+                                        if not content.strip():
+                                            continue
                                     evt = {"name": block.name, "detail": _tool_use_summary(block)[:80]}
                                     if block.name == "Edit":
                                         old = _last_block_inputs.get("old_string", "")
@@ -1968,9 +1975,11 @@ async def run_task_with_qa(
                                 elif block.name == "Bash":
                                     cmd = _tool_use_summary(block)[:80]
                                     cmd_start = cmd.lstrip().split()[0] if cmd.strip() else ""
+                                    # Show test/build commands, skip python -c one-liners (inline verification noise)
                                     if cmd_start in ("pytest", "python", "npx", "npm", "jest",
                                                      "make", "cargo", "go", "ruby", "dotnet"):
-                                        emit("agent_tool", name=block.name, detail=cmd)
+                                        if not (cmd_start == "python" and " -c " in cmd):
+                                            emit("agent_tool", name=block.name, detail=cmd)
                             # Note: ToolResultBlock handling moved to top of block loop
 
                 # Persist agent log
