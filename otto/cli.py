@@ -408,9 +408,9 @@ def add(prompt, verify, max_retries, import_file, no_spec):
             for idx, item in enumerate(spec_items, 1):
                 text = rich_escape(spec_text(item))
                 if spec_is_verifiable(item):
-                    console.print(f"  [dim]{idx}.[/dim] {text}")
+                    console.print(f"  [dim]{idx}.[/dim] [success]✓[/success] {text}")
                 else:
-                    console.print(f"  [dim]{idx}.[/dim] {text} [dim](visual)[/dim]")
+                    console.print(f"  [dim]{idx}.[/dim] [info]◉[/info] {text}")
         else:
             error_console.print(f"[warning]⚠[/warning] Spec generation returned empty \u2014 task not created.")
             error_console.print(f"[dim]Retry or use --no-spec to skip spec generation.[/dim]")
