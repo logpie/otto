@@ -676,7 +676,7 @@ async def coding_loop(
     # Log task start
     telemetry.log(TaskStarted(
         task_key=task_key, task_id=task_id,
-        prompt=prompt[:80], strategy=task_plan.strategy,
+        prompt=prompt, strategy=task_plan.strategy,
     ))
 
     # Bridge on_progress events from run_task_with_qa to telemetry dual-write.
@@ -707,11 +707,11 @@ async def coding_loop(
         if research:
             context_parts.append(f"RESEARCH FINDINGS:\n{research}")
 
-        hint = "\n\n".join(context_parts) if context_parts else None
+        factual_context = "\n\n".join(context_parts) if context_parts else None
 
         result = await run_task_with_qa(
             task, config, project_dir, tasks_file,
-            hint=hint, on_progress=_on_progress,
+            hint=factual_context, on_progress=_on_progress,
         )
 
         duration = time.monotonic() - task_start
@@ -1500,24 +1500,16 @@ async def run_task(
                 if test_file_path_val and test_file_path_val.exists():
                     agent_prompt += (
                         f"\n\nACCEPTANCE TESTS: {test_file_path_val.relative_to(effective_dir)}\n"
-                        f"- You may FIX bugs in this file (broken imports, syntax errors, wrong stdlib usage).\n"
-                        f"- You may NOT weaken assertions (change thresholds, remove checks, add skip/xfail).\n"
-                        f"- If a test seems impossible to pass, explain why rather than hacking around it.\n\n"
-                        f"Other test files in tests/ are from previous tasks.\n"
-                        f"- If your changes intentionally break them, update their assertions.\n"
-                        f"- Do NOT delete tests — only update assertions.\n\n"
-                        f"You may also write additional tests to validate your approach."
+                        f"These tests were generated from the spec before implementation.\n"
+                        f"Fix bugs in them if needed (broken imports, wrong API usage).\n"
+                        f"You may also write additional tests."
                     )
             else:
                 agent_prompt = (
-                    f"Verification failed. Fix the issue.\n\n"
+                    f"Verification failed. Here is the output:\n\n"
                     f"{last_error}\n\n"
                     f"Original task: {prompt}\n\n"
-                    f"You are working in {effective_dir}. Do NOT create git commits.\n"
-                    f"Read the failing tests carefully. Is it a code bug or a test bug?\n"
-                    f"- Code bug: fix your implementation.\n"
-                    f"- Test bug (broken import, wrong stdlib usage): fix the test.\n"
-                    f"- Impossible constraint: explain why and implement the best feasible approach."
+                    f"You are working in {effective_dir}. Do NOT create git commits."
                 )
 
             # Run agent + build candidate + verify — catch infrastructure failures
@@ -1660,7 +1652,7 @@ async def run_task(
                         # Don't auto-pass; treat as failure so pilot can retry.
                         if not parallel_mode:
                             _log_warn("Agent made no changes despite spec requirements — retrying")
-                        last_error = "Agent produced no code changes. The spec requirements have not been implemented."
+                        last_error = "No file changes were detected after your session."
                         continue
 
                     # No spec and no changes — genuinely nothing to do
@@ -2269,14 +2261,10 @@ async def run_task_with_qa(
             # Build prompt for retry
             if attempt > 0 and last_error is not None:
                 agent_prompt = (
-                    f"Verification failed. Fix the issue.\n\n"
+                    f"Verification failed. Here is the output:\n\n"
                     f"{last_error}\n\n"
                     f"Original task: {prompt}\n\n"
-                    f"You are working in {project_dir}. Do NOT create git commits.\n"
-                    f"Read the failing tests carefully. Is it a code bug or a test bug?\n"
-                    f"- Code bug: fix your implementation.\n"
-                    f"- Test bug (broken import, wrong stdlib usage): fix the test.\n"
-                    f"- Impossible constraint: explain why and implement the best feasible approach."
+                    f"You are working in {project_dir}. Do NOT create git commits."
                 )
 
             # Run coding agent
@@ -2407,11 +2395,7 @@ async def run_task_with_qa(
 
             if no_changes:
                 if spec:
-                    last_error = (
-                        "No code changes detected. The spec has not been implemented yet. "
-                        "Read the spec carefully and implement it. Do NOT add unnecessary "
-                        "improvements or padding — implement exactly what the spec asks for."
-                    )
+                    last_error = "No file changes were detected after your session."
                     continue
                 # No spec + no changes = nothing to do, pass
                 subprocess.run(["git", "checkout", default_branch], cwd=project_dir, capture_output=True)
@@ -2507,12 +2491,17 @@ async def run_task_with_qa(
                     )
                     return _result(False, "failed", error=f"squash commit failed: {stderr}")
 
-                # Build diff summary
+                # Build diff — full diff for QA, stat for display/telemetry
                 diff_stat = subprocess.run(
                     ["git", "diff", "--stat", base_sha, "HEAD"],
                     cwd=project_dir, capture_output=True, text=True,
                 )
                 diff_summary = diff_stat.stdout.strip() if diff_stat.returncode == 0 else ""
+                full_diff = subprocess.run(
+                    ["git", "diff", base_sha, "HEAD"],
+                    cwd=project_dir, capture_output=True, text=True,
+                )
+                diff_for_qa = full_diff.stdout.strip() if full_diff.returncode == 0 else diff_summary
 
                 # Write verify.log for read_verify_output
                 try:
@@ -2525,7 +2514,7 @@ async def run_task_with_qa(
                 if spec:
                     emit("phase", name="qa", status="running")
                     qa_start = time.monotonic()
-                    qa_result = await run_qa_agent(task, config, project_dir, diff_summary,
+                    qa_result = await run_qa_agent(task, config, project_dir, diff_for_qa,
                                                       on_progress=on_progress)
                     qa_elapsed = round(time.monotonic() - qa_start, 1)
                     phase_timings["qa"] = phase_timings.get("qa", 0) + qa_elapsed

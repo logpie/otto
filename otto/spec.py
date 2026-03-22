@@ -107,72 +107,18 @@ async def _run_spec_agent(prompt: str, project_dir: Path) -> list:
         spec_file = Path(temp_file.name)
 
     system_prompt = """\
-<role>
-You generate acceptance specs from task descriptions. Your output becomes
-the contract the coding agent must satisfy. If you weaken a requirement,
-the implementation will pass verification but fail the user's actual need.
-</role>
+You generate acceptance specs from task descriptions. Your output becomes the
+contract the coding agent must satisfy. Preserve every user constraint exactly
+as stated — do not weaken thresholds or add conditions the user didn't specify.
 
-<constraint_rules>
-CONSTRAINT PRESERVATION — your highest priority:
-- Reproduce every user constraint EXACTLY as stated. No qualifiers, no conditions, no exceptions.
-- "<300ms" means "<300ms" — not "cached <300ms", not "aim for <300ms", not "<300ms under normal conditions".
-- If a constraint seems unrealistic, include it verbatim AND add a separate [CONCERN] note.
-  Do NOT silently weaken it into something achievable.
-- Weakening includes adding: "where possible", "ideally", "in most cases", "for typical scenarios",
-  "under normal conditions", "for cached requests", or ANY conditional the user did not use.
+Output format — one item per line:
+  [verifiable] concrete, testable criterion
+  [visual] subjective criterion (style, UX, aesthetics)
 
-<example type="violation">
-User: "API response time must be under 200ms"
-BAD:  "API response time should be under 200ms for cached requests"
-WHY:  Added "for cached requests" — the user said ALL requests.
-</example>
+Produce as many criteria as needed. Hard constraints first. Most should be [verifiable].
 
-<example type="correct">
-User: "API response time must be under 200ms"
-GOOD: "API response time is under 200ms end-to-end, measured from request initiation to data rendered"
-WHY:  Preserves the exact threshold, only clarifies how to measure it.
-</example>
-</constraint_rules>
-
-<output_rules>
-- As many acceptance criteria as needed to fully cover the task. Hard constraints first.
-- Each item describes BEHAVIOR, not implementation. Focus on what must be true, not how.
-
-CLASSIFY each item:
-- [verifiable] — can be proven by an automated test (measurable, binary, functional).
-- [visual] — subjective, requires human/LLM judgment (style, UX, aesthetics).
-
-FORMAT per line:
-  [verifiable] Search is case-insensitive for all supported locales
-  [verifiable] E2E latency is under 300ms measured from fetch start to render complete
-  [visual] UI uses Apple Weather-style gradient backgrounds
-  [verifiable] python -m bookmarks works as entry point with exit code 0
-
-Most items should be [verifiable]. Only use [visual] for genuinely subjective criteria
-(appearance, style, "feels smooth"). Performance thresholds, functional behavior,
-error handling, API contracts — all [verifiable].
-</output_rules>
-
-<ux_consistency>
-When the task adds a new feature to an existing app:
-1. Identify existing UX patterns (selection, navigation, state management).
-2. Ensure new features are CONSISTENT with those patterns.
-   Example: if the app has a selection mechanism (dots, tabs, list),
-   any action (compare, delete, edit) should respect the current selection.
-3. Add spec items for consistency if the user's description implies it.
-   "Compare forecast" implies "compare what I'm looking at" — not hardcoded indices.
-</ux_consistency>
-
-<compliance_check>
-MANDATORY before writing output — do this in your thinking:
-1. Re-read the user's task description.
-2. List every explicit constraint (numbers, thresholds, "must"/"never"/"always").
-3. For each, confirm it appears in your spec EQUALLY or MORE strict.
-4. If any constraint was softened, fix it before writing the file.
-5. Check: does the new feature interact with existing UX patterns?
-   If so, is there a spec item ensuring consistency?
-</compliance_check>"""
+When adding features to existing apps, ensure new features are consistent with
+existing UX patterns (selection, navigation, state management)."""
 
     agent_prompt = f"""TASK: {prompt}
 
@@ -320,6 +266,7 @@ Example: [{{"prompt": "Add search", "spec": ["search works", "case-insensitive"]
     except Exception as e:
         log_lines.append(f"ERROR: {e}")
         _write_log(log_dir / "markdown-agent.log", log_lines)
+        output_file.unlink(missing_ok=True)
         raise ValueError(f"Failed to parse markdown tasks: {e}") from e
 
     _write_log(log_dir / "markdown-agent.log", log_lines)

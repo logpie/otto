@@ -460,35 +460,23 @@ Your working directory is: {tmp_dir}
 Write the test file to: {tmp_dir}/{test_rel}
 
 IMPORTANT: Everything you need is in the SPEC and PROJECT CONTEXT above.
-Start writing the test file IMMEDIATELY — do NOT explore broadly.
+Start with the test file using the provided context; avoid broad exploration.
 During self-review, if you need to verify specific details (exact function
 signatures, enum values, flag names), you may read the relevant source file.
 
 Requirements:
 - Test EXACTLY what the spec says — no more, no less.
 - Each spec item should have at least one test that directly verifies it.
-- Test the public interface (CLI via subprocess, library via imports).
-- Use subprocess.run() for CLI testing, not CliRunner.
 - Tests should fail before implementation and pass after correct implementation.
 - Be independent and hermetic (use tmp_path, no shared state).
-- Do NOT invent requirements beyond the spec.
-- NO trivial tests. Use pytest.mark.parametrize where appropriate.
 
 CRITICAL IMPORT RULE:
 - For NEW functions/classes that don't exist yet: import INSIDE each test function, not at module level.
   Example: def test_search(): from bookmarks import search_bookmarks
 - For EXISTING functions (listed in project context): import at module level is fine.
 - This ensures pytest can collect the tests even before the feature is implemented.
-- Module-level imports of non-existent names cause collection errors which break the pipeline.
 
-Steps:
-1. WRITE the test file immediately (don't explore first)
-2. VALIDATE: python -c "import ast; ast.parse(open('<test_file>').read()); print('OK')"
-3. If syntax error: fix and re-validate
-4. VALIDATE: python -m pytest --collect-only <test_file>
-5. If collection fails: read relevant files to debug, fix, re-validate
-6. SELF-REVIEW: Could a lazy implementation pass these tests? Strengthen if needed.
-7. If improved in step 6, re-validate (steps 2-4)
+Write the tests, validate they collect cleanly, and self-review: could a lazy implementation pass them?
 """
     try:
         # Create tests/ subdirectory in temp dir
@@ -627,7 +615,7 @@ def validate_generated_tests(
     if collect.returncode != 0:
         return TestValidationResult(
             status="collection_error",
-            error_output=(collect.stdout + collect.stderr)[:2000],
+            error_output=collect.stdout + collect.stderr,
         )
 
     # Check if any tests were collected
@@ -672,14 +660,14 @@ def validate_generated_tests(
         failed = int(failed_match.group(1))
 
     if passed == 0 and failed == 0:
-        return TestValidationResult(status="no_tests", error_output=output[:2000])
+        return TestValidationResult(status="no_tests", error_output=output)
 
     if failed > 0:
         return TestValidationResult(
             status="tdd_ok",
             passed=passed,
             failed=failed,
-            error_output=output[:2000],
+            error_output=output,
         )
 
     return TestValidationResult(
@@ -815,7 +803,6 @@ RULES:
 - Use CONSISTENT conventions across all test files.
 - Share fixtures via conftest.py. Each file must be independently runnable.
 - Test the public interface (CLI via subprocess, library via imports).
-- Use subprocess.run() for CLI testing, not CliRunner.
 - Tests should fail before implementation and pass after correct implementation.
 - Be independent and hermetic (use tmp_path, no shared state).
 - Do NOT invent requirements beyond the spec.
@@ -958,8 +945,7 @@ Write the test file to: {out_file}
 
 Rules — "test like a user":
 - Test the system the way a real user would use it:
-  - CLI apps: use subprocess.run() to invoke the actual command. Check stdout, stderr, exit codes.
-    Do NOT use in-process test runners (CliRunner, invoke()) — they skip the real entry point.
+  - CLI apps: invoke the actual command and check stdout, stderr, and exit codes.
   - Libraries/APIs: import and call the public interface as a consumer would.
   - Web apps: make HTTP requests to the actual server endpoint.
 - Tests must be hermetic and deterministic — no external network calls
@@ -974,19 +960,10 @@ CRITICAL IMPORT RULE:
 - This ensures pytest can collect the tests even before the feature is implemented.
 - Module-level imports of non-existent names cause collection errors which break the pipeline.
 
-Follow these steps:
-1. Write the test file
-2. VALIDATE syntax: python -c "import ast; ast.parse(open('<test_file>').read()); print('OK')"
-3. If syntax error: fix and re-validate
-4. VALIDATE collection: python -m pytest --collect-only <test_file>
-5. If collection fails: fix and re-validate
-6. SELF-REVIEW: Read your tests back and ask:
-   - Are any tests trivial (would pass with a broken implementation)? Strengthen them.
-   - Could a lazy implementation (return empty list, hardcoded value) pass? Add tests that catch it.
-   - Do assertions verify actual behavior or just check types/existence? Tighten them.
-   - Unsure about exact API details? Read the specific source file to verify.
-7. If you improved tests in step 6, re-run validation (steps 2-5)
-Do NOT finish until validation passes AND self-review is done."""
+Write the tests, validate syntax and collection, and self-review: could a lazy
+implementation pass them? If you improve the tests, re-run validation before
+finishing. Use the specific source file only when you need to verify exact API
+details."""
 
     try:
         agent_opts = ClaudeAgentOptions(
@@ -1079,7 +1056,7 @@ The following features were implemented:
 
 PROJECT DIRECTORY: {project_dir}
 
-RELEVANT SOURCE FILES (already read for you — start writing tests immediately):
+RELEVANT SOURCE FILES (already read for you — enough context to start writing tests):
 {source_context}
 {example_section}{ripple_section}{integ_design_section}
 TEST FRAMEWORK: {framework}
@@ -1105,8 +1082,7 @@ Include:
 - Real user scenarios: what would a user actually do in a single session? Simulate that.
 
 Rules — "test like a user":
-- CLI apps: use subprocess.run() to invoke the actual command. Check stdout, stderr, exit codes.
-  Do NOT use in-process test runners (CliRunner, invoke()).
+- CLI apps: invoke the actual command and check stdout, stderr, and exit codes.
 - Libraries/APIs: import and call the public interface as a consumer would.
 - Tests must be hermetic and deterministic — no external network calls
 - The tests should be runnable with the standard test command for {framework}
@@ -1118,19 +1094,10 @@ CRITICAL IMPORT RULE:
 - This ensures pytest can collect the tests even if run before all features are merged.
 - Module-level imports of non-existent names cause collection errors which break the pipeline.
 
-Follow these steps:
-1. Write the test file
-2. VALIDATE syntax: python -c "import ast; ast.parse(open('<test_file>').read()); print('OK')"
-3. If syntax error: fix and re-validate
-4. VALIDATE collection: python -m pytest --collect-only <test_file>
-5. If collection fails: fix and re-validate
-6. SELF-REVIEW: Read your tests back and ask:
-   - Are any tests trivial (would pass with a broken implementation)? Strengthen them.
-   - Could a lazy implementation (return empty list, hardcoded value) pass? Add tests that catch it.
-   - Do assertions verify actual behavior or just check types/existence? Tighten them.
-   - Unsure about exact API details? Read the specific source file to verify.
-7. If you improved tests in step 6, re-run validation (steps 2-5)
-Do NOT finish until validation passes AND self-review is done."""
+Write the tests, validate syntax and collection, and self-review: do they
+exercise real cross-feature behavior, or could a lazy implementation still
+pass? If you improve the tests, re-run validation before finishing. Use the
+specific source file only when you need to verify exact API details."""
 
     try:
         agent_opts = ClaudeAgentOptions(

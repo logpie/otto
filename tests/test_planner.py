@@ -22,7 +22,6 @@ class TestTaskPlan:
         assert tp.task_key == "abc123"
         assert tp.strategy == "direct"
         assert tp.research_query == ""
-        assert tp.hint == ""
         assert tp.skip_qa is False
         assert tp.effort == "high"
 
@@ -75,7 +74,7 @@ class TestParsePlanJson:
     def test_valid_json(self):
         raw = json.dumps({
             "batches": [
-                {"tasks": [{"task_key": "abc123", "strategy": "direct", "hint": "use pytest"}]},
+                {"tasks": [{"task_key": "abc123", "strategy": "direct"}]},
                 {"tasks": [{"task_key": "def456"}]},
             ],
             "learnings": ["API needs auth"],
@@ -84,7 +83,6 @@ class TestParsePlanJson:
         assert plan is not None
         assert plan.total_tasks == 2
         assert plan.batches[0].tasks[0].task_key == "abc123"
-        assert plan.batches[0].tasks[0].hint == "use pytest"
         assert plan.batches[1].tasks[0].task_key == "def456"
         assert plan.learnings == ["API needs auth"]
 
@@ -309,7 +307,7 @@ class TestReplan:
         ctx.add_failure(TaskResult(task_key="t1", success=False, error="tests failed"))
 
         remaining = ExecutionPlan(batches=[
-            Batch(tasks=[TaskPlan(task_key="t2", hint="try approach B")]),
+            Batch(tasks=[TaskPlan(task_key="t2")]),
         ])
 
         import builtins

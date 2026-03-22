@@ -23,7 +23,6 @@ class TaskPlan:
     task_key: str
     strategy: str = "direct"      # "direct" | "research_first"
     research_query: str = ""      # query for research agent (if strategy=research_first)
-    hint: str = ""                # hint passed to coding agent
     skip_qa: bool = False         # skip QA for trivial tasks
     effort: str = "high"          # agent effort level
 
@@ -68,7 +67,7 @@ def parse_plan_json(raw: str) -> ExecutionPlan | None:
         "batches": [
             {
                 "tasks": [
-                    {"task_key": "abc123", "strategy": "direct", "hint": "..."},
+                    {"task_key": "abc123", "strategy": "direct"},
                     ...
                 ]
             },
@@ -128,7 +127,6 @@ def parse_plan_json(raw: str) -> ExecutionPlan | None:
                 task_key=task_key,
                 strategy=tp_data.get("strategy", "direct"),
                 research_query=tp_data.get("research_query", ""),
-                hint=tp_data.get("hint", ""),
                 skip_qa=bool(tp_data.get("skip_qa", False)),
                 effort=tp_data.get("effort", "high"),
             ))
@@ -233,7 +231,6 @@ Rules:
 - Independent tasks SHOULD be in the same batch (parallel execution)
 - Keep it simple — most tasks are "direct" strategy
 - Only use "research_first" when the task involves unfamiliar APIs/libraries
-- Do NOT include hints — the coding agent has full context and decides its own approach
 """
 
 
@@ -374,7 +371,7 @@ RESEARCH FINDINGS:
 REMAINING TASKS:
 {chr(10).join(remaining_tasks)}
 
-Update strategies based on what we learned. Do NOT include hints.
+Update strategies based on what we learned.
 Output the JSON execution plan for REMAINING tasks only."""
 
     try:

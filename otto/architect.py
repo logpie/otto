@@ -61,13 +61,7 @@ so that independent agents make consistent decisions.
 TASKS THAT WILL BE IMPLEMENTED:
 {task_summaries}
 {existing_section}
-EXPLORE the codebase:
-1. Read the main source files (models, store, CLI, __main__.py)
-2. Read existing test files to understand test patterns
-3. Run --help if there's a CLI
-4. Check the data storage format
-
-Then write analysis files to: {project_dir}/otto_arch/
+Explore the codebase and write analysis files to: {project_dir}/otto_arch/
 
 Write these files:
 - codebase.md: architecture overview, module map, data flow

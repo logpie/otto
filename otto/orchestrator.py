@@ -242,8 +242,8 @@ async def run_per(
 
         try:
             _print_summary(results, run_duration, total_cost=context.total_cost)
-        except Exception:
-            pass
+        except Exception as exc:
+            console.print(f"  [yellow]Warning: summary display error: {exc}[/yellow]")
 
         # Record run history
         _record_run_history(project_dir, results, run_duration, context.total_cost)
