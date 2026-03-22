@@ -110,11 +110,53 @@ def check_cache_info_is_consistent():
     assert info.hits == 1
 
 
+def check_different_keys_not_serialized():
+    """Spawn 10 threads each calling a DIFFERENT key with 0.1s sleep.
+    If calls are properly parallel: ~0.1-0.2s total.
+    If calls are serialized (naive global lock during compute): ~1.0s total.
+    Assert < 0.5s to catch serialization with generous margin."""
+
+    @lru_cache(maxsize=32)
+    def slow(value):
+        time.sleep(0.1)
+        return value * 2
+
+    barrier = threading.Barrier(10)
+    results = {}
+    lock = threading.Lock()
+
+    def worker(key):
+        barrier.wait()
+        result = slow(key)
+        with lock:
+            results[key] = result
+
+    start = time.perf_counter()
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(10)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    elapsed = time.perf_counter() - start
+
+    # Verify correctness
+    assert len(results) == 10
+    for i in range(10):
+        assert results[i] == i * 2, f"Wrong result for key {i}: {results[i]}"
+
+    # Verify concurrency — different keys must not be serialized
+    assert elapsed < 0.5, (
+        f"Different-key calls took {elapsed:.2f}s (expected <0.5s). "
+        f"Calls appear serialized — the fix must not hold a global lock during compute."
+    )
+
+
 report("ttl_cache allows one miss and 99 hits under 100-thread contention", check_ttl_cache_stampede)
 report("lru_cache also suppresses cache stampedes", check_lru_cache_stampede)
 report("different arguments still populate distinct cache entries", check_distinct_arguments_still_cache_independently)
 report("subsequent calls after the first wave are immediate cache hits", check_post_wave_cache_hit)
 report("cache_info remains internally consistent", check_cache_info_is_consistent)
+report("different-key calls run concurrently, not serialized", check_different_keys_not_serialized)
 
 raise SystemExit(1 if failures else 0)
 PY

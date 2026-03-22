@@ -51,32 +51,56 @@ if $COMPARE_MODE; then
 
     python3 -c "
 import json, sys
+
 a = json.load(open('$file_a'))
 b = json.load(open('$file_b'))
 
-print(f'  {\"Metric\":<30} {\"A\":>10} {\"B\":>10} {\"Delta\":>10}')
+# Normalize key names (old format used otto_pass, new uses runner_pass)
+def get_summary(d, key):
+    s = d.get('summary', {})
+    # Try runner_ first, fall back to otto_
+    return s.get(key, s.get(key.replace('runner_', 'otto_'), 0))
+
+def get_proj_field(p, key):
+    return p.get(key, p.get(key.replace('runner_', 'otto_'), '—'))
+
+ra = a.get('summary', {}).get('runner', a.get('projects', {}).get(list(a.get('projects', {}).keys() or [''])[0], {}).get('runner', 'A'))
+rb = b.get('summary', {}).get('runner', b.get('projects', {}).get(list(b.get('projects', {}).keys() or [''])[0], {}).get('runner', 'B'))
+
+print(f'  {\"Metric\":<30} {ra:>10} {rb:>10} {\"Delta\":>10}')
 print(f'  {\"─\"*30} {\"─\"*10} {\"─\"*10} {\"─\"*10}')
 
 for key in ['runner_pass_rate', 'verify_pass_rate', 'false_pass_rate', 'avg_cost', 'avg_time_s', 'total_cost']:
-    va = a.get('summary', {}).get(key, 0)
-    vb = b.get('summary', {}).get(key, 0)
+    va = get_summary(a, key)
+    vb = get_summary(b, key)
+    if va is None: va = 0
+    if vb is None: vb = 0
     delta = vb - va
     sign = '+' if delta > 0 else ''
-    if isinstance(va, float):
-        print(f'  {key:<30} {va:>10.2f} {vb:>10.2f} {sign}{delta:>9.2f}')
+    label = key.replace('runner_', '').replace('_', ' ')
+    if isinstance(va, float) or isinstance(vb, float):
+        print(f'  {label:<30} {va:>10.1f} {vb:>10.1f} {sign}{delta:>9.1f}')
     else:
-        print(f'  {key:<30} {va:>10} {vb:>10} {sign}{delta:>9}')
+        print(f'  {label:<30} {va:>10} {vb:>10} {sign}{delta:>9}')
 
 print()
 print('  Per-project comparison:')
-print(f'  {\"Project\":<35} {\"A\":>8} {\"B\":>8} {\"A verify\":>8} {\"B verify\":>8}')
+print(f'  {\"Project\":<35} {ra:>8} {rb:>8} {ra+\" vfy\":>8} {rb+\" vfy\":>8}')
 print(f'  {\"─\"*35} {\"─\"*8} {\"─\"*8} {\"─\"*8} {\"─\"*8}')
 
 all_projects = sorted(set(list(a.get('projects', {}).keys()) + list(b.get('projects', {}).keys())))
 for p in all_projects:
     pa = a.get('projects', {}).get(p, {})
     pb = b.get('projects', {}).get(p, {})
-    print(f'  {p:<35} {pa.get(\"runner_pass\", \"—\"):>8} {pb.get(\"runner_pass\", \"—\"):>8} {pa.get(\"verify_pass\", \"—\"):>8} {pb.get(\"verify_pass\", \"—\"):>8}')
+    rpa = get_proj_field(pa, 'runner_pass')
+    rpb = get_proj_field(pb, 'runner_pass')
+    vpa = pa.get('verify_pass', '—')
+    vpb = pb.get('verify_pass', '—')
+    # Highlight verify differences
+    marker = ''
+    if vpa != '—' and vpb != '—' and vpa != vpb:
+        marker = ' ◀'
+    print(f'  {p:<35} {rpa:>8} {rpb:>8} {vpa:>8} {vpb:>8}{marker}')
 "
     exit 0
 fi
