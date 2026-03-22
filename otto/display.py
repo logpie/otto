@@ -323,15 +323,27 @@ class TaskDisplay:
             or (text.startswith("- \u2705") and "PASS" not in text[:5])  # "- ✅ Component renders"
         )
 
+        # Detect standalone pass/fail checks: "✓ description" without a number
+        is_standalone_check = (
+            len(clean) > 2
+            and clean[0] in ("\u2713", "\u2717", "\u2705", "\u274c")
+            and not is_numbered_check  # not "✓ 4. desc"
+            and not is_spec_header     # not "Spec N —"
+        )
+
         with self._lock:
-            if is_spec_header or is_table_row or is_numbered_check:
+            # Count specs: only lines with a clear pass/fail signal
+            if is_table_row or is_numbered_check or is_standalone_check:
                 self._qa_spec_count += 1
-                if has_pass or (is_numbered_check and clean[0] in ("\u2713", "\u2705")):
+                check_pass = has_pass or clean[0] in ("\u2713", "\u2705")
+                if check_pass:
                     self._qa_pass_count += 1
             elif is_result_line and has_pass:
+                self._qa_spec_count += 1
                 self._qa_pass_count += 1
             elif is_result_line and has_fail:
-                pass  # don't double-count, just track
+                self._qa_spec_count += 1
+            # Spec headers (Spec N — Title) are just labels, don't count
 
             # Suppress noise
             if "VERDICT" in text:
