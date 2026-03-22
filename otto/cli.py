@@ -412,14 +412,20 @@ def add(prompt, verify, max_retries, import_file, no_spec):
             spec_table.add_column("#", style="dim", width=3, justify="right")
             spec_table.add_column("", width=2)  # icon
             spec_table.add_column("Criterion", ratio=1, no_wrap=False)
-            for idx, item in enumerate(spec_items, 1):
+            display_idx = 0
+            for item in spec_items:
                 text = spec_text(item)
-                # Truncate to ~80 chars for the table
+                # Skip preamble lines (titles, context, separators)
+                if text.startswith(("Acceptance Criteria", "Context:", "====", "----")):
+                    continue
+                if text.startswith(("Next.js", "React", "TypeScript", "Tests use")):
+                    continue
+                display_idx += 1
                 short = text[:80] + "..." if len(text) > 80 else text
                 if spec_is_verifiable(item):
-                    spec_table.add_row(str(idx), "\u25b8", rich_escape(short))
+                    spec_table.add_row(str(display_idx), "\u25b8", rich_escape(short))
                 else:
-                    spec_table.add_row(str(idx), "[info]\u25c9[/info]", rich_escape(short))
+                    spec_table.add_row(str(display_idx), "[info]\u25c9[/info]", rich_escape(short))
             console.print(spec_table)
             console.print()
         else:
