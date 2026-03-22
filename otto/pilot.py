@@ -972,6 +972,12 @@ Before calling finish_run, verify:
         _last_tool_name = None
         _results_file = project_dir / "otto_logs" / "pilot_results.jsonl"
         _results_read_pos = 0
+        # Truncate JSONL to prevent stale events from previous runs
+        _results_file.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            _results_file.write_text("")
+        except OSError:
+            pass
         _debug_log = project_dir / "otto_logs" / "pilot_debug.log"
         _debug_log.parent.mkdir(parents=True, exist_ok=True)
         _debug_fh = open(_debug_log, "w")
@@ -1740,6 +1746,12 @@ Before calling finish_run, verify:
             # Side-channel result file from MCP tools
             _results_file = project_dir / "otto_logs" / "pilot_results.jsonl"
             _results_read_pos = 0  # track how far we've read
+            # Truncate JSONL to prevent stale events from previous runs
+            _results_file.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                _results_file.write_text("")
+            except OSError:
+                pass
             # Structured debug log with timestamps and phases
             _debug_log = project_dir / "otto_logs" / "pilot_debug.log"
             _debug_log.parent.mkdir(parents=True, exist_ok=True)
