@@ -204,7 +204,12 @@ class TaskDisplay:
         if any(p in raw_detail for p in _INTERNAL_PATTERNS):
             return
 
-        detail = _shorten_path(raw_detail)
+        # Shorten paths for file operations, not for Bash commands
+        # _shorten_path strips path prefixes which corrupts command text
+        if name not in ("Bash",):
+            detail = _shorten_path(raw_detail)
+        else:
+            detail = raw_detail
 
         # Also skip after shortening (catches relative paths)
         if any(p in detail for p in _INTERNAL_PATTERNS):
@@ -222,7 +227,7 @@ class TaskDisplay:
                 return
             self._last_tool_key = tool_key
 
-        short = rich_escape(_shorten_path(detail)[:68])
+        short = rich_escape(detail[:68]) if name == "Bash" else rich_escape(_shorten_path(detail)[:68])
 
         # Breathing room before Write/Edit/Bash (they have inline content)
         if name in ("Write", "Edit", "Bash"):
@@ -280,11 +285,17 @@ class TaskDisplay:
         is_spec_header = text.startswith("###") or text.startswith("**Spec")
         is_table_row = text.startswith("|") and (has_pass or has_fail)
         is_table_header = text.startswith("|") and ("Spec" in text[:15] or "Check" in text[:20] or "---" in text[:5])
+        # Detect "✓ N." or "✗ N." pattern (e.g. "✓ 4. LIFO order  Pushed...")
+        is_numbered_check = (
+            len(clean) > 2
+            and clean[0] in ("\u2713", "\u2717", "\u2705", "\u274c")
+            and clean[1:].lstrip().split(".")[0].strip().isdigit()
+        )
 
         with self._lock:
-            if is_spec_header or is_table_row:
+            if is_spec_header or is_table_row or is_numbered_check:
                 self._qa_spec_count += 1
-                if has_pass:
+                if has_pass or (is_numbered_check and clean[0] in ("\u2713", "\u2705")):
                     self._qa_pass_count += 1
             elif has_pass and text.startswith(("**PASS", "PASS")):
                 self._qa_pass_count += 1
@@ -314,6 +325,13 @@ class TaskDisplay:
             else:
                 desc = parts[0][:55] if parts else clean[:55]
             icon = "[green]\u2713[/green]" if has_pass else "[red]\u2717[/red]"
+            self._console.print(f"      {icon} [dim]{rich_escape(desc)}[/dim]")
+
+        elif is_numbered_check:
+            # "✓ 4. LIFO order  Pushed..." or "✗ 2. Edge case..."
+            check_pass = clean[0] in ("\u2713", "\u2705")
+            desc = clean[1:].lstrip().lstrip("0123456789").lstrip(".").strip()[:62]
+            icon = "[green]\u2713[/green]" if check_pass else "[red]\u2717[/red]"
             self._console.print(f"      {icon} [dim]{rich_escape(desc)}[/dim]")
 
         elif has_pass and text.startswith(("**PASS", "PASS")):

@@ -1641,7 +1641,7 @@ You are working in {project_dir}. Do NOT create git commits."""
                                             "Spec ", "spec "]):
                                         # Clean up and emit as QA finding
                                         try:
-                                            on_progress("qa_finding", {"text": line_s[:80]})
+                                            on_progress("qa_finding", {"text": line_s[:200]})
                                         except Exception:
                                             pass
                         elif ToolUseBlock and isinstance(block, ToolUseBlock):

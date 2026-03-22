@@ -232,7 +232,7 @@ Steps:
                         print(block.text, flush=True)
                         log_lines.append(block.text)
                     elif ToolUseBlock and isinstance(block, ToolUseBlock):
-                        print_agent_tool(block)
+                        print_agent_tool(block, quiet=True)
                         log_lines.append(f"● {block.name}  {_tool_use_summary(block)}")
     except Exception as e:
         print(f"  spec agent error: {e}", flush=True)

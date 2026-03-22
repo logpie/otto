@@ -58,19 +58,26 @@ def capture_output(func, *args, **kwargs) -> str:
     """
     import otto.display as display_mod
     import otto.pilot as pilot_mod
+    import otto.theme as theme_mod
 
     buf = io.StringIO()
     test_console = Console(file=buf, highlight=False, color_system=None)
 
-    old_display_console = display_mod.console
-    old_pilot_console = pilot_mod.console
+    # Swap console everywhere it's imported as a name binding
+    old_theme = theme_mod.console
+    old_display = display_mod.console
+    old_pilot = getattr(pilot_mod, 'console', None)
+    theme_mod.console = test_console
     display_mod.console = test_console
-    pilot_mod.console = test_console
+    if old_pilot is not None:
+        pilot_mod.console = test_console
     try:
         func(*args, **kwargs)
     finally:
-        display_mod.console = old_display_console
-        pilot_mod.console = old_pilot_console
+        theme_mod.console = old_theme
+        display_mod.console = old_display
+        if old_pilot is not None:
+            pilot_mod.console = old_pilot
     return buf.getvalue()
 
 
