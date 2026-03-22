@@ -1,0 +1,57 @@
+tasks:
+- id: 1
+  key: abc7d5f2df21
+  prompt: "Add an inRange(number, start, end?) utility function to the radash number\
+    \ module. Equivalent to lodash's _.inRange \u2014 checks if the given number is\
+    \ between two bounds. Start is inclusive, end is exclusive. If only two args provided\
+    \ (number, end), range is [0, end). Handles the case where start > end by swapping\
+    \ the bounds. Returns false for non-number inputs (null, undefined, NaN). Export\
+    \ from the main module. Add comprehensive tests: basic range check, two-arg form,\
+    \ inverted range, boundary values (inclusive start, exclusive end), non-number\
+    \ inputs, negative ranges, zero edge cases. Run tests with: npx jest --forceExit"
+  status: passed
+  spec:
+  - text: '`inRange` is exported from `src/number.ts` and re-exported from `src/index.ts`,
+      so that `import { inRange } from ''radash''` (or equivalent local import) resolves
+      the function.'
+    verifiable: true
+    test_hint: import { inRange } from the main module index, assert typeof inRange
+      === 'function'
+  - text: "Three-arg form: `inRange(number, start, end)` returns true when `start\
+      \ <= number < end`. Start is inclusive, end is exclusive. E.g., `inRange(2,\
+      \ 1, 4)` \u2192 true, `inRange(4, 1, 4)` \u2192 false (exclusive end), `inRange(1,\
+      \ 1, 4)` \u2192 true (inclusive start)."
+    verifiable: true
+    test_hint: assert inRange(2,1,4)===true, inRange(4,1,4)===false, inRange(1,1,4)===true
+  - text: "Returns false for non-number inputs: `inRange(null, 1, 5)` \u2192 false,\
+      \ `inRange(undefined, 1, 5)` \u2192 false, `inRange(NaN, 1, 5)` \u2192 false."
+    verifiable: true
+    test_hint: assert each of these returns exactly false (not falsy, but false)
+  - text: "Negative ranges work correctly. E.g., `inRange(-3, -5, -1)` \u2192 true,\
+      \ `inRange(-5, -5, -1)` \u2192 true (inclusive start), `inRange(-1, -5, -1)`\
+      \ \u2192 false (exclusive end)."
+    verifiable: true
+    test_hint: assert inRange(-3,-5,-1)===true, inRange(-5,-5,-1)===true, inRange(-1,-5,-1)===false
+  - text: 'Comprehensive tests exist in `src/tests/number.test.ts` covering all specified
+      categories: basic range check, two-arg form, inverted range, boundary values
+      (inclusive start, exclusive end), non-number inputs (null, undefined, NaN),
+      negative ranges, and zero edge cases. All tests pass when run with `npx jest
+      --forceExit`.'
+    verifiable: true
+    test_hint: run `npx jest --forceExit`, assert exit code 0 and no test failures
+  feedback: "Project patterns to follow:\n- Add the `inRange` function to `src/number.ts`\
+    \ (currently has `toFloat` and `toInt`)\n- Export it from `src/index.ts` alongside\
+    \ existing number exports: `export { toFloat, toInt } from './number'` \u2192\
+    \ add `inRange` to that line\n- Add tests in `src/tests/number.test.ts` using\
+    \ the existing pattern: `import * as _ from '..'`, then use `describe()` + `test()`\
+    \ blocks with Chai-style assertions\n- Function signature: `inRange(number: number,\
+    \ startOrEnd: number, end?: number): boolean`\n- When only 2 args: range is [0,\
+    \ startOrEnd)\n- When 3 args: range is [start, end)\n- If start > end, swap bounds\n\
+    - Return false for non-number inputs (null, undefined, NaN)\n- Run tests with:\
+    \ npx jest --forceExit"
+  attempts: 1
+  session_id: 3dc2991b-2c5e-4ec3-9b6f-7678fdde4c11
+  merged_sha: c858c99e1d98df4b728649077bedeb0c289e27f7
+  task_fingerprint: 5db0f657a738eb13
+  cost_usd: 0.7597897499999999
+  duration_s: 197.2

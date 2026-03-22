@@ -1,0 +1,56 @@
+tasks:
+- id: 1
+  key: 1f671aab8daf
+  prompt: 'Fix the parseFilename bug from issue #283. Calling parseFilename without
+    an options object should work normally, but the current implementation crashes
+    when the second argument is omitted. Update the implementation and add tests that
+    cover calls with no options as well as existing strict-mode behavior. Run tests
+    with: npm test'
+  status: passed
+  spec:
+  - text: "Calling parseFilename with only a path string and no second argument does\
+      \ not throw \u2014 it returns the expected filename string (or undefined for\
+      \ inputs with no filename)."
+    verifiable: true
+    test_hint: call parseFilename("/path/to/file.txt") without a second arg, assert
+      it returns "file.txt" and does not throw
+  - text: When called without the options object, parseFilename uses non-strict matching
+      by default (FILENAME_REGEX), so any trailing path segment is returned as the
+      filename.
+    verifiable: true
+    test_hint: parseFilename("http://example.com/path/to/.hidden") returns ".hidden"
+      (non-strict allows segments without a dot-separated extension)
+  - text: 'Existing strict-mode behavior is preserved: parseFilename(url, { strict:
+      true }) uses FILENAME_STRICT_REGEX and only matches segments containing a dot-separated
+      extension.'
+    verifiable: true
+    test_hint: 'parseFilename("http://example.com/path/to/.hidden", { strict: true
+      }) returns undefined; parseFilename("http://example.com/path/to/file.txt", {
+      strict: true }) returns "file.txt"'
+  - text: New tests exist that explicitly cover calling parseFilename with no options
+      argument, for multiple URL/path inputs (not just one).
+    verifiable: true
+    test_hint: grep test file for parseFilename calls that have exactly one argument
+      (no second arg); confirm at least 2 distinct input cases
+  - text: All tests pass when run via `npm test`.
+    verifiable: true
+    test_hint: run `npm test`, assert exit code 0 and no test failures
+  - text: "The fix is in the implementation (src/parse.ts), not just in the tests\
+      \ \u2014 the function signature or body is changed so that the options parameter\
+      \ is optional."
+    verifiable: true
+    test_hint: read parseFilename signature in src/parse.ts; confirm the second parameter
+      has a default value or is otherwise optional so callers can omit it
+  feedback: "The bug is on line 201 of src/parse.ts: `export function parseFilename(input\
+    \ = \"\", { strict }): string | undefined` \u2014 the second parameter destructures\
+    \ without a default value, so calling without it throws \"Cannot destructure property\
+    \ 'strict' of undefined\". Fix by giving the second parameter a default empty\
+    \ object: `{ strict }: { strict?: boolean } = {}`. Then add tests in the test\
+    \ directory covering calls with no second argument (at least 2 distinct inputs),\
+    \ and ensure existing strict-mode tests still pass."
+  attempts: 1
+  session_id: a1046e4a-d239-4b5e-929b-496692381c7d
+  merged_sha: 9c5b13f01a91150b9da0635d748529785fa5210e
+  task_fingerprint: 2ce049c938dd28c0
+  cost_usd: 0.27673875000000003
+  duration_s: 195.3

@@ -1,0 +1,5 @@
+PASS parse() classmethod exists
+PASS Inline comments are stripped
+PASS Inline comments preserved by default
+PASS Section whitespace stripping
+PASS Basic parse works

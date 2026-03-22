@@ -1,0 +1,5 @@
+FAIL option ending with triple hyphens is parsed as option: --foo--- was treated as positional instead of being parsed as option
+PASS triple hyphens alone (---) still treated as positional
+PASS quadruple hyphens alone (----) still treated as positional
+PASS normal double-dash options still work
+FAIL source code has anchored regex: Regex /---+(=|$)/ is not anchored with ^

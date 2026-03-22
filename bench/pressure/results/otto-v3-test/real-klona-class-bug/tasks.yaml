@@ -1,0 +1,77 @@
+tasks:
+- id: 1
+  key: 3d7d5a3ee8b4
+  prompt: 'Fix the klona bug from issue #30 where cloning class instances that initialize
+    fields with Object.assign can produce the wrong result. The clone should reflect
+    the source instance''s current state, not a fresh constructor default state, and
+    nested values should still be copied deeply. Add tests covering a custom class
+    initialized with Object.assign. Run tests with: npm test'
+  status: passed
+  spec:
+  - text: 'Cloning a class instance whose constructor uses Object.assign to set fields
+      from a parameter produces a clone that reflects the source instance''s current
+      property values, not a fresh constructor''s default values. For example, given
+      `class Foo { constructor(data) { Object.assign(this, data); } }` and `src =
+      new Foo({ name: ''hello'', extra: true })`, `klona(src)` must yield an object
+      with `name === ''hello''` and `extra === true`.'
+    verifiable: true
+    test_hint: construct instance with Object.assign, clone it, assert each property
+      matches the source
+  - text: Properties that exist on the source instance but do NOT exist on a default-constructed
+      instance (i.e., `new Foo()` with no arguments) are preserved in the clone. The
+      clone contains every own enumerable property of the source.
+    verifiable: true
+    test_hint: create class where `new Foo()` produces fewer properties than `new
+      Foo(data)`, clone the populated instance, assert all source properties are present
+      on the clone
+  - text: Nested object values on a cloned class instance are deep-copied, not shared
+      by reference. Mutating a nested object on the clone does not affect the original,
+      and vice versa.
+    verifiable: true
+    test_hint: clone instance with nested object property, mutate nested value on
+      clone, assert original nested value is unchanged
+  - text: The fix applies to both `src/index.js` (default mode) and `src/lite.js`
+      (lite mode), since both contain the same class-cloning logic.
+    verifiable: true
+    test_hint: import klona from each module, clone an Object.assign-based class instance
+      with each, assert correct properties on both clones
+  - text: New tests are added that cover a custom class whose constructor initializes
+      fields via Object.assign, exercising the scenarios in criteria 1-3.
+    verifiable: true
+    test_hint: inspect test/suites/class.js for new test cases involving Object.assign
+      in constructors
+  - text: "All existing tests continue to pass \u2014 no regressions. `npm test` exits\
+      \ with code 0."
+    verifiable: true
+    test_hint: run `npm test`, assert exit code 0 and no test failures in output
+  - text: The cloned instance's constructor is the same as the source instance's constructor
+      (preserving class identity).
+    verifiable: true
+    test_hint: assert `klona(src).constructor === src.constructor` for the Object.assign-based
+      class
+  feedback: "THE BUG TO FIX:\nIn `src/index.js` lines 7-13, when cloning class instances:\n\
+    ```js\ntmp = new x.constructor();\nfor (k in x) {\n    if (tmp.hasOwnProperty(k)\
+    \ && tmp[k] !== x[k]) {\n        tmp[k] = klona(x[k]);\n    }\n}\n```\nThe `tmp.hasOwnProperty(k)`\
+    \ check on line 10 drops properties that exist on `x` but not on a freshly constructed\
+    \ `tmp`. Example: a class using `Object.assign(this, data)` in its constructor\
+    \ \u2014 calling `new x.constructor()` with no args produces an empty instance,\
+    \ so properties are silently dropped.\n\nFIX: Change the guard from `tmp.hasOwnProperty(k)`\
+    \ to `x.hasOwnProperty(k)`:\n```js\nfor (k in x) {\n    if (x.hasOwnProperty(k)\
+    \ && tmp[k] !== x[k]) {\n        tmp[k] = klona(x[k]);\n    }\n}\n```\n\nALSO\
+    \ fix the same pattern in `src/lite.js` (it has similar class-handling logic).\
+    \ The `src/full.js` is NOT affected. The `src/json.js` doesn't handle classes.\n\
+    \nFOR TESTS: Add test(s) in `test/suites/class.js` covering a class using Object.assign\
+    \ in its constructor, verifying deep clone and class identity preservation."
+  attempts: 3
+  cost_usd: 2.6545907500000006
+  duration_s: 942.2
+  error: "BASELINE_FAIL: test infrastructure is broken on unmodified code. This is\
+    \ a setup issue, not a coding issue.\n (node:internal/modules/cjs/loader:1934:10)\e\
+    [39m\n\e[90m    at Module.load (node:internal/modules/cjs/loader:1524:32)\e[39m\n\
+    \e[90m    at Module._load (node:internal/modules/cjs/loader:1326:12)\e[39m\n\e\
+    [90m    at TracingChannel.traceSync (node:diagnostics_channel:328:14)\e[39m\n\e\
+    [90m    at wrapModuleLoad (node:internal/modules/cjs/loader:245:24)\e[39m\n\e\
+    [90m    at Module.require (node:internal/module"
+  session_id: dd57bd65-6336-44fa-9149-c350b44d982b
+  merged_sha: 54a448b2218c6254b0f77428290190b639c4c105
+  task_fingerprint: 36fe231daeff82b8

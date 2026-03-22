@@ -1,0 +1,4 @@
+PASS basic dash-separated words still camel-case normally
+PASS underscore case after digits preserves lowercase until separator boundary
+PASS dash case after digits also preserves the intended casing
+PASS mixed prefixes with digits continue to camel-case correctly

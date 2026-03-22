@@ -1,0 +1,12 @@
+`npm test` passes — 137 tests across all 4 variants, all green.
+
+## Summary
+
+**Bug:** When cloning class instances whose constructors use `Object.assign`, properties that existed on the source but not on a default-constructed instance were silently dropped. The condition `tmp.hasOwnProperty(k)` on line 10 of `src/index.js` and `src/lite.js` only copied properties present on a freshly `new`'d instance (with no args).
+
+**Fix:** Changed `tmp.hasOwnProperty(k)` → `x.hasOwnProperty(k)` in both `src/index.js` and `src/lite.js`. This ensures all own properties of the source instance are cloned, regardless of what the no-arg constructor produces. (`src/full.js` was already correct — it uses `Object.create` instead of `new constructor()`.)
+
+**Test:** Added `'constructor with Object.assign'` test to `test/suites/class.js` covering:
+- Clone reflects source state, not constructor defaults
+- Extra properties added via `Object.assign(this, data)` are preserved
+- Nested objects and arrays are deeply copied (mutation isolation)

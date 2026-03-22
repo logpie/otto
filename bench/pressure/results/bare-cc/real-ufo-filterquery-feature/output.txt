@@ -1,0 +1,6 @@
+All 479 tests pass, including the 7 new `filterQuery` tests.
+
+Here's what was added:
+
+- **`filterQuery(input, predicate)`** in `src/utils.ts:653` — parses the URL, filters query keys through the predicate, and reconstructs the URL with path and fragment untouched.
+- **7 tests** in `test/query.test.ts` covering: basic filtering, removing all/keeping all params, repeated keys, fragment preservation, and no-query inputs.

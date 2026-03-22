@@ -1,0 +1,4 @@
+PASS Overflow timestamp raises BadTimeSignature
+PASS Normal sign/unsign still works
+PASS Expired signatures still caught properly
+PASS timed.py has ValueError handling

@@ -1,0 +1,77 @@
+tasks:
+- id: 1
+  key: 200abdf38a33
+  prompt: 'Add subcommand alias support to citty. Allow defining aliases on subcommands
+    via an ''alias'' field in the command meta definition, accepting string | string[].
+    When a user types an alias (e.g. ''i'' for ''install''), it should resolve to
+    the corresponding subcommand. Direct key matches must take priority over alias
+    matches. Aliases should also appear in --help output (e.g. ''install, i, add'').
+    Must work with nested subcommands. Add tests that verify: (1) basic alias resolution,
+    (2) array of aliases, (3) direct key match takes priority over alias, (4) alias
+    appears in help text, (5) nested subcommand aliases work, (6) error for unrecognized
+    command/alias. Run tests with: npx vitest run'
+  status: passed
+  spec:
+  - text: 'An `alias` field on `CommandMeta` accepts `string | string[]` and is used
+      to define alternative names for subcommands. When a user invokes a subcommand
+      by its alias (e.g., typing `i` when `install` has `alias: "i"`), it resolves
+      and executes the corresponding subcommand identically to using the primary key.'
+    verifiable: true
+    test_hint: 'define a subcommand under key "install" with meta `{ alias: "i" }`,
+      run with `["i"]` as rawArgs, assert the install command''s `run()` is called.'
+  - text: When `alias` is an array of strings, every alias in the array resolves to
+      the subcommand.
+    verifiable: true
+    test_hint: 'define a subcommand with `alias: ["i", "add"]`, run with `["i"]` and
+      then with `["add"]` as rawArgs, assert both resolve to the same subcommand''s
+      `run()`.'
+  - text: 'Direct subcommand key matches take priority over alias matches. If a subcommand
+      is registered under the key "i" and another subcommand has `alias: "i"`, the
+      command registered under key "i" is resolved.'
+    verifiable: true
+    test_hint: 'define two subcommands: one with key "i" and one with key "install"
+      having `alias: "i"`, run with `["i"]`, assert the "i"-keyed subcommand executes,
+      not "install".'
+  - text: Aliases appear in `--help` output. When rendering usage for a command with
+      subcommands that have aliases, the subcommand line in the COMMANDS section displays
+      the key followed by its aliases (e.g., `install, i, add`).
+    verifiable: true
+    test_hint: 'call `renderUsage()` on a command with a subcommand keyed "install"
+      having `alias: ["i", "add"]`, assert the rendered string contains "install,
+      i, add".'
+  - text: Aliases work with nested subcommands. A subcommand that itself has subcommands
+      with aliases resolves aliases at every nesting level.
+    verifiable: true
+    test_hint: define a top-level subcommand "pkg" with alias "p", which itself has
+      a sub-subcommand "install" with alias "i", run with `["p", "i"]`, assert the
+      nested install command executes.
+  - text: Invoking an unrecognized command name that matches neither a subcommand
+      key nor any alias produces an error (CLIError with code `E_UNKNOWN_COMMAND`).
+    verifiable: true
+    test_hint: define subcommands with specific keys and aliases, run with `["nonexistent"]`,
+      assert it throws with error code `E_UNKNOWN_COMMAND`.
+  - text: All tests pass when run with `npx vitest run`.
+    verifiable: true
+    test_hint: run `npx vitest run` from the project root, assert exit code 0 and
+      no test failures.
+  - text: 'The `alias` field is properly typed on `CommandMeta` as `alias?: string
+      | string[]` so that TypeScript consumers get type checking and autocompletion.'
+    verifiable: true
+    test_hint: run `pnpm test:types` (or `npx tsgo --noEmit`), assert no type errors.
+  feedback: "Key architecture notes for citty:\n- Subcommand resolution happens in\
+    \ `resolveSubCommand()` in `src/command.ts`\n- SubCommands are `Resolvable<Record<string,\
+    \ CommandDef>>` \u2014 may need to await/resolve before iterating\n- The `meta`\
+    \ field on CommandDef is also Resolvable \u2014 use `resolveValue()` from `_utils.ts`\
+    \ to unwrap\n- Add `alias?: string | string[]` to the meta type in `src/types.ts`\n\
+    - For alias resolution: after resolving subCommands record, iterate entries checking\
+    \ each command's resolved meta.alias\n- Direct key match MUST take priority over\
+    \ alias match (check key first, then scan aliases)\n- For help text in `src/usage.ts`,\
+    \ append aliases after the subcommand name (e.g. \"install, i, add\")\n- Use `scule`\
+    \ or the existing case-agnostic comparison pattern for alias matching\n- Tests\
+    \ go in `test/` using vitest \u2014 verify with `npx vitest run`"
+  attempts: 1
+  session_id: 36a09da1-22f3-4634-a03b-65448e2814be
+  merged_sha: affb0c4bd56f4cadfdd7f28b119b5622214e8c1b
+  task_fingerprint: 374e54ba60c877f6
+  cost_usd: 0.79371275
+  duration_s: 334.4

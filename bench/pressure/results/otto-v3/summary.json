@@ -1,0 +1,115 @@
+{
+  "summary": {
+    "total_projects": 13,
+    "runner_pass_rate": 76.9,
+    "verify_pass_rate": 69.2,
+    "false_pass_rate": 7.7,
+    "total_cost": 11.7,
+    "avg_cost": 0.9,
+    "avg_time_s": 661.7
+  },
+  "projects": {
+    "real-box-bugfix": {
+      "runner_pass": "PASS",
+      "verify_pass": "PASS",
+      "cost": 1.57,
+      "time_s": 468,
+      "attempts": 2,
+      "runner": "otto"
+    },
+    "real-cachetools-bugfix": {
+      "runner_pass": "PASS",
+      "verify_pass": "FAIL",
+      "cost": 1.79,
+      "time_s": 744,
+      "attempts": 1,
+      "runner": "otto"
+    },
+    "real-camelcase-number-bug": {
+      "runner_pass": "PASS",
+      "verify_pass": "PASS",
+      "cost": 2.7,
+      "time_s": 1667,
+      "attempts": 2,
+      "runner": "otto"
+    },
+    "real-camelcase-preserve-uppercase": {
+      "runner_pass": "PASS",
+      "verify_pass": "PASS",
+      "cost": 1.74,
+      "time_s": 1226,
+      "attempts": 1,
+      "runner": "otto"
+    },
+    "real-citty-feature": {
+      "runner_pass": "PASS",
+      "verify_pass": "PASS",
+      "cost": 0.63,
+      "time_s": 558,
+      "attempts": 1,
+      "runner": "otto"
+    },
+    "real-klona-class-bug": {
+      "runner_pass": "PASS",
+      "verify_pass": "PASS",
+      "cost": 0.48,
+      "time_s": 855,
+      "attempts": 1,
+      "runner": "otto"
+    },
+    "real-ms-months-feature": {
+      "runner_pass": "SETUP_FAIL",
+      "verify_pass": "SKIP",
+      "cost": 0,
+      "time_s": 0
+    },
+    "real-radash-feature": {
+      "runner_pass": "PASS",
+      "verify_pass": "PASS",
+      "cost": 0.76,
+      "time_s": 377,
+      "attempts": 1,
+      "runner": "otto"
+    },
+    "real-semver-bugfix": {
+      "runner_pass": "PASS",
+      "verify_pass": "PASS",
+      "cost": 0.86,
+      "time_s": 437,
+      "attempts": 1,
+      "runner": "otto"
+    },
+    "real-tinydb-feature": {
+      "runner_pass": "UNKNOWN",
+      "verify_pass": "FAIL",
+      "cost": 0.0,
+      "time_s": 557,
+      "attempts": 0,
+      "runner": "otto"
+    },
+    "real-ufo-filterquery-feature": {
+      "runner_pass": "UNKNOWN",
+      "verify_pass": "FAIL",
+      "cost": 0.0,
+      "time_s": 256,
+      "attempts": 0,
+      "runner": "otto"
+    },
+    "real-ufo-null-prototype": {
+      "runner_pass": "PASS",
+      "verify_pass": "PASS",
+      "cost": 0.89,
+      "time_s": 1069,
+      "attempts": 1,
+      "runner": "otto"
+    },
+    "real-ufo-parsefilename-bug": {
+      "runner_pass": "PASS",
+      "verify_pass": "PASS",
+      "cost": 0.28,
+      "time_s": 388,
+      "attempts": 1,
+      "runner": "otto"
+    }
+  }
+}

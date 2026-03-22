@@ -1,0 +1,21 @@
+✓ Auto-initialized otto  (default_branch: main, max_retries: 3)
+  Tip: commit otto.yaml and customize settings if needed
+✓ Spec (7 criteria — 7 verifiable)
+
+  #      Criterion                                                              
+  1  ▸   Importing `dotenv.cli` does not raise `FileNotFoundError` (or any other
+         exceptio...                                                            
+  2  ▸   Running a dotenv CLI command (e.g., `dotenv list`) from a deleted      
+         working direct...                                                      
+  3  ▸   The fix is in `src/dotenv/cli.py`. No other source files under         
+         `src/dotenv/` are...                                                   
+  4  ▸   When the current working directory exists, the `--file` option still   
+         defaults to...                                                         
+  5  ▸   All existing tests pass when run with `pytest`.                        
+  6  ▸   The eager evaluation of `os.path.join(os.getcwd(), '.env')` in the     
+         `default=` pa...                                                       
+  7  ▸   When CWD is deleted and no `--file` is provided, the CLI does not      
+         silently use a...                                                      
+
+✓ Added task #1 (829619d2f2bd): The python-dotenv CLI crashes if the current 
+working directory has bee

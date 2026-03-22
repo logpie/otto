@@ -1,0 +1,10 @@
+
+ RUN  v3.2.4 /private/tmp/bench-real-ufo-parsefilename-bug
+
+ ✓ test/verify_parsefilename.test.ts (3 tests) 1ms
+
+ Test Files  1 passed (1)
+      Tests  3 passed (3)
+   Start at  03:06:17
+   Duration  252ms (transform 62ms, setup 0ms, collect 58ms, tests 1ms, environment 0ms, prepare 43ms)
+

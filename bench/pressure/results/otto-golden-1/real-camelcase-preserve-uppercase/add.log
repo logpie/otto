@@ -1,0 +1,21 @@
+✓ Auto-initialized otto  (default_branch: main, max_retries: 3)
+  Tip: commit otto.yaml and customize settings if needed
+✓ Spec (7 criteria — 7 verifiable)
+
+  #      Criterion                                                              
+  1  ▸   to a single capitalized word (e.g., "FOO-BAR" → "fooBar",              
+         "XMLHttpRequest" → "xm...                                              
+  2  ▸   The function accepts a `preserveConsecutiveUppercase` boolean option.  
+         Calling `c...                                                          
+  3  ▸   When `preserveConsecutiveUppercase` is enabled, consecutive uppercase  
+         characters...                                                          
+  4  ▸   Default behavior is unchanged when `preserveConsecutiveUppercase` is   
+         not provide...                                                         
+  5  ▸   `preserveConsecutiveUppercase` works in combination with `pascalCase:  
+         true`. For...                                                          
+  6  ▸   The TypeScript type definition in index.d.ts includes                  
+         `preserveConsecutiveUpperc...                                          
+  7  ▸   `npm test` passes with exit code 0.                                    
+
+✓ Added task #1 (36c37a1febc8): Add the preserveConsecutiveUppercase option 
+requested in issue #76. Wh

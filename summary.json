@@ -1,0 +1,12 @@
+{
+  "summary": {
+    "total_projects": 0,
+    "otto_pass_rate": 0,
+    "verify_pass_rate": 0,
+    "false_pass_rate": 0,
+    "total_cost": 0.0,
+    "avg_cost": 0,
+    "avg_time_s": 0
+  },
+  "projects": {}
+}

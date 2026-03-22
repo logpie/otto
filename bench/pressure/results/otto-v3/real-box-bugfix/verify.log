@@ -1,0 +1,6 @@
+PASS existing dotted paths still resolve through get()
+PASS missing intermediate dotted keys return the provided default
+PASS missing final dotted keys return the provided default
+PASS missing dotted paths without a default return None
+PASS box_dots set/access behavior remains intact
+PASS non-dotted get behavior is unchanged

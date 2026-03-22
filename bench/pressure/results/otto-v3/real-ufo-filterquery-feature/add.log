@@ -1,0 +1,23 @@
+✓ Auto-initialized otto  (default_branch: main, max_retries: 3)
+  Tip: commit otto.yaml and customize settings if needed
+✓ Spec (8 criteria — 8 verifiable)
+
+  #      Criterion                                                              
+  1  ▸   `filterQuery` is exported from `src/utils.ts` and re-exported from     
+         `src/index.ts...                                                       
+  2  ▸   `filterQuery(input, predicate)` takes a URL-like string input and a    
+         predicate fu...                                                        
+  3  ▸   The path portion of the URL is returned untouched — `filterQuery` never
+         modifies...                                                            
+  4  ▸   The fragment (hash) is preserved exactly as provided in the input.     
+  5  ▸   Repeated (array-valued) query keys are handled correctly: when the     
+         predicate mat...                                                       
+  6  ▸   When the input has no query string (no `?`), the input is returned     
+         as-is regardl...                                                       
+  7  ▸   All tests pass when run with `npm test`. Tests include explicit cases  
+         for: basic...                                                          
+  8  ▸   The predicate receives the parsed value as a second argument (string   
+         for single ...                                                         
+
+✓ Added task #1 (5a5729c70093): Add the filterQuery utility requested in issue 
+#230. It should take a 

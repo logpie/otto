@@ -1,0 +1,23 @@
+✓ Auto-initialized otto  (default_branch: main, max_retries: 3)
+  Tip: commit otto.yaml and customize settings if needed
+✓ Spec (8 criteria — 8 verifiable)
+
+  #      Criterion                                                              
+  1  ▸   Table accepts a `persist_empty` parameter (default False). Calling     
+         `db.table('my...                                                       
+  2  ▸   Table with persist_empty=False (the default) does NOT appear in storage
+         until a ...                                                            
+  3  ▸   Clearing (truncating) a persist_empty=True table keeps the empty entry 
+         in storag...                                                           
+  4  ▸   Existing behavior is unchanged when persist_empty is not set. All      
+         pre-existing t...                                                      
+  5  ▸   persist_empty works with both JSONStorage and MemoryStorage. The       
+         immediate-write...                                                     
+  6  ▸   The persist_empty parameter is accessible via `db.table('name',        
+         persist_empty=Tr...                                                    
+  7  ▸   Multiple persist_empty=True tables can coexist. Creating several tables
+         with per...                                                            
+  8  ▸   All new tests run and pass via `pytest` from the project root.         
+
+✓ Added task #1 (455c0a9b5a8e): Add a 'persist_empty' feature to TinyDB tables. 
+Currently, calling db.

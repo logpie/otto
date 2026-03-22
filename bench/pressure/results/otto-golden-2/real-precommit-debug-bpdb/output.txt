@@ -1,0 +1,95 @@
+────────────────────────────────────────────────────────────
+  Running baseline check...
+  Warning: Baseline tests failing -- recorded, proceeding
+
+  1 task, 6 specs
+    ○ #1  The debug-statements hook in pre-commit-hooks detects d  (6 spec)
+
+────────────────────────────────────────────────────────────
+  ● Bash  git log --oneline -20
+
+  ● Running  #1  5b6f2744
+  ✓ prepare  5s
+
+      ● Read  debug_statement_ho
+      ● Read  tests/debug_statement_hook_test.py
+
+      ● Edit  tests/debug_statement_hook_test.py
+        - def test_non_utf8_file(tmpdir):
+        -     f_py = tmpdir.join('f.py')
+        -     f_py.write_binary('# -*- coding: cp1252 -*-\nx = 
+"€"\n'.encode('cp1252'))
+        -     assert main((str(f_py),)) == 0
+        + def test_non_utf8_file(tmpdir):
+        +     f_py = tmpdir.join('f.py')
+        +     f_py.write_binary('# -*- coding: cp1252 -*-\nx = 
+"€"\n'.encode('cp1252'))
+        +     assert main((str(f_py),)) == 0
+          ...34 more
+      ● Edit  debug_statement_ho
+        - DEBUG_STATEMENTS = {
+        -     'ipdb',
+        -     'pdb',
+        -     'pdbr',
+          ...7 more
+        + DEBUG_STATEMENTS = {
+        +     'bpdb',
+        +     'ipdb',
+        +     'pdb',
+          ...8 more
+
+      ● Bash  python -m pytest tests/debug_statement_hook_test.py -v 2>&1
+      ● Bash  python -m pytest 2>&1
+  ✓ coding  68s  $0.36  2 files  +50 -15
+
+  ✗ test  6s  === existing_tests FAILED ===
+============
+
+      ● Read  tests/check_case_conflict_test.py
+      ● Read  tests/no_commit_to_branch_test.py
+      ● Read  tests/check_merge_conflict_test.py
+      ● Read  tests/conftest.py
+
+      ● Edit  tests/conftest.py
+        -     cmd_output('git', 'init', '--', str(git_dir))
+        +     cmd_output('git', 'init', '-b', 'master', '--', str(git_dir))
+      ● Edit  tests/check_merge_conflict_test.py
+        -     cmd_output('git', 'init', '--', str(repo1))
+        +     cmd_output('git', 'init', '-b', 'master', '--', str(repo1))
+      ● Edit  tests/check_case_conflict_test.py
+        - import sys
+        - 
+        - import pytest
+        - 
+          ...10 more
+        + import os
+        + import sys
+        + import tempfile
+        + 
+          ...20 more
+
+      ● Bash  python -m pytest 2>&1
+  ✓ coding  125s  $0.73  3 files  +28 -18
+
+  ✓ test  5s  406 passed
+
+      Analyzing code...
+      Verifying...
+      Analyzing code...
+      ✓ 1. `import bpdb` detected  Ran hook on file with `impor
+      ✓ 3. `bpdb` in `DEBUG_STATEMENTS`  Checked set membership
+      ✓ 4. `breakpoint()` still works  Ran hook on file with `b
+      ✓ 5. Clean files pass  Ran hook on file with only `import
+      ✓ 6. Tests pass  Already verified by prior test suite run
+  ✓ qa  35s  6 specs passed
+
+  ✓ Done
+
+  Run complete  4m40s  $1.10
+
+  ✓ #1  The debug-statements hook in pre-commit-hooks detects debug   4m5s  
+$1.10
+       5s prepare · 3m13s coding · 11s test · 35s qa
+
+  1/1 tasks passed
+

@@ -1,0 +1,76 @@
+tasks:
+- id: 1
+  key: f63d4946eb5f
+  prompt: 'When TimestampSigner.unsign() encounters a token with an extremely large
+    or corrupted timestamp, it crashes with an unhandled ValueError (year is out of
+    range) instead of raising BadTimeSignature. This happens because timestamp_to_datetime()
+    calls datetime.fromtimestamp() which raises ValueError for timestamps that would
+    result in dates beyond Python''s datetime range. Fix the unsign() method in src/itsdangerous/timed.py
+    to catch ValueError from timestamp_to_datetime() and convert it to a BadTimeSignature
+    exception with a "Malformed timestamp" message. Run tests with: pytest'
+  status: passed
+  spec:
+  - text: When TimestampSigner.unsign() encounters a token whose decoded timestamp
+      is extremely large (e.g., would produce a year beyond Python's datetime.max),
+      it raises BadTimeSignature instead of an unhandled ValueError.
+    verifiable: true
+    test_hint: craft a signed token with an enormous timestamp (e.g., 2**63), call
+      unsign(), assert pytest.raises(BadTimeSignature)
+  - text: The BadTimeSignature exception raised for an out-of-range timestamp contains
+      the message "Malformed timestamp".
+    verifiable: true
+    test_hint: catch the BadTimeSignature from criterion 1 and assert "Malformed timestamp"
+      in str(exc_info.value)
+  - text: The fix is in the unsign() method of src/itsdangerous/timed.py; it catches
+      ValueError raised by timestamp_to_datetime() and converts it to BadTimeSignature.
+    verifiable: true
+    test_hint: inspect the source of TimestampSigner.unsign(); confirm a try/except
+      ValueError wrapping timestamp_to_datetime() calls that raises BadTimeSignature
+  - text: All existing tests pass (pytest exits with code 0).
+    verifiable: true
+    test_hint: run `pytest` from the project root, assert exit code 0
+  - text: "Every call site of timestamp_to_datetime() inside unsign() is protected\
+      \ \u2014 including the sig_error branch (line 127), the max_age/SignatureExpired\
+      \ branches (lines 144, 151), and the return_timestamp branch (line 155). A corrupted\
+      \ oversized timestamp must not produce an unhandled ValueError from any code\
+      \ path through unsign()."
+    verifiable: true
+    test_hint: for each code path (bad signature + huge ts, valid signature + max_age
+      + huge ts, valid signature + return_timestamp=True + huge ts), assert BadTimeSignature
+      is raised, not ValueError
+  - text: The timestamp_to_datetime() method itself is not modified; the ValueError
+      handling is in unsign().
+    verifiable: true
+    test_hint: confirm timestamp_to_datetime() still contains only `return datetime.fromtimestamp(ts,
+      tz=timezone.utc)` with no try/except
+  - text: "For tokens with valid (in-range) timestamps, unsign() continues to work\
+      \ exactly as before \u2014 returning the value, returning (value, datetime)\
+      \ when return_timestamp=True, and raising SignatureExpired when max_age is exceeded."
+    verifiable: true
+    test_hint: run the existing test_max_age, test_return_timestamp, test_future_age,
+      test_sig_error_date_signed tests and confirm they pass unchanged
+  feedback: "ENVIRONMENT FIX: The test env is now fixed (iniconfig and freezegun installed).\
+    \ All 296 existing tests pass.\n\nTHE BUG: In src/itsdangerous/timed.py, the unsign()\
+    \ method calls self.timestamp_to_datetime(ts_int) at 4 places (lines ~127, ~144,\
+    \ ~151, ~155). timestamp_to_datetime calls datetime.fromtimestamp(ts, tz=timezone.utc)\
+    \ which raises ValueError for timestamps with year out of range. This ValueError\
+    \ is unhandled and crashes instead of raising BadTimeSignature.\n\nTHE FIX: Wrap\
+    \ each call to self.timestamp_to_datetime(ts_int) in unsign() with try/except\
+    \ ValueError and raise BadTimeSignature(\"Malformed timestamp\", payload=value).\
+    \ The 4 call sites are:\n1. Line 127 (inside sig_error handling) - set ts_dt =\
+    \ None on ValueError, let the existing raise proceed\n2. Line 144 (max_age expired)\
+    \ - catch ValueError, raise BadTimeSignature(\"Malformed timestamp\", payload=value)\
+    \  \n3. Line 151 (negative age) - catch ValueError, raise BadTimeSignature(\"\
+    Malformed timestamp\", payload=value)\n4. Line 155 (return_timestamp) - catch\
+    \ ValueError, raise BadTimeSignature(\"Malformed timestamp\", payload=value)\n\
+    \nRun tests with: pytest"
+  attempts: 1
+  cost_usd: 0.6915855000000002
+  duration_s: 332.7
+  error: "BASELINE_FAIL: test infrastructure is broken on unmodified code. This is\
+    \ a setup issue, not a coding issue.\n/_pytest/assertion/util.py\", line 24, in\
+    \ <module>\n    from _pytest.config import Config\n  File \"/Users/yuxuan/work/cc-autonomous/.worktrees/pressure-test/.venv/lib/python3.11/site-packages/_pytest/config/__init__.py\"\
+    , line 51, in <module>\n    from .findpaths import ConfigValue\n  File \"/Users/yuxuan/work/cc-autonomous/.worktrees/pressure-test/.venv/lib/python3.11/site-packages/_pytest/confi"
+  session_id: d5a20aad-2de8-4c3e-bf77-8597e1154447
+  merged_sha: 15c467d8aa4dbb0d8f0496b7c3076842af65f490
+  task_fingerprint: 344fccd86cd778c1

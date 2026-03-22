@@ -1,0 +1,6 @@
+PASS bpdb is in DEBUG_STATEMENTS
+test_bpdb.py:1:0: bpdb imported
+PASS 'import bpdb' is detected
+test_pdb.py:1:0: pdb imported
+PASS 'import pdb' still detected
+PASS Clean file passes

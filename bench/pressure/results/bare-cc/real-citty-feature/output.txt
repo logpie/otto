@@ -1,0 +1,8 @@
+All 77 tests pass (6 test files), including the 7 new subcommand alias tests.
+
+Here's what I implemented:
+
+1. **`types.ts`** — Added `alias?: string | string[]` to `CommandMeta`
+2. **`command.ts`** — Added `resolveSubCommandKey()` helper that checks direct key matches first, then searches subcommand meta aliases. Used in both `runCommand()` and `resolveSubCommand()`
+3. **`usage.ts`** — Aliases are displayed alongside command names in help output (e.g., `install, i, add`)
+4. **`test/subcommand-alias.test.ts`** — 7 tests covering: basic alias, array aliases, direct key priority, help output, nested aliases, unknown command error, and `resolveSubCommand` with aliases

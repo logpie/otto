@@ -1,0 +1,89 @@
+tasks:
+- id: 1
+  key: eb03f13521ca
+  prompt: 'Add subcommand alias support to citty. Allow defining aliases on subcommands
+    via an ''alias'' field in the command meta definition, accepting string | string[].
+    When a user types an alias (e.g. ''i'' for ''install''), it should resolve to
+    the corresponding subcommand. Direct key matches must take priority over alias
+    matches. Aliases should also appear in --help output (e.g. ''install, i, add'').
+    Must work with nested subcommands. Add tests that verify: (1) basic alias resolution,
+    (2) array of aliases, (3) direct key match takes priority over alias, (4) alias
+    appears in help text, (5) nested subcommand aliases work, (6) error for unrecognized
+    command/alias. Run tests with: npx vitest run'
+  status: passed
+  spec:
+  - text: 'The `CommandMeta` interface accepts an `alias` field typed as `string |
+      string[]`. A subcommand defined with `meta: { alias: "i" }` or `meta: { alias:
+      ["i", "add"] }` is valid TypeScript and does not produce type errors.'
+    verifiable: true
+    test_hint: define a command with both forms, run `pnpm test:types` (or tsc/tsgo
+      --noEmit), assert zero type errors.
+  - text: 'When a user invokes a CLI with an alias instead of the subcommand key,
+      the alias resolves to the corresponding subcommand and its `run()` handler executes.
+      For example, if subCommands has key "install" with `meta: { alias: "i" }`, then
+      rawArgs `["i"]` invokes the install command''s run handler.'
+    verifiable: true
+    test_hint: defineCommand with subCommands.install having alias "i", runCommand
+      with rawArgs ["i"], assert run was called.
+  - text: When the `alias` field is an array of strings (e.g. `["i", "add"]`), every
+      alias in the array resolves to the corresponding subcommand.
+    verifiable: true
+    test_hint: 'define alias: ["i", "add"], runCommand with rawArgs ["i"] and separately
+      ["add"], assert both invoke the correct run handler.'
+  - text: 'Direct subcommand key matches take priority over alias matches. If subCommands
+      has both key "i" (a real subcommand) and key "install" with `meta: { alias:
+      "i" }`, then rawArgs `["i"]` resolves to the subcommand keyed "i", not "install".'
+    verifiable: true
+    test_hint: define both subCommands.i and subCommands.install (with alias "i"),
+      runCommand with rawArgs ["i"], assert the subCommands.i run handler executes,
+      not install's.
+  - text: Aliases appear in `--help` output. When a subcommand has aliases, the COMMANDS
+      section of rendered usage shows the key and aliases together (e.g. "install,
+      i, add" rather than just "install").
+    verifiable: true
+    test_hint: call renderUsage on a command with subCommands.install having alias
+      ["i", "add"], assert the returned string contains "install, i, add" (or equivalent
+      comma-separated form with all aliases).
+  - text: Aliases work with nested subcommands. If a top-level subcommand is resolved
+      via alias, and that subcommand itself has sub-subcommands with aliases, those
+      nested aliases also resolve correctly.
+    verifiable: true
+    test_hint: define a two-level command hierarchy where both levels use aliases,
+      runCommand with rawArgs using aliases at both levels, assert the deepest run
+      handler executes.
+  - text: When a user types an unrecognized command that matches neither a subcommand
+      key nor any alias, a CLIError is thrown with error code "E_UNKNOWN_COMMAND".
+    verifiable: true
+    test_hint: runCommand with rawArgs ["nonexistent"], assert it throws CLIError
+      with code "E_UNKNOWN_COMMAND".
+  - text: All tests pass when run with `npx vitest run`.
+    verifiable: true
+    test_hint: run `npx vitest run` in the project root, assert exit code 0 and no
+      test failures.
+  feedback: "Key architectural guidance based on code review:\n\n1. **types.ts**:\
+    \ Add `alias?: string | string[]` to the `CommandMeta` interface (line 87-92).\
+    \ This is where command metadata lives.\n\n2. **command.ts - runCommand()** (line\
+    \ 42-57): After `if (!subCommands[subCommandName])`, instead of immediately throwing,\
+    \ search through all subCommands entries for one whose meta.alias includes subCommandName.\
+    \ Use `resolveValue()` on both the subcommand and its meta to handle lazy loading.\
+    \ Only throw E_UNKNOWN_COMMAND if no alias match is found. The direct key lookup\
+    \ `subCommands[subCommandName]` already happens first, so direct matches naturally\
+    \ take priority.\n\n3. **command.ts - resolveSubCommand()** (line 72-88): Same\
+    \ alias resolution logic needed here \u2014 this function is used for --help resolution.\
+    \ When `subCommands[subCommandName]` is falsy, scan for alias match.\n\n4. **usage.ts\
+    \ - renderUsage()** (line 87-100): In the COMMANDS section loop, resolve each\
+    \ subcommand's meta, check for aliases, and display them alongside the command\
+    \ name (e.g., \"install, i, add\" instead of just \"install\"). Update both the\
+    \ `commandsLines` display and the `commandNames` usage line.\n\n5. **Helper function**:\
+    \ Consider extracting alias resolution into a shared helper in command.ts (e.g.,\
+    \ `resolveSubCommandByAlias(subCommands, name)`) to avoid duplicating the scan\
+    \ logic between runCommand and resolveSubCommand.\n\n6. **Tests**: Use `defineCommand`\
+    \ with `subCommands` that have `meta: { alias: ... }`. Test with `runCommand`\
+    \ for alias resolution and `renderUsage` for help output. The error test should\
+    \ use an unrecognized name that isn't a key or alias."
+  attempts: 1
+  session_id: c2a15478-784b-41a4-a87f-da31180f8175
+  merged_sha: a507c75eebd3200427ac75ac042799b5ff339b55
+  task_fingerprint: f1b5d08562ee746f
+  cost_usd: 0.62781075
+  duration_s: 354.0

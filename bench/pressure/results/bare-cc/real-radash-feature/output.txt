@@ -1,0 +1,11 @@
+All 22 tests pass. Here's what was done:
+
+**`src/number.ts`** — Added `inRange(number, start, end?)`:
+- 3 args: checks if `number` is in `[start, end)`
+- 2 args: checks if `number` is in `[0, start)`
+- Swaps bounds when `start > end`
+- Returns `false` for non-number inputs (null, undefined, NaN)
+
+**`src/index.ts`** — Exported `inRange` from the number module.
+
+**`src/tests/number.test.ts`** — Added 12 test cases covering: basic range, inclusive start, exclusive end, two-arg form, inverted range, negative ranges, NaN inputs, non-number inputs, zero edge cases, and size-1 ranges.
