@@ -218,12 +218,6 @@ class TaskDisplay:
             if tool_key == self._last_tool_key:
                 return
             self._last_tool_key = tool_key
-            if name == "Read":
-                self._read_count += 1
-                if self._read_count > 6:
-                    if self._read_count == 7:
-                        self._console.print("      [dim]...[/dim]")
-                    return
 
         short = rich_escape(_shorten_path(detail)[:68])
 
