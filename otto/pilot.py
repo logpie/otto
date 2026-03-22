@@ -26,8 +26,8 @@ except ImportError:
     ToolResultBlock = None
 
 from otto.config import git_meta_dir
-from otto.display import TaskDisplay, console, rich_escape
 from otto.runner import (
+    _DIM, _GREEN, _RED, _YELLOW, _RESET,
     _log_info, _log_warn,
     _print_summary, _subprocess_env,
 )
@@ -50,27 +50,310 @@ from otto.tasks import load_tasks, update_task
 
 import threading
 
+_CYAN = "\033[36m"
+_BOLD = "\033[1m"
+
 # Tool categories for display tiering
 _PRIMARY_TOOLS = {"run_task_with_qa", "finish_run"}
 _SECONDARY_TOOLS = {"get_run_state", "read_verify_output", "abort_task"}
 _NOISE_TOOLS = {"save_run_state", "ToolSearch", "write_task_notes", "write_learning"}
 
 _TOOL_DISPLAY = {
-    "get_run_state": ("\U0001f4cb", "Loading task state"),
-    "run_task_with_qa": ("\U0001f680", "Running task"),
-    "read_verify_output": ("\U0001f4d6", "Reading verify output"),
-    "abort_task": ("\u274c", "Aborting"),
-    "save_run_state": ("\U0001f4be", "Saving state"),
-    "finish_run": ("\U0001f3c1", "Done"),
-    "write_task_notes": ("\U0001f4dd", "Writing task notes"),
-    "write_learning": ("\U0001f4dd", "Recording learning"),
+    "get_run_state": ("📋", "Loading task state"),
+    "run_task_with_qa": ("🚀", "Running task"),
+    "read_verify_output": ("📖", "Reading verify output"),
+    "abort_task": ("❌", "Aborting"),
+    "save_run_state": ("💾", "Saving state"),
+    "finish_run": ("🏁", "Done"),
+    "write_task_notes": ("📝", "Writing task notes"),
+    "write_learning": ("📝", "Recording learning"),
 }
 
-# Active task display (module-level so tool call/result handlers can manage it)
-_active_display: TaskDisplay | None = None
-_active_task_key: str | None = None  # task key associated with _active_display
+
+class _Spinner:
+    """Animated spinner for long-running operations. Shows elapsed time and coding agent progress."""
+
+    _FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+    def __init__(self, label: str, progress_file: str | None = None):
+        self._label = label
+        self._running = False
+        self._thread: threading.Thread | None = None
+        self._start_time = 0.0
+        self._progress_file = progress_file
+        self._last_progress_pos = 0
+        self._last_progress_line = ""
+
+    def _read_progress(self):
+        """Read new lines from coding agent progress file and print them."""
+        if not self._progress_file:
+            return
+        try:
+            import sys as _sys
+            from pathlib import Path
+            p = Path(self._progress_file)
+            if not p.exists():
+                return
+            with open(p) as f:
+                f.seek(self._last_progress_pos)
+                new_lines = f.readlines()
+                self._last_progress_pos = f.tell()
+            for line in new_lines:
+                line = line.rstrip()
+                if line:
+                    # Clear spinner, print progress line, spinner will redraw
+                    _sys.stdout.write(f"\r{' ' * 80}\r")
+                    _sys.stdout.write(f"  {_DIM}  {line[:78]}{_RESET}\n")
+                    _sys.stdout.flush()
+                    self._last_progress_line = line
+        except OSError:
+            pass
+
+    def start(self):
+        import sys as _sys
+        self._running = True
+        self._start_time = time.monotonic()
+
+        def _spin():
+            idx = 0
+            while self._running:
+                elapsed = time.monotonic() - self._start_time
+                frame = self._FRAMES[idx % len(self._FRAMES)]
+                mins = int(elapsed // 60)
+                secs = int(elapsed % 60)
+                time_str = f"{mins}:{secs:02d}" if mins else f"{secs}s"
+
+                # Check for coding agent progress every ~2 seconds
+                if idx % 13 == 0:
+                    self._read_progress()
+
+                _sys.stdout.write(f"\r  {_DIM}{frame} {self._label} ({time_str}){_RESET}  ")
+                _sys.stdout.flush()
+                idx += 1
+                time.sleep(0.15)
+
+        self._thread = threading.Thread(target=_spin, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._running = False
+        if self._thread:
+            self._thread.join(timeout=1)
+        elapsed = time.monotonic() - self._start_time
+        mins = int(elapsed // 60)
+        secs = int(elapsed % 60)
+        time_str = f"{mins}m{secs:02d}s" if mins else f"{secs}s"
+        # Clear spinner line
+        import sys as _sys
+        _sys.stdout.write(f"\r{' ' * 60}\r")
+        _sys.stdout.flush()
+        return time_str
+
+
+# Phase display names and icons
+_PHASE_ICONS = {
+    "prepare": "◦",
+    "coding": "◦",
+    "verify": "◦",
+    "qa": "◦",
+    "merge": "◦",
+}
+_PHASE_DONE = "✓"
+_PHASE_FAIL = "✗"
+_PHASE_ACTIVE = "●"
+
+
+class _PhaseDisplay:
+    """Phase-aware progress display for run_task_with_qa.
+
+    Replaces the plain spinner with a phase progress view that updates
+    in-place. Falls back to a plain spinner if no progress events arrive
+    within a few seconds.
+    """
+
+    _FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    _PHASE_ORDER = ["prepare", "coding", "test", "qa", "merge"]
+
+    def __init__(self, task_label: str):
+        self._task_label = task_label
+        self._running = False
+        self._thread: threading.Thread | None = None
+        self._start_time = 0.0
+        self._lock = threading.Lock()
+        # Phase state: status can be "pending", "running", "done", "fail"
+        self._phases: dict[str, dict] = {
+            p: {"status": "pending", "time_s": 0.0}
+            for p in self._PHASE_ORDER
+        }
+        self._current_phase: str | None = None
+        self._recent_tools: list[str] = []  # last N agent tool lines
+        self._has_events = False  # any progress events received?
+        self._lines_printed = 0  # how many display lines we printed
+
+    def update_phase(self, name: str, status: str, time_s: float = 0.0,
+                     error: str = "", detail: str = "", **kwargs):
+        """Update a phase's state. Thread-safe."""
+        with self._lock:
+            self._has_events = True
+            if name in self._phases:
+                self._phases[name]["status"] = status
+                if time_s:
+                    self._phases[name]["time_s"] = time_s
+                if error:
+                    self._phases[name]["error"] = error
+                if detail:
+                    self._phases[name]["detail"] = detail
+                if kwargs.get("cost"):
+                    self._phases[name]["cost"] = kwargs["cost"]
+            if status == "running":
+                self._current_phase = name
+                # Clear stale tools from previous phase
+                self._recent_tools.clear()
+                self._printed_tool_count = 0
+                # Reset printed state for this phase (supports retries)
+                self._printed_phases.discard(name)
+                # Print phase header immediately so tools appear under it
+                import sys as _s
+                _s.stdout.write(f"\r\033[2K  {_CYAN}{_PHASE_ACTIVE} {name}{_RESET}\n")
+                _s.stdout.flush()
+
+    def add_tool(self, name: str, detail: str = ""):
+        """Record an agent tool call. Thread-safe."""
+        with self._lock:
+            self._has_events = True
+            line = f"{name}  {detail}" if detail else name
+            self._recent_tools.append(line)
+
+    def add_finding(self, text: str):
+        """Record a QA finding. Thread-safe."""
+        with self._lock:
+            self._has_events = True
+            self._recent_tools.append(text)
+
+    def start(self):
+        import sys as _sys
+        self._running = True
+        self._start_time = time.monotonic()
+        self._printed_phases: set[str] = set()
+        self._printed_tool_count = 0  # how many tool/finding items we've printed
+
+        def _render():
+            idx = 0
+            while self._running:
+                elapsed = time.monotonic() - self._start_time
+                frame = self._FRAMES[idx % len(self._FRAMES)]
+                mins = int(elapsed // 60)
+                secs = int(elapsed % 60)
+                time_str = f"{mins}:{secs:02d}" if mins else f"{secs}s"
+
+                with self._lock:
+                    # 1. Print completed/failed phases once
+                    for pname in self._PHASE_ORDER:
+                        if pname in self._printed_phases:
+                            continue
+                        pdata = self._phases[pname]
+                        pstatus = pdata["status"]
+                        if pstatus in ("done", "fail"):
+                            self._printed_phases.add(pname)
+                            ptime = pdata.get("time_s", 0.0)
+                            detail = pdata.get("detail", "")
+                            cost = pdata.get("cost", 0)
+                            if pstatus == "done":
+                                extras = []
+                                if ptime:
+                                    extras.append(f"{ptime:.0f}s")
+                                if cost:
+                                    extras.append(f"${cost:.2f}")
+                                if detail:
+                                    extras.append(detail[:50])
+                                info = "  ".join(extras)
+                                _sys.stdout.write(f"\r\033[2K  {_GREEN}{_PHASE_DONE} {pname:<10}{_RESET}{_DIM}  {info}{_RESET}\n")
+                            elif pstatus == "fail":
+                                err = pdata.get("error", "")[:50]
+                                dur = f"{ptime:.0f}s" if ptime else ""
+                                _sys.stdout.write(f"\r\033[2K  {_RED}{_PHASE_FAIL} {pname:<10}{_RESET}{_DIM}  {dur}  {err}{_RESET}\n")
+                            _sys.stdout.flush()
+
+                    # 2. Print new tool calls / findings since last check
+                    new_items = self._recent_tools[self._printed_tool_count:]
+                    if new_items:
+                        self._printed_tool_count = len(self._recent_tools)
+                        for item in new_items:
+                            _sys.stdout.write(f"\r\033[2K      {_DIM}{item[:72]}{_RESET}\n")
+                        _sys.stdout.flush()
+
+                    # 3. Spinner — only update every 1s, not every 150ms
+                    if idx % 7 == 0:  # ~1s at 150ms sleep
+                        active = None
+                        for pname in self._PHASE_ORDER:
+                            if self._phases[pname]["status"] == "running":
+                                active = pname
+                        if active:
+                            cost = self._phases[active].get("cost", 0)
+                            cost_str = f"  ${cost:.2f}" if cost else ""
+                            _sys.stdout.write(
+                                f"\r  {_DIM}{frame} {active} ({time_str}){cost_str}{_RESET}  "
+                            )
+                            _sys.stdout.flush()
+
+                idx += 1
+                time.sleep(0.15)
+
+        self._thread = threading.Thread(target=_render, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> str:
+        self._running = False
+        if self._thread:
+            self._thread.join(timeout=1)
+        elapsed = time.monotonic() - self._start_time
+        mins = int(elapsed // 60)
+        secs = int(elapsed % 60)
+        time_str = f"{mins}m{secs:02d}s" if mins else f"{secs}s"
+
+        import sys as _sys
+        # Print any remaining phases that weren't printed yet
+        with self._lock:
+            for pname in self._PHASE_ORDER:
+                if pname in self._printed_phases:
+                    continue
+                pdata = self._phases[pname]
+                pstatus = pdata["status"]
+                ptime = pdata.get("time_s", 0.0)
+                if pstatus == "done":
+                    detail = pdata.get("detail", "")
+                    cost = pdata.get("cost", 0)
+                    extras = []
+                    if ptime:
+                        extras.append(f"{ptime:.0f}s")
+                    if cost:
+                        extras.append(f"${cost:.2f}")
+                    if detail:
+                        extras.append(detail[:50])
+                    info = "  ".join(extras)
+                    _sys.stdout.write(f"\r\033[2K  {_GREEN}{_PHASE_DONE} {pname:<10}{_RESET}{_DIM}  {info}{_RESET}\n")
+                elif pstatus == "fail":
+                    err = pdata.get("error", "")[:50]
+                    dur = f"{ptime:.0f}s" if ptime else ""
+                    _sys.stdout.write(f"\r\033[2K  {_RED}{_PHASE_FAIL} {pname:<10}{_RESET}{_DIM}  {dur}  {err}{_RESET}\n")
+                elif pstatus == "running":
+                    _sys.stdout.write(f"\r\033[2K  {_YELLOW}○ {pname:<10}{_RESET}{_DIM}interrupted{_RESET}\n")
+        # Clear spinner line
+        _sys.stdout.write(f"\r\033[2K")
+        _sys.stdout.flush()
+
+        return time_str
+
+
+# Active spinner (module-level so tool call/result can manage it)
+_active_spinner: _Spinner | None = None
+
+# Active phase display — replaces spinner for run_task_with_qa calls
+_active_phase_display: _PhaseDisplay | None = None
 
 # Track last-displayed tool call to avoid duplicate headers
+# (e.g., when the pilot retries a tool or when side-channel processing
+# triggers a new ToolUseBlock for the same tool+task)
 _last_displayed_tool: str | None = None
 
 # Accumulated progress events per task key (for summary display)
@@ -80,7 +363,7 @@ _task_progress: dict[str, list[dict]] = {}
 def _process_progress_event(data: dict) -> None:
     """Process a progress event from the JSONL side-channel.
 
-    Routes phase/agent_tool events to the active TaskDisplay and
+    Routes phase/agent_tool events to the active _PhaseDisplay and
     accumulates them in _task_progress for the post-run summary.
     """
     event_type = data.get("event")
@@ -93,10 +376,9 @@ def _process_progress_event(data: dict) -> None:
     if task_key:
         _task_progress.setdefault(task_key, []).append(data)
 
-    # Route to active display (capture local ref to avoid TOCTOU race)
-    # Only route events matching the active task to prevent cross-task pollution
-    display = _active_display
-    if display and (_active_task_key is None or task_key == _active_task_key):
+    # Route to active phase display (capture local ref to avoid TOCTOU race)
+    display = _active_phase_display
+    if display:
         try:
             if event_type == "phase":
                 display.update_phase(
@@ -120,20 +402,22 @@ def _process_progress_event(data: dict) -> None:
 
 def _print_pilot_tool_call(block) -> None:
     """Print a pilot tool call with tiered display."""
-    global _active_display, _active_task_key, _last_displayed_tool
+    global _active_spinner, _active_phase_display, _last_displayed_tool
 
-    # Always stop any existing display before printing anything
-    if _active_display:
-        _active_display.stop()
-        _active_display = None
-        _active_task_key = None
+    # Always stop any existing spinner/phase display before printing anything
+    if _active_phase_display:
+        _active_phase_display.stop()
+        _active_phase_display = None
+    if _active_spinner:
+        _active_spinner.stop()
+        _active_spinner = None
 
     name = block.name
     inputs = block.input or {}
 
     # Strip mcp prefix
     tool_name = name.replace("mcp__otto-pilot__", "")
-    icon, label = _TOOL_DISPLAY.get(tool_name, ("\u25cf", tool_name))
+    icon, label = _TOOL_DISPLAY.get(tool_name, ("●", tool_name))
 
     # Build detail string based on tool type
     detail = ""
@@ -144,7 +428,7 @@ def _print_pilot_tool_call(block) -> None:
         detail = f"{len(keys)} tasks"
     if inputs.get("hint"):
         hint_preview = str(inputs["hint"])[:60]
-        detail += f' \u2014 hint: "{hint_preview}"'
+        detail += f' — hint: "{hint_preview}"'
     # Show file paths and commands for common tools
     if not detail:
         if name in ("Read", "Glob", "Grep"):
@@ -155,6 +439,7 @@ def _print_pilot_tool_call(block) -> None:
             cmd = inputs.get("command") or ""
             detail = cmd[:80]
         elif name.startswith("mcp__chrome-devtools__"):
+            # Show chrome-devtools action details
             if inputs.get("url"):
                 detail = inputs["url"]
             elif inputs.get("uid"):
@@ -169,53 +454,54 @@ def _print_pilot_tool_call(block) -> None:
     # Deduplicate: if the same tool+detail was just displayed, skip the header
     display_key = f"{tool_name}:{detail}"
     if display_key == _last_displayed_tool:
-        # Still start a task display for long-running tools (the previous one was stopped above)
+        # Still start a phase display for long-running tools (the previous one was stopped above)
         if tool_name == "run_task_with_qa":
-            _active_display = TaskDisplay(console)
-            _active_task_key = inputs.get("task_key", "")
-            _active_display.start()
+            task_key = inputs.get("task_key", "")
+            _active_phase_display = _PhaseDisplay(f"{label}  {detail}")
+            _active_phase_display.start()
         return
     _last_displayed_tool = display_key
 
     # Tier 2: secondary tools shown dimmed, one line
     if tool_name in _SECONDARY_TOOLS:
-        line = f"  {icon} {label}"
         if detail:
-            line += f"  {rich_escape(detail)}"
-        console.print(line, style="dim")
+            print(f"  {_DIM}{icon} {label}  {detail}{_RESET}", flush=True)
+        else:
+            print(f"  {_DIM}{icon} {label}{_RESET}", flush=True)
         return
 
-    # Tier 1: otto primary tools — prominent with separator, start task display
+    # Tier 1: otto primary tools — prominent with separator, start phase display
     if tool_name in _PRIMARY_TOOLS:
-        console.print()
-        console.print(f"  {'─' * 50}", style="dim")
+        print(f"\n  {_DIM}{'─' * 50}{_RESET}", flush=True)
         if detail:
-            console.print(f"  {icon} [bold]{label}[/bold]  [dim]{rich_escape(detail)}[/dim]")
+            print(f"  {icon} {_BOLD}{label}{_RESET}  {_DIM}{detail}{_RESET}", flush=True)
         else:
-            console.print(f"  {icon} [bold]{label}[/bold]")
+            print(f"  {icon} {_BOLD}{label}{_RESET}", flush=True)
         if tool_name == "run_task_with_qa":
-            _active_display = TaskDisplay(console)
-            _active_task_key = inputs.get("task_key", "")
-            _active_display.start()
+            # Use phase-aware display instead of plain spinner
+            _active_phase_display = _PhaseDisplay(f"{label}  {detail}")
+            _active_phase_display.start()
         return
 
     # Default: show tool with detail, dimmed (Read, Bash, Grep, chrome-devtools, etc.)
-    line = f"  {icon} {label}"
     if detail:
-        line += f"  {rich_escape(detail)}"
-    console.print(line, style="dim")
+        print(f"  {_DIM}{icon} {label}  {detail}{_RESET}", flush=True)
+    else:
+        print(f"  {_DIM}{icon} {label}{_RESET}", flush=True)
 
 
 def _print_pilot_tool_result(block) -> None:
     """Print a pilot tool result with structured parsing."""
-    global _active_display, _active_task_key, _last_displayed_tool
+    global _active_spinner, _active_phase_display, _last_displayed_tool
 
-    # Stop task display if active
+    # Stop phase display or spinner if active
     elapsed_str = ""
-    if _active_display:
-        elapsed_str = _active_display.stop()
-        _active_display = None
-        _active_task_key = None
+    if _active_phase_display:
+        elapsed_str = _active_phase_display.stop()
+        _active_phase_display = None
+    elif _active_spinner:
+        elapsed_str = _active_spinner.stop()
+        _active_spinner = None
 
     # Reset last-displayed tool so the next call shows its header
     _last_displayed_tool = None
@@ -247,14 +533,12 @@ def _print_pilot_tool_result(block) -> None:
     try:
         data = json.loads(content)
         if isinstance(data, dict):
-            # Strip the side-channel "tool" key before pattern matching
+            # Strip the side-channel "tool" key before pattern matching —
+            # _emit_result adds it but it breaks heuristic checks downstream
             data.pop("tool", None)
             # Legacy single task result (has success + status keys)
             if "success" in data and "status" in data:
-                if data["success"]:
-                    icon = "[green]\u2713[/green]"
-                else:
-                    icon = "[red]\u2717[/red]"
+                icon = f"{_GREEN}✓{_RESET}" if data["success"] else f"{_RED}✗{_RESET}"
                 parts = []
                 if data.get("status"):
                     parts.append(data["status"])
@@ -263,24 +547,25 @@ def _print_pilot_tool_result(block) -> None:
                 if elapsed_str:
                     parts.append(elapsed_str)
                 if data.get("error"):
-                    parts.append(f"[red]{rich_escape(data['error'][:80])}[/red]")
-                detail = " \u00b7 ".join(parts)
-                console.print(f"    {icon} {detail}")
+                    parts.append(f"{_RED}{data['error'][:80]}{_RESET}")
+                detail = f" · ".join(parts)
+                print(f"    {icon} {detail}", flush=True)
                 # Show code diff if present
                 diff = data.get("diff", "")
                 if diff:
                     for dline in diff.split("\\n"):
                         if dline.strip():
-                            console.print(f"  {rich_escape(dline)}")
+                            # Diff lines have embedded ANSI for +/- coloring
+                            print(f"  {dline}", flush=True)
                 # Show verify output on failure
                 verify_out = data.get("verify_output", "")
                 if verify_out and not data["success"]:
-                    console.print(f"    {'─' * 40}", style="dim")
+                    print(f"    {_DIM}{'─' * 40}{_RESET}", flush=True)
                     for vline in verify_out.split("\\n")[-10:]:
                         if "FAILED" in vline or "ERROR" in vline or "error" in vline.lower():
-                            console.print(f"    {rich_escape(vline)}", style="red")
+                            print(f"    {_RED}{vline}{_RESET}", flush=True)
                         elif vline.strip():
-                            console.print(f"    {rich_escape(vline)}", style="dim")
+                            print(f"    {_DIM}{vline}{_RESET}", flush=True)
                 return
 
             # Multi-task results (from run_coding_agents)
@@ -290,31 +575,24 @@ def _print_pilot_tool_result(block) -> None:
                 )
                 if has_task_results:
                     if elapsed_str:
-                        console.print(f"    {elapsed_str} total", style="dim")
+                        print(f"    {_DIM}{elapsed_str} total{_RESET}", flush=True)
                     for key, result in data.items():
                         if isinstance(result, dict) and "success" in result:
-                            if result["success"]:
-                                r_icon = "[green]\u2713[/green]"
-                            else:
-                                r_icon = "[red]\u2717[/red]"
+                            icon = f"{_GREEN}✓{_RESET}" if result["success"] else f"{_RED}✗{_RESET}"
                             error = result.get("error", "")
-                            err_str = f" \u2014 [red]{rich_escape(error[:60])}[/red]" if error else ""
-                            console.print(f"    {r_icon} {key[:8]}{err_str}")
+                            err_str = f" — {_RED}{error[:60]}{_RESET}" if error else ""
+                            print(f"    {icon} {key[:8]}{err_str}", flush=True)
                     return
 
             # Integration gate / holistic testgen result
             if "passed" in data:
-                if data["passed"]:
-                    icon = "[green]\u2713[/green]"
-                    label = "passed"
-                else:
-                    icon = "[red]\u2717[/red]"
-                    label = "FAILED"
-                suffix = f"  [dim]{elapsed_str}[/dim]" if elapsed_str else ""
+                icon = f"{_GREEN}✓{_RESET}" if data["passed"] else f"{_RED}✗{_RESET}"
+                label = "passed" if data["passed"] else "FAILED"
+                suffix = f"  {_DIM}{elapsed_str}{_RESET}" if elapsed_str else ""
                 if data.get("skipped"):
-                    console.print("    skipped", style="dim")
+                    print(f"    {_DIM}skipped{_RESET}", flush=True)
                 else:
-                    console.print(f"    {icon} {label}{suffix}")
+                    print(f"    {icon} {label}{suffix}", flush=True)
                 return
 
             # Done signal
@@ -332,29 +610,29 @@ def _print_pilot_tool_result(block) -> None:
                 v is None or (isinstance(v, str) and "test_otto" in v)
                 for v in data.values()
             ):
-                suffix = f"  [dim]{elapsed_str}[/dim]" if elapsed_str else ""
-                console.print(f"    [green]\u2713[/green] {non_null}/{total} test files generated{suffix}")
+                suffix = f"  {_DIM}{elapsed_str}{_RESET}" if elapsed_str else ""
+                print(f"    {_GREEN}✓{_RESET} {non_null}/{total} test files generated{suffix}", flush=True)
                 return
 
         # Task state summary (list of dicts from get_run_state)
         if isinstance(data, list) and data and isinstance(data[0], dict) and "id" in data[0]:
-            _STATUS_ICONS = {
-                "pending": "[dim]\u25cb[/dim]",
-                "running": "[cyan]\u25c9[/cyan]",
-                "passed": "[green]\u2713[/green]",
-                "failed": "[red]\u2717[/red]",
-                "blocked": "[red]\u2298[/red]",
-            }
             for t in data:
                 status = t.get("status", "?")
                 deps = t.get("depends_on", [])
-                deps_str = f" \u2192 #{', #'.join(str(d) for d in deps)}" if deps else ""
+                deps_str = f" → #{', #'.join(str(d) for d in deps)}" if deps else ""
                 spec_count = t.get("spec_count", 0)
-                s_icon = _STATUS_ICONS.get(status, "?")
-                console.print(
-                    f"    {s_icon} #{t.get('id', '?')} "
-                    f"[dim]\\[{spec_count} spec{deps_str}][/dim]  "
-                    f"{rich_escape(t.get('prompt', '')[:55])}"
+                status_icon = {
+                    "pending": f"{_DIM}○{_RESET}",
+                    "running": f"{_CYAN}◉{_RESET}",
+                    "passed": f"{_GREEN}✓{_RESET}",
+                    "failed": f"{_RED}✗{_RESET}",
+                    "blocked": f"{_RED}⊘{_RESET}",
+                }.get(status, "?")
+                print(
+                    f"    {status_icon} #{t.get('id', '?')} "
+                    f"{_DIM}[{spec_count} spec{deps_str}]{_RESET}  "
+                    f"{t.get('prompt', '')[:55]}",
+                    flush=True,
                 )
             return
     except (json.JSONDecodeError, TypeError, KeyError):
@@ -364,11 +642,11 @@ def _print_pilot_tool_result(block) -> None:
     if block.is_error:
         lines = content.strip().splitlines()
         for line in lines[-5:]:
-            console.print(f"    {rich_escape(line)}", style="red")
+            print(f"    {_RED}{line}{_RESET}", flush=True)
     elif len(content) > 300:
-        console.print(f"    {rich_escape(content[:300])}...", style="dim")
+        print(f"    {_DIM}{content[:300]}...{_RESET}", flush=True)
     else:
-        console.print(f"    {rich_escape(content)}", style="dim")
+        print(f"    {_DIM}{content}{_RESET}", flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -669,7 +947,7 @@ async def run_piloted(
         # Check if the lock holder is actually alive (stale lock detection)
         # flock is advisory — if the holder died, the lock is released by the OS.
         # If we get BlockingIOError, another process genuinely holds it.
-        console.print("Another otto process is running", style="red")
+        print(f"{_RED}Another otto process is running{_RESET}", flush=True)
         return 2
 
     # Clean up stale task lock files from crashed runs
@@ -686,10 +964,10 @@ async def run_piloted(
     def _signal_handler(signum, frame):
         nonlocal interrupted
         if interrupted:
-            console.print("\nForce exit", style="red")
+            print(f"\n{_RED}Force exit{_RESET}", flush=True)
             sys.exit(1)
         interrupted = True
-        console.print("\n[yellow]Warning: Interrupted -- pilot will finish current tool call[/yellow]")
+        print(f"\n{_YELLOW}⚠ Interrupted — pilot will finish current tool call{_RESET}", flush=True)
 
     old_sigint = signal.signal(signal.SIGINT, _signal_handler)
     old_sigterm = signal.signal(signal.SIGTERM, _signal_handler)
@@ -713,7 +991,7 @@ async def run_piloted(
                 cwd=project_dir, capture_output=True, text=True,
             )
             if retry.returncode != 0:
-                console.print(f"[red]Cannot checkout {default_branch}: {retry.stderr.strip()}[/red]")
+                print(f"{_RED}✗ Cannot checkout {default_branch}: {retry.stderr.strip()}{_RESET}", flush=True)
                 return 2
 
         # Verify we're actually on the right branch
@@ -722,13 +1000,13 @@ async def run_piloted(
             cwd=project_dir, capture_output=True, text=True,
         ).stdout.strip()
         if actual != default_branch:
-            console.print(f"[red]Expected branch {default_branch}, on {actual}[/red]")
+            print(f"{_RED}✗ Expected branch {default_branch}, on {actual}{_RESET}", flush=True)
             return 2
 
         # Dirty-tree protection — stash or abort
         from otto.runner import check_clean_tree
         if not check_clean_tree(project_dir):
-            console.print("[red]Working tree is dirty -- fix before running otto[/red]")
+            print(f"{_RED}✗ Working tree is dirty — fix before running otto{_RESET}", flush=True)
             return 2
 
         # Baseline check — verify existing tests pass before otto modifies anything.
@@ -752,7 +1030,7 @@ async def run_piloted(
                 # Test runner hung (e.g., interactive watch mode).
                 # Record as baseline issue and proceed — the coding agent
                 # will set up proper test infrastructure.
-                console.print("  [yellow]Warning: Baseline tests timed out (interactive runner?) -- proceeding[/yellow]")
+                print(f"  {_YELLOW}⚠ Baseline tests timed out (interactive runner?) — proceeding{_RESET}", flush=True)
                 baseline_failures = "baseline: test command timed out"
                 result = None
             if result is not None:
@@ -762,14 +1040,7 @@ async def run_piloted(
                     # will work on top of whatever state the project is in.
                     stderr_tail = (result.stderr or b"").decode(errors="replace")[-500:]
                     baseline_failures = f"baseline: exit {result.returncode}\n{stderr_tail}"
-                    console.print("  [yellow]Warning: Baseline tests failing -- recorded, proceeding[/yellow]")
-                elif result.returncode == 0:
-                    # Extract test count if available
-                    import re as _re
-                    stdout_text = (result.stdout or b"").decode(errors="replace")
-                    match = _re.search(r"(\d+) passed", stdout_text)
-                    count = f" ({match.group(1)} tests)" if match else ""
-                    console.print(f"  [green]\u2713[/green] Baseline passing{count}", style="dim")
+                    print(f"  {_YELLOW}⚠ Baseline tests failing — recorded, proceeding{_RESET}", flush=True)
 
         # Recover stale "running" tasks
         tasks = load_tasks(tasks_file)
@@ -777,13 +1048,13 @@ async def run_piloted(
             if t.get("status") == "running":
                 update_task(tasks_file, t["key"], status="pending",
                             error=None, session_id=None)
-                console.print(f"  [yellow]Warning: Task #{t['id']} was stuck in 'running' -- reset to pending[/yellow]")
+                print(f"  {_YELLOW}⚠ Task #{t['id']} was stuck in 'running' — reset to pending{_RESET}", flush=True)
 
         # Load pending tasks
         tasks = load_tasks(tasks_file)
         pending = [t for t in tasks if t.get("status") == "pending"]
         if not pending:
-            console.print("No pending tasks", style="dim")
+            print(f"{_DIM}No pending tasks{_RESET}", flush=True)
             return 0
 
         # Inject dependencies from file-plan.md if otto_arch exists
@@ -804,7 +1075,7 @@ async def run_piloted(
                             update_task(tasks_file, task["key"], depends_on=deps)
                             injected += 1
                 if injected:
-                    console.print(f"  Injected {injected} dependencies from file-plan.md", style="dim")
+                    print(f"  {_DIM}Injected {injected} dependencies from file-plan.md{_RESET}", flush=True)
 
         # Write MCP server script to temp file
         mcp_script = _build_mcp_server_script(config, tasks_file, project_dir)
@@ -823,9 +1094,6 @@ async def run_piloted(
             # Build pilot prompt
             tasks = load_tasks(tasks_file)
             pending = [t for t in tasks if t.get("status") == "pending"]
-            # Track which task keys are being attempted this run — used for
-            # scoping the post-run summary (cost, results, phase timing).
-            pending_keys = {t["key"] for t in pending}
             pilot_prompt = _build_pilot_prompt(pending, config, project_dir)
 
             # Configure MCP server
@@ -959,10 +1227,10 @@ Before calling finish_run, verify:
                 except (TypeError, AttributeError, ValueError):
                     pass  # SDK version doesn't support subagents — skip
 
-            console.print()
-            _log_info("Pilot taking control \u2014 LLM-driven execution")
-            console.print("  The pilot will drive coding \u2192 verify \u2192 merge", style="dim")
-            console.print()
+            print(flush=True)
+            _log_info("Pilot taking control — LLM-driven execution")
+            print(f"  {_DIM}The pilot will drive coding → verify → merge{_RESET}", flush=True)
+            print(flush=True)
 
             # Run pilot agent — three-tier output display
             # Track last tool call name to match results
@@ -1071,22 +1339,6 @@ Before calling finish_run, verify:
                                             aname = rdata.get("name", "")
                                             adetail = rdata.get("detail", "")[:60]
                                             _dlog("EXEC", f"agent: {aname} {adetail}")
-                                    elif tool == "run_task_with_qa":
-                                        # Capture final result with phase_timings
-                                        # for accurate per-task timing in summary
-                                        tk = rdata.get("task_key", "")
-                                        if not tk:
-                                            # Result doesn't have task_key at top level;
-                                            # infer from the last progress event's key
-                                            for evts in reversed(list(_task_progress.values())):
-                                                if evts:
-                                                    tk = evts[-1].get("task_key", "")
-                                                    if tk:
-                                                        break
-                                        if tk:
-                                            _task_progress.setdefault(tk, []).append(
-                                                {"_result": True, **rdata}
-                                            )
                                     # Non-progress events (final results) are
                                     # still displayed via _print_pilot_tool_result
                                     # when the SDK delivers the ToolResultBlock.
@@ -1094,7 +1346,7 @@ Before calling finish_run, verify:
                                     pass
                     except OSError:
                         pass
-                    time.sleep(0.2)
+                    time.sleep(0.5)
 
             _bg_thread = threading.Thread(target=_bg_read_results, daemon=True)
             _bg_thread.start()
@@ -1102,11 +1354,14 @@ Before calling finish_run, verify:
             async for message in query(prompt=pilot_prompt, options=agent_opts):
                 if isinstance(message, ResultMessage):
                     _dlog("DONE", f"ResultMessage is_error={getattr(message, 'is_error', '?')}")
-                    # Stop any active display on completion
-                    global _active_display
-                    if _active_display:
-                        _active_display.stop()
-                        _active_display = None
+                    # Stop any active spinner/phase display on completion
+                    global _active_spinner, _active_phase_display
+                    if _active_phase_display:
+                        _active_phase_display.stop()
+                        _active_phase_display = None
+                    if _active_spinner:
+                        _active_spinner.stop()
+                        _active_spinner = None
                 elif hasattr(message, "session_id") and hasattr(message, "is_error"):
                     pass
                 elif AssistantMessage and isinstance(message, AssistantMessage):
@@ -1121,11 +1376,13 @@ Before calling finish_run, verify:
                             or (ToolResultBlock and isinstance(block, ToolResultBlock))
                         )
                         if not is_tool_block:
-                            # Keep _active_display alive through non-tool blocks —
-                            # it should persist through ThinkingBlocks/TextBlocks
-                            # until the tool result arrives (run_task_with_qa
-                            # takes minutes). Rich Live handles this cleanly.
-                            pass
+                            # Stop plain spinner on non-tool blocks, but keep
+                            # _active_phase_display alive — it should persist
+                            # through ThinkingBlocks/TextBlocks until the tool
+                            # result arrives (run_task_with_qa takes minutes).
+                            if _active_spinner:
+                                _active_spinner.stop()
+                                _active_spinner = None
 
                         if TextBlock and isinstance(block, TextBlock) and block.text:
                             text = block.text.strip()
@@ -1135,30 +1392,22 @@ Before calling finish_run, verify:
                             # Log pilot reasoning
                             _dlog(_current_debug_phase, f"text: {text[:120]}")
 
-                            # Skip code fences, raw JSON, and low-value narration
+                            # Skip code fences and raw JSON
                             if text.startswith("```") or text.startswith("{"):
-                                continue
-                            # Suppress common filler phrases
-                            _lower = text.lower()
-                            if any(filler in _lower for filler in [
-                                "let me", "i'll ", "i will ", "now let me",
-                                "let me save", "let me get", "let me check",
-                                "in parallel", "save the run state",
-                            ]):
                                 continue
 
                             # Tier 1: Execution plan — prominent cyan
                             if "EXECUTION PLAN" in text or "PLAN UPDATE" in text:
-                                console.print(f"\n{text}", style="cyan")
+                                print(f"\n{_CYAN}{text}{_RESET}", flush=True)
                             # Tier 1: Decision points — the pilot's strategic thinking
                             elif any(marker in text.lower() for marker in [
                                 "passed", "failed", "now executing", "starting",
                                 "retrying", "aborting", "all tasks", "integration",
                             ]):
-                                console.print(f"  {text}")
+                                print(f"  {text}", flush=True)
                             # Tier 2: Other pilot reasoning — dimmed
                             else:
-                                console.print(f"  {text}", style="dim")
+                                print(f"  {_DIM}{text}{_RESET}", flush=True)
 
                         elif ToolUseBlock and isinstance(block, ToolUseBlock):
                             _last_tool_name = block.name
@@ -1227,15 +1476,18 @@ Before calling finish_run, verify:
         except Exception as pilot_err:
             # Pilot agent crashed (e.g., buffer overflow from large screenshot)
             # Still proceed to summary — tasks may have passed before the crash
-            if _active_display:
-                _active_display.stop()
-                _active_display = None
+            if _active_phase_display:
+                _active_phase_display.stop()
+                _active_phase_display = None
+            if _active_spinner:
+                _active_spinner.stop()
+                _active_spinner = None
             try:
                 _dlog("ERROR", f"pilot crashed: {pilot_err}")
             except Exception:
                 pass
-            console.print(f"\n  [yellow]Warning: Pilot agent error: {pilot_err}[/yellow]")
-            console.print("  Proceeding to summary -- completed tasks are still merged.", style="dim")
+            print(f"\n  {_YELLOW}⚠ Pilot agent error: {pilot_err}{_RESET}", flush=True)
+            print(f"  {_DIM}Proceeding to summary — completed tasks are still merged.{_RESET}", flush=True)
         finally:
             # Stop background reader if still running
             try:
@@ -1250,15 +1502,11 @@ Before calling finish_run, verify:
             if mcp_script_path.exists():
                 mcp_script_path.unlink()
 
-        # Post-run: calculate results only for tasks attempted this run
+        # Post-run: calculate results from final task states
         final_tasks = load_tasks(tasks_file)
         results: list[tuple[dict, bool]] = []
         total_cost = 0.0
         for t in final_tasks:
-            task_key = t.get("key", "")
-            # Only include tasks that were pending at run start
-            if task_key not in pending_keys:
-                continue
             if t.get("status") in ("passed", "failed", "blocked"):
                 results.append((t, t.get("status") == "passed"))
                 total_cost += t.get("cost_usd", 0.0)
@@ -1268,9 +1516,6 @@ Before calling finish_run, verify:
                             error="pilot crashed during execution")
                 results.append((t, False))
                 total_cost += t.get("cost_usd", 0.0)
-            elif t.get("status") == "pending":
-                # Task was pending at start but never attempted (e.g., blocked)
-                results.append((t, False))
 
         # Print summary with per-phase timing from progress events
         run_duration = time.monotonic() - run_start

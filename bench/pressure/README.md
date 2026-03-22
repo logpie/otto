@@ -76,3 +76,40 @@ Uses the same format as `bench/smoke/` — compatible with the smoke test runner
 
 These use the same format as smoke tests. The pressure test skill (`/pressure-test`)
 reads from this directory. Failed projects are accumulated into `bench/bad-cases.yaml`.
+
+## Benchmark Vision
+
+This project set should evolve into a proper **benchmark** for comparing:
+- Otto vs bare Claude Code (does the harness actually help?)
+- Otto versions (did this change improve reliability?)
+- Different harness frameworks (otto vs other agent runners)
+
+### What's needed to be a trustworthy benchmark
+
+**Already done:**
+- Canonical set with deterministic inputs (pinned commits, fixed specs)
+- Independent verification (verify.sh catches false passes)
+- Bad cases collector (regression tracking across runs)
+- Validate.sh (ensures setups work before burning money)
+
+**TODO — Harder projects (intent-to-product focus):**
+- Full-stack web apps: "Build a todo app with React + Express + SQLite"
+- UI/frontend: "Build a dashboard with charts", "Add dark mode"
+- Database integration: "Switch from in-memory to PostgreSQL"
+- Auth flows: "Add JWT login with registration and password reset"
+- Deployment: "Add Dockerfile and docker-compose for this app"
+- Real product specs: "Build an invoice generator with PDF export"
+- Upgrade/refactor: "Bump Express v4 to v5, fix breaking changes"
+
+Current projects are ~69% first-try pass rate — too easy to differentiate.
+Product-focused projects would be naturally harder and closer to real usage.
+
+**TODO — Baseline comparison:**
+- Run the same projects with bare `claude --dangerously-skip-permissions -p "task"` (no otto)
+- Compare: pass rate, cost, time, verify pass rate
+- This is the key metric: does otto's harness (spec, QA, retry) add value?
+
+**TODO — Statistical rigor:**
+- Run each project 3x to measure flakiness
+- Track verify pass rate separately from otto pass rate
+- Cost per successful verified project = the real efficiency metric

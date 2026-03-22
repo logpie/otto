@@ -5,10 +5,7 @@ git clone --quiet https://github.com/cdgriffith/Box.git .tmp-clone
 cd .tmp-clone
 git checkout --quiet 91cc956aa2d480202aebb21cda01e19d351624b5
 cd ..
-cp -r .tmp-clone/box ./box
-cp -r .tmp-clone/test ./test
-cp .tmp-clone/pyproject.toml ./pyproject.toml 2>/dev/null || true
-cp .tmp-clone/setup.py ./setup.py 2>/dev/null || true
-cp .tmp-clone/setup.cfg ./setup.cfg 2>/dev/null || true
+# Copy entire repo (minus .git) to preserve all config files
+rsync -a --exclude='.git' .tmp-clone/ ./
 rm -rf .tmp-clone
 git add -A && git commit -m "init python-box at v7.3.1 (buggy)"

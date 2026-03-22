@@ -1713,7 +1713,10 @@ async def run_task_with_qa(
     total_cost = 0.0
     session_id = None
     last_error = None
-    total_attempts = 0  # counts both coding retries AND QA-triggered retries
+    # Resume attempt count from persisted state — prevents the pilot from
+    # circumventing max_retries by calling run_task_with_qa multiple times.
+    prior_attempts = task.get("attempts", 0) or 0
+    total_attempts = prior_attempts
     phase_timings: dict[str, float] = {}  # phase_name -> elapsed seconds
     # Live state for otto status -w (read from another terminal)
     _live_state_file = project_dir / "otto_logs" / "live-state.json"
@@ -1806,6 +1809,40 @@ async def run_task_with_qa(
             detected = detect_test_command(project_dir)
             test_command = detected if detected else "pytest"
 
+        # Baseline test check — verify test infrastructure works BEFORE coding.
+        # Only blocks on infrastructure failures (missing modules, broken config).
+        # Normal test failures are allowed (bugfix projects, greenfield with no tests).
+        if test_command:
+            from otto.verify import run_tier1
+            baseline = run_tier1(project_dir, test_command, timeout)
+            if not baseline.passed and not baseline.skipped:
+                output = baseline.output or ""
+                # Detect infrastructure failures vs normal test failures.
+                # Infra failures: the test runner itself can't start or find tests.
+                infra_keywords = [
+                    "Cannot find module",  # missing JS dependency/config
+                    "ModuleNotFoundError",  # missing Python module
+                    "command not found",  # test runner not installed
+                    "No module named",  # Python import failure
+                    "SyntaxError",  # broken source code
+                    "error: unrecognized arguments",  # bad pytest config
+                    "errors during collection",  # pytest can't collect tests
+                ]
+                is_infra_failure = any(kw in output for kw in infra_keywords)
+                if is_infra_failure:
+                    prep_elapsed = round(time.monotonic() - prep_start, 1)
+                    phase_timings["prepare"] = prep_elapsed
+                    emit("phase", name="prepare", status="fail", time_s=prep_elapsed,
+                         error="baseline tests fail before coding — infrastructure issue")
+                    err_detail = output[-500:]
+                    return _result(
+                        False, "failed",
+                        error=f"BASELINE_FAIL: test infrastructure is broken on unmodified code. "
+                              f"This is a setup issue, not a coding issue.\n{err_detail}",
+                    )
+                # Normal test failures (bugfix project, some tests fail) — proceed.
+                # The coding agent will fix them.
+
         prep_elapsed = round(time.monotonic() - prep_start, 1)
         phase_timings["prepare"] = prep_elapsed
         emit("phase", name="prepare", status="done", time_s=prep_elapsed)
@@ -1846,8 +1883,14 @@ async def run_task_with_qa(
         # Step 2+3: Code + Verify + QA loop
         # Both coding retries AND QA-triggered retries count against max_retries.
         # Overall time budget prevents unbounded cycles.
-        for attempt in range(max_retries + 1):
-            attempt_num = attempt + 1
+        # prior_attempts ensures the pilot can't circumvent max_retries by
+        # calling run_task_with_qa multiple times for the same task.
+        remaining = max(0, max_retries + 1 - prior_attempts)
+        if remaining == 0:
+            return _result(False, "failed",
+                           error=f"max retries already exhausted ({prior_attempts} prior attempts)")
+        for attempt in range(remaining):
+            attempt_num = prior_attempts + attempt + 1
             total_attempts += 1
 
             # Time budget check — prevent unbounded QA-retry cycles
@@ -2208,15 +2251,18 @@ async def run_task_with_qa(
             )
             last_error = verify_result.failure_output
 
-        # All retries exhausted
+        # All retries exhausted — include the last actual error so the pilot
+        # knows what went wrong (not just "max retries exhausted")
+        last_err_detail = f"\nLast error:\n{last_error[:500]}" if last_error else ""
         _cleanup_task_failure(
             project_dir, key, default_branch, tasks_file,
             pre_existing_untracked=pre_existing_untracked,
-            error="max retries exhausted", error_code="max_retries",
+            error=f"max retries exhausted{last_err_detail}", error_code="max_retries",
             cost_usd=total_cost,
             duration_s=time.monotonic() - task_start,
         )
-        return _result(False, "failed", error="max retries exhausted")
+        return _result(False, "failed",
+                       error=f"max retries exhausted ({total_attempts} attempts).{last_err_detail}")
 
     except Exception as e:
         duration = time.monotonic() - task_start
