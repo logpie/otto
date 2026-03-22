@@ -244,7 +244,7 @@ def init():
     project_dir = Path.cwd()
     config_path = create_config(project_dir)
     config = load_config(config_path)
-    console.print(f"[success]\\u2713[/success] Created [bold]{rich_escape(config_path.name)}[/bold]")
+    console.print(f"[success]✓[/success] Created [bold]{rich_escape(config_path.name)}[/bold]")
     console.print(f"  [dim]default_branch:[/dim] {config['default_branch']}")
     console.print(f"  [dim]max_retries:[/dim]    {config['max_retries']}")
     console.print(f"\n[dim]Commit otto.yaml to share config with your team.[/dim]")
@@ -334,11 +334,11 @@ def _print_imported_tasks(tasks: list) -> None:
     """Print summary of imported tasks with spec details."""
     for task in tasks:
         spec = task.get("spec", [])
-        console.print(f"  [success]\\u2713[/success] [bold]#{task['id']}[/bold] {rich_escape(task['prompt'][:80])}")
+        console.print(f"  [success]✓[/success] [bold]#{task['id']}[/bold] {rich_escape(task['prompt'][:80])}")
         if spec:
             for item in spec:
                 console.print(f"       [dim]-[/dim] {rich_escape(str(item))}")
-    console.print(f"\n[success]\\u2713[/success] Imported [bold]{len(tasks)}[/bold] tasks. Review specs in tasks.yaml before running.")
+    console.print(f"\n[success]✓[/success] Imported [bold]{len(tasks)}[/bold] tasks. Review specs in tasks.yaml before running.")
 
 
 @main.command(context_settings=CONTEXT_SETTINGS)
@@ -358,7 +358,7 @@ def add(prompt, verify, max_retries, import_file, no_spec):
     if not config_path.exists():
         create_config(project_dir)
         config = load_config(config_path)
-        console.print(f"[success]\\u2713[/success] Auto-initialized otto  [dim](default_branch: {config['default_branch']}, max_retries: {config['max_retries']})[/dim]")
+        console.print(f"[success]✓[/success] Auto-initialized otto  [dim](default_branch: {config['default_branch']}, max_retries: {config['max_retries']})[/dim]")
         console.print(f"  [dim]Tip: commit otto.yaml and customize settings if needed[/dim]")
 
     tasks_path = project_dir / "tasks.yaml"
@@ -375,14 +375,14 @@ def add(prompt, verify, max_retries, import_file, no_spec):
     # Generate spec unless --no-spec
     spec = None
     if no_spec:
-        console.print(f"[warning][bold]\\u26a0 WARNING:[/bold][/warning] [warning]No spec \\u2192 no adversarial tests \\u2192 no verification gate.[/warning]")
+        console.print(f"[warning][bold]⚠ WARNING:[/bold][/warning] [warning]No spec → no adversarial tests → no verification gate.[/warning]")
         console.print(f"  [warning]The coding agent's output will be merged with zero quality checks.[/warning]")
     if not no_spec:
         try:
             with console.status("[dim]Generating spec...[/dim]", spinner="dots") as status:
                 spec_items = generate_spec(prompt, Path.cwd())
         except Exception as e:
-            error_console.print(f"[error]\\u2717[/error] Spec generation failed: {rich_escape(str(e))}")
+            error_console.print(f"[error]✗[/error] Spec generation failed: {rich_escape(str(e))}")
             error_console.print(f"[dim]Task not created. Fix the issue or use --no-spec.[/dim]")
             sys.exit(1)
         if spec_items:
@@ -393,18 +393,18 @@ def add(prompt, verify, max_retries, import_file, no_spec):
             label = f"{verifiable_count} verifiable"
             if visual_count:
                 label += f", {visual_count} visual"
-            console.print(f"[success]\\u2713[/success] Spec ([bold]{len(spec_items)}[/bold] criteria \u2014 {label}):")
+            console.print(f"[success]✓[/success] Spec ([bold]{len(spec_items)}[/bold] criteria \u2014 {label}):")
             for item in spec_items:
-                tag = "[success]\\u2713[/success]" if spec_is_verifiable(item) else "[info]\\u25c9[/info]"
+                tag = "[success]✓[/success]" if spec_is_verifiable(item) else "[info]◉[/info]"
                 console.print(f"  {tag} {rich_escape(spec_text(item))}")
         else:
-            error_console.print(f"[warning]\\u26a0[/warning] Spec generation returned empty \u2014 task not created.")
+            error_console.print(f"[warning]⚠[/warning] Spec generation returned empty \u2014 task not created.")
             error_console.print(f"[dim]Retry or use --no-spec to skip spec generation.[/dim]")
             sys.exit(1)
 
     task = add_task(tasks_path, prompt, verify=verify, max_retries=max_retries,
                     spec=spec)
-    console.print(f"[success]\\u2713[/success] Added task [bold]#{task['id']}[/bold] [dim]({task['key']})[/dim]: {rich_escape(prompt[:70])}")
+    console.print(f"[success]✓[/success] Added task [bold]#{task['id']}[/bold] [dim]({task['key']})[/dim]: {rich_escape(prompt[:70])}")
 
 
 @main.command(context_settings=CONTEXT_SETTINGS)
@@ -421,7 +421,7 @@ def run(prompt, dry_run, no_architect, tdd):
     config_path = project_dir / "otto.yaml"
     if not config_path.exists():
         create_config(project_dir)
-        console.print(f"[success]\\u2713[/success] Auto-initialized otto")
+        console.print(f"[success]✓[/success] Auto-initialized otto")
     config = load_config(config_path)
     if no_architect:
         config["no_architect"] = True
@@ -447,7 +447,7 @@ def run(prompt, dry_run, no_architect, tdd):
         import time
 
         if tdd:
-            error_console.print(f"[warning]\\u26a0[/warning] --tdd ignored for one-off prompts (no spec). Use 'otto add' + 'otto run --tdd'.")
+            error_console.print(f"[warning]⚠[/warning] --tdd ignored for one-off prompts (no spec). Use 'otto add' + 'otto run --tdd'.")
 
         lock_path = git_meta_dir(project_dir) / "otto.lock"
         lock_path.touch()
@@ -462,7 +462,7 @@ def run(prompt, dry_run, no_architect, tdd):
             # Dirty-tree protection
             from otto.runner import check_clean_tree
             if not check_clean_tree(project_dir):
-                error_console.print(f"[error]\\u2717[/error] Working tree is dirty \u2014 fix before running otto")
+                error_console.print(f"[error]✗[/error] Working tree is dirty \u2014 fix before running otto")
                 sys.exit(2)
 
             key = f"adhoc-{int(time.time())}-{os.getpid()}"
@@ -517,7 +517,7 @@ def arch(show, clean):
         try:
             if arch_dir.exists():
                 shutil.rmtree(arch_dir)
-                console.print(f"[success]\\u2713[/success] Deleted otto_arch/")
+                console.print(f"[success]✓[/success] Deleted otto_arch/")
             else:
                 console.print(f"[dim]No otto_arch/ to clean[/dim]")
         finally:
@@ -563,13 +563,13 @@ def arch(show, clean):
         from otto.architect import run_architect_agent
         result = asyncio.run(run_architect_agent(pending, project_dir))
         if result:
-            console.print(f"[success]\\u2713[/success] Architecture docs ready in [bold]otto_arch/[/bold]")
+            console.print(f"[success]✓[/success] Architecture docs ready in [bold]otto_arch/[/bold]")
             for f in sorted(result.iterdir()):
                 if f.name.startswith("."):
                     continue
                 console.print(f"  [dim]-[/dim] {rich_escape(f.name)}")
         else:
-            error_console.print(f"[error]\\u2717[/error] Architect agent failed")
+            error_console.print(f"[error]✗[/error] Architect agent failed")
             sys.exit(1)
     finally:
         fcntl.flock(lock_fh, fcntl.LOCK_UN)
@@ -693,18 +693,18 @@ def _build_live_phase_lines() -> list:
             elapsed = live.get("elapsed_s", 0)
             cost = live.get("cost_usd", 0)
             elapsed_str = _format_duration(elapsed)
-            lines.append(Text.from_markup(f"  [info]\\u25b8 Task #{tid}:[/info] {rich_escape(prompt)}"))
+            lines.append(Text.from_markup(f"  [info]▸ Task #{tid}:[/info] {rich_escape(prompt)}"))
             phases = live.get("phases", {})
             _icons = {
-                "done": "[success]\\u2713[/success]",
-                "fail": "[error]\\u2717[/error]",
-                "running": "[info]\\u25cf[/info]",
-                "pending": "[dim]\\u25e6[/dim]",
+                "done": "[success]✓[/success]",
+                "fail": "[error]✗[/error]",
+                "running": "[info]●[/info]",
+                "pending": "[dim]◦[/dim]",
             }
             for pname in ["prepare", "coding", "test", "qa", "merge"]:
                 pdata = phases.get(pname, {})
                 pstatus = pdata.get("status", "pending")
-                icon = _icons.get(pstatus, "\\u25e6")
+                icon = _icons.get(pstatus, "◦")
                 ptime = pdata.get("time_s", 0)
                 extra = ""
                 if pstatus == "running":
@@ -765,7 +765,7 @@ def status(watch):
                 otto_is_running = True
         if not otto_is_running:
             for t in running:
-                console.print(f"[warning]\\u26a0 Task #{t['id']} stuck in 'running' (otto crashed?) \\u2014 will auto-recover on next 'otto run'[/warning]")
+                console.print(f"[warning]⚠ Task #{t['id']} stuck in 'running' (otto crashed?) — will auto-recover on next 'otto run'[/warning]")
             console.print()
 
     if watch:
@@ -820,7 +820,7 @@ def retry(task_id, feedback, force):
                 )
                 if commit_check.stdout.strip():
                     console.print(
-                        f"[warning]\\u26a0 Task #{task_id} was already merged to main. "
+                        f"[warning]⚠ Task #{task_id} was already merged to main. "
                         f"The coding agent will see no diff and may waste time.[/warning]"
                     )
                     console.print(
@@ -834,7 +834,7 @@ def retry(task_id, feedback, force):
             if feedback:
                 updates["feedback"] = feedback
             update_task(tasks_path, t["key"], **updates)
-            console.print(f"[success]\\u2713[/success] Reset task [bold]#{task_id}[/bold] to pending")
+            console.print(f"[success]✓[/success] Reset task [bold]#{task_id}[/bold] to pending")
             if feedback:
                 console.print(f"  [dim]Feedback: {rich_escape(feedback)}[/dim]")
             return
@@ -866,10 +866,10 @@ def delete(task_id):
 
     task_status = target.get("status", "pending")
     if task_status == "running":
-        error_console.print(f"[error]\\u2717[/error] Cannot delete a running task. Wait for it to finish or reset.")
+        error_console.print(f"[error]✗[/error] Cannot delete a running task. Wait for it to finish or reset.")
         sys.exit(1)
     if task_status == "passed":
-        console.print(f"[warning]\\u26a0[/warning] Task already merged \u2014 this only removes it from the status list.")
+        console.print(f"[warning]⚠[/warning] Task already merged \u2014 this only removes it from the status list.")
         console.print(f"  [dim]Code, commits, and test files stay on main.[/dim]")
         console.print(f"  [dim]To undo code changes: 'otto reset --hard' or 'git revert'.[/dim]")
         click.confirm("  Continue?", abort=True)
@@ -883,11 +883,11 @@ def delete(task_id):
     ]
     if dependents:
         dep_ids = ", ".join(f"#{t['id']}" for t in dependents)
-        console.print(f"[warning]\\u26a0[/warning] Pending tasks depend on this one: {dep_ids}")
+        console.print(f"[warning]⚠[/warning] Pending tasks depend on this one: {dep_ids}")
         click.confirm("  Continue?", abort=True)
 
     delete_task(tasks_path, task_id)
-    console.print(f"[success]\\u2713[/success] Deleted task [bold]#{task_id}[/bold]: {rich_escape(target['prompt'][:60])}")
+    console.print(f"[success]✓[/success] Deleted task [bold]#{task_id}[/bold]: {rich_escape(target['prompt'][:60])}")
 
 
 @main.command(context_settings=CONTEXT_SETTINGS)
@@ -1358,7 +1358,7 @@ def reset(yes, hard):
                     )
                     console.print(f"  [dim]Reset to before first otto commit ({len(otto_commits)} commits removed)[/dim]")
                 else:
-                    error_console.print(f"[warning]\\u26a0[/warning] Could not find parent of oldest otto commit")
+                    error_console.print(f"[warning]⚠[/warning] Could not find parent of oldest otto commit")
 
         # Delete otto/* branches
         result = subprocess.run(
@@ -1403,7 +1403,7 @@ def reset(yes, hard):
                 cwd=project_dir, capture_output=True,
             )
 
-        msg = f"[success]\\u2713[/success] Reset [bold]{count}[/bold] tasks. Cleaned branches, logs, and testgen."
+        msg = f"[success]✓[/success] Reset [bold]{count}[/bold] tasks. Cleaned branches, logs, and testgen."
         if hard:
             msg += " Reverted otto commits."
         console.print(msg)

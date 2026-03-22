@@ -56,13 +56,20 @@ def _extract_tool_detail(name: str, inputs: dict) -> str:
 def _shorten_path(path: str) -> str:
     """Shorten absolute paths to relative project paths."""
     if not path or not path.startswith("/"):
+        # Also handle relative paths with project dir prefix
+        # e.g., "otto-e2e-display2/calc.py" → "calc.py"
+        if "/" in path and not any(path.startswith(m) for m in
+                                    ("src/", "__tests__/", "tests/", "test/", "lib/")):
+            fname = path.rsplit("/", 1)[-1]
+            if "." in fname:  # has extension → likely a file
+                return fname
         return path
     for marker in ("src/", "__tests__/", "tests/", "test/", "lib/", "app/", "components/"):
         idx = path.find(marker)
         if idx >= 0:
             return path[idx:]
-    parts = path.rstrip("/").rsplit("/", 2)
-    return "/".join(parts[-2:]) if len(parts) > 2 else path
+    # Fall back to just the filename
+    return path.rsplit("/", 1)[-1] if "/" in path else path
 
 
 def print_agent_tool(block, quiet: bool = False) -> str:
@@ -254,9 +261,13 @@ class TaskDisplay:
             self._console.print(f"      {icon} [dim]{rich_escape(spec_text[:68])}[/dim]")
 
         elif is_table_row:
-            # Markdown table: "| **8** Default Type II | check | **PASS** |"
+            # Markdown table: "| 4 | add(a,b) returns sum | test | ✅ PASS |"
             parts = [p.strip() for p in clean.split("|") if p.strip()]
-            desc = parts[0][:55] if parts else clean[:55]
+            # Join number + description: "4  add(a,b) returns sum"
+            if len(parts) >= 2:
+                desc = f"{parts[0]}  {parts[1]}"[:55]
+            else:
+                desc = parts[0][:55] if parts else clean[:55]
             icon = "[green]\u2713[/green]" if has_pass else "[red]\u2717[/red]"
             self._console.print(f"      {icon} [dim]{rich_escape(desc)}[/dim]")
 
