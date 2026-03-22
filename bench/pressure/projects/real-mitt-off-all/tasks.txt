@@ -1,0 +1,1 @@
+Extend mitt so off(type) can remove every handler registered for that event type, as requested in issue #123. The current API already removes a specific handler when one is provided; add the omitted-handler behavior without breaking the existing targeted removal semantics, and cover both cases with tests. Run tests with: npm test

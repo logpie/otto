@@ -1,0 +1,1 @@
+Fix the klona bug from issue #30 where cloning class instances that initialize fields with Object.assign can produce the wrong result. The clone should reflect the source instance's current state, not a fresh constructor default state, and nested values should still be copied deeply. Add tests covering a custom class initialized with Object.assign. Run tests with: npm test
