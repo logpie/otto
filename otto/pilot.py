@@ -79,6 +79,9 @@ _task_progress: dict[str, list[dict]] = {}
 # Cache: task_key -> task id (populated during run_piloted)
 _task_key_to_id: dict[str, int] = {}
 
+# Track retry count per task key
+_task_attempt_count: dict[str, int] = {}
+
 
 def _resolve_task_number(task_key: str) -> int | None:
     """Resolve a task key to its task number for display."""
@@ -204,14 +207,36 @@ def _print_pilot_tool_call(block) -> None:
     # Tier 1: otto primary tools — prominent, no separator
     if tool_name in _PRIMARY_TOOLS:
         console.print()
-        if detail:
-            console.print(f"  {icon} [bold]{label}[/bold]  [dim]{rich_escape(detail)}[/dim]")
-        else:
-            console.print(f"  {icon} [bold]{label}[/bold]")
         if tool_name == "run_task_with_qa":
+            task_key = inputs.get("task_key", "")
+            attempt = _task_attempt_count.get(task_key, 0) + 1
+            _task_attempt_count[task_key] = attempt
+            hint = inputs.get("hint", "")
+
+            if attempt > 1:
+                # Retry — show prominently with hint
+                task_num = _resolve_task_number(task_key)
+                task_label = f"#{task_num}" if task_num else task_key[:8]
+                console.print(f"  [yellow]\u21bb Retrying {task_label}[/yellow]  [dim](attempt {attempt})[/dim]")
+                if hint:
+                    hint_short = str(hint)[:120]
+                    console.print(f"    [dim]{rich_escape(hint_short)}[/dim]")
+            else:
+                # First attempt
+                if detail:
+                    console.print(f"  {icon} [bold]{label}[/bold]  [dim]{rich_escape(detail)}[/dim]")
+                else:
+                    console.print(f"  {icon} [bold]{label}[/bold]")
+
             _active_display = TaskDisplay(console)
             _active_task_key = inputs.get("task_key", "")
             _active_display.start()
+        else:
+            # Other primary tools (finish_run, etc.)
+            if detail:
+                console.print(f"  {icon} [bold]{label}[/bold]  [dim]{rich_escape(detail)}[/dim]")
+            else:
+                console.print(f"  {icon} [bold]{label}[/bold]")
         return
 
     # Default: show tool with detail, dimmed (Read, Bash, Grep, chrome-devtools, etc.)
