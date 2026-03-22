@@ -477,14 +477,17 @@ class TaskDisplay:
                 if self._lines_added or self._lines_removed:
                     line_parts = []
                     if self._lines_added:
-                        line_parts.append(f"+{self._lines_added}")
+                        line_parts.append(f"[green]+{self._lines_added}[/green]")
                     if self._lines_removed:
-                        line_parts.append(f"-{self._lines_removed}")
-                    line_info = f", {'/'.join(line_parts)} lines"
+                        line_parts.append(f"[red]-{self._lines_removed}[/red]")
+                    line_info = f"  {' '.join(line_parts)}"
                 parts.append(f"{len(self._coding_files)} files{line_info}")
         elif name == "test" and detail:
             m = re.search(r'(\d+) passed', detail)
-            parts.append(m.group(0) if m else detail[:35])
+            if m:
+                parts.append(f"[green]{m.group(0)}[/green]")
+            else:
+                parts.append(detail[:35])
         elif name == "qa":
             if self._qa_spec_count:
                 t, p = self._qa_spec_count, self._qa_pass_count
@@ -504,6 +507,8 @@ class TaskDisplay:
         info = "  ".join(parts)
         self._console.print(f"  [red]\u2717[/red] [bold]{name}[/bold]  [dim]{info}[/dim]")
 
+    _SPINNER_FRAMES = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"
+
     def _render_footer(self) -> Text:
         with self._lock:
             if not self._current_phase:
@@ -513,8 +518,13 @@ class TaskDisplay:
             secs = int(elapsed % 60)
             time_str = f"{mins}:{secs:02d}" if mins else f"{secs}s"
             cost_str = f"  ${self._current_cost:.2f}" if self._current_cost else ""
+            # Animated spinner
+            frame_idx = int(elapsed * 5) % len(self._SPINNER_FRAMES)
+            spinner = self._SPINNER_FRAMES[frame_idx]
             line = Text()
-            line.append(f"  \u25cf {self._current_phase}  {time_str}{cost_str}", style="dim cyan")
+            line.append(f"  {spinner} ", style="cyan")
+            line.append(f"{self._current_phase}", style="bold cyan")
+            line.append(f"  {time_str}{cost_str}", style="dim")
             return line
 
 
