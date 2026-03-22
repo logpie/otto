@@ -1,73 +1,132 @@
 #!/usr/bin/env bash
 set -euo pipefail
-PASS=0; FAIL=0
-check() { if eval "$2" >/dev/null 2>&1; then echo "  OK  $1"; PASS=$((PASS+1)); else echo "  FAIL  $1"; FAIL=$((FAIL+1)); fi; }
-echo "Verifying: edge-large-spec (URL shortener, 16 acceptance criteria)"
 
-[ -d node_modules ] || npm install --silent 2>/dev/null
+trap 'rm -f verify_check.js' EXIT
 
-# Find and start the server
-SERVER_FILE=""
-for f in index.js server.js app.js src/index.js src/server.js src/app.js; do
-  if [ -f "$f" ]; then SERVER_FILE="$f"; break; fi
-done
-if [ -z "$SERVER_FILE" ]; then echo "  FAIL  No server file found"; exit 1; fi
+cat > verify_check.js <<'JS'
+const assert = require('assert')
+const { spawn } = require('child_process')
+const fs = require('fs')
 
-PORT=$((9000 + RANDOM % 1000))
-export PORT
-node "$SERVER_FILE" &
-SERVER_PID=$!
-trap "kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null" EXIT
+let failures = 0
+let server
 
-for i in $(seq 1 30); do
-  if curl -s "http://localhost:$PORT/health" >/dev/null 2>&1; then break; fi
-  sleep 0.2
-done
+function findServerFile() {
+  for (const candidate of ['server.js', 'app.js', 'index.js', 'src/server.js', 'src/app.js', 'src/index.js']) {
+    if (fs.existsSync(candidate)) return candidate
+  }
+  throw new Error('URL shortener server entry point not found')
+}
 
-check "POST /shorten creates a short URL" \
-  "curl -sf -X POST http://localhost:$PORT/shorten \
-    -H 'Content-Type: application/json' \
-    -d '{\"url\":\"https://example.com/very/long/path\"}' \
-    | node -e '
-      const d = JSON.parse(require(\"fs\").readFileSync(\"/dev/stdin\",\"utf8\"));
-      if (!d.alias && !d.shortUrl) process.exit(1);
-    '"
+async function report(name, fn) {
+  try {
+    await fn()
+    console.log(`PASS ${name}`)
+  } catch (error) {
+    failures += 1
+    console.log(`FAIL ${name}: ${error.message}`)
+  }
+}
 
-# Get the alias from the creation response
-ALIAS=$(curl -sf -X POST "http://localhost:$PORT/shorten" \
-  -H 'Content-Type: application/json' \
-  -d '{"url":"https://httpbin.org/get"}' \
-  | node -e 'const d=JSON.parse(require("fs").readFileSync("/dev/stdin","utf8")); console.log(d.alias || d.shortUrl?.split("/").pop() || "")' 2>/dev/null)
+async function startServer() {
+  const port = 33000 + Math.floor(Math.random() * 1000)
+  server = spawn(process.execPath, [findServerFile()], {
+    env: { ...process.env, PORT: String(port) },
+    stdio: ['ignore', 'ignore', 'ignore']
+  })
+  const base = `http://127.0.0.1:${port}`
+  const deadline = Date.now() + 10000
+  while (Date.now() < deadline) {
+    try {
+      await fetch(`${base}/health`)
+      return base
+    } catch (_) {
+      await new Promise((resolve) => setTimeout(resolve, 150))
+    }
+  }
+  throw new Error('URL shortener server did not become ready')
+}
 
-check "GET /:alias redirects with 301" \
-  "[ -n \"$ALIAS\" ] && RESP=\$(curl -s -o /dev/null -w '%{http_code}' -L0 \"http://localhost:$PORT/$ALIAS\"); \
-   [ \"\$RESP\" = '301' ] || [ \"\$RESP\" = '302' ]"
+process.on('exit', () => { if (server) server.kill('SIGTERM') })
 
-check "GET /:alias/stats returns click data" \
-  "[ -n \"$ALIAS\" ] && curl -sf \"http://localhost:$PORT/$ALIAS/stats\" \
-    | node -e '
-      const d = JSON.parse(require(\"fs\").readFileSync(\"/dev/stdin\",\"utf8\"));
-      if (typeof d.clicks === \"undefined\" && typeof d.visits === \"undefined\") process.exit(1);
-    '"
+;(async () => {
+  const base = await startServer()
 
-check "GET /health returns uptime and link count" \
-  "curl -sf http://localhost:$PORT/health \
-    | node -e '
-      const d = JSON.parse(require(\"fs\").readFileSync(\"/dev/stdin\",\"utf8\"));
-      if (typeof d.uptime === \"undefined\" && typeof d.status === \"undefined\") process.exit(1);
-    '"
+  async function request(method, url, body, headers = {}) {
+    const response = await fetch(`${base}${url}`, {
+      method,
+      redirect: 'manual',
+      headers: body ? { 'content-type': 'application/json', ...headers } : headers,
+      body: body ? JSON.stringify(body) : undefined
+    })
+    const payload = await response.json().catch(() => ({}))
+    return { response, payload }
+  }
 
-check "expired links return 410 Gone" \
-  "EXPIRED_ALIAS=\$(curl -sf -X POST http://localhost:$PORT/shorten \
-    -H 'Content-Type: application/json' \
-    -d '{\"url\":\"https://example.com/temp\",\"expiresIn\":1}' \
-    | node -e 'const d=JSON.parse(require(\"fs\").readFileSync(\"/dev/stdin\",\"utf8\")); console.log(d.alias || d.shortUrl?.split(\"/\").pop() || \"\")'); \
-   sleep 2; \
-   RESP=\$(curl -s -o /dev/null -w '%{http_code}' -L0 \"http://localhost:$PORT/\$EXPIRED_ALIAS\"); \
-   [ \"\$RESP\" = '410' ]"
+  let alias
 
-echo ""
-echo "$PASS passed, $FAIL failed"
-kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null
-trap - EXIT
-[ $FAIL -eq 0 ]
+  await report('health endpoint responds with uptime/count and CORS headers', async () => {
+    const { response, payload } = await request('GET', '/health')
+    assert.ok(payload.uptime !== undefined)
+    assert.ok(payload.totalLinks !== undefined || payload.total !== undefined)
+    assert.ok(response.headers.get('access-control-allow-origin') !== null)
+  })
+
+  await report('POST /shorten returns a base62 alias and short URL', async () => {
+    const { response, payload } = await request('POST', '/shorten', { url: 'https://example.com/one' })
+    assert.strictEqual(response.status < 300, true)
+    assert.ok(payload.shortUrl)
+    assert.ok(/^[A-Za-z0-9]{7}$/.test(payload.alias))
+    alias = payload.alias
+  })
+
+  await report('custom alias validation accepts valid aliases and rejects invalid ones', async () => {
+    const good = await request('POST', '/shorten', { url: 'https://example.com/two', customAlias: 'Alpha12' })
+    assert.strictEqual(good.response.status < 300, true)
+    const bad = await request('POST', '/shorten', { url: 'https://example.com/three', customAlias: '!!' })
+    assert.ok(bad.response.status >= 400)
+    assert.ok(bad.payload.error && bad.payload.code)
+  })
+
+  await report('duplicate URLs reuse the same alias', async () => {
+    const first = await request('POST', '/shorten', { url: 'https://example.com/dupe' })
+    const second = await request('POST', '/shorten', { url: 'https://example.com/dupe' })
+    assert.strictEqual(first.payload.alias, second.payload.alias)
+  })
+
+  await report('redirects increment stats and record click metadata', async () => {
+    const click = await request('GET', `/${alias}`, null, { referer: 'https://ref.example', 'user-agent': 'verify-agent' })
+    assert.strictEqual(click.response.status, 301)
+    const stats = await request('GET', `/${alias}/stats`)
+    const text = JSON.stringify(stats.payload).toLowerCase()
+    assert.ok(text.includes('click'))
+    assert.ok(text.includes('ref'))
+  })
+
+  await report('expired links return 410 Gone', async () => {
+    const created = await request('POST', '/shorten', { url: 'https://example.com/short', expiresIn: 1 })
+    await new Promise((resolve) => setTimeout(resolve, 1200))
+    const expired = await request('GET', `/${created.payload.alias}`)
+    assert.strictEqual(expired.response.status, 410)
+  })
+
+  await report('recent/top endpoints rank links and shorten rate limiting is enforced', async () => {
+    for (let i = 0; i < 9; i += 1) {
+      await request('POST', '/shorten', { url: `https://example.com/rate-${i}` })
+    }
+    const limited = await request('POST', '/shorten', { url: 'https://example.com/rate-over' })
+    assert.strictEqual(limited.response.status, 429)
+    const top = await request('GET', '/api/top')
+    const recent = await request('GET', '/api/recent')
+    assert.ok(Array.isArray(top.payload) || Array.isArray(top.payload.links))
+    assert.ok(Array.isArray(recent.payload) || Array.isArray(recent.payload.links))
+  })
+
+  process.exit(failures ? 1 : 0)
+})().catch((error) => {
+  console.error(error)
+  process.exit(1)
+})
+JS
+
+node verify_check.js

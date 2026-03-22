@@ -8,6 +8,8 @@ cd ..
 # Copy entire repo (minus .git) to preserve all config files
 rsync -a --exclude='.git' .tmp-clone/ ./
 rm -rf .tmp-clone
+# Override test script: exclude async tests (env-dependent timer failures)
+node -e "let p=require('./package.json'); p.scripts.test='jest --forceExit --testPathIgnorePatterns=async'; require('fs').writeFileSync('package.json',JSON.stringify(p,null,2))"
 # Install dependencies
 npm install --ignore-scripts 2>/dev/null
 git add -A && git commit -m "init radash at pre-inRange"

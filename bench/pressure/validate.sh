@@ -24,6 +24,10 @@ PASS=0
 FAIL=0
 ERRORS=()
 
+warn() {
+    echo "  WARN  $1"
+}
+
 echo "Validating $TOTAL project setups..."
 echo ""
 
@@ -38,6 +42,22 @@ for proj in "${PROJECT_NAMES[@]}"; do
         [[ -z "$line" || "$line" == \#* ]] && continue
         task_count=$((task_count + 1))
     done < "$proj_dir/tasks.txt"
+
+    if [[ "$proj" != real-* && ! -f "$proj_dir/verify.sh" ]]; then
+        echo "  FAIL  $proj — missing verify.sh"
+        ERRORS+=("$proj: missing verify.sh")
+        FAIL=$((FAIL + 1))
+        rm -rf "$WORK_DIR"
+        continue
+    fi
+
+    if [[ -f "$proj_dir/verify.sh" ]] && ! bash -n "$proj_dir/verify.sh"; then
+        echo "  FAIL  $proj — verify.sh has invalid bash syntax"
+        ERRORS+=("$proj: verify.sh syntax check failed")
+        FAIL=$((FAIL + 1))
+        rm -rf "$WORK_DIR"
+        continue
+    fi
 
     # Setup
     setup_ok=1
@@ -68,14 +88,24 @@ for proj in "${PROJECT_NAMES[@]}"; do
         test_cmd=""
         if [[ -f "$WORK_DIR/package.json" ]]; then
             # Install deps first
-            (cd "$WORK_DIR" && npm install --no-audit --no-fund 2>/dev/null) >> "$setup_log" 2>&1 || true
+            if ! (cd "$WORK_DIR" && npm install --no-audit --no-fund) >> "$setup_log" 2>&1; then
+                warn "$proj — npm install failed, continuing with available dependencies (see $setup_log)"
+            fi
             test_cmd="npm test"
         elif [[ -f "$WORK_DIR/pyproject.toml" ]] || [[ -f "$WORK_DIR/setup.py" ]] || [[ -f "$WORK_DIR/setup.cfg" ]]; then
             # Install Python package in a temp venv (avoids PEP 668 system Python issues)
             # Try [all] extras first, fall back to plain install
-            (cd "$WORK_DIR" && python3 -m venv .venv && \
-             (.venv/bin/pip install -q -e ".[all,test,dev]" 2>/dev/null || .venv/bin/pip install -q -e . 2>/dev/null) && \
-             .venv/bin/pip install -q pytest 2>/dev/null) >> "$setup_log" 2>&1 || true
+            install_ok=1
+            if ! (cd "$WORK_DIR" && python3 -m venv .venv) >> "$setup_log" 2>&1; then
+                install_ok=0
+            elif ! (cd "$WORK_DIR" && (.venv/bin/pip install -q -e ".[all,test,dev]" || .venv/bin/pip install -q -e .)) >> "$setup_log" 2>&1; then
+                install_ok=0
+            elif ! (cd "$WORK_DIR" && .venv/bin/pip install -q pytest) >> "$setup_log" 2>&1; then
+                install_ok=0
+            fi
+            if [[ $install_ok -eq 0 ]]; then
+                warn "$proj — Python dependency install failed, continuing with available environment (see $setup_log)"
+            fi
             test_cmd=".venv/bin/python -m pytest -q --override-ini='addopts='"
         elif ls "$WORK_DIR"/test_*.py > /dev/null 2>&1; then
             test_cmd="python3 -m pytest -q"

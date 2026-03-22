@@ -20,8 +20,12 @@ if [[ -z "$OTTO_BIN" ]]; then
     fi
 fi
 
-# Resolve to absolute path so it works after cd to /tmp workdirs
-OTTO_BIN="$(cd "$(dirname "$OTTO_BIN")" && pwd)/$(basename "$OTTO_BIN")" 2>/dev/null || true
+if [[ "$OTTO_BIN" == */* ]]; then
+    # Resolve explicit paths so they keep working after cd to /tmp workdirs.
+    OTTO_BIN="$(cd "$(dirname "$OTTO_BIN")" && pwd)/$(basename "$OTTO_BIN")"
+elif command -v "$OTTO_BIN" &>/dev/null; then
+    OTTO_BIN="$(command -v "$OTTO_BIN")"
+fi
 
 if ! command -v "$OTTO_BIN" &>/dev/null && [[ ! -x "$OTTO_BIN" ]]; then
     echo "ERROR: otto not found at '$OTTO_BIN'. Set OTTO_BIN or install otto." >&2
@@ -158,6 +162,8 @@ for proj in "${PROJECT_NAMES[@]}"; do
     # Parse results
     passed=0
     failed=0
+    summary_passed=0
+    summary_failed=0
     total_cost="0.00"
     if [[ -f "$WORK_DIR/tasks.yaml" ]]; then
         passed=$(grep -c 'status: passed' "$WORK_DIR/tasks.yaml" 2>/dev/null || true)
@@ -168,11 +174,21 @@ for proj in "${PROJECT_NAMES[@]}"; do
             | sed 's/.*cost_usd:[[:space:]]*//' \
             | awk '{s += $1} END {printf "%.2f", s}' 2>/dev/null || echo "0.00")
     fi
+    summary_passed=$passed
+    summary_failed=$failed
 
-    if [[ $passed -eq $task_count && $task_count -gt 0 ]]; then
+    if [[ $OTTO_EXIT -ne 0 && ! -f "$WORK_DIR/tasks.yaml" ]]; then
+        status="CRASH"
+        summary_passed=0
+        summary_failed=$task_count
+    elif [[ $passed -eq $task_count && $task_count -gt 0 ]]; then
         status="PASS"
     else
         status="FAIL"
+        if [[ ! -f "$WORK_DIR/tasks.yaml" ]]; then
+            summary_passed=0
+            summary_failed=$task_count
+        fi
     fi
 
     # Independent verification (if verify.sh exists)
@@ -185,11 +201,13 @@ for proj in "${PROJECT_NAMES[@]}"; do
         else
             verify_status=" [VERIFY FAIL]"
             status="VERIFY_FAIL"
+            summary_passed=0
+            summary_failed=$task_count
             cat "$verify_log" | tail -10
         fi
     fi
 
-    echo "$status $task_count $passed $failed $RUN_TIME $total_cost" > "$META_DIR/$proj"
+    echo "$status $task_count $summary_passed $summary_failed $RUN_TIME $total_cost" > "$META_DIR/$proj"
     echo ""
     echo "  Result: $status  ($passed/$task_count passed, ${RUN_TIME}s, \$$total_cost)$verify_status"
     echo ""

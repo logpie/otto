@@ -1,79 +1,105 @@
 #!/usr/bin/env bash
 set -euo pipefail
-PASS=0; FAIL=0
-check() { if eval "$2" >/dev/null 2>&1; then echo "  OK  $1"; PASS=$((PASS+1)); else echo "  FAIL  $1"; FAIL=$((FAIL+1)); fi; }
-echo "Verifying: bugfix-scheduler (6 bugs)"
 
-[ -d node_modules ] || npm install --silent 2>/dev/null
+trap 'rm -f verify_check.js' EXIT
 
-# Bug 1+2: Heap ordering — parent index and sinkDown comparison
-check "Bug1+2: priority queue orders 10+ items correctly" \
-  "node -e '
-const { PriorityQueue } = require(\"./scheduler\");
-const pq = new PriorityQueue();
-const priorities = [7, 3, 9, 1, 5, 8, 2, 6, 4, 10, 0];
-priorities.forEach((p, i) => pq.enqueue(\"item\" + p, p));
-const result = [];
-while (pq.size > 0) result.push(pq.dequeue());
-// Should come out in ascending priority order
-for (let i = 1; i < result.length; i++) {
-  const prev = parseInt(result[i-1].replace(\"item\",\"\"));
-  const curr = parseInt(result[i].replace(\"item\",\"\"));
-  if (prev > curr) { console.error(\"out of order:\", result); process.exit(1); }
+cat > verify_check.js <<'JS'
+const assert = require('assert')
+const { PriorityQueue, Scheduler } = require('./scheduler')
+
+let failures = 0
+
+async function report(name, fn) {
+  try {
+    await fn()
+    console.log(`PASS ${name}`)
+  } catch (error) {
+    failures += 1
+    console.log(`FAIL ${name}: ${error.message}`)
+  }
 }
-'"
 
-# Bug 3: setTimeout callback loses 'this' context
-check "Bug3: delayed job actually executes (this-binding fixed)" \
-  "node -e '
-const { Scheduler } = require(\"./scheduler\");
-const s = new Scheduler();
-let ran = false;
-s.addJob(\"delayed\", () => { ran = true; }, { delay: 50 });
-// Wait for the delay, then run
-setTimeout(async () => {
-  await s.run();
-  s.stop();
-  process.exit(ran ? 0 : 1);
-}, 200);
-setTimeout(() => process.exit(1), 5000);
-'"
+async function checkPriorityQueue() {
+  const pq = new PriorityQueue()
+  const priorities = [7, 3, 9, 1, 5, 8, 2, 6, 4, 10, 0]
+  priorities.forEach((priority) => pq.enqueue(priority, priority))
+  const out = []
+  while (pq.size > 0) out.push(pq.dequeue())
+  assert.deepStrictEqual(out, [...priorities].sort((a, b) => a - b))
+}
 
-# Bug 5: Error serialization — should store err.message not raw Error
-check "Bug5: error results have readable message, not empty object" \
-  "node -e '
-const { Scheduler } = require(\"./scheduler\");
-const s = new Scheduler();
-s.addJob(\"failing\", () => { throw new Error(\"test error msg\"); }, { priority: 1 });
-s.run().then(() => {
-  const errResult = s.results.find(r => r.status === \"error\");
-  if (!errResult) process.exit(1);
-  // The error field should be a string message, not an Error object that serializes to {}
-  const serialized = JSON.stringify(errResult);
-  if (serialized.includes(\"test error msg\")) process.exit(0);
-  // If error is stored as Error object, JSON.stringify makes it {}
-  if (serialized.includes(\"{}\")) { console.error(\"Error serialized as {}\"); process.exit(1); }
-  process.exit(0);
-}).catch(() => process.exit(1));
-setTimeout(() => process.exit(1), 5000);
-'"
+async function checkDelayedJobs() {
+  const scheduler = new Scheduler()
+  const events = []
+  scheduler.addJob('delayed', () => { events.push(Date.now()) }, { delay: 120 })
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  assert.strictEqual(events.length, 0)
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  await scheduler.run()
+  scheduler.stop()
+  assert.strictEqual(events.length, 1)
+}
 
-check "scheduler runs jobs in priority order" \
-  "node -e '
-const { Scheduler } = require(\"./scheduler\");
-const s = new Scheduler();
-const order = [];
-s.addJob(\"low\", () => order.push(\"low\"), { priority: 10 });
-s.addJob(\"high\", () => order.push(\"high\"), { priority: 1 });
-s.addJob(\"mid\", () => order.push(\"mid\"), { priority: 5 });
-s.run(1).then(() => {
-  if (order[0] !== \"high\") { console.error(\"expected high first, got\", order); process.exit(1); }
-  if (order[2] !== \"low\") { console.error(\"expected low last, got\", order); process.exit(1); }
-  process.exit(0);
-}).catch(() => process.exit(1));
-setTimeout(() => process.exit(1), 5000);
-'"
+async function checkIntervalSpacing() {
+  const scheduler = new Scheduler()
+  const times = []
+  scheduler.addJob('interval', () => {
+    times.push(Date.now())
+    if (times.length === 3) scheduler.stop()
+  }, { interval: 120 })
+  await scheduler.run()
+  assert.ok(times.length >= 3)
+  assert.ok(times[1] - times[0] >= 100)
+  assert.ok(times[2] - times[1] >= 100)
+}
 
-echo ""
-echo "$PASS passed, $FAIL failed"
-[ $FAIL -eq 0 ]
+async function checkConcurrency() {
+  const scheduler = new Scheduler()
+  let active = 0
+  let maxActive = 0
+  for (let i = 0; i < 6; i += 1) {
+    scheduler.addJob(`job-${i}`, async () => {
+      active += 1
+      maxActive = Math.max(maxActive, active)
+      await new Promise((resolve) => setTimeout(resolve, 80))
+      active -= 1
+    }, { priority: i })
+  }
+  await scheduler.run(3)
+  scheduler.stop()
+  assert.ok(maxActive >= 2)
+  assert.ok(maxActive <= 3)
+}
+
+async function checkSerializableErrors() {
+  const scheduler = new Scheduler()
+  scheduler.addJob('bad', () => { throw new Error('boom') })
+  await scheduler.run()
+  scheduler.stop()
+  const serialized = JSON.stringify(scheduler.results)
+  assert.ok(serialized.includes('boom'))
+  assert.ok(!serialized.includes('"error":{}'))
+}
+
+async function checkMixedResults() {
+  const scheduler = new Scheduler()
+  scheduler.addJob('ok', () => 'done', { priority: 1 })
+  scheduler.addJob('bad', () => { throw new Error('broken') }, { priority: 2 })
+  const results = await scheduler.run(2)
+  scheduler.stop()
+  assert.ok(results.some((entry) => entry.status === 'ok'))
+  assert.ok(results.some((entry) => entry.status === 'error'))
+}
+
+;(async () => {
+  await report('priority queue is a real min-heap for 10+ items', checkPriorityQueue)
+  await report('delayed jobs do not run before their delay elapses', checkDelayedJobs)
+  await report('interval jobs wait between executions', checkIntervalSpacing)
+  await report('multiple workers process jobs concurrently', checkConcurrency)
+  await report('error results serialize with a readable message', checkSerializableErrors)
+  await report('mixed success and failure jobs complete without crashing', checkMixedResults)
+  process.exit(failures ? 1 : 0)
+})()
+JS
+
+node verify_check.js

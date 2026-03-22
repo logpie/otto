@@ -1,67 +1,153 @@
 #!/usr/bin/env bash
 set -euo pipefail
-PASS=0; FAIL=0
-check() { if eval "$2" >/dev/null 2>&1; then echo "  OK  $1"; PASS=$((PASS+1)); else echo "  FAIL  $1"; FAIL=$((FAIL+1)); fi; }
-echo "Verifying: multi-expense-tracker (3-layer integration)"
 
-[ -d node_modules ] || npm install --silent 2>/dev/null
+trap 'rm -f verify_check.js' EXIT
 
-# Find and start the server
-SERVER_FILE=""
-for f in index.js server.js app.js src/index.js src/server.js src/app.js; do
-  if [ -f "$f" ]; then SERVER_FILE="$f"; break; fi
-done
-if [ -z "$SERVER_FILE" ]; then echo "  FAIL  No server file found"; exit 1; fi
+cat > verify_check.js <<'JS'
+const assert = require('assert')
+const { spawn } = require('child_process')
+const fs = require('fs')
 
-PORT=$((9000 + RANDOM % 1000))
-export PORT
-node "$SERVER_FILE" &
-SERVER_PID=$!
-trap "kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null" EXIT
+let failures = 0
+let server
 
-for i in $(seq 1 30); do
-  if curl -s "http://localhost:$PORT/expenses" >/dev/null 2>&1; then break; fi
-  sleep 0.2
-done
+function findServerFile() {
+  for (const candidate of ['server.js', 'app.js', 'index.js', 'src/server.js', 'src/app.js', 'src/index.js']) {
+    if (fs.existsSync(candidate)) return candidate
+  }
+  throw new Error('expense tracker server entry point not found')
+}
 
-check "POST /expenses creates an expense" \
-  "curl -sf -X POST http://localhost:$PORT/expenses \
-    -H 'Content-Type: application/json' \
-    -d '{\"amount\":42.50,\"currency\":\"USD\",\"category\":\"food\",\"description\":\"lunch\",\"date\":\"2024-01-15\",\"tags\":[\"work\"]}' \
-    | node -e 'const d=JSON.parse(require(\"fs\").readFileSync(\"/dev/stdin\",\"utf8\")); if(!d.id && !d.data?.id) process.exit(1);'"
+async function report(name, fn) {
+  try {
+    await fn()
+    console.log(`PASS ${name}`)
+  } catch (error) {
+    failures += 1
+    console.log(`FAIL ${name}: ${error.message}`)
+  }
+}
 
-check "POST /expenses validates — rejects negative amount" \
-  "RESP=\$(curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:$PORT/expenses \
-    -H 'Content-Type: application/json' \
-    -d '{\"amount\":-10,\"currency\":\"USD\",\"category\":\"food\",\"description\":\"bad\",\"date\":\"2024-01-15\",\"tags\":[]}'); \
-   [ \"\$RESP\" = '400' ] || [ \"\$RESP\" = '422' ]"
+async function startServer() {
+  const port = 34000 + Math.floor(Math.random() * 1000)
+  server = spawn(process.execPath, [findServerFile()], {
+    env: { ...process.env, PORT: String(port) },
+    stdio: ['ignore', 'ignore', 'ignore']
+  })
+  const base = `http://127.0.0.1:${port}`
+  const deadline = Date.now() + 10000
+  while (Date.now() < deadline) {
+    try {
+      await fetch(`${base}/expenses`)
+      return base
+    } catch (_) {
+      await new Promise((resolve) => setTimeout(resolve, 150))
+    }
+  }
+  throw new Error('expense tracker server did not become ready')
+}
 
-# Add more expenses for analytics
-check "POST second expense for analytics" \
-  "curl -sf -X POST http://localhost:$PORT/expenses \
-    -H 'Content-Type: application/json' \
-    -d '{\"amount\":100.00,\"currency\":\"USD\",\"category\":\"transport\",\"description\":\"taxi\",\"date\":\"2024-01-15\",\"tags\":[]}' >/dev/null"
+process.on('exit', () => { if (server) server.kill('SIGTERM') })
 
-check "GET /analytics/category-totals returns totals" \
-  "curl -sf 'http://localhost:$PORT/analytics/category-totals?month=2024-01' \
-    | node -e '
-      const d = JSON.parse(require(\"fs\").readFileSync(\"/dev/stdin\",\"utf8\"));
-      const data = d.data || d;
-      // Should have food and transport categories
-      const hasData = (data.food || data.Food || (Array.isArray(data) && data.length > 0));
-      if (!hasData && Object.keys(data).length === 0) process.exit(1);
-    '"
+;(async () => {
+  const base = await startServer()
 
-check "GET /expenses lists created expenses" \
-  "curl -sf http://localhost:$PORT/expenses \
-    | node -e '
-      const d = JSON.parse(require(\"fs\").readFileSync(\"/dev/stdin\",\"utf8\"));
-      const arr = Array.isArray(d) ? d : (d.expenses || d.data || []);
-      if (arr.length < 2) process.exit(1);
-    '"
+  async function request(method, url, body) {
+    const response = await fetch(`${base}${url}`, {
+      method,
+      headers: body ? { 'content-type': 'application/json' } : {},
+      body: body ? JSON.stringify(body) : undefined
+    })
+    const payload = await response.json().catch(() => ({}))
+    return { response, payload }
+  }
 
-echo ""
-echo "$PASS passed, $FAIL failed"
-kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null
-trap - EXIT
-[ $FAIL -eq 0 ]
+  let createdId
+
+  await report('POST /expenses and /budgets persist valid records', async () => {
+    const expense = await request('POST', '/expenses', {
+      amount: 20,
+      currency: 'USD',
+      category: 'food',
+      description: 'lunch',
+      date: '2024-01-15',
+      tags: ['meal']
+    })
+    const budget = await request('POST', '/budgets', {
+      category: 'food',
+      monthly_limit: 100,
+      currency: 'USD'
+    })
+    assert.strictEqual(expense.response.status < 300, true)
+    assert.strictEqual(budget.response.status < 300, true)
+    createdId = expense.payload.id
+    assert.ok(createdId)
+  })
+
+  await report('validation rejects bad amount, currency, date, and missing category', async () => {
+    const bad = await request('POST', '/expenses', {
+      amount: -1,
+      currency: 'US',
+      category: '',
+      description: 'oops',
+      date: 'not-a-date'
+    })
+    assert.ok(bad.response.status >= 400)
+  })
+
+  await report('GET /expenses supports filtering and pagination', async () => {
+    await request('POST', '/expenses', {
+      amount: 40,
+      currency: 'USD',
+      category: 'travel',
+      description: 'train',
+      date: '2024-01-15',
+      tags: ['trip']
+    })
+    const list = await request('GET', '/expenses?category=food&month=2024-01&minAmount=10&maxAmount=30&page=1&limit=1')
+    const items = Array.isArray(list.payload) ? list.payload : list.payload.items || list.payload.expenses
+    assert.strictEqual(items.length, 1)
+    assert.strictEqual(items[0].category, 'food')
+  })
+
+  await report('GET /expenses/:id returns a record and DELETE removes it', async () => {
+    const fetched = await request('GET', `/expenses/${createdId}`)
+    assert.strictEqual(fetched.payload.id, createdId)
+    const deleted = await request('DELETE', `/expenses/${createdId}`)
+    assert.strictEqual(deleted.response.status < 300, true)
+    const missing = await request('GET', `/expenses/${createdId}`)
+    assert.ok(missing.response.status >= 400)
+  })
+
+  await report('analytics/category-totals and budget-status compute spending correctly', async () => {
+    await request('POST', '/expenses', {
+      amount: 60,
+      currency: 'USD',
+      category: 'food',
+      description: 'dinner',
+      date: '2024-01-16',
+      tags: []
+    })
+    const totals = await request('GET', '/analytics/category-totals?month=2024-01')
+    const budget = await request('GET', '/analytics/budget-status?month=2024-01')
+    const totalsText = JSON.stringify(totals.payload).toLowerCase()
+    const budgetText = JSON.stringify(budget.payload).toLowerCase()
+    assert.ok(totalsText.includes('food'))
+    assert.ok(budgetText.includes('remaining') || budgetText.includes('overbudget'))
+  })
+
+  await report('analytics/trends returns monthly totals in order', async () => {
+    const trends = await request('GET', '/analytics/trends?months=6')
+    const items = Array.isArray(trends.payload) ? trends.payload : trends.payload.trends
+    assert.ok(Array.isArray(items))
+    assert.ok(items.length >= 1)
+  })
+
+  process.exit(failures ? 1 : 0)
+})().catch((error) => {
+  console.error(error)
+  process.exit(1)
+})
+JS
+
+node verify_check.js

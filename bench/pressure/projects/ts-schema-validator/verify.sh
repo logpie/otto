@@ -1,99 +1,94 @@
 #!/usr/bin/env bash
 set -euo pipefail
-PASS=0; FAIL=0
-check() { if eval "$2" >/dev/null 2>&1; then echo "  OK  $1"; PASS=$((PASS+1)); else echo "  FAIL  $1"; FAIL=$((FAIL+1)); fi; }
-echo "Verifying: ts-schema-validator"
 
-[ -d node_modules ] || npm install --silent 2>/dev/null
+npm run build >/dev/null 2>&1 || npx tsc >/dev/null 2>&1 || true
+trap 'rm -f verify_check.js' EXIT
 
-# Build TS if needed
-if [ -f tsconfig.json ]; then
-  npx tsc --noEmit 2>/dev/null || npx tsc 2>/dev/null || true
-fi
+cat > verify_check.js <<'JS'
+const assert = require('assert')
+const fs = require('fs')
+const path = require('path')
 
-# Find compiled output or use ts-node
-EXEC="node"
-if command -v npx >/dev/null 2>&1 && npx ts-node --version >/dev/null 2>&1; then
-  EXEC="npx ts-node --transpileOnly"
-elif [ -d dist ]; then
-  true  # will use node with dist files
-fi
+let failures = 0
 
-# Find the module — try compiled JS first, then TS via ts-node
-MOD=""
-for f in dist/index.js dist/schema.js dist/validator.js index.js src/index.js src/schema.js; do
-  if [ -f "$f" ]; then MOD="$f"; break; fi
-done
-if [ -z "$MOD" ]; then
-  for f in src/index.ts index.ts src/schema.ts; do
-    if [ -f "$f" ]; then MOD="$f"; EXEC="npx ts-node --transpileOnly"; break; fi
-  done
-fi
-if [ -z "$MOD" ]; then echo "  FAIL  No module found"; exit 1; fi
-
-check "string schema parses valid string" \
-  "$EXEC -e '
-const mod = require(require(\"path\").resolve(\"${MOD%.ts}.js\" !== \"$MOD\" ? \"$MOD\" : \"$MOD\".replace(\".ts\",\"\")));
-const s = mod.s || mod.schema || mod.Schema || mod.default || mod;
-const str = (s.string || s.String || (() => { throw new Error(\"no string\"); }))();
-const result = str.parse(\"hello\");
-if (result !== \"hello\") process.exit(1);
-' 2>/dev/null || $EXEC -e '
-const mod = require(require(\"path\").resolve(\"$MOD\".replace(/\.ts$/,\"\")));
-const s = mod.s || mod.schema || mod.Schema || mod.default || mod;
-const str = s.string();
-str.parse(\"hello\");
-'"
-
-check "number schema rejects string input" \
-  "$EXEC -e '
-const mod = require(require(\"path\").resolve(\"$MOD\".replace(/\.ts$/,\"\")));
-const s = mod.s || mod.schema || mod.Schema || mod.default || mod;
-const num = s.number();
-try { num.parse(\"not a number\"); process.exit(1); } catch(e) { process.exit(0); }
-' 2>/dev/null || $EXEC -e '
-const mod = require(require(\"path\").resolve(\"$MOD\".replace(/\.ts$/,\"\")));
-const s = mod.s || mod.schema || mod.Schema || mod.default || mod;
-const num = s.number();
-const r = num.safeParse(\"not a number\");
-if (r.success !== false) process.exit(1);
-'"
-
-check "object schema validates nested fields" \
-  "$EXEC -e '
-const mod = require(require(\"path\").resolve(\"$MOD\".replace(/\.ts$/,\"\")));
-const s = mod.s || mod.schema || mod.Schema || mod.default || mod;
-const schema = s.object({ name: s.string(), age: s.number() });
-const result = schema.parse({ name: \"Alice\", age: 30 });
-if (result.name !== \"Alice\" || result.age !== 30) process.exit(1);
-'"
-
-check "validation errors include field path" \
-  "$EXEC -e '
-const mod = require(require(\"path\").resolve(\"$MOD\".replace(/\.ts$/,\"\")));
-const s = mod.s || mod.schema || mod.Schema || mod.default || mod;
-const schema = s.object({ address: s.object({ zip: s.string() }) });
-try {
-  schema.parse({ address: { zip: 12345 } });
-  process.exit(1);
-} catch(e) {
-  const msg = e.message || JSON.stringify(e.errors || e.issues || e);
-  // Error should reference the path \"address.zip\" or similar
-  if (msg.includes(\"zip\") || msg.includes(\"address\")) process.exit(0);
-  process.exit(1);
+function requireFirst(candidates) {
+  for (const candidate of candidates) {
+    const full = path.resolve(candidate)
+    if (fs.existsSync(full)) return require(full)
+  }
+  throw new Error('schema validator module not found')
 }
-'"
 
-check "safeParse returns success:false on invalid input" \
-  "$EXEC -e '
-const mod = require(require(\"path\").resolve(\"$MOD\".replace(/\.ts$/,\"\")));
-const s = mod.s || mod.schema || mod.Schema || mod.default || mod;
-const num = s.number();
-const r = num.safeParse(\"bad\");
-if (r.success === false) process.exit(0);
-process.exit(1);
-'"
+async function report(name, fn) {
+  try {
+    await fn()
+    console.log(`PASS ${name}`)
+  } catch (error) {
+    failures += 1
+    console.log(`FAIL ${name}: ${error.message}`)
+  }
+}
 
-echo ""
-echo "$PASS passed, $FAIL failed"
-[ $FAIL -eq 0 ]
+const mod = requireFirst(['dist/index.js', 'dist/schema.js', 'index.js', 'src/index.js'])
+const s = mod.s || mod.default || mod
+
+async function checkBaseTypes() {
+  assert.strictEqual(s.string().parse('ok'), 'ok')
+  assert.strictEqual(s.number().parse(4), 4)
+  assert.strictEqual(s.boolean().parse(true), true)
+  assert.deepStrictEqual(s.array(s.number()).parse([1, 2]), [1, 2])
+}
+
+async function checkModifiers() {
+  assert.strictEqual(s.string().optional().parse(undefined), undefined)
+  assert.strictEqual(s.string().nullable().parse(null), null)
+  assert.strictEqual(s.string().default('x').parse(undefined), 'x')
+  assert.strictEqual(s.string().email().parse('a@example.com'), 'a@example.com')
+  assert.strictEqual(s.number().int().min(2).max(5).parse(3), 3)
+}
+
+async function checkObjectAndPathErrors() {
+  const schema = s.object({ address: s.object({ zip: s.string() }) })
+  try {
+    schema.parse({ address: { zip: 12345 } })
+    throw new Error('parse should have failed')
+  } catch (error) {
+    const text = JSON.stringify(error)
+    assert.ok(text.includes('address') || text.includes('zip'))
+  }
+}
+
+async function checkSafeParse() {
+  const result = s.number().safeParse('bad')
+  assert.strictEqual(result.success, false)
+  assert.ok(result.error)
+}
+
+async function checkUnion() {
+  const schema = s.union([s.string(), s.number()])
+  assert.strictEqual(schema.parse('x'), 'x')
+  assert.strictEqual(schema.parse(3), 3)
+  const result = schema.safeParse(true)
+  assert.strictEqual(result.success, false)
+}
+
+async function checkNestedArrays() {
+  const schema = s.object({
+    users: s.array(s.object({ name: s.string().min(1), age: s.number().int() }))
+  })
+  const parsed = schema.parse({ users: [{ name: 'A', age: 1 }] })
+  assert.deepStrictEqual(parsed.users[0], { name: 'A', age: 1 })
+}
+
+;(async () => {
+  await report('primitive and array schemas parse valid values', checkBaseTypes)
+  await report('optional, nullable, default, email, and numeric modifiers behave correctly', checkModifiers)
+  await report('nested object failures include path information', checkObjectAndPathErrors)
+  await report('safeParse returns a non-throwing error result', checkSafeParse)
+  await report('union schemas accept either branch and reject mismatches', checkUnion)
+  await report('nested arrays of objects infer and parse structured values', checkNestedArrays)
+  process.exit(failures ? 1 : 0)
+})()
+JS
+
+node verify_check.js

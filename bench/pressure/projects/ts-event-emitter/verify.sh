@@ -1,76 +1,115 @@
 #!/usr/bin/env bash
 set -euo pipefail
-PASS=0; FAIL=0
-check() { if eval "$2" >/dev/null 2>&1; then echo "  OK  $1"; PASS=$((PASS+1)); else echo "  FAIL  $1"; FAIL=$((FAIL+1)); fi; }
-echo "Verifying: ts-event-emitter"
 
-[ -d node_modules ] || npm install --silent 2>/dev/null
+npm run build >/dev/null 2>&1 || npx tsc >/dev/null 2>&1 || true
+trap 'rm -f verify_check.js' EXIT
 
-# Build if needed
-if [ -f tsconfig.json ]; then
-  npx tsc 2>/dev/null || true
-fi
+cat > verify_check.js <<'JS'
+const assert = require('assert')
+const fs = require('fs')
+const path = require('path')
 
-# Find compiled JS module
-MOD=""
-for f in dist/index.js dist/emitter.js dist/event-emitter.js index.js src/index.js; do
-  if [ -f "$f" ]; then MOD="$f"; break; fi
-done
-if [ -z "$MOD" ]; then
-  # Try finding any .js in dist
-  MOD=$(find dist -name '*.js' 2>/dev/null | head -1) || true
-fi
-if [ -z "$MOD" ]; then echo "  FAIL  No compiled module found"; exit 1; fi
+let failures = 0
 
-check "on/emit work — handler receives emitted payload" \
-  "node -e '
-const mod = require(require(\"path\").resolve(\"$MOD\"));
-const EE = mod.TypedEmitter || mod.EventEmitter || mod.Emitter || mod.default || Object.values(mod).find(v => typeof v === \"function\");
-const emitter = new EE();
-let received = null;
-emitter.on(\"click\", (data) => { received = data; });
-emitter.emit(\"click\", { x: 10 });
-if (!received || received.x !== 10) process.exit(1);
-'"
+function requireFirst(candidates) {
+  for (const candidate of candidates) {
+    const full = path.resolve(candidate)
+    if (fs.existsSync(full)) return require(full)
+  }
+  throw new Error('event emitter module not found')
+}
 
-check "off removes a handler" \
-  "node -e '
-const mod = require(require(\"path\").resolve(\"$MOD\"));
-const EE = mod.TypedEmitter || mod.EventEmitter || mod.Emitter || mod.default || Object.values(mod).find(v => typeof v === \"function\");
-const emitter = new EE();
-let count = 0;
-const handler = () => count++;
-emitter.on(\"test\", handler);
-emitter.emit(\"test\");
-emitter.off(\"test\", handler);
-emitter.emit(\"test\");
-if (count !== 1) process.exit(1);
-'"
+function findEmitter(mod) {
+  return mod.TypedEmitter || mod.EventEmitter || mod.default || Object.values(mod).find((value) => typeof value === 'function' && value.prototype?.emit)
+}
 
-check "once fires only once" \
-  "node -e '
-const mod = require(require(\"path\").resolve(\"$MOD\"));
-const EE = mod.TypedEmitter || mod.EventEmitter || mod.Emitter || mod.default || Object.values(mod).find(v => typeof v === \"function\");
-const emitter = new EE();
-let count = 0;
-emitter.once(\"ping\", () => count++);
-emitter.emit(\"ping\");
-emitter.emit(\"ping\");
-if (count !== 1) process.exit(1);
-'"
+async function report(name, fn) {
+  try {
+    await fn()
+    console.log(`PASS ${name}`)
+  } catch (error) {
+    failures += 1
+    console.log(`FAIL ${name}: ${error.message}`)
+  }
+}
 
-check "wildcard listener receives all events" \
-  "node -e '
-const mod = require(require(\"path\").resolve(\"$MOD\"));
-const EE = mod.TypedEmitter || mod.EventEmitter || mod.Emitter || mod.default || Object.values(mod).find(v => typeof v === \"function\");
-const emitter = new EE();
-const events = [];
-emitter.on(\"*\", (evt) => events.push(typeof evt === \"string\" ? evt : \"got\"));
-emitter.emit(\"click\", {});
-emitter.emit(\"hover\", {});
-if (events.length < 2) process.exit(1);
-'"
+const mod = requireFirst(['dist/index.js', 'dist/emitter.js', 'index.js', 'src/index.js'])
+const Emitter = findEmitter(mod)
+const Mediator = mod.Mediator || Object.values(mod).find((value) => typeof value === 'function' && value.prototype?.request)
 
-echo ""
-echo "$PASS passed, $FAIL failed"
-[ $FAIL -eq 0 ]
+async function checkBasicOnEmit() {
+  const emitter = new Emitter()
+  let seen = null
+  emitter.on('click', (payload) => { seen = payload })
+  emitter.emit('click', { x: 1 })
+  assert.deepStrictEqual(seen, { x: 1 })
+}
+
+async function checkOnceAndOff() {
+  const emitter = new Emitter()
+  let count = 0
+  const handler = () => { count += 1 }
+  emitter.once('ping', handler)
+  emitter.emit('ping')
+  emitter.emit('ping')
+  emitter.on('pong', handler)
+  emitter.off('pong', handler)
+  emitter.emit('pong')
+  assert.strictEqual(count, 1)
+}
+
+async function checkWildcardAndPrepend() {
+  const emitter = new Emitter()
+  const order = []
+  emitter.on('*', () => order.push('wild'))
+  emitter.on('evt', () => order.push('normal'))
+  emitter.prepend('evt', () => order.push('first'))
+  emitter.emit('evt', {})
+  assert.deepStrictEqual(order.slice(0, 2), ['wild', 'first'])
+}
+
+async function checkEmitAsync() {
+  const emitter = new Emitter()
+  const seen = []
+  emitter.on('async', async () => {
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    seen.push('done')
+  })
+  await emitter.emitAsync('async', {})
+  assert.deepStrictEqual(seen, ['done'])
+}
+
+async function checkMaxListenersWarning() {
+  const emitter = new Emitter({ maxListeners: 1 })
+  let warned = false
+  const originalWarn = console.warn
+  console.warn = () => { warned = true }
+  try {
+    emitter.on('warn', () => {})
+    emitter.on('warn', () => {})
+  } finally {
+    console.warn = originalWarn
+  }
+  assert.strictEqual(warned, true)
+}
+
+async function checkMediator() {
+  assert.ok(Mediator, 'Mediator export missing')
+  const mediator = new Mediator()
+  mediator.on('sum', async (payload) => payload.a + payload.b)
+  const value = await mediator.request('sum', { a: 2, b: 3 })
+  assert.strictEqual(value, 5)
+}
+
+;(async () => {
+  await report('basic on/emit delivers payloads', checkBasicOnEmit)
+  await report('once fires once and off removes handlers', checkOnceAndOff)
+  await report('wildcard listeners and prepend both affect dispatch order', checkWildcardAndPrepend)
+  await report('emitAsync waits for async handlers', checkEmitAsync)
+  await report('maxListeners emits a warning instead of failing hard', checkMaxListenersWarning)
+  await report('Mediator request/response resolves handler output', checkMediator)
+  process.exit(failures ? 1 : 0)
+})()
+JS
+
+node verify_check.js

@@ -1,84 +1,103 @@
 #!/usr/bin/env bash
 set -euo pipefail
-PASS=0; FAIL=0
-check() { if eval "$2" >/dev/null 2>&1; then echo "  OK  $1"; PASS=$((PASS+1)); else echo "  FAIL  $1"; FAIL=$((FAIL+1)); fi; }
-echo "Verifying: py-markdown-parser"
 
-# Find the main module
-MOD=""
-for m in markdown_parser parser markdown md_parser converter; do
-  if python3 -c "import $m" 2>/dev/null; then MOD=$m; break; fi
-done
-if [ -z "$MOD" ]; then echo "  FAIL  Could not find markdown parser module"; exit 1; fi
+trap 'rm -f verify_check.py' EXIT
 
-check "h1 heading converts to <h1>" \
-  "python3 -c '
-from $MOD import *
-# Find the render/convert function
+cat > verify_check.py <<'PY'
+import importlib
 import inspect
-mod = __import__(\"$MOD\")
-fn = None
-for name in [\"render\", \"convert\", \"to_html\", \"parse\", \"markdown_to_html\", \"render_markdown\"]:
-    fn = getattr(mod, name, None)
-    if fn and callable(fn): break
-assert fn is not None, \"no render function found\"
-result = fn(\"# Hello\")
-assert \"<h1>\" in result and \"Hello\" in result, f\"got: {result}\"
-'"
 
-check "bold text converts to <strong>" \
-  "python3 -c '
-from $MOD import *
-import inspect
-mod = __import__(\"$MOD\")
-fn = None
-for name in [\"render\", \"convert\", \"to_html\", \"parse\", \"markdown_to_html\", \"render_markdown\"]:
-    fn = getattr(mod, name, None)
-    if fn and callable(fn): break
-result = fn(\"This is **bold** text\")
-assert \"<strong>\" in result and \"bold\" in result, f\"got: {result}\"
-'"
+failures = 0
 
-check "code block with language converts to <pre><code>" \
-  "python3 -c '
-from $MOD import *
-mod = __import__(\"$MOD\")
-fn = None
-for name in [\"render\", \"convert\", \"to_html\", \"parse\", \"markdown_to_html\", \"render_markdown\"]:
-    fn = getattr(mod, name, None)
-    if fn and callable(fn): break
-md = \"\"\"\`\`\`python
-print(\"hello\")
-\`\`\`\"\"\"
-result = fn(md)
-assert \"<pre>\" in result or \"<code>\" in result, f\"got: {result}\"
-assert \"print\" in result, f\"code content missing: {result}\"
-'"
 
-check "links convert to <a href>" \
-  "python3 -c '
-from $MOD import *
-mod = __import__(\"$MOD\")
-fn = None
-for name in [\"render\", \"convert\", \"to_html\", \"parse\", \"markdown_to_html\", \"render_markdown\"]:
-    fn = getattr(mod, name, None)
-    if fn and callable(fn): break
-result = fn(\"Visit [Google](https://google.com)\")
-assert \"<a\" in result and \"href\" in result and \"google.com\" in result, f\"got: {result}\"
-'"
+def report(name, fn):
+    global failures
+    try:
+        fn()
+        print(f"PASS {name}")
+    except Exception as exc:
+        failures += 1
+        print(f"FAIL {name}: {exc}")
 
-check "h3 heading converts to <h3>" \
-  "python3 -c '
-from $MOD import *
-mod = __import__(\"$MOD\")
-fn = None
-for name in [\"render\", \"convert\", \"to_html\", \"parse\", \"markdown_to_html\", \"render_markdown\"]:
-    fn = getattr(mod, name, None)
-    if fn and callable(fn): break
-result = fn(\"### Third level\")
-assert \"<h3>\" in result and \"Third level\" in result, f\"got: {result}\"
-'"
 
-echo ""
-echo "$PASS passed, $FAIL failed"
-[ $FAIL -eq 0 ]
+def load_module():
+    for name in ("markdown_parser", "parser", "markdown", "md_parser", "converter"):
+        try:
+            return importlib.import_module(name)
+        except ImportError:
+            continue
+    raise AssertionError("no markdown parser module found")
+
+
+module = load_module()
+
+
+def render(markdown_text):
+    for name in ("markdown_to_html", "render_markdown", "to_html", "render", "convert"):
+        fn = getattr(module, name, None)
+        if callable(fn):
+            return fn(markdown_text)
+    for _, value in inspect.getmembers(module, inspect.isclass):
+        if "render" in value.__name__.lower():
+            instance = value()
+            if hasattr(instance, "render"):
+                return instance.render(markdown_text)
+    raise AssertionError("no renderer entry point found")
+
+
+def check_architecture_and_empty_input():
+    names = {name.lower() for name, _ in inspect.getmembers(module)}
+    assert any("lexer" in name for name in names)
+    assert any("parser" in name for name in names)
+    html = render("")
+    assert html == "" or html.strip() in ("", "<p></p>")
+
+
+def check_headings():
+    html = render("# One\n\n### Three")
+    assert "<h1>" in html and "One" in html
+    assert "<h3>" in html and "Three" in html
+
+
+def check_nested_inline_formatting():
+    html = render("**bold *and italic***")
+    lowered = html.lower()
+    assert "<strong>" in lowered
+    assert "<em>" in lowered or "<i>" in lowered
+
+
+def check_code_block():
+    html = render("```python\nprint('hi')\n```")
+    lowered = html.lower()
+    assert "<pre" in lowered and "<code" in lowered
+    assert "print" in html
+
+
+def check_lists():
+    html = render("- top\n  - nested\n1. first\n2. second")
+    lowered = html.lower()
+    assert "<ul" in lowered
+    assert "<ol" in lowered
+    assert html.count("<li") >= 3
+
+
+def check_links_images_and_blocks():
+    html = render("[site](https://example.com)\n\n![alt](img.png)\n\n> quoted\n\n---")
+    lowered = html.lower()
+    assert "<a " in lowered and "href=" in lowered
+    assert "<img" in lowered and "alt=" in lowered
+    assert "<blockquote" in lowered
+    assert "<hr" in lowered
+
+
+report("module exposes lexer/parser architecture and handles empty input", check_architecture_and_empty_input)
+report("heading syntax renders to matching heading tags", check_headings)
+report("nested inline formatting renders both strong and emphasis", check_nested_inline_formatting)
+report("fenced code blocks preserve code content", check_code_block)
+report("ordered and unordered lists render as list structures", check_lists)
+report("links, images, blockquotes, and rules render correctly", check_links_images_and_blocks)
+
+raise SystemExit(1 if failures else 0)
+PY
+
+python3 verify_check.py

@@ -1,68 +1,164 @@
 #!/usr/bin/env bash
 set -euo pipefail
-PASS=0; FAIL=0
-check() { if eval "$2" >/dev/null 2>&1; then echo "  OK  $1"; PASS=$((PASS+1)); else echo "  FAIL  $1"; FAIL=$((FAIL+1)); fi; }
-echo "Verifying: py-key-value-store"
 
-TMPDIR=$(mktemp -d /tmp/kvstore_verify_XXXXXX)
-trap "rm -rf $TMPDIR" EXIT
+trap 'rm -f verify_check.py' EXIT
 
-check "KVStore get/set/delete work" \
-  "python3 -c '
-import sys, os
-os.chdir(\"$TMPDIR\")
-from kv_store import KVStore
-store = KVStore(\"$TMPDIR/test.db\")
-store.set(\"key1\", \"value1\")
-assert store.get(\"key1\") == \"value1\", f\"got {store.get(\\\"key1\\\")}\"
-store.delete(\"key1\")
-assert store.get(\"key1\") is None, \"key1 should be deleted\"
-'"
+cat > verify_check.py <<'PY'
+import importlib
+import inspect
+import json
+import os
+import pathlib
+import tempfile
+import threading
+import time
 
-check "get returns default for missing key" \
-  "python3 -c '
-import os; os.chdir(\"$TMPDIR\")
-from kv_store import KVStore
-store = KVStore(\"$TMPDIR/test2.db\")
-assert store.get(\"nonexistent\") is None
-assert store.get(\"nonexistent\", \"default\") == \"default\"
-'"
+failures = 0
 
-check "TTL expiry — expired key not returned" \
-  "python3 -c '
-import time, os; os.chdir(\"$TMPDIR\")
-from kv_store import KVStore
-store = KVStore(\"$TMPDIR/test3.db\")
-store.set(\"ephemeral\", \"gone_soon\", ttl_seconds=1)
-assert store.get(\"ephemeral\") == \"gone_soon\"
-time.sleep(1.5)
-result = store.get(\"ephemeral\")
-assert result is None, f\"expired key returned {result}\"
-'"
 
-check "glob pattern matching on keys" \
-  "python3 -c '
-import os; os.chdir(\"$TMPDIR\")
-from kv_store import KVStore
-store = KVStore(\"$TMPDIR/test4.db\")
-store.set(\"user:1\", \"alice\")
-store.set(\"user:2\", \"bob\")
-store.set(\"config:theme\", \"dark\")
-matches = store.keys(\"user:*\")
-assert len(matches) == 2, f\"expected 2 matches, got {len(matches)}: {matches}\"
-assert \"config:theme\" not in matches
-'"
+def report(name, fn):
+    global failures
+    try:
+        fn()
+        print(f"PASS {name}")
+    except Exception as exc:
+        failures += 1
+        print(f"FAIL {name}: {exc}")
 
-check "exists() returns correct booleans" \
-  "python3 -c '
-import os; os.chdir(\"$TMPDIR\")
-from kv_store import KVStore
-store = KVStore(\"$TMPDIR/test5.db\")
-store.set(\"present\", 42)
-assert store.exists(\"present\") == True
-assert store.exists(\"absent\") == False
-'"
 
-echo ""
-echo "$PASS passed, $FAIL failed"
-[ $FAIL -eq 0 ]
+def load_module():
+    for name in ("kvstore", "kv_store", "store"):
+        try:
+            return importlib.import_module(name)
+        except ImportError:
+            continue
+    raise AssertionError("no KV store module found")
+
+
+def find_store_class(module):
+    for _, value in inspect.getmembers(module, inspect.isclass):
+        methods = ("get", "set", "delete", "keys", "clear")
+        if all(hasattr(value, method) for method in methods):
+            return value
+    raise AssertionError("no KV store class found")
+
+
+def build_store(cls, path):
+    sig = inspect.signature(cls)
+    kwargs = {}
+    for name, param in sig.parameters.items():
+        if name == "self":
+            continue
+        if name in ("path", "filename", "file_path", "storage_path", "db_path"):
+            kwargs[name] = str(path)
+        elif param.default is inspect._empty:
+            raise AssertionError(f"unsupported constructor parameter: {name}")
+    return cls(**kwargs)
+
+
+module = load_module()
+Store = getattr(module, "KVStore", None) or find_store_class(module)
+tmpdir = pathlib.Path(tempfile.mkdtemp(prefix="kvstore-verify-"))
+store_path = tmpdir / "store.db"
+
+
+def fresh_store():
+    return build_store(Store, store_path)
+
+
+def check_crud_and_json():
+    store = fresh_store()
+    payload = {"name": "alice", "tags": [1, 2], "meta": {"a": True}}
+    store.set("user:1", payload)
+    assert store.get("user:1") == payload
+    assert store.exists("user:1") is True
+    store.delete("user:1")
+    assert store.get("user:1") is None
+    store.set("x", 1)
+    store.clear()
+    assert store.keys() == [] or len(store.keys()) == 0
+
+
+def check_default_and_ttl():
+    store = fresh_store()
+    assert store.get("missing", "fallback") == "fallback"
+    store.set("ephemeral", {"ok": True}, ttl_seconds=1)
+    assert store.get("ephemeral") == {"ok": True}
+    time.sleep(1.2)
+    assert store.get("ephemeral", "gone") == "gone"
+
+
+def check_glob_keys():
+    store = fresh_store()
+    store.set("user:1", 1)
+    store.set("user:2", 2)
+    store.set("config:theme", "dark")
+    keys = sorted(store.keys("user:*"))
+    assert keys == ["user:1", "user:2"]
+
+
+def check_compaction():
+    store = fresh_store()
+    large = "x" * 200
+    for index in range(1105):
+        store.set("rolling", f"{large}{index}")
+    size = os.path.getsize(store_path)
+    reopened = fresh_store()
+    assert reopened.get("rolling").startswith(large)
+    assert size < 120000, size
+
+
+def check_concurrent_readers_and_writer():
+    store = fresh_store()
+    errors = []
+    stop = threading.Event()
+
+    def writer():
+        try:
+            for index in range(200):
+                store.set("counter", index)
+                time.sleep(0.002)
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            stop.set()
+
+    def reader():
+        try:
+            while not stop.is_set():
+                value = store.get("counter", 0)
+                assert isinstance(value, int)
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=reader) for _ in range(10)]
+    writer_thread = threading.Thread(target=writer)
+    writer_thread.start()
+    for thread in threads:
+        thread.start()
+    writer_thread.join()
+    for thread in threads:
+        thread.join()
+    reopened = fresh_store()
+    assert not errors, errors
+    assert isinstance(reopened.get("counter"), int)
+
+
+def check_persistence_after_reopen():
+    store = fresh_store()
+    store.set("persisted", {"value": 42})
+    reopened = fresh_store()
+    assert reopened.get("persisted") == {"value": 42}
+
+
+report("KV store supports CRUD with JSON values", check_crud_and_json)
+report("get default and TTL expiry both work", check_default_and_ttl)
+report("keys(pattern) performs glob filtering", check_glob_keys)
+report("append-only log compacts after large write volume", check_compaction)
+report("concurrent readers observe consistent values during writes", check_concurrent_readers_and_writer)
+report("data persists after reopening the store", check_persistence_after_reopen)
+
+raise SystemExit(1 if failures else 0)
+PY
+
+python3 verify_check.py
