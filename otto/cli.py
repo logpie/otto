@@ -11,6 +11,7 @@ import click
 
 from otto.config import create_config, git_meta_dir, load_config
 from otto.display import console, rich_escape
+from otto.theme import error_console
 from otto.spec import generate_spec, parse_markdown_tasks
 from otto.tasks import add_task, add_tasks, delete_task, load_tasks, reset_all_tasks, save_tasks, update_task
 
@@ -223,7 +224,7 @@ def _require_git():
         capture_output=True, cwd=Path.cwd(),
     )
     if result.returncode != 0:
-        console.print("Error: not a git repository. Run 'git init' first.", style="error", stderr=True)
+        error_console.print("Error: not a git repository. Run 'git init' first.", style="error")
         sys.exit(2)
 
 
@@ -368,7 +369,7 @@ def add(prompt, verify, max_retries, import_file, no_spec):
         return
 
     if not prompt:
-        console.print("Error: provide a prompt or use -f to import", style="error", stderr=True)
+        error_console.print("Error: provide a prompt or use -f to import", style="error")
         sys.exit(2)
 
     # Generate spec unless --no-spec
@@ -381,8 +382,8 @@ def add(prompt, verify, max_retries, import_file, no_spec):
             with console.status("[dim]Generating spec...[/dim]", spinner="dots") as status:
                 spec_items = generate_spec(prompt, Path.cwd())
         except Exception as e:
-            console.print(f"[error]\\u2717[/error] Spec generation failed: {rich_escape(str(e))}", stderr=True)
-            console.print(f"[dim]Task not created. Fix the issue or use --no-spec.[/dim]", stderr=True)
+            error_console.print(f"[error]\\u2717[/error] Spec generation failed: {rich_escape(str(e))}")
+            error_console.print(f"[dim]Task not created. Fix the issue or use --no-spec.[/dim]")
             sys.exit(1)
         if spec_items:
             spec = spec_items
@@ -397,8 +398,8 @@ def add(prompt, verify, max_retries, import_file, no_spec):
                 tag = "[success]\\u2713[/success]" if spec_is_verifiable(item) else "[info]\\u25c9[/info]"
                 console.print(f"  {tag} {rich_escape(spec_text(item))}")
         else:
-            console.print(f"[warning]\\u26a0[/warning] Spec generation returned empty \u2014 task not created.", stderr=True)
-            console.print(f"[dim]Retry or use --no-spec to skip spec generation.[/dim]", stderr=True)
+            error_console.print(f"[warning]\\u26a0[/warning] Spec generation returned empty \u2014 task not created.")
+            error_console.print(f"[dim]Retry or use --no-spec to skip spec generation.[/dim]")
             sys.exit(1)
 
     task = add_task(tasks_path, prompt, verify=verify, max_retries=max_retries,
@@ -446,7 +447,7 @@ def run(prompt, dry_run, no_architect, tdd):
         import time
 
         if tdd:
-            console.print(f"[warning]\\u26a0[/warning] --tdd ignored for one-off prompts (no spec). Use 'otto add' + 'otto run --tdd'.", stderr=True)
+            error_console.print(f"[warning]\\u26a0[/warning] --tdd ignored for one-off prompts (no spec). Use 'otto add' + 'otto run --tdd'.")
 
         lock_path = git_meta_dir(project_dir) / "otto.lock"
         lock_path.touch()
@@ -454,14 +455,14 @@ def run(prompt, dry_run, no_architect, tdd):
         try:
             fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            console.print("Another otto process is running", style="error", stderr=True)
+            error_console.print("Another otto process is running", style="error")
             sys.exit(2)
 
         try:
             # Dirty-tree protection
             from otto.runner import check_clean_tree
             if not check_clean_tree(project_dir):
-                console.print(f"[error]\\u2717[/error] Working tree is dirty \u2014 fix before running otto", stderr=True)
+                error_console.print(f"[error]\\u2717[/error] Working tree is dirty \u2014 fix before running otto")
                 sys.exit(2)
 
             key = f"adhoc-{int(time.time())}-{os.getpid()}"
@@ -485,7 +486,7 @@ def run(prompt, dry_run, no_architect, tdd):
             import importlib
             importlib.import_module("mcp")
         except ImportError:
-            console.print("Error: mcp library required. Install with: pip install mcp", style="error", stderr=True)
+            error_console.print("Error: mcp library required. Install with: pip install mcp", style="error")
             sys.exit(2)
         from otto.pilot import run_piloted
         exit_code = asyncio.run(run_piloted(config, tasks_path, project_dir))
@@ -511,7 +512,7 @@ def arch(show, clean):
         try:
             fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            console.print("Cannot clean architect docs while otto is running", style="error", stderr=True)
+            error_console.print("Cannot clean architect docs while otto is running", style="error")
             sys.exit(2)
         try:
             if arch_dir.exists():
@@ -547,7 +548,7 @@ def arch(show, clean):
     try:
         fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        console.print("Cannot run architect while otto is running", style="error", stderr=True)
+        error_console.print("Cannot run architect while otto is running", style="error")
         sys.exit(2)
 
     try:
@@ -568,7 +569,7 @@ def arch(show, clean):
                     continue
                 console.print(f"  [dim]-[/dim] {rich_escape(f.name)}")
         else:
-            console.print(f"[error]\\u2717[/error] Architect agent failed", stderr=True)
+            error_console.print(f"[error]\\u2717[/error] Architect agent failed")
             sys.exit(1)
     finally:
         fcntl.flock(lock_fh, fcntl.LOCK_UN)
@@ -585,12 +586,12 @@ def _build_status_table(tasks: list[dict], show_phase: bool = False):
     from rich.console import Group
 
     table = Table(show_header=True, box=None, pad_edge=False, show_edge=False, expand=False)
-    table.add_column("#", style="bold", width=3, justify="right")
-    table.add_column("Status", width=8)
-    table.add_column("Att", width=3, justify="right")
-    table.add_column("Spec", width=4, justify="right")
-    table.add_column("Cost", width=7, justify="right", style="dim")
-    table.add_column("Time", width=6, justify="right", style="dim")
+    table.add_column("#", style="bold", min_width=2, justify="right")
+    table.add_column("Status", min_width=7)
+    table.add_column("Att", min_width=3, justify="right")
+    table.add_column("Spec", min_width=4, justify="right")
+    table.add_column("Cost", min_width=6, justify="right", style="dim")
+    table.add_column("Time", min_width=5, justify="right", style="dim")
     table.add_column("Prompt", ratio=1, no_wrap=True)
 
     for t in tasks:
@@ -806,8 +807,8 @@ def retry(task_id, feedback, force):
     for t in tasks:
         if t.get("id") == task_id:
             if not force and t.get("status") != "failed":
-                console.print(
-                    f"Task #{task_id} is '{t.get('status')}', not 'failed'. Use --force to override.", style="error", stderr=True
+                error_console.print(
+                    f"Task #{task_id} is '{t.get('status')}', not 'failed'. Use --force to override.", style="error"
                 )
                 sys.exit(1)
             # Warn if retrying a task whose code is already merged to main
@@ -837,7 +838,7 @@ def retry(task_id, feedback, force):
             if feedback:
                 console.print(f"  [dim]Feedback: {rich_escape(feedback)}[/dim]")
             return
-    console.print(f"Task #{task_id} not found", style="error", stderr=True)
+    error_console.print(f"Task #{task_id} not found", style="error")
     sys.exit(1)
 
 
@@ -860,12 +861,12 @@ def delete(task_id):
             target = t
             break
     if not target:
-        console.print(f"Task #{task_id} not found", style="error", stderr=True)
+        error_console.print(f"Task #{task_id} not found", style="error")
         sys.exit(1)
 
     task_status = target.get("status", "pending")
     if task_status == "running":
-        console.print(f"[error]\\u2717[/error] Cannot delete a running task. Wait for it to finish or reset.", stderr=True)
+        error_console.print(f"[error]\\u2717[/error] Cannot delete a running task. Wait for it to finish or reset.")
         sys.exit(1)
     if task_status == "passed":
         console.print(f"[warning]\\u26a0[/warning] Task already merged \u2014 this only removes it from the status list.")
@@ -905,7 +906,7 @@ def logs(task_id, raw, follow):
             target = t
             break
     if not target:
-        console.print(f"Task #{task_id} not found", style="error", stderr=True)
+        error_console.print(f"Task #{task_id} not found", style="error")
         sys.exit(1)
 
     log_dir = Path.cwd() / "otto_logs" / target["key"]
@@ -1126,7 +1127,7 @@ def diff(task_id):
     )
     commits = result.stdout.strip().splitlines()
     if not commits:
-        console.print(f"No commit found for task #{task_id}", style="error", stderr=True)
+        error_console.print(f"No commit found for task #{task_id}", style="error")
         sys.exit(1)
     sha = commits[0].split()[0]
     # Show the diff
@@ -1290,7 +1291,7 @@ def show(task_id):
 
             console.print()
             return
-    console.print(f"Task #{task_id} not found", style="error", stderr=True)
+    error_console.print(f"Task #{task_id} not found", style="error")
     sys.exit(1)
 
 
@@ -1321,7 +1322,7 @@ def reset(yes, hard):
     try:
         fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        console.print("Cannot reset while otto is running", style="error", stderr=True)
+        error_console.print("Cannot reset while otto is running", style="error")
         sys.exit(2)
 
     try:
@@ -1357,7 +1358,7 @@ def reset(yes, hard):
                     )
                     console.print(f"  [dim]Reset to before first otto commit ({len(otto_commits)} commits removed)[/dim]")
                 else:
-                    console.print(f"[warning]\\u26a0[/warning] Could not find parent of oldest otto commit", stderr=True)
+                    error_console.print(f"[warning]\\u26a0[/warning] Could not find parent of oldest otto commit")
 
         # Delete otto/* branches
         result = subprocess.run(
@@ -1442,7 +1443,7 @@ def history(limit_):
             except json.JSONDecodeError:
                 continue
     except OSError:
-        console.print(f"Error reading history file", style="error", stderr=True)
+        error_console.print(f"Error reading history file", style="error")
         sys.exit(1)
 
     if not entries:
@@ -1523,7 +1524,7 @@ def _get_bench_dir() -> Path:
     otto_root = Path(__file__).parent.parent
     bench_dir = otto_root / "bench"
     if not bench_dir.exists():
-        console.print("Error: bench/ directory not found.", style="error", stderr=True)
+        error_console.print("Error: bench/ directory not found.", style="error")
         sys.exit(2)
     return bench_dir
 
@@ -1547,12 +1548,12 @@ def _get_runner(name: str):
     }
 
     if name not in runner_files:
-        console.print(f"Unknown runner: {name}. Available: {', '.join(runner_files)}", style="error", stderr=True)
+        error_console.print(f"Unknown runner: {name}. Available: {', '.join(runner_files)}", style="error")
         sys.exit(2)
 
     runner_path = bench_dir / "runners" / runner_files[name]
     if not runner_path.exists():
-        console.print(f"Runner file not found: {rich_escape(str(runner_path))}", style="error", stderr=True)
+        error_console.print(f"Runner file not found: {rich_escape(str(runner_path))}", style="error")
         sys.exit(2)
 
     spec = importlib.util.spec_from_file_location(f"bench_runner_{name}", runner_path)
@@ -1576,12 +1577,12 @@ def bench_run(task_names, runner_name, label, difficulty, suite_file):
     suite_path = bench_dir / suite_file
 
     if not suite_path.exists():
-        console.print(f"Error: {rich_escape(str(suite_path))} not found.", style="error", stderr=True)
+        error_console.print(f"Error: {rich_escape(str(suite_path))} not found.", style="error")
         sys.exit(2)
 
     tasks = load_suite(suite_path)
     if not tasks:
-        console.print("No tasks found in suite.", style="error", stderr=True)
+        error_console.print("No tasks found in suite.", style="error")
         sys.exit(2)
 
     # Apply filters
@@ -1591,7 +1592,7 @@ def bench_run(task_names, runner_name, label, difficulty, suite_file):
         names=list(task_names) if task_names else None,
     )
     if not tasks:
-        console.print("No tasks match the given filters.", style="error", stderr=True)
+        error_console.print("No tasks match the given filters.", style="error")
         sys.exit(2)
 
     runner = _get_runner(runner_name)
@@ -1645,7 +1646,7 @@ def bench_compare(baseline, current):
         for name, run in list_results(results_dir):
             if run.label == query or run.run_id == query:
                 return results_dir / name
-        console.print(f"Result not found: {rich_escape(query)}", style="error", stderr=True)
+        error_console.print(f"Result not found: {rich_escape(query)}", style="error")
         sys.exit(2)
 
     baseline_path = _find_result(baseline)

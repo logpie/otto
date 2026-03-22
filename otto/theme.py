@@ -42,3 +42,6 @@ OTTO_THEME = Theme({
 
 # The one console instance — thread-safe, themed, no auto-highlighting
 console = Console(highlight=False, theme=OTTO_THEME)
+
+# Stderr console for error messages (same theme)
+error_console = Console(stderr=True, highlight=False, theme=OTTO_THEME)
