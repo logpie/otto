@@ -2,9 +2,9 @@
 set -euo pipefail
 
 npm run build >/dev/null 2>&1 || npx tsc >/dev/null 2>&1 || true
-trap 'rm -f verify_check.js' EXIT
+trap 'rm -f verify_check.cjs' EXIT
 
-cat > verify_check.js <<'JS'
+cat > verify_check.cjs <<'JS'
 const assert = require('assert')
 const fs = require('fs')
 const path = require('path')
@@ -99,4 +99,4 @@ async function report(name, fn) {
 })
 JS
 
-node verify_check.js
+node verify_check.cjs
