@@ -405,9 +405,12 @@ def add(prompt, verify, max_retries, import_file, no_spec):
             if visual_count:
                 label += f", {visual_count} visual"
             console.print(f"[success]✓[/success] Spec ([bold]{len(spec_items)}[/bold] criteria \u2014 {label}):")
-            for item in spec_items:
-                tag = "[success]✓[/success]" if spec_is_verifiable(item) else "[info]◉[/info]"
-                console.print(f"  {tag} {rich_escape(spec_text(item))}")
+            for idx, item in enumerate(spec_items, 1):
+                text = rich_escape(spec_text(item))
+                if spec_is_verifiable(item):
+                    console.print(f"  [dim]{idx}.[/dim] {text}")
+                else:
+                    console.print(f"  [dim]{idx}.[/dim] {text} [dim](visual)[/dim]")
         else:
             error_console.print(f"[warning]⚠[/warning] Spec generation returned empty \u2014 task not created.")
             error_console.print(f"[dim]Retry or use --no-spec to skip spec generation.[/dim]")
