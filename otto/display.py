@@ -92,8 +92,22 @@ _PHASE_ICONS = {
     "fail": ("\u2717", "red"),
 }
 
-# Internal files to exclude from coding file summaries
-_INTERNAL_PATTERNS = {"otto_arch/", "task-notes/", ".md"}
+# Internal files to exclude from display
+_INTERNAL_PATTERNS = {"otto_arch/", "task-notes/"}
+
+
+def _shorten_path(path: str) -> str:
+    """Shorten absolute paths to relative project paths for display."""
+    if not path or not path.startswith("/"):
+        return path
+    # Find common project-relative roots
+    for marker in ("src/", "__tests__/", "tests/", "test/", "lib/", "app/", "components/"):
+        idx = path.find(marker)
+        if idx >= 0:
+            return path[idx:]
+    # Fall back to last 2 components
+    parts = path.rstrip("/").rsplit("/", 2)
+    return "/".join(parts[-2:]) if len(parts) > 2 else path
 
 
 class TaskDisplay:
@@ -184,54 +198,76 @@ class TaskDisplay:
             self._console.print(f"  [bold cyan]{name}[/bold cyan]{header_suffix}")
 
     def add_tool(self, line: str = "", name: str = "", detail: str = "") -> None:
-        """Print a tool call permanently. Thread-safe."""
+        """Print a tool call permanently with color coding. Thread-safe."""
         if not line and name:
             line = f"{name}  {detail}" if detail else name
         if not line:
+            return
+
+        # Strip absolute paths to relative (remove /private/tmp/project/ prefixes)
+        detail = _shorten_path(detail)
+
+        # Skip internal files
+        if any(p in detail for p in _INTERNAL_PATTERNS):
             return
 
         # Track files for coding summary
         with self._lock:
             if self._current_phase == "coding" and name in ("Write", "Edit"):
                 fname = detail.rsplit("/", 1)[-1] if detail else ""
-                if fname and not any(p in detail for p in _INTERNAL_PATTERNS):
-                    if fname not in self._coding_files:
-                        self._coding_files.append(fname)
+                if fname and fname not in self._coding_files:
+                    self._coding_files.append(fname)
 
-        # Print permanently (appears above live footer)
-        self._console.print(f"      [dim]{rich_escape(line[:80])}[/dim]")
+        # Color-coded tool display
+        _TOOL_STYLES = {
+            "Write": ("green", "+"),
+            "Edit": ("yellow", "~"),
+            "Read": ("dim", "\u25b8"),
+            "Bash": ("cyan", "$"),
+            "QA": ("magenta", "\u25c6"),
+        }
+        style, icon = _TOOL_STYLES.get(name, ("dim", "\u2022"))
+        short_detail = rich_escape(_shorten_path(detail)[:72]) if detail else ""
+        self._console.print(f"      [{style}]{icon}[/{style}] [dim]{short_detail}[/dim]")
 
     def add_finding(self, text: str) -> None:
         """Print a QA finding permanently. Thread-safe."""
         if not text:
             return
 
+        # Strip markdown formatting for clean display
+        clean = text.replace("**", "").replace("__", "")
+
         with self._lock:
             if text.startswith("###"):
                 self._qa_spec_count += 1
-            if text.startswith("**PASS"):
+            if "PASS" in text[:15] and not text.startswith("###"):
                 self._qa_pass_count += 1
             # Don't print the verdict line — it's summarized in phase_done
             if "VERDICT" in text:
                 return
 
-        # Format QA findings nicely
+        # Format QA findings with color
         if text.startswith("###"):
-            # Spec header: "### Spec 1: Title" → "  ● Spec 1: Title"
-            spec_text = text.lstrip("# ").strip()
-            self._console.print(f"      [dim]{rich_escape(spec_text)}[/dim]")
-        elif text.startswith("**PASS"):
-            # Pass detail: "**PASS** — detail" → "      ✓ detail"
-            detail_text = text.replace("**PASS**", "").lstrip(" \u2014-").strip()
-            short = detail_text[:70] + "..." if len(detail_text) > 70 else detail_text
+            # Spec header: "### Spec 1: Title" → "      Spec 1: Title"
+            spec_text = clean.lstrip("# ").strip()
+            self._console.print(f"      [bold]{rich_escape(spec_text)}[/bold]")
+        elif "PASS" in text[:15]:
+            # Pass: "**PASS** — detail" or "PASS (code review) — detail"
+            detail_text = clean.replace("PASS", "").lstrip(" \u2014-()").strip()
+            # Remove leading labels like "code review) —"
+            if detail_text.startswith(("code review)", "boundary test)")):
+                detail_text = detail_text.split(")", 1)[-1].lstrip(" \u2014-").strip()
+            short = detail_text[:68] + "..." if len(detail_text) > 68 else detail_text
             self._console.print(f"        [green]\u2713[/green] [dim]{rich_escape(short)}[/dim]")
-        elif text.startswith("**FAIL"):
-            detail_text = text.replace("**FAIL**", "").lstrip(" \u2014-").strip()
-            short = detail_text[:70] + "..." if len(detail_text) > 70 else detail_text
-            self._console.print(f"        [red]\u2717[/red] [dim]{rich_escape(short)}[/dim]")
+        elif "FAIL" in text[:15]:
+            detail_text = clean.replace("FAIL", "").lstrip(" \u2014-()").strip()
+            short = detail_text[:68] + "..." if len(detail_text) > 68 else detail_text
+            self._console.print(f"        [red]\u2717[/red] {rich_escape(short)}")
         elif text.startswith("- **("):
             # Sub-finding: "- **(a) desc**: PASS — detail"
-            self._console.print(f"        [dim]{rich_escape(text[:78])}[/dim]")
+            sub = clean.lstrip("- ").strip()
+            self._console.print(f"        [dim]{rich_escape(sub[:76])}[/dim]")
 
     # -- Private helpers --
 

@@ -306,9 +306,10 @@ class TestTaskDisplay:
         td.add_tool(name="Write", detail="/tmp/project/src/alerts.ts")
         td.add_tool(name="Edit", detail="/tmp/project/src/WeatherApp.tsx")
         output = buf.getvalue()
-        assert "Write" in output
         assert "alerts.ts" in output
-        assert "Edit" in output
+        assert "WeatherApp.tsx" in output
+        assert "+" in output  # Write icon
+        assert "~" in output  # Edit icon
         # Files tracked for coding summary
         assert "alerts.ts" in td._coding_files
         assert "WeatherApp.tsx" in td._coding_files
