@@ -4,7 +4,6 @@ set -euo pipefail
 cat > scheduler.js << 'JSEOF'
 /**
  * Job scheduler with priority queue and cron-like scheduling.
- * Contains several bugs.
  */
 class PriorityQueue {
   constructor() {
@@ -29,8 +28,6 @@ class PriorityQueue {
 
   _bubbleUp(idx) {
     while (idx > 0) {
-      // BUG 1: Parent index calculation is wrong
-      // Should be Math.floor((idx - 1) / 2)
       const parentIdx = Math.floor(idx / 2);
       if (this.heap[parentIdx].priority <= this.heap[idx].priority) break;
       [this.heap[parentIdx], this.heap[idx]] = [this.heap[idx], this.heap[parentIdx]];
@@ -44,7 +41,6 @@ class PriorityQueue {
       let smallest = idx;
       const left = 2 * idx + 1;
       const right = 2 * idx + 2;
-      // BUG 2: Comparison is backwards — should use < not >
       if (left < length && this.heap[left].priority > this.heap[smallest].priority) {
         smallest = left;
       }
@@ -73,7 +69,6 @@ class Scheduler {
   addJob(name, fn, { priority = 5, delay = 0, interval = null } = {}) {
     const job = { name, fn, priority, delay, interval, addedAt: Date.now() };
     if (delay > 0) {
-      // BUG 3: setTimeout callback doesn't preserve 'this' context
       const timer = setTimeout(function() {
         this.queue.enqueue(job, priority);
       }, delay);
@@ -98,21 +93,16 @@ class Scheduler {
     while (this.running) {
       const job = this.queue.dequeue();
       if (!job) {
-        // BUG 4: Should stop when queue is empty AND no intervals are pending
-        // Currently just breaks, missing interval-scheduled jobs
         break;
       }
       try {
         const result = await job.fn();
         this.results.push({ name: job.name, status: 'ok', result });
       } catch (err) {
-        // BUG 5: Stores err directly — should store err.message
-        // When serialized, Error objects become {}
         this.results.push({ name: job.name, status: 'error', error: err });
       }
       // Re-enqueue if interval job
       if (job.interval) {
-        // BUG 6: Re-enqueues immediately instead of waiting for interval
         this.queue.enqueue(job, job.priority);
       }
     }
@@ -152,5 +142,5 @@ test('scheduler runs jobs', async () => {
 JSEOF
 
 npm init -y
-node -e "let p=require('./package.json'); p.scripts.test='npx jest --forceExit'; require('fs').writeFileSync('package.json',JSON.stringify(p,null,2))"
-git add -A && git commit -m "init scheduler with bugs"
+node -e "let p=require('./package.json'); p.scripts.test='npx jest --detectOpenHandles --forceExit'; require('fs').writeFileSync('package.json',JSON.stringify(p,null,2))"
+git add -A && git commit -m "init scheduler"

@@ -8,6 +8,4 @@ cd ..
 # Copy entire repo (minus .git) to preserve all config files
 rsync -a --exclude='.git' .tmp-clone/ ./
 rm -rf .tmp-clone
-# Strip CI-specific pytest config (--cov requires pytest-cov)
-rm -f pytest.ini 2>/dev/null || true
 git add -A && git commit -m "init tinydb at pre-persist-empty-tables"

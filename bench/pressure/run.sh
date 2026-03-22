@@ -175,9 +175,23 @@ for proj in "${PROJECT_NAMES[@]}"; do
         status="FAIL"
     fi
 
+    # Independent verification (if verify.sh exists)
+    verify_status=""
+    if [[ -f "$proj_dir/verify.sh" && "$status" == "PASS" ]]; then
+        echo "  Running independent verification..."
+        verify_log="$proj_results/verify-independent.log"
+        if (cd "$WORK_DIR" && bash "$proj_dir/verify.sh") > "$verify_log" 2>&1; then
+            verify_status=" [verified]"
+        else
+            verify_status=" [VERIFY FAIL]"
+            status="VERIFY_FAIL"
+            cat "$verify_log" | tail -10
+        fi
+    fi
+
     echo "$status $task_count $passed $failed $RUN_TIME $total_cost" > "$META_DIR/$proj"
     echo ""
-    echo "  Result: $status  ($passed/$task_count passed, ${RUN_TIME}s, \$$total_cost)"
+    echo "  Result: $status  ($passed/$task_count passed, ${RUN_TIME}s, \$$total_cost)$verify_status"
     echo ""
 done
 
