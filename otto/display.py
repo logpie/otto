@@ -21,11 +21,7 @@ from rich.text import Text
 from rich.spinner import Spinner
 from rich.live import Live
 
-# ---------------------------------------------------------------------------
-# Module-level console (Rich Console is thread-safe by design)
-# ---------------------------------------------------------------------------
-
-console = Console(highlight=False)
+from otto.theme import console  # noqa: F401 — re-exported for backward compat
 
 # ---------------------------------------------------------------------------
 # Utility functions (preserved API — used by runner.py, architect.py, etc.)
