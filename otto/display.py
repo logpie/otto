@@ -227,31 +227,29 @@ class TaskDisplay:
         else:
             self._console.print(f"      [bold cyan]\u25cf {name}[/bold cyan]  [dim]{short}[/dim]")
 
-        # Inline content below tool call (CC shows diffs/previews)
+        # Inline content summary below tool call
         if data:
-            # Edit: show mini diff
-            old_lines = data.get("old_lines", [])
-            new_lines = data.get("new_lines", [])
-            if old_lines or new_lines:
-                for ol in old_lines[:3]:
-                    self._console.print(f"        [red]- {rich_escape(ol)}[/red]")
-                old_total = data.get("old_total", 0)
-                if old_total > 3:
-                    self._console.print(f"        [dim]  ...{old_total - 3} more lines[/dim]")
-                for nl in new_lines[:3]:
-                    self._console.print(f"        [green]+ {rich_escape(nl)}[/green]")
-                new_total = data.get("new_total", 0)
-                if new_total > 3:
-                    self._console.print(f"        [dim]  ...{new_total - 3} more lines[/dim]")
+            old_total = data.get("old_total", 0)
+            new_total = data.get("new_total", 0)
+            total_lines = data.get("total_lines", 0)
 
-            # Write: show content preview
-            preview = data.get("preview_lines", [])
-            if preview:
-                for pl in preview[:3]:
-                    self._console.print(f"        [green]+ {rich_escape(pl)}[/green]")
-                total = data.get("total_lines", 0)
-                if total > 3:
-                    self._console.print(f"        [dim]  ...{total - 3} more lines[/dim]")
+            if name == "Edit" and (old_total or new_total):
+                # Edit: compact diff summary
+                parts = []
+                if old_total:
+                    parts.append(f"[red]-{old_total}[/red]")
+                if new_total:
+                    parts.append(f"[green]+{new_total}[/green]")
+                self._console.print(f"        [dim]{' '.join(parts)} lines[/dim]")
+
+            elif name == "Write" and total_lines:
+                # Write: show first line + count
+                preview = data.get("preview_lines", [])
+                if preview and preview[0].strip():
+                    first = rich_escape(preview[0][:60])
+                    self._console.print(f"        [green]+[/green] [dim]{first}[/dim]")
+                    if total_lines > 1:
+                        self._console.print(f"        [dim]  ...{total_lines - 1} more lines[/dim]")
 
     def add_tool_result(self, data: dict | None = None) -> None:
         """Print a tool result inline (Bash test output). Thread-safe."""
