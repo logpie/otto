@@ -40,3 +40,18 @@
 - [IMPORTANT] _install_deps not isolated — **deferred**: ephemeral venv is future work
 - [IMPORTANT] abort_task uses global config — **deferred**: minor
 - [NOTE] live-state.json torn reads — **accepted**: readers handle JSONDecodeError
+
+## Implementation Gate — 2026-03-22 — verify.py venv isolation
+
+### Round 1 — Codex
+- [CRITICAL] PATH update doesn't propagate to test execution — fixed: _install_deps returns venv_bin, threaded through run_tier1
+- [IMPORTANT] Venv creation failures crash verification — fixed: existence check + skip fallback
+- [IMPORTANT] run_integration_gate missing _install_deps — fixed: added
+- [NOTE] Windows compatibility (hardcoded "bin") — deferred (existing Unix-only assumptions)
+- [NOTE] No test coverage — fixed: 3 regression tests added by Codex
+
+### Round 2 — Codex
+- [IMPORTANT] Fallback to sys.executable re-introduces contamination — fixed: skip pip install entirely
+
+### Round 3 — Codex
+- APPROVED. No new issues.

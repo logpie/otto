@@ -36,38 +36,81 @@ def _subprocess_env() -> dict:
     return env
 
 
-def _install_deps(worktree_path: Path, timeout: int) -> None:
+def _verification_env(venv_bin: str | None = None) -> dict:
+    """Return the subprocess env, optionally preferring a worktree venv."""
+    env = _subprocess_env()
+    if venv_bin:
+        existing = env.get("PATH", "")
+        if venv_bin not in existing.split(os.pathsep):
+            env["PATH"] = venv_bin + os.pathsep + existing
+    return env
+
+
+def _install_deps(worktree_path: Path, timeout: int) -> str | None:
     """Auto-detect and install project dependencies in the verify worktree.
 
-    Checks for common dependency manifests and runs the appropriate installer.
+    Creates an isolated venv inside the worktree for Python projects to prevent
+    contaminating otto's own venv (e.g., a test project named 'python-dotenv'
+    would overwrite otto's dependency if installed into otto's venv).
+
     Best-effort — failures are logged but don't block verification.
     """
     env = _subprocess_env()
+    venv_bin: str | None = None
 
-    # Python: requirements.txt
-    if (worktree_path / "requirements.txt").exists():
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-q",
-             "-r", str(worktree_path / "requirements.txt")],
-            cwd=worktree_path, capture_output=True, timeout=timeout,
-            env=env,
-        )
+    # Python: create an isolated venv in the worktree for project deps.
+    # This prevents `pip install -e .` from contaminating otto's venv.
+    has_python_project = (
+        (worktree_path / "requirements.txt").exists()
+        or (worktree_path / "pyproject.toml").exists()
+        or (worktree_path / "setup.py").exists()
+    )
+    if has_python_project:
+        venv_path = worktree_path / ".venv"
+        if not venv_path.exists():
+            subprocess.run(
+                [sys.executable, "-m", "venv", str(venv_path)],
+                cwd=worktree_path, capture_output=True, timeout=timeout,
+            )
+        venv_python_path = venv_path / "bin" / "python"
+        if not venv_python_path.exists():
+            # Venv creation failed — skip Python dep installation entirely
+            # rather than falling back to sys.executable which would
+            # contaminate otto's own venv.
+            pass
+        else:
+            venv_bin = str(venv_python_path.parent)
+            env = _verification_env(venv_bin)
+            venv_python = str(venv_python_path)
 
-    # Python: pyproject.toml with [project] or [build-system]
-    if (worktree_path / "pyproject.toml").exists():
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-q", "-e", "."],
-            cwd=worktree_path, capture_output=True, timeout=timeout,
-            env=env,
-        )
+            # Install project deps into the isolated venv
+            if (worktree_path / "requirements.txt").exists():
+                subprocess.run(
+                    [venv_python, "-m", "pip", "install", "-q",
+                     "-r", str(worktree_path / "requirements.txt")],
+                    cwd=worktree_path, capture_output=True, timeout=timeout,
+                    env=env,
+                )
 
-    # Python: setup.py
-    if (worktree_path / "setup.py").exists() and not (worktree_path / "pyproject.toml").exists():
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-q", "-e", "."],
-            cwd=worktree_path, capture_output=True, timeout=timeout,
-            env=env,
-        )
+            if (worktree_path / "pyproject.toml").exists():
+                subprocess.run(
+                    [venv_python, "-m", "pip", "install", "-q", "-e", "."],
+                    cwd=worktree_path, capture_output=True, timeout=timeout,
+                    env=env,
+                )
+            elif (worktree_path / "setup.py").exists():
+                subprocess.run(
+                    [venv_python, "-m", "pip", "install", "-q", "-e", "."],
+                    cwd=worktree_path, capture_output=True, timeout=timeout,
+                    env=env,
+                )
+
+            # Also install pytest into the project venv
+            subprocess.run(
+                [venv_python, "-m", "pip", "install", "-q", "pytest"],
+                cwd=worktree_path, capture_output=True, timeout=timeout,
+                env=env,
+            )
 
     # Node.js: package.json with node_modules missing
     if (worktree_path / "package.json").exists() and not (worktree_path / "node_modules").exists():
@@ -76,6 +119,8 @@ def _install_deps(worktree_path: Path, timeout: int) -> None:
             cwd=worktree_path, capture_output=True, timeout=timeout,
             env=env,
         )
+
+    return venv_bin
 
 
 @dataclass
@@ -124,6 +169,7 @@ def _run_shell_command(
     workdir: Path,
     timeout: int,
     executable: str | None = None,
+    env: dict | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a shell command and kill its process group on timeout."""
     proc = subprocess.Popen(
@@ -135,7 +181,7 @@ def _run_shell_command(
         text=True,
         executable=executable,
         start_new_session=True,
-        env=_subprocess_env(),
+        env=env or _subprocess_env(),
     )
     try:
         stdout, stderr = proc.communicate(timeout=timeout)
@@ -155,12 +201,17 @@ def _run_shell_command(
     )
 
 
-def run_tier1(workdir: Path, test_command: str | None, timeout: int) -> TierResult:
+def run_tier1(
+    workdir: Path,
+    test_command: str | None,
+    timeout: int,
+    env: dict | None = None,
+) -> TierResult:
     """Run existing test suite."""
     if not test_command:
         return TierResult(tier="existing_tests", passed=True, skipped=True)
     try:
-        result = _run_shell_command(test_command, workdir, timeout)
+        result = _run_shell_command(test_command, workdir, timeout, env=env)
         return TierResult(
             tier="existing_tests",
             passed=result.returncode == 0,
@@ -179,6 +230,7 @@ def run_tier2(
     testgen_file: Path | None,
     test_command: str | None,
     timeout: int,
+    env: dict | None = None,
 ) -> TierResult:
     """Run generated integration tests in the worktree.
 
@@ -233,7 +285,7 @@ def run_tier2(
                 cmd = f"{test_command} {rel_path}"
             else:
                 cmd = f"pytest {rel_path} -v"
-        result = _run_shell_command(cmd, workdir, timeout)
+        result = _run_shell_command(cmd, workdir, timeout, env=env)
         return TierResult(
             tier="generated_tests",
             passed=result.returncode == 0,
@@ -247,7 +299,12 @@ def run_tier2(
         )
 
 
-def run_tier3(workdir: Path, verify_cmd: str | None, timeout: int) -> TierResult:
+def run_tier3(
+    workdir: Path,
+    verify_cmd: str | None,
+    timeout: int,
+    env: dict | None = None,
+) -> TierResult:
     """Run custom verify command."""
     if not verify_cmd:
         return TierResult(tier="custom_verify", passed=True, skipped=True)
@@ -257,6 +314,7 @@ def run_tier3(workdir: Path, verify_cmd: str | None, timeout: int) -> TierResult
             workdir,
             timeout,
             executable="/bin/bash",
+            env=env,
         )
         return TierResult(
             tier="custom_verify",
@@ -306,16 +364,17 @@ def run_verification(
 
         # Install project dependencies in the disposable worktree.
         # Without this, projects using third-party libs fail verification.
-        _install_deps(worktree_path, timeout)
+        venv_bin = _install_deps(worktree_path, timeout)
+        env = _verification_env(venv_bin)
 
         # Run all tests (existing + spec-generated) in one pass
-        t1 = run_tier1(worktree_path, test_command, timeout)
+        t1 = run_tier1(worktree_path, test_command, timeout, env=env)
         tiers.append(t1)
         if not t1.passed and not t1.skipped:
             return VerifyResult(passed=False, tiers=tiers)
 
         # Custom verify command (if provided)
-        t3 = run_tier3(worktree_path, verify_cmd, timeout)
+        t3 = run_tier3(worktree_path, verify_cmd, timeout, env=env)
         tiers.append(t3)
 
         all_passed = all(t.passed for t in tiers)
@@ -364,8 +423,11 @@ def run_integration_gate(
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(integration_test_file, dest)
 
+        venv_bin = _install_deps(worktree_path, timeout)
+        env = _verification_env(venv_bin)
+
         # Run full test suite (regression + integration tests in one pass)
-        t1 = run_tier1(worktree_path, test_command, timeout)
+        t1 = run_tier1(worktree_path, test_command, timeout, env=env)
         tiers.append(t1)
 
         all_passed = all(t.passed for t in tiers)
