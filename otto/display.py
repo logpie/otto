@@ -95,6 +95,15 @@ _PHASE_ICONS = {
 # Internal files to exclude from display
 _INTERNAL_PATTERNS = {"otto_arch/", "task-notes/"}
 
+# Tool type → (Rich style, icon)
+_TOOL_STYLES = {
+    "Write": ("green", "+"),
+    "Edit": ("yellow", "~"),
+    "Read": ("dim", "\u25b8"),
+    "Bash": ("cyan", "$"),
+    "QA": ("magenta", "\u25c6"),
+}
+
 
 def _shorten_path(path: str) -> str:
     """Shorten absolute paths to relative project paths for display."""
@@ -134,6 +143,9 @@ class TaskDisplay:
         self._qa_spec_count: int = 0
         self._qa_pass_count: int = 0
         self._coding_files: list[str] = []  # unique files written/edited
+        self._last_tool_key: str = ""  # for deduplication
+        self._last_tool_count: int = 0
+        self._read_count: int = 0  # cap Read display
 
     def start(self) -> None:
         """Start the live status footer."""
@@ -172,6 +184,9 @@ class TaskDisplay:
                 self._current_phase = name
                 self._phase_start = time.monotonic()
                 self._current_cost = 0.0
+                self._last_tool_key = ""
+                self._last_tool_count = 0
+                self._read_count = 0
                 if name == "qa":
                     self._qa_spec_count = 0
                     self._qa_pass_count = 0
@@ -198,74 +213,113 @@ class TaskDisplay:
             self._console.print(f"  [bold cyan]{name}[/bold cyan]{header_suffix}")
 
     def add_tool(self, line: str = "", name: str = "", detail: str = "") -> None:
-        """Print a tool call permanently with color coding. Thread-safe."""
+        """Print a tool call permanently with color coding. Thread-safe.
+
+        Deduplicates consecutive Read/Edit calls to the same file, and
+        skips internal otto files.
+        """
         if not line and name:
             line = f"{name}  {detail}" if detail else name
         if not line:
             return
 
-        # Strip absolute paths to relative (remove /private/tmp/project/ prefixes)
+        # Strip absolute paths to relative
         detail = _shorten_path(detail)
 
         # Skip internal files
         if any(p in detail for p in _INTERNAL_PATTERNS):
             return
 
-        # Track files for coding summary
+        # Deduplicate: collapse repeated tool+file combos
+        tool_key = f"{name}:{detail.rsplit('/', 1)[-1] if detail else ''}"
         with self._lock:
+            # Track files for coding summary
             if self._current_phase == "coding" and name in ("Write", "Edit"):
                 fname = detail.rsplit("/", 1)[-1] if detail else ""
                 if fname and fname not in self._coding_files:
                     self._coding_files.append(fname)
 
+            # Count consecutive duplicates (e.g., 6 edits to same file)
+            if tool_key == self._last_tool_key:
+                self._last_tool_count += 1
+                return  # don't print, will show count on next different tool
+            # Print pending duplicate count from previous tool
+            if self._last_tool_count > 1:
+                self._console.print(
+                    f"      [dim]  \u2026 ({self._last_tool_count}x)[/dim]")
+            self._last_tool_key = tool_key
+            self._last_tool_count = 1
+
+            # Cap Read calls to avoid flooding
+            if name == "Read":
+                self._read_count += 1
+                if self._read_count > 6:
+                    if self._read_count == 7:
+                        self._console.print("      [dim]\u2026 (reading more files)[/dim]")
+                    return
+
         # Color-coded tool display
-        _TOOL_STYLES = {
-            "Write": ("green", "+"),
-            "Edit": ("yellow", "~"),
-            "Read": ("dim", "\u25b8"),
-            "Bash": ("cyan", "$"),
-            "QA": ("magenta", "\u25c6"),
-        }
         style, icon = _TOOL_STYLES.get(name, ("dim", "\u2022"))
-        short_detail = rich_escape(_shorten_path(detail)[:72]) if detail else ""
+        short_detail = rich_escape(detail[:72]) if detail else ""
         self._console.print(f"      [{style}]{icon}[/{style}] [dim]{short_detail}[/dim]")
 
     def add_finding(self, text: str) -> None:
-        """Print a QA finding permanently. Thread-safe."""
+        """Print a QA finding permanently. Thread-safe.
+
+        Handles multiple QA output formats:
+        - "### Spec 1: Title"
+        - "**Spec 3 — Title**: ✅ PASS"
+        - "**PASS** — detail"
+        - "**FAIL** — detail"
+        - "- **(a) sub-finding**: PASS"
+        - "QA VERDICT: PASS"
+        """
         if not text:
             return
 
-        # Strip markdown formatting for clean display
+        # Strip markdown bold for clean display
         clean = text.replace("**", "").replace("__", "")
+        has_pass = "\u2705" in text or "PASS" in text
+        has_fail = "\u274c" in text or "FAIL" in text
+        is_spec = text.startswith("###") or (text.startswith("**Spec") and ("PASS" in text or "FAIL" in text))
 
         with self._lock:
-            if text.startswith("###"):
+            if is_spec:
                 self._qa_spec_count += 1
-            if "PASS" in text[:15] and not text.startswith("###"):
+                if has_pass:
+                    self._qa_pass_count += 1
+            elif has_pass and text.startswith(("**PASS", "PASS")):
+                # Standalone PASS line following a ### Spec header
                 self._qa_pass_count += 1
             # Don't print the verdict line — it's summarized in phase_done
             if "VERDICT" in text:
                 return
+            # Skip style detail lines (CSS class dumps)
+            if text.startswith("- Container") or text.startswith("- Header"):
+                return
 
         # Format QA findings with color
-        if text.startswith("###"):
-            # Spec header: "### Spec 1: Title" → "      Spec 1: Title"
+        if is_spec:
+            # Spec result: extract title, show with pass/fail icon
             spec_text = clean.lstrip("# ").strip()
-            self._console.print(f"      [bold]{rich_escape(spec_text)}[/bold]")
-        elif "PASS" in text[:15]:
-            # Pass: "**PASS** — detail" or "PASS (code review) — detail"
-            detail_text = clean.replace("PASS", "").lstrip(" \u2014-()").strip()
-            # Remove leading labels like "code review) —"
+            # Remove trailing ": ✅ PASS" or emoji
+            for suffix in [": \u2705 PASS", ": \u274c FAIL", "\u2705", "\u274c"]:
+                spec_text = spec_text.replace(suffix, "")
+            spec_text = spec_text.rstrip(": ").strip()
+            icon = "[green]\u2713[/green]" if has_pass else "[red]\u2717[/red]" if has_fail else "\u25cb"
+            self._console.print(f"      {icon} [dim]{rich_escape(spec_text)}[/dim]")
+        elif has_pass and text.startswith(("**PASS", "PASS")):
+            detail_text = clean.replace("PASS", "").lstrip(" \u2014-()").replace("\u2705", "").strip()
             if detail_text.startswith(("code review)", "boundary test)")):
                 detail_text = detail_text.split(")", 1)[-1].lstrip(" \u2014-").strip()
             short = detail_text[:68] + "..." if len(detail_text) > 68 else detail_text
-            self._console.print(f"        [green]\u2713[/green] [dim]{rich_escape(short)}[/dim]")
-        elif "FAIL" in text[:15]:
-            detail_text = clean.replace("FAIL", "").lstrip(" \u2014-()").strip()
+            if short:
+                self._console.print(f"        [green]\u2713[/green] [dim]{rich_escape(short)}[/dim]")
+        elif has_fail and text.startswith(("**FAIL", "FAIL")):
+            detail_text = clean.replace("FAIL", "").lstrip(" \u2014-()").replace("\u274c", "").strip()
             short = detail_text[:68] + "..." if len(detail_text) > 68 else detail_text
             self._console.print(f"        [red]\u2717[/red] {rich_escape(short)}")
         elif text.startswith("- **("):
-            # Sub-finding: "- **(a) desc**: PASS — detail"
             sub = clean.lstrip("- ").strip()
             self._console.print(f"        [dim]{rich_escape(sub[:76])}[/dim]")
 
