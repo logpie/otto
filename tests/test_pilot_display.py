@@ -364,6 +364,52 @@ class TestTaskDisplay:
         assert td._qa_spec_count == 3
         assert td._qa_pass_count == 2
 
+    def test_qa_tools_use_semantic_labels_instead_of_raw_commands(self):
+        buf = io.StringIO()
+        test_console = Console(file=buf, highlight=False, color_system=None)
+        td = TaskDisplay(test_console)
+        td.update_phase("qa", "running")
+        td.add_tool(name="Read", detail="/tmp/project/src/WindCompass.tsx")
+        td.add_tool(name="Bash", detail="npx tsc --noEmit 2>&1 | head -40")
+        td.add_tool(name="Bash", detail="node -e \"// Test the rotation math...\"")
+        td.add_tool(name="Bash", detail="npx jest --testPathPattern=windCompass --no-coverage")
+        td.add_tool(name="Bash", detail="npm run build")
+        output = buf.getvalue()
+        assert "Analyzing code..." in output
+        assert "Checking types..." in output
+        assert "Testing edge cases..." in output
+        assert "Running tests..." in output
+        assert "Checking build..." in output
+        assert "WindCompass.tsx" not in output
+        assert "npx tsc" not in output
+        assert "node -e" not in output
+        assert "jest" not in output
+
+    def test_qa_semantic_labels_deduplicate_consecutive_tool_calls(self):
+        buf = io.StringIO()
+        test_console = Console(file=buf, highlight=False, color_system=None)
+        td = TaskDisplay(test_console)
+        td.update_phase("qa", "running")
+        td.add_tool(name="Read", detail="/tmp/project/src/WindCompass.tsx")
+        td.add_tool(name="Read", detail="/tmp/project/tests/windCompass.test.tsx")
+        td.add_tool(name="Bash", detail="pytest tests/test_api.py -q")
+        td.add_tool(name="Bash", detail="npx jest --testPathPattern=windCompass --no-coverage")
+        output = buf.getvalue()
+        assert output.count("Analyzing code...") == 1
+        assert output.count("Running tests...") == 1
+
+    def test_qa_semantic_labels_reset_when_phase_restarts(self):
+        buf = io.StringIO()
+        test_console = Console(file=buf, highlight=False, color_system=None)
+        td = TaskDisplay(test_console)
+        td.update_phase("qa", "running")
+        td.add_tool(name="Read", detail="/tmp/project/src/WindCompass.tsx")
+        td.update_phase("qa", "done", time_s=1.0)
+        td.update_phase("qa", "running")
+        td.add_tool(name="Read", detail="/tmp/project/src/WindCompass.tsx")
+        output = buf.getvalue()
+        assert output.count("Analyzing code...") == 2
+
     def test_internal_files_excluded_from_coding(self):
         buf = io.StringIO()
         test_console = Console(file=buf, highlight=False, color_system=None)

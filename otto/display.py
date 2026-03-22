@@ -127,6 +127,7 @@ class TaskDisplay:
         self._lines_removed: int = 0
         self._last_tool_key: str = ""
         self._last_tool_type: str = ""
+        self._last_qa_label: str = ""
         self._read_count: int = 0
 
     def start(self) -> None:
@@ -162,6 +163,7 @@ class TaskDisplay:
                 self._current_cost = 0.0
                 self._last_tool_key = ""
                 self._last_tool_type = ""
+                self._last_qa_label = ""
                 self._read_count = 0
                 if name == "qa":
                     self._qa_spec_count = 0
@@ -176,11 +178,13 @@ class TaskDisplay:
                 self._print_phase_done(name, time_s, detail, cost)
                 if name == self._current_phase:
                     self._current_phase = None
+                self._last_qa_label = ""
 
             elif status == "fail":
                 self._print_phase_fail(name, time_s, error, cost)
                 if name == self._current_phase:
                     self._current_phase = None
+                self._last_qa_label = ""
 
             if cost:
                 self._current_cost = cost
@@ -251,6 +255,15 @@ class TaskDisplay:
                 return
             self._last_tool_key = tool_key
 
+        if self._current_phase == "qa":
+            label = self._qa_tool_label(name, detail)
+            with self._lock:
+                if label == self._last_qa_label:
+                    return
+                self._last_qa_label = label
+            self._console.print(f"      [dim]{label}[/dim]")
+            return
+
         # Truncate Bash commands at first newline (multi-line node -e commands)
         if name == "Bash":
             first_line = detail.split("\n")[0].strip()
@@ -292,6 +305,35 @@ class TaskDisplay:
                     self._console.print(f"        [green]+ {rich_escape(pl)}[/green]")
                 if total_lines > len(preview):
                     self._console.print(f"        [dim]  ...{total_lines - len(preview)} more lines[/dim]")
+
+    def _qa_tool_label(self, name: str, detail: str) -> str:
+        """Translate raw QA tool calls into user-facing verification progress."""
+        if name in ("Read", "Glob", "Grep"):
+            return "Analyzing code..."
+
+        if name.startswith("mcp__chrome-devtools__") or name == "chrome-devtools":
+            return "Testing in browser..."
+
+        if name == "Bash":
+            cmd = detail.lower()
+            if any(marker in cmd for marker in (
+                "jest", "pytest", "vitest", "playwright test",
+                "npm test", "pnpm test", "yarn test", "cargo test", "go test",
+            )):
+                return "Running tests..."
+            if "tsc" in cmd or "--noemit" in cmd:
+                return "Checking types..."
+            if any(marker in cmd for marker in (
+                " build", "next build", "npm run build", "pnpm build",
+                "yarn build", "cargo build", "go build",
+            )):
+                return "Checking build..."
+            if any(marker in cmd for marker in (
+                "node -e", "node --eval", "python -c", "python3 -c", "curl ",
+            )):
+                return "Testing edge cases..."
+
+        return "Verifying..."
 
     def add_tool_result(self, data: dict | None = None) -> None:
         """Print a tool result inline (Bash test output). Thread-safe."""
