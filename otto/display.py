@@ -393,10 +393,10 @@ class TaskDisplay:
             parts.append(f"${cost:.2f}")
 
         if name == "coding":
-            if detail:
-                parts.append(detail[:42])
-            elif self._coding_files:
+            if self._coding_files:
                 parts.append(f"{len(self._coding_files)} files")
+            elif detail:
+                parts.append(detail[:42])
         elif name == "test" and detail:
             m = re.search(r'(\d+) passed', detail)
             parts.append(m.group(0) if m else detail[:35])
