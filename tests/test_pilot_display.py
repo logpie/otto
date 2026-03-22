@@ -308,8 +308,8 @@ class TestTaskDisplay:
         output = buf.getvalue()
         assert "alerts.ts" in output
         assert "WeatherApp.tsx" in output
-        assert "+" in output  # Write icon
-        assert "~" in output  # Edit icon
+        assert "Write" in output
+        assert "Edit" in output
         # Files tracked for coding summary
         assert "alerts.ts" in td._coding_files
         assert "WeatherApp.tsx" in td._coding_files
