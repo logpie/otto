@@ -1909,6 +1909,8 @@ async def run_task_with_qa(
 
                 agent_log_lines: list[str] = []
                 result_msg = None
+                _last_block_name = ""
+                _last_block_inputs: dict = {}
                 async for message in query(prompt=agent_prompt, options=agent_opts):
                     if isinstance(message, ResultMessage):
                         result_msg = message
@@ -1919,40 +1921,57 @@ async def run_task_with_qa(
                             if TextBlock and isinstance(block, TextBlock) and block.text:
                                 agent_log_lines.append(block.text)
                             elif ToolUseBlock and isinstance(block, ToolUseBlock):
+                                _last_block_name = block.name
+                                _last_block_inputs = block.input or {}
                                 agent_log_lines.append(f"● {block.name}  {_tool_use_summary(block)}")
-                                # Emit tool calls for display — show what the agent is doing
+                                # Emit rich tool calls — include content for display
                                 if block.name in ("Write", "Edit"):
-                                    # Always show file creation/modification
-                                    emit("agent_tool", name=block.name,
-                                         detail=_tool_use_summary(block)[:80])
+                                    evt = {"name": block.name, "detail": _tool_use_summary(block)[:80]}
+                                    if block.name == "Edit":
+                                        old = _last_block_inputs.get("old_string", "")
+                                        new = _last_block_inputs.get("new_string", "")
+                                        if old or new:
+                                            evt["old_lines"] = old.splitlines()[:4]
+                                            evt["new_lines"] = new.splitlines()[:4]
+                                            evt["old_total"] = old.count("\n") + 1 if old else 0
+                                            evt["new_total"] = new.count("\n") + 1 if new else 0
+                                    elif block.name == "Write":
+                                        content = _last_block_inputs.get("content", "")
+                                        if content:
+                                            evt["preview_lines"] = content.splitlines()[:3]
+                                            evt["total_lines"] = content.count("\n") + 1
+                                    emit("agent_tool", **evt)
                                 elif block.name == "Read":
-                                    # Show file reads (shortened path) so user sees agent is active
                                     path = _tool_use_summary(block)[:80]
-                                    # Only show source files, not config/lock files
                                     if any(ext in path for ext in
                                            [".py", ".ts", ".tsx", ".js", ".jsx", ".rs", ".go"]):
                                         emit("agent_tool", name="Read",
                                              detail=path.split("/")[-1] if "/" in path else path)
                                 elif block.name == "Bash":
                                     cmd = _tool_use_summary(block)[:80]
-                                    # Show test/build commands only — must START with the runner
                                     cmd_start = cmd.lstrip().split()[0] if cmd.strip() else ""
                                     if cmd_start in ("pytest", "python", "npx", "npm", "jest",
                                                      "make", "cargo", "go", "ruby", "dotnet"):
                                         emit("agent_tool", name=block.name, detail=cmd)
                             elif ToolResultBlock and isinstance(block, ToolResultBlock):
-                                # Extract test results from Bash output
                                 content = str(getattr(block, "content", ""))
-                                if content and any(kw in content.lower() for kw in
-                                                   ["passed", "failed", "error", "tests:"]):
+                                # Emit Bash results inline (test output, errors)
+                                if content and _last_block_name == "Bash":
+                                    # Extract the summary line
+                                    result_line = ""
                                     for line in reversed(content.splitlines()):
                                         ls = line.strip()
                                         if any(kw in ls.lower() for kw in
-                                               ["passed", "failed", "tests:", "test suites:"]):
+                                               ["passed", "failed", "tests:", "test suites:", "error"]):
                                             if any(c.isdigit() for c in ls):
-                                                emit("agent_tool", name="test",
-                                                     detail=ls[:70])
+                                                result_line = ls[:70]
                                                 break
+                                    if result_line:
+                                        is_pass = "passed" in result_line.lower() and "failed" not in result_line.lower()
+                                        emit("agent_tool_result", detail=result_line,
+                                             passed=is_pass)
+                                _last_block_name = ""
+                                _last_block_inputs = {}
 
                 # Persist agent log
                 try:
@@ -2248,11 +2267,16 @@ def _print_summary(
     passed = sum(1 for _, s in results if s)
     failed = len(results) - passed
 
+    from rich.panel import Panel
+
     cost_str = f"  {_format_cost(total_cost)}" if total_cost > 0 else ""
     console.print()
-    console.print("\u2501" * 60, style="bold")
-    console.print(f"[bold]  Run complete[/bold]  [dim]{_format_duration(total_duration)}{cost_str}[/dim]")
-    console.print("\u2501" * 60, style="bold")
+    console.print(Panel(
+        f"[bold]Run complete[/bold]  [dim]{_format_duration(total_duration)}{cost_str}[/dim]",
+        border_style="dim",
+        expand=False,
+        padding=(0, 2),
+    ))
 
     for task, success in results:
         icon = "[green]\u2713[/green]" if success else "[red]\u2717[/red]"

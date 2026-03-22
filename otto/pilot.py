@@ -108,10 +108,9 @@ def _process_progress_event(data: dict) -> None:
                     cost=data.get("cost", 0),
                 )
             elif event_type == "agent_tool":
-                display.add_tool(
-                    name=data.get("name", ""),
-                    detail=data.get("detail", ""),
-                )
+                display.add_tool(data=data)
+            elif event_type == "agent_tool_result":
+                display.add_tool_result(data=data)
             elif event_type == "qa_finding":
                 display.add_finding(data.get("text", ""))
         except (AttributeError, RuntimeError):

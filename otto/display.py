@@ -181,33 +181,43 @@ class TaskDisplay:
             retry = f"  [dim](retry {attempt})[/dim]" if attempt and attempt > 1 else ""
             self._console.print(f"  [bold cyan]{name}[/bold cyan]{retry}")
 
-    def add_tool(self, line: str = "", name: str = "", detail: str = "") -> None:
-        """Print a tool call permanently (CC style). Thread-safe."""
-        if not line and name:
-            line = f"{name}  {detail}" if detail else name
-        if not line:
+    def add_tool(self, line: str = "", name: str = "", detail: str = "",
+                 data: dict | None = None) -> None:
+        """Print a tool call permanently (CC style with inline content). Thread-safe."""
+        # Support both old API (name=, detail=) and new (data=)
+        if data:
+            name = data.get("name", name)
+            detail = data.get("detail", detail)
+
+        if not name and not line:
+            return
+        if not name and line:
+            name = line.split()[0] if line else ""
+            detail = line.split("  ", 1)[-1] if "  " in line else ""
+
+        raw_detail = detail or ""
+
+        # Skip internal files (check BEFORE path shortening)
+        if any(p in raw_detail for p in _INTERNAL_PATTERNS):
             return
 
-        detail = _shorten_path(detail)
+        detail = _shorten_path(raw_detail)
 
-        # Skip internal files
-        if any(p in (detail or "") for p in _INTERNAL_PATTERNS):
+        # Also skip after shortening (catches relative paths)
+        if any(p in detail for p in _INTERNAL_PATTERNS):
             return
 
-        # Deduplicate silently (no "2x" markers)
-        fname = detail.rsplit("/", 1)[-1] if detail and "/" in detail else (detail or "")
+        # Deduplicate silently
+        fname = detail.rsplit("/", 1)[-1] if "/" in detail else detail
         tool_key = f"{name}:{fname}"
 
         with self._lock:
             if self._current_phase == "coding" and name in ("Write", "Edit"):
                 if fname and fname not in self._coding_files:
                     self._coding_files.append(fname)
-
             if tool_key == self._last_tool_key:
-                return  # silent dedup
+                return
             self._last_tool_key = tool_key
-
-            # Cap Read calls
             if name == "Read":
                 self._read_count += 1
                 if self._read_count > 6:
@@ -215,12 +225,50 @@ class TaskDisplay:
                         self._console.print("      [dim]...[/dim]")
                     return
 
-        # CC style: "  ● Name  path"
-        short = rich_escape(_shorten_path(detail)[:70]) if detail else ""
+        short = rich_escape(_shorten_path(detail)[:68])
+
+        # CC style: "  ● Name  path" with breathing room
         if name == "QA":
             self._console.print(f"      [dim]{rich_escape(name)}  {short}[/dim]")
         else:
             self._console.print(f"      [bold cyan]\u25cf {name}[/bold cyan]  [dim]{short}[/dim]")
+
+        # Inline content below tool call (CC shows diffs/previews)
+        if data:
+            # Edit: show mini diff
+            old_lines = data.get("old_lines", [])
+            new_lines = data.get("new_lines", [])
+            if old_lines or new_lines:
+                for ol in old_lines[:3]:
+                    self._console.print(f"        [red]- {rich_escape(ol)}[/red]")
+                old_total = data.get("old_total", 0)
+                if old_total > 3:
+                    self._console.print(f"        [dim]  ...{old_total - 3} more lines[/dim]")
+                for nl in new_lines[:3]:
+                    self._console.print(f"        [green]+ {rich_escape(nl)}[/green]")
+                new_total = data.get("new_total", 0)
+                if new_total > 3:
+                    self._console.print(f"        [dim]  ...{new_total - 3} more lines[/dim]")
+
+            # Write: show content preview
+            preview = data.get("preview_lines", [])
+            if preview:
+                for pl in preview[:3]:
+                    self._console.print(f"        [green]+ {rich_escape(pl)}[/green]")
+                total = data.get("total_lines", 0)
+                if total > 3:
+                    self._console.print(f"        [dim]  ...{total - 3} more lines[/dim]")
+
+    def add_tool_result(self, data: dict | None = None) -> None:
+        """Print a tool result inline (Bash test output). Thread-safe."""
+        if not data:
+            return
+        detail = data.get("detail", "")
+        passed = data.get("passed", False)
+        if not detail:
+            return
+        style = "green" if passed else "red"
+        self._console.print(f"        [{style}]{rich_escape(detail)}[/{style}]")
 
     def add_finding(self, text: str) -> None:
         """Print a QA finding permanently. Handles all QA output formats."""
