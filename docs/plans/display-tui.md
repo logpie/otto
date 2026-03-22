@@ -1,4 +1,4 @@
-# Otto TUI — Full-Screen Dashboard for `otto run`
+# Otto TUI — Full-Screen Display System
 
 ## Why TUI
 
@@ -6,17 +6,50 @@ The scrollback model breaks for parallel tasks. With N agents running, interleav
 
 CC uses a React-based terminal renderer. Codex CLI uses React+Ink. We use **Textual** — Python, built on Rich, battle-tested, handles resize/SSH/tmux.
 
+## Which Commands Get TUI
+
+Any command that takes >2s with streaming progress:
+
+| Command | TUI Screen | What it shows |
+|---------|-----------|---------------|
+| `otto run` | RunScreen | Task panels, tool logs, phase progress, QA findings |
+| `otto add` | AddScreen | Spec agent activity (file reads, thinking), criteria preview |
+| `otto add -f` | AddScreen | Batch spec generation progress, per-task status |
+| `otto arch` | AgentScreen | Architect agent exploring codebase |
+| `otto status -w` | WatchScreen | Live dashboard, auto-refresh |
+| `otto logs -f` | LogScreen | Live log tail |
+
+Instant commands stay Rich console.print: `status`, `show`, `logs`, `history`, `init`, `diff`, `reset`.
+
 ## Architecture
 
 ```
-otto run
-  ├─ is_terminal? → OttoRunApp (Textual TUI)
-  └─ piped/CI?    → PlainOutput (console.print, JSONL)
+any long-running otto command
+  ├─ is_terminal? → OttoApp with appropriate Screen
+  └─ piped/CI?    → PlainOutput (console.print or JSONL)
 ```
 
-The TUI is ONLY for `otto run` when connected to a terminal. All other commands (`status`, `show`, `add`, etc.) keep using Rich console.print — they're short-lived and don't need a dashboard.
-
 When the TUI exits, it dumps a final summary to normal scrollback so the result persists in terminal history.
+
+### Shared Component Tree
+
+```
+OttoApp(App)
+├─ Screens (one active at a time)
+│   ├─ RunScreen          — the main event (otto run)
+│   ├─ AddScreen          — spec generation (otto add)
+│   ├─ AgentScreen        — any single-agent run (otto arch)
+│   ├─ WatchScreen        — live dashboard (otto status -w)
+│   └─ LogScreen          — log tail (otto logs -f)
+├─ Reusable Widgets
+│   ├─ ToolLog (RichLog)  — scrollable tool call history
+│   ├─ PhaseBar (Static)  — phase progress indicators
+│   ├─ TaskPanel (Widget) — per-task container with header + ToolLog
+│   └─ StatsBar (Static)  — cost, time, model info
+└─ Common
+    ├─ Keyboard shortcuts (q=quit, 1-9=focus task)
+    └─ Theme (from otto/theme.py)
+```
 
 ## Layout: Single Task
 
