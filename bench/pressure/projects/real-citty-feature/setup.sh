@@ -5,10 +5,11 @@ git clone --quiet https://github.com/unjs/citty.git .tmp-clone
 cd .tmp-clone
 git checkout --quiet 69252d409b9a93c3fade0a4d207f598d1cdef732
 cd ..
-cp -r .tmp-clone/src ./src
-cp -r .tmp-clone/test ./test 2>/dev/null || true
-cp .tmp-clone/package.json ./package.json
-cp .tmp-clone/tsconfig.json ./tsconfig.json 2>/dev/null || true
-cp .tmp-clone/vitest.config.ts ./vitest.config.ts 2>/dev/null || true
+# Copy entire repo (minus .git) to preserve all config files
+rsync -a --exclude='.git' .tmp-clone/ ./
 rm -rf .tmp-clone
+# Fix test script: original uses pnpm + lint + type-check. We only need vitest.
+node -e "let p=require('./package.json'); p.scripts.test='npx vitest run'; require('fs').writeFileSync('package.json',JSON.stringify(p,null,2))"
+# Install dependencies (vitest, typescript needed for tests)
+npm install --ignore-scripts 2>/dev/null
 git add -A && git commit -m "init citty at pre-subcommand-aliases"
