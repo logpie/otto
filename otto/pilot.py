@@ -52,12 +52,12 @@ import threading
 
 # Tool categories for display tiering
 _PRIMARY_TOOLS = {"run_task_with_qa", "finish_run"}
-_SECONDARY_TOOLS = {"get_run_state", "read_verify_output", "abort_task"}
-_NOISE_TOOLS = {"save_run_state", "ToolSearch", "write_task_notes", "write_learning"}
+_SECONDARY_TOOLS = {"read_verify_output", "abort_task"}
+_NOISE_TOOLS = {"save_run_state", "ToolSearch", "write_task_notes", "write_learning", "get_run_state"}
 
 _TOOL_DISPLAY = {
     "get_run_state": ("\u25cf", "Loading task state"),
-    "run_task_with_qa": ("\u25cf", "Running task"),
+    "run_task_with_qa": ("\u25cf", "Running"),
     "read_verify_output": ("\u25cf", "Reading verify output"),
     "abort_task": ("\u2717", "Aborting"),
     "save_run_state": ("\u25cf", "Saving state"),
@@ -76,6 +76,14 @@ _last_displayed_tool: str | None = None
 
 # Accumulated progress events per task key (for summary display)
 _task_progress: dict[str, list[dict]] = {}
+
+# Cache: task_key -> task id (populated during run_piloted)
+_task_key_to_id: dict[str, int] = {}
+
+
+def _resolve_task_number(task_key: str) -> int | None:
+    """Resolve a task key to its task number for display."""
+    return _task_key_to_id.get(task_key)
 
 
 def _process_progress_event(data: dict) -> None:
@@ -147,7 +155,13 @@ def _print_pilot_tool_call(block) -> None:
     # Build detail string based on tool type
     detail = ""
     if "task_key" in inputs:
-        detail = f"task {inputs['task_key'][:8]}"
+        task_key = inputs['task_key']
+        # Resolve task number from key for display
+        task_num = _resolve_task_number(task_key)
+        if task_num:
+            detail = f"#{task_num}  {task_key[:8]}"
+        else:
+            detail = task_key[:8]
     elif "task_keys" in inputs:
         keys = inputs["task_keys"]
         detail = f"{len(keys)} tasks"
@@ -194,10 +208,9 @@ def _print_pilot_tool_call(block) -> None:
         console.print(line, style="dim")
         return
 
-    # Tier 1: otto primary tools — prominent with separator, start task display
+    # Tier 1: otto primary tools — prominent, no separator
     if tool_name in _PRIMARY_TOOLS:
         console.print()
-        console.print(f"  {'─' * 50}", style="dim")
         if detail:
             console.print(f"  {icon} [bold]{label}[/bold]  [dim]{rich_escape(detail)}[/dim]")
         else:
@@ -284,7 +297,6 @@ def _print_pilot_tool_result(block) -> None:
                 # Show verify output on failure
                 verify_out = data.get("verify_output", "")
                 if verify_out and not data["success"]:
-                    console.print(f"    {'─' * 40}", style="dim")
                     for vline in verify_out.split("\\n")[-10:]:
                         if "FAILED" in vline or "ERROR" in vline or "error" in vline.lower():
                             console.print(f"    {rich_escape(vline)}", style="red")
@@ -964,9 +976,11 @@ Before calling finish_run, verify:
                 console.print(f"    [dim]\u25cb[/dim] [bold]#{t['id']}[/bold]  {rich_escape(t.get('prompt', '')[:55])}  [dim]({spec_count} spec){dep_str}[/dim]")
 
             console.print()
-            _log_info("Pilot taking control \u2014 LLM-driven execution")
-            console.print("  The pilot will drive coding \u2192 verify \u2192 merge", style="dim")
-            console.print()
+            console.print(f"{'─' * 60}", style="dim")
+
+        # Populate task key -> id cache for display
+        for t in pending:
+            _task_key_to_id[t.get("key", "")] = t.get("id", 0)
 
         # Run pilot agent — three-tier output display
         _last_tool_name = None
@@ -1203,7 +1217,10 @@ Before calling finish_run, verify:
                             except (json.JSONDecodeError, TypeError):
                                 _dlog(_current_debug_phase, f"result: {result_preview}")
                         if not _suppress_console:
-                            _print_pilot_tool_result(block)
+                            # Suppress results for noise tools
+                            _resolved_tool = (_last_tool_name or "").replace("mcp__otto-pilot__", "")
+                            if _resolved_tool not in _NOISE_TOOLS and _last_tool_name != "ToolSearch":
+                                _print_pilot_tool_result(block)
                         _last_tool_name = None
 
         _bg_reader_running = False
@@ -1411,14 +1428,14 @@ async def run_piloted(
 ) -> int:
     """LLM-driven orchestrator that replaces run_all().
 
-    Launches a Claude agent with MCP tools exposing otto's internal functions.
-    The agent decides execution order, handles failures, and drives the pipeline.
+    Handles pre-flight setup (lock, branch, baseline) and cleanup, then
+    delegates the pilot agent loop to _run_pilot_core() which has the
+    taste-fixed display code.
 
     Returns exit code (0=all passed, 1=any failed, 2=error).
     """
     import fcntl
     import signal
-    import tempfile
 
     default_branch = config["default_branch"]
 
@@ -1429,9 +1446,6 @@ async def run_piloted(
     try:
         fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        # Check if the lock holder is actually alive (stale lock detection)
-        # flock is advisory — if the holder died, the lock is released by the OS.
-        # If we get BlockingIOError, another process genuinely holds it.
         console.print("Another otto process is running", style="red")
         return 2
 
@@ -1458,660 +1472,14 @@ async def run_piloted(
     old_sigterm = signal.signal(signal.SIGTERM, _signal_handler)
 
     try:
-        # Ensure we're on the default branch before starting.
-        # If checkout fails (dirty tracked files, stale branch), force-clean first.
-        checkout = subprocess.run(
-            ["git", "checkout", default_branch],
-            cwd=project_dir, capture_output=True, text=True,
-        )
-        if checkout.returncode != 0:
-            # Checkout failed — likely dirty tracked files from a killed run.
-            # Try stashing, then checkout again.
-            subprocess.run(
-                ["git", "stash", "--include-untracked"],
-                cwd=project_dir, capture_output=True,
-            )
-            retry = subprocess.run(
-                ["git", "checkout", default_branch],
-                cwd=project_dir, capture_output=True, text=True,
-            )
-            if retry.returncode != 0:
-                console.print(f"[red]Cannot checkout {default_branch}: {retry.stderr.strip()}[/red]")
-                return 2
+        # Pre-flight checks (branch, baseline, stale recovery, deps)
+        error_code, pending = _preflight_checks(config, tasks_file, project_dir)
+        if error_code is not None:
+            return error_code
 
-        # Verify we're actually on the right branch
-        actual = subprocess.run(
-            ["git", "branch", "--show-current"],
-            cwd=project_dir, capture_output=True, text=True,
-        ).stdout.strip()
-        if actual != default_branch:
-            console.print(f"[red]Expected branch {default_branch}, on {actual}[/red]")
-            return 2
-
-        # Dirty-tree protection — stash or abort
-        from otto.runner import check_clean_tree
-        if not check_clean_tree(project_dir):
-            console.print("[red]Working tree is dirty -- fix before running otto[/red]")
-            return 2
-
-        # Baseline check — verify existing tests pass before otto modifies anything.
-        # Greenfield projects (no tests) and projects with pre-existing failures
-        # are handled gracefully: failures are recorded so verification can
-        # distinguish otto-introduced regressions from pre-existing ones.
-        test_command = config.get("test_command")
-        baseline_failures = None  # None = clean, str = recorded failure output
-        if test_command:
-            _log_info("Running baseline check...")
-            baseline_env = _subprocess_env()
-            # CI=true disables interactive test runners (CRA/Jest watch mode)
-            baseline_env["CI"] = "true"
-            try:
-                result = subprocess.run(
-                    test_command, shell=True, cwd=project_dir,
-                    capture_output=True, timeout=config["verify_timeout"],
-                    env=baseline_env,
-                )
-            except subprocess.TimeoutExpired:
-                # Test runner hung (e.g., interactive watch mode).
-                # Record as baseline issue and proceed — the coding agent
-                # will set up proper test infrastructure.
-                console.print("  [yellow]Warning: Baseline tests timed out (interactive runner?) -- proceeding[/yellow]")
-                baseline_failures = "baseline: test command timed out"
-                result = None
-            if result is not None:
-                # Exit code 5 = "no tests collected" (empty test suite) — not a failure
-                if result.returncode not in (0, 5):
-                    # Record baseline failures but don't block — the coding agent
-                    # will work on top of whatever state the project is in.
-                    stderr_tail = (result.stderr or b"").decode(errors="replace")[-500:]
-                    baseline_failures = f"baseline: exit {result.returncode}\n{stderr_tail}"
-                    console.print("  [yellow]Warning: Baseline tests failing -- recorded, proceeding[/yellow]")
-                elif result.returncode == 0:
-                    # Extract test count if available
-                    import re as _re
-                    stdout_text = (result.stdout or b"").decode(errors="replace")
-                    match = _re.search(r"(\d+) passed", stdout_text)
-                    count = f" ({match.group(1)} tests)" if match else ""
-                    console.print(f"  [green]\u2713[/green] Baseline passing{count}", style="dim")
-
-        # Recover stale "running" tasks
-        tasks = load_tasks(tasks_file)
-        for t in tasks:
-            if t.get("status") == "running":
-                update_task(tasks_file, t["key"], status="pending",
-                            error=None, session_id=None)
-                console.print(f"  [yellow]Warning: Task #{t['id']} was stuck in 'running' -- reset to pending[/yellow]")
-
-        # Load pending tasks
-        tasks = load_tasks(tasks_file)
-        pending = [t for t in tasks if t.get("status") == "pending"]
-        if not pending:
-            console.print("No pending tasks", style="dim")
-            return 0
-
-        # Inject dependencies from file-plan.md if otto_arch exists
-        if not config.get("no_architect", False) and len(pending) >= 2:
-            from otto.architect import parse_file_plan
-            arch_deps = parse_file_plan(project_dir)
-            if arch_deps:
-                tasks = load_tasks(tasks_file)
-                pending = [t for t in tasks if t.get("status") == "pending"]
-                pending_by_id = {t["id"]: t for t in pending}
-                injected = 0
-                for dep_id, on_id in arch_deps:
-                    task = pending_by_id.get(dep_id)
-                    if task:
-                        deps = list(task.get("depends_on") or [])
-                        if on_id not in deps:
-                            deps.append(on_id)
-                            update_task(tasks_file, task["key"], depends_on=deps)
-                            injected += 1
-                if injected:
-                    console.print(f"  Injected {injected} dependencies from file-plan.md", style="dim")
-
-        # Write MCP server script to temp file
-        mcp_script = _build_mcp_server_script(config, tasks_file, project_dir)
-        with tempfile.NamedTemporaryFile(
-            "w",
-            suffix=".py",
-            prefix="otto_pilot_mcp_",
-            delete=False,
-        ) as temp_file:
-            temp_file.write(mcp_script)
-            mcp_script_path = Path(temp_file.name)
-
-        run_start = time.monotonic()
-
-        try:
-            # Build pilot prompt
-            tasks = load_tasks(tasks_file)
-            pending = [t for t in tasks if t.get("status") == "pending"]
-            # Track which task keys are being attempted this run — used for
-            # scoping the post-run summary (cost, results, phase timing).
-            pending_keys = {t["key"] for t in pending}
-            pilot_prompt = _build_pilot_prompt(pending, config, project_dir)
-
-            # Configure MCP server
-            mcp_server_config = {
-                "command": sys.executable,
-                "args": [str(mcp_script_path)],
-            }
-
-            # Merge otto-pilot MCP with user's MCP servers from ~/.claude.json
-            all_mcp_servers = {"otto-pilot": mcp_server_config}
-            user_claude_json = Path.home() / ".claude.json"
-            if user_claude_json.exists():
-                try:
-                    user_config = json.loads(user_claude_json.read_text())
-                    for name, srv in user_config.get("mcpServers", {}).items():
-                        if name == "otto-pilot":
-                            continue  # don't override our own
-                        # Chrome-devtools: use dedicated otto profile + headless
-                        # to avoid conflicts with user's browser. Reuse the same
-                        # profile across runs to avoid accumulating macOS
-                        # code_sign_clone copies (~1.9G each).
-                        if name == "chrome-devtools":
-                            srv = dict(srv)
-                            args = list(srv.get("args", []))
-                            if "--headless" not in args:
-                                args.append("--headless")
-                            if not any(a.startswith("--viewport") for a in args):
-                                args.extend(["--viewport", "1280x720"])
-                            if not any(a.startswith("--userDataDir") for a in args):
-                                otto_chrome_profile = str(Path.home() / ".cache" / "otto" / "chrome-profile")
-                                args.extend(["--userDataDir", otto_chrome_profile])
-                            srv["args"] = args
-                        all_mcp_servers[name] = srv
-                except (json.JSONDecodeError, OSError):
-                    pass
-
-            _pilot_system_prompt = """\
-<role>
-You are a tech lead managing coding agents. You orchestrate task execution
-and make strategic decisions. The coding, verification, QA, and merge steps
-are handled automatically by run_task_with_qa — you decide WHAT to run,
-in WHAT ORDER, and with what HINTS.
-</role>
-
-<workflow>
-PHASE 1: PLAN
-- get_run_state → git log → read what you need → plan execution order
-- Respect depends_on. The coding agent does its own deep exploration.
-
-PHASE 2: EXECUTE (for each task)
-- Optional: dispatch Agent(researcher) in background for hard tasks
-- run_task_with_qa(key) → full deterministic loop:
-  prepare → code → verify → QA → merge (all automatic)
-- Returns {{success, status, cost_usd, error, diff_summary, qa_report}}
-- If failed: decide retry strategy:
-  - Read the error carefully. Give a targeted, specific hint — not generic advice.
-  - Different error from last time? Good — making progress. Keep going.
-  - Same error repeating? Doom loop. Change strategy fundamentally:
-    different algorithm, different library, different architecture.
-  - Before retrying a hard failure, dispatch Agent(researcher, "how to ...") first.
-    Feed the research findings into the hint parameter.
-  - Think you're stuck? List 3 alternative approaches you haven't tried.
-  - abort_task will REFUSE if fewer than 3 attempts have been made.
-    You must genuinely try before giving up.
-  - run_task_with_qa(key, hint="specific guidance based on failure analysis")
-
-PHASE 3: REPORT
-- finish_run with summary
-</workflow>
-
-<subagents>
-You have one native subagent available via the Agent tool:
-- researcher: Searches the web, reads docs, studies similar repos.
-  Two patterns:
-  1. Serial (after failure): research first, feed findings into retry hint.
-  2. Parallel (hard task): dispatch researcher alongside run_task_with_qa.
-     If task succeeds, ignore research. If it fails, findings are ready.
-  Example: Agent(researcher, "how to achieve <200ms LCP in Next.js with React hydration")
-</subagents>
-
-<tools>
-MCP TOOLS:
-- get_run_state: see all tasks and their status
-- run_task_with_qa(task_key, hint?): run full task loop (prepare → code → verify → QA → merge)
-- read_verify_output(task_key): read verification failure details for crafting retry hints
-- abort_task(task_key, reason): give up with structured reason (min-retry guardrail)
-- save_run_state(phase, notes): persist state for session recovery
-- write_task_notes(task_key, notes): document approach for future retries
-- write_learning(learning): record cross-task learning
-- finish_run(summary): signal completion
-</tools>
-
-<rules>
-- Track progress: call save_run_state after major decisions
-- Do NOT modify project files directly — let the coding agent do that
-- Do NOT kill dev servers with pkill/killall — only by specific PID you started
-- Never retry with the same approach twice — always provide a different hint
-</rules>
-
-<completion_check>
-Before calling finish_run, verify:
-1. Every task has been run through run_task_with_qa
-2. No unresolved failures (all either passed or properly aborted)
-</completion_check>"""
-
-            agent_opts = ClaudeAgentOptions(
-                permission_mode="bypassPermissions",
-                cwd=str(project_dir),
-                max_turns=100,
-                mcp_servers=all_mcp_servers,
-                setting_sources=["user", "project"],
-                env=_subprocess_env(),
-                effort=config.get("effort", "high"),
-                max_buffer_size=10 * 1024 * 1024,  # 10MB — screenshots can be large
-                system_prompt=_pilot_system_prompt,
-            )
-            if config.get("model"):
-                agent_opts.model = config["model"]
-
-            # Add native subagent for research (coding and QA are now internal
-            # to run_task_with_qa — no longer pilot subagents)
-            if AgentDefinition:
-                try:
-                    agent_opts.agents = {
-                        "researcher": AgentDefinition(
-                            description="Research a technical topic: search the web, read docs, study similar repos. Use BEFORE retrying a failed coding task, or in parallel with coding on hard tasks.",
-                            prompt="You are a research assistant. Search the web, read documentation, and study reference implementations. Report concrete findings: code patterns, API usage examples, library recommendations. Be specific — include URLs, code snippets, and exact function signatures.",
-                            model=config.get("researcher_model", "sonnet"),
-                        ),
-                    }
-                except (TypeError, AttributeError, ValueError):
-                    pass  # SDK version doesn't support subagents — skip
-
-            # Show task overview
-            from otto.tasks import spec_is_verifiable  # noqa: F811
-            tasks = load_tasks(tasks_file)
-            pending = [t for t in tasks if t.get("status") == "pending"]
-            total_specs = sum(len(t.get("spec") or []) for t in pending)
-            console.print()
-            console.print(f"  [bold]{len(pending)} task{'s' if len(pending) != 1 else ''}[/bold], [dim]{total_specs} specs[/dim]")
-            for t in pending:
-                deps = t.get("depends_on", [])
-                dep_str = f" [dim]\u2192 #{', #'.join(str(d) for d in deps)}[/dim]" if deps else ""
-                spec_count = len(t.get("spec") or [])
-                console.print(f"    [dim]\u25cb[/dim] [bold]#{t['id']}[/bold]  {rich_escape(t.get('prompt', '')[:55])}  [dim]({spec_count} spec){dep_str}[/dim]")
-
-            console.print()
-            _log_info("Pilot taking control \u2014 LLM-driven execution")
-            console.print("  The pilot will drive coding \u2192 verify \u2192 merge", style="dim")
-            console.print()
-
-            # Run pilot agent — three-tier output display
-            # Track last tool call name to match results
-            _last_tool_name = None
-            # Side-channel result file from MCP tools
-            _results_file = project_dir / "otto_logs" / "pilot_results.jsonl"
-            _results_read_pos = 0  # track how far we've read
-            # Truncate JSONL to prevent stale events from previous runs
-            _results_file.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                _results_file.write_text("")
-            except OSError:
-                pass
-            # Structured debug log with timestamps and phases
-            _debug_log = project_dir / "otto_logs" / "pilot_debug.log"
-            _debug_log.parent.mkdir(parents=True, exist_ok=True)
-            _debug_fh = open(_debug_log, "w")
-            _current_debug_phase = "INIT"
-
-            def _dlog(phase: str, msg: str) -> None:
-                """Write a timestamped structured line to the debug log."""
-                nonlocal _current_debug_phase
-                _current_debug_phase = phase
-                ts = time.strftime("%H:%M:%S")
-                _debug_fh.write(f"[{ts}] [{phase}] {msg}\n")
-                _debug_fh.flush()
-
-            # Log initial state
-            _dlog("INIT", f"pilot started — {len(pending)} pending tasks")
-            try:
-                git_head = subprocess.run(
-                    ["git", "rev-parse", "--short", "HEAD"],
-                    cwd=project_dir, capture_output=True, text=True,
-                )
-                git_branch = subprocess.run(
-                    ["git", "branch", "--show-current"],
-                    cwd=project_dir, capture_output=True, text=True,
-                )
-                _dlog("INIT", f"git branch={git_branch.stdout.strip()} HEAD={git_head.stdout.strip()}")
-            except Exception:
-                pass
-
-            # Clear progress tracking from previous runs
-            _task_progress.clear()
-
-            # Background JSONL reader — polls the side-channel file every 500ms
-            # to pick up progress events while the pilot agent is blocked on
-            # run_task_with_qa (which is a single long MCP call).
-            _bg_reader_running = True
-
-            def _bg_read_results():
-                nonlocal _results_read_pos
-                _carry = ""  # buffer for partial lines
-                _last_inode = 0  # track file identity for replacement detection
-                try:
-                    _dlog("INIT", "background JSONL reader started")
-                except Exception:
-                    pass
-                while _bg_reader_running:
-                    try:
-                        if _results_file.exists():
-                            # Detect file replacement/truncation
-                            try:
-                                st = _results_file.stat()
-                                # File replaced (new inode) or truncated (smaller)
-                                if st.st_ino != _last_inode or st.st_size < _results_read_pos:
-                                    _results_read_pos = 0
-                                    _carry = ""
-                                _last_inode = st.st_ino
-                            except OSError:
-                                pass
-                            with open(_results_file) as rf:
-                                rf.seek(_results_read_pos)
-                                raw = rf.read()
-                            new_lines: list[str] = []
-                            if raw:
-                                raw = _carry + raw
-                                if raw.endswith("\n"):
-                                    new_lines = raw.splitlines()
-                                    _carry = ""
-                                    _results_read_pos += len(raw.encode())
-                                else:
-                                    parts = raw.rsplit("\n", 1)
-                                    new_lines = parts[0].splitlines() if len(parts) > 1 else []
-                                    _carry = parts[-1]
-                                    _results_read_pos += len(raw.encode()) - len(_carry.encode())
-                            for rline in new_lines:
-                                rline = rline.strip()
-                                if not rline:
-                                    continue
-                                try:
-                                    rdata = json.loads(rline)
-                                    tool = rdata.get("tool", "")
-                                    if tool == "progress":
-                                        # Route to phase display
-                                        _process_progress_event(rdata)
-                                        # Also write structured debug log for progress events
-                                        evt = rdata.get("event", "")
-                                        task_key = rdata.get("task_key", "")[:8]
-                                        if evt == "phase":
-                                            pname = rdata.get("name", "")
-                                            pstatus = rdata.get("status", "")
-                                            ptime = rdata.get("time_s", 0)
-                                            perr = rdata.get("error", "")[:60]
-                                            if pstatus == "running":
-                                                _dlog("EXEC", f"{pname} started — task={task_key}")
-                                            elif pstatus == "done":
-                                                _dlog("EXEC", f"{pname} done — {ptime:.0f}s task={task_key}")
-                                            elif pstatus == "fail":
-                                                _dlog("EXEC", f"{pname} FAILED — {ptime:.0f}s {perr} task={task_key}")
-                                        elif evt == "agent_tool":
-                                            aname = rdata.get("name", "")
-                                            adetail = rdata.get("detail", "")[:60]
-                                            _dlog("EXEC", f"agent: {aname} {adetail}")
-                                    elif tool == "run_task_with_qa":
-                                        # Capture final result with phase_timings
-                                        # for accurate per-task timing in summary
-                                        tk = rdata.get("task_key", "")
-                                        if not tk:
-                                            # Result doesn't have task_key at top level;
-                                            # infer from the last progress event's key
-                                            for evts in reversed(list(_task_progress.values())):
-                                                if evts:
-                                                    tk = evts[-1].get("task_key", "")
-                                                    if tk:
-                                                        break
-                                        if tk:
-                                            _task_progress.setdefault(tk, []).append(
-                                                {"_result": True, **rdata}
-                                            )
-                                    # Non-progress events (final results) are
-                                    # still displayed via _print_pilot_tool_result
-                                    # when the SDK delivers the ToolResultBlock.
-                                except json.JSONDecodeError:
-                                    pass
-                    except OSError:
-                        pass
-                    time.sleep(0.2)
-
-            _bg_thread = threading.Thread(target=_bg_read_results, daemon=True)
-            _bg_thread.start()
-
-            async for message in query(prompt=pilot_prompt, options=agent_opts):
-                if isinstance(message, ResultMessage):
-                    _dlog("DONE", f"ResultMessage is_error={getattr(message, 'is_error', '?')}")
-                    # Stop any active display on completion
-                    global _active_display
-                    if _active_display:
-                        _active_display.stop()
-                        _active_display = None
-                elif hasattr(message, "session_id") and hasattr(message, "is_error"):
-                    pass
-                elif AssistantMessage and isinstance(message, AssistantMessage):
-                    for block in message.content:
-                        block_type = type(block).__name__
-
-                        # Catch-all: stop spinner/phase display for any block
-                        # type that isn't ToolUseBlock or ToolResultBlock
-                        # (e.g., ThinkingBlock). Those handle spinner themselves.
-                        is_tool_block = (
-                            (ToolUseBlock and isinstance(block, ToolUseBlock))
-                            or (ToolResultBlock and isinstance(block, ToolResultBlock))
-                        )
-                        if not is_tool_block:
-                            # Keep _active_display alive through non-tool blocks —
-                            # it should persist through ThinkingBlocks/TextBlocks
-                            # until the tool result arrives (run_task_with_qa
-                            # takes minutes). Rich Live handles this cleanly.
-                            pass
-
-                        if TextBlock and isinstance(block, TextBlock) and block.text:
-                            text = block.text.strip()
-                            if not text:
-                                continue
-
-                            # After finish_run is called, suppress pilot's LLM summary — otto generates its own
-                            if _last_tool_name and "finish_run" in _last_tool_name:
-                                continue
-
-                            # Log pilot reasoning
-                            _dlog(_current_debug_phase, f"text: {text[:120]}")
-
-                            # Skip code fences, raw JSON, and low-value narration
-                            if text.startswith("```") or text.startswith("{"):
-                                continue
-                            # Suppress common filler phrases and narration noise
-                            _lower = text.lower()
-                            if any(filler in _lower for filler in [
-                                "let me", "i'll ", "i will ", "now let me",
-                                "let me save", "let me get", "let me check",
-                                "in parallel", "save the run state",
-                            ]):
-                                continue
-                            # Suppress chatty openers and markdown tables
-                            if _lower.startswith(("good.", "good,", "great.", "here's", "here is", "the state is clear")):
-                                continue
-                            if text.startswith("|"):
-                                continue
-
-                            # Tier 1: Execution plan — prominent cyan
-                            if "EXECUTION PLAN" in text or "PLAN UPDATE" in text:
-                                console.print(f"\n{text}", style="cyan")
-                            # Tier 1: Decision points — the pilot's strategic thinking
-                            elif any(marker in text.lower() for marker in [
-                                "passed", "failed", "now executing", "starting",
-                                "retrying", "aborting", "all tasks", "integration",
-                            ]):
-                                console.print(f"  {text}")
-                            # Tier 2: Other pilot reasoning — dimmed
-                            else:
-                                console.print(f"  {text}", style="dim")
-
-                        elif ToolUseBlock and isinstance(block, ToolUseBlock):
-                            _last_tool_name = block.name
-                            # Structured debug log for tool calls
-                            tool_name = block.name.replace("mcp__otto-pilot__", "")
-                            inputs = block.input or {}
-                            detail_parts = []
-                            if "task_key" in inputs:
-                                detail_parts.append(f"task={inputs['task_key'][:8]}")
-                            if inputs.get("hint"):
-                                detail_parts.append(f'hint="{str(inputs["hint"])[:50]}"')
-                            if "phase" in inputs:
-                                detail_parts.append(f"phase={inputs['phase']}")
-                            detail = " ".join(detail_parts)
-                            # Determine debug phase from tool name
-                            if tool_name in ("get_run_state", "save_run_state"):
-                                _dlog("PLAN", f"{tool_name} {detail}")
-                            elif tool_name in ("run_task_with_qa", "abort_task"):
-                                _dlog("EXEC", f"{tool_name} {detail}")
-                            elif tool_name == "finish_run":
-                                _dlog("REPORT", f"{tool_name} {detail}")
-                            else:
-                                _dlog(_current_debug_phase, f"{tool_name} {detail}")
-                            _print_pilot_tool_call(block)
-                        elif ToolResultBlock and isinstance(block, ToolResultBlock):
-                            # Log tool result summary
-                            raw = block.content
-                            result_preview = ""
-                            if isinstance(raw, str):
-                                result_preview = raw[:100]
-                            elif isinstance(raw, list):
-                                parts = []
-                                for item in raw:
-                                    if isinstance(item, str):
-                                        parts.append(item)
-                                    elif hasattr(item, "text"):
-                                        parts.append(item.text)
-                                result_preview = " ".join(parts)[:100]
-                            if block.is_error:
-                                _dlog(_current_debug_phase, f"ERROR: {result_preview}")
-                            else:
-                                # Parse JSON for structured summary
-                                try:
-                                    rdata = json.loads(result_preview if len(result_preview) < 100 else str(raw)[:200])
-                                    if isinstance(rdata, dict):
-                                        if "success" in rdata:
-                                            s = "PASSED" if rdata["success"] else "FAILED"
-                                            cost = rdata.get("cost_usd", 0)
-                                            err = rdata.get("error", "")[:50]
-                                            _dlog(_current_debug_phase, f"result: {s} cost=${cost:.2f} {err}")
-                                        elif "done" in rdata:
-                                            _dlog("REPORT", "run complete")
-                                        else:
-                                            _dlog(_current_debug_phase, f"result: {result_preview}")
-                                    else:
-                                        _dlog(_current_debug_phase, f"result: {result_preview}")
-                                except (json.JSONDecodeError, TypeError):
-                                    _dlog(_current_debug_phase, f"result: {result_preview}")
-                            _print_pilot_tool_result(block)
-                            _last_tool_name = None
-
-            # Stop background reader
-            _bg_reader_running = False
-            _bg_thread.join(timeout=2)
-
-        except Exception as pilot_err:
-            # Pilot agent crashed (e.g., buffer overflow from large screenshot)
-            # Still proceed to summary — tasks may have passed before the crash
-            if _active_display:
-                _active_display.stop()
-                _active_display = None
-            try:
-                _dlog("ERROR", f"pilot crashed: {pilot_err}")
-            except Exception:
-                pass
-            console.print(f"\n  [yellow]Warning: Pilot agent error: {pilot_err}[/yellow]")
-            console.print("  Proceeding to summary -- completed tasks are still merged.", style="dim")
-        finally:
-            # Stop background reader if still running
-            try:
-                _bg_reader_running = False  # noqa: F841 — may not exist if we errored early
-            except NameError:
-                pass
-            # Clean up
-            try:
-                _debug_fh.close()
-            except Exception:
-                pass
-            if mcp_script_path.exists():
-                mcp_script_path.unlink()
-
-        # Post-run: calculate results only for tasks attempted this run
-        final_tasks = load_tasks(tasks_file)
-        results: list[tuple[dict, bool]] = []
-        total_cost = 0.0
-        for t in final_tasks:
-            task_key = t.get("key", "")
-            # Only include tasks that were pending at run start
-            if task_key not in pending_keys:
-                continue
-            if t.get("status") in ("passed", "failed", "blocked"):
-                results.append((t, t.get("status") == "passed"))
-                total_cost += t.get("cost_usd", 0.0)
-            elif t.get("status") == "running":
-                # Task stuck in "running" — pilot crashed mid-task
-                update_task(tasks_file, t["key"], status="failed",
-                            error="pilot crashed during execution")
-                results.append((t, False))
-                total_cost += t.get("cost_usd", 0.0)
-            elif t.get("status") == "pending":
-                # Task was pending at start but never attempted (e.g., blocked)
-                results.append((t, False))
-
-        # Print summary with per-phase timing from progress events
-        run_duration = time.monotonic() - run_start
-        _print_summary(results, run_duration,
-                       total_cost=total_cost, task_progress=_task_progress)
-
-        # Record run history
-        try:
-            history_file = project_dir / "otto_logs" / "run-history.jsonl"
-            history_file.parent.mkdir(parents=True, exist_ok=True)
-            tasks_passed = sum(1 for _, s in results if s)
-            tasks_failed = sum(1 for _, s in results if not s)
-            # Get failure summary for history display
-            failure_summary = ""
-            if tasks_failed > 0:
-                failed_tasks = [(t, s) for t, s in results if not s]
-                if len(failed_tasks) == 1:
-                    ft = failed_tasks[0][0]
-                    failure_summary = f"task #{ft.get('id', '?')} failed: {ft.get('error', 'unknown')[:40]}"
-                else:
-                    failure_summary = f"{tasks_failed} tasks failed"
-            # Get current commit SHA
-            commit_sha = ""
-            try:
-                sha_result = subprocess.run(
-                    ["git", "rev-parse", "--short", "HEAD"],
-                    cwd=project_dir, capture_output=True, text=True,
-                )
-                if sha_result.returncode == 0:
-                    commit_sha = sha_result.stdout.strip()
-            except Exception:
-                pass
-            from datetime import datetime as _dt
-            entry = {
-                "timestamp": _dt.now().isoformat(timespec="seconds"),
-                "tasks_total": len(results),
-                "tasks_passed": tasks_passed,
-                "tasks_failed": tasks_failed,
-                "cost_usd": round(total_cost, 4),
-                "time_s": round(run_duration, 1),
-                "commit": commit_sha,
-                "failure_summary": failure_summary,
-            }
-            with open(history_file, "a") as hf:
-                hf.write(json.dumps(entry) + "\n")
-        except Exception:
-            pass  # Non-critical — don't fail the run for history recording
-
-        any_failed = any(not s for _, s in results)
-        return 1 if any_failed else 0
+        # Delegate to the shared core (taste-fixed display)
+        exit_code = await _run_pilot_core(config, tasks_file, project_dir, tui_app=None)
+        return exit_code
 
     finally:
         # Ensure we're back on the default branch after the pilot finishes

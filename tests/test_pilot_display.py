@@ -81,13 +81,13 @@ def capture_output(func, *args, **kwargs) -> str:
 class TestPilotToolCallDisplay:
     """Test _print_pilot_tool_call with various tool types."""
 
-    def test_primary_tool_shows_bold_with_separator(self):
+    def test_primary_tool_shows_bold_no_separator(self):
         block = FakeToolUseBlock(name="mcp__otto-pilot__run_task_with_qa",
                                   input={"task_key": "abc123def456"})
         output = capture_output(_print_pilot_tool_call, block)
-        assert "Running task" in output
+        assert "Running" in output
         assert "abc123de" in output  # truncated key
-        assert "\u2500" in output  # separator (─)
+        assert "\u2500" not in output  # no separator
 
     def test_primary_tool_with_hint(self):
         block = FakeToolUseBlock(name="mcp__otto-pilot__run_task_with_qa",
@@ -107,12 +107,11 @@ class TestPilotToolCallDisplay:
         output = capture_output(_print_pilot_tool_call, block)
         assert output.strip() == ""
 
-    def test_secondary_tool_dimmed(self):
+    def test_get_run_state_suppressed(self):
+        """get_run_state is noise — should be completely suppressed."""
         block = FakeToolUseBlock(name="mcp__otto-pilot__get_run_state", input={})
         output = capture_output(_print_pilot_tool_call, block)
-        assert "Loading task state" in output
-        # Should NOT have separator line
-        assert "\u2500" * 50 not in output
+        assert output.strip() == ""
 
     def test_unknown_tool_shows_name(self):
         block = FakeToolUseBlock(name="mcp__otto-pilot__some_new_tool", input={})
