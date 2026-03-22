@@ -54,16 +54,15 @@ def _parse_spec_output(text: str) -> list:
     """Parse LLM output into a list of spec items.
 
     Each item is either a plain string (backward compat) or a dict with
-    {text, verifiable, test_hint}.
+    {text, verifiable}.
 
     Format per line (after stripping numbering):
-      [verifiable] description text | hint: test strategy
+      [verifiable] description text
       [visual] description text
-      plain description text  (treated as verifiable, no hint)
+      plain description text  (treated as verifiable)
     """
     _VERIFIABLE_RE = re.compile(r"^\[verifiable\]\s*", re.IGNORECASE)
     _VISUAL_RE = re.compile(r"^\[visual\]\s*", re.IGNORECASE)
-    _HINT_RE = re.compile(r"\s*\|\s*hint:\s*", re.IGNORECASE)
 
     items = []
     for line in text.splitlines():
@@ -82,18 +81,8 @@ def _parse_spec_output(text: str) -> list:
         if _VERIFIABLE_RE.match(stripped):
             stripped = _VERIFIABLE_RE.sub("", stripped).strip()
 
-        # Check for | hint: suffix
-        hint = ""
-        hint_match = _HINT_RE.split(stripped, maxsplit=1)
-        if len(hint_match) == 2:
-            stripped = hint_match[0].strip()
-            hint = hint_match[1].strip()
-
         if stripped:
-            item: dict = {"text": stripped, "verifiable": True}
-            if hint:
-                item["test_hint"] = hint
-            items.append(item)
+            items.append({"text": stripped, "verifiable": True})
 
     return items
 
@@ -101,7 +90,7 @@ def _parse_spec_output(text: str) -> list:
 def generate_spec(prompt: str, project_dir: Path) -> list:
     """Generate a spec for a single task using an agentic QA engineer.
 
-    Returns a list of spec items (dicts with text/verifiable/test_hint),
+    Returns a list of spec items (dicts with text/verifiable),
     or empty list on failure.
     """
     spec, _cost = asyncio.run(_run_spec_agent(prompt, project_dir))
@@ -147,20 +136,18 @@ WHY:  Preserves the exact threshold, only clarifies how to measure it.
 </constraint_rules>
 
 <output_rules>
-- 5-8 acceptance criteria. Hard constraints first, then supporting requirements.
+- As many acceptance criteria as needed to fully cover the task. Hard constraints first.
 - Each item describes BEHAVIOR, not implementation. Focus on what must be true, not how.
-- No bikeshedding (formatting, unit labels, value ranges unless user specified them).
 
 CLASSIFY each item:
 - [verifiable] — can be proven by an automated test (measurable, binary, functional).
-  Add "| hint: how to test it" after the description.
 - [visual] — subjective, requires human/LLM judgment (style, UX, aesthetics).
 
 FORMAT per line:
-  [verifiable] Search is case-insensitive | hint: search "HELLO" and "hello", verify same results
-  [verifiable] E2E latency is under 300ms | hint: measure from fetch start to render, assert <300
+  [verifiable] Search is case-insensitive for all supported locales
+  [verifiable] E2E latency is under 300ms measured from fetch start to render complete
   [visual] UI uses Apple Weather-style gradient backgrounds
-  [verifiable] python -m bookmarks works as entry point | hint: subprocess run, assert exit code 0
+  [verifiable] python -m bookmarks works as entry point with exit code 0
 
 Most items should be [verifiable]. Only use [visual] for genuinely subjective criteria
 (appearance, style, "feels smooth"). Performance thresholds, functional behavior,
@@ -191,15 +178,7 @@ MANDATORY before writing output — do this in your thinking:
 
 You are working in {project_dir}. Explore the codebase as needed.
 
-Write the acceptance spec to: {spec_file}
-
-Steps:
-1. EXPLORE: Read the relevant source files to understand what exists.
-2. EXTRACT: Identify every hard requirement from the task (numbers, thresholds, "must"/"never").
-3. WRITE: Generate acceptance criteria — hard constraints first, verbatim.
-4. VERIFY: Re-read the task description. Confirm every constraint is preserved exactly.
-   If anything was softened, fix it now.
-5. OUTPUT: Write the final numbered list to the file."""
+Explore the codebase as needed, understand the task, and write acceptance criteria to: {spec_file}"""
 
     # Persistent log for debugging
     log_dir = project_dir / "otto_logs"
@@ -211,7 +190,6 @@ Steps:
         agent_opts = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
             cwd=str(project_dir),
-            max_turns=10,
             system_prompt=system_prompt,
             setting_sources=["user", "project"],
             env=dict(os.environ),
@@ -308,7 +286,7 @@ Write a JSON array to: {output_file}
 
 Each element should have:
 - "prompt": a clear, actionable description of what to implement
-- "spec": 5-10 concrete, testable acceptance criteria
+- "spec": concrete, testable acceptance criteria (as many as needed)
 - "depends_on": indices (0-based) of tasks this one requires, or [] if independent.
   Task B depends on A if B needs code/APIs/data that A creates.
   When unsure, include the dependency (safe default).
@@ -329,7 +307,6 @@ Example: [{{"prompt": "Add search", "spec": ["search works", "case-insensitive"]
         agent_opts = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
             cwd=str(project_dir),
-            max_turns=10,
         )
 
         async for message in query(prompt=agent_prompt, options=agent_opts):

@@ -582,9 +582,6 @@ def read_verify_output(task_key: str) -> str:
         return json.dumps({{"error": "no verify logs found"}})
 
     content = verify_logs[0].read_text()
-    # Return truncated summary
-    if len(content) > 10000:
-        content = content[:10000] + "\\n... (truncated)"
     return content
 
 
@@ -855,7 +852,6 @@ Before calling finish_run, verify:
         agent_opts = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
             cwd=str(project_dir),
-            max_turns=100,
             mcp_servers=all_mcp_servers,
             setting_sources=["user", "project"],
             env=_subprocess_env(),

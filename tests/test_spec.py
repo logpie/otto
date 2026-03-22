@@ -35,12 +35,12 @@ class TestParseSpecOutput:
         assert len(result) == 2
 
     def test_verifiable_tag(self):
-        text = "[verifiable] search is case-insensitive | hint: test mixed case"
+        text = "[verifiable] search is case-insensitive"
         result = _parse_spec_output(text)
         assert len(result) == 1
         assert result[0]["text"] == "search is case-insensitive"
         assert result[0]["verifiable"] is True
-        assert result[0]["test_hint"] == "test mixed case"
+        assert "test_hint" not in result[0]  # hint parsing removed (C3)
 
     def test_visual_tag(self):
         text = "[visual] Apple Weather-style gradient backgrounds"
@@ -52,14 +52,15 @@ class TestParseSpecOutput:
 
     def test_mixed_classified(self):
         text = (
-            "1. [verifiable] latency <300ms | hint: measure and assert\n"
+            "1. [verifiable] latency <300ms\n"
             "2. [visual] smooth transitions\n"
             "3. plain criterion without tag"
         )
         result = _parse_spec_output(text)
         assert len(result) == 3
         assert result[0]["verifiable"] is True
-        assert result[0]["test_hint"] == "measure and assert"
+        assert result[0]["text"] == "latency <300ms"
+        assert "test_hint" not in result[0]  # hint parsing removed (C3)
         assert result[1]["verifiable"] is False
         assert result[2]["verifiable"] is True  # default
 

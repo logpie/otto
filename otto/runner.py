@@ -695,18 +695,23 @@ async def coding_loop(
             pass
 
     try:
-        hint = task_plan.hint or ""
+        # Inject factual context (learnings, research) — NOT planner hints.
+        # Learnings are observations from prior tasks. Research is web/doc findings.
+        # These are raw environmental info, not an LLM's paraphrased advice.
+        context_parts: list[str] = []
         if context.learnings:
-            hint += "\n\nLEARNINGS FROM PRIOR TASKS:\n" + "\n".join(
+            context_parts.append("LEARNINGS FROM PRIOR TASKS:\n" + "\n".join(
                 f"- {l}" for l in context.learnings
-            )
+            ))
         research = context.get_research(task_key)
         if research:
-            hint += f"\n\nRESEARCH FINDINGS:\n{research}"
+            context_parts.append(f"RESEARCH FINDINGS:\n{research}")
+
+        hint = "\n\n".join(context_parts) if context_parts else None
 
         result = await run_task_with_qa(
             task, config, project_dir, tasks_file,
-            hint=hint or None, on_progress=_on_progress,
+            hint=hint, on_progress=_on_progress,
         )
 
         duration = time.monotonic() - task_start
@@ -736,7 +741,7 @@ async def coding_loop(
         error = str(result.get("error", "") or "")
         telemetry.log(TaskFailed(
             task_key=task_key, task_id=task_id,
-            error=error[:200],
+            error=error,
             cost_usd=cost, duration_s=duration,
         ))
         return TaskResult(
@@ -751,7 +756,7 @@ async def coding_loop(
         duration = time.monotonic() - task_start
         telemetry.log(TaskFailed(
             task_key=task_key, task_id=task_id,
-            error=str(exc)[:200], duration_s=duration,
+            error=str(exc), duration_s=duration,
         ))
         return TaskResult(
             task_key=task_key, success=False,
@@ -935,32 +940,6 @@ You are an autonomous coding agent. You implement features, fix bugs, and write 
 Your work is verified externally — you must meet the acceptance spec exactly.
 </role>
 
-<spec_rules>
-SPEC COMPLIANCE — your highest priority:
-- The acceptance spec is the contract. Meet EVERY item, not just the easy ones.
-- A spec item like "<300ms latency" means ALL requests, not just cached/warm ones.
-  If you only optimize the fast path, you haven't met the spec.
-- When you think a constraint is met, test the HARDEST case, not the easiest.
-  If "<300ms" works for cache hits but not cold fetches, it's not met.
-- If a constraint is genuinely impossible (e.g., network latency to external API),
-  implement the best feasible approach AND write a note explaining what was tried
-  and why the hard limit can't be met. Do not silently declare success.
-
-SPEC-DODGING (never do this):
-- Meeting a performance constraint by only measuring the fast path
-- Meeting a feature constraint by stubbing/mocking instead of implementing
-- Meeting a constraint by removing the thing that was hard to optimize
-- Declaring a constraint met when only some cases pass
-
-<example type="violation">
-Spec: "e2e latency <300ms"
-BAD: Add caching, measure cache hits at <1ms, declare spec met.
-WHY: Cold fetches still take 500ms+. Only the easy case was solved.
-BETTER: Cache + prefetch + parallel requests + stale-while-revalidate.
-         If still >300ms on cold fetch, explain what was tried in task notes.
-</example>
-</spec_rules>
-
 <autonomy>
 - You are running AUTONOMOUSLY. Do NOT ask questions or wait for input.
 - Make decisions yourself. If unsure, pick the best option and document why.
@@ -979,45 +958,14 @@ Before you finish, verify against the spec:
 </completion_check>"""
 
 QA_SYSTEM_PROMPT = """\
-You are an adversarial QA tester. Your ONLY job is to find ways the
-implementation does NOT meet the spec. You get rewarded for finding bugs.
+You are an adversarial QA tester. Your job is to find bugs the test suite missed.
+The code already passed verification in a clean worktree — focus on what tests DON'T cover.
 
-<what_already_passed>
-The code already passed a full test suite in a clean worktree.
-Do NOT re-run existing tests (npm test, pytest, jest). That's already done.
-Your job is to find bugs the existing tests MISS.
-</what_already_passed>
+For each spec item: test the HARDEST case. Report PASS or FAIL with evidence.
+Use whatever approach works — read code, write test scripts, curl endpoints,
+run the app, use browser testing. You decide.
 
-<testing_layers>
-Test in layers — exhaust each before moving to the next:
-
-LAYER 1: STATIC ANALYSIS (fastest, do this first)
-- Read the source code. Check for obvious bugs, missing error handling,
-  hardcoded values, dead code paths, wrong logic.
-- Verify structural requirements (file exists, function signature, imports).
-- Check edge cases in the logic that unit tests might not cover.
-
-LAYER 2: TARGETED FUNCTIONAL TESTING (fast)
-- Write SHORT test scripts (Python/bash one-liners) for specific edge cases.
-- For web apps: curl the SSR HTML to check content is present.
-  Do NOT build the project or start dev servers unless strictly necessary.
-  If you must start a server, use the EXISTING build (don't rebuild).
-- For CLI tools: run with edge-case inputs, check exit codes + output.
-- For libraries: import and call with boundary values.
-- Focus on the spec items — one targeted test per spec, not a full test suite.
-
-LAYER 3: BROWSER TESTING (slow, only if spec requires it)
-- Only for visual/interactive verification that curl cannot test.
-- If the spec doesn't mention visual appearance, skip this layer entirely.
-</testing_layers>
-
-<rules>
-- Be FAST. Target 2-3 minutes total. You're looking for bugs, not writing a test suite.
-- Test the HARDEST case per spec item, not every case.
-- For each spec item: one targeted check, report PASS or FAIL with evidence.
-- Do NOT rebuild the project. Do NOT re-run the full test suite.
-- Kill any servers you started (by PID, not pkill).
-</rules>"""
+Kill any servers you started (by PID, not pkill)."""
 
 
 def _build_coding_prompt(
@@ -1042,23 +990,23 @@ def _build_coding_prompt(
     if feedback:
         base_prompt = f"{prompt}\n\nIMPORTANT feedback from the user:\n{feedback}"
 
-    # Include relevant source files in the prompt
-    from otto.testgen import get_relevant_file_contents
-    source_context = get_relevant_file_contents(effective_dir, task_hint=prompt)
+    # Provide file tree instead of pre-loaded file contents.
+    # The agent has Read/Grep/Glob tools — let it decide what to read.
+    file_tree_result = subprocess.run(
+        ["git", "ls-files"],
+        cwd=effective_dir, capture_output=True, text=True,
+    )
+    file_tree = file_tree_result.stdout.strip() if file_tree_result.returncode == 0 else ""
 
     # Include spec items if available — classified as verifiable or visual
     spec_section = ""
     if spec:
-        from otto.tasks import spec_text, spec_is_verifiable, spec_test_hint
+        from otto.tasks import spec_text, spec_is_verifiable
         spec_lines = []
         for i, item in enumerate(spec):
             text = spec_text(item)
-            if spec_is_verifiable(item):
-                hint_val = spec_test_hint(item)
-                hint_str = f"\n     Test hint: {hint_val}" if hint_val else ""
-                spec_lines.append(f"  {i+1}. [verifiable] {text}{hint_str}")
-            else:
-                spec_lines.append(f"  {i+1}. [visual] {text}")
+            tag = "[verifiable]" if spec_is_verifiable(item) else "[visual]"
+            spec_lines.append(f"  {i+1}. {tag} {text}")
         spec_section = f"\n\nACCEPTANCE SPEC (meet ALL of them):\n" + "\n".join(spec_lines) + "\n"
 
     # Persistent memory
@@ -1076,31 +1024,18 @@ def _build_coding_prompt(
 
 You are working in {effective_dir}. Do NOT create git commits.
 
-RELEVANT SOURCE FILES (pre-loaded — do NOT re-read these):
-{source_context}
+PROJECT FILES:
+{file_tree}
 {spec_section}
 
-APPROACH — start writing code immediately:
-1. You already have the source files above. Do NOT re-read them.
-   Only read additional files if you need something not shown above.
-2. WRITE TESTS FIRST for each [verifiable] spec item. Test the hardest case.
-   Run them — they should FAIL (red). If they pass, your tests are too weak.
-3. IMPLEMENT until all tests pass (green).
-4. RUN ALL TESTS (yours + existing). Fix any regressions.
-5. Re-read each spec item — does your code handle the hardest case?
-6. Write notes to otto_arch/task-notes/{key}.md:
+Implement the feature and write tests for all [verifiable] spec items.
+The spec is your contract — meet every item. Test the hardest cases.
 
-IMPORTANT — stay in your lane:
-- Write code and unit/integration tests. Run them with the test runner.
-- Do NOT start dev servers, do NOT curl endpoints, do NOT do browser testing.
-  A separate QA agent handles live testing after you're done.
-- Do NOT re-explore files already shown above.
-- Do NOT invent unnecessary improvements, refactors, or extra features.
-  Implement EXACTLY what the spec asks for. Nothing more.
-   - What approach you took and why
-   - What you learned about the codebase
-   - Any gotchas for future tasks
-   - Any spec items that couldn't be fully met and why
+Write notes to otto_arch/task-notes/{key}.md when done:
+- What approach you took and why
+- What you learned about the codebase
+- Any gotchas for future tasks
+- Any spec items that couldn't be fully met and why
 
 If your first approach doesn't meet a hard constraint, don't give up —
 rethink the architecture. Try at least 3 different approaches before
@@ -1167,7 +1102,7 @@ def prepare_task(
         # Cleanup on failure — don't strand task in "running"
         if tasks_file:
             update_task(tasks_file, key, status="failed",
-                        error=f"prepare failed: {str(exc)[:200]}")
+                        error=f"prepare failed: {exc}")
         subprocess.run(["git", "checkout", default_branch],
                        cwd=project_dir, capture_output=True)
         raise
@@ -1591,8 +1526,7 @@ async def run_task(
                     agent_opts = ClaudeAgentOptions(
                         permission_mode="bypassPermissions",
                         cwd=str(effective_dir),
-                        max_turns=config.get("max_turns", 200),
-                        setting_sources=["user", "project"],
+                            setting_sources=["user", "project"],
                         env=_subprocess_env(),
                         effort=config.get("effort", "high"),
                         system_prompt=CODING_SYSTEM_PROMPT,
@@ -2025,7 +1959,6 @@ You are working in {project_dir}. Do NOT create git commits."""
     qa_opts = ClaudeAgentOptions(
         permission_mode="bypassPermissions",
         cwd=str(project_dir),
-        max_turns=50,
         setting_sources=["project"],
         env=_subprocess_env(),
         effort=config.get("effort", "high"),
@@ -2036,7 +1969,7 @@ You are working in {project_dir}. Do NOT create git commits."""
     if config.get("model"):
         qa_opts.model = config["model"]
 
-    qa_timeout = config.get("qa_timeout", 900)
+    qa_timeout = config.get("qa_timeout", 3600)  # 1 hour circuit breaker
     report_lines: list[str] = []
 
     try:
@@ -2135,7 +2068,7 @@ async def run_task_with_qa(
     task_id = task["id"]
     prompt = task["prompt"]
     max_retries = task.get("max_retries", config["max_retries"])
-    max_task_time = config.get("max_task_time", 900)  # 15 min default
+    max_task_time = config.get("max_task_time", 3600)  # 1 hour circuit breaker
     default_branch = config["default_branch"]
     timeout = config["verify_timeout"]
 
@@ -2176,8 +2109,8 @@ async def run_task_with_qa(
                 detail = data.get("detail", "")
                 tool_name = data.get("name", "")
                 _live_tools.append(f"{tool_name}  {detail}" if detail else tool_name)
-                if len(_live_tools) > 4:
-                    _live_tools[:] = _live_tools[-4:]
+                if len(_live_tools) > 20:
+                    _live_tools[:] = _live_tools[-20:]
             _live_state_file.write_text(json.dumps({
                 "task_key": key, "task_id": task_id,
                 "prompt": prompt[:80],
@@ -2204,7 +2137,7 @@ async def run_task_with_qa(
                 if duration > 0:
                     updates["duration_s"] = round(duration, 1)
                 if error:
-                    updates["error"] = error[:500]
+                    updates["error"] = error
                 update_task(tasks_file, key, **updates)
             except Exception:
                 pass
@@ -2353,7 +2286,6 @@ async def run_task_with_qa(
                 agent_opts = ClaudeAgentOptions(
                     permission_mode="bypassPermissions",
                     cwd=str(project_dir),
-                    max_turns=config.get("max_turns", 200),
                     setting_sources=["user", "project"],
                     env=_subprocess_env(),
                     effort=config.get("effort", "high"),
@@ -2669,7 +2601,7 @@ async def run_task_with_qa(
 
         # All retries exhausted — include the last actual error so the pilot
         # knows what went wrong (not just "max retries exhausted")
-        last_err_detail = f"\nLast error:\n{last_error[:500]}" if last_error else ""
+        last_err_detail = f"\nLast error:\n{last_error}" if last_error else ""
         _cleanup_task_failure(
             project_dir, key, default_branch, tasks_file,
             pre_existing_untracked=pre_existing_untracked,
@@ -2691,7 +2623,7 @@ async def run_task_with_qa(
             )
         except Exception:
             pass
-        return _result(False, "failed", error=f"unexpected error: {str(e)[:200]}")
+        return _result(False, "failed", error=f"unexpected error: {e}")
 
 
 def _print_summary(

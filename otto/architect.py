@@ -116,7 +116,6 @@ Rules:
         agent_opts = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
             cwd=str(project_dir),
-            max_turns=15,
             setting_sources=["user", "project"],
             env=dict(os.environ),
         )

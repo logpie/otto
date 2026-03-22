@@ -9,9 +9,12 @@ This module contains:
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any
+
+logger = logging.getLogger("otto.planner")
 
 
 @dataclass
@@ -206,7 +209,6 @@ produce an optimal execution plan that:
 2. Respects depends_on constraints (dependent tasks go in later batches)
 3. Assigns strategies: "direct" for straightforward tasks, "research_first"
    for tasks that need web research or doc reading before coding
-4. Provides hints to guide the coding agent
 
 Output ONLY a JSON object in this exact format:
 ```json
@@ -217,7 +219,6 @@ Output ONLY a JSON object in this exact format:
                 {
                     "task_key": "<12-char hex key>",
                     "strategy": "direct",
-                    "hint": "optional guidance for the coding agent",
                     "effort": "high"
                 }
             ]
@@ -232,6 +233,7 @@ Rules:
 - Independent tasks SHOULD be in the same batch (parallel execution)
 - Keep it simple — most tasks are "direct" strategy
 - Only use "research_first" when the task involves unfamiliar APIs/libraries
+- Do NOT include hints — the coding agent has full context and decides its own approach
 """
 
 
@@ -267,7 +269,7 @@ async def plan(
         spec_count = len(t.get("spec", []))
         task_lines.append(
             f"- key={t['key']} id=#{t.get('id', '?')} "
-            f"spec={spec_count} items{dep_str}: {t.get('prompt', '')[:100]}"
+            f"spec={spec_count} items{dep_str}: {t.get('prompt', '')}"
         )
 
     prompt = f"""Plan the execution of these {len(tasks)} tasks:
@@ -282,7 +284,6 @@ Respect depends_on constraints."""
         agent_opts = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
             cwd=str(project_dir),
-            max_turns=5,
             setting_sources=["project"],
             env=_subprocess_env(),
             effort="low",
@@ -303,8 +304,9 @@ Respect depends_on constraints."""
         if result and not result.is_empty:
             return result
 
-    except Exception:
-        pass
+        logger.warning("Planner output unparseable, falling back to default_plan. Raw: %s", raw_output[:300])
+    except Exception as exc:
+        logger.warning("Planner query failed: %s, falling back to default_plan", exc)
 
     return default_plan(tasks)
 
@@ -328,13 +330,30 @@ async def replan(
     except ImportError:
         return remaining_plan
 
-    # Build context summary
+    # Build rich context — pass raw environmental feedback, not summaries
     results_summary = []
     for key, result in context.results.items():
-        status = "PASSED" if result.success else f"FAILED: {result.error or 'unknown'}"
-        results_summary.append(f"- {key[:8]}: {status}")
+        if result.success:
+            results_summary.append(
+                f"- {key}: PASSED — {result.diff_summary or 'no diff'}"
+            )
+        else:
+            parts = [f"- {key}: FAILED"]
+            if result.error:
+                parts.append(f"  Error: {result.error}")
+            if result.qa_report:
+                parts.append(f"  QA report: {result.qa_report}")
+            results_summary.append("\n".join(parts))
 
     learnings_str = "\n".join(f"- {l}" for l in context.learnings) if context.learnings else "None"
+
+    # Include research findings
+    research_parts = []
+    for key in context.results:
+        findings = context.get_research(key)
+        if findings:
+            research_parts.append(f"- Research for {key}: {findings}")
+    research_str = "\n".join(research_parts) if research_parts else "None"
 
     remaining_tasks = []
     for batch in remaining_plan.batches:
@@ -349,10 +368,13 @@ COMPLETED RESULTS:
 LEARNINGS:
 {learnings_str}
 
+RESEARCH FINDINGS:
+{research_str}
+
 REMAINING TASKS:
 {chr(10).join(remaining_tasks)}
 
-Update the plan with better hints/strategies based on what we learned.
+Update strategies based on what we learned. Do NOT include hints.
 Output the JSON execution plan for REMAINING tasks only."""
 
     try:
@@ -360,7 +382,6 @@ Output the JSON execution plan for REMAINING tasks only."""
         agent_opts = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
             cwd=str(project_dir),
-            max_turns=5,
             setting_sources=["project"],
             env=_subprocess_env(),
             effort="low",
@@ -380,7 +401,8 @@ Output the JSON execution plan for REMAINING tasks only."""
         if result and not result.is_empty:
             return result
 
-    except Exception:
-        pass
+        logger.warning("Replanner output unparseable, keeping remaining plan. Raw: %s", raw_output[:300])
+    except Exception as exc:
+        logger.warning("Replan query failed: %s, keeping remaining plan", exc)
 
     return remaining_plan

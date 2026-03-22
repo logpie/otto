@@ -513,7 +513,6 @@ Steps:
         agent_opts = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
             cwd=tmp_dir,
-            max_turns=15,
         )
 
         # Stream agent messages
@@ -580,8 +579,8 @@ Steps:
 def _subprocess_env() -> dict:
     """Return env dict with current Python's bin dir on PATH.
 
-    Re-implemented here (mirrors otto.verify._subprocess_env) to avoid
-    importing from verify which would create coupling.
+    Mirrors otto.verify._subprocess_env — kept separate to avoid circular
+    imports (verify.py imports from testgen.py).
     """
     venv_bin = str(Path(sys.executable).parent)
     env = os.environ.copy()
@@ -859,7 +858,6 @@ Steps:
         agent_opts = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
             cwd=tmp_dir,
-            max_turns=20,
         )
 
         async for message in query(prompt=prompt, options=agent_opts):
@@ -994,7 +992,6 @@ Do NOT finish until validation passes AND self-review is done."""
         agent_opts = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
             cwd=str(project_dir),
-            max_turns=15,
         )
 
         async for message in query(prompt=prompt, options=agent_opts):
@@ -1139,7 +1136,6 @@ Do NOT finish until validation passes AND self-review is done."""
         agent_opts = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
             cwd=str(project_dir),
-            max_turns=15,
         )
 
         async for message in query(prompt=prompt, options=agent_opts):

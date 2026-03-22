@@ -26,12 +26,6 @@ def spec_is_verifiable(item) -> bool:
     return True
 
 
-def spec_test_hint(item) -> str:
-    """Get the test hint for a spec item, or empty string."""
-    if isinstance(item, dict):
-        return item.get("test_hint", "")
-    return ""
-
 
 def generate_key(existing_keys: set[str]) -> str:
     """Generate a unique 12-char hex key."""
