@@ -1364,7 +1364,7 @@ def run_piloted_with_tui(
             tasks_path=tasks_file,
             project_dir=project_dir,
         )
-        app.run()
+        app.run(inline=True, inline_no_clear=True)
 
         # After TUI exits, print summary to scrollback
         final_tasks = load_tasks(tasks_file)

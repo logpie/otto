@@ -349,14 +349,20 @@ class TaskPanel(Vertical):
 # ---------------------------------------------------------------------------
 
 class OttoRunApp(App):
-    """Full-screen TUI for otto run."""
+    """Inline TUI for otto run — renders in the terminal buffer, not alternate screen."""
 
     DEFAULT_CSS = """
     Screen {
         layout: vertical;
+        height: auto;
+        max-height: 100vh;
+    }
+    :inline Screen {
+        max-height: 40;
     }
     #task-container {
         height: 1fr;
+        min-height: 10;
     }
     #phase-bar {
         dock: bottom;
