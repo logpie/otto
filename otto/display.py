@@ -328,8 +328,10 @@ class TaskDisplay:
                 "yarn build", "cargo build", "go build",
             )):
                 return "Checking build..."
+            if "curl " in cmd:
+                return "Testing endpoints..."
             if any(marker in cmd for marker in (
-                "node -e", "node --eval", "python -c", "python3 -c", "curl ",
+                "node -e", "node --eval", "python -c", "python3 -c",
             )):
                 return "Testing edge cases..."
 
