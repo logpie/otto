@@ -301,13 +301,21 @@ class TaskDisplay:
             and clean[1:].lstrip().split(".")[0].strip().isdigit()
         )
 
+        # Detect result lines: "**RESULT**: ✅ PASS", "**PASS**", "PASS —"
+        is_result_line = (
+            text.startswith(("**PASS", "PASS", "**RESULT"))
+            or (text.startswith("- \u2705") and "PASS" not in text[:5])  # "- ✅ Component renders"
+        )
+
         with self._lock:
             if is_spec_header or is_table_row or is_numbered_check:
                 self._qa_spec_count += 1
                 if has_pass or (is_numbered_check and clean[0] in ("\u2713", "\u2705")):
                     self._qa_pass_count += 1
-            elif has_pass and text.startswith(("**PASS", "PASS")):
+            elif is_result_line and has_pass:
                 self._qa_pass_count += 1
+            elif is_result_line and has_fail:
+                pass  # don't double-count, just track
 
             # Suppress noise
             if "VERDICT" in text:
@@ -343,11 +351,19 @@ class TaskDisplay:
             icon = "[green]\u2713[/green]" if check_pass else "[red]\u2717[/red]"
             self._console.print(f"      {icon} {rich_escape(desc)}")
 
-        elif has_pass and text.startswith(("**PASS", "PASS")):
-            detail_text = clean.replace("PASS", "").replace("\u2705", "").lstrip(" \u2014-()").strip()
+        elif is_result_line and has_pass:
+            # "**RESULT**: ✅ PASS — detail" or "**PASS** — detail"
+            detail_text = clean.replace("RESULT", "").replace("PASS", "").replace("\u2705", "")
+            detail_text = detail_text.lstrip(": \u2014-*()").strip()
             if detail_text:
-                short = detail_text[:62] + "..." if len(detail_text) > 62 else detail_text
+                short = detail_text[:60] + "..." if len(detail_text) > 60 else detail_text
                 self._console.print(f"        [green]\u2713[/green] [dim]{rich_escape(short)}[/dim]")
+
+        elif is_result_line and has_fail:
+            detail_text = clean.replace("RESULT", "").replace("FAIL", "").replace("\u274c", "")
+            detail_text = detail_text.lstrip(": \u2014-*()").strip()
+            short = detail_text[:60] + "..." if len(detail_text) > 60 else detail_text
+            self._console.print(f"        [red]\u2717[/red] {rich_escape(short)}")
 
         elif has_fail and text.startswith(("**FAIL", "FAIL")):
             detail_text = clean.replace("FAIL", "").replace("\u274c", "").lstrip(" \u2014-()").strip()
