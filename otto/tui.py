@@ -354,15 +354,11 @@ class OttoRunApp(App):
     DEFAULT_CSS = """
     Screen {
         layout: vertical;
-        height: auto;
-        max-height: 100vh;
-    }
-    :inline Screen {
-        max-height: 40;
     }
     #task-container {
         height: 1fr;
         min-height: 10;
+        max-height: 35;
     }
     #phase-bar {
         dock: bottom;
