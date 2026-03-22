@@ -148,6 +148,9 @@ class TaskDisplay:
     def update_phase(self, name: str, status: str, time_s: float = 0.0,
                      error: str = "", detail: str = "", **kwargs) -> None:
         """Update phase state. Prints permanent lines for transitions."""
+        attempt = kwargs.get("attempt", 0)
+        header_suffix = ""
+
         with self._lock:
             cost = kwargs.get("cost", 0)
 
@@ -160,6 +163,8 @@ class TaskDisplay:
                     self._qa_pass_count = 0
                 if name == "coding":
                     self._coding_files.clear()
+                    if attempt and attempt > 1:
+                        header_suffix = f"  [dim](retry {attempt})[/dim]"
 
             elif status == "done":
                 self._print_phase_done(name, time_s, detail, cost)
@@ -176,7 +181,7 @@ class TaskDisplay:
 
         # Print "phase" header when entering running (permanent)
         if status == "running":
-            self._console.print(f"  [bold cyan]{name}[/bold cyan]")
+            self._console.print(f"  [bold cyan]{name}[/bold cyan]{header_suffix}")
 
     def add_tool(self, line: str = "", name: str = "", detail: str = "") -> None:
         """Print a tool call permanently. Thread-safe."""
