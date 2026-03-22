@@ -179,11 +179,17 @@ run_bare_cc() {
     return ${PIPESTATUS[0]}
 }
 
+# Cleanup workdirs on exit/kill
+_ACTIVE_WORKDIR=""
+trap 'rm -rf "$_ACTIVE_WORKDIR" 2>/dev/null' EXIT INT TERM
+
 for proj in "${PROJECT_NAMES[@]}"; do
     proj_dir="$PROJECTS_DIR/$proj"
     proj_results="$RESULTS_DIR/$proj"
     WORK_DIR="/tmp/bench-$proj"
-    mkdir -p "$proj_results"
+    _ACTIVE_WORKDIR="$WORK_DIR"
+    # Clean stale results from previous runs to prevent contamination
+    rm -rf "$proj_results" && mkdir -p "$proj_results"
 
     echo "────────────────────────────────────────────"
     echo "  $proj"

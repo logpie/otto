@@ -1,0 +1,6 @@
+PASS persist_empty=True materializes an empty table immediately
+PASS default tables remain lazy until first insert
+PASS truncate keeps an empty entry for persist_empty tables
+PASS persist_empty survives JSON storage round-trips
+PASS existing TinyDB table behavior remains unchanged
+PASS persist_empty=False remains explicitly lazy

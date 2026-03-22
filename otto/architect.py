@@ -121,18 +121,30 @@ Rules:
             env=dict(os.environ),
         )
 
+        result_msg = None
+        num_turns = 0
         async for message in query(prompt=prompt, options=agent_opts):
             if isinstance(message, ResultMessage):
-                pass
+                result_msg = message
             elif hasattr(message, "session_id") and hasattr(message, "is_error"):
-                pass
+                result_msg = message
             elif hasattr(message, "content"):
+                num_turns += 1
                 for block in message.content:
                     if TextBlock and isinstance(block, TextBlock) and block.text:
                         if not quiet:
                             print(block.text, flush=True)
                     elif ToolUseBlock and isinstance(block, ToolUseBlock):
                         print_agent_tool(block, quiet=quiet)
+
+        # Check if agent reported an error
+        if result_msg and getattr(result_msg, "is_error", False):
+            error_detail = getattr(result_msg, "result", None) or "unknown error"
+            raise RuntimeError(f"Architect agent error: {error_detail}")
+
+        # Check if agent never started (no result message at all)
+        if num_turns == 0 and result_msg is None:
+            raise RuntimeError("Architect agent produced no output — agent may have failed to start")
 
         # Validate that architect produced at least the core files
         expected = ["conventions.md", "data-model.md", "interfaces.md"]

@@ -1,0 +1,46 @@
+tasks:
+- id: 1
+  key: 5b6f2744ba0a
+  prompt: 'The debug-statements hook in pre-commit-hooks detects debug imports like
+    pdb, ipdb, pdbr, etc., but it does not detect bpdb (a debugger that uses bpython
+    as the interface). Users who use bpdb can accidentally leave "import bpdb" statements
+    in their code without the hook catching it. Add bpdb to the set of detected debug
+    statement modules in pre_commit_hooks/debug_statement_hook.py so that "import
+    bpdb" and "from bpdb import ..." are flagged. Run tests with: python -m pytest'
+  status: passed
+  spec:
+  - text: "`import bpdb` is detected and flagged by the hook \u2014 a Python file\
+      \ containing `import bpdb` causes a non-zero exit code and prints a diagnostic\
+      \ message including \"bpdb\" and \"imported\""
+    verifiable: true
+    test_hint: write a temp .py file with `import bpdb`, run debug_statement_hook.check_file
+      on it, assert return value is 1 and output contains "bpdb" and "imported"
+  - text: "`from bpdb import set_trace` (and any `from bpdb import ...` variant) is\
+      \ detected and flagged by the hook \u2014 a Python file containing `from bpdb\
+      \ import set_trace` causes a non-zero exit code and prints a diagnostic message\
+      \ including \"bpdb\" and \"imported\""
+    verifiable: true
+    test_hint: write a temp .py file with `from bpdb import set_trace`, run debug_statement_hook.check_file
+      on it, assert return value is 1 and output contains "bpdb"
+  - text: '`bpdb` is a member of the `DEBUG_STATEMENTS` set in `pre_commit_hooks/debug_statement_hook.py`'
+    verifiable: true
+    test_hint: '`from pre_commit_hooks.debug_statement_hook import DEBUG_STATEMENTS;
+      assert ''bpdb'' in DEBUG_STATEMENTS`'
+  - text: '`breakpoint()` call detection remains functional and unaffected'
+    verifiable: true
+    test_hint: create a temp file containing `breakpoint()`, assert check_file returns
+      1
+  - text: Clean Python files without any debug statements still pass (exit code 0)
+    verifiable: true
+    test_hint: create a temp file with `import os`, assert check_file returns 0
+  - text: 'All existing tests pass: `python -m pytest` exits with code 0 from the
+      project root'
+    verifiable: true
+    test_hint: run `python -m pytest` in `/private/tmp/bench-real-precommit-debug-bpdb`,
+      assert exit code 0
+  attempts: 2
+  session_id: 546ce769-275d-41ee-9809-e82a36865cd5
+  merged_sha: d4fee19d5593cdb94d740d354b9811a8e8e95846
+  task_fingerprint: f6e6f4206b700ef1
+  cost_usd: 1.09781725
+  duration_s: 245.4

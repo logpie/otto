@@ -1,0 +1,110 @@
+────────────────────────────────────────────────────────────
+  Running baseline check...
+  ✓ Baseline passing
+
+  1 task, 12 specs
+    ○ #1  Fix the prerelease identifier parsing bug in node-semve  (12 spec)
+
+────────────────────────────────────────────────────────────
+  ● Bash  git log --oneline -20
+
+  ● Running  #1  8c62b044 — hint: "The root cause is in the PRERELEASEIDENTIFIER
+regex definiti"
+  ✓ prepare  4s
+
+      ● Read  re.js
+      ● Read  test/classes/semver.js
+      ● Read  test/functions/coerce.js
+
+      ● Write  test/internal/mixed-prerelease.js
+        + const { test } = require('tap')
+        + const SemVer = require('../../classes/semver')
+        + const coerce = require('../../functions/coerce')
+          ...65 more lines
+
+      ● Edit  test/internal/mixed-prerelease.js
+        - test('PRERELEASEIDENTIFIER regex has NONNUMERICIDENTIFIER before 
+NUMERICIDENTIFIER', (t) => {
+        -   // The PRERELEASEIDENTIFIER should try non-numeric before numeric
+        -   // so that mixed identifiers like '1ab' are not truncated to '1'
+        -   const prereleaseIdSrc = src[t.PRERELEASEIDENTIFIER]
+          ...10 more
+        + test('PRERELEASEIDENTIFIER regex has NONNUMERICIDENTIFIER before 
+NUMERICIDENTIFIER', (t) => {
+        +   // The PRERELEASEIDENTIFIER should try non-numeric before numeric
+        +   // so that mixed identifiers like '1ab' are not truncated to '1'
+        +   const prereleaseIdSrc = src[tokens.PRERELEASEIDENTIFIER]
+          ...10 more
+      ● Edit  re.js
+        - createToken('PRERELEASEIDENTIFIER', `(?:${src[t.NUMERICIDENTIFIER]
+        - }|${src[t.NONNUMERICIDENTIFIER]})`)
+        + createToken('PRERELEASEIDENTIFIER', `(?:${src[t.NONNUMERICIDENTIFIER]
+        + }|${src[t.NUMERICIDENTIFIER]})`)
+
+      ● Bash  npm test 2>&1
+
+      ● Read  test/internal/re.js
+
+      ● Edit  test/internal/re.js
+        - const { test } = require('tap')
+        - const { src, re, safeRe, safeSrc } = require('../../internal/re')
+        - const semver = require('../../')
+        + const { test } = require('tap')
+        + const { src, re, safeRe, safeSrc, t: tokens } = 
+require('../../internal/re')
+        + const semver = require('../../')
+      ● Edit  test/classes/semver.js
+        - test('compare main vs pre', (t) => {
+        + test('mixed alphanumeric prerelease identifiers are preserved', (t) =>
+{
+        +   // '1.0.0-alpha.1ab' should parse with prerelease ['alpha', '1ab']
+        +   const v1 = new SemVer('1.0.0-alpha.1ab')
+        +   t.strictSame(v1.prerelease, ['alpha', '1ab'],
+          ...18 more
+      ● Edit  test/functions/coerce.js
+        -   t.same(valid(coerce('42.6.7.9.3-alpha')), '42.6.7')
+        -   t.same(valid(coerce('42.6.7-alpha+rev.1', { includePrerelease: true 
+})), '42.6.7-alpha')
+        -   t.same(valid(coerce('v2')), '2.0.0')
+        - 
+          ...2 more
+        +   t.same(valid(coerce('42.6.7.9.3-alpha')), '42.6.7')
+        +   t.same(valid(coerce('42.6.7-alpha+rev.1', { includePrerelease: true 
+})), '42.6.7-alpha')
+        +   t.same(valid(coerce('v2')), '2.0.0')
+        + 
+          ...13 more
+
+      ● Bash  npm test 2>&1 | tail -30
+      ● Bash  npm test 2>&1 | grep -E "(not ok|# fail|# pass|ok \d+ -|exit 
+code)" 
+      ● Bash  npm test 2>&1 | grep -E "not ok" | head -20
+      ● Bash  npm test 2>&1; echo "EXIT CODE: $?"
+      ● Bash  tail -5...
+  ✓ coding  260s  $1.45  5 files  +146 -31
+
+  ✓ test  17s  ok 1 - expected to throw: TypeError
+
+      Analyzing code...
+      ✓ 1-3  Bug description: NUMERICIDENTIFIER greedy matching
+      ✓ 4  NONNUMERICIDENTIFIER tried before NUMERICIDENTIFIER
+      ✓ 5  `'1.0.0-alpha.1ab'` → prerelease `['alpha', '1ab']`
+      ✓ 6  `'1.0.0-beta.12ab34'` → prerelease `['beta', '12ab34
+      ✓ 7  `'1.0.0-alpha.1'` → prerelease `['alpha', 1]` (numbe
+      ✓ 8  `coerce('1.0.0-alpha.1ab', {includePrerelease: true}
+      ✓ 9  `coerce('1.0.0-beta.12ab34', {includePrerelease: tru
+      ✓ 10  Fix is in PRERELEASEIDENTIFIER regex ordering in `i
+      ✓ 11  All existing tests pass
+      ✓ 12  New test cases cover criteria 1-5
+  ✓ qa  78s  10 specs passed
+
+  ✓ Done
+
+  Run complete  6m39s  $1.45
+
+  ✓ #1  Fix the prerelease identifier parsing bug in node-semver. Th  5m58s  
+$1.45
+       4s prepare · 4m20s coding · 17s test · 1m18s qa
+
+  1/1 tasks passed
+

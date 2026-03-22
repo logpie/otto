@@ -1,0 +1,4 @@
+✓ Auto-initialized otto  (default_branch: main, max_retries: 3)
+  Tip: commit otto.yaml and customize settings if needed
+⚠ Spec generation returned empty — task not created.
+Retry or use --no-spec to skip spec generation.

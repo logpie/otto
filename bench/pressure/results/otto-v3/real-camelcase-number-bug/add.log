@@ -1,0 +1,60 @@
+✓ Auto-initialized otto  (default_branch: main, max_retries: 3)
+  Tip: commit otto.yaml and customize settings if needed
+Generating spec...
+  ● Agent
+  ● Bash  find /private/tmp/bench-real-camelcase-number-bug -type f -name "*.json"
+-o...
+  ● Bash  ls -la /private/tmp/bench-real-camelcase-number-bug/
+  ● Read  /private/tmp/bench-real-camelcase-number-bug/package.json
+  ● Read  /private/tmp/bench-real-camelcase-number-bug/index.js
+  ● Read  /private/tmp/bench-real-camelcase-number-bug/test.js
+  ● Read  /private/tmp/bench-real-camelcase-number-bug/readme.md
+  ● Read  /private/tmp/bench-real-camelcase-number-bug/index.d.ts
+  ● Bash  git log --oneline -20
+  ● Bash  git show c948fc6 --stat
+  ● Bash  git log --all --oneline --graph
+  ● Bash  git show c948fc6:index.js | head -60
+  ● Bash  find /private/tmp/bench-real-camelcase-number-bug -name "*.md" -o -name 
+"*.txt"...
+  ● Bash  npm test 2>&1
+  ● Bash  grep -n "foo-1\|hello1\|Hello1\|1hello\|h2w\|\d"...
+  ● Bash  node -e "
+const IDENTIFIER = /([\p{Alpha}\p{N}_]|$)/u;
+const SEPARATORS =...
+  ● Bash  node -e "
+const camelCase =...
+  ● Bash  node -e "
+// Simulate the postProcess function behavior
+const IDENTIFIER =...
+  ● Read  /private/tmp/bench-real-camelcase-number-bug/index.js
+  ● Read  /private/tmp/bench-real-camelcase-number-bug/test.js
+Now let me verify the current buggy behavior:
+  ● Bash  node -e "import camelCase from './index.js';...
+  ● Bash  node -e "import camelCase from './index.js';...
+Now I have a complete understanding of the bug. Let me write the acceptance spec.
+  ● Write  /var/folders/xg/dk8wgfy119z44797kyz7w0380000gn/T/otto_spec_wxam0zz0.txt
+  ● Bash  ls 
+/var/folders/xg/dk8wgfy119z44797kyz7w0380000gn/T/otto_spec_wxam0zz0.txt 2>&1...
+  ● Read  /var/folders/xg/dk8wgfy119z44797kyz7w0380000gn/T/otto_spec_wxam0zz0.txt
+  ● Write  /var/folders/xg/dk8wgfy119z44797kyz7w0380000gn/T/otto_spec_wxam0zz0.txt
+Acceptance spec written. Here's a summary of the 7 criteria:
+
+1. **Core bug fix**: `b2b_registration_request` → `b2bRegistrationRequest` (not `b2BRegistrationRequest` as it currently produces)
+2. **Dash variant**: `b2b-registration-request` → `b2bRegistrationRequest` 
+3. **Tests added**: Both underscore and dash variants must have test assertions in test.js
+4. **Normal behavior preserved**: Digit-as-word-boundary still works for unseparated inputs (`hello1world` → `hello1World`, `h2w` → `h2W`)
+5. **No regressions**: All pre-existing tests continue to pass
+6. **Implementation fix**: The change must be in index.js (the `postProcess` function / `NUMBERS_AND_IDENTIFIER` regex logic), not just test additions
+7. **`npm test` passes**: Exit code 0, zero failures
+
+The root cause is in `postProcess` (line 52-53 of index.js): after `SEPARATORS_AND_IDENTIFIER` removes separators, the `NUMBERS_AND_IDENTIFIER` regex matches `2b` in `b2b` and uppercases it to `2B`, even though `b2b` was a single separator-delimited word segment where the digit should not act as a word boundary.
+✓ Spec (8 criteria — 8 verifiable):
+  ✓ Acceptance Criteria — Fix camelCase digit-separator bug (issue #77)
+  ✓ `camelCase('b2b_registration_request')` returns `'b2bRegistrationRequest'` — digits within a separator-delimited word segment do not cause spurious uppercasing of the following letter in the same segment
+  ✓ The dash variant produces the same result: `camelCase('b2b-registration-request')` returns `'b2bRegistrationRequest'`
+  ✓ Tests for both the underscore variant (`b2b_registration_request`) and the dash variant (`b2b-registration-request`) are present in test.js and pass
+  ✓ Normal digit-as-word-boundary behavior is preserved for inputs without separators: `camelCase('hello1world')` returns `'hello1World'`, `camelCase('h2w')` returns `'h2W'`
+  ✓ All pre-existing tests continue to pass — the fix does not regress any existing camelCase, pascalCase, preserveConsecutiveUppercase, locale, or error-handling behavior
+  ✓ The fix is in the implementation (index.js), not just in the tests — the `postProcess` function or its regex/replacement logic is modified so that digit-letter sequences that were part of the same separator-delimited word segment are not uppercased
+  ✓ `npm test` is the test entry point and completes successfully
+✓ Added task #1 (ca13e1c61c3b): Fix the camelcase bug from issue #77 where inputs containing digits followed by separators are camel-cased incorrectly. For example, `b2b_registration_request` should become `b2bRegistrationRequest`, not mis-case the word after the numeric segment. Update the implementation and add tests covering underscore and dash variants while keeping normal camel-casing behavior intact. Run tests with: npm test

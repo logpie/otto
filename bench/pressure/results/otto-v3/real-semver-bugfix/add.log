@@ -1,0 +1,23 @@
+✓ Auto-initialized otto  (default_branch: main, max_retries: 3)
+  Tip: commit otto.yaml and customize settings if needed
+✓ Spec (8 criteria — 8 verifiable)
+
+  #      Criterion                                                              
+  1  ▸   Parsing '1.0.0-alpha.1ab' produces a SemVer object with prerelease     
+         array ['alpha...                                                       
+  2  ▸   Parsing '1.0.0-beta.12ab34' preserves the full mixed identifier —      
+         prerelease arr...                                                      
+  3  ▸   Pure numeric prerelease identifiers are unaffected: '1.0.0-alpha.1'    
+         parses with ...                                                        
+  4  ▸   coerce('1.0.0-alpha.1ab', { includePrerelease: true }) returns a SemVer
+         with pre...                                                            
+  5  ▸   coerce('1.0.0-beta.12ab34', { includePrerelease: true }) returns a     
+         SemVer with p...                                                       
+  6  ▸   The fix is in the PRERELEASEIDENTIFIER regex ordering:                 
+         NONNUMERICIDENTIFIER is m...                                           
+  7  ▸   All existing tests pass — `npm test` exits with code 0                 
+  8  ▸   New tests are added that cover cases (1)-(5) above — the test suite    
+         includes ass...                                                        
+
+✓ Added task #1 (151f079489e2): Fix the prerelease identifier parsing bug in 
+node-semver. The bug: pre

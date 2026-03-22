@@ -1,0 +1,111 @@
+tasks:
+- id: 1
+  key: 95905944fdcb
+  prompt: 'Fix the cache stampede bug in cachetools function decorators (ttl_cache,
+    lru_cache, etc.). The bug: when many threads simultaneously call a decorated function
+    before the first call returns, ALL threads get cache misses instead of only one.
+    With 1000 threads calling a function that sleeps 0.1s, the expected result is
+    CacheInfo(hits=999, misses=1) but the actual is CacheInfo(hits=0, misses=1000).
+    The lock is released before the value is stored in the cache, allowing all threads
+    to execute the underlying function. Fix the lock/cache interaction so only one
+    thread executes the function while others wait for the cached result. Add a threading
+    test that verifies: spawn 100 threads calling the same cached function simultaneously,
+    assert misses=1 and hits=99. Run tests with: pytest'
+  status: passed
+  spec:
+  - text: 'Acceptance Spec: Fix cache stampede bug in cachetools function decorators'
+    verifiable: true
+  - text: ========================================================================
+    verifiable: true
+  - text: 'When 100 threads simultaneously call the same cached function (decorated
+      with lru_cache, ttl_cache, or any locked cachetools decorator) before the first
+      call returns, exactly 1 thread executes the underlying function and the other
+      99 receive the cached result: CacheInfo shows misses=1 and hits=99'
+    verifiable: true
+    test_hint: spawn 100 threads calling a function that sleeps long enough to guarantee
+      overlap (e.g. 0.1s), barrier-start them, join all, assert cache_info().misses
+      == 1 and cache_info().hits == 99
+  - text: "Only one thread executes the underlying function while all other threads\
+      \ wait for the cached result \u2014 the underlying function's call count is\
+      \ exactly 1 after all 100 threads complete"
+    verifiable: true
+    test_hint: use an atomic counter (threading lock + int, or list.append) inside
+      the decorated function, assert counter == 1 after joining all threads
+  - text: "The fix applies to all locked decorator variants: _cached_locked_info,\
+      \ _cached_locked, and cachedmethod with lock \u2014 not just one code path"
+    verifiable: true
+    test_hint: write or inspect tests covering cached(lock=Lock(), info=True), cached(lock=Lock(),
+      info=False), and cachedmethod with lock; all must show misses=1 for concurrent
+      identical calls
+  - text: A threading test is added to the test suite that spawns 100 threads calling
+      the same cached function simultaneously, asserts misses=1 and hits=99, and passes
+      under pytest
+    verifiable: true
+    test_hint: run `pytest` from the project root, verify the new test is discovered
+      and passes with exit code 0
+  - text: "All existing tests continue to pass \u2014 no regressions"
+    verifiable: true
+    test_hint: run `pytest` and assert exit code 0 with no failures
+  - text: The fix does not introduce deadlocks when a cached function is called recursively
+      or reentrantly from within the lock (the existing test_decorator_needs_rlock
+      scenario must still pass)
+    verifiable: true
+    test_hint: run the existing RLock test in test_func.py, verify it passes without
+      hanging
+  - text: "Threads calling the decorated function with different arguments still execute\
+      \ the underlying function independently \u2014 the stampede fix only coalesces\
+      \ calls for the same cache key, not across different keys"
+    verifiable: true
+    test_hint: call cached_fn(1) and cached_fn(2) concurrently, assert misses=2 (one
+      per distinct key)
+  feedback: "IMPORTANT: pyproject.toml now has [tool.pytest.ini_options] pythonpath\
+    \ = [\"src\"], so `pytest` works directly.\n\nThe bug is in `src/cachetools/_decorators.py`\
+    \ in two functions: `_cached_locked_info` (line 4) and `_cached_locked` (line\
+    \ 86). Both release the lock after a cache miss, then call func() outside the\
+    \ lock, causing the stampede.\n\nFIX: Move the func() call and cache store INSIDE\
+    \ the `with lock:` block. On KeyError, do NOT exit the lock \u2014 keep holding\
+    \ it, call func(), store result, then release. Example for `_cached_locked_info`:\n\
+    \n```python\ndef wrapper(*args, **kwargs):\n    nonlocal hits, misses\n    k =\
+    \ key(*args, **kwargs)\n    with lock:\n        try:\n            result = cache[k]\n\
+    \            hits += 1\n            return result\n        except KeyError:\n\
+    \            misses += 1\n        v = func(*args, **kwargs)\n        try:\n  \
+    \          return cache.setdefault(k, v)\n        except ValueError:\n       \
+    \     return v\n```\n\nApply the same pattern to `_cached_locked`. The lock is\
+    \ an RLock so recursive calls are safe.\n\nFor the threading test in `tests/test_func.py`:\
+    \ use threading.Barrier(100) + threading.Thread, decorate a function with @lru_cache\
+    \ that does a small sleep, have all threads call it with the same args, assert\
+    \ misses==1 and hits==99."
+  attempts: 1
+  cost_usd: 1.7947027500000001
+  duration_s: 487.0
+  error: 'BASELINE_FAIL: test infrastructure is broken on unmodified code. This is
+    a setup issue, not a coding issue.
+
+    === short test summary info ============================
+
+    ERROR tests/test_cache.py
+
+    ERROR tests/test_cached.py
+
+    ERROR tests/test_cachedmethod.py
+
+    ERROR tests/test_fifo.py
+
+    ERROR tests/test_func.py
+
+    ERROR tests/test_keys.py
+
+    ERROR tests/test_lfu.py
+
+    ERROR tests/test_lru.py
+
+    ERROR tests/test_rr.py
+
+    ERROR tests/test_tlru.py
+
+    ERROR tests/test_ttl.py
+
+    !!!!!!!!!!!!!!!!!!! Interrupted: 11 errors during coll'
+  session_id: dd6958ba-8976-47cc-b7b8-f4606adff4ef
+  merged_sha: 926d283f5cde950dde850a9828d817a96b3ee0b5
+  task_fingerprint: a62127b67218a007

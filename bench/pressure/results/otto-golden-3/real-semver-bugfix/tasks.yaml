@@ -1,0 +1,79 @@
+tasks:
+- id: 1
+  key: 8c62b044890b
+  prompt: "Fix the prerelease identifier parsing bug in node-semver. The bug: prerelease\
+    \ identifiers that start with digits but contain letters are truncated. For example,\
+    \ '1.0.0-alpha.1ab' is coerced to '1.0.0-alpha.1', and '1.0.0-alpha.12ab' becomes\
+    \ '1.0.0-alpha.12'. The issue is in the regex for PRERELEASEIDENTIFIER where NUMERICIDENTIFIER\
+    \ is matched before NONNUMERICIDENTIFIER \u2014 since numeric matches greedily\
+    \ on leading digits, a mixed identifier like '1ab' matches as '1' instead of '1ab'.\
+    \ Fix the regex ordering so non-numeric identifiers are tried first, and add tests\
+    \ that verify: (1) '1.0.0-alpha.1ab' parses correctly with prerelease ['alpha',\
+    \ '1ab'], (2) '1.0.0-beta.12ab34' preserves the full identifier, (3) pure numeric\
+    \ identifiers like '1.0.0-alpha.1' still work, (4) coerce() handles these cases\
+    \ too. Run tests with: npm test"
+  status: passed
+  spec:
+  - text: 'The bug: In PRERELEASEIDENTIFIER regex, NUMERICIDENTIFIER is matched before'
+    verifiable: true
+  - text: NONNUMERICIDENTIFIER. Since the numeric alternative greedily matches leading
+    verifiable: true
+  - text: digits, a mixed identifier like '1ab' matches as '1' (truncated) instead
+      of '1ab'.
+    verifiable: true
+  - text: NONNUMERICIDENTIFIER is tried before NUMERICIDENTIFIER.
+    verifiable: true
+  - text: "Parsing '1.0.0-alpha.1ab' produces prerelease array ['alpha', '1ab'] \u2014\
+      \ the mixed alphanumeric identifier '1ab' is not truncated to '1'."
+    verifiable: true
+    test_hint: '`new SemVer(''1.0.0-alpha.1ab'').prerelease` deep-equals `[''alpha'',
+      ''1ab'']`'
+  - text: "Parsing '1.0.0-beta.12ab34' preserves the full identifier '12ab34' \u2014\
+      \ it is not truncated to '12'."
+    verifiable: true
+    test_hint: '`new SemVer(''1.0.0-beta.12ab34'').prerelease` deep-equals `[''beta'',
+      ''12ab34'']`'
+  - text: 'Pure numeric prerelease identifiers still work: parsing ''1.0.0-alpha.1''
+      produces prerelease array [''alpha'', 1] where ''1'' is stored as the number
+      1 (not string).'
+    verifiable: true
+    test_hint: '`new SemVer(''1.0.0-alpha.1'').prerelease` deep-equals `[''alpha'',
+      1]` with strict type checking on the numeric element'
+  - text: 'coerce(''1.0.0-alpha.1ab'', { includePrerelease: true }) returns a SemVer
+      with prerelease [''alpha'', ''1ab''].'
+    verifiable: true
+    test_hint: call coerce with includePrerelease option, assert .prerelease deep-equals
+      ['alpha', '1ab']
+  - text: 'coerce(''1.0.0-beta.12ab34'', { includePrerelease: true }) returns a SemVer
+      with prerelease [''beta'', ''12ab34''].'
+    verifiable: true
+    test_hint: call coerce with includePrerelease option, assert .prerelease deep-equals
+      ['beta', '12ab34']
+  - text: 'The fix is in the PRERELEASEIDENTIFIER regex ordering in internal/re.js:
+      NONNUMERICIDENTIFIER appears before NUMERICIDENTIFIER in the alternation.'
+    verifiable: true
+    test_hint: read the createToken('PRERELEASEIDENTIFIER', ...) call and verify the
+      NONNUMERICIDENTIFIER alternative precedes the NUMERICIDENTIFIER alternative
+      in the regex
+  - text: "All existing tests pass \u2014 no regressions."
+    verifiable: true
+    test_hint: run `npm test` and assert exit code 0 with zero test failures
+  - text: "New test cases are added that cover criteria 1\u20135 (mixed alphanumeric\
+      \ prerelease identifiers for both parse and coerce)."
+    verifiable: true
+    test_hint: grep test files for '1ab', '12ab34'; confirm test assertions exist
+      for the specified version strings
+  feedback: 'The root cause is in the PRERELEASEIDENTIFIER regex definition. It currently
+    tries NUMERICIDENTIFIER before NONNUMERICIDENTIFIER. Since NUMERICIDENTIFIER greedily
+    matches leading digits, a mixed identifier like ''1ab'' matches as just ''1''.
+    The fix: swap the order so NONNUMERICIDENTIFIER (which matches strings containing
+    at least one letter) is tried first. This way ''1ab'' matches as a non-numeric
+    identifier, while pure numeric strings like ''123'' still fall through to NUMERICIDENTIFIER.
+    Look in the source file that defines these regex patterns (likely internal/re.js
+    or similar). Also add tests for the 4 scenarios listed in the task prompt.'
+  attempts: 1
+  session_id: f3b6ff4b-8395-43d6-8a8e-45f98f0e0da5
+  merged_sha: 2c54da706520bbed6a1e1aeddb2cbdd6490ddfff
+  task_fingerprint: 4b78052f8a04186f
+  cost_usd: 1.45246625
+  duration_s: 358.9

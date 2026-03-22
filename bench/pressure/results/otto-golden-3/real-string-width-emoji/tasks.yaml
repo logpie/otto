@@ -1,0 +1,93 @@
+tasks:
+- id: 1
+  key: 01d8ab26db09
+  prompt: 'The string-width library incorrectly calculates the width of minimally-qualified
+    and unqualified emoji sequences. For example, keycap sequences like "1\u20E3"
+    (digit one + combining enclosing keycap, without VS16) render as double-width
+    emoji in terminals but string-width reports them as width 1. Similarly, ZWJ emoji
+    sequences that lack VS16 qualifiers (like "\u{1F468}\u200D\u{1F469}\u200D\u{1F467}"
+    without the \uFE0F characters) are not detected by the \p{RGI_Emoji} regex because
+    they''re "minimally qualified", so they fall through to East Asian Width logic
+    which returns incorrect widths. Fix index.js to detect these non-RGI but still
+    double-width emoji sequences: keycap sequences (digit/hash/asterisk + U+20E3)
+    and ZWJ sequences with 2+ Extended_Pictographic code points. Run tests with: npm
+    test'
+  status: passed
+  spec:
+  - text: 'Keycap sequences without VS16 (digit/hash/asterisk + U+20E3) return width
+      2. Specifically: "0\u20E3", "1\u20E3", "2\u20E3", "3\u20E3", "4\u20E3", "5\u20E3",
+      "6\u20E3", "7\u20E3", "8\u20E3", "9\u20E3", "#\u20E3", and "*\u20E3" each have
+      width 2.'
+    verifiable: true
+    test_hint: 'for each of the 12 keycap bases (0-9, #, *), construct base + "\u20E3"
+      and assert stringWidth returns 2'
+  - text: Minimally-qualified ZWJ emoji sequences (those lacking VS16 qualifiers)
+      with 2+ Extended_Pictographic code points return width 2. For example, "\u{1F468}\u200D\u{1F469}\u200D\u{1F467}"
+      (man + ZWJ + woman + ZWJ + girl, without any \uFE0F) returns width 2.
+    verifiable: true
+    test_hint: construct the family ZWJ sequence without VS16 characters and assert
+      stringWidth returns 2; also test "\u{1F468}\u200D\u{1F469}" (two Extended_Pictographic
+      joined by ZWJ) returns 2
+  - text: "Existing fully-qualified (RGI) emoji are not regressed: \"1\uFE0F\u20E3\
+      \" (digit + VS16 + U+20E3) returns 2, \"\U0001F468\u200D\U0001F469\u200D\U0001F467\
+      \u200D\U0001F466\" (fully-qualified family) returns 2, basic emoji like \"\U0001F600\
+      \" return 2, skin-tone modified emoji like \"\U0001F44B\U0001F3FD\" return 2,\
+      \ flag sequences like \"\U0001F1FA\U0001F1F8\" return 2."
+    verifiable: true
+    test_hint: run the existing test suite assertions for these sequences and confirm
+      they still pass
+  - text: 'Plain digits, hash, and asterisk without U+20E3 are not affected: "0",
+      "1", "9", "#", "*" each return width 1. Digits/hash/asterisk + VS16 alone (without
+      U+20E3) also remain width 1 (e.g., "0\uFE0F" returns 1).'
+    verifiable: true
+    test_hint: assert stringWidth("0") === 1, stringWidth("#") === 1, stringWidth("0\uFE0F")
+      === 1, etc.
+  - text: "Non-emoji characters and single Extended_Pictographic code points without\
+      \ ZWJ are not affected by the ZWJ detection logic. A lone emoji like \"\U0001F600\
+      \" still uses the existing RGI path (width 2). A single Extended_Pictographic\
+      \ without ZWJ (e.g., \"\u260E\" without VS16) retains its East Asian Width (width\
+      \ 1). ASCII text \"hello\" remains width 5. Full-width CJK \"\u4F60\u597D\"\
+      \ remains width 4."
+    verifiable: true
+    test_hint: "assert stringWidth(\"\u260E\") === 1, stringWidth(\"hello\") === 5,\
+      \ stringWidth(\"\u4F60\u597D\") === 4"
+  - text: "The fix is entirely within index.js \u2014 no other source files are modified\
+      \ (test files may be updated to add new test cases)."
+    verifiable: true
+    test_hint: git diff --name-only on source files shows only index.js (plus optionally
+      test.js)
+  - text: '`npm test` passes (runs xo linter, ava test suite, and tsd type checks
+      all green).'
+    verifiable: true
+    test_hint: run `npm test`, assert exit code 0 and no test failures in output
+  - text: "A ZWJ sequence with only one Extended_Pictographic code point (e.g., a\
+      \ text character + ZWJ + non-pictographic character) does not incorrectly get\
+      \ width 2 from the new ZWJ detection \u2014 it falls through to existing East\
+      \ Asian Width logic. The threshold is 2+ Extended_Pictographic code points,\
+      \ not merely the presence of ZWJ."
+    verifiable: true
+    test_hint: construct a ZWJ sequence joining a single emoji with a non-Extended_Pictographic
+      character (like an ASCII letter) and verify it does not return width 2 from
+      the new path
+  feedback: "Key insight: The current code checks `\\p{RGI_Emoji}` which only matches\
+    \ fully-qualified emoji. Two categories of emoji fall through incorrectly:\n\n\
+    1. **Keycap sequences without VS16**: e.g. `\"1\\u20E3\"` (digit/hash/asterisk\
+    \ + U+20E3 combining enclosing keycap). These are \"unqualified\" keycap sequences\
+    \ that render as double-width in terminals. Detection: check if the grapheme cluster\
+    \ contains U+20E3 and the base is one of [0-9, #, *].\n\n2. **ZWJ sequences without\
+    \ VS16**: e.g. `\"\\u{1F468}\\u200D\\u{1F469}\\u200D\\u{1F467}\"` \u2014 minimally\
+    \ qualified ZWJ sequences. Detection: check if the grapheme cluster contains U+200D\
+    \ (ZWJ) and has 2+ code points with Extended_Pictographic property.\n\nImplementation\
+    \ approach: After the `rgiEmojiRegex.test(segment)` check fails, add two additional\
+    \ checks before falling through to EAW:\n- Check for keycap pattern: `/^[0-9#*]\\\
+    uFE0F?\\u20E3$/` \u2014 if matched, width = 2\n- Check for ZWJ emoji pattern:\
+    \ segment contains ZWJ (U+200D) AND has 2+ Extended_Pictographic (`\\p{Extended_Pictographic}`)\
+    \ code points \u2014 if matched, width = 2\n\nUse the `/v` flag for Unicode set\
+    \ notation if needed. Be careful not to break existing tests \u2014 the existing\
+    \ test suite has comprehensive coverage. Run `npm test` to verify."
+  attempts: 1
+  session_id: 6de1dc0f-a869-4274-8361-98c5cd0ef9c5
+  merged_sha: 3d178fd08fbbe404be361246db2272806739687f
+  task_fingerprint: 3a8b2a0e9f5bebb1
+  cost_usd: 1.1500982499999999
+  duration_s: 439.5

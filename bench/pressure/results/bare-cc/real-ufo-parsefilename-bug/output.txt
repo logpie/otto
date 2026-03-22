@@ -1,0 +1,5 @@
+All 477 tests pass, including the 4 new ones.
+
+**Fix:** Added `= {}` default to the destructured options parameter in `parseFilename` (`src/parse.ts:201`), so calling `parseFilename(url)` without a second argument no longer crashes — `strict` defaults to `undefined` (falsy), using the non-strict regex.
+
+**Tests added:** 4 new tests in `test/parse.test.ts` covering calls without the options object — filename extraction, directory path, hidden file (confirming non-strict default), and empty string.

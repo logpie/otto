@@ -1,0 +1,21 @@
+{
+  "summary": {
+    "total_projects": 1,
+    "otto_pass_rate": 100.0,
+    "verify_pass_rate": 100.0,
+    "false_pass_rate": 0.0,
+    "total_cost": 2.65,
+    "avg_cost": 2.65,
+    "avg_time_s": 1555.0
+  },
+  "projects": {
+    "real-klona-class-bug": {
+      "otto_pass": "PASS",
+      "verify_pass": "PASS",
+      "cost": 2.65,
+      "time_s": 1555,
+      "attempts": 3,
+      "runner": "otto"
+    }
+  }
+}

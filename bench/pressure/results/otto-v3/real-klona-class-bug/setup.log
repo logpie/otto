@@ -1,0 +1,52 @@
+
+added 16 packages, and audited 17 packages in 647ms
+
+found 0 vulnerabilities
+[main (root-commit) f2881c7] init klona at pre-class-object-assign-fix
+ 46 files changed, 2352 insertions(+)
+ create mode 100644 .editorconfig
+ create mode 100644 .github/FUNDING.yml
+ create mode 100644 .github/workflows/ci.yml
+ create mode 100644 .gitignore
+ create mode 100644 bench/fixtures/default.js
+ create mode 100644 bench/fixtures/full.js
+ create mode 100644 bench/fixtures/json.js
+ create mode 100644 bench/fixtures/lite.js
+ create mode 100644 bench/index.js
+ create mode 100644 bench/package.json
+ create mode 100644 bench/validate/default.js
+ create mode 100644 bench/validate/full.js
+ create mode 100644 bench/validate/json.js
+ create mode 100644 bench/validate/lite.js
+ create mode 100644 index.d.ts
+ create mode 100644 license
+ create mode 100644 logo.png
+ create mode 100644 package.json
+ create mode 100644 readme.md
+ create mode 100644 src/full.js
+ create mode 100755 src/index.js
+ create mode 100644 src/json.js
+ create mode 100644 src/lite.js
+ create mode 100644 test/full.js
+ create mode 100644 test/index.js
+ create mode 100644 test/json.js
+ create mode 100644 test/lite.js
+ create mode 100644 test/suites/api.js
+ create mode 100644 test/suites/array.js
+ create mode 100644 test/suites/boolean.js
+ create mode 100644 test/suites/class.js
+ create mode 100644 test/suites/date.js
+ create mode 100644 test/suites/descriptor.js
+ create mode 100644 test/suites/dictionary.js
+ create mode 100644 test/suites/function.js
+ create mode 100644 test/suites/index.js
+ create mode 100644 test/suites/map.js
+ create mode 100644 test/suites/nullish.js
+ create mode 100644 test/suites/number.js
+ create mode 100644 test/suites/object.js
+ create mode 100644 test/suites/pollution.js
+ create mode 100644 test/suites/regexp.js
+ create mode 100644 test/suites/set.js
+ create mode 100644 test/suites/string.js
+ create mode 100644 test/suites/symbol.js
+ create mode 100644 test/suites/typedarray.js

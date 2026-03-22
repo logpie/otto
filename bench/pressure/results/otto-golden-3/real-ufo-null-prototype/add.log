@@ -1,0 +1,17 @@
+✓ Auto-initialized otto  (default_branch: main, max_retries: 3)
+  Tip: commit otto.yaml and customize settings if needed
+✓ Spec (5 criteria — 5 verifiable)
+
+  #      Criterion                                                              
+  1  ▸   parseQuery returns a null-prototype object —                           
+         Object.getPrototypeOf(parseQuery("f...                                 
+  2  ▸   The returned object correctly stores keys that collide with            
+         Object.prototype pro...                                                
+  3  ▸   New tests exist that exercise normal query parsing directly through    
+         parseQuery (...                                                        
+  4  ▸   New tests exist that verify the returned object is safe to use with    
+         prototype-co...                                                        
+  5  ▸   npm test exits with code 0                                             
+
+✓ Added task #1 (d21e6b2ba312): Improve parseQuery as discussed in issue #282 so
+the returned query ob

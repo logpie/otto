@@ -1,0 +1,10 @@
+
+ RUN  v2.1.9 /private/tmp/bench-real-ufo-filterquery-feature
+
+ ✓ test/verify_filterquery.test.ts (3 tests) 1ms
+
+ Test Files  1 passed (1)
+      Tests  3 passed (3)
+   Start at  02:55:53
+   Duration  282ms (transform 57ms, setup 0ms, collect 59ms, tests 1ms, environment 0ms, prepare 41ms)
+

@@ -1,0 +1,19 @@
+✓ Auto-initialized otto  (default_branch: main, max_retries: 3)
+  Tip: commit otto.yaml and customize settings if needed
+✓ Spec (6 criteria — 6 verifiable)
+
+  #      Criterion                                                              
+  1  ▸   An empty file (zero bytes) remains empty (zero bytes) after            
+         sort_file_contents()...                                                
+  2  ▸   sort_file_contents() returns PASS (0) for an empty file, indicating no 
+         modificat...                                                           
+  3  ▸   The trailing newline is still appended when there is actual content —  
+         non-empty ...                                                          
+  4  ▸   Files containing only whitespace or blank lines (e.g. b'\n', b'\n\n',  
+         b'  \n') a...                                                          
+  5  ▸   The full test suite passes: `python -m pytest` exits with code 0.      
+  6  ▸   The fix is in pre_commit_hooks/file_contents_sorter.py — only this file
+         (and its...                                                            
+
+✓ Added task #1 (ad1343958de3): The file-contents-sorter hook adds a blank line 
+to empty files. When a

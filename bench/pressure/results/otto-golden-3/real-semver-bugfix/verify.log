@@ -1,0 +1,6 @@
+PASS parse preserves mixed alphanumeric prerelease identifiers
+PASS longer mixed prerelease identifiers are preserved intact
+PASS pure numeric prerelease identifiers still behave normally
+PASS coerce(includePrerelease) keeps mixed identifiers intact
+PASS version objects stringify back to the full prerelease
+PASS other semver parsing behavior remains intact

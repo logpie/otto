@@ -1,0 +1,37 @@
+✓ Auto-initialized otto  (default_branch: main, max_retries: 3)
+  Tip: commit otto.yaml and customize settings if needed
+✓ Spec (18 criteria — 18 verifiable)
+
+  #      Criterion                                                              
+  1  ▸   ## Context                                                             
+  2  ▸   Currently, db.table('name') creates a Table instance in memory but does
+         NOT                                                                    
+  3  ▸   write anything to storage until data is inserted. The persist_empty    
+         parameter                                                              
+  4  ▸   (default False) causes the table to be immediately written to storage  
+         as an                                                                  
+  5  ▸   empty entry, analogous to SQL CREATE TABLE.                            
+  6  ▸   The Table constructor currently accepts (storage, name, cache_size).   
+  7  ▸   The Database.table() method passes **kwargs to the Table constructor.  
+  8  ▸   Storage format: {'table_name': {doc_id: doc, ...}, ...}.               
+  9  ▸   An empty persisted table appears as {'table_name': {}}.                
+ 10  ▸   db.tables() returns the set of keys in storage, so a persisted empty   
+         table                                                                  
+ 11  ▸   will appear there.                                                     
+ 12  ▸   Table with persist_empty=True appears in storage immediately after     
+         creation — ca...                                                       
+ 13  ▸   Table with persist_empty=False (the default) does NOT appear in storage
+         until a ...                                                            
+ 14  ▸   Clearing (truncating) a persist_empty=True table keeps the empty entry 
+         in storag...                                                           
+ 15  ▸   Existing behavior is unchanged when persist_empty is not set — all     
+         existing test...                                                       
+ 16  ▸   persist_empty=True is accepted as a keyword argument through db.table()
+         — the pa...                                                            
+ 17  ▸   persist_empty parameter defaults to False — Table('storage', 'name')   
+         without spe...                                                         
+ 18  ▸   All tests pass via pytest — the full test suite (pytest from project   
+         root) passe...                                                         
+
+✓ Added task #1 (0a1d7fd95107): Add a 'persist_empty' feature to TinyDB tables. 
+Currently, calling db.

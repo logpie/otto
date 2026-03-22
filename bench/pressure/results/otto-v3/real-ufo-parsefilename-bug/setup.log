@@ -1,0 +1,49 @@
+
+added 421 packages, and audited 422 packages in 6s
+
+124 packages are looking for funding
+  run `npm fund` for details
+
+found 0 vulnerabilities
+[main (root-commit) b4e9d77] init ufo at pre-parsefilename-opts-fix
+ 40 files changed, 24015 insertions(+)
+ create mode 100644 .editorconfig
+ create mode 100644 .github/banner.svg
+ create mode 100644 .github/workflows/autofix.yml
+ create mode 100644 .github/workflows/ci.yml
+ create mode 100644 .gitignore
+ create mode 100644 .prettierrc
+ create mode 100644 CHANGELOG.md
+ create mode 100644 LICENSE
+ create mode 100644 README.md
+ create mode 100644 SECURITY.md
+ create mode 100644 eslint.config.mjs
+ create mode 100644 package-lock.json
+ create mode 100644 package.json
+ create mode 100644 pnpm-lock.yaml
+ create mode 100644 renovate.json
+ create mode 100644 src/encoding.ts
+ create mode 100644 src/index.ts
+ create mode 100644 src/parse.ts
+ create mode 100644 src/punycode.ts
+ create mode 100644 src/query.ts
+ create mode 100644 src/url.ts
+ create mode 100644 src/utils.ts
+ create mode 100644 test/base.test.ts
+ create mode 100644 test/double-slash.test.ts
+ create mode 100644 test/encoding.test.ts
+ create mode 100644 test/fixture/README.md
+ create mode 100644 test/fixture/toascii.json
+ create mode 100644 test/fixture/urltestdata.json
+ create mode 100644 test/is-same.test.ts
+ create mode 100644 test/join.test.ts
+ create mode 100644 test/normalize.test.ts
+ create mode 100644 test/parse.test.ts
+ create mode 100644 test/punycode.test.ts
+ create mode 100644 test/query.test.ts
+ create mode 100644 test/resolve.test.ts
+ create mode 100644 test/trailing-slash.test.ts
+ create mode 100644 test/types.test-d.ts
+ create mode 100644 test/url.test.ts
+ create mode 100644 test/utilities.test.ts
+ create mode 100644 tsconfig.json

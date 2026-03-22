@@ -1,0 +1,4 @@
+Traceback (most recent call last):
+  File "/private/tmp/bench-real-tinydb-feature/verify_check.py", line 5, in <module>
+    from tinydb import TinyDB
+ModuleNotFoundError: No module named 'tinydb'

@@ -1,0 +1,86 @@
+tasks:
+- id: 1
+  key: f10d6126d010
+  prompt: 'Add the preserveConsecutiveUppercase option requested in issue #76. When
+    enabled, uppercase runs in the input should remain uppercase through camel-casing
+    instead of being normalized to a single capitalized word. Keep the default behavior
+    unchanged when the option is not provided, and add tests for both modes. Run tests
+    with: npm test'
+  status: passed
+  spec:
+  - text: "Default behavior is unchanged: when `preserveConsecutiveUppercase` is not\
+      \ provided (or is `false`), every existing test case produces the same output\
+      \ as before \u2014 e.g. `camelCase('FOO-BAR')` \u2192 `'fooBar'`, `camelCase('XMLHttpRequest')`\
+      \ \u2192 `'xmlHttpRequest'`, `camelCase('FOO')` \u2192 `'foo'`, `camelCase('FBBazzy')`\
+      \ \u2192 `'fbBazzy'`, `camelCase('FOO', {pascalCase: true})` \u2192 `'Foo'`."
+    verifiable: true
+    test_hint: run the full existing test suite (`npm test`) with zero modifications
+      to the default-path assertions and confirm all pass
+  - text: "A `preserveConsecutiveUppercase` boolean option is accepted by `camelCase()`.\
+      \ When set to `true`, consecutive-uppercase runs (2+ uppercase letters in a\
+      \ row) in the input are kept uppercase in the output instead of being lowercased\
+      \ and re-capitalized. For example: `camelCase('foo-BAR', {preserveConsecutiveUppercase:\
+      \ true})` \u2192 `'fooBAR'` (not `'fooBar'`); `camelCase('foo-BAR', {preserveConsecutiveUppercase:\
+      \ true, pascalCase: true})` \u2192 `'FooBAR'` (not `'FooBar'`)."
+    verifiable: true
+    test_hint: assert these exact input/output pairs in the test suite
+  - text: "`preserveConsecutiveUppercase` works together with the `pascalCase` option.\
+      \ When both are `true`, the first character is uppercased AND consecutive-uppercase\
+      \ runs are preserved \u2014 e.g. `camelCase('FOO-BAR', {preserveConsecutiveUppercase:\
+      \ true, pascalCase: true})` keeps the uppercase runs rather than normalizing\
+      \ them to `'FooBar'`."
+    verifiable: true
+    test_hint: 'test with combined options `{pascalCase: true, preserveConsecutiveUppercase:
+      true}` on inputs containing uppercase runs and verify uppercase letters are
+      preserved'
+  - text: 'The test file contains dedicated tests for `preserveConsecutiveUppercase:
+      true` covering both camelCase and pascalCase modes, with multiple inputs that
+      include consecutive-uppercase runs (e.g. all-caps words like `FOO`, acronyms
+      like `XML`/`HTML`/`URL`, mixed like `myURLstring`, and separator-joined like
+      `FOO-BAR`).'
+    verifiable: true
+    test_hint: grep the test file for `preserveConsecutiveUppercase` and confirm at
+      least 5 distinct assertions exist for each of camelCase and pascalCase modes
+  - text: The TypeScript definition file (`index.d.ts`) declares `preserveConsecutiveUppercase`
+      as an optional boolean property on the `Options` interface, with a default of
+      `false`.
+    verifiable: true
+    test_hint: 'parse `index.d.ts`, confirm `preserveConsecutiveUppercase?: boolean`
+      exists inside the Options interface'
+  - text: '`npm test` passes with exit code 0, including all original tests and all
+      new `preserveConsecutiveUppercase` tests.'
+    verifiable: true
+    test_hint: run `npm test`, assert exit code 0 and no test failures in output
+  - text: "When `preserveConsecutiveUppercase` is `false` (or omitted), the output\
+      \ is identical to the pre-change behavior for every input \u2014 the option\
+      \ introduction does not alter any code path when the option is not active."
+    verifiable: true
+    test_hint: "run the original test assertions (without the new option) and confirm\
+      \ identical results; specifically `camelCase('FOO-BAR')` \u2192 `'fooBar'` and\
+      \ `camelCase('XMLHttpRequest')` \u2192 `'xmlHttpRequest'`"
+  feedback: "Key implementation guidance:\n\n1. **index.js**: Add `preserveConsecutiveUppercase`\
+    \ to the options destructuring (default `false`). The critical change is in the\
+    \ main `camelCase` function \u2014 when the option is true, after `preserveCamelCase()`\
+    \ runs and separators are inserted, you need to avoid the `.toLocaleLowerCase()`\
+    \ call on segments that are consecutive uppercase. The approach: after the separator-insertion\
+    \ step, split by separators, and for each word-segment, only lowercase it if it's\
+    \ NOT an all-uppercase run (or keep uppercase letters that were consecutive).\
+    \ A clean approach is to modify the pipeline so that when `preserveConsecutiveUppercase`\
+    \ is true, uppercase runs are preserved through the lowercasing step. One way:\
+    \ replace the single `.toLocaleLowerCase()` on the whole string with a per-word\
+    \ approach that checks if a word is all-uppercase and preserves it.\n\n2. **index.d.ts**:\
+    \ Add `preserveConsecutiveUppercase?: boolean` to the Options interface with JSDoc.\n\
+    \n3. **test.js**: Add dedicated test blocks for `preserveConsecutiveUppercase:\
+    \ true` in both camelCase and pascalCase modes. Key test cases:\n   - `camelCase('foo-BAR',\
+    \ {preserveConsecutiveUppercase: true})` \u2192 `'fooBAR'`\n   - `camelCase('FOO-BAR',\
+    \ {preserveConsecutiveUppercase: true})` \u2192 `'FOOBAR'`  \n   - `camelCase('FOO',\
+    \ {preserveConsecutiveUppercase: true})` \u2192 `'FOO'`\n   - `camelCase('XMLHttpRequest',\
+    \ {preserveConsecutiveUppercase: true})` \u2192 `'XMLHttpRequest'`\n   - With\
+    \ pascalCase: `camelCase('foo-BAR', {preserveConsecutiveUppercase: true, pascalCase:\
+    \ true})` \u2192 `'FooBAR'`\n\nMake sure all existing tests still pass unchanged."
+  attempts: 1
+  session_id: e41d3efd-5e51-4ddb-b3c3-98eb024930ee
+  merged_sha: 824c998d8e72203706c3b21f6cced03aa9818046
+  task_fingerprint: 09786f2c5013c0b3
+  cost_usd: 1.74274675
+  duration_s: 926.9

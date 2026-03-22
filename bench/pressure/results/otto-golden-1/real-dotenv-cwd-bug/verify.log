@@ -1,0 +1,4 @@
+PASS CLI does not eagerly call os.getcwd() in click.option default
+PASS A helper exists to safely resolve the .env path
+FAIL Safe return value when CWD is missing: cli.py should have a safe return path when cwd is missing
+PASS No bare os.getcwd() in decorator line

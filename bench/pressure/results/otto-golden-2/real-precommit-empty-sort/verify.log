@@ -1,0 +1,4 @@
+FAIL Empty file remains empty: Expected PASS for empty file, got 1
+PASS Non-empty file is sorted correctly
+PASS Already sorted file returns PASS
+FAIL Source code has conditional newline: Expected a conditional check before adding trailing newline

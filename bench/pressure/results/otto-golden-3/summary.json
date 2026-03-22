@@ -1,0 +1,69 @@
+{
+  "summary": {
+    "total_projects": 7,
+    "runner_pass_rate": 57.1,
+    "verify_pass_rate": 57.1,
+    "false_pass_rate": 0.0,
+    "total_cost": 3.81,
+    "avg_cost": 0.54,
+    "avg_time_s": 380.7
+  },
+  "projects": {
+    "real-semver-bugfix": {
+      "runner_pass": "PASS",
+      "verify_pass": "PASS",
+      "cost": 1.45,
+      "time_s": 523,
+      "attempts": 1,
+      "runner": "otto"
+    },
+    "real-string-width-emoji": {
+      "runner_pass": "UNKNOWN",
+      "verify_pass": "FAIL",
+      "cost": 0.0,
+      "time_s": 1,
+      "attempts": 0,
+      "runner": "otto"
+    },
+    "real-tinydb-feature": {
+      "runner_pass": "PASS",
+      "verify_pass": "PASS",
+      "cost": 0.7,
+      "time_s": 950,
+      "attempts": 2,
+      "runner": "otto"
+    },
+    "real-ufo-filterquery-feature": {
+      "runner_pass": "PASS",
+      "verify_pass": "PASS",
+      "cost": 1.3,
+      "time_s": 785,
+      "attempts": 2,
+      "runner": "otto"
+    },
+    "real-ufo-null-prototype": {
+      "runner_pass": "PASS",
+      "verify_pass": "PASS",
+      "cost": 0.36,
+      "time_s": 406,
+      "attempts": 1,
+      "runner": "otto"
+    },
+    "real-ufo-parsefilename-bug": {
+      "runner_pass": "UNKNOWN",
+      "verify_pass": "FAIL",
+      "cost": 0.0,
+      "time_s": 0,
+      "attempts": 0,
+      "runner": "otto"
+    },
+    "real-yargs-parser-hyphens": {
+      "runner_pass": "UNKNOWN",
+      "verify_pass": "FAIL",
+      "cost": 0.0,
+      "time_s": 0,
+      "attempts": 0,
+      "runner": "otto"
+    }
+  }
+}

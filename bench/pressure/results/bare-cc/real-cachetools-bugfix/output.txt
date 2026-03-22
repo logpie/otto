@@ -1,0 +1,7 @@
+All 194 tests pass, including the new `StampedeTest::test_stampede_lock`.
+
+**Summary of changes:**
+
+1. **`src/cachetools/_decorators.py`** — Fixed both `_cached_locked_info` and `_cached_locked` by moving `func(*args, **kwargs)` and `cache.setdefault(k, v)` inside the `with lock:` block. Previously the lock was released between the cache check and the function call, allowing all concurrent threads to see a cache miss and execute the function. Now the lock is held for the entire miss path (check → compute → store), so only one thread executes the function while others block and then get the cached result.
+
+2. **`tests/test_cached.py`** — Updated lock count expectations in 4 tests (since a cache miss now acquires the lock once instead of twice) and added `StampedeTest.test_stampede_lock` which spawns 100 threads calling the same cached function simultaneously and asserts `misses=1, hits=99`.

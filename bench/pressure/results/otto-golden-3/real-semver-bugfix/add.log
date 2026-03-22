@@ -1,0 +1,30 @@
+✓ Auto-initialized otto  (default_branch: main, max_retries: 3)
+  Tip: commit otto.yaml and customize settings if needed
+✓ Spec (12 criteria — 12 verifiable)
+
+  #      Criterion                                                              
+  1  ▸   The bug: In PRERELEASEIDENTIFIER regex, NUMERICIDENTIFIER is matched   
+         before                                                                 
+  2  ▸   NONNUMERICIDENTIFIER. Since the numeric alternative greedily matches   
+         leading                                                                
+  3  ▸   digits, a mixed identifier like '1ab' matches as '1' (truncated)       
+         instead of '1ab...                                                     
+  4  ▸   NONNUMERICIDENTIFIER is tried before NUMERICIDENTIFIER.                
+  5  ▸   Parsing '1.0.0-alpha.1ab' produces prerelease array ['alpha', '1ab'] — 
+         the mixed...                                                           
+  6  ▸   Parsing '1.0.0-beta.12ab34' preserves the full identifier '12ab34' — it
+         is not t...                                                            
+  7  ▸   Pure numeric prerelease identifiers still work: parsing '1.0.0-alpha.1'
+         produces...                                                            
+  8  ▸   coerce('1.0.0-alpha.1ab', { includePrerelease: true }) returns a SemVer
+         with pre...                                                            
+  9  ▸   coerce('1.0.0-beta.12ab34', { includePrerelease: true }) returns a     
+         SemVer with p...                                                       
+ 10  ▸   The fix is in the PRERELEASEIDENTIFIER regex ordering in               
+         internal/re.js: NONNUME...                                             
+ 11  ▸   All existing tests pass — no regressions.                              
+ 12  ▸   New test cases are added that cover criteria 1–5 (mixed alphanumeric   
+         prerelease ...                                                         
+
+✓ Added task #1 (8c62b044890b): Fix the prerelease identifier parsing bug in 
+node-semver. The bug: pre

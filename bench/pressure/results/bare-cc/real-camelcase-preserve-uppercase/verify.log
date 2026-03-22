@@ -1,0 +1,3 @@
+PASS option preserves uppercase runs
+PASS default behavior unchanged without option
+PASS composes with pascalCase

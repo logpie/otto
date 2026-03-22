@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+git clone --quiet https://github.com/pallets/itsdangerous.git .tmp-clone
+cd .tmp-clone
+git checkout --quiet 3b76264
+cd ..
+rsync -a --exclude='.git' .tmp-clone/ ./
+rm -rf .tmp-clone
+git add -A && git commit -m "init itsdangerous at pre-overflow-fix"

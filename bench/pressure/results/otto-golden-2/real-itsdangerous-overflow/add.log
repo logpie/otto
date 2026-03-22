@@ -1,0 +1,21 @@
+✓ Auto-initialized otto  (default_branch: main, max_retries: 3)
+  Tip: commit otto.yaml and customize settings if needed
+✓ Spec (7 criteria — 7 verifiable)
+
+  #      Criterion                                                              
+  1  ▸   When TimestampSigner.unsign() encounters a token whose decoded         
+         timestamp is extr...                                                   
+  2  ▸   The BadTimeSignature exception raised for an out-of-range timestamp    
+         contains the...                                                        
+  3  ▸   The fix is in the unsign() method of src/itsdangerous/timed.py; it     
+         catches Value...                                                       
+  4  ▸   All existing tests pass (pytest exits with code 0).                    
+  5  ▸   Every call site of timestamp_to_datetime() inside unsign() is protected
+         — includ...                                                            
+  6  ▸   The timestamp_to_datetime() method itself is not modified; the         
+         ValueError handli...                                                   
+  7  ▸   For tokens with valid (in-range) timestamps, unsign() continues to work
+         exactly ...                                                            
+
+✓ Added task #1 (f63d4946eb5f): When TimestampSigner.unsign() encounters a token
+with an extremely lar

@@ -518,16 +518,21 @@ Steps:
 
         # Stream agent messages
         testgen_cost = 0.0
+        result_msg = None
+        num_turns = 0
         async for message in query(prompt=prompt, options=agent_opts):
             if isinstance(message, ResultMessage):
+                result_msg = message
                 raw_cost = getattr(message, "total_cost_usd", None)
                 if isinstance(raw_cost, (int, float)):
                     testgen_cost = float(raw_cost)
             elif hasattr(message, "session_id") and hasattr(message, "is_error"):
+                result_msg = message
                 raw_cost = getattr(message, "total_cost_usd", None)
                 if isinstance(raw_cost, (int, float)):
                     testgen_cost = float(raw_cost)
             elif hasattr(message, "content"):
+                num_turns += 1
                 for block in message.content:
                     if TextBlock and isinstance(block, TextBlock) and block.text:
                         if not quiet:
@@ -536,6 +541,19 @@ Steps:
                     elif ToolUseBlock and isinstance(block, ToolUseBlock):
                         log_line = print_agent_tool(block, quiet=quiet)
                         log_lines.append(log_line)
+
+        # Check if agent reported an error
+        if result_msg and getattr(result_msg, "is_error", False):
+            error_detail = getattr(result_msg, "result", None) or "unknown error"
+            print(f"  testgen agent error: {error_detail}", flush=True)
+            log_lines.append(f"ERROR: {error_detail}")
+            return None, log_lines, testgen_cost
+
+        # Check if agent never started (no result message at all)
+        if num_turns == 0 and result_msg is None:
+            print("  testgen agent produced no output — agent may have failed to start", flush=True)
+            log_lines.append("ERROR: agent produced no output")
+            return None, log_lines, testgen_cost
 
         # Check if test file was written in temp dir
         test_file_in_tmp = Path(tmp_dir) / test_rel

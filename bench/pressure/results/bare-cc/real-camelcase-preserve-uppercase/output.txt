@@ -1,0 +1,12 @@
+All tests pass. Here's a summary of the changes:
+
+**`index.js`** - Added `preserveConsecutiveUppercase` option (default `false`). When enabled, the conversion uses a word-splitting approach: after `preserveCamelCase` detects word boundaries, each word is checked — if it's entirely uppercase letters (2+ chars), it stays uppercase; otherwise it's lowercased normally. The first word follows camelCase/pascalCase rules (lowercased for camelCase, preserved for pascalCase if all-upper).
+
+**`index.d.ts`** - Added the `preserveConsecutiveUppercase?: boolean` property to the `Options` interface with JSDoc and examples.
+
+**`test.js`** - Added two test groups (~120 test cases) covering `preserveConsecutiveUppercase` alone and combined with `pascalCase`, including edge cases like Unicode, digits, special characters, empty inputs, and arrays.
+
+Key behavior examples:
+- `FOO-BAR` → `fooBAR` (camelCase) / `FOOBAR` (pascalCase)
+- `XMLHttpRequest` → `xmlHttpRequest` (camelCase) / `XMLHttpRequest` (pascalCase)
+- `foo-bar` → `fooBar` (unchanged from default, no uppercase to preserve)

@@ -1,0 +1,27 @@
+✓ Auto-initialized otto  (default_branch: main, max_retries: 3)
+  Tip: commit otto.yaml and customize settings if needed
+✓ Spec (10 criteria — 10 verifiable)
+
+  #      Criterion                                                              
+  1  ▸   letter after the digit within the same separator-delimited token is    
+         incorrectly                                                            
+  2  ▸   upper-cased. The NUMBERS_AND_IDENTIFIER regex in postProcess()         
+         capitalizes                                                            
+  3  ▸   letters after any digit sequence, even when no word boundary is        
+         intended.                                                              
+  4  ▸   `camelCase('b2b_registration_request')` returns                        
+         `'b2bRegistrationRequest'` — dig...                                    
+  5  ▸   `camelCase('b2b-registration-request')` returns                        
+         `'b2bRegistrationRequest'` — das...                                    
+  6  ▸   The test file contains new test assertions for underscore-separated    
+         inputs where...                                                        
+  7  ▸   The test file contains new test assertions for dash-separated inputs   
+         where a tok...                                                         
+  8  ▸   Digits still act as implicit word boundaries when NO explicit separator
+         follows ...                                                            
+  9  ▸   All pre-existing tests pass unchanged — normal camel-casing behavior   
+         (separators...                                                         
+ 10  ▸   `npm test` exits with code 0.                                          
+
+✓ Added task #1 (27b0ea105678): Fix the camelcase bug from issue #77 where 
+inputs containing digits fo

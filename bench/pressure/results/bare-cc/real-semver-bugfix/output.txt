@@ -1,0 +1,9 @@
+Done. Here's a summary of the fix:
+
+**Root cause:** In `internal/re.js`, `PRERELEASEIDENTIFIER` and `PRERELEASEIDENTIFIERLOOSE` had `NUMERICIDENTIFIER` before `NONNUMERICIDENTIFIER` in their alternation. When the regex engine encounters `1ab`, the numeric alternative greedily matches `1` and stops — it never tries the non-numeric alternative that would match the full `1ab`. This only manifests in non-anchored contexts like `COERCEFULL`.
+
+**Fix** (2 lines in `internal/re.js:80-84`): Swapped the alternation order so `NONNUMERICIDENTIFIER` (`\d*[a-zA-Z-][a-zA-Z0-9-]*`) is tried first. Pure numeric identifiers like `1` don't match `NONNUMERICIDENTIFIER` (it requires at least one letter/hyphen), so they correctly fall through to `NUMERICIDENTIFIER`.
+
+**Tests added:**
+- `test/functions/prerelease.js` — 5 cases for mixed alphanumeric identifiers (`1ab`, `12ab34`, `0abc`, `1a`) plus pure numeric
+- `test/functions/coerce.js` — 3 cases verifying `coerce()` with `includePrerelease` preserves mixed identifiers

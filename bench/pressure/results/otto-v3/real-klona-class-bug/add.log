@@ -1,0 +1,20 @@
+✓ Auto-initialized otto  (default_branch: main, max_retries: 3)
+  Tip: commit otto.yaml and customize settings if needed
+✓ Spec (6 criteria — 6 verifiable)
+
+  #      Criterion                                                              
+  1  ▸   Cloning a class instance that initializes fields via Object.assign in  
+         its constr...                                                          
+  2  ▸   Nested object and array values within a cloned                         
+         Object.assign-initialized class i...                                   
+  3  ▸   The fix applies to all klona modes that support class cloning (at      
+         minimum the de...                                                      
+  4  ▸   Tests exist in the test suite covering a custom class that initializes 
+         fields wi...                                                           
+  5  ▸   `npm test` passes with zero failures (exit code 0), including all      
+         pre-existing t...                                                      
+  6  ▸   The clone preserves the constructor identity of the source instance    
+         (i.e., `clon...                                                        
+
+✓ Added task #1 (e5163a41b9ba): Fix the klona bug from issue #30 where cloning 
+class instances that in

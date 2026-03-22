@@ -1,0 +1,53 @@
+tasks:
+- id: 1
+  key: d21e6b2ba312
+  prompt: 'Improve parseQuery as discussed in issue #282 so the returned query object
+    is safer to use with arbitrary keys while preserving the existing parsing semantics.
+    Add tests that verify normal query parsing still works and that the returned object
+    shape is compatible with keys that would otherwise collide with object-prototype
+    properties. Run tests with: npm test'
+  status: passed
+  spec:
+  - text: "parseQuery returns a null-prototype object \u2014 Object.getPrototypeOf(parseQuery(\"\
+      foo=1\")) === null"
+    verifiable: true
+    test_hint: call parseQuery with any valid query string, assert Object.getPrototypeOf(result)
+      === null
+  - text: "The returned object correctly stores keys that collide with Object.prototype\
+      \ property names (e.g., toString, hasOwnProperty, valueOf) as plain data \u2014\
+      \ parseQuery(\"toString=foo&hasOwnProperty=bar\") yields { toString: \"foo\"\
+      , hasOwnProperty: \"bar\" } with no TypeError or shadowing issues"
+    verifiable: true
+    test_hint: parse a query string containing toString, hasOwnProperty, valueOf as
+      keys; assert each value equals the expected string; assert typeof result.toString
+      === "string" (data, not a function)
+  - text: "New tests exist that exercise normal query parsing directly through parseQuery\
+      \ (not only through getQuery/withQuery wrappers) \u2014 covering at least: single\
+      \ key-value, multiple key-value pairs, duplicate keys producing arrays, and\
+      \ value decoding"
+    verifiable: true
+    test_hint: grep test files for describe/test blocks that import and call parseQuery
+      directly
+  - text: "New tests exist that verify the returned object is safe to use with prototype-colliding\
+      \ keys \u2014 at minimum testing that keys like \"toString\" and \"hasOwnProperty\"\
+      \ are stored and retrievable as data"
+    verifiable: true
+    test_hint: grep test files for assertions involving toString or hasOwnProperty
+      as query parameter keys
+  - text: npm test exits with code 0
+    verifiable: true
+    test_hint: run "npm test" in the project root, assert exit code 0
+  feedback: 'The core change is in src/query.ts line 34: change `const object: ParsedQuery
+    = {};` to `const object: ParsedQuery = Object.create(null) as ParsedQuery;`. This
+    makes the returned object have no prototype, so keys like toString, hasOwnProperty,
+    valueOf won''t collide with Object.prototype methods. The existing __proto__ and
+    constructor guards on line 44 can be kept for extra safety. Add new tests in test/query.test.ts
+    that: (1) verify Object.getPrototypeOf(result) === null, (2) test parsing prototype-colliding
+    keys like toString, hasOwnProperty, valueOf as normal data, (3) cover normal parsing:
+    single key-value, multiple pairs, duplicate keys producing arrays, value decoding.'
+  attempts: 1
+  session_id: b848a515-7cfc-45bd-b8b5-9c4f1052779d
+  merged_sha: 0553fbc79b7b847db2a81b50509f4a47ef51e0e6
+  task_fingerprint: 21045ac072cdd6d8
+  cost_usd: 0.3645685
+  duration_s: 167.9
