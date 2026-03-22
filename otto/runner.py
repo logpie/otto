@@ -2003,18 +2003,11 @@ async def run_task_with_qa(
 
                 coding_elapsed = round(time.monotonic() - coding_start, 1)
                 phase_timings["coding"] = phase_timings.get("coding", 0) + coding_elapsed
-                # Get diff stat — try both committed and uncommitted, take whichever has more
-                diff_detail = ""
-                for diff_cmd in (
-                    ["git", "diff", "--shortstat", base_sha, "HEAD"],
-                    ["git", "diff", "--shortstat", base_sha],
-                ):
-                    r = subprocess.run(diff_cmd, cwd=project_dir, capture_output=True, text=True)
-                    out = r.stdout.strip() if r.returncode == 0 else ""
-                    if out and len(out) > len(diff_detail):
-                        diff_detail = out
+                # No git diff stat here — it's unreliable during coding
+                # (agent may or may not have committed). The display tracks
+                # file/line counts from Write/Edit events instead.
                 emit("phase", name="coding", status="done", time_s=coding_elapsed,
-                     cost=attempt_cost, attempt=attempt_num, detail=diff_detail)
+                     cost=attempt_cost, attempt=attempt_num)
 
                 if result_msg and result_msg.is_error:
                     raise RuntimeError(f"Agent error: {result_msg.result or 'unknown'}")
