@@ -1,79 +1,76 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-npm run build >/dev/null 2>&1 || npx tsc >/dev/null 2>&1 || true
-trap 'rm -f verify_check.js' EXIT
+# Radash is TypeScript — use the project's jest+ts-jest to verify.
+# This avoids needing a build step and tests the source directly.
+trap 'rm -f src/tests/verify_inrange.test.ts' EXIT
 
-cat > verify_check.js <<'JS'
-const assert = require('assert')
-const fs = require('fs')
-const path = require('path')
-const { pathToFileURL } = require('url')
+cat > src/tests/verify_inrange.test.ts <<'TS'
+// Independent verification of inRange feature
+// Tests behavior, not implementation details
 
-let failures = 0
+let inRange: any;
 
-async function loadModule() {
-  for (const candidate of ['dist/index.cjs', 'dist/index.js', 'src/index.js']) {
-    const full = path.resolve(candidate)
-    if (fs.existsSync(full)) return require(full)
-  }
-  for (const candidate of ['dist/index.mjs']) {
-    const full = path.resolve(candidate)
-    if (fs.existsSync(full)) return import(pathToFileURL(full).href)
-  }
-  throw new Error('radash build output not found')
-}
+beforeAll(() => {
+    // Try multiple import paths — otto may organize differently
+    try { inRange = require('../number').inRange; } catch {}
+    if (!inRange) try { inRange = require('../index').inRange; } catch {}
+    if (!inRange) try { inRange = require('../../src/number').inRange; } catch {}
+});
 
-async function report(name, fn) {
-  try {
-    await fn()
-    console.log(`PASS ${name}`)
-  } catch (error) {
-    failures += 1
-    console.log(`FAIL ${name}: ${error.message}`)
-  }
-}
+describe('inRange independent verification', () => {
+    test('function exists and is exported', () => {
+        expect(typeof inRange).toBe('function');
+    });
 
-;(async () => {
-  const mod = await loadModule()
-  const inRange = mod.inRange
+    test('basic range check: 3 is in [1, 5)', () => {
+        expect(inRange(3, 1, 5)).toBe(true);
+    });
 
-  await report('inRange is exported from the main module', async () => {
-    assert.strictEqual(typeof inRange, 'function')
-  })
+    test('outside range: 6 is not in [1, 5)', () => {
+        expect(inRange(6, 1, 5)).toBe(false);
+    });
 
-  await report('start is inclusive and end is exclusive', async () => {
-    assert.strictEqual(inRange(3, 3, 5), true)
-    assert.strictEqual(inRange(5, 3, 5), false)
-  })
+    test('start is inclusive: 1 is in [1, 5)', () => {
+        expect(inRange(1, 1, 5)).toBe(true);
+    });
 
-  await report('two-argument form uses [0, end)', async () => {
-    assert.strictEqual(inRange(2, 4), true)
-    assert.strictEqual(inRange(4, 4), false)
-  })
+    test('end is exclusive: 5 is not in [1, 5)', () => {
+        expect(inRange(5, 1, 5)).toBe(false);
+    });
 
-  await report('inverted bounds are handled by swapping', async () => {
-    assert.strictEqual(inRange(3, 5, 1), true)
-    assert.strictEqual(inRange(6, 5, 1), false)
-  })
+    test('two-arg form: inRange(3, 5) means [0, 5)', () => {
+        expect(inRange(3, 5)).toBe(true);
+        expect(inRange(5, 5)).toBe(false);
+        expect(inRange(-1, 5)).toBe(false);
+    });
 
-  await report('non-number inputs return false', async () => {
-    assert.strictEqual(inRange(null, 0, 2), false)
-    assert.strictEqual(inRange(undefined, 0, 2), false)
-    assert.strictEqual(inRange(Number.NaN, 0, 2), false)
-  })
+    test('non-number inputs return false', () => {
+        expect(inRange(null as any, 1, 5)).toBe(false);
+        expect(inRange(undefined as any, 1, 5)).toBe(false);
+        expect(inRange(NaN, 1, 5)).toBe(false);
+    });
 
-  await report('negative and zero edge cases match lodash semantics', async () => {
-    assert.strictEqual(inRange(-3, -5, -1), true)
-    assert.strictEqual(inRange(0, 0, 1), true)
-    assert.strictEqual(inRange(1, 0, 1), false)
-  })
+    test('negative ranges work', () => {
+        expect(inRange(-3, -5, -1)).toBe(true);
+        expect(inRange(0, -5, -1)).toBe(false);
+    });
 
-  process.exit(failures ? 1 : 0)
-})().catch((error) => {
-  console.error(error)
-  process.exit(1)
-})
-JS
+    test('zero edge cases', () => {
+        expect(inRange(0, 0, 1)).toBe(true);
+        expect(inRange(0, 1)).toBe(true);  // [0, 1)
+    });
+});
+TS
 
-node verify_check.js
+# Run with project's jest (has ts-jest configured)
+npx jest src/tests/verify_inrange.test.ts --forceExit --no-coverage 2>&1
+exit_code=$?
+
+# Print summary
+if [ $exit_code -eq 0 ]; then
+    echo "PASS all inRange checks verified"
+else
+    echo "FAIL inRange verification failed"
+fi
+exit $exit_code

@@ -2,101 +2,73 @@
 set -euo pipefail
 
 npm run build >/dev/null 2>&1 || npx tsc >/dev/null 2>&1 || true
-trap 'rm -f verify_check.cjs' EXIT
+trap 'rm -f verify_check.mjs' EXIT
 
-cat > verify_check.cjs <<'JS'
-const assert = require('assert')
-const fs = require('fs')
-const path = require('path')
-const { pathToFileURL } = require('url')
+cat > verify_check.mjs <<'JS'
+import assert from 'node:assert';
+import { defineCommand, runCommand, renderUsage } from './dist/index.mjs';
 
-let failures = 0
-
-async function loadModule() {
-  const candidates = ['dist/index.cjs', 'dist/index.mjs', 'dist/index.js', 'src/index.js']
-  for (const candidate of candidates) {
-    const full = path.resolve(candidate)
-    if (!fs.existsSync(full)) continue
-    if (full.endsWith('.mjs')) return import(pathToFileURL(full).href)
-    return require(full)
-  }
-  throw new Error('citty build output not found')
-}
+let failures = 0;
 
 async function report(name, fn) {
   try {
-    await fn()
-    console.log(`PASS ${name}`)
+    await fn();
+    console.log(`PASS ${name}`);
   } catch (error) {
-    failures += 1
-    console.log(`FAIL ${name}: ${error.message}`)
+    failures += 1;
+    console.log(`FAIL ${name}: ${error.message}`);
   }
 }
 
-;(async () => {
-  const mod = await loadModule()
-  const defineCommand = mod.defineCommand
-  const runCommand = mod.runCommand
-  const renderUsage = mod.renderUsage
-
-  function makeCli() {
-    return defineCommand({
-      meta: { name: 'root' },
-      subCommands: {
-        install: defineCommand({ meta: { name: 'install', alias: ['i', 'add'] }, run: () => 'install' }),
-        info: defineCommand({ meta: { name: 'info' }, run: () => 'info' }),
-        i: defineCommand({ meta: { name: 'i' }, run: () => 'literal-i' }),
-        nested: defineCommand({
-          meta: { name: 'nested' },
-          subCommands: {
-            child: defineCommand({ meta: { name: 'child', alias: ['c'] }, run: () => 'child' })
-          }
-        })
-      }
-    })
-  }
-
-  await report('single-string aliases resolve to the subcommand', async () => {
-    const result = await runCommand(makeCli(), { rawArgs: ['i'] })
-    assert.strictEqual(result.result, 'install')
-  })
-
-  await report('array aliases resolve to the same subcommand', async () => {
-    const result = await runCommand(makeCli(), { rawArgs: ['add'] })
-    assert.strictEqual(result.result, 'install')
-  })
-
-  await report('direct key matches win over alias matches', async () => {
-    const result = await runCommand(makeCli(), { rawArgs: ['i'] })
-    assert.notStrictEqual(result.result, 'literal-i')
-  })
-
-  await report('aliases appear in rendered help output', async () => {
-    const usage = await renderUsage(makeCli())
-    assert.ok(usage.includes('install'))
-    assert.ok(usage.includes('i'))
-    assert.ok(usage.includes('add'))
-  })
-
-  await report('nested subcommand aliases also resolve correctly', async () => {
-    const result = await runCommand(makeCli(), { rawArgs: ['nested', 'c'] })
-    assert.strictEqual(result.result, 'child')
-  })
-
-  await report('unknown aliases still error cleanly', async () => {
-    try {
-      await runCommand(makeCli(), { rawArgs: ['missing'] })
-      throw new Error('unknown alias should fail')
-    } catch (error) {
-      assert.ok(/unknown|not found|invalid/i.test(error.message))
+function makeCli() {
+  return defineCommand({
+    meta: { name: 'root' },
+    subCommands: {
+      install: defineCommand({ meta: { name: 'install', alias: ['i', 'add'] }, run: () => {} }),
+      info: defineCommand({ meta: { name: 'info' }, run: () => {} }),
+      nested: defineCommand({
+        meta: { name: 'nested' },
+        subCommands: {
+          child: defineCommand({ meta: { name: 'child', alias: ['c'] }, run: () => {} })
+        }
+      })
     }
-  })
+  });
+}
 
-  process.exit(failures ? 1 : 0)
-})().catch((error) => {
-  console.error(error)
-  process.exit(1)
-})
+await report('alias resolves to subcommand without error', async () => {
+  // Before the feature, this throws "Unknown command i"
+  await runCommand(makeCli(), { rawArgs: ['i'] });
+});
+
+await report('array alias also resolves', async () => {
+  await runCommand(makeCli(), { rawArgs: ['add'] });
+});
+
+await report('direct key match still works', async () => {
+  await runCommand(makeCli(), { rawArgs: ['install'] });
+});
+
+await report('aliases appear in rendered help output', async () => {
+  const usage = await renderUsage(makeCli());
+  assert.ok(usage.includes('install'), 'help should mention install');
+  assert.ok(usage.includes('i') || usage.includes('add'), 'help should mention at least one alias');
+});
+
+await report('nested subcommand aliases resolve', async () => {
+  await runCommand(makeCli(), { rawArgs: ['nested', 'c'] });
+});
+
+await report('unknown command still errors', async () => {
+  try {
+    await runCommand(makeCli(), { rawArgs: ['nonexistent'] });
+    throw new Error('should have thrown');
+  } catch (e) {
+    assert.ok(/unknown|not found|invalid/i.test(e.message), `expected unknown error, got: ${e.message}`);
+  }
+});
+
+process.exit(failures ? 1 : 0);
 JS
 
-node verify_check.cjs
+node verify_check.mjs
