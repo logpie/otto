@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-set -euo pipefail
-trap 'rm -f verify_check.mjs' EXIT
+set -uo pipefail
+trap 'rc=$?; rm -f verify_check.mjs; exit $rc' EXIT
 cat > verify_check.mjs <<'JS'
 import assert from 'node:assert/strict';
 import camelCase from './index.js';

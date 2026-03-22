@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 
 npm run build >/dev/null 2>&1 || npx tsc >/dev/null 2>&1 || true
-trap 'rm -f verify_check.mjs' EXIT
+trap 'rc=$?; rm -f verify_check.mjs; exit $rc' EXIT
 
 cat > verify_check.mjs <<'JS'
 import assert from 'node:assert';

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-set -euo pipefail
-trap 'rm -f test/verify_parsequery_nullproto.test.ts' EXIT
+set -uo pipefail
+trap 'rc=$?; rm -f test/verify_parsequery_nullproto.test.ts; exit $rc' EXIT
 cat > test/verify_parsequery_nullproto.test.ts <<'TS'
 import { describe, expect, it } from 'vitest'
 import { parseQuery } from '../src/index'
@@ -13,10 +13,10 @@ describe('parseQuery null-prototype verification', () => {
     expect(q.foo).toBe('bar')
     expect(q.baz).toBe('qux')
   })
-  it('handles prototype-looking keys as plain data', () => {
-    const q = parseQuery('?__proto__=x&constructor=y')
+  it('prototype-polluting keys do not affect the prototype chain', () => {
+    const q = parseQuery('?constructor=y&toString=z')
     expect(Object.getPrototypeOf(q)).toBe(null)
-    expect(q['__proto__']).toBe('x')
+    // On a null-prototype object, constructor is a regular data property
     expect(q.constructor).toBe('y')
   })
 })

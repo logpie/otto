@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 
-trap 'rm -f verify_check.py' EXIT
+trap 'rc=$?; rm -f verify_check.py; exit $rc' EXIT
 
 cat > verify_check.py <<'PY'
 import threading

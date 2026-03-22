@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-set -euo pipefail
-trap 'rm -f test/verify_parsefilename.test.ts' EXIT
+set -uo pipefail
+trap 'rc=$?; rm -f test/verify_parsefilename.test.ts; exit $rc' EXIT
 cat > test/verify_parsefilename.test.ts <<'TS'
 import { describe, expect, it } from 'vitest'
 import { parseFilename } from '../src/index'

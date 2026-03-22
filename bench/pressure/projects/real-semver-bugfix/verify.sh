@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 
-trap 'rm -f verify_check.js' EXIT
+trap 'rc=$?; rm -f verify_check.js; exit $rc' EXIT
 
 cat > verify_check.js <<'JS'
 const assert = require('assert')

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 
 # Radash is TypeScript — use the project's jest+ts-jest to verify.
 # This avoids needing a build step and tests the source directly.
-trap 'rm -f src/tests/verify_inrange.test.ts' EXIT
+trap 'rc=$?; rm -f src/tests/verify_inrange.test.ts; exit $rc' EXIT
 
 cat > src/tests/verify_inrange.test.ts <<'TS'
 // Independent verification of inRange feature

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-set -euo pipefail
-trap 'rm -f test/verify_filterquery.test.ts' EXIT
+set -uo pipefail
+trap 'rc=$?; rm -f test/verify_filterquery.test.ts; exit $rc' EXIT
 cat > test/verify_filterquery.test.ts <<'TS'
 import { describe, expect, it } from 'vitest'
 import { filterQuery } from '../src/index'

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 npm run build >/dev/null 2>&1 || true
-trap 'rm -f verify_check.cjs' EXIT
+trap 'rc=$?; rm -f verify_check.cjs; exit $rc' EXIT
 cat > verify_check.cjs <<'JS'
 const assert = require('assert');
 function loadKlona() {
