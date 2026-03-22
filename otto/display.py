@@ -177,9 +177,15 @@ class TaskDisplay:
             if cost:
                 self._current_cost = cost
 
+        # Phase headers: only show for significant phases, skip trivial ones
         if status == "running":
+            # Don't print headers for prepare/merge — they're instant and noise
+            if name in ("prepare", "merge"):
+                return
             retry = f"  [dim](retry {attempt})[/dim]" if attempt and attempt > 1 else ""
-            self._console.print(f"  [bold cyan]{name}[/bold cyan]{retry}")
+            # Visual separation — blank line before phase header
+            self._console.print()
+            self._console.print(f"  [bold]{name}[/bold]{retry}")
 
     def add_tool(self, line: str = "", name: str = "", detail: str = "",
                  data: dict | None = None) -> None:
@@ -221,11 +227,8 @@ class TaskDisplay:
 
         short = rich_escape(_shorten_path(detail)[:68])
 
-        # CC style: "  ● Name  path" with breathing room
-        if name == "QA":
-            self._console.print(f"      [dim]{rich_escape(name)}  {short}[/dim]")
-        else:
-            self._console.print(f"      [bold cyan]\u25cf {name}[/bold cyan]  [dim]{short}[/dim]")
+        # Consistent style for all phases — ● Name  detail
+        self._console.print(f"      [bold cyan]\u25cf {name}[/bold cyan]  [dim]{short}[/dim]")
 
         # Inline diff/preview below tool call (like CC)
         if data:
@@ -330,8 +333,12 @@ class TaskDisplay:
     # -- Private --
 
     def _print_phase_done(self, name: str, time_s: float, detail: str, cost: float) -> None:
+        # Suppress trivial phases (0s, no info)
+        if name in ("prepare", "merge") and time_s < 1 and not detail:
+            return
+
         parts = []
-        if time_s:
+        if time_s >= 1:
             parts.append(f"{time_s:.0f}s")
         if cost:
             parts.append(f"${cost:.2f}")
@@ -350,7 +357,7 @@ class TaskDisplay:
                 parts.append(f"{t} specs passed" if p == t else f"{p}/{t} specs passed")
 
         info = "  ".join(parts)
-        self._console.print(f"  [green]\u2713[/green] [bold]{name}[/bold]  [dim]{info}[/dim]")
+        self._console.print(f"  [green]\u2713 {name}[/green]  [dim]{info}[/dim]")
 
     def _print_phase_fail(self, name: str, time_s: float, error: str, cost: float) -> None:
         parts = []

@@ -56,14 +56,14 @@ _SECONDARY_TOOLS = {"get_run_state", "read_verify_output", "abort_task"}
 _NOISE_TOOLS = {"save_run_state", "ToolSearch", "write_task_notes", "write_learning"}
 
 _TOOL_DISPLAY = {
-    "get_run_state": ("\U0001f4cb", "Loading task state"),
-    "run_task_with_qa": ("\U0001f680", "Running task"),
-    "read_verify_output": ("\U0001f4d6", "Reading verify output"),
-    "abort_task": ("\u274c", "Aborting"),
-    "save_run_state": ("\U0001f4be", "Saving state"),
-    "finish_run": ("\U0001f3c1", "Done"),
-    "write_task_notes": ("\U0001f4dd", "Writing task notes"),
-    "write_learning": ("\U0001f4dd", "Recording learning"),
+    "get_run_state": ("\u25cf", "Loading task state"),
+    "run_task_with_qa": ("\u25cf", "Running task"),
+    "read_verify_output": ("\u25cf", "Reading verify output"),
+    "abort_task": ("\u2717", "Aborting"),
+    "save_run_state": ("\u25cf", "Saving state"),
+    "finish_run": ("\u2713", "Done"),
+    "write_task_notes": ("\u25cf", "Writing task notes"),
+    "write_learning": ("\u25cf", "Recording learning"),
 }
 
 # Active task display (module-level so tool call/result handlers can manage it)
