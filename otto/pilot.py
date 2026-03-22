@@ -66,9 +66,10 @@ _TOOL_DISPLAY = {
     "write_learning": ("\u25cf", "Recording learning"),
 }
 
-# Active task display (module-level so tool call/result handlers can manage it)
+# Active display — either TUI app or legacy TaskDisplay
 _active_display: TaskDisplay | None = None
-_active_task_key: str | None = None  # task key associated with _active_display
+_active_tui: Any = None  # OttoRunApp when TUI is active
+_active_task_key: str | None = None
 
 # Track last-displayed tool call to avoid duplicate headers
 _last_displayed_tool: str | None = None
@@ -80,8 +81,8 @@ _task_progress: dict[str, list[dict]] = {}
 def _process_progress_event(data: dict) -> None:
     """Process a progress event from the JSONL side-channel.
 
-    Routes phase/agent_tool events to the active TaskDisplay and
-    accumulates them in _task_progress for the post-run summary.
+    Routes events to either the TUI app or the legacy TaskDisplay.
+    Also accumulates in _task_progress for the post-run summary.
     """
     event_type = data.get("event")
     task_key = data.get("task_key", "")
@@ -93,8 +94,17 @@ def _process_progress_event(data: dict) -> None:
     if task_key:
         _task_progress.setdefault(task_key, []).append(data)
 
-    # Route to active display (capture local ref to avoid TOCTOU race)
-    # Only route events matching the active task to prevent cross-task pollution
+    # Route to TUI app (thread-safe via post_message)
+    tui = _active_tui
+    if tui is not None:
+        try:
+            from otto.tui import ProgressEvent
+            tui.post_message(ProgressEvent(event_type, data))
+        except Exception:
+            pass
+        return
+
+    # Legacy fallback: route to TaskDisplay
     display = _active_display
     if display and (_active_task_key is None or task_key == _active_task_key):
         try:
@@ -114,7 +124,7 @@ def _process_progress_event(data: dict) -> None:
             elif event_type == "qa_finding":
                 display.add_finding(data.get("text", ""))
         except (AttributeError, RuntimeError):
-            pass  # display was stopped between check and use
+            pass
 
 
 def _print_pilot_tool_call(block) -> None:
