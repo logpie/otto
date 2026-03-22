@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 import sys
 import time
 from datetime import datetime
@@ -13,10 +14,52 @@ from otto.config import create_config, git_meta_dir, load_config
 from otto.display import console, rich_escape
 from otto.theme import error_console
 from otto.spec import generate_spec, parse_markdown_tasks
-from otto.tasks import add_task, add_tasks, delete_task, load_tasks, reset_all_tasks, save_tasks, update_task
+from otto.tasks import (
+    add_task,
+    add_tasks,
+    delete_task,
+    load_tasks,
+    reset_all_tasks,
+    save_tasks,
+    spec_is_verifiable,
+    spec_text,
+    update_task,
+)
 
 
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
+
+_SPEC_SEPARATOR_RE = re.compile(r"^[-=*_`#\s]+$")
+_SPEC_LABEL_RE = re.compile(r"^[A-Z][A-Za-z0-9 /()_-]{1,40}:")
+_SPEC_TITLE_RE = re.compile(r"^[A-Z][A-Za-z0-9()/'-]*(?: [A-Z][A-Za-z0-9()/'-]*){0,7}$")
+_SPEC_REQUIREMENT_RE = re.compile(
+    r"\b("
+    r"must|should|shall|will|can|"
+    r"display(?:ed|s)?|render(?:ed|s)?|show(?:n|s)?|"
+    r"calculate(?:d|s)?|compute(?:d|s)?|convert(?:ed|s)?|format(?:ted|s)?|"
+    r"classif(?:y|ied|ies)|match(?:es|ed)?|cover(?:ed|s)?|"
+    r"respect(?:s|ed)?|handle(?:d|s)?|support(?:ed|s)?|"
+    r"pass(?:es|ed)?|fail(?:s|ed)?|raise(?:s|d)?|"
+    r"return(?:s|ed)?|update(?:s|d)?|store(?:s|d)?|"
+    r"use(?:s|d)?|include(?:s|d)?|"
+    r"is displayed|is rendered|is calculated|is shown|"
+    r"are displayed|are rendered|are calculated|are shown"
+    r")\b",
+    re.IGNORECASE,
+)
+_SPEC_CONTEXT_PHRASES = (
+    "existing ",
+    "already ",
+    "available on",
+    "available in",
+    "always arrives",
+    "tests live in",
+    "tests use",
+    "using jest",
+    "current.",
+    "from api",
+    "from the api",
+)
 
 
 def _format_duration(seconds: float) -> str:
@@ -32,6 +75,42 @@ def _format_cost(cost: float) -> str:
     if cost < 0.01:
         return f"${cost:.4f}"
     return f"${cost:.2f}"
+
+
+def _has_requirement_signal(text: str) -> bool:
+    """Heuristic: real acceptance criteria usually describe required behavior."""
+    lower = text.lower()
+    if lower.startswith(("the ", "a ", "an ", "when ", "if ")):
+        return True
+    return bool(_SPEC_REQUIREMENT_RE.search(text))
+
+
+def _is_preamble(item) -> bool:
+    """Detect generated spec preamble/context rows that should not be treated as criteria."""
+    text = " ".join(spec_text(item).split()).strip()
+    if not text:
+        return True
+
+    lower = text.lower()
+    has_requirement = _has_requirement_signal(text)
+
+    if _SPEC_SEPARATOR_RE.fullmatch(text):
+        return True
+    if lower.startswith(("acceptance spec", "acceptance criteria", "context:", "overview:")):
+        return True
+    if _SPEC_LABEL_RE.match(text) and not has_requirement:
+        return True
+    if len(text) < 40 and not has_requirement and _SPEC_TITLE_RE.fullmatch(text):
+        return True
+    if any(phrase in lower for phrase in _SPEC_CONTEXT_PHRASES) and not has_requirement:
+        return True
+
+    return False
+
+
+def _filter_generated_spec_items(spec_items: list) -> list:
+    """Drop title/context rows from generated specs before display or storage."""
+    return [item for item in spec_items if not _is_preamble(item)]
 
 
 # ---------------------------------------------------------------------------
@@ -290,7 +369,7 @@ def _import_tasks(import_path: Path, tasks_path: Path) -> None:
         batch = []
         for i, line in enumerate(lines, 1):
             console.print(f"  [dim]{i}/{len(lines)}[/dim] {rich_escape(line[:50])}")
-            spec_items = generate_spec(line, project_dir)
+            spec_items = _filter_generated_spec_items(generate_spec(line, project_dir))
             item = {"prompt": line}
             if spec_items:
                 item["spec"] = spec_items
@@ -314,7 +393,7 @@ def _import_tasks(import_path: Path, tasks_path: Path) -> None:
                 console.print(f"  [dim]{i}/{len(imported)}[/dim] {rich_escape(t['prompt'][:50])}")
             else:
                 console.print(f"  [dim]{i}/{len(imported)}[/dim] {rich_escape(t['prompt'][:50])}")
-                spec_items = generate_spec(t["prompt"], project_dir)
+                spec_items = _filter_generated_spec_items(generate_spec(t["prompt"], project_dir))
                 if spec_items:
                     item["spec"] = spec_items
                     console.print(f"  {len(spec_items)} criteria generated")
@@ -396,27 +475,16 @@ def add(prompt, verify, max_retries, import_file, no_spec):
             error_console.print(f"[error]✗[/error] Spec generation failed: {rich_escape(str(e))}")
             error_console.print(f"[dim]Task not created. Fix the issue or use --no-spec.[/dim]")
             sys.exit(1)
-        if spec_items:
-            spec = spec_items
-            from otto.tasks import spec_text, spec_is_verifiable
-            verifiable_count = sum(1 for i in spec_items if spec_is_verifiable(i))
-            visual_count = len(spec_items) - verifiable_count
-            label = f"{verifiable_count} verifiable"
-            if visual_count:
-                label += f", {visual_count} visual"
-            # Filter preamble before counting
-            def _is_preamble(item) -> bool:
-                t = spec_text(item)
-                return t.startswith(("Acceptance Criteria", "Context:", "====", "----",
-                                     "Next.js", "React", "TypeScript", "Tests use"))
-            real_specs = [i for i in spec_items if not _is_preamble(i)]
-            verifiable_count = sum(1 for i in real_specs if spec_is_verifiable(i))
-            visual_count = len(real_specs) - verifiable_count
+        filtered_spec = _filter_generated_spec_items(spec_items)
+        if filtered_spec:
+            spec = filtered_spec
+            verifiable_count = sum(1 for i in spec if spec_is_verifiable(i))
+            visual_count = len(spec) - verifiable_count
             label = f"{verifiable_count} verifiable"
             if visual_count:
                 label += f", {visual_count} visual"
 
-            console.print(f"[success]✓[/success] Spec ([bold]{len(real_specs)}[/bold] criteria \u2014 {label})")
+            console.print(f"[success]✓[/success] Spec ([bold]{len(spec)}[/bold] criteria \u2014 {label})")
             console.print()
             from rich.table import Table
             spec_table = Table(box=None, show_header=True, pad_edge=False,
@@ -424,7 +492,7 @@ def add(prompt, verify, max_retries, import_file, no_spec):
             spec_table.add_column("#", style="dim", width=3, justify="right")
             spec_table.add_column("", width=2)  # icon
             spec_table.add_column("Criterion", ratio=1, no_wrap=False)
-            for idx, item in enumerate(real_specs, 1):
+            for idx, item in enumerate(spec, 1):
                 text = spec_text(item)
                 short = text[:80] + "..." if len(text) > 80 else text
                 if spec_is_verifiable(item):
