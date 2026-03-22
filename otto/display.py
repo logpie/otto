@@ -123,6 +123,7 @@ class TaskDisplay:
         self._qa_pass_count: int = 0
         self._coding_files: list[str] = []
         self._last_tool_key: str = ""
+        self._last_tool_type: str = ""
         self._read_count: int = 0
 
     def start(self) -> None:
@@ -157,6 +158,7 @@ class TaskDisplay:
                 self._phase_start = time.monotonic()
                 self._current_cost = 0.0
                 self._last_tool_key = ""
+                self._last_tool_type = ""
                 self._read_count = 0
                 if name == "qa":
                     self._qa_spec_count = 0
@@ -234,8 +236,11 @@ class TaskDisplay:
         else:
             short = rich_escape(_shorten_path(detail)[:68])
 
-        # Breathing room before Write/Edit/Bash (they have inline content)
-        if name in ("Write", "Edit", "Bash"):
+        # Breathing room on tool type change (Read→Bash, Write→Read, etc.)
+        with self._lock:
+            prev_type = getattr(self, '_last_tool_type', "")
+            self._last_tool_type = name
+        if prev_type and prev_type != name:
             self._console.print()
 
         # Consistent style for all phases — ● Name  detail
