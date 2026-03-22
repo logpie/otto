@@ -227,7 +227,12 @@ class TaskDisplay:
                 return
             self._last_tool_key = tool_key
 
-        short = rich_escape(detail[:68]) if name == "Bash" else rich_escape(_shorten_path(detail)[:68])
+        # Truncate Bash commands at first newline (multi-line node -e commands)
+        if name == "Bash":
+            first_line = detail.split("\n")[0].strip()
+            short = rich_escape(first_line[:68])
+        else:
+            short = rich_escape(_shorten_path(detail)[:68])
 
         # Breathing room before Write/Edit/Bash (they have inline content)
         if name in ("Write", "Edit", "Bash"):
@@ -282,7 +287,11 @@ class TaskDisplay:
         has_fail = "\u274c" in text or "FAIL" in text
 
         # Detect spec-level findings across formats
-        is_spec_header = text.startswith("###") or text.startswith("**Spec")
+        is_spec_header = (
+            text.startswith("###")
+            or text.startswith("**Spec")
+            or (clean.startswith("Spec ") and clean[5:6].isdigit())  # "Spec 1: ..."
+        )
         is_table_row = text.startswith("|") and (has_pass or has_fail)
         is_table_header = text.startswith("|") and ("Spec" in text[:15] or "Check" in text[:20] or "---" in text[:5])
         # Detect "✓ N." or "✗ N." pattern (e.g. "✓ 4. LIFO order  Pushed...")
@@ -307,32 +316,32 @@ class TaskDisplay:
                 return
             if text.startswith(("- Container", "- Header", "\u25cb Edge")):
                 return
+            if "Minor Observation" in text or "not spec violation" in text.lower():
+                return
 
-        # Render
+        # Render — spec findings are KEY info, not dim
         if is_spec_header:
             spec_text = clean.lstrip("# ").strip()
             for s in [": \u2705 PASS", ": \u274c FAIL", "\u2705", "\u274c"]:
                 spec_text = spec_text.replace(s, "").rstrip(": ").strip()
             icon = "[green]\u2713[/green]" if has_pass else "[red]\u2717[/red]" if has_fail else " "
-            self._console.print(f"      {icon} [dim]{rich_escape(spec_text[:68])}[/dim]")
+            self._console.print(f"      {icon} {rich_escape(spec_text[:68])}")
 
         elif is_table_row:
-            # Markdown table: "| 4 | add(a,b) returns sum | test | ✅ PASS |"
             parts = [p.strip() for p in clean.split("|") if p.strip()]
-            # Join number + description: "4  add(a,b) returns sum"
             if len(parts) >= 2:
                 desc = f"{parts[0]}  {parts[1]}"[:55]
             else:
                 desc = parts[0][:55] if parts else clean[:55]
             icon = "[green]\u2713[/green]" if has_pass else "[red]\u2717[/red]"
-            self._console.print(f"      {icon} [dim]{rich_escape(desc)}[/dim]")
+            self._console.print(f"      {icon} {rich_escape(desc)}")
 
         elif is_numbered_check:
             # "✓ 4. LIFO order  Pushed..." or "✗ 2. Edge case..."
             check_pass = clean[0] in ("\u2713", "\u2705")
             desc = clean[1:].lstrip().lstrip("0123456789").lstrip(".").strip()[:62]
             icon = "[green]\u2713[/green]" if check_pass else "[red]\u2717[/red]"
-            self._console.print(f"      {icon} [dim]{rich_escape(desc)}[/dim]")
+            self._console.print(f"      {icon} {rich_escape(desc)}")
 
         elif has_pass and text.startswith(("**PASS", "PASS")):
             detail_text = clean.replace("PASS", "").replace("\u2705", "").lstrip(" \u2014-()").strip()
