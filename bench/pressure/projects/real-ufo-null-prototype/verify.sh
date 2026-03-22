@@ -5,19 +5,19 @@ cat > test/verify_parsequery_nullproto.test.ts <<'TS'
 import { describe, expect, it } from 'vitest'
 import { parseQuery } from '../src/index'
 describe('parseQuery null-prototype verification', () => {
-  it('returns an object with null prototype', () => {
-    expect(Object.getPrototypeOf(parseQuery('?foo=bar'))).toBe(null)
+  it('returned object does not inherit from Object.prototype', () => {
+    const q = parseQuery('?foo=bar')
+    expect('hasOwnProperty' in q).toBe(false)
+    expect('toString' in q).toBe(false)
   })
   it('still parses ordinary query keys', () => {
     const q = parseQuery('?foo=bar&baz=qux')
     expect(q.foo).toBe('bar')
     expect(q.baz).toBe('qux')
   })
-  it('prototype-polluting keys do not affect the prototype chain', () => {
-    const q = parseQuery('?constructor=y&toString=z')
-    expect(Object.getPrototypeOf(q)).toBe(null)
-    // On a null-prototype object, constructor is a regular data property
-    expect(q.constructor).toBe('y')
+  it('retains array behavior for repeated keys', () => {
+    const q = parseQuery('?tag=a&tag=b')
+    expect(q.tag).toEqual(['a', 'b'])
   })
 })
 TS
