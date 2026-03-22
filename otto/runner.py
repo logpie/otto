@@ -84,6 +84,117 @@ def check_clean_tree(project_dir: Path) -> bool:
     return True
 
 
+def preflight_checks(
+    config: dict[str, Any],
+    tasks_file: Path,
+    project_dir: Path,
+) -> tuple[int | None, list[dict]]:
+    """Run pre-flight checks before launching the orchestrator.
+
+    Returns (error_code, pending_tasks). If error_code is not None, the caller
+    should abort with that exit code. Otherwise pending_tasks is the list of
+    tasks to run.
+
+    Side effects: checks out default branch, runs baseline, resets stale tasks,
+    injects deps from file-plan.
+    """
+    default_branch = config["default_branch"]
+
+    # Ensure we're on the default branch
+    checkout = subprocess.run(
+        ["git", "checkout", default_branch],
+        cwd=project_dir, capture_output=True, text=True,
+    )
+    if checkout.returncode != 0:
+        subprocess.run(
+            ["git", "stash", "--include-untracked"],
+            cwd=project_dir, capture_output=True,
+        )
+        retry = subprocess.run(
+            ["git", "checkout", default_branch],
+            cwd=project_dir, capture_output=True, text=True,
+        )
+        if retry.returncode != 0:
+            console.print(f"[red]Cannot checkout {default_branch}: {retry.stderr.strip()}[/red]")
+            return (2, [])
+
+    actual = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=project_dir, capture_output=True, text=True,
+    ).stdout.strip()
+    if actual != default_branch:
+        console.print(f"[red]Expected branch {default_branch}, on {actual}[/red]")
+        return (2, [])
+
+    if not check_clean_tree(project_dir):
+        console.print("[red]Working tree is dirty -- fix before running otto[/red]")
+        return (2, [])
+
+    # Baseline check
+    test_command = config.get("test_command")
+    if test_command:
+        _log_info("Running baseline check...")
+        baseline_env = _subprocess_env()
+        baseline_env["CI"] = "true"
+        try:
+            result = subprocess.run(
+                test_command, shell=True, cwd=project_dir,
+                capture_output=True, timeout=config["verify_timeout"],
+                env=baseline_env,
+            )
+        except subprocess.TimeoutExpired:
+            console.print("  [yellow]Warning: Baseline tests timed out (interactive runner?) -- proceeding[/yellow]")
+            result = None
+        if result is not None:
+            if result.returncode not in (0, 5):
+                console.print("  [yellow]Warning: Baseline tests failing -- recorded, proceeding[/yellow]")
+            elif result.returncode == 0:
+                import re as _re
+                stdout_text = (result.stdout or b"").decode(errors="replace")
+                match = _re.search(r"(\d+) passed", stdout_text)
+                count = f" ({match.group(1)} tests)" if match else ""
+                console.print(f"  [green]\u2713[/green] Baseline passing{count}", style="dim")
+
+    # Recover stale "running" tasks
+    tasks = load_tasks(tasks_file)
+    for t in tasks:
+        if t.get("status") == "running":
+            update_task(tasks_file, t["key"], status="pending",
+                        error=None, session_id=None)
+            console.print(f"  [yellow]Warning: Task #{t['id']} was stuck in 'running' -- reset to pending[/yellow]")
+
+    tasks = load_tasks(tasks_file)
+    pending = [t for t in tasks if t.get("status") == "pending"]
+    if not pending:
+        console.print("No pending tasks", style="dim")
+        return (0, [])
+
+    # Inject dependencies from file-plan.md
+    if not config.get("no_architect", False) and len(pending) >= 2:
+        from otto.architect import parse_file_plan
+        arch_deps = parse_file_plan(project_dir)
+        if arch_deps:
+            tasks = load_tasks(tasks_file)
+            pending = [t for t in tasks if t.get("status") == "pending"]
+            pending_by_id = {t["id"]: t for t in pending}
+            injected = 0
+            for dep_id, on_id in arch_deps:
+                task = pending_by_id.get(dep_id)
+                if task:
+                    deps = list(task.get("depends_on") or [])
+                    if on_id not in deps:
+                        deps.append(on_id)
+                        update_task(tasks_file, task["key"], depends_on=deps)
+                        injected += 1
+            if injected:
+                console.print(f"  Injected {injected} dependencies from file-plan.md", style="dim")
+            # Reload after injecting deps
+            tasks = load_tasks(tasks_file)
+            pending = [t for t in tasks if t.get("status") == "pending"]
+
+    return (None, pending)
+
+
 def _snapshot_untracked(project_dir: Path) -> set[str]:
     """Return the set of currently untracked files (excluding ignored).
 
@@ -494,6 +605,158 @@ def cleanup_branch(project_dir: Path, key: str, default_branch: str = "main") ->
         ["git", "branch", "-D", branch_name],
         f"git branch -D {branch_name}",
     )
+
+
+def rebase_and_merge(project_dir: Path, task_branch: str, default_branch: str) -> bool:
+    """Rebase task_branch onto default_branch then ff-only merge.
+
+    Used by v4 orchestrator for serial merge of parallel tasks.
+    Returns False on rebase conflict.
+    """
+    # Rebase task branch onto default
+    rebase = subprocess.run(
+        ["git", "rebase", default_branch, task_branch],
+        cwd=project_dir, capture_output=True, text=True,
+    )
+    if rebase.returncode != 0:
+        # Abort the failed rebase
+        subprocess.run(
+            ["git", "rebase", "--abort"],
+            cwd=project_dir, capture_output=True,
+        )
+        return False
+
+    # Fast-forward merge
+    subprocess.run(
+        ["git", "checkout", default_branch],
+        cwd=project_dir, capture_output=True, check=True,
+    )
+    result = subprocess.run(
+        ["git", "merge", "--ff-only", task_branch],
+        cwd=project_dir, capture_output=True,
+    )
+    if result.returncode == 0:
+        subprocess.run(
+            ["git", "branch", "-d", task_branch],
+            cwd=project_dir, capture_output=True,
+        )
+        return True
+    return False
+
+
+async def coding_loop(
+    task_plan: Any,  # otto.planner.TaskPlan
+    context: Any,    # otto.context.PipelineContext
+    config: dict[str, Any],
+    project_dir: Path,
+    telemetry: Any,  # otto.telemetry.Telemetry
+    tasks_file: Path | None = None,
+) -> Any:  # otto.context.TaskResult
+    """v4 coding loop — run a single task through prepare/code/verify/QA/merge.
+
+    Passes an on_progress callback to run_task_with_qa() so phase events
+    flow through the telemetry dual-write (legacy pilot_results.jsonl).
+    Emits TaskMerged/TaskFailed at the actual completion time (not deferred).
+    """
+    from otto.context import TaskResult
+    from otto.telemetry import AgentToolCall, TaskFailed, TaskMerged, TaskStarted
+
+    task_key = task_plan.task_key
+
+    # Load task from tasks.yaml
+    tasks = load_tasks(tasks_file) if tasks_file else []
+    task = next((t for t in tasks if t.get("key") == task_key), None)
+    if not task:
+        return TaskResult(task_key=task_key, success=False, error="task not found")
+
+    task_id = task.get("id", 0)
+    prompt = task.get("prompt", "")
+    task_start = time.monotonic()
+
+    # Log task start
+    telemetry.log(TaskStarted(
+        task_key=task_key, task_id=task_id,
+        prompt=prompt[:80], strategy=task_plan.strategy,
+    ))
+
+    # Bridge on_progress events from run_task_with_qa to telemetry dual-write.
+    # This routes phase/tool events to pilot_results.jsonl so otto status -w,
+    # otto show, and otto logs -f all work under v4.
+    def _on_progress(event_type: str, data: dict) -> None:
+        try:
+            if telemetry._legacy_enabled:
+                telemetry._emit_legacy_progress({
+                    "tool": "progress",
+                    "event": event_type,
+                    "task_key": task_key,
+                    **data,
+                })
+        except Exception:
+            pass
+
+    try:
+        hint = task_plan.hint or ""
+        if context.learnings:
+            hint += "\n\nLEARNINGS FROM PRIOR TASKS:\n" + "\n".join(
+                f"- {l}" for l in context.learnings
+            )
+        research = context.get_research(task_key)
+        if research:
+            hint += f"\n\nRESEARCH FINDINGS:\n{research}"
+
+        result = await run_task_with_qa(
+            task, config, project_dir, tasks_file,
+            hint=hint or None, on_progress=_on_progress,
+        )
+
+        duration = time.monotonic() - task_start
+        cost = float(result.get("cost_usd", 0.0) or 0.0)
+
+        if result.get("success"):
+            commit_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=project_dir, capture_output=True, text=True,
+            ).stdout.strip()
+
+            # Emit TaskMerged NOW (not deferred to batch loop)
+            telemetry.log(TaskMerged(
+                task_key=task_key, task_id=task_id,
+                cost_usd=cost, duration_s=duration,
+                diff_summary=result.get("diff_summary", ""),
+            ))
+
+            return TaskResult(
+                task_key=task_key, success=True,
+                commit_sha=commit_sha,
+                cost_usd=cost, duration_s=duration,
+                qa_report=result.get("qa_report", ""),
+                diff_summary=result.get("diff_summary", ""),
+            )
+
+        error = str(result.get("error", "") or "")
+        telemetry.log(TaskFailed(
+            task_key=task_key, task_id=task_id,
+            error=error[:200],
+            cost_usd=cost, duration_s=duration,
+        ))
+        return TaskResult(
+            task_key=task_key, success=False,
+            cost_usd=cost, error=error,
+            duration_s=duration,
+            qa_report=result.get("qa_report", ""),
+            diff_summary=result.get("diff_summary", ""),
+        )
+
+    except Exception as exc:
+        duration = time.monotonic() - task_start
+        telemetry.log(TaskFailed(
+            task_key=task_key, task_id=task_id,
+            error=str(exc)[:200], duration_s=duration,
+        ))
+        return TaskResult(
+            task_key=task_key, success=False,
+            error=f"unexpected error: {exc}", duration_s=duration,
+        )
 
 
 def _cleanup_task_failure(
@@ -1113,17 +1376,35 @@ def _setup_task_worktree(project_dir: Path, key: str, base_sha: str) -> Path:
     """Create an isolated git worktree for parallel task execution."""
     wt_dir = project_dir / ".worktrees" / f"otto-{key}"
     branch_name = f"otto/{key}"
+
+    tasks_path = project_dir / "tasks.yaml"
+    task = None
+    if tasks_path.exists():
+        task = next((t for t in load_tasks(tasks_path) if t.get("key") == key), None)
+
+    branch_exists = subprocess.run(
+        ["git", "rev-parse", "--verify", branch_name],
+        cwd=project_dir,
+        capture_output=True,
+    ).returncode == 0
+    if branch_exists and task and task.get("status") == "failed" and task.get("error_code") == "merge_diverged":
+        raise RuntimeError(
+            f"Branch {branch_name} preserved from diverge failure — "
+            f"manually resolve or run 'otto reset' first"
+        )
+
     # Clean up stale worktree if it exists
     if wt_dir.exists():
         subprocess.run(
             ["git", "worktree", "remove", "--force", str(wt_dir)],
             cwd=project_dir, capture_output=True,
         )
-    # Delete stale branch if it exists
-    subprocess.run(
-        ["git", "branch", "-D", branch_name],
-        cwd=project_dir, capture_output=True,
-    )
+    # Delete stale branch if it exists and is not intentionally preserved
+    if branch_exists:
+        subprocess.run(
+            ["git", "branch", "-D", branch_name],
+            cwd=project_dir, capture_output=True,
+        )
     wt_dir.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         ["git", "worktree", "add", str(wt_dir), "-b", branch_name, base_sha],
@@ -1677,14 +1958,14 @@ async def run_task(
         return False
 
 
-async def _run_qa_agent(
+async def run_qa_agent(
     task: dict[str, Any],
     config: dict[str, Any],
     project_dir: Path,
     diff_summary: str,
     on_progress: Any = None,
 ) -> dict[str, Any]:
-    """Run adversarial QA agent. Returns {passed, report, has_failures}."""
+    """Run adversarial QA agent. Returns {passed, report, has_failures, cost_usd}."""
     spec = task.get("spec")
     if not spec:
         return {"passed": True, "report": "No spec items — QA skipped", "has_failures": False}
@@ -2312,7 +2593,7 @@ async def run_task_with_qa(
                 if spec:
                     emit("phase", name="qa", status="running")
                     qa_start = time.monotonic()
-                    qa_result = await _run_qa_agent(task, config, project_dir, diff_summary,
+                    qa_result = await run_qa_agent(task, config, project_dir, diff_summary,
                                                       on_progress=on_progress)
                     qa_elapsed = round(time.monotonic() - qa_start, 1)
                     phase_timings["qa"] = phase_timings.get("qa", 0) + qa_elapsed

@@ -55,3 +55,26 @@
 
 ### Round 3 — Codex
 - APPROVED. No new issues.
+---
+
+## Implementation Gate — 2026-03-22 — Otto v4 PER Pipeline
+
+### Fresh Review Round 1 — Codex (read-only)
+- [CRITICAL] v4 never runs QA — `run_task()` parallel path skips QA entirely — **fixed by Codex**: `coding_loop()` calls `run_task_with_qa()` directly
+- [CRITICAL] Task marked "passed" before merge — **fixed by Codex**: resolved by using `run_task_with_qa()` which marks passed only after merge
+- [CRITICAL] Planner output not validated for coverage/uniqueness — **fixed by Codex**: added `_plan_covers_pending()`, falls back to `default_plan()`
+- [IMPORTANT] Interrupt exits 0 with unexecuted tasks — **fixed by Codex**: `return 1 if failed or interrupted or missing`
+- [IMPORTANT] `context.pids` never populated — **deferred**: requires SDK integration
+- [IMPORTANT] Preserved diverged branches destroyed by `_setup_task_worktree` — **fixed by Codex**: checks `error_code="merge_diverged"`
+- [IMPORTANT] Worktree cleanup leaves stale metadata — **deferred**: existing behavior
+- [IMPORTANT] Telemetry doesn't write live-state.json — **deferred**: follow-up work
+- [IMPORTANT] `run_qa_agent()` doesn't require explicit PASS — pre-existing, intentional
+- [IMPORTANT] v3 Ctrl-C doesn't thread interrupted — pre-existing v3 behavior
+- [NOTE] Research/learnings scaffolding not wired — deferred, design only
+
+### Fresh Review Round 2 — Codex (read-only)
+- [CRITICAL] Parallel `run_task_with_qa()` on shared checkout is unsafe — **fixed by Codex**: removed `asyncio.gather()`, batch tasks execute sequentially
+- [IMPORTANT] Replan coverage not validated — **fixed by Codex**: validates with `_plan_covers_pending()`, falls back to remaining plan
+- [IMPORTANT] AllDone telemetry doesn't reflect missing tasks — **fixed by Codex**: added `total_missing_or_interrupted` field
+- [NOTE] live-state.json racy under parallel — resolved by sequential execution
+- APPROVED. No new issues.

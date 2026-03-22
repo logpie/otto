@@ -30,6 +30,7 @@ from otto.display import TaskDisplay, console, rich_escape
 from otto.runner import (
     _log_info, _log_warn,
     _print_summary, _subprocess_env,
+    preflight_checks,
 )
 
 # Optional import — may not exist in older SDK versions
@@ -681,116 +682,7 @@ if __name__ == "__main__":
 # ---------------------------------------------------------------------------
 
 
-def _preflight_checks(
-    config: dict[str, Any],
-    tasks_file: Path,
-    project_dir: Path,
-) -> tuple[int | None, list[dict]]:
-    """Run pre-flight checks before launching the pilot agent.
-
-    Returns (error_code, pending_tasks). If error_code is not None, the caller
-    should abort with that exit code. Otherwise pending_tasks is the list of
-    tasks to run.
-
-    Side effects: acquires lock (caller must hold lock_fh open), checks out
-    default branch, runs baseline, resets stale tasks, injects deps.
-    """
-    default_branch = config["default_branch"]
-
-    # Ensure we're on the default branch
-    checkout = subprocess.run(
-        ["git", "checkout", default_branch],
-        cwd=project_dir, capture_output=True, text=True,
-    )
-    if checkout.returncode != 0:
-        subprocess.run(
-            ["git", "stash", "--include-untracked"],
-            cwd=project_dir, capture_output=True,
-        )
-        retry = subprocess.run(
-            ["git", "checkout", default_branch],
-            cwd=project_dir, capture_output=True, text=True,
-        )
-        if retry.returncode != 0:
-            console.print(f"[red]Cannot checkout {default_branch}: {retry.stderr.strip()}[/red]")
-            return (2, [])
-
-    actual = subprocess.run(
-        ["git", "branch", "--show-current"],
-        cwd=project_dir, capture_output=True, text=True,
-    ).stdout.strip()
-    if actual != default_branch:
-        console.print(f"[red]Expected branch {default_branch}, on {actual}[/red]")
-        return (2, [])
-
-    from otto.runner import check_clean_tree
-    if not check_clean_tree(project_dir):
-        console.print("[red]Working tree is dirty -- fix before running otto[/red]")
-        return (2, [])
-
-    # Baseline check
-    test_command = config.get("test_command")
-    if test_command:
-        _log_info("Running baseline check...")
-        baseline_env = _subprocess_env()
-        baseline_env["CI"] = "true"
-        try:
-            result = subprocess.run(
-                test_command, shell=True, cwd=project_dir,
-                capture_output=True, timeout=config["verify_timeout"],
-                env=baseline_env,
-            )
-        except subprocess.TimeoutExpired:
-            console.print("  [yellow]Warning: Baseline tests timed out (interactive runner?) -- proceeding[/yellow]")
-            result = None
-        if result is not None:
-            if result.returncode not in (0, 5):
-                console.print("  [yellow]Warning: Baseline tests failing -- recorded, proceeding[/yellow]")
-            elif result.returncode == 0:
-                import re as _re
-                stdout_text = (result.stdout or b"").decode(errors="replace")
-                match = _re.search(r"(\d+) passed", stdout_text)
-                count = f" ({match.group(1)} tests)" if match else ""
-                console.print(f"  [green]\u2713[/green] Baseline passing{count}", style="dim")
-
-    # Recover stale "running" tasks
-    tasks = load_tasks(tasks_file)
-    for t in tasks:
-        if t.get("status") == "running":
-            update_task(tasks_file, t["key"], status="pending",
-                        error=None, session_id=None)
-            console.print(f"  [yellow]Warning: Task #{t['id']} was stuck in 'running' -- reset to pending[/yellow]")
-
-    tasks = load_tasks(tasks_file)
-    pending = [t for t in tasks if t.get("status") == "pending"]
-    if not pending:
-        console.print("No pending tasks", style="dim")
-        return (0, [])
-
-    # Inject dependencies from file-plan.md
-    if not config.get("no_architect", False) and len(pending) >= 2:
-        from otto.architect import parse_file_plan
-        arch_deps = parse_file_plan(project_dir)
-        if arch_deps:
-            tasks = load_tasks(tasks_file)
-            pending = [t for t in tasks if t.get("status") == "pending"]
-            pending_by_id = {t["id"]: t for t in pending}
-            injected = 0
-            for dep_id, on_id in arch_deps:
-                task = pending_by_id.get(dep_id)
-                if task:
-                    deps = list(task.get("depends_on") or [])
-                    if on_id not in deps:
-                        deps.append(on_id)
-                        update_task(tasks_file, task["key"], depends_on=deps)
-                        injected += 1
-            if injected:
-                console.print(f"  Injected {injected} dependencies from file-plan.md", style="dim")
-            # Reload after injecting deps
-            tasks = load_tasks(tasks_file)
-            pending = [t for t in tasks if t.get("status") == "pending"]
-
-    return (None, pending)
+# _preflight_checks removed — use runner.preflight_checks() (imported at top)
 
 
 async def _run_pilot_core(
@@ -1370,7 +1262,7 @@ async def run_piloted(
 
     try:
         # Pre-flight checks (branch, baseline, stale recovery, deps)
-        error_code, pending = _preflight_checks(config, tasks_file, project_dir)
+        error_code, pending = preflight_checks(config, tasks_file, project_dir)
         if error_code is not None:
             return error_code
 

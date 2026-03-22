@@ -16,6 +16,8 @@ from otto.runner import (
     build_candidate_commit,
     merge_to_default,
     cleanup_branch,
+    rebase_and_merge,
+    preflight_checks,
 )
 
 
@@ -215,4 +217,72 @@ class TestTamperDetection:
             capture_output=True, text=True,
         ).stdout.strip()
         assert restored_sha == original_sha
+
+
+def _commit_file(repo, name, content, msg="add file"):
+    """Helper: write, stage, commit a file."""
+    path = repo / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+    subprocess.run(["git", "add", name], cwd=repo, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", msg], cwd=repo, capture_output=True, check=True)
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+
+class TestRebaseAndMerge:
+    def test_simple_rebase_and_merge(self, tmp_git_repo):
+        """Task branch rebases onto main and merges ff-only."""
+        # Create a commit on main
+        _commit_file(tmp_git_repo, "base.txt", "base", "base commit")
+
+        # Create task branch from main
+        subprocess.run(["git", "checkout", "-b", "otto/task1"], cwd=tmp_git_repo, capture_output=True)
+        _commit_file(tmp_git_repo, "task.txt", "task work", "task commit")
+        subprocess.run(["git", "checkout", "main"], cwd=tmp_git_repo, capture_output=True)
+
+        # Add another commit on main (diverge)
+        _commit_file(tmp_git_repo, "main_new.txt", "main work", "main diverge")
+
+        # Rebase and merge should succeed
+        result = rebase_and_merge(tmp_git_repo, "otto/task1", "main")
+        assert result is True
+
+        # Verify task file exists on main
+        assert (tmp_git_repo / "task.txt").exists()
+        assert (tmp_git_repo / "main_new.txt").exists()
+
+        # Verify branch was deleted
+        branches = subprocess.run(
+            ["git", "branch"], cwd=tmp_git_repo, capture_output=True, text=True,
+        ).stdout
+        assert "otto/task1" not in branches
+
+    def test_rebase_conflict_returns_false(self, tmp_git_repo):
+        """Conflicting changes should return False."""
+        _commit_file(tmp_git_repo, "conflict.txt", "base content", "base")
+        subprocess.run(["git", "checkout", "-b", "otto/task2"], cwd=tmp_git_repo, capture_output=True)
+        _commit_file(tmp_git_repo, "conflict.txt", "task content", "task edit")
+        subprocess.run(["git", "checkout", "main"], cwd=tmp_git_repo, capture_output=True)
+        _commit_file(tmp_git_repo, "conflict.txt", "main content", "main edit")
+
+        result = rebase_and_merge(tmp_git_repo, "otto/task2", "main")
+        assert result is False
+
+        # Branch should still exist (rebase was aborted)
+        branches = subprocess.run(
+            ["git", "branch"], cwd=tmp_git_repo, capture_output=True, text=True,
+        ).stdout
+        assert "otto/task2" in branches
+
+    def test_fast_forward_when_no_diverge(self, tmp_git_repo):
+        """No divergence = simple ff merge."""
+        subprocess.run(["git", "checkout", "-b", "otto/task3"], cwd=tmp_git_repo, capture_output=True)
+        _commit_file(tmp_git_repo, "simple.txt", "simple", "simple commit")
+        subprocess.run(["git", "checkout", "main"], cwd=tmp_git_repo, capture_output=True)
+
+        result = rebase_and_merge(tmp_git_repo, "otto/task3", "main")
+        assert result is True
+        assert (tmp_git_repo / "simple.txt").exists()
 

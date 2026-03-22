@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 from rich.console import Console
 
-from otto.pilot import (
+from otto.pilot_v3 import (
     _process_progress_event,
     _print_pilot_tool_call,
     _print_pilot_tool_result,
@@ -58,7 +58,7 @@ def capture_output(func, *args, **kwargs) -> str:
     to a StringIO buffer, then restores the original.
     """
     import otto.display as display_mod
-    import otto.pilot as pilot_mod
+    import otto.pilot_v3 as pilot_mod
     import otto.theme as theme_mod
 
     buf = io.StringIO()
@@ -421,7 +421,7 @@ class TestTaskDisplay:
         assert len(td._coding_files) == 1  # task-notes excluded
 
     def test_process_progress_event_routes_qa_summary(self):
-        import otto.pilot as pilot_mod
+        import otto.pilot_v3 as pilot_mod
 
         buf = io.StringIO()
         test_console = Console(file=buf, highlight=False, color_system=None)

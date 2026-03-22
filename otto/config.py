@@ -16,6 +16,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "max_parallel": 3,
     "max_turns": 200,
     "effort": "high",
+    "orchestrator": "v4",
 }
 
 

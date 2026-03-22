@@ -516,7 +516,8 @@ def add(prompt, verify, max_retries, import_file, no_spec):
 @click.option("--dry-run", is_flag=True, help="Show what would run without executing")
 @click.option("--no-architect", is_flag=True, help="Skip architect agent (no codebase analysis)")
 @click.option("--tdd", is_flag=True, help="Generate adversarial tests before coding (optional)")
-def run(prompt, dry_run, no_architect, tdd):
+@click.option("--pilot", is_flag=True, help="Use v3 LLM pilot (fallback)")
+def run(prompt, dry_run, no_architect, tdd, pilot):
     """Run pending tasks (or a one-off task if prompt given)."""
     from otto.runner import run_task
 
@@ -585,15 +586,20 @@ def run(prompt, dry_run, no_architect, tdd):
             lock_fh.close()
     else:
         tasks_path = project_dir / "tasks.yaml"
-        # Preflight: check mcp is importable
-        try:
-            import importlib
-            importlib.import_module("mcp")
-        except ImportError:
-            error_console.print("Error: mcp library required. Install with: pip install mcp", style="error")
-            sys.exit(2)
-        from otto.pilot import run_piloted
-        exit_code = asyncio.run(run_piloted(config, tasks_path, project_dir))
+        if pilot or config.get("orchestrator") == "v3":
+            # v3 LLM pilot (fallback)
+            try:
+                import importlib
+                importlib.import_module("mcp")
+            except ImportError:
+                error_console.print("Error: mcp library required for --pilot. Install with: pip install mcp", style="error")
+                sys.exit(2)
+            from otto.pilot_v3 import run_piloted
+            exit_code = asyncio.run(run_piloted(config, tasks_path, project_dir))
+        else:
+            # v4 PER orchestrator (default)
+            from otto.orchestrator import run_per
+            exit_code = asyncio.run(run_per(config, tasks_path, project_dir))
         sys.exit(exit_code)
 
 

@@ -324,7 +324,7 @@ class TestPilotPromptBuilder:
 
     def test_prompt_is_a_start_instruction(self, tmp_git_repo):
         """User prompt is lean — just a start instruction. All rules are in system_prompt."""
-        from otto.pilot import _build_pilot_prompt
+        from otto.pilot_v3 import _build_pilot_prompt
 
         tasks = [
             {"id": 1, "key": "aaa111", "prompt": "Implement search feature",
@@ -349,7 +349,7 @@ class TestPilotPromptBuilder:
 
     def test_prompt_does_not_include_stale_architect_docs(self, tmp_git_repo):
         """Pilot prompt should NOT include architect docs (agents explore codebase directly)."""
-        from otto.pilot import _build_pilot_prompt
+        from otto.pilot_v3 import _build_pilot_prompt
 
         # Create architect docs — these should NOT appear in the pilot prompt
         arch_dir = tmp_git_repo / "otto_arch"
@@ -367,7 +367,7 @@ class TestPilotPromptBuilder:
         assert "Module map" not in prompt
 
     def test_prompt_handles_empty_task_list(self, tmp_git_repo):
-        from otto.pilot import _build_pilot_prompt
+        from otto.pilot_v3 import _build_pilot_prompt
 
         config = {"max_retries": 3, "test_command": "pytest", "max_parallel": 3,
                   "default_branch": "main", "verify_timeout": 300}
@@ -381,7 +381,7 @@ class TestMcpServerScript:
     """Integration: _build_mcp_server_script produces syntactically valid Python."""
 
     def test_script_is_valid_python(self, tmp_git_repo):
-        from otto.pilot import _build_mcp_server_script
+        from otto.pilot_v3 import _build_mcp_server_script
 
         tasks_path = tmp_git_repo / "tasks.yaml"
         tasks_path.write_text(yaml.dump({"tasks": []}, default_flow_style=False))
@@ -415,7 +415,7 @@ class TestMcpServerScript:
         )
 
     def test_script_embeds_correct_paths(self, tmp_git_repo):
-        from otto.pilot import _build_mcp_server_script
+        from otto.pilot_v3 import _build_mcp_server_script
 
         tasks_path = tmp_git_repo / "tasks.yaml"
         tasks_path.write_text(yaml.dump({"tasks": []}, default_flow_style=False))
@@ -438,7 +438,7 @@ class TestRunPiloted:
     @pytest.mark.asyncio
     async def test_piloted_with_no_pending_tasks(self, tmp_git_repo):
         """run_piloted should exit early with 0 when there are no pending tasks."""
-        from otto.pilot import run_piloted
+        from otto.pilot_v3 import run_piloted
 
         create_config(tmp_git_repo)
         _commit_file(tmp_git_repo, "otto.yaml",
@@ -452,11 +452,11 @@ class TestRunPiloted:
         assert exit_code == 0
 
     @pytest.mark.asyncio
-    @patch("otto.pilot.query", new=_stub_query)
+    @patch("otto.pilot_v3.query", new=_stub_query)
     async def test_piloted_with_stub_agent(self, tmp_git_repo):
         """run_piloted with mocked agent (no real Claude) should complete.
         The stub yields a single empty ResultMessage, so the pilot finishes quickly."""
-        from otto.pilot import run_piloted
+        from otto.pilot_v3 import run_piloted
 
         create_config(tmp_git_repo)
         _commit_file(tmp_git_repo, "otto.yaml",
