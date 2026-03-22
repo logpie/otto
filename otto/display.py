@@ -227,29 +227,30 @@ class TaskDisplay:
         else:
             self._console.print(f"      [bold cyan]\u25cf {name}[/bold cyan]  [dim]{short}[/dim]")
 
-        # Inline content summary below tool call
+        # Inline diff/preview below tool call (like CC)
         if data:
+            old_lines = data.get("old_lines", [])
+            new_lines = data.get("new_lines", [])
             old_total = data.get("old_total", 0)
             new_total = data.get("new_total", 0)
+            preview = data.get("preview_lines", [])
             total_lines = data.get("total_lines", 0)
 
-            if name == "Edit" and (old_total or new_total):
-                # Edit: compact diff summary
-                parts = []
-                if old_total:
-                    parts.append(f"[red]-{old_total}[/red]")
-                if new_total:
-                    parts.append(f"[green]+{new_total}[/green]")
-                self._console.print(f"        [dim]{' '.join(parts)} lines[/dim]")
+            if name == "Edit" and (old_lines or new_lines):
+                for ol in old_lines:
+                    self._console.print(f"        [red]- {rich_escape(ol)}[/red]")
+                if old_total > len(old_lines):
+                    self._console.print(f"        [dim]  ...{old_total - len(old_lines)} more[/dim]")
+                for nl in new_lines:
+                    self._console.print(f"        [green]+ {rich_escape(nl)}[/green]")
+                if new_total > len(new_lines):
+                    self._console.print(f"        [dim]  ...{new_total - len(new_lines)} more[/dim]")
 
-            elif name == "Write" and total_lines:
-                # Write: show first line + count
-                preview = data.get("preview_lines", [])
-                if preview and preview[0].strip():
-                    first = rich_escape(preview[0][:60])
-                    self._console.print(f"        [green]+[/green] [dim]{first}[/dim]")
-                    if total_lines > 1:
-                        self._console.print(f"        [dim]  ...{total_lines - 1} more lines[/dim]")
+            elif name == "Write" and preview:
+                for pl in preview:
+                    self._console.print(f"        [green]+ {rich_escape(pl)}[/green]")
+                if total_lines > len(preview):
+                    self._console.print(f"        [dim]  ...{total_lines - len(preview)} more lines[/dim]")
 
     def add_tool_result(self, data: dict | None = None) -> None:
         """Print a tool result inline (Bash test output). Thread-safe."""
