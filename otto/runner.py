@@ -1975,10 +1975,12 @@ async def run_task_with_qa(
                                 elif block.name == "Bash":
                                     cmd = _tool_use_summary(block)[:80]
                                     cmd_start = cmd.lstrip().split()[0] if cmd.strip() else ""
-                                    # Show test/build commands, skip python -c one-liners (inline verification noise)
+                                    # Show meaningful commands (test/build/explore)
+                                    # Skip python -c one-liners (inline verification noise)
                                     if cmd_start in ("pytest", "python", "npx", "npm", "jest",
-                                                     "make", "cargo", "go", "ruby", "dotnet"):
-                                        if not (cmd_start == "python" and " -c " in cmd):
+                                                     "make", "cargo", "go", "ruby", "dotnet",
+                                                     "cat", "ls", "find", "grep", "head", "tail"):
+                                        if not (cmd_start in ("python", "python3") and " -c " in cmd):
                                             emit("agent_tool", name=block.name, detail=cmd)
                             # Note: ToolResultBlock handling moved to top of block loop
 
