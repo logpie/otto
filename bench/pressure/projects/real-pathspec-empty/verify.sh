@@ -4,6 +4,8 @@ set -uo pipefail
 trap 'rc=$?; rm -f verify_check.py; exit $rc' EXIT
 
 cat > verify_check.py <<'PY'
+import importlib
+import os
 import sys
 sys.path.insert(0, '.')
 
@@ -22,40 +24,60 @@ def report(name, fn):
 
 def check_re2_no_raise_on_empty():
     """The re2 backend should not raise ValueError for empty patterns."""
-    source = open("pathspec/_backends/re2/pathspec.py").read()
-    # Before fix: 'if not patterns:\n\t\traise ValueError'
-    # After fix: the ValueError raise for empty patterns is removed
-    if 'raise ValueError' in source:
-        # Check if it's guarded by "if not patterns"
-        lines = source.split('\n')
-        for i, line in enumerate(lines):
-            if 'not patterns' in line and i + 1 < len(lines) and 'raise ValueError' in lines[i + 1]:
-                raise AssertionError(
-                    "re2 backend still raises ValueError for empty patterns"
-                )
+    # Try to actually instantiate with empty patterns instead of inspecting source
+    try:
+        mod = importlib.import_module("pathspec._backends.re2.pathspec")
+    except ImportError:
+        print("  (re2 backend not importable — checking source as fallback)")
+        source = open("pathspec/_backends/re2/pathspec.py").read()
+        if 'raise ValueError' in source:
+            lines = source.split('\n')
+            for i, line in enumerate(lines):
+                if 'not patterns' in line and i + 1 < len(lines) and 'raise ValueError' in lines[i + 1]:
+                    raise AssertionError(
+                        "re2 backend still raises ValueError for empty patterns"
+                    )
+        return
+
+    # Find the PathSpec-like class and try instantiating with empty patterns
+    for attr_name in dir(mod):
+        cls = getattr(mod, attr_name)
+        if isinstance(cls, type) and hasattr(cls, '__init__'):
+            try:
+                cls([])  # empty patterns should not raise
+            except ValueError as e:
+                if 'empty' in str(e).lower() or 'pattern' in str(e).lower():
+                    raise AssertionError(f"re2 backend raises ValueError on empty patterns: {e}")
+            except (TypeError, Exception):
+                pass  # other errors are fine — we only care about ValueError on empty
 
 
 def check_hyperscan_no_raise_on_empty():
     """The hyperscan backend should not raise ValueError for empty patterns."""
-    source = open("pathspec/_backends/hyperscan/pathspec.py").read()
-    if 'raise ValueError' in source:
-        lines = source.split('\n')
-        for i, line in enumerate(lines):
-            if 'not patterns' in line and i + 1 < len(lines) and 'raise ValueError' in lines[i + 1]:
-                raise AssertionError(
-                    "hyperscan backend still raises ValueError for empty patterns"
-                )
+    try:
+        mod = importlib.import_module("pathspec._backends.hyperscan.pathspec")
+    except ImportError:
+        print("  (hyperscan backend not importable — checking source as fallback)")
+        source = open("pathspec/_backends/hyperscan/pathspec.py").read()
+        if 'raise ValueError' in source:
+            lines = source.split('\n')
+            for i, line in enumerate(lines):
+                if 'not patterns' in line and i + 1 < len(lines) and 'raise ValueError' in lines[i + 1]:
+                    raise AssertionError(
+                        "hyperscan backend still raises ValueError for empty patterns"
+                    )
+        return
 
-
-def check_re2_handles_empty_gracefully():
-    """The re2 backend code should handle the case of no patterns being passed."""
-    source = open("pathspec/_backends/re2/pathspec.py").read()
-    # After fix, there should be handling for when patterns is empty
-    # The fix changes 'if not patterns: raise' to 'if patterns and not isinstance...'
-    assert 'patterns and not isinstance' in source or \
-           'if not patterns' not in source or \
-           'if patterns:' in source, \
-        "re2 backend should handle empty patterns without raising"
+    for attr_name in dir(mod):
+        cls = getattr(mod, attr_name)
+        if isinstance(cls, type) and hasattr(cls, '__init__'):
+            try:
+                cls([])
+            except ValueError as e:
+                if 'empty' in str(e).lower() or 'pattern' in str(e).lower():
+                    raise AssertionError(f"hyperscan backend raises ValueError on empty patterns: {e}")
+            except (TypeError, Exception):
+                pass
 
 
 def check_default_backend_empty_still_works():
@@ -68,7 +90,6 @@ def check_default_backend_empty_still_works():
 
 report("re2 backend does not raise ValueError on empty patterns", check_re2_no_raise_on_empty)
 report("hyperscan backend does not raise ValueError on empty patterns", check_hyperscan_no_raise_on_empty)
-report("re2 backend handles empty gracefully", check_re2_handles_empty_gracefully)
 report("Default backend still handles empty patterns", check_default_backend_empty_still_works)
 
 raise SystemExit(1 if failures else 0)

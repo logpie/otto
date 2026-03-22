@@ -4,6 +4,8 @@ set -uo pipefail
 trap 'rc=$?; rm -f verify_check.py; exit $rc' EXIT
 
 cat > verify_check.py <<'PY'
+import sys
+sys.path.insert(0, 'src')
 import threading
 import time
 

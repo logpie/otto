@@ -217,12 +217,21 @@ Steps:
             env=dict(os.environ),
         )
 
+        num_turns = 0
+        result_msg = None
         async for message in query(prompt=agent_prompt, options=agent_opts):
             if isinstance(message, ResultMessage):
+                result_msg = message
+                raw_cost = getattr(message, "total_cost_usd", None)
+                if isinstance(raw_cost, (int, float)):
+                    spec_cost = float(raw_cost)
+            elif hasattr(message, "session_id") and hasattr(message, "is_error"):
+                result_msg = message
                 raw_cost = getattr(message, "total_cost_usd", None)
                 if isinstance(raw_cost, (int, float)):
                     spec_cost = float(raw_cost)
             elif AssistantMessage and isinstance(message, AssistantMessage):
+                num_turns += 1
                 for block in message.content:
                     if ThinkingBlock and isinstance(block, ThinkingBlock):
                         thinking = getattr(block, "thinking", "")
@@ -234,10 +243,23 @@ Steps:
                     elif ToolUseBlock and isinstance(block, ToolUseBlock):
                         print_agent_tool(block, quiet=True)
                         log_lines.append(f"● {block.name}  {_tool_use_summary(block)}")
+
+        # Check if agent reported an error
+        if result_msg and getattr(result_msg, "is_error", False):
+            error_detail = getattr(result_msg, "result", None) or "unknown error"
+            raise RuntimeError(f"Spec agent error: {error_detail}")
+
+        # Check if agent never started (no result message at all)
+        if num_turns == 0 and result_msg is None:
+            raise RuntimeError("Spec agent produced no output — agent may have failed to start")
+
     except Exception as e:
         print(f"  spec agent error: {e}", flush=True)
         log_lines.append(f"ERROR: {e}")
         _write_log(log_dir / "spec-agent.log", log_lines)
+        # Clean up temp file on error path
+        if spec_file.exists():
+            spec_file.unlink(missing_ok=True)
         return [], spec_cost
 
     _write_log(log_dir / "spec-agent.log", log_lines)
@@ -248,6 +270,8 @@ Steps:
         spec_file.unlink()
         return _parse_spec_output(text), spec_cost
 
+    # Clean up temp file if it doesn't exist (shouldn't happen, but be safe)
+    spec_file.unlink(missing_ok=True)
     return [], spec_cost
 
 
