@@ -172,6 +172,159 @@ def _restore_workspace_state(
 
 
 
+def _should_show_tool(name: str, detail: str) -> bool:
+    """Decide if a tool call should be shown to the user."""
+    if name in ("Write", "Edit"):
+        return bool(detail)
+    if name == "Read":
+        return any(ext in detail for ext in (".py", ".ts", ".tsx", ".js", ".jsx", ".rs", ".go"))
+    if name == "Bash":
+        cmd = detail.strip()
+        first_word = cmd.split()[0] if cmd else ""
+        if first_word in ("python", "python3", "node") and any(flag in cmd for flag in (" -c ", " -e ")):
+            return False
+        return first_word in (
+            "pytest", "python", "python3", "npx", "npm", "jest",
+            "make", "cargo", "go", "ruby", "dotnet", "node",
+            "cat", "ls", "find", "grep", "head", "tail",
+            "pnpm", "yarn", "uv", "bash", "sh", "tsc",
+        )
+    return True
+
+
+def _build_agent_tool_event(block) -> dict[str, Any] | None:
+    """Build a progress payload for a tool use block."""
+    name = block.name
+    inputs = block.input or {}
+    raw_detail = _tool_use_summary(block)
+
+    if name == "Glob":
+        if not _should_show_tool("Read", raw_detail):
+            return None
+        return {"name": "Read", "detail": raw_detail[:80]}
+
+    if name not in ("Read", "Write", "Edit", "Bash"):
+        return None
+    if not _should_show_tool(name, raw_detail):
+        return None
+
+    event: dict[str, Any] = {"name": name, "detail": raw_detail[:80]}
+    if name == "Edit":
+        old = inputs.get("old_string", "")
+        new = inputs.get("new_string", "")
+        if old or new:
+            event["old_lines"] = old.splitlines()[:4]
+            event["new_lines"] = new.splitlines()[:4]
+            event["old_total"] = old.count("\n") + 1 if old else 0
+            event["new_total"] = new.count("\n") + 1 if new else 0
+    elif name == "Write":
+        content = inputs.get("content", "")
+        if content:
+            event["preview_lines"] = content.splitlines()[:3]
+            event["total_lines"] = content.count("\n") + 1
+    return event
+
+
+def _extract_qa_spec_results(report: str) -> list[dict[str, Any]]:
+    """Extract authoritative pass/fail results from a QA report."""
+    results: list[dict[str, Any]] = []
+    result_index: dict[str, int] = {}
+    current_spec_key: str | None = None
+
+    def _record_result(key: str | None, passed: bool) -> None:
+        final_key = key or f"line:{len(results)}"
+        payload = {"key": final_key, "passed": passed}
+        if final_key in result_index:
+            results[result_index[final_key]] = payload
+        else:
+            result_index[final_key] = len(results)
+            results.append(payload)
+
+    for line in report.splitlines():
+        text = line.strip()
+        if not text:
+            continue
+
+        clean = text.replace("**", "").replace("__", "")
+        has_pass = "\u2705" in text or "PASS" in text
+        has_fail = "\u274c" in text or "FAIL" in text
+
+        is_spec_header = (
+            text.startswith("###")
+            or text.startswith("**Spec")
+            or (clean.startswith("Spec ") and clean[5:6].isdigit())
+        )
+        is_table_row = text.startswith("|") and (has_pass or has_fail)
+        is_table_header = text.startswith("|") and (
+            "Spec" in text[:15] or "Check" in text[:20] or "---" in text[:5]
+        )
+        is_numbered_check = (
+            len(clean) > 2
+            and clean[0] in ("\u2713", "\u2717", "\u2705", "\u274c")
+            and clean[1:].lstrip().split(".")[0].strip().isdigit()
+        )
+        is_result_line = (
+            text.startswith(("**PASS", "PASS", "**RESULT"))
+            or (text.startswith("- \u2705") and "PASS" not in text[:5])
+        )
+        is_standalone_check = (
+            len(clean) > 2
+            and clean[0] in ("\u2713", "\u2717", "\u2705", "\u274c")
+            and not is_numbered_check
+            and not is_spec_header
+        )
+
+        if "VERDICT" in text or is_table_header:
+            continue
+        if text.startswith(("- Container", "- Header", "\u25cb Edge")):
+            continue
+        if "Minor Observation" in text or "not spec violation" in text.lower():
+            continue
+
+        if is_spec_header:
+            spec_text = clean.lstrip("# ").strip()
+            for marker in (": \u2705 PASS", ": \u274c FAIL", "\u2705", "\u274c"):
+                spec_text = spec_text.replace(marker, "").rstrip(": ").strip()
+            current_spec_key = f"spec:{spec_text}"
+            if has_pass or has_fail:
+                _record_result(current_spec_key, has_pass and not has_fail)
+            continue
+
+        if is_table_row:
+            parts = [part.strip() for part in clean.split("|") if part.strip()]
+            key = f"table:{parts[0]}" if parts else None
+            _record_result(key, has_pass and not has_fail)
+            current_spec_key = None
+            continue
+
+        if is_numbered_check:
+            number = clean[1:].lstrip().split(".", 1)[0].strip()
+            _record_result(f"number:{number}", clean[0] in ("\u2713", "\u2705"))
+            current_spec_key = None
+            continue
+
+        if is_standalone_check:
+            desc = clean[1:].strip()
+            _record_result(f"check:{desc}", clean[0] in ("\u2713", "\u2705"))
+            current_spec_key = None
+            continue
+
+        if is_result_line and (has_pass or has_fail):
+            detail_text = clean.replace("RESULT", "").replace("PASS", "").replace("FAIL", "")
+            detail_text = detail_text.replace("\u2705", "").replace("\u274c", "")
+            detail_text = detail_text.lstrip(": \u2014-*()").strip()
+            _record_result(current_spec_key or f"result:{detail_text or clean}", has_pass and not has_fail)
+            current_spec_key = None
+            continue
+
+        if has_fail and text.startswith(("**FAIL", "FAIL")):
+            detail_text = clean.replace("FAIL", "").replace("\u274c", "").lstrip(" \u2014-()").strip()
+            _record_result(current_spec_key or f"fail:{detail_text or clean}", False)
+            current_spec_key = None
+
+    return results
+
+
 def create_task_branch(
     project_dir: Path, key: str, default_branch: str,
     task: dict[str, Any] | None = None,
@@ -381,17 +534,6 @@ def _cleanup_task_failure(
             update_task(tasks_file, key, **updates)
         except Exception:
             pass
-
-
-# Legacy ANSI color codes — kept for backward compatibility with imports.
-# New code should use console.print() with Rich styles instead.
-_DIM = "\033[2m"
-_BOLD = "\033[1m"
-_CYAN = "\033[36m"
-_GREEN = "\033[32m"
-_RED = "\033[31m"
-_YELLOW = "\033[33m"
-_RESET = "\033[0m"
 
 # Aliases from display module
 _format_duration = format_duration
@@ -1641,19 +1783,16 @@ You are working in {project_dir}. Do NOT create git commits."""
                                             "Spec ", "spec "]):
                                         # Clean up and emit as QA finding
                                         try:
-                                            on_progress("qa_finding", {"text": line_s[:80]})
+                                            on_progress("qa_finding", {"text": line_s[:200]})
                                         except Exception:
                                             pass
                         elif ToolUseBlock and isinstance(block, ToolUseBlock):
                             # Emit QA agent tool calls so user sees activity during QA
                             if on_progress:
                                 try:
-                                    detail = _tool_use_summary(block)[:60]
-                                    if block.name == "Bash":
-                                        on_progress("agent_tool", {"name": "QA", "detail": detail})
-                                    elif block.name in ("Read", "Glob"):
-                                        fname = detail.rsplit("/", 1)[-1] if "/" in detail else detail
-                                        on_progress("agent_tool", {"name": "QA", "detail": f"reading {fname}"})
+                                    event = _build_agent_tool_event(block)
+                                    if event:
+                                        on_progress("agent_tool", event)
                                 except Exception:
                                     pass
 
@@ -1667,6 +1806,16 @@ You are working in {project_dir}. Do NOT create git commits."""
         qa_completed = False
 
     report = "\n".join(report_lines)
+    if on_progress:
+        try:
+            spec_results = _extract_qa_spec_results(report)
+            on_progress("qa_summary", {
+                "total": len(spec_results),
+                "passed": sum(1 for result in spec_results if result["passed"]),
+                "failed": sum(1 for result in spec_results if not result["passed"]),
+            })
+        except Exception:
+            pass
     # Explicit FAIL in report = definitely failed
     has_explicit_fail = "QA VERDICT: FAIL" in report or "FAIL" in report.upper().split("QA VERDICT")[-1] if "QA VERDICT" in report else False
     # QA must complete AND have an explicit PASS verdict to be considered passing
@@ -1952,6 +2101,8 @@ async def run_task_with_qa(
 
                 agent_log_lines: list[str] = []
                 result_msg = None
+                _last_block_name = ""
+                _last_block_inputs: dict = {}
                 async for message in query(prompt=agent_prompt, options=agent_opts):
                     if isinstance(message, ResultMessage):
                         result_msg = message
@@ -1959,43 +2110,34 @@ async def run_task_with_qa(
                         result_msg = message
                     elif AssistantMessage and isinstance(message, AssistantMessage):
                         for block in message.content:
-                            if TextBlock and isinstance(block, TextBlock) and block.text:
-                                agent_log_lines.append(block.text)
-                            elif ToolUseBlock and isinstance(block, ToolUseBlock):
-                                agent_log_lines.append(f"● {block.name}  {_tool_use_summary(block)}")
-                                # Emit tool calls for display — show what the agent is doing
-                                if block.name in ("Write", "Edit"):
-                                    # Always show file creation/modification
-                                    emit("agent_tool", name=block.name,
-                                         detail=_tool_use_summary(block)[:80])
-                                elif block.name == "Read":
-                                    # Show file reads (shortened path) so user sees agent is active
-                                    path = _tool_use_summary(block)[:80]
-                                    # Only show source files, not config/lock files
-                                    if any(ext in path for ext in
-                                           [".py", ".ts", ".tsx", ".js", ".jsx", ".rs", ".go"]):
-                                        emit("agent_tool", name="Read",
-                                             detail=path.split("/")[-1] if "/" in path else path)
-                                elif block.name == "Bash":
-                                    cmd = _tool_use_summary(block)[:80]
-                                    # Show test/build commands only — must START with the runner
-                                    cmd_start = cmd.lstrip().split()[0] if cmd.strip() else ""
-                                    if cmd_start in ("pytest", "python", "npx", "npm", "jest",
-                                                     "make", "cargo", "go", "ruby", "dotnet"):
-                                        emit("agent_tool", name=block.name, detail=cmd)
-                            elif ToolResultBlock and isinstance(block, ToolResultBlock):
-                                # Extract test results from Bash output
+                            # Check for ToolResultBlock in any message type
+                            if ToolResultBlock and isinstance(block, ToolResultBlock):
                                 content = str(getattr(block, "content", ""))
-                                if content and any(kw in content.lower() for kw in
-                                                   ["passed", "failed", "error", "tests:"]):
-                                    for line in reversed(content.splitlines()):
-                                        ls = line.strip()
+                                if content and _last_block_name == "Bash":
+                                    result_line = ""
+                                    for rl in reversed(content.splitlines()):
+                                        ls = rl.strip()
                                         if any(kw in ls.lower() for kw in
                                                ["passed", "failed", "tests:", "test suites:"]):
                                             if any(c.isdigit() for c in ls):
-                                                emit("agent_tool", name="test",
-                                                     detail=ls[:70])
+                                                result_line = ls[:70]
                                                 break
+                                    if result_line:
+                                        is_pass = "passed" in result_line.lower() and "failed" not in result_line.lower()
+                                        emit("agent_tool_result", detail=result_line, passed=is_pass)
+                                _last_block_name = ""
+                                _last_block_inputs = {}
+                                continue
+                            if TextBlock and isinstance(block, TextBlock) and block.text:
+                                agent_log_lines.append(block.text)
+                            elif ToolUseBlock and isinstance(block, ToolUseBlock):
+                                _last_block_name = block.name
+                                _last_block_inputs = block.input or {}
+                                agent_log_lines.append(f"● {block.name}  {_tool_use_summary(block)}")
+                                event = _build_agent_tool_event(block)
+                                if event:
+                                    emit("agent_tool", **event)
+                            # Note: ToolResultBlock handling moved to top of block loop
 
                 # Persist agent log
                 try:
@@ -2016,18 +2158,11 @@ async def run_task_with_qa(
 
                 coding_elapsed = round(time.monotonic() - coding_start, 1)
                 phase_timings["coding"] = phase_timings.get("coding", 0) + coding_elapsed
-                # Get diff stat for display — try committed changes first, fall back to working tree
-                diff_detail = ""
-                for diff_cmd in (
-                    ["git", "diff", "--shortstat", base_sha, "HEAD"],  # committed changes
-                    ["git", "diff", "--shortstat", base_sha],           # uncommitted changes
-                ):
-                    r = subprocess.run(diff_cmd, cwd=project_dir, capture_output=True, text=True)
-                    if r.returncode == 0 and r.stdout.strip():
-                        diff_detail = r.stdout.strip()
-                        break
+                # No git diff stat here — it's unreliable during coding
+                # (agent may or may not have committed). The display tracks
+                # file/line counts from Write/Edit events instead.
                 emit("phase", name="coding", status="done", time_s=coding_elapsed,
-                     cost=attempt_cost, attempt=attempt_num, detail=diff_detail)
+                     cost=attempt_cost, attempt=attempt_num)
 
                 if result_msg and result_msg.is_error:
                     raise RuntimeError(f"Agent error: {result_msg.result or 'unknown'}")
@@ -2296,9 +2431,8 @@ def _print_summary(
 
     cost_str = f"  {_format_cost(total_cost)}" if total_cost > 0 else ""
     console.print()
-    console.print("\u2501" * 60, style="bold")
-    console.print(f"[bold]  Run complete[/bold]  [dim]{_format_duration(total_duration)}{cost_str}[/dim]")
-    console.print("\u2501" * 60, style="bold")
+    console.print(f"  [bold]Run complete[/bold]  [dim]{_format_duration(total_duration)}{cost_str}[/dim]")
+    console.print()
 
     for task, success in results:
         icon = "[green]\u2713[/green]" if success else "[red]\u2717[/red]"
@@ -2330,7 +2464,7 @@ def _print_summary(
                         if pname and ptime:
                             phase_times[pname] = phase_times.get(pname, 0) + float(ptime)
             for pname in ["prepare", "coding", "test", "qa", "merge"]:
-                if pname in phase_times:
+                if pname in phase_times and phase_times[pname] >= 1:
                     phase_parts.append(f"{_format_duration(phase_times[pname])} {pname}")
 
         # Build the main status line

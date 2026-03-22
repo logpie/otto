@@ -45,6 +45,40 @@ class TestAdd:
         assert tasks[0]["verify"] == "python bench.py"
 
     @patch("otto.cli.generate_spec")
+    def test_filters_generated_spec_preamble_before_display_and_storage(self, mock_gen, runner, tmp_git_repo, monkeypatch):
+        monkeypatch.chdir(tmp_git_repo)
+        mock_gen.return_value = [
+            "Acceptance Spec: Dew Point Indicator Panel",
+            "Existing card style: bg-white/15 backdrop-blur-lg rounded-2xl border border-white/20",
+            "Temperature always arrives in Celsius from API; convertTemp/formatTemp in src/lib/units.ts",
+            "current.temperature and current.humidity are available on WeatherData",
+            "Tests live in __tests__/ using Jest + @testing-library/react",
+            "---",
+            "Dew point temperature is calculated from current.temperature and current.humidity.",
+            "The panel displays exactly one of four comfort level labels.",
+            "The dew point temperature is displayed respecting the user's temperature unit preference.",
+            "The panel is rendered in the WeatherApp layout alongside existing panels.",
+            {"text": "The panel matches the existing card style used elsewhere in the UI.", "verifiable": False},
+            "Tests cover: dew point calculation, comfort classification, and rendering.",
+            "The dew point calculation and comfort classification logic are in a separate utility module.",
+        ]
+
+        result = runner.invoke(main, ["add", "Add a dew point indicator panel"])
+
+        assert result.exit_code == 0
+        assert "Spec (7 criteria — 6 verifiable, 1 visual)" in result.output
+        assert "Acceptance Spec: Dew Point Indicator Panel" not in result.output
+        assert "Existing card style:" not in result.output
+        assert "Tests live in __tests__/" not in result.output
+        assert "Tests cover:" in result.output
+
+        tasks = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())["tasks"]
+        assert len(tasks[0]["spec"]) == 7
+        stored_texts = [item["text"] if isinstance(item, dict) else item for item in tasks[0]["spec"]]
+        assert "Acceptance Spec: Dew Point Indicator Panel" not in stored_texts
+        assert any(text.startswith("Tests cover:") for text in stored_texts)
+
+    @patch("otto.cli.generate_spec")
     def test_imports_from_file(self, mock_gen, runner, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
         mock_gen.return_value = []

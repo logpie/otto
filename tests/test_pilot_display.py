@@ -15,6 +15,7 @@ import pytest
 from rich.console import Console
 
 from otto.pilot import (
+    _process_progress_event,
     _print_pilot_tool_call,
     _print_pilot_tool_result,
 )
@@ -58,19 +59,26 @@ def capture_output(func, *args, **kwargs) -> str:
     """
     import otto.display as display_mod
     import otto.pilot as pilot_mod
+    import otto.theme as theme_mod
 
     buf = io.StringIO()
     test_console = Console(file=buf, highlight=False, color_system=None)
 
-    old_display_console = display_mod.console
-    old_pilot_console = pilot_mod.console
+    # Swap console everywhere it's imported as a name binding
+    old_theme = theme_mod.console
+    old_display = display_mod.console
+    old_pilot = getattr(pilot_mod, 'console', None)
+    theme_mod.console = test_console
     display_mod.console = test_console
-    pilot_mod.console = test_console
+    if old_pilot is not None:
+        pilot_mod.console = test_console
     try:
         func(*args, **kwargs)
     finally:
-        display_mod.console = old_display_console
-        pilot_mod.console = old_pilot_console
+        theme_mod.console = old_theme
+        display_mod.console = old_display
+        if old_pilot is not None:
+            pilot_mod.console = old_pilot
     return buf.getvalue()
 
 
@@ -81,13 +89,13 @@ def capture_output(func, *args, **kwargs) -> str:
 class TestPilotToolCallDisplay:
     """Test _print_pilot_tool_call with various tool types."""
 
-    def test_primary_tool_shows_bold_with_separator(self):
+    def test_primary_tool_shows_bold_no_separator(self):
         block = FakeToolUseBlock(name="mcp__otto-pilot__run_task_with_qa",
                                   input={"task_key": "abc123def456"})
         output = capture_output(_print_pilot_tool_call, block)
-        assert "Running task" in output
+        assert "Running" in output
         assert "abc123de" in output  # truncated key
-        assert "\u2500" in output  # separator (─)
+        assert "\u2500" not in output  # no separator
 
     def test_primary_tool_with_hint(self):
         block = FakeToolUseBlock(name="mcp__otto-pilot__run_task_with_qa",
@@ -107,12 +115,11 @@ class TestPilotToolCallDisplay:
         output = capture_output(_print_pilot_tool_call, block)
         assert output.strip() == ""
 
-    def test_secondary_tool_dimmed(self):
+    def test_get_run_state_suppressed(self):
+        """get_run_state is noise — should be completely suppressed."""
         block = FakeToolUseBlock(name="mcp__otto-pilot__get_run_state", input={})
         output = capture_output(_print_pilot_tool_call, block)
-        assert "Loading task state" in output
-        # Should NOT have separator line
-        assert "\u2500" * 50 not in output
+        assert output.strip() == ""
 
     def test_unknown_tool_shows_name(self):
         block = FakeToolUseBlock(name="mcp__otto-pilot__some_new_tool", input={})
@@ -308,11 +315,23 @@ class TestTaskDisplay:
         output = buf.getvalue()
         assert "alerts.ts" in output
         assert "WeatherApp.tsx" in output
-        assert "+" in output  # Write icon
-        assert "~" in output  # Edit icon
+        assert "Write" in output
+        assert "Edit" in output
         # Files tracked for coding summary
-        assert "alerts.ts" in td._coding_files
-        assert "WeatherApp.tsx" in td._coding_files
+        assert "src/alerts.ts" in td._coding_files
+        assert "src/WeatherApp.tsx" in td._coding_files
+
+    def test_tool_dedup_uses_shortened_relative_path(self):
+        buf = io.StringIO()
+        test_console = Console(file=buf, highlight=False, color_system=None)
+        td = TaskDisplay(test_console)
+        td._current_phase = "coding"
+        td.add_tool(name="Write", detail="/tmp/project/src/app.py")
+        td.add_tool(name="Write", detail="/tmp/project/tests/app.py")
+        output = buf.getvalue()
+        assert "src/app.py" in output
+        assert "tests/app.py" in output
+        assert td._coding_files == ["src/app.py", "tests/app.py"]
 
     def test_qa_findings_print_permanently(self):
         buf = io.StringIO()
@@ -332,6 +351,65 @@ class TestTaskDisplay:
         assert td._qa_spec_count == 2
         assert td._qa_pass_count == 2
 
+    def test_qa_summary_is_authoritative(self):
+        buf = io.StringIO()
+        test_console = Console(file=buf, highlight=False, color_system=None)
+        td = TaskDisplay(test_console)
+        td.update_phase("qa", "running")
+        td.add_finding("**PASS** \u2014 URL verified")
+        td.set_qa_summary(total=3, passed=2, failed=1)
+        td.update_phase("qa", "done", time_s=3.0)
+        output = buf.getvalue()
+        assert "2/3 specs passed" in output
+        assert td._qa_spec_count == 3
+        assert td._qa_pass_count == 2
+
+    def test_qa_tools_use_semantic_labels_instead_of_raw_commands(self):
+        buf = io.StringIO()
+        test_console = Console(file=buf, highlight=False, color_system=None)
+        td = TaskDisplay(test_console)
+        td.update_phase("qa", "running")
+        td.add_tool(name="Read", detail="/tmp/project/src/WindCompass.tsx")
+        td.add_tool(name="Bash", detail="npx tsc --noEmit 2>&1 | head -40")
+        td.add_tool(name="Bash", detail="node -e \"// Test the rotation math...\"")
+        td.add_tool(name="Bash", detail="npx jest --testPathPattern=windCompass --no-coverage")
+        td.add_tool(name="Bash", detail="npm run build")
+        output = buf.getvalue()
+        assert "Analyzing code..." in output
+        assert "Checking types..." in output
+        assert "Testing edge cases..." in output
+        assert "Running tests..." in output
+        assert "Checking build..." in output
+        assert "WindCompass.tsx" not in output
+        assert "npx tsc" not in output
+        assert "node -e" not in output
+        assert "jest" not in output
+
+    def test_qa_semantic_labels_deduplicate_consecutive_tool_calls(self):
+        buf = io.StringIO()
+        test_console = Console(file=buf, highlight=False, color_system=None)
+        td = TaskDisplay(test_console)
+        td.update_phase("qa", "running")
+        td.add_tool(name="Read", detail="/tmp/project/src/WindCompass.tsx")
+        td.add_tool(name="Read", detail="/tmp/project/tests/windCompass.test.tsx")
+        td.add_tool(name="Bash", detail="pytest tests/test_api.py -q")
+        td.add_tool(name="Bash", detail="npx jest --testPathPattern=windCompass --no-coverage")
+        output = buf.getvalue()
+        assert output.count("Analyzing code...") == 1
+        assert output.count("Running tests...") == 1
+
+    def test_qa_semantic_labels_reset_when_phase_restarts(self):
+        buf = io.StringIO()
+        test_console = Console(file=buf, highlight=False, color_system=None)
+        td = TaskDisplay(test_console)
+        td.update_phase("qa", "running")
+        td.add_tool(name="Read", detail="/tmp/project/src/WindCompass.tsx")
+        td.update_phase("qa", "done", time_s=1.0)
+        td.update_phase("qa", "running")
+        td.add_tool(name="Read", detail="/tmp/project/src/WindCompass.tsx")
+        output = buf.getvalue()
+        assert output.count("Analyzing code...") == 2
+
     def test_internal_files_excluded_from_coding(self):
         buf = io.StringIO()
         test_console = Console(file=buf, highlight=False, color_system=None)
@@ -339,5 +417,29 @@ class TestTaskDisplay:
         td._current_phase = "coding"
         td.add_tool(name="Write", detail="/tmp/p/src/api.ts")
         td.add_tool(name="Write", detail="/tmp/p/otto_arch/task-notes/abc123.md")
-        assert "api.ts" in td._coding_files
+        assert "src/api.ts" in td._coding_files
         assert len(td._coding_files) == 1  # task-notes excluded
+
+    def test_process_progress_event_routes_qa_summary(self):
+        import otto.pilot as pilot_mod
+
+        buf = io.StringIO()
+        test_console = Console(file=buf, highlight=False, color_system=None)
+        td = TaskDisplay(test_console)
+        old_display = pilot_mod._active_display
+        old_task_key = pilot_mod._active_task_key
+        try:
+            pilot_mod._active_display = td
+            pilot_mod._active_task_key = "abc123"
+            _process_progress_event({
+                "event": "qa_summary",
+                "task_key": "abc123",
+                "total": 4,
+                "passed": 3,
+                "failed": 1,
+            })
+            assert td._qa_spec_count == 4
+            assert td._qa_pass_count == 3
+        finally:
+            pilot_mod._active_display = old_display
+            pilot_mod._active_task_key = old_task_key
