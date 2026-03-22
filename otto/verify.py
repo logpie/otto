@@ -39,35 +39,62 @@ def _subprocess_env() -> dict:
 def _install_deps(worktree_path: Path, timeout: int) -> None:
     """Auto-detect and install project dependencies in the verify worktree.
 
-    Checks for common dependency manifests and runs the appropriate installer.
+    Creates an isolated venv inside the worktree for Python projects to prevent
+    contaminating otto's own venv (e.g., a test project named 'python-dotenv'
+    would overwrite otto's dependency if installed into otto's venv).
+
     Best-effort — failures are logged but don't block verification.
     """
     env = _subprocess_env()
 
-    # Python: requirements.txt
-    if (worktree_path / "requirements.txt").exists():
+    # Python: create an isolated venv in the worktree for project deps.
+    # This prevents `pip install -e .` from contaminating otto's venv.
+    has_python_project = (
+        (worktree_path / "requirements.txt").exists()
+        or (worktree_path / "pyproject.toml").exists()
+        or (worktree_path / "setup.py").exists()
+    )
+    if has_python_project:
+        venv_path = worktree_path / ".venv"
+        if not venv_path.exists():
+            subprocess.run(
+                [sys.executable, "-m", "venv", str(venv_path)],
+                cwd=worktree_path, capture_output=True, timeout=timeout,
+            )
+        venv_python = str(venv_path / "bin" / "python")
+
+        # Install project deps into the isolated venv
+        if (worktree_path / "requirements.txt").exists():
+            subprocess.run(
+                [venv_python, "-m", "pip", "install", "-q",
+                 "-r", str(worktree_path / "requirements.txt")],
+                cwd=worktree_path, capture_output=True, timeout=timeout,
+                env=env,
+            )
+
+        if (worktree_path / "pyproject.toml").exists():
+            subprocess.run(
+                [venv_python, "-m", "pip", "install", "-q", "-e", "."],
+                cwd=worktree_path, capture_output=True, timeout=timeout,
+                env=env,
+            )
+        elif (worktree_path / "setup.py").exists():
+            subprocess.run(
+                [venv_python, "-m", "pip", "install", "-q", "-e", "."],
+                cwd=worktree_path, capture_output=True, timeout=timeout,
+                env=env,
+            )
+
+        # Also install pytest into the project venv
         subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-q",
-             "-r", str(worktree_path / "requirements.txt")],
+            [venv_python, "-m", "pip", "install", "-q", "pytest"],
             cwd=worktree_path, capture_output=True, timeout=timeout,
             env=env,
         )
 
-    # Python: pyproject.toml with [project] or [build-system]
-    if (worktree_path / "pyproject.toml").exists():
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-q", "-e", "."],
-            cwd=worktree_path, capture_output=True, timeout=timeout,
-            env=env,
-        )
-
-    # Python: setup.py
-    if (worktree_path / "setup.py").exists() and not (worktree_path / "pyproject.toml").exists():
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install", "-q", "-e", "."],
-            cwd=worktree_path, capture_output=True, timeout=timeout,
-            env=env,
-        )
+        # Update PATH so the worktree's venv Python is used for test execution
+        venv_bin = str(venv_path / "bin")
+        env["PATH"] = venv_bin + os.pathsep + env.get("PATH", "")
 
     # Node.js: package.json with node_modules missing
     if (worktree_path / "package.json").exists() and not (worktree_path / "node_modules").exists():
