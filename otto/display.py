@@ -177,15 +177,12 @@ class TaskDisplay:
             if cost:
                 self._current_cost = cost
 
-        # Phase headers: only show for significant phases, skip trivial ones
-        if status == "running":
-            # Don't print headers for prepare/merge — they're instant and noise
-            if name in ("prepare", "merge"):
-                return
-            retry = f"  [dim](retry {attempt})[/dim]" if attempt and attempt > 1 else ""
-            # Visual separation — blank line before phase header
+        # No separate phase header — the live footer shows the active phase
+        # with a spinner + elapsed time. When done, the completion line prints
+        # permanently. Retries get a note in the completion line.
+        if status == "running" and name not in ("prepare", "merge"):
+            # Blank line for visual separation before a new phase's tool calls
             self._console.print()
-            self._console.print(f"  [bold]{name}[/bold]{retry}")
 
     def add_tool(self, line: str = "", name: str = "", detail: str = "",
                  data: dict | None = None) -> None:
