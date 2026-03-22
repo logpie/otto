@@ -404,13 +404,24 @@ def add(prompt, verify, max_retries, import_file, no_spec):
             label = f"{verifiable_count} verifiable"
             if visual_count:
                 label += f", {visual_count} visual"
-            console.print(f"[success]✓[/success] Spec ([bold]{len(spec_items)}[/bold] criteria \u2014 {label}):")
+            console.print(f"[success]✓[/success] Spec ([bold]{len(spec_items)}[/bold] criteria \u2014 {label})")
+            console.print()
+            from rich.table import Table
+            spec_table = Table(box=None, show_header=True, pad_edge=False,
+                               show_edge=False, expand=False, padding=(0, 1))
+            spec_table.add_column("#", style="dim", width=3, justify="right")
+            spec_table.add_column("", width=2)  # icon
+            spec_table.add_column("Criterion", ratio=1, no_wrap=False)
             for idx, item in enumerate(spec_items, 1):
-                text = rich_escape(spec_text(item))
+                text = spec_text(item)
+                # Truncate to ~80 chars for the table
+                short = text[:80] + "..." if len(text) > 80 else text
                 if spec_is_verifiable(item):
-                    console.print(f"  [dim]{idx}.[/dim] [dim]\u25b8[/dim] {text}")
+                    spec_table.add_row(str(idx), "\u25b8", rich_escape(short))
                 else:
-                    console.print(f"  [dim]{idx}.[/dim] [info]\u25c9[/info] {text}")
+                    spec_table.add_row(str(idx), "[info]\u25c9[/info]", rich_escape(short))
+            console.print(spec_table)
+            console.print()
         else:
             error_console.print(f"[warning]⚠[/warning] Spec generation returned empty \u2014 task not created.")
             error_console.print(f"[dim]Retry or use --no-spec to skip spec generation.[/dim]")
