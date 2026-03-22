@@ -57,7 +57,7 @@ b = json.load(open('$file_b'))
 print(f'  {\"Metric\":<30} {\"A\":>10} {\"B\":>10} {\"Delta\":>10}')
 print(f'  {\"─\"*30} {\"─\"*10} {\"─\"*10} {\"─\"*10}')
 
-for key in ['otto_pass_rate', 'verify_pass_rate', 'false_pass_rate', 'avg_cost', 'avg_time_s', 'total_cost']:
+for key in ['runner_pass_rate', 'verify_pass_rate', 'false_pass_rate', 'avg_cost', 'avg_time_s', 'total_cost']:
     va = a.get('summary', {}).get(key, 0)
     vb = b.get('summary', {}).get(key, 0)
     delta = vb - va
@@ -76,7 +76,7 @@ all_projects = sorted(set(list(a.get('projects', {}).keys()) + list(b.get('proje
 for p in all_projects:
     pa = a.get('projects', {}).get(p, {})
     pb = b.get('projects', {}).get(p, {})
-    print(f'  {p:<35} {pa.get(\"otto_pass\", \"—\"):>8} {pb.get(\"otto_pass\", \"—\"):>8} {pa.get(\"verify_pass\", \"—\"):>8} {pb.get(\"verify_pass\", \"—\"):>8}')
+    print(f'  {p:<35} {pa.get(\"runner_pass\", \"—\"):>8} {pb.get(\"runner_pass\", \"—\"):>8} {pa.get(\"verify_pass\", \"—\"):>8} {pb.get(\"verify_pass\", \"—\"):>8}')
 "
     exit 0
 fi
@@ -203,7 +203,7 @@ for proj in "${PROJECT_NAMES[@]}"; do
 
     if [[ $setup_ok -eq 0 ]]; then
         echo "  SETUP FAIL"
-        echo '{"otto_pass":"SETUP_FAIL","verify_pass":"SKIP","cost":0,"time_s":0}' > "$proj_results/result.json"
+        echo '{"runner_pass":"SETUP_FAIL","verify_pass":"SKIP","cost":0,"time_s":0}' > "$proj_results/result.json"
         continue
     fi
 
@@ -217,7 +217,7 @@ for proj in "${PROJECT_NAMES[@]}"; do
     RUN_TIME=$((RUN_END - RUN_START))
 
     # Parse otto results (if available)
-    otto_pass="UNKNOWN"
+    runner_pass="UNKNOWN"
     cost="0.00"
     attempts=0
     if [[ -f "$WORK_DIR/tasks.yaml" ]]; then
@@ -229,11 +229,11 @@ for proj in "${PROJECT_NAMES[@]}"; do
             | awk '{s += $1} END {printf "%.2f", s}' 2>/dev/null || echo "0.00")
         attempts=$(grep 'attempts:' "$WORK_DIR/tasks.yaml" 2>/dev/null \
             | awk '{s += $2} END {print s}' 2>/dev/null || echo 0)
-        [[ "$passed" -eq "$task_count" && "$task_count" -gt 0 ]] && otto_pass="PASS" || otto_pass="FAIL"
+        [[ "$passed" -eq "$task_count" && "$task_count" -gt 0 ]] && runner_pass="PASS" || runner_pass="FAIL"
     elif [[ "$RUNNER" == "bare-cc" ]]; then
-        # Bare CC doesn't produce tasks.yaml — check if files were created
-        file_count=$(find "$WORK_DIR" -name "*.py" -o -name "*.js" -o -name "*.ts" | grep -v node_modules | grep -v ".git" | wc -l | tr -d ' ')
-        [[ "$file_count" -gt 2 ]] && otto_pass="DONE" || otto_pass="FAIL"
+        # Bare CC doesn't produce tasks.yaml — rely on verify.sh for pass/fail.
+        # Mark as DONE (ran to completion) — verify determines actual correctness.
+        runner_pass="DONE"
     fi
 
     # Independent verification
@@ -250,7 +250,7 @@ for proj in "${PROJECT_NAMES[@]}"; do
     # Write result
     cat > "$proj_results/result.json" << ENDJSON
 {
-    "otto_pass": "$otto_pass",
+    "runner_pass": "$runner_pass",
     "verify_pass": "$verify_pass",
     "cost": $cost,
     "time_s": $RUN_TIME,
@@ -259,7 +259,12 @@ for proj in "${PROJECT_NAMES[@]}"; do
 }
 ENDJSON
 
-    echo "  Otto: $otto_pass | Verify: $verify_pass | ${RUN_TIME}s | \$$cost"
+    # Label based on runner
+    runner_label="otto"
+    [[ "$RUNNER" == "bare-cc" ]] && runner_label="bare-cc"
+    cost_display="\$$cost"
+    [[ "$RUNNER" == "bare-cc" ]] && cost_display="n/a"
+    echo "  $runner_label: $runner_pass | Verify: $verify_pass | ${RUN_TIME}s | $cost_display"
     echo ""
 
     # Cleanup workdir
@@ -267,12 +272,12 @@ ENDJSON
 done
 
 # ─── Generate summary ──────────────────────────────────────
-RESULTS_DIR="$RESULTS_DIR" python3 << 'PYEOF'
+RESULTS_DIR="$RESULTS_DIR" RUNNER="$RUNNER" python3 << 'PYEOF'
 import json, os, sys
 
 results_dir = os.environ.get("RESULTS_DIR", ".")
 projects = {}
-total = otto_passes = verify_passes = false_passes = 0
+total = runner_passes = verify_passes = false_passes = 0
 total_cost = 0.0
 total_time = 0
 
@@ -284,18 +289,18 @@ for proj in sorted(os.listdir(results_dir)):
         r = json.load(f)
     projects[proj] = r
     total += 1
-    if r["otto_pass"] in ("PASS", "DONE"):
-        otto_passes += 1
+    if r["runner_pass"] in ("PASS", "DONE"):
+        runner_passes += 1
     if r["verify_pass"] == "PASS":
         verify_passes += 1
-    if r["otto_pass"] in ("PASS", "DONE") and r["verify_pass"] == "FAIL":
+    if r["runner_pass"] in ("PASS", "DONE") and r["verify_pass"] == "FAIL":
         false_passes += 1
     total_cost += r.get("cost", 0)
     total_time += r.get("time_s", 0)
 
 summary = {
     "total_projects": total,
-    "otto_pass_rate": round(otto_passes / total * 100, 1) if total else 0,
+    "runner_pass_rate": round(runner_passes / total * 100, 1) if total else 0,
     "verify_pass_rate": round(verify_passes / total * 100, 1) if total else 0,
     "false_pass_rate": round(false_passes / total * 100, 1) if total else 0,
     "total_cost": round(total_cost, 2),
@@ -313,7 +318,9 @@ print("============================================")
 print("  BENCHMARK RESULTS")
 print("============================================")
 print(f"  Projects:        {total}")
-print(f"  Otto pass rate:  {summary['otto_pass_rate']}%")
+runner_name = os.environ.get("RUNNER", "otto")
+print(f"  Runner:          {runner_name}")
+print(f"  Runner pass rate: {summary['runner_pass_rate']}%")
 print(f"  Verify pass rate: {summary['verify_pass_rate']}%")
 print(f"  False pass rate: {summary['false_pass_rate']}%")
 print(f"  Total cost:      ${summary['total_cost']}")
