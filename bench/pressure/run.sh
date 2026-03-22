@@ -81,7 +81,8 @@ echo ""
 
 # Per-project results
 META_DIR="$(mktemp -d)"
-trap 'rm -rf "$META_DIR"' EXIT
+_ACTIVE_WORKDIR=""
+trap 'rm -rf "$META_DIR" "$_ACTIVE_WORKDIR" 2>/dev/null' EXIT INT TERM
 
 IDX=0
 for proj in "${PROJECT_NAMES[@]}"; do
@@ -90,6 +91,7 @@ for proj in "${PROJECT_NAMES[@]}"; do
     proj_results="$RUN_DIR/$proj"
     mkdir -p "$proj_results"
     WORK_DIR="/tmp/pt-$proj"
+    _ACTIVE_WORKDIR="$WORK_DIR"
 
     echo "────────────────────────────────────────────"
     echo "  [$IDX/$TOTAL] $proj"
