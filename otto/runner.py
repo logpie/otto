@@ -1818,23 +1818,39 @@ async def run_task_with_qa(
             detected = detect_test_command(project_dir)
             test_command = detected if detected else "pytest"
 
-        # Baseline test check — verify existing tests pass BEFORE coding.
-        # If existing tests fail on unmodified code, the project's test
-        # infrastructure is broken. Retrying won't help — abort immediately.
+        # Baseline test check — verify test infrastructure works BEFORE coding.
+        # Only blocks on infrastructure failures (missing modules, broken config).
+        # Normal test failures are allowed (bugfix projects, greenfield with no tests).
         if test_command:
             from otto.verify import run_tier1
             baseline = run_tier1(project_dir, test_command, timeout)
             if not baseline.passed and not baseline.skipped:
-                prep_elapsed = round(time.monotonic() - prep_start, 1)
-                phase_timings["prepare"] = prep_elapsed
-                emit("phase", name="prepare", status="fail", time_s=prep_elapsed,
-                     error="baseline tests fail before coding")
-                err_detail = baseline.output[-500:] if baseline.output else "unknown"
-                return _result(
-                    False, "failed",
-                    error=f"BASELINE_FAIL: existing tests fail on unmodified code. "
-                          f"This is a project setup issue, not a coding issue.\n{err_detail}",
-                )
+                output = baseline.output or ""
+                # Detect infrastructure failures vs normal test failures.
+                # Infra failures: the test runner itself can't start or find tests.
+                infra_keywords = [
+                    "Cannot find module",  # missing JS dependency/config
+                    "ModuleNotFoundError",  # missing Python module
+                    "command not found",  # test runner not installed
+                    "No module named",  # Python import failure
+                    "SyntaxError",  # broken source code
+                    "error: unrecognized arguments",  # bad pytest config
+                    "errors during collection",  # pytest can't collect tests
+                ]
+                is_infra_failure = any(kw in output for kw in infra_keywords)
+                if is_infra_failure:
+                    prep_elapsed = round(time.monotonic() - prep_start, 1)
+                    phase_timings["prepare"] = prep_elapsed
+                    emit("phase", name="prepare", status="fail", time_s=prep_elapsed,
+                         error="baseline tests fail before coding — infrastructure issue")
+                    err_detail = output[-500:]
+                    return _result(
+                        False, "failed",
+                        error=f"BASELINE_FAIL: test infrastructure is broken on unmodified code. "
+                              f"This is a setup issue, not a coding issue.\n{err_detail}",
+                    )
+                # Normal test failures (bugfix project, some tests fail) — proceed.
+                # The coding agent will fix them.
 
         prep_elapsed = round(time.monotonic() - prep_start, 1)
         phase_timings["prepare"] = prep_elapsed
