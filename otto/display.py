@@ -122,6 +122,8 @@ class TaskDisplay:
         self._qa_spec_count: int = 0
         self._qa_pass_count: int = 0
         self._coding_files: list[str] = []
+        self._lines_added: int = 0
+        self._lines_removed: int = 0
         self._last_tool_key: str = ""
         self._last_tool_type: str = ""
         self._read_count: int = 0
@@ -165,6 +167,8 @@ class TaskDisplay:
                     self._qa_pass_count = 0
                 if name == "coding":
                     self._coding_files.clear()
+                    self._lines_added = 0
+                    self._lines_removed = 0
 
             elif status == "done":
                 self._print_phase_done(name, time_s, detail, cost)
@@ -225,6 +229,13 @@ class TaskDisplay:
             if self._current_phase == "coding" and name in ("Write", "Edit"):
                 if fname and fname not in self._coding_files:
                     self._coding_files.append(fname)
+                # Track line counts from event data
+                if data:
+                    if name == "Write":
+                        self._lines_added += data.get("total_lines", 0)
+                    elif name == "Edit":
+                        self._lines_added += data.get("new_total", 0)
+                        self._lines_removed += data.get("old_total", 0)
             if tool_key == self._last_tool_key:
                 return
             self._last_tool_key = tool_key
@@ -394,9 +405,15 @@ class TaskDisplay:
 
         if name == "coding":
             if self._coding_files:
-                parts.append(f"{len(self._coding_files)} files")
-            elif detail:
-                parts.append(detail[:42])
+                line_info = ""
+                if self._lines_added or self._lines_removed:
+                    line_parts = []
+                    if self._lines_added:
+                        line_parts.append(f"+{self._lines_added}")
+                    if self._lines_removed:
+                        line_parts.append(f"-{self._lines_removed}")
+                    line_info = f", {'/'.join(line_parts)} lines"
+                parts.append(f"{len(self._coding_files)} files{line_info}")
         elif name == "test" and detail:
             m = re.search(r'(\d+) passed', detail)
             parts.append(m.group(0) if m else detail[:35])
