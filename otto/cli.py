@@ -379,8 +379,19 @@ def add(prompt, verify, max_retries, import_file, no_spec):
         console.print(f"  [warning]The coding agent's output will be merged with zero quality checks.[/warning]")
     if not no_spec:
         try:
+            import threading
+            _spec_start = time.time()
+            _spec_done = False
+            def _update_timer(status):
+                while not _spec_done:
+                    elapsed = int(time.time() - _spec_start)
+                    status.update(f"[dim]Generating spec... {elapsed}s[/dim]")
+                    time.sleep(1)
             with console.status("[dim]Generating spec...[/dim]", spinner="dots") as status:
+                timer_thread = threading.Thread(target=_update_timer, args=(status,), daemon=True)
+                timer_thread.start()
                 spec_items = generate_spec(prompt, Path.cwd())
+                _spec_done = True
         except Exception as e:
             error_console.print(f"[error]✗[/error] Spec generation failed: {rich_escape(str(e))}")
             error_console.print(f"[dim]Task not created. Fix the issue or use --no-spec.[/dim]")
