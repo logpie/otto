@@ -1,15 +1,18 @@
 """Otto display system — Rich-based terminal output.
 
-Provides thread-safe display components using Rich Live for real-time
-progress updates. Replaces all raw ANSI escape codes and manual
-stdout management.
+Permanent scrolling log with live status footer. Events (tool calls, QA
+findings, phase completions) print permanently via console.print() and are
+visible in scrollback / captured by tee. A minimal Rich Live footer shows
+the current phase timer, pinned at the bottom of the terminal.
 
-Also re-exports utility functions used by other otto modules.
+When console.print() is called during a Rich Live session, Rich renders it
+ABOVE the live area — scrolling log above, status footer below.
 """
 
 import re
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 from rich.console import Console, Group
@@ -60,11 +63,7 @@ def _extract_tool_detail(name: str, inputs: dict) -> str:
 
 
 def print_agent_tool(block, quiet: bool = False) -> str:
-    """Print an agent tool use block with Rich styling and return a log line.
-
-    Accepts any object with .name and .input attributes (ToolUseBlock or similar).
-    When quiet=True, skips printing but still returns the log line.
-    """
+    """Print an agent tool use block with Rich styling and return a log line."""
     name = block.name
     inputs = block.input or {}
 
@@ -83,69 +82,63 @@ def print_agent_tool(block, quiet: bool = False) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Phase progress display — Rich Live-based
+# Phase progress display — permanent log + live footer
 # ---------------------------------------------------------------------------
 
 PHASE_ORDER = ["prepare", "coding", "test", "qa", "merge"]
 
-# Phase status -> (icon, style)
-_PHASE_STYLES: dict[str, tuple[str, str]] = {
-    "done":    ("\u2713", "green"),
-    "fail":    ("\u2717", "red"),
-    "running": ("\u25cf", "cyan"),
-    "pending": (" ", "dim"),
+_PHASE_ICONS = {
+    "done": ("\u2713", "green"),
+    "fail": ("\u2717", "red"),
 }
+
+# Internal files to exclude from coding file summaries
+_INTERNAL_PATTERNS = {"otto_arch/", "task-notes/", ".md"}
 
 
 class TaskDisplay:
-    """Thread-safe task progress display using Rich Live.
+    """Task progress display: permanent scrolling log + live status footer.
 
-    All state updates go through update_phase() / add_tool() which
-    acquire _lock, then call _live.update() which Rich handles
-    thread-safely.
+    Phase completions, tool calls, and QA findings print permanently via
+    console.print(). A minimal Rich Live footer shows the current phase
+    timer pinned at the bottom. Rich renders console.print() output above
+    the live area automatically.
 
-    The display overwrites itself in-place — no line-by-line accumulation,
-    no ANSI escape management.
+    All methods are thread-safe (called from the background JSONL reader).
     """
 
-    def __init__(self, console: Console | None = None):
-        self._console = console or globals()["console"]
+    def __init__(self, console_: Console | None = None):
+        self._console = console_ or console
         self._lock = threading.Lock()
         self._live: Live | None = None
         self._start_time: float = 0.0
+        self._phase_start: float = 0.0
 
-        # State (all protected by _lock)
-        self._phases: dict[str, dict[str, Any]] = {
-            p: {"status": "pending", "time_s": 0.0}
-            for p in PHASE_ORDER
-        }
-        self._tools: list[str] = []  # recent tool/finding lines
-        self._phase_tools: dict[str, list[str]] = {}  # phase -> all tool lines (for final render)
+        # State (protected by _lock)
         self._current_phase: str | None = None
-        self._max_tools = 8  # show last N tool lines
+        self._current_cost: float = 0.0
+        self._qa_spec_count: int = 0
+        self._qa_pass_count: int = 0
+        self._coding_files: list[str] = []  # unique files written/edited
 
     def start(self) -> None:
-        """Start the live display."""
+        """Start the live status footer."""
         self._start_time = time.monotonic()
+        self._phase_start = self._start_time
         self._live = Live(
-            self._render(),
+            self._render_footer(),
             console=self._console,
             refresh_per_second=2,
-            transient=True,  # clear live display when stopped
-            get_renderable=self._render,  # Rich calls this on each refresh cycle
+            transient=True,
+            get_renderable=self._render_footer,
         )
         self._live.start()
 
     def stop(self) -> str:
-        """Stop the live display and print final static state. Returns elapsed time string."""
+        """Stop the live footer. Returns elapsed time string."""
         if self._live:
             self._live.stop()
             self._live = None
-
-        # Print final static renderable (non-transient)
-        final = self._render_final()
-        if final:
-            self._console.print(final)
 
         elapsed = time.monotonic() - self._start_time
         mins = int(elapsed // 60)
@@ -154,195 +147,142 @@ class TaskDisplay:
 
     def update_phase(self, name: str, status: str, time_s: float = 0.0,
                      error: str = "", detail: str = "", **kwargs) -> None:
-        """Update a phase's state. Thread-safe."""
+        """Update phase state. Prints permanent lines for transitions."""
         with self._lock:
-            if name in self._phases:
-                if status == "running":
-                    # Reset all fields when entering running to prevent stale
-                    # data from a previous attempt leaking into the display
-                    self._phases[name] = {"status": "running", "time_s": 0.0}
-                    self._current_phase = name
-                    self._tools.clear()
-                else:
-                    self._phases[name]["status"] = status
-                    # Always assign values (not truthiness-gated) so zeros
-                    # and empty strings properly clear previous values
-                    self._phases[name]["time_s"] = time_s
-                    if error:
-                        self._phases[name]["error"] = error
-                    elif "error" in self._phases[name]:
-                        del self._phases[name]["error"]
-                    if detail:
-                        self._phases[name]["detail"] = detail
-                    elif "detail" in self._phases[name]:
-                        del self._phases[name]["detail"]
-                    cost = kwargs.get("cost", 0)
-                    if cost:
-                        self._phases[name]["cost"] = cost
-                    elif "cost" in self._phases[name]:
-                        del self._phases[name]["cost"]
-        self._refresh()
+            cost = kwargs.get("cost", 0)
+
+            if status == "running":
+                self._current_phase = name
+                self._phase_start = time.monotonic()
+                self._current_cost = 0.0
+                if name == "qa":
+                    self._qa_spec_count = 0
+                    self._qa_pass_count = 0
+                if name == "coding":
+                    self._coding_files.clear()
+
+            elif status == "done":
+                self._print_phase_done(name, time_s, detail, cost)
+                if name == self._current_phase:
+                    self._current_phase = None
+
+            elif status == "fail":
+                self._print_phase_fail(name, time_s, error, cost)
+                if name == self._current_phase:
+                    self._current_phase = None
+
+            if cost:
+                self._current_cost = cost
+
+        # Print "phase" header when entering running (permanent)
+        if status == "running":
+            self._console.print(f"  [bold cyan]{name}[/bold cyan]")
 
     def add_tool(self, line: str = "", name: str = "", detail: str = "") -> None:
-        """Record an agent tool call or QA finding. Thread-safe."""
+        """Print a tool call permanently. Thread-safe."""
+        if not line and name:
+            line = f"{name}  {detail}" if detail else name
+        if not line:
+            return
+
+        # Track files for coding summary
         with self._lock:
-            if not line and name:
-                line = f"{name}  {detail}" if detail else name
-            if line:
-                self._tools.append(line)
-                # Trim live display to max
-                if len(self._tools) > self._max_tools:
-                    self._tools = self._tools[-self._max_tools:]
-                # Also record in per-phase history for final render
-                if self._current_phase:
-                    self._phase_tools.setdefault(self._current_phase, []).append(line)
-        self._refresh()
+            if self._current_phase == "coding" and name in ("Write", "Edit"):
+                fname = detail.rsplit("/", 1)[-1] if detail else ""
+                if fname and not any(p in detail for p in _INTERNAL_PATTERNS):
+                    if fname not in self._coding_files:
+                        self._coding_files.append(fname)
+
+        # Print permanently (appears above live footer)
+        self._console.print(f"      [dim]{rich_escape(line[:80])}[/dim]")
 
     def add_finding(self, text: str) -> None:
-        """Record a QA finding. Thread-safe."""
-        self.add_tool(line=text)
+        """Print a QA finding permanently. Thread-safe."""
+        if not text:
+            return
 
-    def _refresh(self) -> None:
-        """Push a new renderable to the live display."""
-        if self._live:
-            try:
-                self._live.update(self._render())
-            except Exception:
-                pass  # live display was stopped between check and use
-
-    def _render(self) -> Group:
-        """Build the complete live display. Called on every update."""
         with self._lock:
-            parts: list[Text | Spinner] = []
+            if text.startswith("###"):
+                self._qa_spec_count += 1
+            if text.startswith("**PASS"):
+                self._qa_pass_count += 1
+            # Don't print the verdict line — it's summarized in phase_done
+            if "VERDICT" in text:
+                return
 
-            for phase in PHASE_ORDER:
-                pdata = self._phases[phase]
-                pstatus = pdata["status"]
-                icon, style = _PHASE_STYLES.get(pstatus, (" ", "dim"))
+        # Format QA findings nicely
+        if text.startswith("###"):
+            # Spec header: "### Spec 1: Title" → "  ● Spec 1: Title"
+            spec_text = text.lstrip("# ").strip()
+            self._console.print(f"      [dim]{rich_escape(spec_text)}[/dim]")
+        elif text.startswith("**PASS"):
+            # Pass detail: "**PASS** — detail" → "      ✓ detail"
+            detail_text = text.replace("**PASS**", "").lstrip(" \u2014-").strip()
+            short = detail_text[:70] + "..." if len(detail_text) > 70 else detail_text
+            self._console.print(f"        [green]\u2713[/green] [dim]{rich_escape(short)}[/dim]")
+        elif text.startswith("**FAIL"):
+            detail_text = text.replace("**FAIL**", "").lstrip(" \u2014-").strip()
+            short = detail_text[:70] + "..." if len(detail_text) > 70 else detail_text
+            self._console.print(f"        [red]\u2717[/red] [dim]{rich_escape(short)}[/dim]")
+        elif text.startswith("- **("):
+            # Sub-finding: "- **(a) desc**: PASS — detail"
+            self._console.print(f"        [dim]{rich_escape(text[:78])}[/dim]")
 
-                line = Text()
-                line.append(f"  {icon} ", style=style)
-                line.append(f"{phase:<10}", style=style if pstatus != "running" else "bold cyan")
+    # -- Private helpers --
 
-                if pstatus in ("done", "fail"):
-                    extras = []
-                    ptime = pdata.get("time_s", 0.0)
-                    if ptime:
-                        extras.append(f"{ptime:.0f}s")
-                    cost = pdata.get("cost", 0)
-                    if cost:
-                        extras.append(f"${cost:.2f}")
-                    detail = pdata.get("detail", "")
-                    if detail:
-                        extras.append(detail[:50])
-                    if pstatus == "fail":
-                        err = pdata.get("error", "")[:50]
-                        if err:
-                            extras.append(err)
-                    if extras:
-                        line.append("  " + "  ".join(extras), style="dim")
+    def _print_phase_done(self, name: str, time_s: float, detail: str, cost: float) -> None:
+        """Print a permanent phase completion line."""
+        parts = []
+        if time_s:
+            parts.append(f"{time_s:.0f}s")
+        if cost:
+            parts.append(f"${cost:.2f}")
 
-                elif pstatus == "running":
-                    elapsed = time.monotonic() - self._start_time
-                    mins = int(elapsed // 60)
-                    secs = int(elapsed % 60)
-                    time_str = f"{mins}:{secs:02d}" if mins else f"{secs}s"
-                    cost = pdata.get("cost", 0)
-                    cost_str = f"  ${cost:.2f}" if cost else ""
-                    line.append(f"  {time_str}{cost_str}", style="dim")
+        # Phase-specific summaries
+        if name == "coding":
+            if detail:
+                parts.append(detail[:50])
+            elif self._coding_files:
+                parts.append(f"{len(self._coding_files)} files")
+        elif name == "test" and detail:
+            parts.append(detail[:50])
+        elif name == "qa":
+            if self._qa_spec_count:
+                if self._qa_pass_count == self._qa_spec_count:
+                    parts.append(f"{self._qa_spec_count}/{self._qa_spec_count} specs passed")
+                else:
+                    parts.append(f"{self._qa_pass_count}/{self._qa_spec_count} specs passed")
 
-                parts.append(line)
+        info = "  ".join(parts)
+        self._console.print(f"  [green]\u2713[/green] {name:<10}[dim]{info}[/dim]")
 
-                # Show tool lines under active or just-completed phase
-                is_active = pstatus == "running"
-                is_latest_done = (pstatus in ("done", "fail")
-                                  and phase == self._current_phase)
-                if (is_active or is_latest_done) and self._tools:
-                    for tool_line in self._tools:
-                        tl = Text()
-                        tl.append(f"      {tool_line[:72]}", style="dim")
-                        parts.append(tl)
+    def _print_phase_fail(self, name: str, time_s: float, error: str, cost: float) -> None:
+        """Print a permanent phase failure line."""
+        parts = []
+        if time_s:
+            parts.append(f"{time_s:.0f}s")
+        if cost:
+            parts.append(f"${cost:.2f}")
+        if error:
+            parts.append(error[:50])
+        info = "  ".join(parts)
+        self._console.print(f"  [red]\u2717[/red] {name:<10}[dim]{info}[/dim]")
 
-            return Group(*parts)
-
-    def _render_final(self) -> Group | None:
-        """Build the final static display after live stops."""
+    def _render_footer(self) -> Text:
+        """Render the minimal live footer (1 line: current phase + timer)."""
         with self._lock:
-            parts: list[Text] = []
-            has_content = False
+            if not self._current_phase:
+                return Text("")
 
-            for phase in PHASE_ORDER:
-                pdata = self._phases[phase]
-                pstatus = pdata["status"]
+            elapsed = time.monotonic() - self._phase_start
+            mins = int(elapsed // 60)
+            secs = int(elapsed % 60)
+            time_str = f"{mins}:{secs:02d}" if mins else f"{secs}s"
+            cost_str = f"  ${self._current_cost:.2f}" if self._current_cost else ""
 
-                if pstatus == "pending":
-                    continue  # don't show pending phases in final output
-
-                has_content = True
-                icon, style = _PHASE_STYLES.get(pstatus, (" ", "dim"))
-
-                line = Text()
-                line.append(f"  {icon} ", style=style)
-                line.append(f"{phase:<10}", style=style)
-
-                if pstatus in ("done", "fail"):
-                    extras = []
-                    ptime = pdata.get("time_s", 0.0)
-                    if ptime:
-                        extras.append(f"{ptime:.0f}s")
-                    cost = pdata.get("cost", 0)
-                    if cost:
-                        extras.append(f"${cost:.2f}")
-                    detail = pdata.get("detail", "")
-                    if detail:
-                        extras.append(detail[:50])
-                    if pstatus == "fail":
-                        err = pdata.get("error", "")[:50]
-                        if err:
-                            extras.append(err)
-                    if extras:
-                        line.append("  " + "  ".join(extras), style="dim")
-
-                elif pstatus == "running":
-                    # Phase was still running when stopped (interrupted)
-                    line.append("  interrupted", style="dim")
-
-                parts.append(line)
-
-                # Show condensed tool/finding summary under completed phases
-                phase_history = self._phase_tools.get(phase, [])
-                if phase_history and pstatus in ("done", "fail"):
-                    # For coding: show unique files written/edited
-                    if phase == "coding":
-                        files = []
-                        for tl in phase_history:
-                            if tl.startswith("Write") or tl.startswith("Edit"):
-                                fname = tl.split("  ", 1)[-1].rsplit("/", 1)[-1]
-                                if fname and fname not in files:
-                                    files.append(fname)
-                        if files:
-                            summary = "  ".join(files[:6])
-                            if len(files) > 6:
-                                summary += f"  (+{len(files) - 6})"
-                            tl = Text()
-                            tl.append(f"      {summary}", style="dim")
-                            parts.append(tl)
-                    # For QA: show verdict and finding count
-                    elif phase == "qa" and phase_history:
-                        verdict_lines = [l for l in phase_history if "VERDICT" in l or "PASS" in l[:10] or "FAIL" in l[:10]]
-                        finding_count = sum(1 for l in phase_history if l.startswith("###"))
-                        if finding_count:
-                            summary = f"{finding_count} specs checked"
-                            verdict = next((l for l in phase_history if "VERDICT" in l), "")
-                            if "PASS" in verdict:
-                                summary += " — all passed"
-                            elif "FAIL" in verdict:
-                                summary += " — issues found"
-                            tl = Text()
-                            tl.append(f"      {summary}", style="dim")
-                            parts.append(tl)
-
-            return Group(*parts) if has_content else None
+            line = Text()
+            line.append(f"  \u25cf {self._current_phase}  {time_str}{cost_str}", style="dim cyan")
+            return line
 
 
 # ---------------------------------------------------------------------------

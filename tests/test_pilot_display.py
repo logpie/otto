@@ -287,21 +287,56 @@ class TestTaskDisplay:
         elapsed = td.stop()
         assert isinstance(elapsed, str)
 
-    def test_phase_updates_recorded(self):
+    def test_phase_done_prints_permanently(self):
         buf = io.StringIO()
         test_console = Console(file=buf, highlight=False, color_system=None)
         td = TaskDisplay(test_console)
         td.update_phase("coding", "running")
-        td.update_phase("coding", "done", time_s=10.0)
-        assert td._phases["coding"]["status"] == "done"
-        assert td._phases["coding"]["time_s"] == 10.0
+        td.update_phase("coding", "done", time_s=10.0, cost=0.5)
+        output = buf.getvalue()
+        assert "coding" in output
+        assert "10s" in output
+        assert "$0.50" in output
 
-    def test_tool_lines_tracked(self):
+    def test_tool_calls_print_permanently(self):
         buf = io.StringIO()
         test_console = Console(file=buf, highlight=False, color_system=None)
         td = TaskDisplay(test_console)
-        td.add_tool(name="Write", detail="alerts.ts")
-        td.add_tool(name="Edit", detail="WeatherApp.tsx")
-        assert len(td._tools) == 2
-        assert "Write" in td._tools[0]
-        assert "Edit" in td._tools[1]
+        td._current_phase = "coding"
+        td.add_tool(name="Write", detail="/tmp/project/src/alerts.ts")
+        td.add_tool(name="Edit", detail="/tmp/project/src/WeatherApp.tsx")
+        output = buf.getvalue()
+        assert "Write" in output
+        assert "alerts.ts" in output
+        assert "Edit" in output
+        # Files tracked for coding summary
+        assert "alerts.ts" in td._coding_files
+        assert "WeatherApp.tsx" in td._coding_files
+
+    def test_qa_findings_print_permanently(self):
+        buf = io.StringIO()
+        test_console = Console(file=buf, highlight=False, color_system=None)
+        td = TaskDisplay(test_console)
+        td._current_phase = "qa"
+        td.update_phase("qa", "running")
+        td.add_finding("### Spec 1: API endpoint")
+        td.add_finding("**PASS** \u2014 URL verified")
+        td.add_finding("### Spec 2: AQI display")
+        td.add_finding("**PASS** \u2014 renders correctly")
+        td.add_finding("QA VERDICT: PASS")
+        output = buf.getvalue()
+        assert "Spec 1" in output
+        assert "Spec 2" in output
+        assert "\u2713" in output  # pass checkmark
+        assert td._qa_spec_count == 2
+        assert td._qa_pass_count == 2
+
+    def test_internal_files_excluded_from_coding(self):
+        buf = io.StringIO()
+        test_console = Console(file=buf, highlight=False, color_system=None)
+        td = TaskDisplay(test_console)
+        td._current_phase = "coding"
+        td.add_tool(name="Write", detail="/tmp/p/src/api.ts")
+        td.add_tool(name="Write", detail="/tmp/p/otto_arch/task-notes/abc123.md")
+        assert "api.ts" in td._coding_files
+        assert len(td._coding_files) == 1  # task-notes excluded
