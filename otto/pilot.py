@@ -66,9 +66,8 @@ _TOOL_DISPLAY = {
     "write_learning": ("\u25cf", "Recording learning"),
 }
 
-# Active display — either TUI app or legacy TaskDisplay
+# Active display for the currently running task
 _active_display: TaskDisplay | None = None
-_active_tui: Any = None  # OttoRunApp when TUI is active
 _active_task_key: str | None = None
 
 # Track last-displayed tool call to avoid duplicate headers
@@ -89,8 +88,7 @@ def _resolve_task_number(task_key: str) -> int | None:
 def _process_progress_event(data: dict) -> None:
     """Process a progress event from the JSONL side-channel.
 
-    Routes events to either the TUI app or the legacy TaskDisplay.
-    Also accumulates in _task_progress for the post-run summary.
+    Routes events to the active TaskDisplay and accumulates them for summary.
     """
     event_type = data.get("event")
     task_key = data.get("task_key", "")
@@ -102,17 +100,6 @@ def _process_progress_event(data: dict) -> None:
     if task_key:
         _task_progress.setdefault(task_key, []).append(data)
 
-    # Route to TUI app (thread-safe via post_message)
-    tui = _active_tui
-    if tui is not None:
-        try:
-            from otto.tui import ProgressEvent
-            tui.post_message(ProgressEvent(event_type, data))
-        except Exception:
-            pass
-        return
-
-    # Legacy fallback: route to TaskDisplay
     display = _active_display
     if display and (_active_task_key is None or task_key == _active_task_key):
         try:
@@ -131,7 +118,13 @@ def _process_progress_event(data: dict) -> None:
                 display.add_tool_result(data=data)
             elif event_type == "qa_finding":
                 display.add_finding(data.get("text", ""))
-        except (AttributeError, RuntimeError):
+            elif event_type == "qa_summary":
+                display.set_qa_summary(
+                    total=data.get("total", 0),
+                    passed=data.get("passed", 0),
+                    failed=data.get("failed", 0),
+                )
+        except Exception:
             pass
 
 
@@ -779,37 +772,15 @@ async def _run_pilot_core(
     config: dict[str, Any],
     tasks_file: Path,
     project_dir: Path,
-    *,
-    tui_app: Any = None,
 ) -> int:
-    """Core pilot agent loop — shared by TTY (TUI) and non-TTY paths.
-
-    When tui_app is provided, sets _active_tui so progress events route to the
-    TUI instead of the legacy TaskDisplay. Console output for task overview and
-    pilot narration is suppressed (the TUI shows it).
-
-    Returns exit code (0=all passed, 1=any failed, 2=error).
-    """
-    global _active_tui
-
-    # Set TUI routing
-    if tui_app is not None:
-        _active_tui = tui_app
-
-    try:
-        return await _run_pilot_core_impl(config, tasks_file, project_dir,
-                                          tui_app=tui_app)
-    finally:
-        if tui_app is not None:
-            _active_tui = None
+    """Core pilot agent loop. Returns 0 on success, 1 on task failure, 2 on error."""
+    return await _run_pilot_core_impl(config, tasks_file, project_dir)
 
 
 async def _run_pilot_core_impl(
     config: dict[str, Any],
     tasks_file: Path,
     project_dir: Path,
-    *,
-    tui_app: Any = None,
 ) -> int:
     """Implementation of the core pilot agent loop."""
     # Load pending tasks
@@ -834,6 +805,35 @@ async def _run_pilot_core_impl(
     run_start = time.monotonic()
 
     try:
+        def _safe_console_print(*args, **kwargs) -> None:
+            try:
+                console.print(*args, **kwargs)
+            except Exception:
+                pass
+
+        def _safe_print_tool_call(block) -> None:
+            try:
+                _print_pilot_tool_call(block)
+            except Exception:
+                pass
+
+        def _safe_print_tool_result(block) -> None:
+            try:
+                _print_pilot_tool_result(block)
+            except Exception:
+                pass
+
+        def _safe_stop_active_display() -> None:
+            global _active_display, _active_task_key
+            try:
+                if _active_display:
+                    _active_display.stop()
+            except Exception:
+                pass
+            finally:
+                _active_display = None
+                _active_task_key = None
+
         pilot_prompt = _build_pilot_prompt(pending, config, project_dir)
 
         # Configure MCP server
@@ -961,22 +961,19 @@ Before calling finish_run, verify:
             except (TypeError, AttributeError, ValueError):
                 pass
 
-        # Show task overview (only in non-TUI mode)
-        if tui_app is None:
-            from otto.tasks import spec_is_verifiable  # noqa: F811
-            tasks = load_tasks(tasks_file)
-            pending = [t for t in tasks if t.get("status") == "pending"]
-            total_specs = sum(len(t.get("spec") or []) for t in pending)
-            console.print()
-            console.print(f"  [bold]{len(pending)} task{'s' if len(pending) != 1 else ''}[/bold], [dim]{total_specs} specs[/dim]")
-            for t in pending:
-                deps = t.get("depends_on", [])
-                dep_str = f" [dim]\u2192 #{', #'.join(str(d) for d in deps)}[/dim]" if deps else ""
-                spec_count = len(t.get("spec") or [])
-                console.print(f"    [dim]\u25cb[/dim] [bold]#{t['id']}[/bold]  {rich_escape(t.get('prompt', '')[:55])}  [dim]({spec_count} spec){dep_str}[/dim]")
+        tasks = load_tasks(tasks_file)
+        pending = [t for t in tasks if t.get("status") == "pending"]
+        total_specs = sum(len(t.get("spec") or []) for t in pending)
+        _safe_console_print()
+        _safe_console_print(f"  [bold]{len(pending)} task{'s' if len(pending) != 1 else ''}[/bold], [dim]{total_specs} specs[/dim]")
+        for t in pending:
+            deps = t.get("depends_on", [])
+            dep_str = f" [dim]\u2192 #{', #'.join(str(d) for d in deps)}[/dim]" if deps else ""
+            spec_count = len(t.get("spec") or [])
+            _safe_console_print(f"    [dim]\u25cb[/dim] [bold]#{t['id']}[/bold]  {rich_escape(t.get('prompt', '')[:55])}  [dim]({spec_count} spec){dep_str}[/dim]")
 
-            console.print()
-            console.print(f"{'─' * 60}", style="dim")
+        _safe_console_print()
+        _safe_console_print(f"{'─' * 60}", style="dim")
 
         # Populate task key -> id cache for display
         for t in pending:
@@ -1103,28 +1100,14 @@ Before calling finish_run, verify:
         _bg_thread = threading.Thread(target=_bg_read_results, daemon=True)
         _bg_thread.start()
 
-        # In TUI mode, skip pilot console output — the TUI shows progress
-        _suppress_console = (tui_app is not None)
-
         async for message in query(prompt=pilot_prompt, options=agent_opts):
             if isinstance(message, ResultMessage):
                 _dlog("DONE", f"ResultMessage is_error={getattr(message, 'is_error', '?')}")
-                if not _suppress_console:
-                    global _active_display
-                    if _active_display:
-                        _active_display.stop()
-                        _active_display = None
+                _safe_stop_active_display()
             elif hasattr(message, "session_id") and hasattr(message, "is_error"):
                 pass
             elif AssistantMessage and isinstance(message, AssistantMessage):
                 for block in message.content:
-                    block_type = type(block).__name__
-
-                    is_tool_block = (
-                        (ToolUseBlock and isinstance(block, ToolUseBlock))
-                        or (ToolResultBlock and isinstance(block, ToolResultBlock))
-                    )
-
                     if TextBlock and isinstance(block, TextBlock) and block.text:
                         text = block.text.strip()
                         if not text:
@@ -1134,9 +1117,6 @@ Before calling finish_run, verify:
                             continue
 
                         _dlog(_current_debug_phase, f"text: {text[:120]}")
-
-                        if _suppress_console:
-                            continue
 
                         if text.startswith("```") or text.startswith("{"):
                             continue
@@ -1153,14 +1133,14 @@ Before calling finish_run, verify:
                             continue
 
                         if "EXECUTION PLAN" in text or "PLAN UPDATE" in text:
-                            console.print(f"\n{text}", style="cyan")
+                            _safe_console_print(f"\n{text}", style="cyan")
                         elif any(marker in text.lower() for marker in [
                             "passed", "failed", "now executing", "starting",
                             "retrying", "aborting", "all tasks", "integration",
                         ]):
-                            console.print(f"  {text}")
+                            _safe_console_print(f"  {text}")
                         else:
-                            console.print(f"  {text}", style="dim")
+                            _safe_console_print(f"  {text}", style="dim")
 
                     elif ToolUseBlock and isinstance(block, ToolUseBlock):
                         _last_tool_name = block.name
@@ -1182,8 +1162,7 @@ Before calling finish_run, verify:
                             _dlog("REPORT", f"{tool_name} {detail}")
                         else:
                             _dlog(_current_debug_phase, f"{tool_name} {detail}")
-                        if not _suppress_console:
-                            _print_pilot_tool_call(block)
+                        _safe_print_tool_call(block)
                     elif ToolResultBlock and isinstance(block, ToolResultBlock):
                         raw = block.content
                         result_preview = ""
@@ -1216,28 +1195,22 @@ Before calling finish_run, verify:
                                     _dlog(_current_debug_phase, f"result: {result_preview}")
                             except (json.JSONDecodeError, TypeError):
                                 _dlog(_current_debug_phase, f"result: {result_preview}")
-                        if not _suppress_console:
-                            # Suppress results for noise tools
-                            _resolved_tool = (_last_tool_name or "").replace("mcp__otto-pilot__", "")
-                            if _resolved_tool not in _NOISE_TOOLS and _last_tool_name != "ToolSearch":
-                                _print_pilot_tool_result(block)
+                        _resolved_tool = (_last_tool_name or "").replace("mcp__otto-pilot__", "")
+                        if _resolved_tool not in _NOISE_TOOLS and _last_tool_name != "ToolSearch":
+                            _safe_print_tool_result(block)
                         _last_tool_name = None
 
         _bg_reader_running = False
         _bg_thread.join(timeout=2)
 
     except Exception as pilot_err:
-        if not (tui_app is not None):
-            if _active_display:
-                _active_display.stop()
-                _active_display = None
+        _safe_stop_active_display()
         try:
             _dlog("ERROR", f"pilot crashed: {pilot_err}")
         except Exception:
             pass
-        if tui_app is None:
-            console.print(f"\n  [yellow]Warning: Pilot agent error: {pilot_err}[/yellow]")
-            console.print("  Proceeding to summary -- completed tasks are still merged.", style="dim")
+        _safe_console_print(f"\n  [yellow]Warning: Pilot agent error: {pilot_err}[/yellow]")
+        _safe_console_print("  Proceeding to summary -- completed tasks are still merged.", style="dim")
     finally:
         try:
             _bg_reader_running = False  # noqa: F841
@@ -1271,10 +1244,10 @@ Before calling finish_run, verify:
 
     run_duration = time.monotonic() - run_start
 
-    # Print summary (only in non-TUI mode; TUI prints after exit)
-    if tui_app is None:
-        _print_summary(results, run_duration,
-                       total_cost=total_cost, task_progress=_task_progress)
+    try:
+        _print_summary(results, run_duration, total_cost=total_cost, task_progress=_task_progress)
+    except Exception:
+        pass
 
     # Record run history
     try:
@@ -1318,107 +1291,6 @@ Before calling finish_run, verify:
 
     any_failed = any(not s for _, s in results)
     return 1 if any_failed else 0
-
-
-def run_piloted_with_tui(
-    config: dict[str, Any],
-    tasks_file: Path,
-    project_dir: Path,
-) -> int:
-    """TUI entry point for `otto run` when connected to a TTY.
-
-    Does pre-flight checks (lock, branch, baseline) before launching the
-    Textual TUI. The pilot agent runs as a background worker inside the app.
-    After the app exits, prints summary to scrollback and returns exit code.
-    """
-    import fcntl
-    import signal
-
-    default_branch = config["default_branch"]
-
-    # Acquire process lock
-    lock_path = git_meta_dir(project_dir) / "otto.lock"
-    lock_path.touch()
-    lock_fh = open(lock_path, "r")
-    try:
-        fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        console.print("Another otto process is running", style="red")
-        return 2
-
-    # Clean up stale task lock files
-    tasks_lock = project_dir / ".tasks.lock"
-    if tasks_lock.exists():
-        try:
-            tasks_lock.unlink()
-        except OSError:
-            pass
-
-    # Signal handling
-    interrupted = False
-
-    def _signal_handler(signum, frame):
-        nonlocal interrupted
-        if interrupted:
-            sys.exit(1)
-        interrupted = True
-
-    old_sigint = signal.signal(signal.SIGINT, _signal_handler)
-    old_sigterm = signal.signal(signal.SIGTERM, _signal_handler)
-
-    try:
-        # Pre-flight checks (prints to stderr for errors)
-        error_code, pending = _preflight_checks(config, tasks_file, project_dir)
-        if error_code is not None:
-            return error_code
-
-        # Launch TUI with the pilot as a background worker
-        from otto.tui import OttoRunApp
-
-        app = OttoRunApp(
-            tasks=pending,
-            config=config,
-            tasks_path=tasks_file,
-            project_dir=project_dir,
-        )
-        app.run(inline=True, inline_no_clear=True, mouse=False)
-
-        # After TUI exits, print summary to scrollback
-        final_tasks = load_tasks(tasks_file)
-        pending_keys = {t["key"] for t in pending}
-        results: list[tuple[dict, bool]] = []
-        total_cost = 0.0
-        for t in final_tasks:
-            task_key = t.get("key", "")
-            if task_key not in pending_keys:
-                continue
-            if t.get("status") in ("passed", "failed", "blocked"):
-                results.append((t, t.get("status") == "passed"))
-                total_cost += t.get("cost_usd", 0.0)
-            elif t.get("status") == "running":
-                update_task(tasks_file, t["key"], status="failed",
-                            error="pilot crashed during execution")
-                results.append((t, False))
-                total_cost += t.get("cost_usd", 0.0)
-            elif t.get("status") == "pending":
-                results.append((t, False))
-
-        if results:
-            _print_summary(results, 0, total_cost=total_cost,
-                           task_progress=_task_progress)
-
-        exit_code = app._exit_code
-        return exit_code
-
-    finally:
-        subprocess.run(
-            ["git", "checkout", default_branch],
-            cwd=project_dir, capture_output=True,
-        )
-        signal.signal(signal.SIGINT, old_sigint)
-        signal.signal(signal.SIGTERM, old_sigterm)
-        fcntl.flock(lock_fh, fcntl.LOCK_UN)
-        lock_fh.close()
 
 
 async def run_piloted(
@@ -1478,7 +1350,7 @@ async def run_piloted(
             return error_code
 
         # Delegate to the shared core (taste-fixed display)
-        exit_code = await _run_pilot_core(config, tasks_file, project_dir, tui_app=None)
+        exit_code = await _run_pilot_core(config, tasks_file, project_dir)
         return exit_code
 
     finally:

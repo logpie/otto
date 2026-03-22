@@ -269,6 +269,10 @@ async def _run_markdown_agent(md_file: Path, project_dir: Path) -> list[dict]:
     with tempfile.NamedTemporaryFile(suffix=".json", prefix="otto_tasks_", delete=False) as temp_file:
         output_file = Path(temp_file.name)
 
+    log_dir = project_dir / "otto_logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_lines: list[str] = []
+
     agent_prompt = f"""You are a senior engineer breaking a feature document into coding tasks.
 
 DOCUMENT:
@@ -308,11 +312,16 @@ Example: [{{"prompt": "Add search", "spec": ["search works", "case-insensitive"]
             if AssistantMessage and isinstance(message, AssistantMessage):
                 for block in message.content:
                     if TextBlock and isinstance(block, TextBlock) and block.text:
-                        print(block.text, flush=True)
+                        log_lines.append(block.text)
                     elif ToolUseBlock and isinstance(block, ToolUseBlock):
-                        print_agent_tool(block)
+                        print_agent_tool(block, quiet=True)
+                        log_lines.append(f"\u25cf {block.name}  {_tool_use_summary(block)}")
     except Exception as e:
+        log_lines.append(f"ERROR: {e}")
+        _write_log(log_dir / "markdown-agent.log", log_lines)
         raise ValueError(f"Failed to parse markdown tasks: {e}") from e
+
+    _write_log(log_dir / "markdown-agent.log", log_lines)
 
     output = output_file.read_text().strip()
     output_file.unlink()

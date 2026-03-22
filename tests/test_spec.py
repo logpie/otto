@@ -123,6 +123,48 @@ class TestParseMarkdownTasks:
         assert tasks[0]["spec"] == ["case-insensitive"]
 
     @patch("otto.spec.query")
+    def test_markdown_parser_is_quiet(self, mock_query, tmp_path, capsys):
+        md_file = tmp_path / "features.md"
+        md_file.write_text("# Search\nAdd search.\n")
+
+        async def fake_query(*, prompt, options=None):
+            import re
+            from dataclasses import dataclass
+
+            @dataclass
+            class FakeTextBlock:
+                text: str
+
+            @dataclass
+            class FakeToolUseBlock:
+                name: str
+                input: dict
+
+            @dataclass
+            class FakeAssistantMessage:
+                content: list
+
+            match = re.search(r'JSON array to: (.+\.json)', prompt)
+            if match:
+                Path(match.group(1)).write_text(json.dumps([
+                    {"prompt": "Add search method", "spec": ["case-insensitive"]},
+                ]))
+            yield FakeAssistantMessage(content=[
+                FakeTextBlock("thinking out loud"),
+                FakeToolUseBlock("Read", {"file_path": "src/app.py"}),
+            ])
+            from otto._agent_stub import ResultMessage
+            yield ResultMessage(session_id="s1")
+
+        mock_query.side_effect = fake_query
+
+        tasks = parse_markdown_tasks(md_file, tmp_path)
+        captured = capsys.readouterr()
+        assert tasks[0]["prompt"] == "Add search method"
+        assert captured.out == ""
+        assert captured.err == ""
+
+    @patch("otto.spec.query")
     def test_raises_when_agent_doesnt_write_file(self, mock_query, tmp_path):
         md_file = tmp_path / "features.md"
         md_file.write_text("# Task\nDo something.\n")

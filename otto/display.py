@@ -121,6 +121,7 @@ class TaskDisplay:
         self._current_cost: float = 0.0
         self._qa_spec_count: int = 0
         self._qa_pass_count: int = 0
+        self._qa_summary_authoritative: bool = False
         self._coding_files: list[str] = []
         self._lines_added: int = 0
         self._lines_removed: int = 0
@@ -165,6 +166,7 @@ class TaskDisplay:
                 if name == "qa":
                     self._qa_spec_count = 0
                     self._qa_pass_count = 0
+                    self._qa_summary_authoritative = False
                 if name == "coding":
                     self._coding_files.clear()
                     self._lines_added = 0
@@ -189,6 +191,16 @@ class TaskDisplay:
         if status == "running" and name not in ("prepare", "merge"):
             # Blank line for visual separation before a new phase's tool calls
             self._console.print()
+
+    def set_qa_summary(self, total: int, passed: int, failed: int = 0) -> None:
+        """Set authoritative QA counts from the runner."""
+        with self._lock:
+            total = max(0, int(total))
+            passed = max(0, min(int(passed), total))
+            failed = max(0, min(int(failed), total - passed))
+            self._qa_spec_count = total
+            self._qa_pass_count = passed
+            self._qa_summary_authoritative = True
 
     def add_tool(self, line: str = "", name: str = "", detail: str = "",
                  data: dict | None = None) -> None:
@@ -222,13 +234,12 @@ class TaskDisplay:
             return
 
         # Deduplicate silently
-        fname = detail.rsplit("/", 1)[-1] if "/" in detail else detail
-        tool_key = f"{name}:{fname}"
+        tool_key = f"{name}:{detail}"
 
         with self._lock:
             if self._current_phase == "coding" and name in ("Write", "Edit"):
-                if fname and fname not in self._coding_files:
-                    self._coding_files.append(fname)
+                if detail and detail not in self._coding_files:
+                    self._coding_files.append(detail)
                 # Track line counts from event data
                 if data:
                     if name == "Write":
@@ -332,18 +343,19 @@ class TaskDisplay:
         )
 
         with self._lock:
-            # Count specs: only lines with a clear pass/fail signal
-            if is_table_row or is_numbered_check or is_standalone_check:
-                self._qa_spec_count += 1
-                check_pass = has_pass or clean[0] in ("\u2713", "\u2705")
-                if check_pass:
+            if not self._qa_summary_authoritative:
+                # Fallback counting when the runner does not emit qa_summary.
+                if is_table_row or is_numbered_check or is_standalone_check:
+                    self._qa_spec_count += 1
+                    check_pass = has_pass or clean[0] in ("\u2713", "\u2705")
+                    if check_pass:
+                        self._qa_pass_count += 1
+                elif is_result_line and has_pass:
+                    self._qa_spec_count += 1
                     self._qa_pass_count += 1
-            elif is_result_line and has_pass:
-                self._qa_spec_count += 1
-                self._qa_pass_count += 1
-            elif is_result_line and has_fail:
-                self._qa_spec_count += 1
-            # Spec headers (Spec N — Title) are just labels, don't count
+                elif is_result_line and has_fail:
+                    self._qa_spec_count += 1
+                # Spec headers (Spec N — Title) are just labels, don't count
 
             # Suppress noise
             if "VERDICT" in text:

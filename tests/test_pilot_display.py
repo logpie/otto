@@ -15,6 +15,7 @@ import pytest
 from rich.console import Console
 
 from otto.pilot import (
+    _process_progress_event,
     _print_pilot_tool_call,
     _print_pilot_tool_result,
 )
@@ -317,8 +318,20 @@ class TestTaskDisplay:
         assert "Write" in output
         assert "Edit" in output
         # Files tracked for coding summary
-        assert "alerts.ts" in td._coding_files
-        assert "WeatherApp.tsx" in td._coding_files
+        assert "src/alerts.ts" in td._coding_files
+        assert "src/WeatherApp.tsx" in td._coding_files
+
+    def test_tool_dedup_uses_shortened_relative_path(self):
+        buf = io.StringIO()
+        test_console = Console(file=buf, highlight=False, color_system=None)
+        td = TaskDisplay(test_console)
+        td._current_phase = "coding"
+        td.add_tool(name="Write", detail="/tmp/project/src/app.py")
+        td.add_tool(name="Write", detail="/tmp/project/tests/app.py")
+        output = buf.getvalue()
+        assert "src/app.py" in output
+        assert "tests/app.py" in output
+        assert td._coding_files == ["src/app.py", "tests/app.py"]
 
     def test_qa_findings_print_permanently(self):
         buf = io.StringIO()
@@ -338,6 +351,19 @@ class TestTaskDisplay:
         assert td._qa_spec_count == 2
         assert td._qa_pass_count == 2
 
+    def test_qa_summary_is_authoritative(self):
+        buf = io.StringIO()
+        test_console = Console(file=buf, highlight=False, color_system=None)
+        td = TaskDisplay(test_console)
+        td.update_phase("qa", "running")
+        td.add_finding("**PASS** \u2014 URL verified")
+        td.set_qa_summary(total=3, passed=2, failed=1)
+        td.update_phase("qa", "done", time_s=3.0)
+        output = buf.getvalue()
+        assert "2/3 specs passed" in output
+        assert td._qa_spec_count == 3
+        assert td._qa_pass_count == 2
+
     def test_internal_files_excluded_from_coding(self):
         buf = io.StringIO()
         test_console = Console(file=buf, highlight=False, color_system=None)
@@ -345,5 +371,29 @@ class TestTaskDisplay:
         td._current_phase = "coding"
         td.add_tool(name="Write", detail="/tmp/p/src/api.ts")
         td.add_tool(name="Write", detail="/tmp/p/otto_arch/task-notes/abc123.md")
-        assert "api.ts" in td._coding_files
+        assert "src/api.ts" in td._coding_files
         assert len(td._coding_files) == 1  # task-notes excluded
+
+    def test_process_progress_event_routes_qa_summary(self):
+        import otto.pilot as pilot_mod
+
+        buf = io.StringIO()
+        test_console = Console(file=buf, highlight=False, color_system=None)
+        td = TaskDisplay(test_console)
+        old_display = pilot_mod._active_display
+        old_task_key = pilot_mod._active_task_key
+        try:
+            pilot_mod._active_display = td
+            pilot_mod._active_task_key = "abc123"
+            _process_progress_event({
+                "event": "qa_summary",
+                "task_key": "abc123",
+                "total": 4,
+                "passed": 3,
+                "failed": 1,
+            })
+            assert td._qa_spec_count == 4
+            assert td._qa_pass_count == 3
+        finally:
+            pilot_mod._active_display = old_display
+            pilot_mod._active_task_key = old_task_key
