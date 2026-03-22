@@ -1650,10 +1650,10 @@ You are working in {project_dir}. Do NOT create git commits."""
                                 try:
                                     detail = _tool_use_summary(block)[:60]
                                     if block.name == "Bash":
-                                        on_progress("agent_tool", {"name": "QA", "detail": detail})
+                                        on_progress("agent_tool", {"name": "Bash", "detail": detail})
                                     elif block.name in ("Read", "Glob"):
                                         fname = detail.rsplit("/", 1)[-1] if "/" in detail else detail
-                                        on_progress("agent_tool", {"name": "QA", "detail": f"reading {fname}"})
+                                        on_progress("agent_tool", {"name": "Read", "detail": fname})
                                 except Exception:
                                     pass
 
@@ -2267,16 +2267,10 @@ def _print_summary(
     passed = sum(1 for _, s in results if s)
     failed = len(results) - passed
 
-    from rich.panel import Panel
-
     cost_str = f"  {_format_cost(total_cost)}" if total_cost > 0 else ""
     console.print()
-    console.print(Panel(
-        f"[bold]Run complete[/bold]  [dim]{_format_duration(total_duration)}{cost_str}[/dim]",
-        border_style="dim",
-        expand=False,
-        padding=(0, 2),
-    ))
+    console.print(f"  [bold]Run complete[/bold]  [dim]{_format_duration(total_duration)}{cost_str}[/dim]")
+    console.print()
 
     for task, success in results:
         icon = "[green]\u2713[/green]" if success else "[red]\u2717[/red]"
@@ -2308,7 +2302,7 @@ def _print_summary(
                         if pname and ptime:
                             phase_times[pname] = phase_times.get(pname, 0) + float(ptime)
             for pname in ["prepare", "coding", "test", "qa", "merge"]:
-                if pname in phase_times:
+                if pname in phase_times and phase_times[pname] >= 1:
                     phase_parts.append(f"{_format_duration(phase_times[pname])} {pname}")
 
         # Build the main status line

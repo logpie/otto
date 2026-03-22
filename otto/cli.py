@@ -488,12 +488,8 @@ def run(prompt, dry_run, no_architect, tdd):
         except ImportError:
             error_console.print("Error: mcp library required. Install with: pip install mcp", style="error")
             sys.exit(2)
-        if sys.stdout.isatty():
-            from otto.pilot import run_piloted_with_tui
-            exit_code = run_piloted_with_tui(config, tasks_path, project_dir)
-        else:
-            from otto.pilot import run_piloted
-            exit_code = asyncio.run(run_piloted(config, tasks_path, project_dir))
+        from otto.pilot import run_piloted
+        exit_code = asyncio.run(run_piloted(config, tasks_path, project_dir))
         sys.exit(exit_code)
 
 

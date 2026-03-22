@@ -227,6 +227,10 @@ class TaskDisplay:
 
         short = rich_escape(_shorten_path(detail)[:68])
 
+        # Breathing room before Write/Edit/Bash (they have inline content)
+        if name in ("Write", "Edit", "Bash"):
+            self._console.print()
+
         # Consistent style for all phases — ● Name  detail
         self._console.print(f"      [bold cyan]\u25cf {name}[/bold cyan]  [dim]{short}[/dim]")
 
