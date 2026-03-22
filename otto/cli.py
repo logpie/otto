@@ -404,7 +404,19 @@ def add(prompt, verify, max_retries, import_file, no_spec):
             label = f"{verifiable_count} verifiable"
             if visual_count:
                 label += f", {visual_count} visual"
-            console.print(f"[success]✓[/success] Spec ([bold]{len(spec_items)}[/bold] criteria \u2014 {label})")
+            # Filter preamble before counting
+            def _is_preamble(item) -> bool:
+                t = spec_text(item)
+                return t.startswith(("Acceptance Criteria", "Context:", "====", "----",
+                                     "Next.js", "React", "TypeScript", "Tests use"))
+            real_specs = [i for i in spec_items if not _is_preamble(i)]
+            verifiable_count = sum(1 for i in real_specs if spec_is_verifiable(i))
+            visual_count = len(real_specs) - verifiable_count
+            label = f"{verifiable_count} verifiable"
+            if visual_count:
+                label += f", {visual_count} visual"
+
+            console.print(f"[success]✓[/success] Spec ([bold]{len(real_specs)}[/bold] criteria \u2014 {label})")
             console.print()
             from rich.table import Table
             spec_table = Table(box=None, show_header=True, pad_edge=False,
@@ -412,20 +424,13 @@ def add(prompt, verify, max_retries, import_file, no_spec):
             spec_table.add_column("#", style="dim", width=3, justify="right")
             spec_table.add_column("", width=2)  # icon
             spec_table.add_column("Criterion", ratio=1, no_wrap=False)
-            display_idx = 0
-            for item in spec_items:
+            for idx, item in enumerate(real_specs, 1):
                 text = spec_text(item)
-                # Skip preamble lines (titles, context, separators)
-                if text.startswith(("Acceptance Criteria", "Context:", "====", "----")):
-                    continue
-                if text.startswith(("Next.js", "React", "TypeScript", "Tests use")):
-                    continue
-                display_idx += 1
                 short = text[:80] + "..." if len(text) > 80 else text
                 if spec_is_verifiable(item):
-                    spec_table.add_row(str(display_idx), "\u25b8", rich_escape(short))
+                    spec_table.add_row(str(idx), "\u25b8", rich_escape(short))
                 else:
-                    spec_table.add_row(str(display_idx), "[info]\u25c9[/info]", rich_escape(short))
+                    spec_table.add_row(str(idx), "[info]\u25c9[/info]", rich_escape(short))
             console.print(spec_table)
             console.print()
         else:
