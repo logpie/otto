@@ -1918,6 +1918,24 @@ async def run_task_with_qa(
                         result_msg = message
                     elif AssistantMessage and isinstance(message, AssistantMessage):
                         for block in message.content:
+                            # Check for ToolResultBlock in any message type
+                            if ToolResultBlock and isinstance(block, ToolResultBlock):
+                                content = str(getattr(block, "content", ""))
+                                if content and _last_block_name == "Bash":
+                                    result_line = ""
+                                    for rl in reversed(content.splitlines()):
+                                        ls = rl.strip()
+                                        if any(kw in ls.lower() for kw in
+                                               ["passed", "failed", "tests:", "test suites:"]):
+                                            if any(c.isdigit() for c in ls):
+                                                result_line = ls[:70]
+                                                break
+                                    if result_line:
+                                        is_pass = "passed" in result_line.lower() and "failed" not in result_line.lower()
+                                        emit("agent_tool_result", detail=result_line, passed=is_pass)
+                                _last_block_name = ""
+                                _last_block_inputs = {}
+                                continue
                             if TextBlock and isinstance(block, TextBlock) and block.text:
                                 agent_log_lines.append(block.text)
                             elif ToolUseBlock and isinstance(block, ToolUseBlock):
@@ -1953,25 +1971,7 @@ async def run_task_with_qa(
                                     if cmd_start in ("pytest", "python", "npx", "npm", "jest",
                                                      "make", "cargo", "go", "ruby", "dotnet"):
                                         emit("agent_tool", name=block.name, detail=cmd)
-                            elif ToolResultBlock and isinstance(block, ToolResultBlock):
-                                content = str(getattr(block, "content", ""))
-                                # Emit Bash results inline (test output, errors)
-                                if content and _last_block_name == "Bash":
-                                    # Extract the summary line
-                                    result_line = ""
-                                    for line in reversed(content.splitlines()):
-                                        ls = line.strip()
-                                        if any(kw in ls.lower() for kw in
-                                               ["passed", "failed", "tests:", "test suites:", "error"]):
-                                            if any(c.isdigit() for c in ls):
-                                                result_line = ls[:70]
-                                                break
-                                    if result_line:
-                                        is_pass = "passed" in result_line.lower() and "failed" not in result_line.lower()
-                                        emit("agent_tool_result", detail=result_line,
-                                             passed=is_pass)
-                                _last_block_name = ""
-                                _last_block_inputs = {}
+                            # Note: ToolResultBlock handling moved to top of block loop
 
                 # Persist agent log
                 try:
