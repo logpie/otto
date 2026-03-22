@@ -1644,6 +1644,18 @@ You are working in {project_dir}. Do NOT create git commits."""
                                             on_progress("qa_finding", {"text": line_s[:80]})
                                         except Exception:
                                             pass
+                        elif ToolUseBlock and isinstance(block, ToolUseBlock):
+                            # Emit QA agent tool calls so user sees activity during QA
+                            if on_progress:
+                                try:
+                                    detail = _tool_use_summary(block)[:60]
+                                    if block.name == "Bash":
+                                        on_progress("agent_tool", {"name": "QA", "detail": detail})
+                                    elif block.name in ("Read", "Glob"):
+                                        fname = detail.rsplit("/", 1)[-1] if "/" in detail else detail
+                                        on_progress("agent_tool", {"name": "QA", "detail": f"reading {fname}"})
+                                except Exception:
+                                    pass
 
         await asyncio.wait_for(_run_qa(), timeout=qa_timeout)
         qa_completed = True
