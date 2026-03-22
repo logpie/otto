@@ -959,6 +959,19 @@ Before calling finish_run, verify:
                 except (TypeError, AttributeError, ValueError):
                     pass  # SDK version doesn't support subagents — skip
 
+            # Show task overview
+            from otto.tasks import spec_is_verifiable  # noqa: F811
+            tasks = load_tasks(tasks_file)
+            pending = [t for t in tasks if t.get("status") == "pending"]
+            total_specs = sum(len(t.get("spec") or []) for t in pending)
+            console.print()
+            console.print(f"  [bold]{len(pending)} task{'s' if len(pending) != 1 else ''}[/bold], [dim]{total_specs} specs[/dim]")
+            for t in pending:
+                deps = t.get("depends_on", [])
+                dep_str = f" [dim]\u2192 #{', #'.join(str(d) for d in deps)}[/dim]" if deps else ""
+                spec_count = len(t.get("spec") or [])
+                console.print(f"    [dim]\u25cb[/dim] [bold]#{t['id']}[/bold]  {rich_escape(t.get('prompt', '')[:55])}  [dim]({spec_count} spec){dep_str}[/dim]")
+
             console.print()
             _log_info("Pilot taking control \u2014 LLM-driven execution")
             console.print("  The pilot will drive coding \u2192 verify \u2192 merge", style="dim")
@@ -1132,19 +1145,28 @@ Before calling finish_run, verify:
                             if not text:
                                 continue
 
+                            # After finish_run is called, suppress pilot's LLM summary — otto generates its own
+                            if _last_tool_name and "finish_run" in _last_tool_name:
+                                continue
+
                             # Log pilot reasoning
                             _dlog(_current_debug_phase, f"text: {text[:120]}")
 
                             # Skip code fences, raw JSON, and low-value narration
                             if text.startswith("```") or text.startswith("{"):
                                 continue
-                            # Suppress common filler phrases
+                            # Suppress common filler phrases and narration noise
                             _lower = text.lower()
                             if any(filler in _lower for filler in [
                                 "let me", "i'll ", "i will ", "now let me",
                                 "let me save", "let me get", "let me check",
                                 "in parallel", "save the run state",
                             ]):
+                                continue
+                            # Suppress chatty openers and markdown tables
+                            if _lower.startswith(("good.", "good,", "great.", "here's", "here is", "the state is clear")):
+                                continue
+                            if text.startswith("|"):
                                 continue
 
                             # Tier 1: Execution plan — prominent cyan

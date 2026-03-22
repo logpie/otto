@@ -142,6 +142,7 @@ class TaskDisplay:
         self._last_tool_key: str = ""  # for deduplication
         self._last_tool_count: int = 0
         self._read_count: int = 0  # cap Read display
+        self._pending_count: int = 0  # remaining tasks (set by pilot)
 
     def start(self) -> None:
         """Start the live status footer."""
@@ -259,6 +260,11 @@ class TaskDisplay:
         short_detail = rich_escape(detail[:72]) if detail else ""
         self._console.print(f"      [{style}]{icon}[/{style}] [dim]{short_detail}[/dim]")
 
+    def set_pending_count(self, n: int) -> None:
+        """Set the remaining pending task count (shown in footer)."""
+        with self._lock:
+            self._pending_count = n
+
     def add_finding(self, text: str) -> None:
         """Print a QA finding permanently. Thread-safe.
 
@@ -336,7 +342,12 @@ class TaskDisplay:
             elif self._coding_files:
                 parts.append(f"{len(self._coding_files)} files")
         elif name == "test" and detail:
-            parts.append(detail[:50])
+            # Parse "Tests:       502 passed, 502 total" → "502 passed"
+            m = re.search(r'(\d+) passed', detail)
+            if m:
+                parts.append(f"{m.group(1)} passed")
+            elif detail:
+                parts.append(detail[:50])
         elif name == "qa":
             if self._qa_spec_count:
                 if self._qa_pass_count == self._qa_spec_count:
@@ -360,7 +371,7 @@ class TaskDisplay:
         self._console.print(f"  [red]\u2717[/red] {name:<10}[dim]{info}[/dim]")
 
     def _render_footer(self) -> Text:
-        """Render the minimal live footer (1 line: current phase + timer)."""
+        """Render the minimal live footer (1 line: current phase + timer + pending)."""
         with self._lock:
             if not self._current_phase:
                 return Text("")
@@ -370,9 +381,10 @@ class TaskDisplay:
             secs = int(elapsed % 60)
             time_str = f"{mins}:{secs:02d}" if mins else f"{secs}s"
             cost_str = f"  ${self._current_cost:.2f}" if self._current_cost else ""
+            pending_str = f"  {self._pending_count} remaining" if self._pending_count > 0 else ""
 
             line = Text()
-            line.append(f"  \u25cf {self._current_phase}  {time_str}{cost_str}", style="dim cyan")
+            line.append(f"  \u25cf {self._current_phase}  {time_str}{cost_str}{pending_str}", style="dim cyan")
             return line
 
 

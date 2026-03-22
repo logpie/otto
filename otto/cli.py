@@ -288,7 +288,7 @@ def _import_tasks(import_path: Path, tasks_path: Path) -> None:
         console.print(f"Found {len(lines)} tasks in {rich_escape(import_path.name)}.\n")
         batch = []
         for i, line in enumerate(lines, 1):
-            console.print(f"\\[{i}/{len(lines)}] Generating spec for: {rich_escape(line[:50])}...")
+            console.print(f"  [dim]{i}/{len(lines)}[/dim] {rich_escape(line[:50])}")
             spec_items = generate_spec(line, project_dir)
             item = {"prompt": line}
             if spec_items:
@@ -310,9 +310,9 @@ def _import_tasks(import_path: Path, tasks_path: Path) -> None:
             item = {"prompt": t["prompt"]}
             if t.get("spec"):
                 item["spec"] = t["spec"]
-                console.print(f"\\[{i}/{len(imported)}] {rich_escape(t['prompt'][:50])} \u2014 {len(t['spec'])} spec items (from file)")
+                console.print(f"  [dim]{i}/{len(imported)}[/dim] {rich_escape(t['prompt'][:50])}")
             else:
-                console.print(f"\\[{i}/{len(imported)}] Generating spec for: {rich_escape(t['prompt'][:50])}...")
+                console.print(f"  [dim]{i}/{len(imported)}[/dim] {rich_escape(t['prompt'][:50])}")
                 spec_items = generate_spec(t["prompt"], project_dir)
                 if spec_items:
                     item["spec"] = spec_items
@@ -377,9 +377,9 @@ def add(prompt, verify, max_retries, import_file, no_spec):
         console.print(f"[warning][bold]\\u26a0 WARNING:[/bold][/warning] [warning]No spec \\u2192 no adversarial tests \\u2192 no verification gate.[/warning]")
         console.print(f"  [warning]The coding agent's output will be merged with zero quality checks.[/warning]")
     if not no_spec:
-        console.print(f"[dim]Generating spec...[/dim]")
         try:
-            spec_items = generate_spec(prompt, Path.cwd())
+            with console.status("[dim]Generating spec...[/dim]", spinner="dots") as status:
+                spec_items = generate_spec(prompt, Path.cwd())
         except Exception as e:
             console.print(f"[error]\\u2717[/error] Spec generation failed: {rich_escape(str(e))}", stderr=True)
             console.print(f"[dim]Task not created. Fix the issue or use --no-spec.[/dim]", stderr=True)
@@ -403,7 +403,7 @@ def add(prompt, verify, max_retries, import_file, no_spec):
 
     task = add_task(tasks_path, prompt, verify=verify, max_retries=max_retries,
                     spec=spec)
-    console.print(f"[success]\\u2713[/success] Added task [bold]#{task['id']}[/bold] [dim]({rich_escape(task['key'])})[/dim]: {rich_escape(prompt)}")
+    console.print(f"[success]\\u2713[/success] Added task [bold]#{task['id']}[/bold] [dim]({task['key']})[/dim]: {rich_escape(prompt[:70])}")
 
 
 @main.command(context_settings=CONTEXT_SETTINGS)
