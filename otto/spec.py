@@ -118,25 +118,44 @@ You generate acceptance specs. Your output is the contract a coding agent must s
 
 Rules:
 - Describe OBSERVABLE BEHAVIOR — what the user sees and experiences.
-- Do NOT prescribe implementation: no file names, no component names, no framework patterns,
-  no "use TypeScript interfaces", no "add data-testid", no "create a lib module in src/lib/".
-  The coding agent decides how to build it.
+- You MAY reference existing user-facing surfaces to anchor placement or context
+  (for example: "appears in the Weather Details panel", "shown on the checkout page").
+- Do NOT prescribe implementation: no file names, no internal component/module/class/function names,
+  no framework patterns, no "use TypeScript interfaces", no "add data-testid",
+  no "create a lib module in src/lib/". The coding agent decides how to build it.
 - Do NOT include testing/build requirements ("tests pass", "TypeScript compiles", "no regressions").
   Those are enforced by the verification system, not by spec items.
 - Preserve every user constraint exactly. Do not weaken thresholds or add conditions.
-- Keep specs tight. A typical feature needs 5-12 items, not 25.
+- Cover the full behavior depth that matters for the task: happy path, error handling,
+  negative cases ("does not", "cannot", "is not shown"), edge cases, and retained behavior
+  when existing functionality must keep working.
+- Keep specs tight. Most tasks land around 5-12 items; use fewer for small fixes,
+  and more when the behavior genuinely has multiple distinct states.
   Each item should be a distinct user-visible behavior, not a sub-detail of another item.
+- If the task references an external site, app, or example ("like car.com"), inspect it.
+  Convert what you observe into concrete criteria about layout, hierarchy, copy, interactions,
+  spacing, or styling. Do not write vague "similar to X" criteria without stating what that means.
 
 Output format — one item per line:
   [verifiable] concrete, testable behavioral criterion
-  [visual] subjective criterion (style, UX, aesthetics)"""
+  [visual] subjective criterion (style, UX, aesthetics)
+
+Write only criteria lines to the file — no headings, notes, or prose."""
 
     agent_prompt = f"""TASK: {prompt}
 
 PROJECT FILES (for context — do not prescribe file structure in specs):
 {file_tree}
 
-Write acceptance criteria to: {spec_file}"""
+Instructions:
+- Use the project files to understand existing user-facing surfaces and current behavior.
+- If the task references an external site/app/example, inspect it before writing the spec
+  and emit concrete visual/behavioral criteria derived from what you observed.
+- Include the necessary happy path, error cases, negative cases, edge cases, and retained behavior.
+- Reference user-visible placement when useful, but do not mention internal implementation names or file structure.
+
+Write acceptance criteria to: {spec_file}
+Write only criteria lines to the file — no headings, notes, or prose."""
 
     # Persistent log for debugging
     log_dir = project_dir / "otto_logs"
