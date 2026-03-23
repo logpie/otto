@@ -1,6 +1,7 @@
 """Otto runner — core execution loop with branch management and verification."""
 
 import asyncio
+import fnmatch
 import json
 import os
 import shutil
@@ -38,6 +39,137 @@ from otto.display import _truncate_at_word, console, format_cost, format_duratio
 from otto.tasks import load_tasks, update_task
 from otto.testgen import detect_test_framework, test_file_path
 from otto.verify import VerifyResult, run_verification, _subprocess_env
+
+
+_PROJECT_MAP_COLLAPSE_THRESHOLD = 20
+_PROJECT_MAP_MAX_LINES = 150
+_ROOT_MANIFEST_PATTERNS = (
+    "package.json",
+    "pyproject.toml",
+    "Cargo.toml",
+    "go.mod",
+    "pom.xml",
+    "Gemfile",
+    "README",
+    "README.*",
+    "Makefile",
+    "Dockerfile",
+    "docker-compose.yml",
+    "docker-compose.yaml",
+)
+
+
+class _ProjectMapNode:
+    """Trie node for rendering a shallow project structure summary."""
+
+    def __init__(self) -> None:
+        self.files: set[str] = set()
+        self.dirs: dict[str, "_ProjectMapNode"] = {}
+        self.total_files = 0
+
+
+def _tracked_git_paths(project_dir: Path) -> list[str]:
+    """Return tracked paths from git, preserving filenames exactly via -z."""
+    result = subprocess.run(
+        ["git", "ls-files", "-z"],
+        cwd=project_dir,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        return []
+
+    return [os.fsdecode(raw) for raw in result.stdout.split(b"\0") if raw]
+
+
+def _insert_tracked_path(root: _ProjectMapNode, path: str) -> None:
+    parts = [part for part in path.split("/") if part]
+    if not parts:
+        return
+
+    node = root
+    for part in parts[:-1]:
+        node = node.dirs.setdefault(part, _ProjectMapNode())
+    node.files.add(parts[-1])
+
+
+def _populate_file_counts(node: _ProjectMapNode) -> int:
+    total = len(node.files)
+    for child in node.dirs.values():
+        total += _populate_file_counts(child)
+    node.total_files = total
+    return total
+
+
+def _manifest_rank(name: str) -> tuple[int, str]:
+    lowered = name.lower()
+    for index, pattern in enumerate(_ROOT_MANIFEST_PATTERNS):
+        if fnmatch.fnmatch(lowered, pattern.lower()):
+            return (index, lowered)
+    return (len(_ROOT_MANIFEST_PATTERNS), lowered)
+
+
+def _sorted_root_files(files: set[str]) -> list[str]:
+    return sorted(files, key=lambda name: (_manifest_rank(name), name.lower(), name))
+
+
+def _sorted_names(names: set[str] | list[str] | dict[str, Any]) -> list[str]:
+    return sorted(names, key=lambda name: (name.lower(), name))
+
+
+def _should_collapse_dir(node: _ProjectMapNode) -> bool:
+    child_entries = len(node.files) + len(node.dirs)
+    return node.total_files > _PROJECT_MAP_COLLAPSE_THRESHOLD and (
+        child_entries > _PROJECT_MAP_COLLAPSE_THRESHOLD or not node.dirs
+    )
+
+
+def build_project_map(project_dir: Path) -> str:
+    """Return a shallow summary of tracked files suitable for prompt injection."""
+    tracked_paths = _tracked_git_paths(project_dir)
+    if not tracked_paths:
+        return ""
+
+    root = _ProjectMapNode()
+    for tracked_path in tracked_paths:
+        _insert_tracked_path(root, tracked_path)
+    total_files = _populate_file_counts(root)
+
+    rendered: list[tuple[str, int]] = []
+
+    def add_line(text: str, represented_files: int) -> None:
+        rendered.append((text, represented_files))
+
+    def render_dir(node: _ProjectMapNode, name: str, depth: int) -> None:
+        indent = "  " * depth
+        if _should_collapse_dir(node):
+            add_line(f"{indent}{name}/  ({node.total_files:,} files)", node.total_files)
+            return
+
+        add_line(f"{indent}{name}/", 0)
+        next_indent = "  " * (depth + 1)
+        for file_name in _sorted_names(node.files):
+            add_line(f"{next_indent}{file_name}", 1)
+        for child_name in _sorted_names(node.dirs):
+            child = node.dirs[child_name]
+            if depth >= 1 or _should_collapse_dir(child):
+                add_line(f"{next_indent}{child_name}/  ({child.total_files:,} files)", child.total_files)
+                continue
+            render_dir(child, child_name, depth + 1)
+
+    for file_name in _sorted_root_files(root.files):
+        add_line(file_name, 1)
+    for dir_name in _sorted_names(root.dirs):
+        render_dir(root.dirs[dir_name], dir_name, 0)
+
+    if len(rendered) <= _PROJECT_MAP_MAX_LINES:
+        return "\n".join(line for line, _ in rendered)
+
+    visible = rendered[: _PROJECT_MAP_MAX_LINES - 1]
+    shown_files = sum(represented for _, represented in visible)
+    remaining_files = max(total_files - shown_files, 0)
+    lines = [line for line, _ in visible]
+    lines.append(f"... and {remaining_files:,} more files")
+    return "\n".join(lines)
 
 
 
@@ -1029,22 +1161,9 @@ def _build_coding_prompt(
     if feedback:
         base_prompt = f"{prompt}\n\nIMPORTANT feedback from the user:\n{feedback}"
 
-    # Provide file tree instead of pre-loaded file contents.
-    # The agent has Read/Grep/Glob tools — let it decide what to read.
-    # Filter out node_modules, __pycache__, .next, and other noise that
-    # bloats the prompt (node_modules alone can be 17K+ lines).
-    file_tree_result = subprocess.run(
-        ["git", "ls-files"],
-        cwd=effective_dir, capture_output=True, text=True,
-    )
-    if file_tree_result.returncode == 0:
-        _noise_prefixes = ("node_modules/", ".next/", "__pycache__/", ".cache/", "dist/", "build/")
-        file_tree = "\n".join(
-            f for f in file_tree_result.stdout.strip().splitlines()
-            if not f.startswith(_noise_prefixes)
-        )
-    else:
-        file_tree = ""
+    # Provide a shallow tracked-file summary instead of dumping the full repo.
+    # The agent has Read/Grep/Glob tools — let it decide what to inspect in depth.
+    file_tree = build_project_map(effective_dir)
 
     # Include spec items if available — classified as verifiable or visual
     spec_section = ""

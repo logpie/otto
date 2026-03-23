@@ -4,7 +4,6 @@ import asyncio
 import json
 import os
 import re
-import subprocess
 import tempfile
 from pathlib import Path
 
@@ -23,6 +22,7 @@ except (ImportError, AttributeError):
     ThinkingBlock = None  # type: ignore[assignment,misc]
 
 from otto.display import print_agent_tool
+from otto.runner import build_project_map
 
 
 def _tool_use_summary(block) -> str:
@@ -107,19 +107,8 @@ async def _run_spec_agent(prompt: str, project_dir: Path) -> list:
     with tempfile.NamedTemporaryFile(suffix=".txt", prefix="otto_spec_", delete=False) as temp_file:
         spec_file = Path(temp_file.name)
 
-    # Get file tree for minimal project context (no deep exploration needed)
-    # Filter out node_modules and other noise that bloats the prompt.
-    file_tree_result = subprocess.run(
-        ["git", "ls-files"], cwd=project_dir, capture_output=True, text=True,
-    )
-    if file_tree_result.returncode == 0:
-        _noise = ("node_modules/", ".next/", "__pycache__/", ".cache/", "dist/", "build/")
-        file_tree = "\n".join(
-            f for f in file_tree_result.stdout.strip().splitlines()
-            if not f.startswith(_noise)
-        )
-    else:
-        file_tree = ""
+    # Keep repo context shallow and consistent with the coding prompt.
+    file_tree = build_project_map(project_dir)
 
     system_prompt = """\
 You generate acceptance specs. Your output is the contract a coding agent must satisfy.

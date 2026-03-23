@@ -66,10 +66,12 @@ class TestParseSpecOutput:
 
 
 class TestGenerateSpec:
+    @patch("otto.spec.build_project_map", return_value="PROJECT MAP")
     @patch("otto.spec.query")
-    def test_returns_parsed_spec(self, mock_query, tmp_path):
+    def test_returns_parsed_spec(self, mock_query, mock_project_map, tmp_path):
         """Agent writes spec to a temp file, we parse it."""
         async def fake_query(*, prompt, options=None):
+            assert "PROJECT FILES (for context — do not prescribe file structure in specs):\nPROJECT MAP" in prompt
             # Extract the spec file path from the prompt
             import re
             match = re.search(r'(?:criteria|spec) to: (.+\.txt)', prompt)
@@ -85,6 +87,7 @@ class TestGenerateSpec:
 
         mock_query.side_effect = fake_query
         spec = generate_spec("Add search", tmp_path)
+        mock_project_map.assert_called_once_with(tmp_path)
         assert len(spec) == 3
         assert "case-insensitive" in spec[0]["text"]
 

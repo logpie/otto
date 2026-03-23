@@ -9,8 +9,10 @@ import yaml
 
 from otto.runner import (
     _restore_workspace_state,
+    _build_coding_prompt,
     _setup_task_worktree,
     _teardown_task_worktree,
+    build_project_map,
     check_clean_tree,
     create_task_branch,
     build_candidate_commit,
@@ -19,6 +21,11 @@ from otto.runner import (
     rebase_and_merge,
     preflight_checks,
 )
+
+
+def _commit_all(repo: Path, message: str = "test commit") -> None:
+    subprocess.run(["git", "add", "."], cwd=repo, capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", message], cwd=repo, capture_output=True, check=True)
 
 
 class TestCheckCleanTree:
@@ -83,6 +90,66 @@ class TestCreateTaskBranch:
         # Should not raise — deletes and recreates
         base_sha = create_task_branch(tmp_git_repo, "abc123def456", "main")
         assert len(base_sha) == 40
+
+
+class TestBuildProjectMap:
+    def test_prioritizes_manifests_and_renders_shallow_tree(self, tmp_git_repo):
+        (tmp_git_repo / "package.json").write_text('{"name": "otto"}\n')
+        (tmp_git_repo / "Dockerfile").write_text("FROM python:3.12\n")
+        (tmp_git_repo / "zeta.txt").write_text("zeta\n")
+        (tmp_git_repo / "src" / "app").mkdir(parents=True)
+        (tmp_git_repo / "src" / "lib").mkdir(parents=True)
+        (tmp_git_repo / "src" / "app" / "layout.tsx").write_text("export default null\n")
+        (tmp_git_repo / "src" / "app" / "my file.ts").write_text("export const x = 1\n")
+        (tmp_git_repo / "src" / "lib" / "api.ts").write_text("export const api = {}\n")
+        _commit_all(tmp_git_repo, "add project tree")
+
+        project_map = build_project_map(tmp_git_repo)
+        lines = project_map.splitlines()
+
+        assert lines[:4] == ["package.json", "README.md", "Dockerfile", "zeta.txt"]
+        assert "src/" in lines
+        assert "  app/" in lines
+        assert "    layout.tsx" in lines
+        assert "    my file.ts" in lines
+        assert "  lib/" in lines
+        assert "    api.ts" in lines
+
+    def test_collapses_large_directories(self, tmp_git_repo):
+        vendor_dir = tmp_git_repo / "vendor"
+        vendor_dir.mkdir()
+        for index in range(21):
+            (vendor_dir / f"file_{index:02d}.txt").write_text(f"{index}\n")
+        _commit_all(tmp_git_repo, "add vendor files")
+
+        project_map = build_project_map(tmp_git_repo)
+
+        assert "vendor/  (21 files)" in project_map
+
+    def test_caps_output_and_reports_remaining_files(self, tmp_git_repo):
+        for index in range(200):
+            (tmp_git_repo / f"file_{index:03d}.txt").write_text(f"{index}\n")
+        _commit_all(tmp_git_repo, "add many files")
+
+        project_map = build_project_map(tmp_git_repo)
+        lines = project_map.splitlines()
+
+        assert len(lines) == 150
+        assert lines[-1] == "... and 52 more files"
+
+
+class TestBuildCodingPrompt:
+    @patch("otto.runner.build_project_map", return_value="PROJECT MAP")
+    def test_uses_shared_project_map(self, mock_project_map, tmp_git_repo):
+        prompt = _build_coding_prompt(
+            {"prompt": "Add feature", "key": "abc123"},
+            {},
+            tmp_git_repo,
+            tmp_git_repo,
+        )
+
+        mock_project_map.assert_called_once_with(tmp_git_repo)
+        assert "PROJECT FILES:\nPROJECT MAP" in prompt
 
 
 class TestBuildCandidateCommit:
@@ -285,4 +352,3 @@ class TestRebaseAndMerge:
         result = rebase_and_merge(tmp_git_repo, "otto/task3", "main")
         assert result is True
         assert (tmp_git_repo / "simple.txt").exists()
-
