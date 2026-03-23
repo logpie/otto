@@ -1031,11 +1031,20 @@ def _build_coding_prompt(
 
     # Provide file tree instead of pre-loaded file contents.
     # The agent has Read/Grep/Glob tools — let it decide what to read.
+    # Filter out node_modules, __pycache__, .next, and other noise that
+    # bloats the prompt (node_modules alone can be 17K+ lines).
     file_tree_result = subprocess.run(
         ["git", "ls-files"],
         cwd=effective_dir, capture_output=True, text=True,
     )
-    file_tree = file_tree_result.stdout.strip() if file_tree_result.returncode == 0 else ""
+    if file_tree_result.returncode == 0:
+        _noise_prefixes = ("node_modules/", ".next/", "__pycache__/", ".cache/", "dist/", "build/")
+        file_tree = "\n".join(
+            f for f in file_tree_result.stdout.strip().splitlines()
+            if not f.startswith(_noise_prefixes)
+        )
+    else:
+        file_tree = ""
 
     # Include spec items if available — classified as verifiable or visual
     spec_section = ""

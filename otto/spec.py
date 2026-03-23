@@ -108,10 +108,18 @@ async def _run_spec_agent(prompt: str, project_dir: Path) -> list:
         spec_file = Path(temp_file.name)
 
     # Get file tree for minimal project context (no deep exploration needed)
+    # Filter out node_modules and other noise that bloats the prompt.
     file_tree_result = subprocess.run(
         ["git", "ls-files"], cwd=project_dir, capture_output=True, text=True,
     )
-    file_tree = file_tree_result.stdout.strip() if file_tree_result.returncode == 0 else ""
+    if file_tree_result.returncode == 0:
+        _noise = ("node_modules/", ".next/", "__pycache__/", ".cache/", "dist/", "build/")
+        file_tree = "\n".join(
+            f for f in file_tree_result.stdout.strip().splitlines()
+            if not f.startswith(_noise)
+        )
+    else:
+        file_tree = ""
 
     system_prompt = """\
 You generate acceptance specs. Your output is the contract a coding agent must satisfy.
