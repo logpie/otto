@@ -94,6 +94,9 @@ Deterministic Plan-Execute-Replan (PER) orchestrator replacing v3's 100-turn LLM
 - N31-N34: Pilot v3 micromanagement (legacy path)
 - S1-S12: Systemic design issues
 
+### Process
+- **Codex should audit all prompts**: Every system prompt and agent prompt in the project should be reviewed by Codex for over-specification, telephone games, arbitrary constraints, and missed opportunities. This caught real issues every time it was done (spec prompt, QA prompt, coding prompt). Should be a standard step before any release.
+
 ## Bare CC vs Otto Comparison (Weatherapp Task 31 — Radar)
 
 | Metric | Otto v4 | Bare CC |
