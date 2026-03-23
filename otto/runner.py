@@ -1161,10 +1161,6 @@ def _build_coding_prompt(
     if feedback:
         base_prompt = f"{prompt}\n\nIMPORTANT feedback from the user:\n{feedback}"
 
-    # Provide a shallow tracked-file summary instead of dumping the full repo.
-    # The agent has Read/Grep/Glob tools — let it decide what to inspect in depth.
-    file_tree = build_project_map(effective_dir)
-
     # Include spec items if available — classified as verifiable or visual
     spec_section = ""
     if spec:
@@ -1190,9 +1186,6 @@ def _build_coding_prompt(
     agent_prompt = f"""{base_prompt}
 
 You are working in {effective_dir}. Do NOT create git commits.
-
-PROJECT FILES:
-{file_tree}
 {spec_section}
 
 Implement the feature and write tests for all [verifiable] spec items.

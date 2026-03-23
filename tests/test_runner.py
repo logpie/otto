@@ -139,8 +139,7 @@ class TestBuildProjectMap:
 
 
 class TestBuildCodingPrompt:
-    @patch("otto.runner.build_project_map", return_value="PROJECT MAP")
-    def test_uses_shared_project_map(self, mock_project_map, tmp_git_repo):
+    def test_omits_project_files_section(self, tmp_git_repo):
         prompt = _build_coding_prompt(
             {"prompt": "Add feature", "key": "abc123"},
             {},
@@ -148,8 +147,8 @@ class TestBuildCodingPrompt:
             tmp_git_repo,
         )
 
-        mock_project_map.assert_called_once_with(tmp_git_repo)
-        assert "PROJECT FILES:\nPROJECT MAP" in prompt
+        assert "PROJECT FILES:" not in prompt
+        assert "You are working in" in prompt
 
 
 class TestBuildCandidateCommit:

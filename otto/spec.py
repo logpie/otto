@@ -22,7 +22,6 @@ except (ImportError, AttributeError):
     ThinkingBlock = None  # type: ignore[assignment,misc]
 
 from otto.display import print_agent_tool
-from otto.runner import build_project_map
 
 
 def _tool_use_summary(block) -> str:
@@ -107,9 +106,6 @@ async def _run_spec_agent(prompt: str, project_dir: Path) -> list:
     with tempfile.NamedTemporaryFile(suffix=".txt", prefix="otto_spec_", delete=False) as temp_file:
         spec_file = Path(temp_file.name)
 
-    # Keep repo context shallow and consistent with the coding prompt.
-    file_tree = build_project_map(project_dir)
-
     system_prompt = """\
 You generate acceptance specs. Your output is the contract a coding agent must satisfy.
 
@@ -141,11 +137,8 @@ Write only criteria lines to the file — no headings, notes, or prose."""
 
     agent_prompt = f"""TASK: {prompt}
 
-PROJECT FILES (for context — do not prescribe file structure in specs):
-{file_tree}
-
 Instructions:
-- Use the project files to understand existing user-facing surfaces and current behavior.
+- Explore the codebase as needed to understand existing user-facing surfaces and current behavior.
 - If the task references an external site/app/example, inspect it before writing the spec
   and emit concrete visual/behavioral criteria derived from what you observed.
 - Include the necessary happy path, error cases, negative cases, edge cases, and retained behavior.
