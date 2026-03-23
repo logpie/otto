@@ -1,0 +1,29 @@
+{
+  "summary": {
+    "total_projects": 2,
+    "runner_pass_rate": 100.0,
+    "verify_pass_rate": 100.0,
+    "false_pass_rate": 0.0,
+    "total_cost": 1.39,
+    "avg_cost": 0.7,
+    "avg_time_s": 433.0
+  },
+  "projects": {
+    "real-string-width-emoji": {
+      "runner_pass": "PASS",
+      "verify_pass": "PASS",
+      "cost": 0.99,
+      "time_s": 601,
+      "attempts": 1,
+      "runner": "otto"
+    },
+    "real-ufo-parsefilename-bug": {
+      "runner_pass": "PASS",
+      "verify_pass": "PASS",
+      "cost": 0.4,
+      "time_s": 265,
+      "attempts": 1,
+      "runner": "otto"
+    }
+  }
+}

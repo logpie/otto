@@ -1,0 +1,21 @@
+────────────────────────────────────────────────────────────
+  Running baseline check...
+  ✓ Baseline passing (13 tests)
+
+  1 task, 8 specs  (v4 PER)
+    ○ #1  Fix the parseFilename bug from issue #283. Calling pars  (8 spec)
+
+────────────────────────────────────────────────────────────
+  Planning...
+  Plan: 1 batch(es), 1 tasks
+
+  Batch 1  1 task
+  Batch 1: 1 passed, 0 failed
+
+  Run complete  2m54s  $0.40
+
+  ✓ #1  Fix the parseFilename bug from issue #283. Calling parseFile  2m53s  
+$0.40
+
+  1/1 tasks passed
+

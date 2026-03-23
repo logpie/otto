@@ -1,0 +1,21 @@
+────────────────────────────────────────────────────────────
+  Running baseline check...
+  ✓ Baseline passing
+
+  1 task, 7 specs  (v4 PER)
+    ○ #1  The string-width library incorrectly calculates the wid  (7 spec)
+
+────────────────────────────────────────────────────────────
+  Planning...
+  Plan: 1 batch(es), 1 tasks
+
+  Batch 1  1 task
+  Batch 1: 1 passed, 0 failed
+
+  Run complete  7m47s  $0.99
+
+  ✓ #1  The string-width library incorrectly calculates the width of  7m44s  
+$0.99
+
+  1/1 tasks passed
+
