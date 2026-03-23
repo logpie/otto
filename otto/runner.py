@@ -2065,6 +2065,7 @@ You are working in {project_dir}. Do NOT create git commits."""
     has_explicit_fail = "QA VERDICT: FAIL" in report or "FAIL" in report.upper().split("QA VERDICT")[-1] if "QA VERDICT" in report else False
     # QA must complete AND have an explicit PASS verdict to be considered passing
     has_explicit_pass = "QA VERDICT: PASS" in report
+
     if has_explicit_fail:
         passed = False
     elif not qa_completed:

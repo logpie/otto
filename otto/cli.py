@@ -2,11 +2,17 @@
 
 import asyncio
 import json
+import os
 import re
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
+
+# Clear CLAUDECODE at startup so otto can run from inside Claude Code sessions.
+# Without this, agent SDK query() spawns a Claude Code subprocess that detects
+# the env var and refuses to start ("cannot launch inside another session").
+os.environ.pop("CLAUDECODE", None)
 
 import click
 
