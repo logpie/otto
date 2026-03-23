@@ -679,11 +679,44 @@ async def coding_loop(
         prompt=prompt, strategy=task_plan.strategy,
     ))
 
-    # Bridge on_progress events from run_task_with_qa to telemetry dual-write.
-    # This routes phase/tool events to pilot_results.jsonl so otto status -w,
-    # otto show, and otto logs -f all work under v4.
+    # Print task header
+    from otto.display import TaskDisplay
+    console.print()
+    console.print(f"  \u25cf [bold]Running[/bold]  [dim]#{task_id}  {task_key[:8]}[/dim]")
+    display = TaskDisplay(console)
+    display.start()
+
+    # Bridge on_progress events to:
+    # 1. Rich Live display (TaskDisplay) — inline progress visible to user
+    # 2. Legacy JSONL (pilot_results.jsonl) — for otto status -w, otto show
     def _on_progress(event_type: str, data: dict) -> None:
         try:
+            # Route to live display
+            if event_type == "phase":
+                display.update_phase(
+                    name=data.get("name", ""),
+                    status=data.get("status", ""),
+                    time_s=data.get("time_s", 0.0),
+                    error=data.get("error", ""),
+                    detail=data.get("detail", ""),
+                    cost=data.get("cost", 0),
+                )
+            elif event_type == "agent_tool":
+                display.add_tool(data=data)
+            elif event_type == "agent_tool_result":
+                display.add_tool_result(data=data)
+            elif event_type == "qa_finding":
+                display.add_finding(data.get("text", ""))
+            elif event_type == "qa_summary":
+                display.set_qa_summary(
+                    total=data.get("total", 0),
+                    passed=data.get("passed", 0),
+                    failed=data.get("failed", 0),
+                )
+        except Exception:
+            pass
+        try:
+            # Route to legacy JSONL
             if telemetry._legacy_enabled:
                 telemetry._emit_legacy_progress({
                     "tool": "progress",
@@ -716,12 +749,16 @@ async def coding_loop(
 
         duration = time.monotonic() - task_start
         cost = float(result.get("cost_usd", 0.0) or 0.0)
+        elapsed_str = display.stop()
 
         if result.get("success"):
             commit_sha = subprocess.run(
                 ["git", "rev-parse", "HEAD"],
                 cwd=project_dir, capture_output=True, text=True,
             ).stdout.strip()
+
+            # Print result
+            console.print(f"    [green]\u2713[/green] passed  [dim]{elapsed_str}  ${cost:.2f}[/dim]")
 
             # Emit TaskMerged NOW (not deferred to batch loop)
             telemetry.log(TaskMerged(
@@ -739,6 +776,7 @@ async def coding_loop(
             )
 
         error = str(result.get("error", "") or "")
+        console.print(f"    [red]\u2717[/red] failed  [dim]{elapsed_str}  ${cost:.2f}[/dim]")
         telemetry.log(TaskFailed(
             task_key=task_key, task_id=task_id,
             error=error,
@@ -753,6 +791,7 @@ async def coding_loop(
         )
 
     except Exception as exc:
+        display.stop()
         duration = time.monotonic() - task_start
         telemetry.log(TaskFailed(
             task_key=task_key, task_id=task_id,
