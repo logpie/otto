@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -106,25 +107,36 @@ async def _run_spec_agent(prompt: str, project_dir: Path) -> list:
     with tempfile.NamedTemporaryFile(suffix=".txt", prefix="otto_spec_", delete=False) as temp_file:
         spec_file = Path(temp_file.name)
 
+    # Get file tree for minimal project context (no deep exploration needed)
+    file_tree_result = subprocess.run(
+        ["git", "ls-files"], cwd=project_dir, capture_output=True, text=True,
+    )
+    file_tree = file_tree_result.stdout.strip() if file_tree_result.returncode == 0 else ""
+
     system_prompt = """\
-You generate acceptance specs from task descriptions. Your output becomes the
-contract the coding agent must satisfy. Preserve every user constraint exactly
-as stated — do not weaken thresholds or add conditions the user didn't specify.
+You generate acceptance specs. Your output is the contract a coding agent must satisfy.
+
+Rules:
+- Describe OBSERVABLE BEHAVIOR — what the user sees and experiences.
+- Do NOT prescribe implementation: no file names, no component names, no framework patterns,
+  no "use TypeScript interfaces", no "add data-testid", no "create a lib module in src/lib/".
+  The coding agent decides how to build it.
+- Do NOT include testing/build requirements ("tests pass", "TypeScript compiles", "no regressions").
+  Those are enforced by the verification system, not by spec items.
+- Preserve every user constraint exactly. Do not weaken thresholds or add conditions.
+- Keep specs tight. A typical feature needs 5-12 items, not 25.
+  Each item should be a distinct user-visible behavior, not a sub-detail of another item.
 
 Output format — one item per line:
-  [verifiable] concrete, testable criterion
-  [visual] subjective criterion (style, UX, aesthetics)
-
-Produce as many criteria as needed. Hard constraints first. Most should be [verifiable].
-
-When adding features to existing apps, ensure new features are consistent with
-existing UX patterns (selection, navigation, state management)."""
+  [verifiable] concrete, testable behavioral criterion
+  [visual] subjective criterion (style, UX, aesthetics)"""
 
     agent_prompt = f"""TASK: {prompt}
 
-You are working in {project_dir}. Explore the codebase as needed.
+PROJECT FILES (for context — do not prescribe file structure in specs):
+{file_tree}
 
-Explore the codebase as needed, understand the task, and write acceptance criteria to: {spec_file}"""
+Write acceptance criteria to: {spec_file}"""
 
     # Persistent log for debugging
     log_dir = project_dir / "otto_logs"
@@ -241,9 +253,8 @@ RULES:
 - Each task is a complete, self-contained unit of work
 - Do NOT create separate tasks for writing tests — test expectations belong in the spec
 - One heading/section = one task
-- Spec items describe BEHAVIOR, not implementation details
+- Spec items describe BEHAVIOR, not implementation details (no file names, component names, framework patterns)
 - Include: happy path, error handling, negative ("does NOT"), edge cases
-- Reference actual class/function names you found in the project
 - If a task modifies existing functionality, include regression criteria
 
 Write ONLY a valid JSON array to {output_file}. No prose.
