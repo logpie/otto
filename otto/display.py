@@ -307,35 +307,44 @@ class TaskDisplay:
                     self._console.print(f"        [dim]  ...{total_lines - len(preview)} more lines[/dim]")
 
     def _qa_tool_label(self, name: str, detail: str) -> str:
-        """Translate raw QA tool calls into user-facing verification progress."""
-        if name in ("Read", "Glob", "Grep"):
-            return "Analyzing code..."
+        """Build a concise, informative QA activity label from tool call data."""
+        short_detail = _shorten_path(detail)[:60] if detail else ""
 
-        if name.startswith("mcp__chrome-devtools__") or name == "chrome-devtools":
-            return "Testing in browser..."
+        if name in ("Read", "Glob", "Grep"):
+            return f"Reading {short_detail}" if short_detail else "Reading code"
+
+        if name.startswith("mcp__chrome-devtools__"):
+            action = name.replace("mcp__chrome-devtools__", "")
+            if short_detail:
+                return f"Browser: {action} {short_detail}"
+            return f"Browser: {action}"
+
+        if name == "Write":
+            return f"Writing {short_detail}" if short_detail else "Writing file"
 
         if name == "Bash":
-            cmd = detail.lower()
-            if any(marker in cmd for marker in (
-                "jest", "pytest", "vitest", "playwright test",
-                "npm test", "pnpm test", "yarn test", "cargo test", "go test",
-            )):
-                return "Running tests..."
-            if "tsc" in cmd or "--noemit" in cmd:
-                return "Checking types..."
-            if any(marker in cmd for marker in (
-                " build", "next build", "npm run build", "pnpm build",
-                "yarn build", "cargo build", "go build",
-            )):
-                return "Checking build..."
-            if "curl " in cmd:
-                return "Testing endpoints..."
-            if any(marker in cmd for marker in (
-                "node -e", "node --eval", "python -c", "python3 -c",
-            )):
-                return "Testing edge cases..."
+            cmd = detail.strip()
+            first_line = cmd.split("\n")[0][:65]
+            # Extract the meaningful part of the command
+            lower = cmd.lower()
+            if any(m in lower for m in ("jest", "pytest", "vitest", "cargo test", "go test")):
+                # Show which test file or pattern
+                return f"Testing: {first_line}"
+            if "curl " in lower:
+                return f"Curl: {first_line}"
+            if "tsc" in lower or "--noemit" in lower:
+                return "Checking types"
+            if any(m in lower for m in ("next build", "npm run build", "cargo build")):
+                return "Building project"
+            if any(m in lower for m in ("node -e", "python -c", "python3 -c")):
+                return f"Running: {first_line}"
+            if any(m in lower for m in ("next dev", "npm start", "npm run dev")):
+                return "Starting dev server"
+            if "kill " in lower or "pkill " in lower:
+                return "Stopping server"
+            return first_line
 
-        return "Verifying..."
+        return f"{name} {short_detail}".strip()
 
     def add_tool_result(self, data: dict | None = None) -> None:
         """Print a tool result inline (Bash test output). Thread-safe."""

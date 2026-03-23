@@ -364,7 +364,8 @@ class TestTaskDisplay:
         assert td._qa_spec_count == 3
         assert td._qa_pass_count == 2
 
-    def test_qa_tools_use_semantic_labels_instead_of_raw_commands(self):
+    def test_qa_tools_show_informative_labels(self):
+        """QA tool calls show what's being tested, not generic categories."""
         buf = io.StringIO()
         test_console = Console(file=buf, highlight=False, color_system=None)
         td = TaskDisplay(test_console)
@@ -375,30 +376,35 @@ class TestTaskDisplay:
         td.add_tool(name="Bash", detail="npx jest --testPathPattern=windCompass --no-coverage")
         td.add_tool(name="Bash", detail="npm run build")
         output = buf.getvalue()
-        assert "Analyzing code..." in output
-        assert "Checking types..." in output
-        assert "Testing edge cases..." in output
-        assert "Running tests..." in output
-        assert "Checking build..." in output
-        assert "WindCompass.tsx" not in output
-        assert "npx tsc" not in output
-        assert "node -e" not in output
-        assert "jest" not in output
+        # Should show actual details, not generic labels
+        assert "WindCompass.tsx" in output
+        assert "Checking types" in output
+        assert "node -e" in output
+        assert "jest" in output
+        assert "Building project" in output
+        # Should NOT show generic labels
+        assert "Analyzing code..." not in output
+        assert "Verifying..." not in output
 
-    def test_qa_semantic_labels_deduplicate_consecutive_tool_calls(self):
+    def test_qa_labels_deduplicate_identical_calls_only(self):
+        """Identical consecutive QA tool calls deduplicate, different ones don't."""
         buf = io.StringIO()
         test_console = Console(file=buf, highlight=False, color_system=None)
         td = TaskDisplay(test_console)
         td.update_phase("qa", "running")
+        # Two different files — both should show
         td.add_tool(name="Read", detail="/tmp/project/src/WindCompass.tsx")
         td.add_tool(name="Read", detail="/tmp/project/tests/windCompass.test.tsx")
-        td.add_tool(name="Bash", detail="pytest tests/test_api.py -q")
-        td.add_tool(name="Bash", detail="npx jest --testPathPattern=windCompass --no-coverage")
+        # Same file twice — second should deduplicate
+        td.add_tool(name="Read", detail="/tmp/project/tests/windCompass.test.tsx")
         output = buf.getvalue()
-        assert output.count("Analyzing code...") == 1
-        assert output.count("Running tests...") == 1
+        assert "WindCompass.tsx" in output
+        assert "windCompass.test.tsx" in output
+        # The second read of the same file should be suppressed
+        assert output.count("windCompass.test.tsx") == 1
 
-    def test_qa_semantic_labels_reset_when_phase_restarts(self):
+    def test_qa_labels_reset_when_phase_restarts(self):
+        """Same file read in two QA phases should show both times."""
         buf = io.StringIO()
         test_console = Console(file=buf, highlight=False, color_system=None)
         td = TaskDisplay(test_console)
@@ -408,7 +414,7 @@ class TestTaskDisplay:
         td.update_phase("qa", "running")
         td.add_tool(name="Read", detail="/tmp/project/src/WindCompass.tsx")
         output = buf.getvalue()
-        assert output.count("Analyzing code...") == 2
+        assert output.count("WindCompass.tsx") == 2
 
     def test_internal_files_excluded_from_coding(self):
         buf = io.StringIO()
