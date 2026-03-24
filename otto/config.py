@@ -8,20 +8,26 @@ from typing import Any
 import yaml
 
 DEFAULT_CONFIG: dict[str, Any] = {
-    "test_command": None,
-    "max_retries": 3,
-    "model": None,
+    # Core
     "default_branch": "main",
-    "verify_timeout": 300,
-    "max_parallel": 3,
-    "effort": "high",
-    "orchestrator": "v4",
-    # Agent settings scope — controls which CC settings are loaded per agent type
+    "max_retries": 3,
+    "test_command": None,           # auto-detected if not set
+    "model": None,                  # override Claude model (e.g. sonnet)
+
+    # Timeouts
+    "verify_timeout": 120,          # seconds for test suite in verify worktree
+    "max_task_time": 3600,          # 1hr circuit breaker per task
+    "qa_timeout": 3600,             # 1hr circuit breaker for QA agent
+
+    # Agent CC settings scope — what settings each agent loads
     # "user,project": loads user CLAUDE.md, skills, hooks + project settings
-    # "project": loads only project settings (faster, skips user skills/hooks)
-    "coding_agent_settings": "user,project",   # coding benefits from user CLAUDE.md
-    "spec_agent_settings": "project",           # spec doesn't need user prefs
-    "qa_agent_settings": "project",             # QA doesn't need user prefs
+    # "project": project settings only (faster, no user skills/hooks)
+    "coding_agent_settings": "user,project",
+    "spec_agent_settings": "project",
+    "qa_agent_settings": "project",
+
+    # Internal (not exposed in otto.yaml)
+    "orchestrator": "v4",           # v3 pilot (legacy) or v4 PER
 }
 
 
@@ -195,17 +201,17 @@ def create_config(project_dir: Path) -> Path:
     # Write config with comments showing all available options
     config_path = project_dir / "otto.yaml"
     lines = yaml.dump(config, default_flow_style=False, sort_keys=False).rstrip()
-    lines += "\n\n# Other options (uncomment to customize):\n"
-    lines += f"# test_command: pytest          # auto-detected if not set\n"
-    lines += f"# model: null                   # override Claude model (e.g. sonnet)\n"
-    lines += f"# max_turns: 200                # max agent turns per task\n"
-    lines += f"# effort: high                  # agent thinking effort (low/medium/high/max)\n"
-    lines += f"# max_parallel: 3               # max parallel tasks (future)\n"
-    lines += f"# researcher_model: sonnet       # model for research subagent (sonnet/haiku/opus)\n"
-    lines += f"# max_task_time: 900             # max seconds per task (prevents unbounded retries)\n"
-    lines += f"# coding_agent_settings: user,project  # CC settings for coding agent (user,project or project)\n"
-    lines += f"# spec_agent_settings: project         # CC settings for spec agent\n"
-    lines += f"# qa_agent_settings: project           # CC settings for QA agent\n"
+    lines += "\n"
+    lines += "\n# Timeouts:\n"
+    lines += f"# verify_timeout: 120            # seconds for test suite in verify\n"
+    lines += f"# max_task_time: 3600            # 1hr circuit breaker per task\n"
+    lines += f"# qa_timeout: 3600               # 1hr circuit breaker for QA agent\n"
+    lines += "\n# Model:\n"
+    lines += f"# model: null                    # override Claude model (e.g. sonnet)\n"
+    lines += "\n# Agent settings scope (user,project or project):\n"
+    lines += f"# coding_agent_settings: user,project  # coding loads user CLAUDE.md + skills\n"
+    lines += f"# spec_agent_settings: project         # spec needs only project context\n"
+    lines += f"# qa_agent_settings: project            # QA needs only project context\n"
     config_path.write_text(lines + "\n")
 
     # Update .git/info/exclude for runtime files (use git_meta_dir for linked worktrees)
