@@ -1374,7 +1374,7 @@ async def run_task_v45(
             _should = len(spec) - _must
             _breakdown = f"{len(spec)} items ({_must} must, {_should} should)"
             emit("phase", name="spec_gen", status="done", time_s=spec_elapsed,
-                 detail=_breakdown)
+                 detail=_breakdown, cost=spec_cost)
             from otto.tasks import spec_binding, spec_text
             for item in spec:
                 binding = spec_binding(item)
@@ -1786,7 +1786,8 @@ async def run_task_v45(
 
                 if qa_result_nc["must_passed"]:
                     # QA confirms feature exists and works — pass
-                    emit("phase", name="qa", status="done", time_s=qa_elapsed_nc)
+                    emit("phase", name="qa", status="done", time_s=qa_elapsed_nc,
+                         cost=qa_result_nc.get("cost_usd", 0.0))
                     emit("phase", name="merge", status="done", time_s=0,
                          detail="no changes needed")
                     subprocess.run(["git", "checkout", default_branch],
@@ -2072,7 +2073,8 @@ async def run_task_v45(
                     last_error_source = "qa"
                     continue
                 else:
-                    emit("phase", name="qa", status="done", time_s=qa_elapsed)
+                    emit("phase", name="qa", status="done", time_s=qa_elapsed,
+                         cost=qa_result.get("cost_usd", 0.0))
             else:
                 # Tier 0 — skip QA
                 emit("phase", name="qa", status="done", time_s=0,
