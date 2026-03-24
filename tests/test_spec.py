@@ -120,7 +120,7 @@ class TestGenerateSpec:
         """Agent writes spec to a temp file, we parse it."""
         async def fake_query(*, prompt, options=None):
             assert "PROJECT FILES" not in prompt
-            assert "Explore the codebase as needed" in prompt
+            assert "Read only what you need" in prompt
             # Extract the spec file path from the prompt
             import re
             match = re.search(r'(?:criteria|spec) to: (.+\.txt)', prompt)

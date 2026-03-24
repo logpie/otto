@@ -166,12 +166,14 @@ Output format — one item per line:
     agent_prompt = f"""TASK: {prompt}
 
 Instructions:
-- Explore the codebase as needed to understand existing user-facing surfaces and current behavior.
+- Read only what you need: the data types/models file and 1-2 existing components
+  for context. Do not read every file in the project.
 - If the task references an external site/app/example, inspect it before writing the spec
   and emit concrete behavioral criteria derived from what you observed.
 - Include the necessary happy path, error cases, negative cases, edge cases, and retained behavior.
 - Reference user-visible placement when useful, but do not mention internal implementation names or file structure.
 - Tag each criterion as [must] or [should] based on binding level.
+- Do not ask questions. Write the criteria based on the task description.
 
 Write acceptance criteria to: {spec_file}
 Write only [must]/[should] criteria lines to the file — no headings, notes, or prose."""
