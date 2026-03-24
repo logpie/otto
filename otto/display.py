@@ -699,7 +699,7 @@ class TaskDisplay:
 
         if passed is True:
             self._console.print(f"      [green]\u2713[/green] {display_text}")
-            if clean.startswith("[should") and evidence:
+            if evidence:
                 self._console.print(f"        [dim]{rich_escape(evidence)}[/dim]")
             return
         if passed is None:

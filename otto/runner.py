@@ -877,11 +877,14 @@ Testing order — test in the order listed:
 1. Verifiable [must] items FIRST — use code inspection, scripts, curl, unit checks.
    If ANY [must] item fails, write the verdict immediately. Do not proceed to
    browser testing or [should] items.
-2. Non-verifiable [must ◈] items — may need browser/visual inspection.
+2. Non-verifiable [must ◈] items — these are subjective (visual, UX, wording).
+   For visual/layout/styling items: start a dev server, navigate to the page,
+   and verify in the browser. Code inspection alone cannot confirm appearance.
+   For non-visual subjective items: use your best judgment with evidence.
 3. [should] items — note observations, do not block merge.
 
-Items marked [must ◈] are subjective (visual, UX). All other [must] items
-are verifiable and should be testable without a browser.
+Items marked ◈ cannot be verified by code alone. Visual items MUST use browser.
+Always run existing tests before writing the verdict.
 
 Also check:
 - Does the implementation contradict the ORIGINAL task prompt?
@@ -2085,20 +2088,31 @@ async def run_task_v45(
                 if qa_warning:
                     qa_report = f"[warning] {qa_warning}\n\n{qa_report}".strip()
                 verdict = qa_result.get("verdict", {})
-                # Match QA verdict items back to spec to get ◈ marker
-                spec_markers = {}  # criterion text → has ◈
+                # Build spec lookup for ◈ marker — fuzzy match since QA paraphrases
+                _visual_specs: list[str] = []  # normalized non-verifiable spec texts
                 if qa_spec:
                     from otto.tasks import spec_text, spec_is_verifiable
                     for si in qa_spec:
-                        spec_markers[spec_text(si).lower().strip()] = not spec_is_verifiable(si)
+                        if not spec_is_verifiable(si):
+                            # Store first 40 chars normalized for fuzzy matching
+                            _visual_specs.append(spec_text(si).lower().strip()[:40])
+
+                def _is_visual_criterion(criterion: str) -> bool:
+                    """Check if criterion matches any non-verifiable spec (fuzzy)."""
+                    if not _visual_specs:
+                        return False
+                    c = criterion.lower().strip()
+                    for vs in _visual_specs:
+                        # Match if either contains the other's first 30 chars
+                        if vs[:30] in c or c[:30] in vs:
+                            return True
+                    return False
 
                 for item in verdict.get("must_items", []):
                     passed = item.get("status") == "pass"
                     evidence = item.get("evidence", "")[:80]
                     criterion = item.get("criterion", "")[:70]
-                    # Check if this criterion matches a non-verifiable spec
-                    is_visual = spec_markers.get(criterion.lower().strip(), False)
-                    marker = " ◈" if is_visual else ""
+                    marker = " ◈" if _is_visual_criterion(criterion) else ""
                     emit(
                         "qa_item_result",
                         text=f"{'✓' if passed else '✗'} [must{marker}] {criterion}",
@@ -2109,8 +2123,7 @@ async def run_task_v45(
                 for note in should_notes:
                     obs = note.get("observation", "")[:60]
                     criterion = note.get("criterion", "")[:70]
-                    is_visual = spec_markers.get(criterion.lower().strip(), False)
-                    marker = " ◈" if is_visual else ""
+                    marker = " ◈" if _is_visual_criterion(criterion) else ""
                     emit("qa_item_result",
                          text=f"[should{marker}] {criterion}",
                          passed=None,
