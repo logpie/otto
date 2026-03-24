@@ -192,14 +192,105 @@ def simulate_run(console: Console) -> None:
     console.print()
 
 
+def replay_from_jsonl(console: Console, jsonl_path: str) -> None:
+    """Replay a real otto run from pilot_results.jsonl through TaskDisplay."""
+    import json
+
+    display = TaskDisplay(console)
+    events = []
+    with open(jsonl_path) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    events.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+
+    if not events:
+        console.print("[red]No events found in JSONL file[/red]")
+        return
+
+    # Extract task info from first event
+    task_key = None
+    for e in events:
+        if e.get("task_key"):
+            task_key = e["task_key"]
+            break
+
+    console.print()
+    console.print(f"  [bold dim]Replay from:[/bold dim] [dim]{jsonl_path}[/dim]")
+    if task_key:
+        console.print(f"  [bold dim]Task:[/bold dim] [dim]{task_key}[/dim]")
+    console.print()
+
+    for evt in events:
+        event_type = evt.get("event", "")
+
+        if event_type == "phase":
+            name = evt.get("name", "")
+            status = evt.get("status", "")
+            time_s = evt.get("time_s", 0.0)
+            error = evt.get("error", "")
+            detail = evt.get("detail", "")
+            cost = evt.get("cost", 0)
+
+            display.update_phase(name, status, time_s=time_s,
+                                 error=error, detail=detail, cost=cost)
+
+        elif event_type == "agent_tool":
+            display.add_tool(data=evt)
+
+        elif event_type == "agent_tool_result":
+            display.add_tool_result(data=evt)
+
+        elif event_type == "qa_finding":
+            display.add_finding(evt.get("text", ""))
+
+        elif event_type == "qa_status":
+            text = evt.get("text", "")
+            if text:
+                console.print(f"      [dim]{rich_escape(text[:80])}[/dim]")
+
+        elif event_type == "qa_item_result":
+            display.add_qa_item_result(
+                text=evt.get("text", ""),
+                passed=evt.get("passed", True),
+                evidence=evt.get("evidence", ""),
+            )
+
+        elif event_type == "qa_summary":
+            display.set_qa_summary(
+                total=evt.get("total", 0),
+                passed=evt.get("passed", 0),
+                failed=evt.get("failed", 0),
+            )
+
+        elif event_type == "spec_item":
+            display.add_spec_item(evt.get("text", ""))
+
+        elif event_type == "spec_items_done":
+            display.flush_spec_summary()
+
+        elif event_type == "attempt_boundary":
+            display.add_attempt_boundary(
+                attempt=evt.get("attempt", 0),
+                reason=evt.get("reason", ""),
+            )
+
+
 def _ts() -> str:
     return time.strftime("%H:%M:%S")
 
 
-def generate_preview(output_path: str | None = None) -> Path:
+def generate_preview(output_path: str | None = None, replay_file: str | None = None) -> Path:
     """Generate HTML preview and return the file path."""
     console = Console(record=True, width=100, color_system="truecolor")
-    simulate_run(console)
+
+    if replay_file:
+        replay_from_jsonl(console, replay_file)
+    else:
+        simulate_run(console)
 
     html_content = console.export_html(inline_styles=True)
 
@@ -235,12 +326,19 @@ pre {{
 if __name__ == "__main__":
     import sys
     out = None
+    replay = None
+
     if "--save" in sys.argv:
         idx = sys.argv.index("--save")
         if idx + 1 < len(sys.argv):
             out = sys.argv[idx + 1]
 
-    path = generate_preview(out)
+    if "--replay" in sys.argv:
+        idx = sys.argv.index("--replay")
+        if idx + 1 < len(sys.argv):
+            replay = sys.argv[idx + 1]
+
+    path = generate_preview(out, replay_file=replay)
     print(f"Preview saved to: {path}")
 
     # Try to open in browser
