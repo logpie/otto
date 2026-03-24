@@ -36,7 +36,7 @@ def _truncate_at_word(text: str, max_len: int) -> str:
     return text[:cut] + "..."
 
 
-_PROJECT_DIR_RE = re.compile(r"/(?:private/)?tmp/[^\s/]+/")
+_PROJECT_DIR_RE = re.compile(r"/(?:private/)?tmp/[^\s/]+/?")  # trailing slash optional
 
 def _strip_temp_prefix(detail: str) -> str:
     """Strip otto temp dir prefixes and project dir paths for cleaner display."""
@@ -297,6 +297,9 @@ class TaskDisplay:
 
         raw_detail = detail or ""
 
+        # Strip temp dir prefixes from all tool details (project paths, otto work dirs)
+        raw_detail = _strip_temp_prefix(raw_detail)
+
         # Skip internal files (check BEFORE path shortening)
         if any(p in raw_detail for p in _INTERNAL_PATTERNS):
             return
@@ -378,7 +381,17 @@ class TaskDisplay:
                 if label == self._last_qa_label:
                     return
                 self._last_qa_label = label
-            self._console.print(f"      [dim]{label}[/dim]")
+
+            # Style QA activity by type — key actions bold, reads dim, narration dim
+            if label.startswith(("Testing:", "Curl:")):
+                self._console.print(f"      [bold]{label}[/bold]")
+            elif label.startswith("Browser:"):
+                self._console.print(f"      [bold magenta]{label}[/bold magenta]")
+            elif label.startswith(("Reading", "Writing verdict")):
+                self._console.print(f"      [dim]{label}[/dim]")
+            else:
+                # Other tool actions (building, starting server, etc.)
+                self._console.print(f"      {label}")
             return
 
         # Truncate Bash commands at first newline (multi-line node -e commands)
@@ -395,8 +408,16 @@ class TaskDisplay:
         if prev_type and prev_type != name:
             self._console.print()
 
-        # Consistent style for all phases — ● Name  detail
-        self._console.print(f"      [bold cyan]\u25cf {name}[/bold cyan]  [dim]{short}[/dim]")
+        # Per-tool-type styling — matches theme.py semantics
+        if name in ("Write", "Edit"):
+            # Key actions: green bullet + name, visible detail
+            self._console.print(f"      [bold green]\u25cf {name}[/bold green]  {short}")
+        elif name == "Bash":
+            # Commands: cyan bullet + name, visible detail
+            self._console.print(f"      [bold cyan]\u25cf {name}[/bold cyan]  {short}")
+        else:
+            # Read/Glob/Grep: dim bullet + name + detail (background exploration)
+            self._console.print(f"      [dim]\u25cf {name}  {short}[/dim]")
 
         # Inline diff/preview below tool call (like CC)
         if data:
@@ -609,7 +630,16 @@ class TaskDisplay:
                 self._spec_items_buffer.append(text)
                 print_now = False
         if print_now:
-            self._console.print(f"      [dim]{rich_escape(text)}[/dim]")
+            self._print_spec_item(text)
+
+    def _print_spec_item(self, text: str) -> None:
+        """Print a spec item with binding-level styling."""
+        t = text[:80]
+        if "[must]" in t:
+            rest = rich_escape(t.replace("[must]", "", 1).strip())
+            self._console.print(f"      [cyan]\\[must][/cyan] {rest}")
+        else:
+            self._console.print(f"      [dim]{rich_escape(t)}[/dim]")
 
     def flush_spec_summary(self) -> None:
         """Print a collapsed summary of buffered spec items."""
@@ -621,7 +651,7 @@ class TaskDisplay:
         must_items = [t for t in items if "[must]" in t]
         preview = must_items[:3] or items[:3]
         for item in preview:
-            self._console.print(f"      [dim]{rich_escape(item[:80])}[/dim]")
+            self._print_spec_item(item)
         remaining = len(items) - len(preview)
         if remaining > 0:
             self._console.print(f"      [dim]... +{remaining} more[/dim]")
@@ -630,14 +660,45 @@ class TaskDisplay:
         """Print a QA per-item result."""
         if not text:
             return
+        # Strip existing ✓/✗ prefix if present — we add styled ones
+        clean = text.lstrip()
+        if clean and clean[0] in ("\u2713", "\u2717", "\u2705", "\u274c"):
+            clean = clean[1:].lstrip()
+
+        # Color the [must]/[should] tag for scannability
+        # ◈ marks non-verifiable (visual/subjective) items
+        has_visual = "\u25c8" in clean
+        # Strip tag + marker from text to get the description
+        stripped = clean
+        for removal in ("[must ◈]", "[must]", "[should ◈]", "[should]"):
+            stripped = stripped.replace(removal, "", 1)
+        rest = rich_escape(stripped.strip())
+
+        if "[must" in clean:
+            if has_visual:
+                tag = "[cyan]\\[must[/cyan] [magenta]◈[/magenta][cyan]][/cyan]"
+            else:
+                tag = "[cyan]\\[must][/cyan]"
+            display_text = f"{tag} {rest}"
+        elif "[should" in clean:
+            if has_visual:
+                tag = "[dim]\\[should[/dim] [magenta]◈[/magenta][dim]][/dim]"
+            else:
+                tag = "[dim]\\[should][/dim]"
+            display_text = f"{tag} {rest}"
+        else:
+            display_text = rich_escape(clean)
+
         if passed:
-            # Passed items: dim with green checkmark (not all-green)
-            self._console.print(f"      [dim]{rich_escape(text)}[/dim]")
+            self._console.print(f"      [green]\u2713[/green] {display_text}")
+            # Show observation for [should] items (that's the useful part)
+            if "[should]" in text and evidence:
+                self._console.print(f"        [dim]{rich_escape(evidence)}[/dim]")
             return
         # Failed items: red with evidence
-        self._console.print(f"      [red]{rich_escape(text)}[/red]")
+        self._console.print(f"      [red]\u2717[/red] [red]{display_text}[/red]")
         if evidence:
-            self._console.print(f"        [dim]evidence: {rich_escape(evidence)}[/dim]")
+            self._console.print(f"        [dim]{rich_escape(evidence)}[/dim]")
 
     # -- Private --
 
@@ -648,47 +709,52 @@ class TaskDisplay:
 
         timestamp = time.strftime("%H:%M:%S")
         phase_label = name.replace("_", " ")
-        parts = []
+
+        # Build info with targeted colors — NOT wrapped in [dim] (kills nested styles)
+        meta = []  # dim metadata (time, cost)
+        highlight = []  # colored highlights (line counts, test results)
+
         if time_s >= 1:
-            parts.append(f"{time_s:.0f}s")
+            meta.append(f"{time_s:.0f}s")
         if cost:
-            parts.append(f"${cost:.2f}")
+            meta.append(f"${cost:.2f}")
 
         if name == "prepare" and detail:
-            parts.append(detail)
+            highlight.append(detail)
         elif name == "coding":
             if self._coding_files:
-                line_info = ""
-                if self._lines_added or self._lines_removed:
-                    line_parts = []
-                    if self._lines_added:
-                        line_parts.append(f"[green]+{self._lines_added}[/green]")
-                    if self._lines_removed:
-                        line_parts.append(f"[red]-{self._lines_removed}[/red]")
-                    line_info = f"  {' '.join(line_parts)}"
-                parts.append(f"{len(self._coding_files)} files{line_info}")
+                highlight.append(f"{len(self._coding_files)} files")
+                if self._lines_added:
+                    highlight.append(f"[green]+{self._lines_added}[/green]")
+                if self._lines_removed:
+                    highlight.append(f"[red]-{self._lines_removed}[/red]")
         elif name == "spec_gen":
-            # Show spec count + binding breakdown
             if detail:
-                parts.append(detail)
+                highlight.append(detail)
         elif name == "test" and detail:
             m = re.search(r'(\d+) passed', detail)
             if m:
-                parts.append(f"[green]{m.group(0)}[/green]")
+                highlight.append(f"[green]{m.group(0)}[/green]")
             else:
-                parts.append(detail[:35])
+                highlight.append(detail[:35])
         elif name == "qa":
             if self._qa_spec_count:
                 t, p = self._qa_spec_count, self._qa_pass_count
-                parts.append(f"{t} specs passed" if p == t else f"{p}/{t} specs passed")
+                if p == t:
+                    highlight.append(f"[green]{t} specs passed[/green]")
+                else:
+                    highlight.append(f"{p}/{t} specs passed")
             tier_detail = self._phase_details.get("qa", "")
             if tier_detail:
-                parts.append(tier_detail)
+                meta.append(tier_detail)
         elif name == "candidate":
             return
 
-        info = "  ".join(parts)
-        self._console.print(f"  [green]{timestamp}  \u2713 {phase_label}[/green]  [dim]{info}[/dim]")
+        meta_str = f"  [dim]{'  '.join(meta)}[/dim]" if meta else ""
+        highlight_str = f"  {'  '.join(highlight)}" if highlight else ""
+        self._console.print(
+            f"  [green]{timestamp}  \u2713 {phase_label}[/green]{meta_str}{highlight_str}"
+        )
 
     def _print_phase_fail(self, name: str, time_s: float, error: str, cost: float) -> None:
         timestamp = time.strftime("%H:%M:%S")

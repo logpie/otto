@@ -205,7 +205,9 @@ async def run_per(
                 tasks_failed=batch_failed,
             ))
 
-            console.print(f"  [dim]Batch {batch_idx}: {batch_passed} passed, {batch_failed} failed[/dim]")
+            pass_str = f"[green]{batch_passed} passed[/green]"
+            fail_str = f"[red]{batch_failed} failed[/red]" if batch_failed else f"{batch_failed} failed"
+            console.print(f"  Batch {batch_idx}: {pass_str}, {fail_str}")
 
             # Remove completed batch and check for replan
             completed_keys = {r.task_key for r in batch_results}

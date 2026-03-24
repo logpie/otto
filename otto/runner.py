@@ -680,10 +680,11 @@ async def coding_loop(
             elif event_type == "qa_finding":
                 display.add_finding(data.get("text", ""))
             elif event_type == "qa_status":
-                # QA reasoning narration — show as dim status line
+                # QA reasoning narration — default text (not dim)
+                # Key findings and headers need to be readable
                 text = data.get("text", "")
                 if text:
-                    console.print(f"      [dim]{rich_escape(text[:80])}[/dim]")
+                    console.print(f"      {rich_escape(text[:80])}")
             elif event_type == "qa_item_result":
                 display.add_qa_item_result(
                     text=data.get("text", ""),
@@ -732,9 +733,9 @@ async def coding_loop(
                 cwd=project_dir, capture_output=True, text=True,
             ).stdout.strip()
 
-            # Print result
+            # Print task result — same indentation level as phase completions
             console.print(
-                f"    {time.strftime('%H:%M:%S')}  [green]\u2713[/green] passed  "
+                f"  [green]{time.strftime('%H:%M:%S')}  \u2713 passed[/green]  "
                 f"[dim]{elapsed_str}  ${cost:.2f}[/dim]"
             )
             task_meta = task
@@ -749,11 +750,11 @@ async def coding_loop(
             if file_count:
                 parts.append(f"{file_count} files")
             if spec_count:
-                parts.append(f"{spec_count} specs verified")
+                parts.append(f"[green]{spec_count} specs[/green] verified")
             if attempts > 1:
                 parts.append(f"{attempts} attempts")
             if parts:
-                console.print(f"      [dim]{' · '.join(parts)}[/dim]")
+                console.print(f"    {' · '.join(parts)}")
 
             # Emit TaskMerged NOW (not deferred to batch loop)
             telemetry.log(TaskMerged(
@@ -1425,11 +1426,14 @@ async def run_task_v45(
             _must = sum(1 for item in spec if _sb_count(item) == "must")
             _should = len(spec) - _must
             _breakdown = f"{len(spec)} items ({_must} must, {_should} should)"
+            # Show critical-path wait (how much it blocked QA), not wall time
             if already_done:
-                _breakdown += " (ready)"
-            elif wait_time > 1:
-                _breakdown += f" (waited {wait_time:.0f}s)"
-            emit("phase", name="spec_gen", status="done", time_s=spec_elapsed,
+                _breakdown += f" (ready, background {spec_elapsed:.0f}s)"
+                critical_wait = 0.0
+            else:
+                _breakdown += f" (waited {wait_time:.0f}s, background {spec_elapsed:.0f}s)"
+                critical_wait = wait_time
+            emit("phase", name="spec_gen", status="done", time_s=critical_wait,
                  detail=_breakdown, cost=spec_cost)
             from otto.tasks import spec_binding, spec_text
             for item in spec:
@@ -2072,20 +2076,36 @@ async def run_task_v45(
                 if qa_warning:
                     qa_report = f"[warning] {qa_warning}\n\n{qa_report}".strip()
                 verdict = qa_result.get("verdict", {})
+                # Match QA verdict items back to spec to get ◈ marker
+                spec_markers = {}  # criterion text → has ◈
+                if qa_spec:
+                    from otto.tasks import spec_text, spec_is_verifiable
+                    for si in qa_spec:
+                        spec_markers[spec_text(si).lower().strip()] = not spec_is_verifiable(si)
+
                 for item in verdict.get("must_items", []):
                     passed = item.get("status") == "pass"
-                    evidence = item.get("evidence", "")[:80] if not passed else ""
+                    evidence = item.get("evidence", "")[:80]
+                    criterion = item.get("criterion", "")[:70]
+                    # Check if this criterion matches a non-verifiable spec
+                    is_visual = spec_markers.get(criterion.lower().strip(), False)
+                    marker = " ◈" if is_visual else ""
                     emit(
                         "qa_item_result",
-                        text=f"{'✓' if passed else '✗'} [must] {item.get('criterion', '')[:70]}",
+                        text=f"{'✓' if passed else '✗'} [must{marker}] {criterion}",
                         passed=passed,
                         evidence=evidence,
                     )
-                should_count = len(verdict.get("should_notes", []))
-                if should_count:
+                should_notes = verdict.get("should_notes", [])
+                for note in should_notes:
+                    obs = note.get("observation", "")[:60]
+                    criterion = note.get("criterion", "")[:70]
+                    is_visual = spec_markers.get(criterion.lower().strip(), False)
+                    marker = " ◈" if is_visual else ""
                     emit("qa_item_result",
-                         text=f"  [should] {should_count} items noted",
-                         passed=True)
+                         text=f"[should{marker}] {criterion}",
+                         passed=True,
+                         evidence=obs)
 
                 # Persist QA report
                 try:

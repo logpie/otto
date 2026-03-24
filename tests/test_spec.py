@@ -85,7 +85,23 @@ class TestParseSpecOutput:
         assert len(result) == 1
         assert result[0]["text"] == "prefer inline explanations"
         assert result[0]["binding"] == "should"
-        assert result[0]["verifiable"] is False
+        assert result[0]["verifiable"] is True  # [should] is verifiable by default
+
+    def test_should_visual_tag(self):
+        text = "[should ◈] colors match existing theme"
+        result = _parse_spec_output(text)
+        assert len(result) == 1
+        assert result[0]["text"] == "colors match existing theme"
+        assert result[0]["binding"] == "should"
+        assert result[0]["verifiable"] is False  # ◈ = non-verifiable
+
+    def test_must_visual_tag(self):
+        text = "[must ◈] card renders in weather details area"
+        result = _parse_spec_output(text)
+        assert len(result) == 1
+        assert result[0]["text"] == "card renders in weather details area"
+        assert result[0]["binding"] == "must"
+        assert result[0]["verifiable"] is False  # ◈ = non-verifiable
 
     def test_must_should_mixed(self):
         text = (

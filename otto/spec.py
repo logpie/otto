@@ -57,14 +57,19 @@ def _parse_spec_output(text: str) -> list:
 
     Format per line (after stripping numbering):
       [must] concrete requirement            → binding="must", verifiable=True
-      [should] nice-to-have suggestion       → binding="should", verifiable=False
+      [must ◈] visual/subjective requirement → binding="must", verifiable=False
+      [should] nice-to-have suggestion       → binding="should", verifiable=True
+      [should ◈] visual nice-to-have         → binding="should", verifiable=False
       plain text (no tag)                    → binding="must", verifiable=True
 
     Backward compat:
       [verifiable] ...                       → binding="must", verifiable=True
       [visual] ...                           → binding="should", verifiable=False
     """
+    # Tags with optional ◈ marker for non-verifiable items
+    _MUST_VISUAL_RE = re.compile(r"^\[must\s*◈\]\s*", re.IGNORECASE)
     _MUST_RE = re.compile(r"^\[must\]\s*", re.IGNORECASE)
+    _SHOULD_VISUAL_RE = re.compile(r"^\[should\s*◈\]\s*", re.IGNORECASE)
     _SHOULD_RE = re.compile(r"^\[should\]\s*", re.IGNORECASE)
     _VERIFIABLE_RE = re.compile(r"^\[verifiable\]\s*", re.IGNORECASE)
     _VISUAL_RE = re.compile(r"^\[visual\]\s*", re.IGNORECASE)
@@ -75,11 +80,25 @@ def _parse_spec_output(text: str) -> list:
         if not stripped:
             continue
 
-        # Check for [should] or [visual] prefix → binding="should"
+        # [must ◈] → must, non-verifiable (visual/subjective)
+        if _MUST_VISUAL_RE.match(stripped):
+            text_part = _MUST_VISUAL_RE.sub("", stripped).strip()
+            if text_part:
+                items.append({"text": text_part, "binding": "must", "verifiable": False})
+            continue
+
+        # [should ◈] → should, non-verifiable
+        if _SHOULD_VISUAL_RE.match(stripped):
+            text_part = _SHOULD_VISUAL_RE.sub("", stripped).strip()
+            if text_part:
+                items.append({"text": text_part, "binding": "should", "verifiable": False})
+            continue
+
+        # [should] or [visual] → should, verifiable by default
         if _SHOULD_RE.match(stripped):
             text_part = _SHOULD_RE.sub("", stripped).strip()
             if text_part:
-                items.append({"text": text_part, "binding": "should", "verifiable": False})
+                items.append({"text": text_part, "binding": "should", "verifiable": True})
             continue
 
         if _VISUAL_RE.match(stripped):
@@ -88,13 +107,13 @@ def _parse_spec_output(text: str) -> list:
                 items.append({"text": text_part, "binding": "should", "verifiable": False})
             continue
 
-        # Check for [must] or [verifiable] prefix → binding="must"
+        # [must] or [verifiable] → must, verifiable
         if _MUST_RE.match(stripped):
             stripped = _MUST_RE.sub("", stripped).strip()
         elif _VERIFIABLE_RE.match(stripped):
             stripped = _VERIFIABLE_RE.sub("", stripped).strip()
 
-        # Default (plain text or after stripping [must]/[verifiable]) → must
+        # Default (plain text or after stripping [must]/[verifiable]) → must, verifiable
         if stripped:
             items.append({"text": stripped, "binding": "must", "verifiable": True})
 
@@ -173,6 +192,9 @@ Instructions:
 - Include the necessary happy path, error cases, negative cases, edge cases, and retained behavior.
 - Reference user-visible placement when useful, but do not mention internal implementation names or file structure.
 - Tag each criterion as [must] or [should] based on binding level.
+- For visual/subjective items that need browser inspection (not code-testable),
+  add ◈ marker: [must ◈] or [should ◈]. Examples: layout appearance, color
+  consistency, visual alignment, animation smoothness, responsive feel.
 - Do not ask questions. Write the criteria based on the task description.
 
 Write acceptance criteria to: {spec_file}

@@ -96,25 +96,33 @@ def simulate_run(console: Console) -> None:
     # QA start
     display.update_phase("qa", "running", detail="tier 2")
 
-    # QA narration (new feature)
-    console.print(f"      [dim]Now let me build the app and test visually.[/dim]")
-    console.print(f"      [dim]Build passes. Starting dev server.[/dim]")
-    console.print(f"      [bold cyan]● Browser:navigate_page[/bold cyan]  [dim]http://localhost:3000[/dim]")
-    console.print(f"      [bold cyan]● Browser:take_screenshot[/bold cyan]")
-    console.print(f"      [dim]Verified color thresholds match spec.[/dim]")
-    console.print(f"      [bold cyan]● Browser:evaluate_script[/bold cyan]")
-    console.print(f"      [dim]All 824 tests pass. Writing verdict.[/dim]")
+    # QA tool calls — routed through display to exercise styling
+    display.add_tool(name="Bash", detail="npm run build")
+    display.add_tool(name="Bash", detail="npm run dev &")
+    display.add_tool(name="mcp__chrome-devtools__navigate_page", detail="http://localhost:3000")
+    display.add_tool(name="mcp__chrome-devtools__take_screenshot", detail="")
+    display.add_tool(name="Read", detail="src/components/SafetyIndex.tsx")
+    display.add_tool(name="mcp__chrome-devtools__evaluate_script", detail="document.querySelector('.safety-score')")
+    display.add_tool(name="Bash", detail="npx jest --no-coverage --testPathPattern='safety' 2>&1")
+    display.add_tool(name="Bash", detail="curl http://localhost:3000/api/weather?city=Denver")
 
-    # QA results — passed items dim, failed items red
-    display.add_qa_item_result("✓ [must] Safety score displayed as 0-100 integer", passed=True)
-    display.add_qa_item_result("✓ [must] Color-coded safety level with four tiers", passed=True)
-    display.add_qa_item_result("✓ [must] Risk factor text identifies biggest concern", passed=True)
-    display.add_qa_item_result("✓ [must] Score clamps to 0-100 range", passed=True)
-    display.add_qa_item_result("✓ [must] Card renders in weather details area", passed=True)
-    display.add_qa_item_result("✓ [must] Handles missing data gracefully", passed=True)
-    display.add_qa_item_result("✓ [must] Multiple factors compound to lower score", passed=True)
-    display.add_qa_item_result("✓ [must] Panel visible without user interaction", passed=True)
-    display.add_qa_item_result("  [should] 4 items noted", passed=True)
+    # QA results — [must] cyan, [must ◈] visual, [should] dim with observations
+    display.add_qa_item_result("[must] Safety score displayed as 0-100 integer", passed=True)
+    display.add_qa_item_result("[must] Color-coded safety level with four tiers", passed=True)
+    display.add_qa_item_result("[must] Risk factor text identifies biggest concern", passed=True)
+    display.add_qa_item_result("[must] Score clamps to 0-100 range", passed=True)
+    display.add_qa_item_result("[must ◈] Card renders in weather details area", passed=True)
+    display.add_qa_item_result("[must] Handles missing data gracefully", passed=True)
+    display.add_qa_item_result("[must ◈] Multiple factors compound to lower score", passed=True)
+    display.add_qa_item_result("[must] Panel visible without user interaction", passed=True)
+    display.add_qa_item_result("[should] Arrow positioned next to temperature",
+                               passed=True, evidence="Inline flex, 4px gap")
+    display.add_qa_item_result("[should ◈] Colors match existing weather theme",
+                               passed=True, evidence="Uses same Tailwind palette")
+    display.add_qa_item_result("[should] Accessible via screen reader",
+                               passed=True, evidence="aria-label present")
+    display.add_qa_item_result("[should ◈] Responsive on mobile viewport",
+                               passed=True, evidence="Tested 375px width")
 
     # QA done
     display.update_phase("qa", "done", time_s=90.0, cost=0.67)
@@ -152,8 +160,8 @@ def simulate_run(console: Console) -> None:
                           detail="10 items (6 must, 4 should)")
 
     display2.update_phase("qa", "running", detail="tier 1")
-    console.print(f"      [dim]Testing scoring logic with edge cases.[/dim]")
-    console.print(f"      [dim]Running: npx jest --testPathPattern='exercise'[/dim]")
+    display2.add_tool(name="Bash", detail="npx jest --testPathPattern='exercise' 2>&1")
+    display2.add_tool(name="Read", detail="src/components/ExercisePanel.tsx")
 
     # QA with failures
     display2.add_qa_item_result("✓ [must] Displays 3 exercises ranked by score", passed=True)
@@ -250,7 +258,7 @@ def replay_from_jsonl(console: Console, jsonl_path: str) -> None:
         elif event_type == "qa_status":
             text = evt.get("text", "")
             if text:
-                console.print(f"      [dim]{rich_escape(text[:80])}[/dim]")
+                console.print(f"      {rich_escape(text[:80])}")
 
         elif event_type == "qa_item_result":
             display.add_qa_item_result(
@@ -283,6 +291,58 @@ def _ts() -> str:
     return time.strftime("%H:%M:%S")
 
 
+def _detect_terminal_theme() -> dict[str, str]:
+    """Read the terminal's actual color palette for accurate preview rendering.
+
+    Tries ghostty +show-config first. Falls back to Dracula defaults.
+    """
+    import subprocess
+
+    # Map ghostty palette indices to xterm.js theme keys
+    INDEX_TO_KEY = {
+        0: "black", 1: "red", 2: "green", 3: "yellow",
+        4: "blue", 5: "magenta", 6: "cyan", 7: "white",
+        8: "brightBlack", 9: "brightRed", 10: "brightGreen", 11: "brightYellow",
+        12: "brightBlue", 13: "brightMagenta", 14: "brightCyan", 15: "brightWhite",
+    }
+
+    # Dracula defaults (fallback)
+    theme = {
+        "background": "#282a36", "foreground": "#f8f8f2", "cursor": "#f8f8f2",
+        "black": "#21222c", "red": "#ff5555", "green": "#50fa7b",
+        "yellow": "#f1fa8c", "blue": "#bd93f9", "magenta": "#ff79c6",
+        "cyan": "#8be9fd", "white": "#f8f8f2",
+        "brightBlack": "#6272a4", "brightRed": "#ff6e6e", "brightGreen": "#69ff94",
+        "brightYellow": "#ffffa5", "brightBlue": "#d6acff", "brightMagenta": "#ff92df",
+        "brightCyan": "#a4ffff", "brightWhite": "#ffffff",
+    }
+
+    try:
+        result = subprocess.run(
+            ["ghostty", "+show-config"],
+            capture_output=True, text=True, timeout=5,
+        )
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("background = "):
+                theme["background"] = line.split("= ", 1)[1].strip()
+            elif line.startswith("foreground = "):
+                val = line.split("= ", 1)[1].strip()
+                theme["foreground"] = val
+                theme["cursor"] = val
+            elif line.startswith("palette = "):
+                parts = line.split("= ", 1)[1].strip()
+                if "=#" in parts:
+                    idx_str, color = parts.split("=", 1)
+                    idx = int(idx_str)
+                    if idx in INDEX_TO_KEY:
+                        theme[INDEX_TO_KEY[idx]] = color
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass  # not ghostty or command failed — use defaults
+
+    return theme
+
+
 def generate_preview(output_path: str | None = None, replay_file: str | None = None) -> Path:
     """Generate HTML preview using xterm.js for terminal-accurate rendering."""
     import io
@@ -303,7 +363,13 @@ def generate_preview(output_path: str | None = None, replay_file: str | None = N
                   .replace("`", "\\`")
                   .replace("$", "\\$"))
 
-    # Use xterm.js to render ANSI codes exactly like a terminal
+    # Detect terminal's actual color palette for faithful rendering
+    t = _detect_terminal_theme()
+
+    # Build xterm.js theme object from detected colors
+    theme_js = ",\n        ".join(f"'{k}': '{v}'" for k, v in t.items())
+
+    # Use xterm.js to render ANSI codes exactly like the terminal
     full_html = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -313,7 +379,7 @@ def generate_preview(output_path: str | None = None, replay_file: str | None = N
 <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
 <style>
 body {{
-    background: #1e1e2e;
+    background: {t['background']};
     padding: 20px;
     margin: 0;
 }}
@@ -326,26 +392,9 @@ body {{
 <div id="terminal"></div>
 <script>
 const term = new Terminal({{
+    // Auto-detected from terminal (ghostty +show-config)
     theme: {{
-        background: '#1e1e2e',
-        foreground: '#cdd6f4',
-        cursor: '#f5e0dc',
-        black: '#45475a',
-        red: '#f38ba8',
-        green: '#a6e3a1',
-        yellow: '#f9e2af',
-        blue: '#89b4fa',
-        magenta: '#f5c2e7',
-        cyan: '#94e2d5',
-        white: '#bac2de',
-        brightBlack: '#585b70',
-        brightRed: '#f38ba8',
-        brightGreen: '#a6e3a1',
-        brightYellow: '#f9e2af',
-        brightBlue: '#89b4fa',
-        brightMagenta: '#f5c2e7',
-        brightCyan: '#94e2d5',
-        brightWhite: '#a6adc8',
+        {theme_js}
     }},
     fontSize: 13,
     fontFamily: "'JetBrains Mono', 'Menlo', 'Monaco', monospace",
@@ -356,9 +405,12 @@ const term = new Terminal({{
 }});
 term.open(document.getElementById('terminal'));
 term.write(`{js_escaped}`);
-// Auto-resize to content
+// Auto-resize to content — make viewport transparent so rows show through
 const viewport = document.querySelector('.xterm-viewport');
-if (viewport) viewport.style.overflow = 'visible';
+if (viewport) {{
+    viewport.style.overflow = 'visible';
+    viewport.style.background = 'transparent';
+}}
 const screen = document.querySelector('.xterm-screen');
 if (screen) document.getElementById('terminal').style.height = screen.style.height;
 </script>

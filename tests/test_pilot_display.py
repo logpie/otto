@@ -383,7 +383,7 @@ class TestTaskDisplay:
         output = buf.getvalue()
         assert "[must] Adds feature flag" in output
         assert "Rejects invalid input" in output
-        assert "evidence: raised ValueError" in output
+        assert "raised ValueError" in output
 
     def test_qa_tools_show_informative_labels(self):
         """QA tool calls show what's being tested, not generic categories."""
