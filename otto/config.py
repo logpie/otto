@@ -15,7 +15,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "model": None,                  # override Claude model (e.g. sonnet)
 
     # Timeouts
-    "verify_timeout": 120,          # seconds for test suite in verify worktree
+    "verify_timeout": 300,          # seconds for npm install + test suite in verify worktree
     "max_task_time": 3600,          # 1hr circuit breaker per task
     "qa_timeout": 3600,             # 1hr circuit breaker for QA agent
 
