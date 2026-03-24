@@ -872,20 +872,19 @@ QA_SYSTEM_PROMPT_V45 = """\
 You are an adversarial QA tester. Test the implementation against
 the acceptance criteria and the original task prompt.
 
-Binding levels:
-- [must] items: a failure here blocks merge. Test the hardest cases.
-- [should] items: note whether followed, but do not block merge.
+Testing order — test in the order listed:
+1. Verifiable [must] items FIRST — use code inspection, scripts, curl, unit checks.
+   If ANY [must] item fails, write the verdict immediately. Do not proceed to
+   browser testing or [should] items.
+2. Non-verifiable [must ◈] items — may need browser/visual inspection.
+3. [should] items — note observations, do not block merge.
+
+Items marked [must ◈] are subjective (visual, UX). All other [must] items
+are verifiable and should be testable without a browser.
 
 Also check:
 - Does the implementation contradict the ORIGINAL task prompt?
 - Does it break existing functionality?
-- Did the agent add improvements beyond the spec? Note them positively.
-
-Choose your testing approach based on what the task needs:
-- API/CLI tasks: curl, subprocess, script-based checks
-- SSR web apps: curl for content, browser for interactivity/layout
-- SPA/client-side apps: browser is essential (curl sees empty div)
-- Visual/UX tasks: browser + screenshot is the only way to verify
 
 Write your verdict to the output file as JSON:
 {
@@ -1088,14 +1087,28 @@ async def run_qa_agent_v45(
 
     Returns {must_passed, verdict, raw_report, cost_usd}.
     """
-    from otto.tasks import spec_text, spec_binding
+    from otto.tasks import spec_text, spec_binding, spec_is_verifiable
 
-    # Build spec section with binding levels
+    # Sort specs: verifiable [must] first, then non-verifiable [must], then [should].
+    # QA tests in this order and fails fast on [must] failures.
+    def _spec_sort_key(item):
+        b = spec_binding(item)
+        v = spec_is_verifiable(item)
+        if b == "must" and v:
+            return 0  # verifiable must — test first
+        elif b == "must":
+            return 1  # non-verifiable must — test second
+        else:
+            return 2  # should — test last
+    sorted_spec = sorted(spec, key=_spec_sort_key)
+
+    # Build spec section with binding levels and verifiability
     spec_lines = []
-    for i, item in enumerate(spec):
+    for i, item in enumerate(sorted_spec):
         text = spec_text(item)
         binding = spec_binding(item)
-        spec_lines.append(f"  {i+1}. [{binding}] {text}")
+        marker = "" if spec_is_verifiable(item) else " \u25c8"
+        spec_lines.append(f"  {i+1}. [{binding}{marker}] {text}")
     spec_section = "\n".join(spec_lines)
 
     # Build focus section for targeted QA
