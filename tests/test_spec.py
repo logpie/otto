@@ -1,11 +1,18 @@
 """Tests for otto.spec module."""
 
+import asyncio
 import json
-import tempfile
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
-from otto.spec import generate_spec, _parse_spec_output, parse_markdown_tasks
+import pytest
+
+from otto.spec import (
+    async_generate_spec,
+    generate_spec,
+    _parse_spec_output,
+    parse_markdown_tasks,
+)
 
 
 class TestParseSpecOutput:
@@ -13,8 +20,8 @@ class TestParseSpecOutput:
         text = "1. criterion one\n2. criterion two\n3. criterion three"
         result = _parse_spec_output(text)
         assert len(result) == 3
-        assert result[0] == {"text": "criterion one", "verifiable": True}
-        assert result[2] == {"text": "criterion three", "verifiable": True}
+        assert result[0] == {"text": "criterion one", "binding": "must", "verifiable": True}
+        assert result[2] == {"text": "criterion three", "binding": "must", "verifiable": True}
 
     def test_bullet_list(self):
         text = "- criterion one\n- criterion two"
@@ -64,6 +71,48 @@ class TestParseSpecOutput:
         assert result[1]["verifiable"] is False
         assert result[2]["verifiable"] is True  # default
 
+    def test_must_tag(self):
+        text = "[must] rate-limited requests return HTTP 429"
+        result = _parse_spec_output(text)
+        assert len(result) == 1
+        assert result[0]["text"] == "rate-limited requests return HTTP 429"
+        assert result[0]["binding"] == "must"
+        assert result[0]["verifiable"] is True
+
+    def test_should_tag(self):
+        text = "[should] prefer inline explanations"
+        result = _parse_spec_output(text)
+        assert len(result) == 1
+        assert result[0]["text"] == "prefer inline explanations"
+        assert result[0]["binding"] == "should"
+        assert result[0]["verifiable"] is False
+
+    def test_must_should_mixed(self):
+        text = (
+            "1. [must] returns 429 for rate-limited requests\n"
+            "2. [should] include retry-after header\n"
+            "3. plain criterion defaults to must"
+        )
+        result = _parse_spec_output(text)
+        assert len(result) == 3
+        assert result[0]["binding"] == "must"
+        assert result[1]["binding"] == "should"
+        assert result[2]["binding"] == "must"
+
+    def test_backward_compat_verifiable(self):
+        """[verifiable] still works, maps to binding=must."""
+        text = "[verifiable] search is case-insensitive"
+        result = _parse_spec_output(text)
+        assert result[0]["binding"] == "must"
+        assert result[0]["verifiable"] is True
+
+    def test_backward_compat_visual(self):
+        """[visual] still works, maps to binding=should."""
+        text = "[visual] smooth transitions"
+        result = _parse_spec_output(text)
+        assert result[0]["binding"] == "should"
+        assert result[0]["verifiable"] is False
+
 
 class TestGenerateSpec:
     @patch("otto.spec.query")
@@ -93,11 +142,28 @@ class TestGenerateSpec:
     @patch("otto.spec.query")
     def test_returns_empty_on_failure(self, mock_query, tmp_path):
         async def fake_query(*, prompt, options=None):
+            if False:
+                yield None
             raise RuntimeError("agent failed")
 
         mock_query.side_effect = fake_query
         spec = generate_spec("Add search", tmp_path)
         assert spec == []
+
+    @patch("otto.spec.query")
+    def test_async_returns_structured_error_on_failure(self, mock_query, tmp_path):
+        async def fake_query(*, prompt, options=None):
+            if False:
+                yield None
+            raise RuntimeError("agent failed")
+
+        mock_query.side_effect = fake_query
+
+        spec, cost, error = asyncio.run(async_generate_spec("Add search", tmp_path))
+
+        assert spec == []
+        assert cost == 0.0
+        assert error == "agent failed"
 
 
 class TestParseMarkdownTasks:
@@ -180,4 +246,18 @@ class TestParseMarkdownTasks:
 
         import pytest as _pytest
         with _pytest.raises(ValueError, match="did not write"):
+            parse_markdown_tasks(md_file, tmp_path)
+
+    @patch("otto.spec.query")
+    def test_raises_on_agent_result_error(self, mock_query, tmp_path):
+        md_file = tmp_path / "features.md"
+        md_file.write_text("# Task\nDo something.\n")
+
+        async def fake_query(*, prompt, options=None):
+            from otto._agent_stub import ResultMessage
+            yield ResultMessage(session_id="s1", is_error=True, result="agent exploded")
+
+        mock_query.side_effect = fake_query
+
+        with pytest.raises(ValueError, match="agent exploded"):
             parse_markdown_tasks(md_file, tmp_path)

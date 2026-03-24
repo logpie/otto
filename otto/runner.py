@@ -1,12 +1,11 @@
 """Otto runner — core execution loop with branch management and verification."""
 
 import asyncio
-import fnmatch
 import json
 import os
+import re
 import shutil
 import subprocess
-import sys
 import tempfile
 import time
 from pathlib import Path
@@ -37,139 +36,17 @@ except (ImportError, AttributeError):
 from otto.config import git_meta_dir, detect_test_command
 from otto.display import _truncate_at_word, console, format_cost, format_duration, rich_escape
 from otto.tasks import load_tasks, update_task
-from otto.testgen import detect_test_framework, test_file_path
-from otto.verify import VerifyResult, run_verification, _subprocess_env
+from otto.verify import run_verification, _subprocess_env
+
+_CANDIDATE_ATTEMPT_RE = re.compile(r"/attempt-(\d+)$")
 
 
-_PROJECT_MAP_COLLAPSE_THRESHOLD = 20
-_PROJECT_MAP_MAX_LINES = 150
-_ROOT_MANIFEST_PATTERNS = (
-    "package.json",
-    "pyproject.toml",
-    "Cargo.toml",
-    "go.mod",
-    "pom.xml",
-    "Gemfile",
-    "README",
-    "README.*",
-    "Makefile",
-    "Dockerfile",
-    "docker-compose.yml",
-    "docker-compose.yaml",
-)
-
-
-class _ProjectMapNode:
-    """Trie node for rendering a shallow project structure summary."""
-
-    def __init__(self) -> None:
-        self.files: set[str] = set()
-        self.dirs: dict[str, "_ProjectMapNode"] = {}
-        self.total_files = 0
-
-
-def _tracked_git_paths(project_dir: Path) -> list[str]:
-    """Return tracked paths from git, preserving filenames exactly via -z."""
-    result = subprocess.run(
-        ["git", "ls-files", "-z"],
-        cwd=project_dir,
-        capture_output=True,
-    )
-    if result.returncode != 0:
-        return []
-
-    return [os.fsdecode(raw) for raw in result.stdout.split(b"\0") if raw]
-
-
-def _insert_tracked_path(root: _ProjectMapNode, path: str) -> None:
-    parts = [part for part in path.split("/") if part]
-    if not parts:
-        return
-
-    node = root
-    for part in parts[:-1]:
-        node = node.dirs.setdefault(part, _ProjectMapNode())
-    node.files.add(parts[-1])
-
-
-def _populate_file_counts(node: _ProjectMapNode) -> int:
-    total = len(node.files)
-    for child in node.dirs.values():
-        total += _populate_file_counts(child)
-    node.total_files = total
-    return total
-
-
-def _manifest_rank(name: str) -> tuple[int, str]:
-    lowered = name.lower()
-    for index, pattern in enumerate(_ROOT_MANIFEST_PATTERNS):
-        if fnmatch.fnmatch(lowered, pattern.lower()):
-            return (index, lowered)
-    return (len(_ROOT_MANIFEST_PATTERNS), lowered)
-
-
-def _sorted_root_files(files: set[str]) -> list[str]:
-    return sorted(files, key=lambda name: (_manifest_rank(name), name.lower(), name))
-
-
-def _sorted_names(names: set[str] | list[str] | dict[str, Any]) -> list[str]:
-    return sorted(names, key=lambda name: (name.lower(), name))
-
-
-def _should_collapse_dir(node: _ProjectMapNode) -> bool:
-    child_entries = len(node.files) + len(node.dirs)
-    return node.total_files > _PROJECT_MAP_COLLAPSE_THRESHOLD and (
-        child_entries > _PROJECT_MAP_COLLAPSE_THRESHOLD or not node.dirs
-    )
-
-
-def build_project_map(project_dir: Path) -> str:
-    """Return a shallow summary of tracked files suitable for prompt injection."""
-    tracked_paths = _tracked_git_paths(project_dir)
-    if not tracked_paths:
-        return ""
-
-    root = _ProjectMapNode()
-    for tracked_path in tracked_paths:
-        _insert_tracked_path(root, tracked_path)
-    total_files = _populate_file_counts(root)
-
-    rendered: list[tuple[str, int]] = []
-
-    def add_line(text: str, represented_files: int) -> None:
-        rendered.append((text, represented_files))
-
-    def render_dir(node: _ProjectMapNode, name: str, depth: int) -> None:
-        indent = "  " * depth
-        if _should_collapse_dir(node):
-            add_line(f"{indent}{name}/  ({node.total_files:,} files)", node.total_files)
-            return
-
-        add_line(f"{indent}{name}/", 0)
-        next_indent = "  " * (depth + 1)
-        for file_name in _sorted_names(node.files):
-            add_line(f"{next_indent}{file_name}", 1)
-        for child_name in _sorted_names(node.dirs):
-            child = node.dirs[child_name]
-            if depth >= 1 or _should_collapse_dir(child):
-                add_line(f"{next_indent}{child_name}/  ({child.total_files:,} files)", child.total_files)
-                continue
-            render_dir(child, child_name, depth + 1)
-
-    for file_name in _sorted_root_files(root.files):
-        add_line(file_name, 1)
-    for dir_name in _sorted_names(root.dirs):
-        render_dir(root.dirs[dir_name], dir_name, 0)
-
-    if len(rendered) <= _PROJECT_MAP_MAX_LINES:
-        return "\n".join(line for line, _ in rendered)
-
-    visible = rendered[: _PROJECT_MAP_MAX_LINES - 1]
-    shown_files = sum(represented for _, represented in visible)
-    remaining_files = max(total_files - shown_files, 0)
-    lines = [line for line, _ in visible]
-    lines.append(f"... and {remaining_files:,} more files")
-    return "\n".join(lines)
+def _fence_untrusted_text(text: str) -> str:
+    """Wrap untrusted model/input text in a code fence."""
+    text = text or ""
+    max_ticks = max((len(match) for match in re.findall(r"`+", text)), default=0)
+    fence = "`" * max(3, max_ticks + 1)
+    return f"{fence}\n{text}\n{fence}"
 
 
 
@@ -261,6 +138,41 @@ def preflight_checks(
     if not check_clean_tree(project_dir):
         console.print("[red]Working tree is dirty -- fix before running otto[/red]")
         return (2, [])
+
+    # Ensure .gitignore exists — agents use Glob/Read which respect it,
+    # and without it they waste time exploring build artifacts.
+    # Scan for untracked dirs that are obviously build/dependency artifacts.
+    gitignore = project_dir / ".gitignore"
+    if not gitignore.exists():
+        # Ask git what's untracked and large — these are almost certainly
+        # build dirs or dependency caches that should be ignored.
+        ls_result = subprocess.run(
+            ["git", "ls-files", "--others", "--directory", "--exclude-standard", "-z"],
+            cwd=project_dir, capture_output=True, text=True,
+        )
+        untracked_dirs = [
+            d.rstrip("/") for d in ls_result.stdout.split("\0")
+            if d.endswith("/") and d.rstrip("/") not in ("otto_logs", "otto_arch")
+        ]
+        # Count files in each to find big ones (>50 files = build/dep dir)
+        ignore_dirs = []
+        for d in untracked_dirs:
+            dp = project_dir / d
+            if dp.is_dir():
+                try:
+                    count = sum(1 for _ in dp.rglob("*") if _.is_file())
+                except (OSError, StopIteration):
+                    count = 0
+                if count > 50:
+                    ignore_dirs.append(d + "/")
+        if ignore_dirs:
+            gitignore.write_text("\n".join(sorted(ignore_dirs)) + "\n")
+            subprocess.run(["git", "add", ".gitignore"], cwd=project_dir, capture_output=True)
+            subprocess.run(
+                ["git", "commit", "-m", "otto: add .gitignore for build artifacts"],
+                cwd=project_dir, capture_output=True,
+            )
+            console.print(f"  [dim]Created .gitignore ({', '.join(d.rstrip('/') for d in ignore_dirs[:3])}...)[/dim]")
 
     # Baseline check
     test_command = config.get("test_command")
@@ -413,42 +325,38 @@ def _restore_workspace_state(
     _run_cleanup_git_command(project_dir, cmd, "git reset --hard")
     _remove_otto_created_untracked(project_dir, pre_existing_untracked)
 
-
-
-def _should_show_tool(name: str, detail: str) -> bool:
-    """Decide if a tool call should be shown to the user."""
-    if name in ("Write", "Edit"):
-        return bool(detail)
-    if name == "Read":
-        return any(ext in detail for ext in (".py", ".ts", ".tsx", ".js", ".jsx", ".rs", ".go"))
-    if name == "Bash":
-        cmd = detail.strip()
-        first_word = cmd.split()[0] if cmd else ""
-        if first_word in ("python", "python3", "node") and any(flag in cmd for flag in (" -c ", " -e ")):
-            return False
-        return first_word in (
-            "pytest", "python", "python3", "npx", "npm", "jest",
-            "make", "cargo", "go", "ruby", "dotnet", "node",
-            "cat", "ls", "find", "grep", "head", "tail",
-            "pnpm", "yarn", "uv", "bash", "sh", "tsc",
-        )
-    return True
-
-
 def _build_agent_tool_event(block) -> dict[str, Any] | None:
     """Build a progress payload for a tool use block."""
+    def _should_emit_tool(tool_name: str, detail: str) -> bool:
+        if tool_name in ("Write", "Edit"):
+            return bool(detail)
+        if tool_name == "Read":
+            return any(ext in detail for ext in (".py", ".ts", ".tsx", ".js", ".jsx", ".rs", ".go"))
+        if tool_name == "Bash":
+            cmd = detail.strip()
+            first_word = cmd.split()[0] if cmd else ""
+            if first_word in ("python", "python3", "node") and any(flag in cmd for flag in (" -c ", " -e ")):
+                return False
+            return first_word in (
+                "pytest", "python", "python3", "npx", "npm", "jest",
+                "make", "cargo", "go", "ruby", "dotnet", "node",
+                "cat", "ls", "find", "grep", "head", "tail",
+                "pnpm", "yarn", "uv", "bash", "sh", "tsc",
+            )
+        return True
+
     name = block.name
     inputs = block.input or {}
     raw_detail = _tool_use_summary(block)
 
     if name == "Glob":
-        if not _should_show_tool("Read", raw_detail):
+        if not _should_emit_tool("Read", raw_detail):
             return None
         return {"name": "Read", "detail": raw_detail[:80]}
 
     if name not in ("Read", "Write", "Edit", "Bash"):
         return None
-    if not _should_show_tool(name, raw_detail):
+    if not _should_emit_tool(name, raw_detail):
         return None
 
     event: dict[str, Any] = {"name": name, "detail": raw_detail[:80]}
@@ -466,106 +374,6 @@ def _build_agent_tool_event(block) -> dict[str, Any] | None:
             event["preview_lines"] = content.splitlines()[:3]
             event["total_lines"] = content.count("\n") + 1
     return event
-
-
-def _extract_qa_spec_results(report: str) -> list[dict[str, Any]]:
-    """Extract authoritative pass/fail results from a QA report."""
-    results: list[dict[str, Any]] = []
-    result_index: dict[str, int] = {}
-    current_spec_key: str | None = None
-
-    def _record_result(key: str | None, passed: bool) -> None:
-        final_key = key or f"line:{len(results)}"
-        payload = {"key": final_key, "passed": passed}
-        if final_key in result_index:
-            results[result_index[final_key]] = payload
-        else:
-            result_index[final_key] = len(results)
-            results.append(payload)
-
-    for line in report.splitlines():
-        text = line.strip()
-        if not text:
-            continue
-
-        clean = text.replace("**", "").replace("__", "")
-        has_pass = "\u2705" in text or "PASS" in text
-        has_fail = "\u274c" in text or "FAIL" in text
-
-        is_spec_header = (
-            text.startswith("###")
-            or text.startswith("**Spec")
-            or (clean.startswith("Spec ") and clean[5:6].isdigit())
-        )
-        is_table_row = text.startswith("|") and (has_pass or has_fail)
-        is_table_header = text.startswith("|") and (
-            "Spec" in text[:15] or "Check" in text[:20] or "---" in text[:5]
-        )
-        is_numbered_check = (
-            len(clean) > 2
-            and clean[0] in ("\u2713", "\u2717", "\u2705", "\u274c")
-            and clean[1:].lstrip().split(".")[0].strip().isdigit()
-        )
-        is_result_line = (
-            text.startswith(("**PASS", "PASS", "**RESULT"))
-            or (text.startswith("- \u2705") and "PASS" not in text[:5])
-        )
-        is_standalone_check = (
-            len(clean) > 2
-            and clean[0] in ("\u2713", "\u2717", "\u2705", "\u274c")
-            and not is_numbered_check
-            and not is_spec_header
-        )
-
-        if "VERDICT" in text or is_table_header:
-            continue
-        if text.startswith(("- Container", "- Header", "\u25cb Edge")):
-            continue
-        if "Minor Observation" in text or "not spec violation" in text.lower():
-            continue
-
-        if is_spec_header:
-            spec_text = clean.lstrip("# ").strip()
-            for marker in (": \u2705 PASS", ": \u274c FAIL", "\u2705", "\u274c"):
-                spec_text = spec_text.replace(marker, "").rstrip(": ").strip()
-            current_spec_key = f"spec:{spec_text}"
-            if has_pass or has_fail:
-                _record_result(current_spec_key, has_pass and not has_fail)
-            continue
-
-        if is_table_row:
-            parts = [part.strip() for part in clean.split("|") if part.strip()]
-            key = f"table:{parts[0]}" if parts else None
-            _record_result(key, has_pass and not has_fail)
-            current_spec_key = None
-            continue
-
-        if is_numbered_check:
-            number = clean[1:].lstrip().split(".", 1)[0].strip()
-            _record_result(f"number:{number}", clean[0] in ("\u2713", "\u2705"))
-            current_spec_key = None
-            continue
-
-        if is_standalone_check:
-            desc = clean[1:].strip()
-            _record_result(f"check:{desc}", clean[0] in ("\u2713", "\u2705"))
-            current_spec_key = None
-            continue
-
-        if is_result_line and (has_pass or has_fail):
-            detail_text = clean.replace("RESULT", "").replace("PASS", "").replace("FAIL", "")
-            detail_text = detail_text.replace("\u2705", "").replace("\u274c", "")
-            detail_text = detail_text.lstrip(": \u2014-*()").strip()
-            _record_result(current_spec_key or f"result:{detail_text or clean}", has_pass and not has_fail)
-            current_spec_key = None
-            continue
-
-        if has_fail and text.startswith(("**FAIL", "FAIL")):
-            detail_text = clean.replace("FAIL", "").replace("\u274c", "").lstrip(" \u2014-()").strip()
-            _record_result(current_spec_key or f"fail:{detail_text or clean}", False)
-            current_spec_key = None
-
-    return results
 
 
 def create_task_branch(
@@ -633,10 +441,9 @@ def create_task_branch(
 def build_candidate_commit(
     project_dir: Path,
     base_sha: str,
-    testgen_file: Path | None,
     pre_existing_untracked: set[str] | None = None,
 ) -> str:
-    """Build a candidate commit with agent changes + generated test."""
+    """Build a candidate commit with the agent's changes."""
     # If agent made commits, squash them
     head = subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -668,22 +475,6 @@ def build_candidate_commit(
                 ["git", "add", "--", f],
                 cwd=project_dir, capture_output=True,
             )
-
-    # Copy testgen file into project if available
-    if testgen_file and testgen_file.exists():
-        framework = detect_test_framework(project_dir) or "pytest"
-        # Use test_file_path to get the directory, but preserve the original filename
-        # to avoid double-suffix issues (e.g. .test.test.js)
-        placeholder_path = test_file_path(framework, "placeholder")
-        dest_dir = project_dir / placeholder_path.parent
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        rel_path = placeholder_path.parent / testgen_file.name
-        dest = project_dir / rel_path
-        shutil.copy2(testgen_file, dest)
-        subprocess.run(
-            ["git", "add", str(rel_path)],
-            cwd=project_dir, capture_output=True, check=True,
-        )
 
     # Create candidate commit
     subprocess.run(
@@ -742,7 +533,7 @@ def cleanup_branch(project_dir: Path, key: str, default_branch: str = "main") ->
 def rebase_and_merge(project_dir: Path, task_branch: str, default_branch: str) -> bool:
     """Rebase task_branch onto default_branch then ff-only merge.
 
-    Used by v4 orchestrator for serial merge of parallel tasks.
+    Used for serial merge of parallel tasks.
     Returns False on rebase conflict.
     """
     # Rebase task branch onto default
@@ -784,10 +575,10 @@ async def coding_loop(
     telemetry: Any,  # otto.telemetry.Telemetry
     tasks_file: Path | None = None,
 ) -> Any:  # otto.context.TaskResult
-    """v4 coding loop — run a single task through prepare/code/verify/QA/merge.
+    """v4 coding loop — run a single task through the v4.5 execution path.
 
-    Passes an on_progress callback to run_task_with_qa() so phase events
-    flow through the telemetry dual-write (legacy pilot_results.jsonl).
+    Passes an on_progress callback to run_task_v45() so phase events flow
+    through the telemetry dual-write (legacy pilot_results.jsonl).
     Emits TaskMerged/TaskFailed at the actual completion time (not deferred).
     """
     from otto.context import TaskResult
@@ -837,13 +628,28 @@ async def coding_loop(
                 display.add_tool(data=data)
             elif event_type == "agent_tool_result":
                 display.add_tool_result(data=data)
+            elif event_type == "spec_item":
+                display.add_spec_item(data.get("text", ""))
+            elif event_type == "spec_items_done":
+                display.flush_spec_summary()
             elif event_type == "qa_finding":
                 display.add_finding(data.get("text", ""))
+            elif event_type == "qa_item_result":
+                display.add_qa_item_result(
+                    text=data.get("text", ""),
+                    passed=data.get("passed", True),
+                    evidence=data.get("evidence", ""),
+                )
             elif event_type == "qa_summary":
                 display.set_qa_summary(
                     total=data.get("total", 0),
                     passed=data.get("passed", 0),
                     failed=data.get("failed", 0),
+                )
+            elif event_type == "attempt_boundary":
+                display.add_attempt_boundary(
+                    attempt=data.get("attempt", 0),
+                    reason=data.get("reason", ""),
                 )
         except Exception:
             pass
@@ -860,23 +666,10 @@ async def coding_loop(
             pass
 
     try:
-        # Inject factual context (learnings, research) — NOT planner hints.
-        # Learnings are observations from prior tasks. Research is web/doc findings.
-        # These are raw environmental info, not an LLM's paraphrased advice.
-        context_parts: list[str] = []
-        if context.learnings:
-            context_parts.append("LEARNINGS FROM PRIOR TASKS:\n" + "\n".join(
-                f"- {l}" for l in context.learnings
-            ))
-        research = context.get_research(task_key)
-        if research:
-            context_parts.append(f"RESEARCH FINDINGS:\n{research}")
-
-        factual_context = "\n\n".join(context_parts) if context_parts else None
-
-        result = await run_task_with_qa(
+        # v4.5: use run_task_v45 which passes context directly
+        result = await run_task_v45(
             task, config, project_dir, tasks_file,
-            hint=factual_context, on_progress=_on_progress,
+            context=context, on_progress=_on_progress,
         )
 
         duration = time.monotonic() - task_start
@@ -890,7 +683,27 @@ async def coding_loop(
             ).stdout.strip()
 
             # Print result
-            console.print(f"    [green]\u2713[/green] passed  [dim]{elapsed_str}  ${cost:.2f}[/dim]")
+            console.print(
+                f"    {time.strftime('%H:%M:%S')}  [green]\u2713[/green] passed  "
+                f"[dim]{elapsed_str}  ${cost:.2f}[/dim]"
+            )
+            task_meta = task
+            if tasks_file:
+                updated_tasks = load_tasks(tasks_file)
+                task_meta = next((t for t in updated_tasks if t.get("key") == task_key), task)
+            diff_summary = result.get("diff_summary", "")
+            file_count = sum(1 for line in diff_summary.splitlines() if "|" in line) if diff_summary else 0
+            spec_count = len(task_meta.get("spec") or [])
+            attempts = int(task_meta.get("attempts", 1) or 1)
+            parts = []
+            if file_count:
+                parts.append(f"{file_count} files")
+            if spec_count:
+                parts.append(f"{spec_count} specs verified")
+            if attempts > 1:
+                parts.append(f"{attempts} attempts")
+            if parts:
+                console.print(f"      [dim]{' · '.join(parts)}[/dim]")
 
             # Emit TaskMerged NOW (not deferred to batch loop)
             telemetry.log(TaskMerged(
@@ -908,7 +721,10 @@ async def coding_loop(
             )
 
         error = str(result.get("error", "") or "")
-        console.print(f"    [red]\u2717[/red] failed  [dim]{elapsed_str}  ${cost:.2f}[/dim]")
+        console.print(
+            f"    {time.strftime('%H:%M:%S')}  [red]\u2717[/red] failed  "
+            f"[dim]{elapsed_str}  ${cost:.2f}[/dim]"
+        )
         telemetry.log(TaskFailed(
             task_key=task_key, task_id=task_id,
             error=error,
@@ -920,6 +736,7 @@ async def coding_loop(
             duration_s=duration,
             qa_report=result.get("qa_report", ""),
             diff_summary=result.get("diff_summary", ""),
+            review_ref=result.get("review_ref"),
         )
 
     except Exception as exc:
@@ -957,10 +774,6 @@ def _cleanup_task_failure(
         f"git checkout {default_branch}",
     )
     cleanup_branch(project_dir, key, default_branch)
-    # Clean testgen artifacts
-    testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / key
-    if testgen_dir.exists():
-        shutil.rmtree(testgen_dir, ignore_errors=True)
     if tasks_file:
         try:
             updates: dict[str, Any] = {
@@ -980,93 +793,11 @@ _format_cost = format_cost
 
 
 def _log_info(msg: str) -> None:
-    console.print("\u2500" * 60, style="dim")
     console.print(f"  {msg}")
-
-
-def _log_task_start(task_id: int, key: str, attempt: int, max_attempts: int, prompt: str) -> None:
-    console.print()
-    console.print("\u2501" * 60, style="bold")
-    console.print(f"[bold]  Task #{task_id}[/bold]  {rich_escape(prompt[:80])}")
-    console.print(f"  attempt {attempt}/{max_attempts}  \u00b7  key {key}", style="dim")
-    console.print("\u2501" * 60, style="bold")
-
-
-def _log_pass(task_id: int, branch: str, duration: float | None = None, cost: float = 0.0) -> None:
-    dur = f" in {_format_duration(duration)}" if duration else ""
-    cost_str = f" ({_format_cost(cost)})" if cost > 0 else ""
-    console.print(f"\n  [green bold]\u2713 Task #{task_id} PASSED[/green bold] [dim]\u2014 merged to {branch}{dur}{cost_str}[/dim]")
-
-
-def _log_fail(task_id: int, reason: str, duration: float | None = None, cost: float = 0.0) -> None:
-    dur = f" in {_format_duration(duration)}" if duration else ""
-    cost_str = f" ({_format_cost(cost)})" if cost > 0 else ""
-    console.print(f"\n  [red bold]\u2717 Task #{task_id} FAILED[/red bold] [dim]\u2014 {rich_escape(reason)}{dur}{cost_str}[/dim]")
 
 
 def _log_warn(msg: str) -> None:
     console.print(f"  [yellow]Warning: {rich_escape(msg)}[/yellow]")
-
-
-def _log_verify(tiers: list) -> None:
-    """Print verification results inline with test counts."""
-    import re as _re
-    console.print(f"\n  {'─' * 50}", style="dim")
-    for t in tiers:
-        if t.skipped:
-            continue
-        icon = "[green]\u2713[/green]" if t.passed else "[red]\u2717[/red]"
-        count_str = ""
-        if t.output:
-            match = _re.search(r"(\d+) passed", t.output)
-            if match:
-                count_str = f" [dim]({match.group(1)} tests)[/dim]"
-        console.print(f"  {icon} {t.tier}{count_str}")
-
-
-def _print_tool_use(block) -> None:
-    """Print a tool use block like the Claude TUI."""
-    name = block.name
-    inputs = block.input or {}
-
-    # Show key argument inline based on tool type
-    detail = ""
-    if name in ("Read", "Glob", "Grep"):
-        detail = inputs.get("file_path") or inputs.get("path") or inputs.get("pattern") or ""
-    elif name in ("Edit", "Write"):
-        detail = inputs.get("file_path") or ""
-    elif name == "Bash":
-        cmd = inputs.get("command") or ""
-        detail = _truncate_at_word(cmd, 80)
-
-    if detail:
-        console.print(f"  [bold cyan]\u25cf {name}[/bold cyan]  [dim]{rich_escape(detail)}[/dim]")
-    else:
-        console.print(f"  [bold cyan]\u25cf {name}[/bold cyan]")
-
-    # Show edit diff for Edit tool
-    if name == "Edit":
-        old = inputs.get("old_string", "")
-        new = inputs.get("new_string", "")
-        if old or new:
-            for line in old.splitlines()[:3]:
-                console.print(f"    - {rich_escape(line)}", style="dim red")
-            if old.count("\n") > 3:
-                console.print(f"    ... ({old.count(chr(10)) - 3} more lines)", style="dim")
-            for line in new.splitlines()[:3]:
-                console.print(f"    + {rich_escape(line)}", style="dim green")
-            if new.count("\n") > 3:
-                console.print(f"    ... ({new.count(chr(10)) - 3} more lines)", style="dim")
-
-    # Show content preview for Write tool
-    elif name == "Write":
-        content = inputs.get("content", "")
-        if content:
-            lines = content.splitlines()
-            for line in lines[:3]:
-                console.print(f"    + {rich_escape(line)}", style="dim green")
-            if len(lines) > 3:
-                console.print(f"    ... ({len(lines) - 3} more lines)", style="dim")
 
 
 def _tool_use_summary(block) -> str:
@@ -1083,1011 +814,267 @@ def _tool_use_summary(block) -> str:
     return ""
 
 
-def _print_tool_result(block) -> None:
-    """Print tool result — truncated output for success, full for errors."""
-    content = block.content if isinstance(block.content, str) else str(block.content)
-    if not content.strip():
-        return
-    if block.is_error:
-        lines = content.strip().splitlines()
-        shown = lines[-5:] if len(lines) > 5 else lines
-        for line in shown:
-            console.print(f"    {rich_escape(line)}", style="red")
-    else:
-        lines = content.strip().splitlines()
-        if len(lines) <= 3:
-            for line in lines:
-                console.print(f"    {rich_escape(line)}", style="dim")
-        else:
-            console.print(f"    {rich_escape(lines[0])}", style="dim")
-            console.print(f"    {rich_escape(lines[1])}", style="dim")
-            console.print(f"    ... ({len(lines) - 3} more lines)", style="dim")
-            console.print(f"    {rich_escape(lines[-1])}", style="dim")
+# ---------------------------------------------------------------------------
+# v4.5 — Bare CC coding, structured QA, risk-based tiering, candidate refs
+# ---------------------------------------------------------------------------
 
+QA_SYSTEM_PROMPT_V45 = """\
+You are an adversarial QA tester. Test the implementation against
+the acceptance criteria and the original task prompt.
 
-CODING_SYSTEM_PROMPT = """\
-<role>
-You are an autonomous coding agent. You implement features, fix bugs, and write tests.
-Your work is verified externally — you must meet the acceptance spec exactly.
-</role>
+Binding levels:
+- [must] items: a failure here blocks merge. Test the hardest cases.
+- [should] items: note whether followed, but do not block merge.
 
-<autonomy>
-- You are running AUTONOMOUSLY. Do NOT ask questions or wait for input.
-- Make decisions yourself. If unsure, pick the best option and document why.
-- Create a .gitignore if the project needs one (node_modules/, __pycache__/, etc.)
-</autonomy>
+Also check:
+- Does the implementation contradict the ORIGINAL task prompt?
+- Does it break existing functionality?
+- Did the agent add improvements beyond the spec? Note them positively.
 
-<completion_check>
-Before you finish, verify against the spec:
-1. Re-read each spec item.
-2. For each [verifiable] item: name the specific test that proves it.
-   If no test exists for a verifiable item, write one now.
-3. For each [verifiable] item: test the HARDEST case, not the easiest.
-4. For [visual] items: implement your best judgment, no test required.
-5. If any verifiable item can't be met after trying 3+ different approaches,
-   document what was tried in task notes. Do not silently skip it.
-</completion_check>"""
+Choose your testing approach based on what the task needs:
+- API/CLI tasks: curl, subprocess, script-based checks
+- SSR web apps: curl for content, browser for interactivity/layout
+- SPA/client-side apps: browser is essential (curl sees empty div)
+- Visual/UX tasks: browser + screenshot is the only way to verify
 
-QA_SYSTEM_PROMPT = """\
-You are an adversarial QA tester. Your job is to find bugs the test suite missed.
-The code already passed verification in a clean worktree — focus on what tests DON'T cover.
-
-For each spec item: test the HARDEST case. Report PASS or FAIL with evidence.
-Use whatever approach works — read code, write test scripts, curl endpoints,
-run the app, use browser testing. You decide.
+Write your verdict to the output file as JSON:
+{
+  "must_passed": true/false,
+  "must_items": [
+    {"criterion": "...", "status": "pass/fail", "evidence": "..."}
+  ],
+  "should_notes": [
+    {"criterion": "...", "observation": "...", "screenshot": "path or null"}
+  ],
+  "regressions": [],
+  "prompt_intent": "Implementation matches/diverges from original prompt because...",
+  "extras": ["Agent added contributing factor explanations — improves UX"]
+}
 
 Kill any servers you started (by PID, not pkill)."""
 
 
-def _build_coding_prompt(
+def format_spec_v45(spec: list) -> str:
+    """Format spec items with [must]/[should] binding for prompt injection."""
+    from otto.tasks import spec_text, spec_binding
+    lines = []
+    for item in spec:
+        text = spec_text(item)
+        binding = spec_binding(item)
+        lines.append(f"  [{binding}] {text}")
+    return "\n".join(lines)
+
+
+def determine_qa_tier(
     task: dict[str, Any],
-    config: dict[str, Any],
-    project_dir: Path,
-    effective_dir: Path,
-    hint: str | None = None,
-) -> str:
-    """Build the initial coding agent prompt with spec, source context, and learnings.
+    spec: list,
+    attempt: int,
+    diff_info: dict[str, Any],
+    spec_test_mapping: dict[str, str | None] | None = None,
+) -> int:
+    """Determine QA tier based on residual risk after verification.
 
-    Extracted from run_task() so prepare_task() and run_task() share the same logic.
+    Tier 0: skip QA (all [must] items have tests, local change, first attempt)
+    Tier 1: targeted QA (unmapped [must] items, cross-cutting changes)
+    Tier 2: full QA with browser (visual/SPA, auth/crypto, retries)
     """
-    prompt = task["prompt"]
-    key = task["key"]
-    spec = task.get("spec")
-    feedback = task.get("feedback", "")
-    if hint:
-        feedback = hint
+    from otto.tasks import spec_binding
 
-    base_prompt = prompt
-    if feedback:
-        base_prompt = f"{prompt}\n\nIMPORTANT feedback from the user:\n{feedback}"
+    diff_files = diff_info.get("files", [])
+    spec_test_mapping = spec_test_mapping or {}
 
-    # Include spec items if available — classified as verifiable or visual
-    spec_section = ""
-    if spec:
-        from otto.tasks import spec_text, spec_is_verifiable
-        spec_lines = []
-        for i, item in enumerate(spec):
-            text = spec_text(item)
-            tag = "[verifiable]" if spec_is_verifiable(item) else "[visual]"
-            spec_lines.append(f"  {i+1}. {tag} {text}")
-        spec_section = f"\n\nACCEPTANCE SPEC (meet ALL of them):\n" + "\n".join(spec_lines) + "\n"
+    # Tier 2: high-risk domains
+    HIGH_RISK_PATTERNS = ["auth", "crypto", "permission", "migration",
+                          "payment", "security", "token", "session"]
+    if any(pattern in f.lower() for f in diff_files for pattern in HIGH_RISK_PATTERNS):
+        return 2
 
-    # Persistent memory
-    learnings_file = project_dir / "otto_arch" / "learnings.md"
-    learnings_section = ""
-    if learnings_file.exists():
-        learnings_section = f"\nLEARNINGS (from previous tasks):\n{learnings_file.read_text()}\n"
-
-    task_notes_path = project_dir / "otto_arch" / "task-notes" / f"{key}.md"
-    task_notes_section = ""
-    if task_notes_path.exists():
-        task_notes_section = f"\nTASK NOTES (from previous attempts):\n{task_notes_path.read_text()}\n"
-
-    agent_prompt = f"""{base_prompt}
-
-You are working in {effective_dir}. Do NOT create git commits.
-{spec_section}
-
-Implement the feature and write tests for all [verifiable] spec items.
-The spec is your contract — meet every item. Test the hardest cases.
-
-Write notes to otto_arch/task-notes/{key}.md when done:
-- What approach you took and why
-- What you learned about the codebase
-- Any gotchas for future tasks
-- Any spec items that couldn't be fully met and why
-
-If your first approach doesn't meet a hard constraint, don't give up —
-rethink the architecture. Try at least 3 different approaches before
-concluding anything is infeasible.
-
-{learnings_section}
-{task_notes_section}
-"""
-    return agent_prompt
-
-
-def prepare_task(
-    task: dict[str, Any],
-    config: dict[str, Any],
-    project_dir: Path,
-    tasks_file: Path | None,
-    hint: str | None = None,
-) -> dict[str, Any]:
-    """Prepare a task for coding: create git branch, build prompt with spec/context.
-
-    Returns a dict with:
-        work_dir: str — directory for the coding agent to work in
-        prompt: str — full coding prompt with spec, source context, learnings
-        system_prompt: str — coding agent system prompt
-        base_sha: str — SHA of the base commit for later verification
-
-    This is the "setup" half of run_task(), extracted for the native subagent
-    architecture where the pilot dispatches a coding subagent directly.
-    """
-    key = task["key"]
-    default_branch = config["default_branch"]
-
-    if tasks_file:
-        update_task(tasks_file, key, status="running", attempts=0)
-
-    try:
-        # Create branch
-        base_sha = create_task_branch(project_dir, key, default_branch, task=task)
-
-        # Snapshot untracked files BEFORE coding — verify_task needs this to
-        # distinguish agent-created files from pre-existing ones.
-        pre_untracked = list(_snapshot_untracked(project_dir) or [])
-
-        # Auto-detect test_command if spec exists but no test_command configured
-        spec = task.get("spec")
-        test_command = config.get("test_command")
-        if spec and not test_command:
-            detected = detect_test_command(project_dir)
-            test_command = detected if detected else "pytest"
-
-        # Build the coding agent prompt
-        agent_prompt = _build_coding_prompt(
-            task, config, project_dir, project_dir, hint=hint,
-        )
-
-        return {
-            "work_dir": str(project_dir),
-            "prompt": agent_prompt,
-            "system_prompt": CODING_SYSTEM_PROMPT,
-            "base_sha": base_sha,
-            "pre_untracked": pre_untracked,
-        }
-    except Exception as exc:
-        # Cleanup on failure — don't strand task in "running"
-        if tasks_file:
-            update_task(tasks_file, key, status="failed",
-                        error=f"prepare failed: {exc}")
-        subprocess.run(["git", "checkout", default_branch],
-                       cwd=project_dir, capture_output=True)
-        raise
-
-
-def verify_task(
-    task_key: str,
-    config: dict[str, Any],
-    project_dir: Path,
-    tasks_file: Path | None,
-    pre_untracked: list[str] | None = None,
-    auto_merge: bool = True,
-) -> dict[str, Any]:
-    """Verify task implementation: build candidate, run tests, optionally merge.
-
-    Call this AFTER the coding subagent finishes.
-
-    Args:
-        pre_untracked: untracked files snapshot from prepare_task(). Required to
-            correctly distinguish agent-created files from pre-existing ones.
-        auto_merge: if True (default), merge to default branch on success.
-            Set to False to leave the squash commit on the task branch —
-            useful when QA testing should happen before merge.
-
-    Returns a dict with:
-        passed: bool — whether verification passed
-        error: str|None — failure details if not passed
-        diff_summary: str — summary of changes made
-
-    This is the "verify + merge" half of run_task(), extracted for the native
-    subagent architecture.
-    """
-    key = task_key
-    default_branch = config["default_branch"]
-    test_command = config.get("test_command")
-    verify_cmd = None
-    timeout = config["verify_timeout"]
-
-    # Load task to get verify_cmd, spec, and other metadata
-    task = None
-    if tasks_file:
-        tasks = load_tasks(tasks_file)
-        task = next((t for t in tasks if t.get("key") == key), None)
-        if task:
-            verify_cmd = task.get("verify")
-
-    # Use pre-agent untracked snapshot from prepare_task, not a fresh one
-    pre_existing_untracked = set(pre_untracked) if pre_untracked else set()
-
-    # Ensure we're on the correct task branch (prepare_task for another task
-    # may have switched branches since we last ran).
-    expected_branch = f"otto/{key}"
-    current_branch = subprocess.run(
-        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-        cwd=project_dir, capture_output=True, text=True,
-    ).stdout.strip()
-    if current_branch != expected_branch:
-        checkout = subprocess.run(
-            ["git", "checkout", expected_branch],
-            cwd=project_dir, capture_output=True,
-        )
-        if checkout.returncode != 0:
-            return {
-                "passed": False,
-                "error": f"Branch {expected_branch} not found. Call prepare_task first.",
-                "diff_summary": "",
-            }
-
-    base_sha = subprocess.run(
-        ["git", "merge-base", default_branch, "HEAD"],
-        cwd=project_dir, capture_output=True, text=True,
-    ).stdout.strip()
-    if not base_sha:
-        base_sha = subprocess.run(
-            ["git", "rev-parse", f"{default_branch}"],
-            cwd=project_dir, capture_output=True, text=True, check=True,
-        ).stdout.strip()
-
-    # Check if agent made any changes
-    diff_check = subprocess.run(
-        ["git", "diff", "--quiet", base_sha],
-        cwd=project_dir, capture_output=True,
+    # Tier 2: visual/UI specs (need browser), SPA apps, or retries
+    from otto.tasks import spec_text
+    has_visual = any(
+        spec_binding(item) == "should"
+        and any(kw in spec_text(item).lower()
+                for kw in ("ui", "layout", "style", "visual", "responsive"))
+        for item in spec
     )
-    untracked_check = subprocess.run(
-        ["git", "ls-files", "--others", "--exclude-standard"],
+    is_spa = any(f.endswith((".jsx", ".tsx", ".vue", ".svelte")) for f in diff_files)
+    if has_visual or is_spa or attempt > 0:
+        return 2
+
+    # Tier 1: unmapped [must] items or cross-cutting changes
+    unmapped = [item for item in spec
+                if spec_binding(item) == "must"
+                and not spec_test_mapping.get(spec_text(item))]
+    if unmapped or len(diff_files) > 5:
+        return 1
+
+    # Tier 0: every [must] item has a test, local change, first attempt
+    return 0
+
+
+def _anchor_candidate_ref(project_dir: Path, task_key: str, attempt_num: int, commit_sha: str) -> str:
+    """Anchor a verified candidate as a durable git ref.
+
+    Returns the ref name. SHAs without refs can become dangling after reset.
+    """
+    ref_name = f"refs/otto/candidates/{task_key}/attempt-{attempt_num}"
+    result = subprocess.run(
+        ["git", "update-ref", ref_name, commit_sha],
         cwd=project_dir, capture_output=True, text=True,
     )
-    new_untracked = {f for f in untracked_check.stdout.strip().splitlines() if f} - pre_existing_untracked
-    no_changes = diff_check.returncode == 0 and not new_untracked
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        raise RuntimeError(f"failed to anchor candidate ref {ref_name}: {stderr or 'git update-ref failed'}")
+    return ref_name
 
-    if no_changes:
-        has_spec = task and task.get("spec")
-        if has_spec:
-            # No changes on a task with spec = agent didn't do anything. Fail so pilot retries.
-            return {"passed": False, "error": "No code changes detected — agent may have failed silently", "diff_summary": ""}
-        # No spec + no changes = nothing to do, pass
-        subprocess.run(["git", "checkout", default_branch], cwd=project_dir, capture_output=True)
-        cleanup_branch(project_dir, key, default_branch)
-        if tasks_file:
-            update_task(tasks_file, key, status="passed")
-        return {"passed": True, "error": None, "diff_summary": "No changes needed"}
 
-    # Build candidate commit
-    candidate_sha = build_candidate_commit(
-        project_dir, base_sha, None, pre_existing_untracked,
+def _find_best_candidate_ref(project_dir: Path, task_key: str) -> str | None:
+    """Find the best verified candidate ref for a task.
+
+    Returns the ref name of the most recent verified candidate, or None.
+    """
+    result = subprocess.run(
+        ["git", "for-each-ref", "--format=%(refname)", f"refs/otto/candidates/{task_key}/"],
+        cwd=project_dir, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    refs = [r.strip() for r in result.stdout.strip().splitlines() if r.strip()]
+    if not refs:
+        return None
+
+    def _sort_key(ref_name: str) -> tuple[int, str]:
+        match = _CANDIDATE_ATTEMPT_RE.search(ref_name)
+        attempt_num = int(match.group(1)) if match else -1
+        return (attempt_num, ref_name)
+
+    return max(refs, key=_sort_key)
+
+
+def _get_diff_info(project_dir: Path, base_sha: str) -> dict[str, Any]:
+    """Get diff info for QA tiering."""
+    result = subprocess.run(
+        ["git", "diff", "--name-only", base_sha, "HEAD"],
+        cwd=project_dir, capture_output=True, text=True,
+    )
+    files = [f.strip() for f in result.stdout.strip().splitlines() if f.strip()]
+
+    full_diff = subprocess.run(
+        ["git", "diff", base_sha, "HEAD"],
+        cwd=project_dir, capture_output=True, text=True,
     )
 
-    # Re-detect test command after agent may have created the project
-    if not config.get("test_command"):
-        detected = detect_test_command(project_dir)
-        if detected:
-            test_command = detected
+    return {
+        "files": files,
+        "full_diff": full_diff.stdout.strip() if full_diff.returncode == 0 else "",
+    }
 
-    # Run verification in disposable worktree
-    verify_result = run_verification(
-        project_dir=project_dir,
-        candidate_sha=candidate_sha,
-        test_command=test_command,
-        verify_cmd=verify_cmd,
-        timeout=timeout,
-    )
 
-    if verify_result.passed:
-        # Squash all branch commits into a single commit
+def _parse_qa_verdict_json(report: str) -> dict[str, Any]:
+    """Parse structured JSON QA verdict from agent output.
+
+    Searches for a JSON block in the report text. Falls back to
+    legacy pass/fail detection if no JSON found.
+    """
+    import re as _re
+
+    # Try to find JSON block in the report
+    # Look for ```json ... ``` or raw JSON object
+    json_match = _re.search(r'```json\s*\n(.*?)```', report, _re.DOTALL)
+    if not json_match:
+        json_match = _re.search(r'(\{[^{}]*"must_passed"[^{}]*\})', report, _re.DOTALL)
+    if not json_match:
+        # Try to find a larger JSON block with nested objects
+        json_match = _re.search(r'(\{.*"must_passed".*\})', report, _re.DOTALL)
+
+    if json_match:
         try:
-            subprocess.run(
-                ["git", "reset", "--mixed", base_sha],
-                cwd=project_dir, capture_output=True, check=True,
-            )
-            subprocess.run(
-                ["git", "add", "-u"],
-                cwd=project_dir, capture_output=True, check=True,
-            )
-            untracked_final = subprocess.run(
-                ["git", "ls-files", "--others", "--exclude-standard", "-z"],
-                cwd=project_dir, capture_output=True, text=True,
-            )
-            skip = pre_existing_untracked or set()
-            for f in untracked_final.stdout.split("\0"):
-                if f and f not in skip:
-                    subprocess.run(
-                        ["git", "add", "--", f],
-                        cwd=project_dir, capture_output=True,
-                    )
+            verdict = json.loads(json_match.group(1))
+            if isinstance(verdict, dict) and "must_passed" in verdict:
+                return verdict
+        except json.JSONDecodeError:
+            pass
 
-            # Get task prompt for commit message
-            commit_msg = f"otto: task {key}"
-            if tasks_file:
-                tasks = load_tasks(tasks_file)
-                task = next((t for t in tasks if t.get("key") == key), None)
-                if task:
-                    commit_msg = f"otto: {task['prompt'][:60]} (#{task.get('id', '?')})"
+    # Try reading from a verdict file if the agent wrote one
+    # (QA prompt says "Write your verdict to the output file as JSON")
 
-            subprocess.run(
-                ["git", "commit", "-m", commit_msg],
-                cwd=project_dir, capture_output=True, text=True, check=True,
-            )
-        except (subprocess.CalledProcessError, Exception) as e:
-            stderr = getattr(e, "stderr", str(e))
-            _restore_workspace_state(project_dir, pre_existing_untracked=pre_existing_untracked)
-            subprocess.run(["git", "checkout", default_branch], cwd=project_dir, capture_output=True)
-            cleanup_branch(project_dir, key, default_branch)
-            if tasks_file:
-                update_task(tasks_file, key, status="failed",
-                            error=f"squash commit failed: {stderr}",
-                            error_code="internal_error")
-            return {"passed": False, "error": f"squash commit failed: {stderr}", "diff_summary": ""}
+    # Fallback: parse legacy format
+    upper = report.upper()
+    has_explicit_fail = "QA VERDICT: FAIL" in report or "VERDICT: FAIL" in upper
+    has_explicit_pass = "QA VERDICT: PASS" in report or "VERDICT: PASS" in upper
+    # Also detect natural language pass patterns
+    if not has_explicit_pass and not has_explicit_fail:
+        pass_patterns = ["all must", "all criteria pass", "ready to merge",
+                         "all 🟢", "all pass"]
+        has_explicit_pass = any(p in report.lower() for p in pass_patterns)
 
-        # Build diff summary from the squash commit
-        diff_stat = subprocess.run(
-            ["git", "diff", "--stat", base_sha, "HEAD"],
-            cwd=project_dir, capture_output=True, text=True,
-        )
-        diff_summary = diff_stat.stdout.strip() if diff_stat.returncode == 0 else ""
-
-        if not auto_merge:
-            # Leave squash commit on task branch — caller will merge after QA
-            return {"passed": True, "error": None, "diff_summary": diff_summary}
-
-        # Merge to default branch
-        if merge_to_default(project_dir, key, default_branch):
-            if tasks_file:
-                update_task(tasks_file, key, status="passed")
-            return {"passed": True, "error": None, "diff_summary": diff_summary}
-        else:
-            if tasks_file:
-                update_task(tasks_file, key, status="failed",
-                            error=f"branch diverged — otto/{key} preserved",
-                            error_code="merge_diverged")
-            return {
-                "passed": False,
-                "error": f"branch diverged — otto/{key} preserved, manual rebase needed",
-                "diff_summary": "",
-            }
-
-    # Verification failed — reset working tree for retry
-    subprocess.run(
-        ["git", "reset", "--mixed", base_sha],
-        cwd=project_dir, capture_output=True,
-    )
-    failure_output = verify_result.failure_output or "verification failed"
-    return {"passed": False, "error": failure_output, "diff_summary": ""}
+    return {
+        "must_passed": has_explicit_pass and not has_explicit_fail,
+        "must_items": [],
+        "should_notes": [],
+        "regressions": [],
+        "prompt_intent": "",
+        "extras": [],
+        "_legacy_parse": True,
+    }
 
 
-def _setup_task_worktree(project_dir: Path, key: str, base_sha: str) -> Path:
-    """Create an isolated git worktree for parallel task execution."""
-    wt_dir = project_dir / ".worktrees" / f"otto-{key}"
-    branch_name = f"otto/{key}"
-
-    tasks_path = project_dir / "tasks.yaml"
-    task = None
-    if tasks_path.exists():
-        task = next((t for t in load_tasks(tasks_path) if t.get("key") == key), None)
-
-    branch_exists = subprocess.run(
-        ["git", "rev-parse", "--verify", branch_name],
-        cwd=project_dir,
-        capture_output=True,
-    ).returncode == 0
-    if branch_exists and task and task.get("status") == "failed" and task.get("error_code") == "merge_diverged":
-        raise RuntimeError(
-            f"Branch {branch_name} preserved from diverge failure — "
-            f"manually resolve or run 'otto reset' first"
-        )
-
-    # Clean up stale worktree if it exists
-    if wt_dir.exists():
-        subprocess.run(
-            ["git", "worktree", "remove", "--force", str(wt_dir)],
-            cwd=project_dir, capture_output=True,
-        )
-    # Delete stale branch if it exists and is not intentionally preserved
-    if branch_exists:
-        subprocess.run(
-            ["git", "branch", "-D", branch_name],
-            cwd=project_dir, capture_output=True,
-        )
-    wt_dir.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        ["git", "worktree", "add", str(wt_dir), "-b", branch_name, base_sha],
-        cwd=project_dir, capture_output=True, check=True,
-    )
-    return wt_dir
-
-
-def _teardown_task_worktree(project_dir: Path, key: str) -> None:
-    """Remove a task's git worktree and its branch."""
-    wt_dir = project_dir / ".worktrees" / f"otto-{key}"
-    branch_name = f"otto/{key}"
-    subprocess.run(
-        ["git", "worktree", "remove", "--force", str(wt_dir)],
-        cwd=project_dir, capture_output=True,
-    )
-    _run_cleanup_git_command(
-        project_dir,
-        ["git", "branch", "-D", branch_name],
-        f"git branch -D {branch_name}",
-    )
-    if wt_dir.exists():
-        shutil.rmtree(wt_dir, ignore_errors=True)
-
-
-async def run_task(
+async def run_qa_agent_v45(
     task: dict[str, Any],
+    spec: list,
     config: dict[str, Any],
     project_dir: Path,
-    tasks_file: Path | None,
-    work_dir: Path | None = None,
-) -> bool:
-    """Run a single task through the full loop. Returns True if passed.
-
-    When work_dir is set (parallel mode), the task runs in an isolated worktree:
-    - Branch creation and merge are handled by the caller
-    - All agent/git operations use work_dir as cwd
-    - tasks_file operations still use project_dir (via flock)
-    """
-    key = task["key"]
-    task_id = task["id"]
-    prompt = task["prompt"]
-    max_retries = task.get("max_retries", config["max_retries"])
-    verify_cmd = task.get("verify")
-    test_command = config.get("test_command")
-    default_branch = config["default_branch"]
-    timeout = config["verify_timeout"]
-    parallel_mode = work_dir is not None
-    effective_dir = work_dir if parallel_mode else project_dir
-
-
-    # In parallel mode, prefix structural messages and suppress verbose agent output.
-    # Full output goes to log files (otto logs <id>).
-    _task_tag = f"[#{task_id}]" if parallel_mode else ""
-
-    def _tprint(msg: str = "", **kwargs) -> None:
-        """Print with task prefix in parallel mode."""
-        if _task_tag:
-            console.print(f"  [dim]{_task_tag}[/dim] {msg}")
-        else:
-            console.print(msg)
-
-    if tasks_file:
-        update_task(tasks_file, key, status="running", attempts=0)
-
-    task_start = time.monotonic()
-    pre_existing_untracked: set[str] | None = None
-    log_dir = project_dir / "otto_logs" / key
-    total_cost = 0.0
-    session_id = None
-    last_error = None  # verification failure output for retry feedback
-    try:
-        # Snapshot pre-existing untracked files so we don't sweep them into the commit
-        pre_existing_untracked = _snapshot_untracked(effective_dir)
-
-        # Create branch (skip in parallel mode — caller sets up worktree with branch)
-        if parallel_mode:
-            base_sha = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=effective_dir, capture_output=True, text=True, check=True,
-            ).stdout.strip()
-        else:
-            base_sha = create_task_branch(project_dir, key, default_branch, task=task)
-
-        # Auto-detect test_command if spec exists but no test_command configured
-        spec = task.get("spec")
-        if spec and not test_command:
-            test_command = detect_test_command(effective_dir)
-            if not test_command:
-                test_command = "pytest"  # fallback for Python projects
-
-        # Print task header before testgen (so testgen output is under the right task)
-        if parallel_mode:
-            _tprint(f"[bold]Task #{task_id}[/bold]  {rich_escape(prompt[:60])}  [dim]started[/dim]")
-        else:
-            console.print()
-            console.print("\u2501" * 60, style="bold")
-            console.print(f"[bold]  Task #{task_id}[/bold]  {rich_escape(prompt[:80])}")
-            console.print(f"  key {key}", style="dim")
-            console.print("\u2501" * 60, style="bold")
-
-        # Timing for profiling
-        timings: dict[str, float] = {}
-
-        log_dir.mkdir(parents=True, exist_ok=True)
-
-        # Optional TDD mode: generate adversarial tests before coding
-        test_file_path_val = None
-        tdd_commit_sha = None  # SHA after TDD tests committed (for retry reset)
-        if config.get("tdd", False) and spec:
-            from otto.testgen import build_blackbox_context, run_testgen_agent, validate_generated_tests
-            if not parallel_mode:
-                console.print(f"  TDD mode: generating adversarial tests ({len(spec)} criteria)...", style="dim")
-            task_hint = prompt + "\n" + "\n".join(spec)
-            blackbox_ctx = build_blackbox_context(effective_dir, task_hint=task_hint)
-            test_file_path_val, _, _tg_cost = await run_testgen_agent(
-                spec, key, blackbox_ctx, effective_dir, quiet=parallel_mode, task_spec=prompt,
-            )
-            if test_file_path_val:
-                validation = validate_generated_tests(test_file_path_val, "pytest", effective_dir)
-                if validation.status in ("collection_error", "no_tests"):
-                    if not parallel_mode:
-                        _log_warn(f"Generated tests unusable ({validation.status}) — skipping TDD tests")
-                    test_file_path_val.unlink()
-                    test_file_path_val = None
-                elif validation.status == "all_pass":
-                    if not parallel_mode:
-                        _log_warn("All TDD tests pass before implementation — tests may be too weak, skipping")
-                    test_file_path_val.unlink()
-                    test_file_path_val = None
-                else:
-                    # Commit test file
-                    subprocess.run(["git", "add", str(test_file_path_val.relative_to(effective_dir))],
-                                   cwd=effective_dir, capture_output=True)
-                    subprocess.run(["git", "commit", "-m", f"otto: TDD tests for task #{task_id}"],
-                                   cwd=effective_dir, capture_output=True)
-                    tdd_commit_sha = subprocess.run(
-                        ["git", "rev-parse", "HEAD"], cwd=effective_dir,
-                        capture_output=True, text=True, check=True,
-                    ).stdout.strip()
-                    if not parallel_mode:
-                        console.print(f"  [green]\u2713[/green] [dim]TDD tests ready ({validation.failed} failing, {validation.passed} passing)[/dim]")
-
-        for attempt in range(max_retries + 1):
-            attempt_num = attempt + 1
-            if not parallel_mode:
-                console.print(f"\n  attempt {attempt_num}/{max_retries + 1}", style="dim")
-
-            if tasks_file:
-                update_task(tasks_file, key, attempts=attempt_num)
-
-            # Build agent prompt — include relevant source files so agent doesn't need to explore
-            if attempt == 0 or last_error is None:
-                agent_prompt = _build_coding_prompt(
-                    task, config, project_dir, effective_dir,
-                )
-                # TDD mode: tell coding agent about pre-generated test files
-                if test_file_path_val and test_file_path_val.exists():
-                    agent_prompt += (
-                        f"\n\nACCEPTANCE TESTS: {test_file_path_val.relative_to(effective_dir)}\n"
-                        f"These tests were generated from the spec before implementation.\n"
-                        f"Fix bugs in them if needed (broken imports, wrong API usage).\n"
-                        f"You may also write additional tests."
-                    )
-            else:
-                agent_prompt = (
-                    f"Verification failed. Here is the output:\n\n"
-                    f"{last_error}\n\n"
-                    f"Original task: {prompt}\n\n"
-                    f"You are working in {effective_dir}. Do NOT create git commits."
-                )
-
-            # Run agent + build candidate + verify — catch infrastructure failures
-            try:
-                try:
-                    agent_opts = ClaudeAgentOptions(
-                        permission_mode="bypassPermissions",
-                        cwd=str(effective_dir),
-                            setting_sources=["user", "project"],
-                        env=_subprocess_env(),
-                        effort=config.get("effort", "high"),
-                        system_prompt=CODING_SYSTEM_PROMPT,
-                    )
-                    if config.get("model"):
-                        agent_opts.model = config["model"]
-                    if session_id:
-                        agent_opts.resume = session_id
-                    # Subagents for parallelized work within a task
-                    if AgentDefinition:
-                        try:
-                            agent_opts.agents = {
-                                "researcher": AgentDefinition(
-                                    description="Research APIs, read docs, investigate approaches",
-                                    prompt="You are a research assistant. Investigate the topic thoroughly and report findings.",
-                                    model="haiku",
-                                ),
-                                "explorer": AgentDefinition(
-                                    description="Search codebase for patterns, find relevant files",
-                                    prompt="You are a codebase explorer. Search for relevant code patterns, find files, and report what you find.",
-                                    model="haiku",
-                                ),
-                            }
-                        except (TypeError, AttributeError, ValueError):
-                            pass  # SDK version doesn't support subagents — skip
-
-                    # query() is async iterator — stream messages, keep last ResultMessage
-                    agent_log_lines: list[str] = []
-                    result_msg = None
-                    async for message in query(prompt=agent_prompt, options=agent_opts):
-                        if isinstance(message, ResultMessage):
-                            result_msg = message
-                        elif hasattr(message, "session_id") and hasattr(message, "is_error"):
-                            # Duck-type check for ResultMessage (mocks, stub)
-                            result_msg = message
-                        elif AssistantMessage and isinstance(message, AssistantMessage):
-                            progress_file = log_dir / "progress.txt"
-                            for block in message.content:
-                                if ThinkingBlock and isinstance(block, ThinkingBlock):
-                                    thinking = getattr(block, "thinking", "")
-                                    if thinking:
-                                        agent_log_lines.append(f"[thinking] {thinking}")
-                                elif TextBlock and isinstance(block, TextBlock) and block.text:
-                                    if not parallel_mode:
-                                        console.print(block.text)
-                                    agent_log_lines.append(block.text)
-                                    # Write reasoning to progress file
-                                    try:
-                                        with open(progress_file, "a") as pf:
-                                            # Show first line of reasoning
-                                            first_line = block.text.strip().split("\n")[0]
-                                            if first_line:
-                                                pf.write(first_line + "\n")
-                                    except OSError:
-                                        pass
-                                elif ToolUseBlock and isinstance(block, ToolUseBlock):
-                                    if not parallel_mode:
-                                        _print_tool_use(block)
-                                    summary_line = f"● {block.name}  {_tool_use_summary(block)}"
-                                    agent_log_lines.append(summary_line)
-                                    # Write tool call to progress file
-                                    try:
-                                        with open(progress_file, "a") as pf:
-                                            pf.write(summary_line + "\n")
-                                    except OSError:
-                                        pass
-                                elif ToolResultBlock and isinstance(block, ToolResultBlock):
-                                    if not parallel_mode:
-                                        _print_tool_result(block)
-                                    content = block.content if isinstance(block.content, str) else str(block.content)
-                                    if content.strip():
-                                        prefix = "ERROR: " if block.is_error else ""
-                                        agent_log_lines.append(f"  {prefix}{content[:500]}")
-                                        # Write errors to progress (important for user to see)
-                                        if block.is_error:
-                                            try:
-                                                with open(progress_file, "a") as pf:
-                                                    pf.write(f"  ERROR: {content[:200]}\n")
-                                            except OSError:
-                                                pass
-
-                    # Persist agent log
-                    try:
-                        agent_log = log_dir / f"attempt-{attempt_num}-agent.log"
-                        agent_log.write_text("\n".join(agent_log_lines))
-                    except OSError:
-                        pass
-
-                    # Extract session_id for resume
-                    if result_msg and getattr(result_msg, "session_id", None):
-                        session_id = result_msg.session_id
-                        if tasks_file:
-                            update_task(tasks_file, key, session_id=session_id)
-
-                    # Extract cost from result
-                    raw_cost = getattr(result_msg, "total_cost_usd", None)
-                    attempt_cost = float(raw_cost) if isinstance(raw_cost, (int, float)) else 0.0
-                    total_cost += attempt_cost
-
-                    # Check if agent reported an error
-                    if result_msg and result_msg.is_error:
-                        raise RuntimeError(f"Agent error: {result_msg.result or 'unknown'}")
-
-                except Exception as e:
-                    _log_warn(f"Agent error: {e}")
-                    # Reset workspace — preserve TDD commit if it exists
-                    reset_sha = tdd_commit_sha if tdd_commit_sha else base_sha
-                    _restore_workspace_state(
-                        effective_dir,
-                        reset_ref=reset_sha,
-                        pre_existing_untracked=pre_existing_untracked,
-                    )
-                    continue
-
-                # Check if agent made any changes
-                commit_base = tdd_commit_sha if tdd_commit_sha else base_sha
-                diff_check = subprocess.run(
-                    ["git", "diff", "--quiet", commit_base],
-                    cwd=effective_dir, capture_output=True,
-                )
-                untracked_check = subprocess.run(
-                    ["git", "ls-files", "--others", "--exclude-standard"],
-                    cwd=effective_dir, capture_output=True, text=True,
-                )
-                new_untracked = {f for f in untracked_check.stdout.strip().splitlines() if f} - (pre_existing_untracked or set())
-                no_changes = diff_check.returncode == 0 and not new_untracked
-
-                if no_changes and not tdd_commit_sha:
-                    if spec:
-                        # Task has spec items but agent made no changes — suspicious.
-                        # Don't auto-pass; treat as failure so pilot can retry.
-                        if not parallel_mode:
-                            _log_warn("Agent made no changes despite spec requirements — retrying")
-                        last_error = "No file changes were detected after your session."
-                        continue
-
-                    # No spec and no changes — genuinely nothing to do
-                    if not parallel_mode:
-                        console.print("  No changes needed", style="dim")
-                    if not parallel_mode:
-                        subprocess.run(["git", "checkout", default_branch], cwd=project_dir, capture_output=True)
-                        cleanup_branch(project_dir, key, default_branch)
-                    timings["total"] = time.monotonic() - task_start
-                    if tasks_file:
-                        updates = {"status": "passed", "duration_s": round(timings["total"], 1)}
-                        if total_cost > 0:
-                            updates["cost_usd"] = total_cost
-                        update_task(tasks_file, key, **updates)
-                    _log_pass(task_id, default_branch, timings["total"], cost=total_cost)
-                    try:
-                        (log_dir / "timing.log").write_text(
-                            "\n".join(f"{k}: {v:.1f}s" for k, v in timings.items()) + "\n"
-                        )
-                    except OSError:
-                        pass
-                    return True
-
-                # Build candidate commit
-                # Spec tests are already committed — testgen_file is always None
-                # (old fallback path removed; adversarial tests committed before attempt loop)
-                candidate_sha = build_candidate_commit(
-                    effective_dir, commit_base, None,
-                    pre_existing_untracked,
-                )
-
-                # Re-detect test command after agent may have created the project
-                if not config.get("test_command"):
-                    detected = detect_test_command(effective_dir)
-                    if detected:
-                        test_command = detected
-
-                # Run verification in disposable worktree
-                verify_result = run_verification(
-                    project_dir=effective_dir,
-                    candidate_sha=candidate_sha,
-                    test_command=test_command,
-                    verify_cmd=verify_cmd,
-                    timeout=timeout,
-                )
-
-            except Exception as e:
-                # Unexpected error during agent/candidate/verify phases — safe to clean up
-                _log_fail(task_id, f"unexpected error: {e}", time.monotonic() - task_start, cost=total_cost)
-                if not parallel_mode:
-                    _cleanup_task_failure(
-                        project_dir, key, default_branch, tasks_file,
-                        pre_existing_untracked=pre_existing_untracked,
-                        error=f"unexpected error: {e}", error_code="internal_error",
-                        cost_usd=total_cost,
-                        duration_s=time.monotonic() - task_start,
-                    )
-                elif tasks_file:
-                    update_task(tasks_file, key,
-                                status="failed", error=f"unexpected error: {e}",
-                                error_code="internal_error",
-                                cost_usd=total_cost,
-                                duration_s=round(time.monotonic() - task_start, 1))
-                return False
-
-            # Write verification log (non-critical, best-effort)
-            try:
-                verify_log = log_dir / f"attempt-{attempt_num}-verify.log"
-                verify_log.write_text(
-                    "\n".join(f"{t.tier}: {'PASS' if t.passed else 'FAIL'}\n{t.output}"
-                              for t in verify_result.tiers)
-                )
-            except OSError:
-                pass  # best-effort log write
-
-            if not parallel_mode:
-                _log_verify(verify_result.tiers)
-
-            if verify_result.passed:
-                # Squash all branch commits into a single commit
-                # When spec tests exist, there are 2 commits (test + candidate) to squash
-                try:
-                    # Reset to base_sha (not commit_base) to squash everything into one commit
-                    subprocess.run(
-                        ["git", "reset", "--mixed", base_sha],
-                        cwd=effective_dir, capture_output=True, check=True,
-                    )
-                    # Re-stage everything
-                    subprocess.run(
-                        ["git", "add", "-u"],
-                        cwd=effective_dir, capture_output=True, check=True,
-                    )
-                    untracked_final = subprocess.run(
-                        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
-                        cwd=effective_dir, capture_output=True, text=True,
-                    )
-                    skip = pre_existing_untracked or set()
-                    for f in untracked_final.stdout.split("\0"):
-                        if f and f not in skip:
-                            subprocess.run(
-                                ["git", "add", "--", f],
-                                cwd=effective_dir, capture_output=True,
-                            )
-                    subprocess.run(
-                        ["git", "commit", "-m",
-                         f"otto: {prompt[:60]} (#{task_id})"],
-                        cwd=effective_dir, capture_output=True, text=True,
-                        check=True,
-                    )
-                except (subprocess.CalledProcessError, Exception) as e:
-                    stderr = getattr(e, "stderr", str(e))
-                    _log_fail(task_id, f"squash commit failed: {stderr}", time.monotonic() - task_start, cost=total_cost)
-                    if not parallel_mode:
-                        _cleanup_task_failure(
-                            project_dir, key, default_branch, tasks_file,
-                            pre_existing_untracked=pre_existing_untracked,
-                            error=f"squash commit failed: {stderr}", error_code="internal_error",
-                            cost_usd=total_cost,
-                            duration_s=time.monotonic() - task_start,
-                        )
-                    elif tasks_file:
-                        update_task(tasks_file, key,
-                                    status="failed", error=f"squash commit failed: {stderr}",
-                                    error_code="internal_error",
-                                    cost_usd=total_cost,
-                                    duration_s=round(time.monotonic() - task_start, 1))
-                    return False
-                if not parallel_mode:
-                    console.print()
-
-                # In parallel mode, caller handles merge — just return success
-                if parallel_mode:
-                    testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / key
-                    if testgen_dir.exists():
-                        shutil.rmtree(testgen_dir, ignore_errors=True)
-                    timings["total"] = time.monotonic() - task_start
-                    if tasks_file:
-                        updates = {"status": "passed", "duration_s": round(timings["total"], 1)}
-                        if total_cost > 0:
-                            updates["cost_usd"] = total_cost
-                        update_task(tasks_file, key, **updates)
-                    _log_pass(task_id, default_branch, timings["total"], cost=total_cost)
-                    try:
-                        (log_dir / "timing.log").write_text(
-                            "\n".join(f"{k}: {v:.1f}s" for k, v in timings.items()) + "\n"
-                        )
-                    except OSError:
-                        pass
-                    return True
-
-                # Merge to default — post-merge bookkeeping errors are non-destructive
-                if merge_to_default(project_dir, key, default_branch):
-                    testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / key
-                    if testgen_dir.exists():
-                        shutil.rmtree(testgen_dir, ignore_errors=True)
-                    timings["total"] = time.monotonic() - task_start
-                    if tasks_file:
-                        updates = {"status": "passed", "duration_s": round(timings["total"], 1)}
-                        if total_cost > 0:
-                            updates["cost_usd"] = total_cost
-                        update_task(tasks_file, key, **updates)
-                    _log_pass(task_id, default_branch, timings["total"], cost=total_cost)
-                    try:
-                        (log_dir / "timing.log").write_text(
-                            "\n".join(f"{k}: {v:.1f}s" for k, v in timings.items()) + "\n"
-                        )
-                    except OSError:
-                        pass
-                    return True
-
-                testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / key
-                if testgen_dir.exists():
-                    shutil.rmtree(testgen_dir, ignore_errors=True)
-                if tasks_file:
-                    updates: dict[str, Any] = {
-                        "status": "failed",
-                        "error": f"branch diverged — otto/{key} preserved, manual rebase needed",
-                        "error_code": "merge_diverged",
-                    }
-                    if total_cost > 0:
-                        updates["cost_usd"] = total_cost
-                    update_task(tasks_file, key, **updates)
-                _log_fail(task_id, f"branch diverged — otto/{key} preserved, manual rebase needed", time.monotonic() - task_start, cost=total_cost)
-                return False
-
-            # Unwind candidate commit for retry
-            subprocess.run(
-                ["git", "reset", "--mixed", commit_base],
-                cwd=effective_dir, capture_output=True,
-            )
-            last_error = verify_result.failure_output
-            if not parallel_mode:
-                _log_warn("Verification failed — retrying")
-
-        # All retries exhausted
-        if not parallel_mode:
-            _cleanup_task_failure(
-                project_dir, key, default_branch, tasks_file,
-                pre_existing_untracked=pre_existing_untracked,
-                error="max retries exhausted", error_code="max_retries",
-                cost_usd=total_cost,
-                duration_s=time.monotonic() - task_start,
-            )
-        elif tasks_file:
-            update_task(tasks_file, key,
-                        status="failed", error="max retries exhausted",
-                        error_code="max_retries",
-                        cost_usd=total_cost,
-                        duration_s=round(time.monotonic() - task_start, 1))
-        _log_fail(task_id, "all retries exhausted", time.monotonic() - task_start, cost=total_cost)
-        return False
-    except Exception as e:
-        duration = time.monotonic() - task_start
-        _log_fail(task_id, f"unexpected error: {e}", duration, cost=total_cost)
-        if not parallel_mode:
-            _cleanup_task_failure(
-                project_dir, key, default_branch, tasks_file,
-                pre_existing_untracked=pre_existing_untracked,
-                error=f"unexpected error: {e}", error_code="internal_error",
-                cost_usd=total_cost,
-                duration_s=duration,
-            )
-        elif tasks_file:
-            update_task(tasks_file, key,
-                        status="failed", error=f"unexpected error: {e}",
-                        error_code="internal_error",
-                        cost_usd=total_cost,
-                        duration_s=round(duration, 1))
-        return False
-
-
-async def run_qa_agent(
-    task: dict[str, Any],
-    config: dict[str, Any],
-    project_dir: Path,
-    diff_summary: str,
+    original_prompt: str,
+    diff: str,
+    tier: int = 1,
+    focus_items: list | None = None,
     on_progress: Any = None,
 ) -> dict[str, Any]:
-    """Run adversarial QA agent. Returns {passed, report, has_failures, cost_usd}."""
-    spec = task.get("spec")
-    if not spec:
-        return {"passed": True, "report": "No spec items — QA skipped", "has_failures": False}
+    """v4.5 QA agent — structured JSON verdict, risk-based tiering.
 
-    from otto.tasks import spec_text, spec_is_verifiable
+    Returns {must_passed, verdict, raw_report, cost_usd}.
+    """
+    from otto.tasks import spec_text, spec_binding
 
-    # Build spec section for QA
+    # Build spec section with binding levels
     spec_lines = []
     for i, item in enumerate(spec):
         text = spec_text(item)
-        kind = "verifiable" if spec_is_verifiable(item) else "visual"
-        spec_lines.append(f"  {i+1}. [{kind}] {text}")
+        binding = spec_binding(item)
+        spec_lines.append(f"  {i+1}. [{binding}] {text}")
     spec_section = "\n".join(spec_lines)
 
-    qa_prompt = f"""You are running adversarial QA on this implementation.
+    # Build focus section for targeted QA
+    focus_section = ""
+    if focus_items:
+        focus_texts = [spec_text(item) for item in focus_items]
+        focus_section = "\n\nFocus your testing on these items that lack test coverage:\n"
+        focus_section += "\n".join(f"  - {t}" for t in focus_texts)
 
-ACCEPTANCE SPEC:
+    # Create a temp file for the verdict
+    with tempfile.NamedTemporaryFile(suffix=".json", prefix="otto_qa_", delete=False) as tf:
+        verdict_file = Path(tf.name)
+
+    qa_prompt = f"""Test this implementation against the acceptance criteria and the original task prompt.
+
+You are working in {project_dir}. All project files are in this directory. Do not search outside it.
+
+ORIGINAL TASK PROMPT:
+{original_prompt}
+
+ACCEPTANCE CRITERIA:
 {spec_section}
+{focus_section}
 
-DIFF SUMMARY:
-{diff_summary}
+DIFF:
+{diff}
 
-TASK: {task.get('prompt', '')}
+Write your JSON verdict to: {verdict_file}
+"""
 
-Test the HARDEST cases first. For each spec item, try to find the ONE case that breaks it.
-Report exactly what you tested, what you expected, and what happened.
-
-If everything genuinely passes, end your report with: QA VERDICT: PASS
-If any spec item fails, end your report with: QA VERDICT: FAIL
-
-You are working in {project_dir}. Do NOT create git commits."""
-
-    # Only give QA chrome-devtools if the spec has visual items that need browser
-    has_visual_specs = any(not spec_is_verifiable(item) for item in spec)
+    # Configure MCP servers for browser testing (tier 2)
     qa_mcp_servers = {}
-    if has_visual_specs:
+    if tier >= 2:
         user_claude_json = Path.home() / ".claude.json"
         if user_claude_json.exists():
             try:
@@ -2105,7 +1092,7 @@ You are working in {project_dir}. Do NOT create git commits."""
                             args.extend(["--userDataDir", otto_chrome_profile])
                         srv["args"] = args
                         qa_mcp_servers[name] = srv
-            except (Exception,):
+            except Exception:
                 pass
 
     qa_opts = ClaudeAgentOptions(
@@ -2113,47 +1100,46 @@ You are working in {project_dir}. Do NOT create git commits."""
         cwd=str(project_dir),
         setting_sources=["project"],
         env=_subprocess_env(),
-        effort=config.get("effort", "high"),
-        system_prompt=QA_SYSTEM_PROMPT,
+        # Keep CC's default prompt (Glob over find, etc.) + append QA instructions
+        system_prompt={"type": "preset", "preset": "claude_code",
+                       "append": QA_SYSTEM_PROMPT_V45},
     )
     if qa_mcp_servers:
         qa_opts.mcp_servers = qa_mcp_servers
     if config.get("model"):
         qa_opts.model = config["model"]
 
-    qa_timeout = config.get("qa_timeout", 3600)  # 1 hour circuit breaker
+    qa_timeout = config.get("qa_timeout", 3600)
     report_lines: list[str] = []
+    qa_cost = 0.0
 
     try:
         async def _run_qa():
-            nonlocal report_lines
+            nonlocal report_lines, qa_cost
             async for message in query(prompt=qa_prompt, options=qa_opts):
                 if isinstance(message, ResultMessage):
-                    pass
+                    raw_cost = getattr(message, "total_cost_usd", None)
+                    if isinstance(raw_cost, (int, float)):
+                        qa_cost = float(raw_cost)
                 elif hasattr(message, "session_id") and hasattr(message, "is_error"):
-                    pass
+                    raw_cost = getattr(message, "total_cost_usd", None)
+                    if isinstance(raw_cost, (int, float)):
+                        qa_cost = float(raw_cost)
                 elif AssistantMessage and isinstance(message, AssistantMessage):
                     for block in message.content:
                         if TextBlock and isinstance(block, TextBlock) and block.text:
                             report_lines.append(block.text)
-                            # Extract QA findings for live display
                             if on_progress:
                                 for line in block.text.splitlines():
                                     line_s = line.strip()
-                                    if not line_s:
-                                        continue
-                                    # Look for spec result patterns
-                                    if any(marker in line_s for marker in
-                                           ["PASS", "FAIL", "CONCERN",
-                                            "✅", "❌", "⚠",
-                                            "Spec ", "spec "]):
-                                        # Clean up and emit as QA finding
+                                    if line_s and any(m in line_s for m in
+                                                      ["PASS", "FAIL", "must", "should",
+                                                       "✅", "❌"]):
                                         try:
                                             on_progress("qa_finding", {"text": line_s[:200]})
                                         except Exception:
                                             pass
                         elif ToolUseBlock and isinstance(block, ToolUseBlock):
-                            # Emit QA agent tool calls so user sees activity during QA
                             if on_progress:
                                 try:
                                     event = _build_agent_tool_event(block)
@@ -2163,60 +1149,77 @@ You are working in {project_dir}. Do NOT create git commits."""
                                     pass
 
         await asyncio.wait_for(_run_qa(), timeout=qa_timeout)
-        qa_completed = True
     except asyncio.TimeoutError:
         report_lines.append(f"\n[QA agent timed out after {qa_timeout}s]")
-        qa_completed = False
     except Exception as e:
         report_lines.append(f"\n[QA agent error: {e}]")
-        qa_completed = False
 
-    report = "\n".join(report_lines)
+    raw_report = "\n".join(report_lines)
+
+    # Try to read verdict from file first, then parse from report
+    verdict = None
+    if verdict_file.exists():
+        try:
+            verdict_text = verdict_file.read_text().strip()
+            if verdict_text:
+                verdict = json.loads(verdict_text)
+        except (json.JSONDecodeError, OSError):
+            pass
+        finally:
+            verdict_file.unlink(missing_ok=True)
+    else:
+        verdict_file.unlink(missing_ok=True)
+
+    if not verdict or "must_passed" not in verdict:
+        verdict = _parse_qa_verdict_json(raw_report)
+
+    must_passed = verdict.get("must_passed", False)
+
+    # Emit summary for display
     if on_progress:
         try:
-            spec_results = _extract_qa_spec_results(report)
+            must_items = verdict.get("must_items", [])
+            total = len(must_items)
+            passed = sum(1 for item in must_items if item.get("status") == "pass")
             on_progress("qa_summary", {
-                "total": len(spec_results),
-                "passed": sum(1 for result in spec_results if result["passed"]),
-                "failed": sum(1 for result in spec_results if not result["passed"]),
+                "total": total,
+                "passed": passed,
+                "failed": total - passed,
             })
         except Exception:
             pass
-    # Explicit FAIL in report = definitely failed
-    has_explicit_fail = "QA VERDICT: FAIL" in report or "FAIL" in report.upper().split("QA VERDICT")[-1] if "QA VERDICT" in report else False
-    # QA must complete AND have an explicit PASS verdict to be considered passing
-    has_explicit_pass = "QA VERDICT: PASS" in report
 
-    if has_explicit_fail:
-        passed = False
-    elif not qa_completed:
-        passed = False  # timeout/error = inconclusive, not pass
-    elif not has_explicit_pass and not report_lines:
-        passed = False  # empty output = inconclusive
-    else:
-        passed = not has_explicit_fail
-
-    return {"passed": passed, "report": report, "has_failures": not passed}
+    return {
+        "must_passed": must_passed,
+        "verdict": verdict,
+        "raw_report": raw_report,
+        "cost_usd": qa_cost,
+    }
 
 
-async def run_task_with_qa(
+async def run_task_v45(
     task: dict[str, Any],
     config: dict[str, Any],
     project_dir: Path,
     tasks_file: Path | None,
-    hint: str | None = None,
+    context: Any | None = None,  # PipelineContext
     on_progress: Any | None = None,
 ) -> dict[str, Any]:
-    """Run full task loop: prepare -> code -> verify -> QA -> merge.
+    """v4.5 per-task execution loop — bare CC + parallel spec gen + verify + QA.
 
-    Args:
-        on_progress: Optional callback ``(event_type: str, data: dict) -> None``
-            called at key execution points. Event types:
-            - ``"phase"``  — phase start/end (name, status, time_s, cost, error)
-            - ``"agent_tool"`` — significant tool call from coding/QA agent (name, detail)
+    Key differences from run_task_with_qa():
+    - Attempt 1 = bare CC (raw prompt, no custom system prompt, no spec)
+    - Spec gen runs in parallel with coding, awaited before QA
+    - Structured JSON QA verdict with [must]/[should] binding
+    - Risk-based QA tiering (Tier 0/1/2)
+    - Durable candidate refs (never discard verified code)
+    - Session resume on retry
 
-    Returns {success, status, cost_usd, error, diff_summary, qa_report, phase_timings}.
+    Returns {success, status, cost_usd, error, diff_summary, qa_report,
+             phase_timings, review_ref}.
     """
+    from otto.spec import async_generate_spec
+
     key = task["key"]
     task_id = task["id"]
     prompt = task["prompt"]
@@ -2229,16 +1232,23 @@ async def run_task_with_qa(
     total_cost = 0.0
     session_id = None
     last_error = None
-    # Resume attempt count from persisted state — prevents the pilot from
-    # circumventing max_retries by calling run_task_with_qa multiple times.
+    last_error_source = None
     prior_attempts = task.get("attempts", 0) or 0
     total_attempts = prior_attempts
-    phase_timings: dict[str, float] = {}  # phase_name -> elapsed seconds
-    # Live state for otto status -w (read from another terminal)
+    # empty_retries removed — prompt now includes working dir, should not happen
+    phase_timings: dict[str, float] = {}
+    spec = task.get("spec")
+    pre_existing_untracked: set[str] | None = None
+    spec_task: asyncio.Task | None = None
+    spec_started_at: float | None = None
+    spec_generation_error = ""
+    _result_error_code_unset = object()
+
+    # Live state for otto status -w
     _live_state_file = project_dir / "otto_logs" / "live-state.json"
     _live_phases: dict[str, dict] = {
         p: {"status": "pending", "time_s": 0.0}
-        for p in ["prepare", "coding", "test", "qa", "merge"]
+        for p in ["prepare", "spec_gen", "coding", "test", "qa", "merge"]
     }
     _live_tools: list[str] = []
 
@@ -2248,7 +1258,6 @@ async def run_task_with_qa(
                 on_progress(event, data)
             except Exception:
                 pass
-        # Update live state file for otto status -w
         try:
             if event == "phase":
                 name = data.get("name", "")
@@ -2275,9 +1284,63 @@ async def run_task_with_qa(
         except Exception:
             pass
 
+    async def _cancel_spec_task() -> None:
+        nonlocal spec_task
+        if not spec_task:
+            return
+        if spec_task.done():
+            spec_task = None
+            return
+        spec_task.cancel()
+        try:
+            await spec_task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+        finally:
+            spec_task = None
+
+    async def _await_spec_task() -> None:
+        nonlocal spec, spec_task, total_cost, spec_generation_error
+        if not spec_task or spec:
+            return
+        try:
+            spec_items, spec_cost, spec_error = await spec_task
+        finally:
+            spec_task = None
+
+        spec_elapsed = round(time.monotonic() - spec_started_at, 1) if spec_started_at else 0.0
+        total_cost += spec_cost
+        if spec_items:
+            spec = spec_items
+            if tasks_file:
+                try:
+                    update_task(tasks_file, key, spec=spec)
+                except Exception:
+                    pass
+            from otto.tasks import spec_binding as _sb_count
+            _must = sum(1 for item in spec if _sb_count(item) == "must")
+            _should = len(spec) - _must
+            _breakdown = f"{len(spec)} items ({_must} must, {_should} should)"
+            emit("phase", name="spec_gen", status="done", time_s=spec_elapsed,
+                 detail=_breakdown)
+            from otto.tasks import spec_binding, spec_text
+            for item in spec:
+                binding = spec_binding(item)
+                text = spec_text(item)
+                emit("spec_item", text=f"[{binding}] {text}")
+            emit("spec_items_done")
+            return
+
+        spec_generation_error = spec_error or "spec generation produced no items"
+        emit("phase", name="spec_gen", status="fail", time_s=spec_elapsed,
+             error=spec_generation_error[:100])
+
     def _result(success: bool, status: str, error: str = "",
-                diff_summary: str = "", qa_report: str = "") -> dict[str, Any]:
-        # Clean up live state file
+                diff_summary: str = "", qa_report: str = "",
+                review_ref: str | None = None,
+                error_code: Any = _result_error_code_unset) -> dict[str, Any]:
         try:
             if _live_state_file.exists():
                 _live_state_file.unlink()
@@ -2291,6 +1354,10 @@ async def run_task_with_qa(
                     updates["duration_s"] = round(duration, 1)
                 if error:
                     updates["error"] = error
+                if error_code is not _result_error_code_unset:
+                    updates["error_code"] = error_code
+                if review_ref:
+                    updates["review_ref"] = review_ref
                 update_task(tasks_file, key, **updates)
             except Exception:
                 pass
@@ -2302,134 +1369,195 @@ async def run_task_with_qa(
             "diff_summary": diff_summary,
             "qa_report": qa_report,
             "phase_timings": phase_timings,
+            "review_ref": review_ref,
         }
 
     try:
-        # Step 1: Prepare — create branch, build prompt
+        # Step 1: Prepare — create branch
         emit("phase", name="prepare", status="running")
         prep_start = time.monotonic()
-        prep = prepare_task(task, config, project_dir, tasks_file, hint=hint)
-        base_sha = prep["base_sha"]
-        pre_existing_untracked = set(prep.get("pre_untracked") or [])
-        agent_prompt = prep["prompt"]
+
+        if tasks_file:
+            update_task(tasks_file, key, status="running", attempts=0, review_ref=None)
+
+        base_sha = create_task_branch(project_dir, key, default_branch, task=task)
+        pre_existing_untracked = _snapshot_untracked(project_dir)
 
         log_dir = project_dir / "otto_logs" / key
         log_dir.mkdir(parents=True, exist_ok=True)
 
         verify_cmd = task.get("verify")
         test_command = config.get("test_command")
-        spec = task.get("spec")
 
-        # Auto-detect test_command if spec exists but no test_command configured
-        if spec and not test_command:
+        # Auto-detect test_command
+        if not test_command:
             detected = detect_test_command(project_dir)
-            test_command = detected if detected else "pytest"
+            test_command = detected if detected else None
 
-        # Baseline test check — verify test infrastructure works BEFORE coding.
-        # Only blocks on infrastructure failures (missing modules, broken config).
-        # Normal test failures are allowed (bugfix projects, greenfield with no tests).
+        # Baseline test check
+        baseline_detail = ""
         if test_command:
             from otto.verify import run_tier1
+            import re as _re_baseline
             baseline = run_tier1(project_dir, test_command, timeout)
             if not baseline.passed and not baseline.skipped:
                 output = baseline.output or ""
-                # Detect infrastructure failures vs normal test failures.
-                # Infra failures: the test runner itself can't start or find tests.
                 infra_keywords = [
-                    "Cannot find module",  # missing JS dependency/config
-                    "ModuleNotFoundError",  # missing Python module
-                    "command not found",  # test runner not installed
-                    "No module named",  # Python import failure
-                    "SyntaxError",  # broken source code
-                    "error: unrecognized arguments",  # bad pytest config
-                    "errors during collection",  # pytest can't collect tests
+                    "Cannot find module", "ModuleNotFoundError",
+                    "command not found", "No module named",
+                    "SyntaxError", "error: unrecognized arguments",
+                    "errors during collection",
                 ]
-                is_infra_failure = any(kw in output for kw in infra_keywords)
-                if is_infra_failure:
+                if any(kw in output for kw in infra_keywords):
                     prep_elapsed = round(time.monotonic() - prep_start, 1)
                     phase_timings["prepare"] = prep_elapsed
                     emit("phase", name="prepare", status="fail", time_s=prep_elapsed,
-                         error="baseline tests fail before coding — infrastructure issue")
-                    err_detail = output[-500:]
-                    return _result(
-                        False, "failed",
-                        error=f"BASELINE_FAIL: test infrastructure is broken on unmodified code. "
-                              f"This is a setup issue, not a coding issue.\n{err_detail}",
+                         error="baseline tests fail — infrastructure issue")
+                    _cleanup_task_failure(
+                        project_dir, key, default_branch, tasks_file,
+                        pre_existing_untracked=pre_existing_untracked,
+                        error=f"BASELINE_FAIL: {output[-500:]}",
+                        error_code="baseline_fail",
+                        cost_usd=total_cost,
+                        duration_s=time.monotonic() - task_start,
                     )
-                # Normal test failures (bugfix project, some tests fail) — proceed.
-                # The coding agent will fix them.
+                    return _result(False, "failed",
+                                   error=f"BASELINE_FAIL: test infrastructure broken\n{output[-500:]}")
+            # Extract test count for display
+            if baseline.output:
+                m = _re_baseline.search(r"(\d+) passed", baseline.output)
+                if m:
+                    baseline_detail = f"baseline: {m.group(1)} tests passing"
 
         prep_elapsed = round(time.monotonic() - prep_start, 1)
         phase_timings["prepare"] = prep_elapsed
-        emit("phase", name="prepare", status="done", time_s=prep_elapsed)
+        emit("phase", name="prepare", status="done", time_s=prep_elapsed,
+             detail=baseline_detail)
 
-        # Check if this task was previously passed (retried via `otto retry --force`)
-        # Only skip if ALL conditions hold:
-        #   1. tasks.yaml records status="passed" (prior successful run)
-        #   2. Merge commit SHA recorded from prior run
-        #   3. Task fingerprint matches (prompt+spec hasn't changed since pass)
-        #   4. Branch has no new commits (HEAD == base_sha, agent hasn't started)
-        #   5. The merge commit is still reachable on default branch
-        import hashlib
-        _task_fp = hashlib.sha256(
-            (prompt + str(spec or "")).encode()
-        ).hexdigest()[:16]
-        merged_sha = task.get("merged_sha", "")
-        merged_fp = task.get("task_fingerprint", "")
-        if task.get("status") == "passed" and merged_sha and merged_fp == _task_fp:
-            head_sha = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=project_dir, capture_output=True, text=True,
-            ).stdout.strip()
-            if head_sha == base_sha:
-                # Verify the merge commit is still reachable
-                reachable = subprocess.run(
-                    ["git", "merge-base", "--is-ancestor", merged_sha, default_branch],
-                    cwd=project_dir, capture_output=True,
-                ).returncode == 0
-                if reachable:
-                    _log_warn("Task was previously passed — skipping (use otto reset to re-run)")
-                    emit("phase", name="coding", status="done", time_s=0,
-                         detail="already implemented")
-                    subprocess.run(["git", "checkout", default_branch], cwd=project_dir, capture_output=True)
-                    cleanup_branch(project_dir, key, default_branch)
-                    return _result(True, "passed",
-                                   diff_summary="Already implemented (from previous run)")
-
-        # Step 2+3: Code + Verify + QA loop
-        # Both coding retries AND QA-triggered retries count against max_retries.
-        # Overall time budget prevents unbounded cycles.
-        # prior_attempts ensures the pilot can't circumvent max_retries by
-        # calling run_task_with_qa multiple times for the same task.
+        # Step 2: Coding + Verify + QA loop
         remaining = max(0, max_retries + 1 - prior_attempts)
         if remaining == 0:
-            return _result(False, "failed",
-                           error=f"max retries already exhausted ({prior_attempts} prior attempts)")
+            await _cancel_spec_task()
+            error = f"max retries already exhausted ({prior_attempts} prior)"
+            _cleanup_task_failure(
+                project_dir, key, default_branch, tasks_file,
+                pre_existing_untracked=pre_existing_untracked,
+                error=error,
+                error_code="max_retries",
+                cost_usd=total_cost,
+                duration_s=time.monotonic() - task_start,
+            )
+            return _result(False, "failed", error=error, error_code="max_retries")
+
+        # Fire spec gen in background if no specs yet
+        if not spec:
+            async def _spec_with_timeout():
+                try:
+                    spec_items, spec_cost, spec_error = await asyncio.wait_for(
+                        async_generate_spec(prompt, project_dir),
+                        timeout=300,  # 5 min max for spec gen
+                    )
+                    return spec_items, spec_cost, spec_error
+                except asyncio.TimeoutError:
+                    return None, 0.0, "spec generation timed out after 300s"
+                except Exception as exc:
+                    return None, 0.0, f"spec generation failed: {exc}"
+
+            emit("phase", name="spec_gen", status="running")
+            spec_started_at = time.monotonic()
+            spec_task = asyncio.create_task(_spec_with_timeout())
+
         for attempt in range(remaining):
             attempt_num = prior_attempts + attempt + 1
             total_attempts += 1
+            retry_reason = ""
+            if attempt > 0 and last_error:
+                source = last_error_source or "unknown"
+                # Extract a concise reason from the error
+                if source == "verify":
+                    # Find "N failed" or first error line
+                    import re as _re_retry
+                    m = _re_retry.search(r"\d+ (?:failed|error)", last_error)
+                    reason_text = m.group(0) if m else last_error.strip().splitlines()[0][:50]
+                elif source == "qa":
+                    # Find failed criterion or concise summary
+                    reason_text = "QA found issues"
+                    for eline in last_error.splitlines():
+                        es = eline.strip()
+                        if "FAIL" in es or "✗" in es or "CRITICAL" in es:
+                            reason_text = es[:60]
+                            break
+                elif source == "coding":
+                    reason_text = last_error.strip().splitlines()[0][:60]
+                else:
+                    reason_text = last_error.strip().splitlines()[0][:60]
+                retry_reason = f"{source}: {reason_text}"
+            emit("attempt_boundary", attempt=attempt_num, reason=retry_reason)
 
-            # Time budget check — prevent unbounded QA-retry cycles
+            # Time budget check
             elapsed = time.monotonic() - task_start
             if elapsed > max_task_time and attempt > 0:
-                return _result(False, "failed",
-                               error=f"time budget exceeded ({int(elapsed)}s > {max_task_time}s) "
-                                     f"after {total_attempts} attempts")
+                await _cancel_spec_task()
+                error = f"time budget exceeded ({int(elapsed)}s)"
+                _cleanup_task_failure(
+                    project_dir, key, default_branch, tasks_file,
+                    pre_existing_untracked=pre_existing_untracked,
+                    error=error,
+                    error_code="time_budget_exceeded",
+                    cost_usd=total_cost,
+                    duration_s=time.monotonic() - task_start,
+                )
+                return _result(False, "failed", error=error, error_code="time_budget_exceeded")
 
             if tasks_file:
                 update_task(tasks_file, key, attempts=total_attempts)
 
-            # Build prompt for retry
-            if attempt > 0 and last_error is not None:
-                agent_prompt = (
-                    f"Verification failed. Here is the output:\n\n"
-                    f"{last_error}\n\n"
-                    f"Original task: {prompt}\n\n"
-                    f"You are working in {project_dir}. Do NOT create git commits."
-                )
+            # Ensure specs are available before attempt 2+
+            if attempt > 0 and spec_task and not spec:
+                await _await_spec_task()
 
-            # Run coding agent
-            emit("phase", name="coding", status="running", attempt=attempt_num)
+            # Build prompt for this attempt
+            feedback = task.get("feedback", "")
+            if attempt == 0 and not last_error:
+                # ROUND 1: Bare CC — raw prompt + cross-task learnings + user feedback
+                coding_prompt = prompt
+                if feedback:
+                    coding_prompt += f"\n\nIMPORTANT feedback from the user:\n{feedback}"
+                if context and hasattr(context, 'observed_learnings') and context.observed_learnings:
+                    coding_prompt += f"\n\nFactual observations from prior tasks:\n"
+                    coding_prompt += "\n".join(
+                        f"- [{l.source}] {l.text}" for l in context.observed_learnings
+                    )
+            else:
+                # ROUND 2+: raw prompt + feedback + specs + raw errors + learnings
+                coding_prompt = prompt
+                if feedback:
+                    coding_prompt += f"\n\nIMPORTANT feedback from the user:\n{feedback}"
+                if spec:
+                    coding_prompt += f"\n\nAcceptance criteria (satisfy [must], exceed where helpful):\n"
+                    coding_prompt += format_spec_v45(spec)
+                if last_error:
+                    coding_prompt += f"\n\nPrevious attempt failed."
+                    coding_prompt += f"\n  Source: {last_error_source}"
+                    coding_prompt += (
+                        f"\n  Raw output:\n{_fence_untrusted_text(last_error)}"
+                    )
+                if context and hasattr(context, 'observed_learnings') and context.observed_learnings:
+                    coding_prompt += f"\n\nFactual observations from prior tasks:\n"
+                    coding_prompt += "\n".join(
+                        f"- [{l.source}] {l.text}" for l in context.observed_learnings
+                    )
+
+            coding_prompt += f"\n\nYou are working in {project_dir}. Do not create git commits."
+
+            # Run coding agent — NO custom system prompt (bare CC)
+            if attempt == 0 and not last_error:
+                coding_detail = "bare CC"
+            else:
+                reason = last_error_source or "unknown"
+                coding_detail = f"attempt {attempt_num} — {reason} failed"
+            emit("phase", name="coding", status="running", attempt=attempt_num,
+                 detail=coding_detail)
             coding_start = time.monotonic()
             try:
                 agent_opts = ClaudeAgentOptions(
@@ -2437,42 +1565,30 @@ async def run_task_with_qa(
                     cwd=str(project_dir),
                     setting_sources=["user", "project"],
                     env=_subprocess_env(),
-                    effort=config.get("effort", "high"),
-                    system_prompt=CODING_SYSTEM_PROMPT,
+                    # Use CC's default system prompt (Glob over find, etc.)
+                    # None would blank it; preset keeps CC's defaults.
+                    system_prompt={"type": "preset", "preset": "claude_code"},
+                    # NO max_turns — agent finishes naturally
                 )
                 if config.get("model"):
                     agent_opts.model = config["model"]
                 if session_id:
                     agent_opts.resume = session_id
-                if AgentDefinition:
-                    try:
-                        agent_opts.agents = {
-                            "researcher": AgentDefinition(
-                                description="Research APIs, read docs, investigate approaches",
-                                prompt="You are a research assistant. Investigate the topic thoroughly and report findings.",
-                                model="haiku",
-                            ),
-                            "explorer": AgentDefinition(
-                                description="Search codebase for patterns, find relevant files",
-                                prompt="You are a codebase explorer. Search for relevant code patterns, find files, and report what you find.",
-                                model="haiku",
-                            ),
-                        }
-                    except (TypeError, AttributeError, ValueError):
-                        pass
+                # Don't define custom subagents — the built-in Agent tool
+                # is available by default. Custom definitions with vague prompts
+                # ("Research APIs", "Search codebase") encourage unnecessary
+                # dispatches that multiply exploration overhead.
 
                 agent_log_lines: list[str] = []
                 result_msg = None
                 _last_block_name = ""
-                _last_block_inputs: dict = {}
-                async for message in query(prompt=agent_prompt, options=agent_opts):
+                async for message in query(prompt=coding_prompt, options=agent_opts):
                     if isinstance(message, ResultMessage):
                         result_msg = message
                     elif hasattr(message, "session_id") and hasattr(message, "is_error"):
                         result_msg = message
                     elif AssistantMessage and isinstance(message, AssistantMessage):
                         for block in message.content:
-                            # Check for ToolResultBlock in any message type
                             if ToolResultBlock and isinstance(block, ToolResultBlock):
                                 content = str(getattr(block, "content", ""))
                                 if content and _last_block_name == "Bash":
@@ -2488,18 +1604,15 @@ async def run_task_with_qa(
                                         is_pass = "passed" in result_line.lower() and "failed" not in result_line.lower()
                                         emit("agent_tool_result", detail=result_line, passed=is_pass)
                                 _last_block_name = ""
-                                _last_block_inputs = {}
                                 continue
                             if TextBlock and isinstance(block, TextBlock) and block.text:
                                 agent_log_lines.append(block.text)
                             elif ToolUseBlock and isinstance(block, ToolUseBlock):
                                 _last_block_name = block.name
-                                _last_block_inputs = block.input or {}
                                 agent_log_lines.append(f"● {block.name}  {_tool_use_summary(block)}")
                                 event = _build_agent_tool_event(block)
                                 if event:
                                     emit("agent_tool", **event)
-                            # Note: ToolResultBlock handling moved to top of block loop
 
                 # Persist agent log
                 try:
@@ -2520,11 +1633,6 @@ async def run_task_with_qa(
 
                 coding_elapsed = round(time.monotonic() - coding_start, 1)
                 phase_timings["coding"] = phase_timings.get("coding", 0) + coding_elapsed
-                # No git diff stat here — it's unreliable during coding
-                # (agent may or may not have committed). The display tracks
-                # file/line counts from Write/Edit events instead.
-                emit("phase", name="coding", status="done", time_s=coding_elapsed,
-                     cost=attempt_cost, attempt=attempt_num)
 
                 if result_msg and result_msg.is_error:
                     raise RuntimeError(f"Agent error: {result_msg.result or 'unknown'}")
@@ -2533,16 +1641,16 @@ async def run_task_with_qa(
                 coding_elapsed = round(time.monotonic() - coding_start, 1)
                 emit("phase", name="coding", status="fail", time_s=coding_elapsed,
                      error=str(e)[:80], attempt=attempt_num)
-                _log_warn(f"Agent error: {e}")
                 _restore_workspace_state(
                     project_dir,
                     reset_ref=base_sha,
                     pre_existing_untracked=pre_existing_untracked,
                 )
                 last_error = str(e)
+                last_error_source = "coding"
                 continue
 
-            # Check if agent made changes
+            # Check if agent made changes BEFORE declaring coding done
             diff_check = subprocess.run(
                 ["git", "diff", "--quiet", base_sha],
                 cwd=project_dir, capture_output=True,
@@ -2555,17 +1663,108 @@ async def run_task_with_qa(
             no_changes = diff_check.returncode == 0 and not new_untracked
 
             if no_changes:
-                if spec:
-                    last_error = "No file changes were detected after your session."
+                # Extract agent's last reasoning for display
+                last_text = ""
+                for line in reversed(agent_log_lines):
+                    if not line.startswith("●") and line.strip():
+                        last_text = line.strip()[:120]
+                        break
+                reason = last_text if last_text else "no code changes"
+
+                emit("phase", name="coding", status="done", time_s=coding_elapsed,
+                     cost=attempt_cost, detail=f"no changes — {reason}")
+
+                # Agent made no changes. Could mean "feature already exists".
+                # Wait for specs, then run QA to verify properly.
+                # If QA passes, the task passes. If QA fails, retry with findings.
+                if spec_task and not spec:
+                    emit("phase", name="spec_gen", status="running",
+                         detail="awaiting specs to verify existing code...")
+                    await _await_spec_task()
+
+                qa_spec = spec
+                if not qa_spec:
+                    # No spec available — can't verify, treat as failure
+                    emit("phase", name="coding", status="fail", time_s=0,
+                         error="no changes and no spec to verify against")
+                    last_error = f"No code changes produced and no spec available.\nAgent: {last_text}"
+                    last_error_source = "coding"
                     continue
-                # No spec + no changes = nothing to do, pass
-                subprocess.run(["git", "checkout", default_branch], cwd=project_dir, capture_output=True)
-                cleanup_branch(project_dir, key, default_branch)
-                return _result(True, "passed", diff_summary="No changes needed")
+
+                # Run QA against existing (unchanged) code
+                diff_info_nc = {"files": [], "full_diff": "(no changes)"}
+                qa_tier_nc = max(determine_qa_tier(task, qa_spec, attempt, diff_info_nc), 1)
+                emit("phase", name="qa", status="running",
+                     detail=f"tier {qa_tier_nc} — verifying existing code")
+                qa_start_nc = time.monotonic()
+
+                from otto.tasks import spec_binding as _sb_nc
+                focus_nc = [item for item in qa_spec if _sb_nc(item) == "must"]
+
+                qa_result_nc = await run_qa_agent_v45(
+                    task, qa_spec, config, project_dir,
+                    original_prompt=prompt,
+                    diff="(no code changes — agent believes feature already exists)",
+                    tier=qa_tier_nc,
+                    focus_items=focus_nc,
+                    on_progress=on_progress,
+                )
+                qa_elapsed_nc = round(time.monotonic() - qa_start_nc, 1)
+                total_cost += qa_result_nc.get("cost_usd", 0.0)
+                qa_report_nc = qa_result_nc.get("raw_report", "")
+
+                # Emit per-item QA results
+                verdict_nc = qa_result_nc.get("verdict", {})
+                for item in verdict_nc.get("must_items", []):
+                    status_icon = "✓" if item.get("status") == "pass" else "✗"
+                    emit("qa_item_result",
+                         text=f"{status_icon} [must] {item.get('criterion', '')[:70]}",
+                         passed=item.get("status") == "pass",
+                         evidence=item.get("evidence", "")[:80] if item.get("status") != "pass" else "")
+
+                try:
+                    (log_dir / "qa-report.md").write_text(qa_report_nc or "No QA output")
+                    if verdict_nc:
+                        (log_dir / "qa-verdict.json").write_text(json.dumps(verdict_nc, indent=2))
+                except OSError:
+                    pass
+
+                if qa_result_nc["must_passed"]:
+                    # QA confirms feature exists and works — pass
+                    emit("phase", name="qa", status="done", time_s=qa_elapsed_nc)
+                    emit("phase", name="merge", status="done", time_s=0,
+                         detail="no changes needed")
+                    subprocess.run(["git", "checkout", default_branch],
+                                   cwd=project_dir, capture_output=True)
+                    cleanup_branch(project_dir, key, default_branch)
+                    return _result(True, "passed", qa_report=qa_report_nc,
+                                   diff_summary="No changes needed — QA verified existing code")
+
+                # QA found gaps — retry with QA findings
+                failed_musts = [
+                    item for item in verdict_nc.get("must_items", [])
+                    if item.get("status") == "fail"
+                ]
+                for item in failed_musts:
+                    criterion = item.get("criterion", "")[:80]
+                    evidence = item.get("evidence", "")[:80]
+                    emit("qa_finding", text=f"[must] ✗ {criterion}")
+                    if evidence:
+                        emit("qa_finding", text=f"       evidence: {evidence}")
+
+                emit("phase", name="qa", status="fail", time_s=qa_elapsed_nc,
+                     error="existing code doesn't satisfy spec")
+                last_error = f"No code changes produced. QA found gaps:\n{qa_report_nc}"
+                last_error_source = "qa"
+                continue
+
+            # Coding succeeded — agent produced changes
+            emit("phase", name="coding", status="done", time_s=coding_elapsed,
+                 cost=attempt_cost, attempt=attempt_num)
 
             # Build candidate commit
             candidate_sha = build_candidate_commit(
-                project_dir, base_sha, None, pre_existing_untracked,
+                project_dir, base_sha, pre_existing_untracked,
             )
 
             # Re-detect test command
@@ -2574,7 +1773,26 @@ async def run_task_with_qa(
                 if detected:
                     test_command = detected
 
-            # Run verification
+            # PRE-VERIFY: quick sanity check in the working directory.
+            # Catches missing files, broken imports, etc. before paying
+            # the cost of a full verify worktree cycle.
+            pre_check = None
+            if test_command:
+                from otto.verify import run_tier1
+                pre_check = run_tier1(project_dir, test_command, timeout)
+                if not pre_check.passed and not pre_check.skipped:
+                    emit("phase", name="coding", status="fail", time_s=coding_elapsed,
+                         error="tests fail in working dir", cost=attempt_cost)
+                    last_error = pre_check.output or "tests failed locally"
+                    last_error_source = "verify"
+                    # Reset for retry
+                    subprocess.run(
+                        ["git", "reset", "--mixed", base_sha],
+                        cwd=project_dir, capture_output=True,
+                    )
+                    continue
+
+            # VERIFY — clean worktree, deterministic
             emit("phase", name="test", status="running")
             verify_start = time.monotonic()
             verify_result = run_verification(
@@ -2596,161 +1814,241 @@ async def run_task_with_qa(
             except OSError:
                 pass
 
-            # Extract test summary from verify output for display
             verify_detail = ""
             for tier in verify_result.tiers:
                 if tier.output:
                     for line in reversed(tier.output.splitlines()):
                         ls = line.strip()
-                        # Match common test result patterns
                         if any(kw in ls.lower() for kw in
                                ["passed", "failed", "error", "tests:", "test suites:"]):
                             if any(c.isdigit() for c in ls):
                                 verify_detail = ls[:70]
                                 break
 
+            if not verify_result.passed:
+                # If pre-verify passed locally but worktree failed, this is
+                # a worktree-specific issue (module mapping, missing deps).
+                # Trust the local test result and proceed to QA.
+                if test_command and pre_check and pre_check.passed:
+                    _log_warn(
+                        f"Verify worktree failed but tests pass locally — "
+                        f"worktree issue, proceeding"
+                    )
+                    emit("phase", name="test", status="done", time_s=verify_elapsed,
+                         detail=f"{verify_detail} (worktree issue bypassed)")
+                    # Fall through to the verify-passed path below
+                else:
+                    emit("phase", name="test", status="fail", time_s=verify_elapsed,
+                         error=(verify_result.failure_output or "")[:80], detail=verify_detail)
+                    subprocess.run(
+                        ["git", "reset", "--mixed", base_sha],
+                        cwd=project_dir, capture_output=True,
+                    )
+                    last_error = verify_result.failure_output
+                    last_error_source = "verify"
+                    continue
+
             if verify_result.passed:
                 emit("phase", name="test", status="done", time_s=verify_elapsed,
                      detail=verify_detail)
 
-                # Squash commits into a single commit
-                try:
-                    subprocess.run(
-                        ["git", "reset", "--mixed", base_sha],
-                        cwd=project_dir, capture_output=True, check=True,
-                    )
-                    subprocess.run(
-                        ["git", "add", "-u"],
-                        cwd=project_dir, capture_output=True, check=True,
-                    )
-                    untracked_final = subprocess.run(
-                        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
-                        cwd=project_dir, capture_output=True, text=True,
-                    )
-                    skip = pre_existing_untracked or set()
-                    for f in untracked_final.stdout.split("\0"):
-                        if f and f not in skip:
-                            subprocess.run(
-                                ["git", "add", "--", f],
-                                cwd=project_dir, capture_output=True,
-                            )
+            # ANCHOR verified candidate as durable git ref
+            ref_name = _anchor_candidate_ref(project_dir, key, attempt_num, candidate_sha)
+            emit("phase", name="candidate", status="done", detail=ref_name)
 
-                    commit_msg = f"otto: {prompt[:60]} (#{task_id})"
-                    subprocess.run(
-                        ["git", "commit", "-m", commit_msg],
-                        cwd=project_dir, capture_output=True, text=True, check=True,
-                    )
-                except (subprocess.CalledProcessError, Exception) as e:
-                    stderr = getattr(e, "stderr", str(e))
-                    _cleanup_task_failure(
-                        project_dir, key, default_branch, tasks_file,
-                        pre_existing_untracked=pre_existing_untracked,
-                        error=f"squash commit failed: {stderr}",
-                        error_code="internal_error",
-                        cost_usd=total_cost,
-                        duration_s=time.monotonic() - task_start,
-                    )
-                    return _result(False, "failed", error=f"squash commit failed: {stderr}")
-
-                # Build diff — full diff for QA, stat for display/telemetry
-                diff_stat = subprocess.run(
-                    ["git", "diff", "--stat", base_sha, "HEAD"],
+            # Squash commits into a single commit
+            try:
+                subprocess.run(
+                    ["git", "reset", "--mixed", base_sha],
+                    cwd=project_dir, capture_output=True, check=True,
+                )
+                subprocess.run(
+                    ["git", "add", "-u"],
+                    cwd=project_dir, capture_output=True, check=True,
+                )
+                untracked_final = subprocess.run(
+                    ["git", "ls-files", "--others", "--exclude-standard", "-z"],
                     cwd=project_dir, capture_output=True, text=True,
                 )
-                diff_summary = diff_stat.stdout.strip() if diff_stat.returncode == 0 else ""
-                full_diff = subprocess.run(
-                    ["git", "diff", base_sha, "HEAD"],
-                    cwd=project_dir, capture_output=True, text=True,
-                )
-                diff_for_qa = full_diff.stdout.strip() if full_diff.returncode == 0 else diff_summary
+                skip = pre_existing_untracked or set()
+                for f in untracked_final.stdout.split("\0"):
+                    if f and f not in skip:
+                        subprocess.run(
+                            ["git", "add", "--", f],
+                            cwd=project_dir, capture_output=True,
+                        )
 
-                # Write verify.log for read_verify_output
+                commit_msg = f"otto: {prompt[:60]} (#{task_id})"
+                subprocess.run(
+                    ["git", "commit", "-m", commit_msg],
+                    cwd=project_dir, capture_output=True, text=True, check=True,
+                )
+            except (subprocess.CalledProcessError, Exception) as e:
+                stderr = getattr(e, "stderr", str(e))
+                _cleanup_task_failure(
+                    project_dir, key, default_branch, tasks_file,
+                    pre_existing_untracked=pre_existing_untracked,
+                    error=f"squash commit failed: {stderr}",
+                    error_code="internal_error",
+                    cost_usd=total_cost,
+                    duration_s=time.monotonic() - task_start,
+                )
+                return _result(False, "failed", error=f"squash commit failed: {stderr}")
+
+            # Build diff info for QA
+            diff_info = _get_diff_info(project_dir, base_sha)
+            diff_summary = subprocess.run(
+                ["git", "diff", "--stat", base_sha, "HEAD"],
+                cwd=project_dir, capture_output=True, text=True,
+            ).stdout.strip()
+
+            # Write verify.log
+            try:
+                (log_dir / "verify.log").write_text("PASSED")
+            except OSError:
+                pass
+
+            # Await specs before QA (if still generating)
+            if spec_task and not spec:
+                emit("phase", name="spec_gen", status="running",
+                     detail="awaiting specs before QA...")
+                await _await_spec_task()
+
+            # QA — risk-based tiering
+            qa_report = ""
+            qa_spec = spec
+            qa_warning = ""
+            if not qa_spec:
+                fallback_detail = spec_generation_error or "structured spec unavailable"
+                qa_warning = (
+                    "Structured spec generation failed; running QA against the original prompt only "
+                    f"({fallback_detail})."
+                )
+                qa_spec = [{
+                    "text": "Implementation fulfills the original task prompt and avoids regressions.",
+                    "binding": "must",
+                }]
+
+            qa_tier = determine_qa_tier(task, qa_spec, attempt, diff_info)
+            if qa_warning:
+                qa_tier = max(qa_tier, 2)
+
+            if qa_tier >= 1:
+                qa_detail = f"tier {qa_tier}"
+                if qa_warning:
+                    qa_detail += " — prompt-only fallback"
+                emit("phase", name="qa", status="running", detail=qa_detail)
+                qa_start = time.monotonic()
+
+                from otto.tasks import spec_binding as _sb
+                focus_items = [item for item in qa_spec
+                               if _sb(item) == "must"]
+
+                qa_result = await run_qa_agent_v45(
+                    task, qa_spec, config, project_dir,
+                    original_prompt=prompt,
+                    diff=diff_info["full_diff"],
+                    tier=qa_tier,
+                    focus_items=focus_items,
+                    on_progress=on_progress,
+                )
+                qa_elapsed = round(time.monotonic() - qa_start, 1)
+                phase_timings["qa"] = phase_timings.get("qa", 0) + qa_elapsed
+                total_cost += qa_result.get("cost_usd", 0.0)
+                qa_report = qa_result.get("raw_report", "")
+                if qa_warning:
+                    qa_report = f"[warning] {qa_warning}\n\n{qa_report}".strip()
+                verdict = qa_result.get("verdict", {})
+                for item in verdict.get("must_items", []):
+                    passed = item.get("status") == "pass"
+                    evidence = item.get("evidence", "")[:80] if not passed else ""
+                    emit(
+                        "qa_item_result",
+                        text=f"{'✓' if passed else '✗'} [must] {item.get('criterion', '')[:70]}",
+                        passed=passed,
+                        evidence=evidence,
+                    )
+                for item in verdict.get("should_notes", []):
+                    emit(
+                        "qa_item_result",
+                        text=(
+                            f"  [should] {item.get('criterion', '')[:70]} — "
+                            f"{item.get('observation', '')[:50]}"
+                        ),
+                        passed=True,
+                    )
+
+                # Persist QA report
                 try:
-                    (log_dir / "verify.log").write_text("PASSED")
+                    (log_dir / "qa-report.md").write_text(qa_report or "No QA output")
+                    if verdict:
+                        (log_dir / "qa-verdict.json").write_text(
+                            json.dumps(verdict, indent=2)
+                        )
                 except OSError:
                     pass
 
-                # Step 4: QA agent (if spec exists)
-                qa_report = ""
-                if spec:
-                    emit("phase", name="qa", status="running")
-                    qa_start = time.monotonic()
-                    qa_result = await run_qa_agent(task, config, project_dir, diff_for_qa,
-                                                      on_progress=on_progress)
-                    qa_elapsed = round(time.monotonic() - qa_start, 1)
-                    phase_timings["qa"] = phase_timings.get("qa", 0) + qa_elapsed
-                    qa_report = qa_result.get("report", "")
-
-                    # Persist QA report for otto show/logs
-                    try:
-                        (log_dir / "qa-report.md").write_text(qa_report or "No QA output")
-                    except OSError:
-                        pass
-
-                    if not qa_result["passed"]:
-                        emit("phase", name="qa", status="fail", time_s=qa_elapsed,
-                             error="QA verdict: FAIL")
-                        # QA failed — retry coding with QA findings
-                        # Reset to base for retry
-                        subprocess.run(
-                            ["git", "reset", "--mixed", base_sha],
-                            cwd=project_dir, capture_output=True,
+                if not qa_result["must_passed"]:
+                    failed_musts = [
+                        item for item in verdict.get("must_items", [])
+                        if item.get("status") == "fail"
+                    ]
+                    if failed_musts:
+                        fail_summary = (
+                            f"{len(failed_musts)}/{len(verdict.get('must_items', []))} must failed: "
+                            + failed_musts[0].get("criterion", "")[:50]
                         )
-                        last_error = (
-                            f"QA TESTING FAILED. Fix these issues:\n\n{qa_report}\n\n"
-                            f"Original task: {prompt}"
-                        )
-                        # Continue the retry loop (counts against max_retries)
-                        continue
                     else:
-                        emit("phase", name="qa", status="done", time_s=qa_elapsed)
-
-                # Step 5: Merge to default branch
-                emit("phase", name="merge", status="running")
-                merge_start = time.monotonic()
-                if merge_to_default(project_dir, key, default_branch):
-                    merge_elapsed = round(time.monotonic() - merge_start, 1)
-                    phase_timings["merge"] = merge_elapsed
-                    emit("phase", name="merge", status="done", time_s=merge_elapsed)
-                    # Record merge commit SHA + task fingerprint for already-merged detection on retry
-                    try:
-                        _merged_sha = subprocess.run(
-                            ["git", "rev-parse", "HEAD"],
-                            cwd=project_dir, capture_output=True, text=True,
-                        ).stdout.strip()
-                        if tasks_file and _merged_sha:
-                            update_task(tasks_file, key,
-                                        merged_sha=_merged_sha,
-                                        task_fingerprint=_task_fp)
-                    except Exception:
-                        pass
-                    testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / key
-                    if testgen_dir.exists():
-                        shutil.rmtree(testgen_dir, ignore_errors=True)
-                    return _result(True, "passed", diff_summary=diff_summary, qa_report=qa_report)
-                else:
-                    merge_elapsed = round(time.monotonic() - merge_start, 1)
-                    emit("phase", name="merge", status="fail", time_s=merge_elapsed,
-                         error="branch diverged")
-                    return _result(
-                        False, "failed",
-                        error=f"branch diverged — otto/{key} preserved, manual rebase needed",
-                        diff_summary=diff_summary,
-                        qa_report=qa_report,
+                        # Legacy parse — extract first useful line from QA report
+                        first_line = ""
+                        for rline in qa_report.splitlines():
+                            rs = rline.strip()
+                            if rs and len(rs) > 10 and not rs.startswith("["):
+                                first_line = rs[:60]
+                                break
+                        fail_summary = first_line if first_line else "QA did not pass"
+                    emit("phase", name="qa", status="fail", time_s=qa_elapsed,
+                         error=f"QA: {fail_summary}"[:80])
+                    # Reset for retry
+                    subprocess.run(
+                        ["git", "reset", "--mixed", base_sha],
+                        cwd=project_dir, capture_output=True,
                     )
+                    last_error = qa_report
+                    last_error_source = "qa"
+                    continue
+                else:
+                    emit("phase", name="qa", status="done", time_s=qa_elapsed)
+            else:
+                # Tier 0 — skip QA
+                emit("phase", name="qa", status="done", time_s=0,
+                     detail="tier 0 — skipped")
 
-            # Verification failed — reset for retry
-            verify_err = verify_result.failure_output or "verification failed"
-            emit("phase", name="test", status="fail", time_s=verify_elapsed,
-                 error=verify_err[:80], detail=verify_detail)
-            subprocess.run(
-                ["git", "reset", "--mixed", base_sha],
-                cwd=project_dir, capture_output=True,
-            )
-            last_error = verify_result.failure_output
+            # SUCCESS — merge to default branch
+            emit("phase", name="merge", status="running")
+            merge_start = time.monotonic()
+            if merge_to_default(project_dir, key, default_branch):
+                merge_elapsed = round(time.monotonic() - merge_start, 1)
+                phase_timings["merge"] = merge_elapsed
+                emit("phase", name="merge", status="done", time_s=merge_elapsed)
+                testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / key
+                if testgen_dir.exists():
+                    shutil.rmtree(testgen_dir, ignore_errors=True)
+                return _result(True, "passed", diff_summary=diff_summary, qa_report=qa_report)
+            else:
+                merge_elapsed = round(time.monotonic() - merge_start, 1)
+                emit("phase", name="merge", status="fail", time_s=merge_elapsed,
+                     error="branch diverged")
+                return _result(
+                    False, "failed",
+                    error=f"branch diverged — otto/{key} preserved",
+                    diff_summary=diff_summary, qa_report=qa_report,
+                    error_code="merge_diverged",
+                )
 
-        # All retries exhausted — include the last actual error so the pilot
-        # knows what went wrong (not just "max retries exhausted")
+        # All retries exhausted — find best verified candidate
+        await _cancel_spec_task()
+        best_ref = _find_best_candidate_ref(project_dir, key)
         last_err_detail = f"\nLast error:\n{last_error}" if last_error else ""
         _cleanup_task_failure(
             project_dir, key, default_branch, tasks_file,
@@ -2759,14 +2057,19 @@ async def run_task_with_qa(
             cost_usd=total_cost,
             duration_s=time.monotonic() - task_start,
         )
-        return _result(False, "failed",
-                       error=f"max retries exhausted ({total_attempts} attempts).{last_err_detail}")
+        return _result(
+            False, "failed",
+            error=f"max retries exhausted ({total_attempts} attempts).{last_err_detail}",
+            review_ref=best_ref,
+        )
 
     except Exception as e:
         duration = time.monotonic() - task_start
+        await _cancel_spec_task()
         try:
             _cleanup_task_failure(
                 project_dir, key, default_branch, tasks_file,
+                pre_existing_untracked=pre_existing_untracked,
                 error=f"unexpected error: {e}", error_code="internal_error",
                 cost_usd=total_cost,
                 duration_s=duration,
@@ -2774,6 +2077,24 @@ async def run_task_with_qa(
         except Exception:
             pass
         return _result(False, "failed", error=f"unexpected error: {e}")
+
+
+async def run_task_with_qa(
+    task: dict[str, Any],
+    config: dict[str, Any],
+    project_dir: Path,
+    tasks_file: Path | None,
+    hint: str | None = None,
+    on_progress: Any | None = None,
+) -> dict[str, Any]:
+    """Backward-compatible wrapper for the v3 pilot."""
+    if hint:
+        task = dict(task)
+        task["feedback"] = hint
+    return await run_task_v45(
+        task, config, project_dir, tasks_file,
+        on_progress=on_progress,
+    )
 
 
 def _print_summary(
@@ -2809,7 +2130,7 @@ def _print_summary(
         qa_summary = ""
         if task_progress and task_key in task_progress:
             events = task_progress[task_key]
-            # Prefer phase_timings from the final run_task_with_qa result
+            # Prefer phase_timings from the final task result event
             phase_times: dict[str, float] = {}
             result_evt = None
             for evt in events:

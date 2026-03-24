@@ -409,8 +409,8 @@ class TestContextE2E:
     def test_learnings_injected_into_hint(self):
         """Context learnings should be available for coding_loop to inject."""
         ctx = PipelineContext()
-        ctx.learnings.append("Use pytest -x for fast fail")
-        ctx.learnings.append("API requires auth header")
+        ctx.add_learning("Use pytest -x for fast fail", source="task-0")
+        ctx.add_learning("API requires auth header", source="task-1")
         ctx.add_research("task1", "Found: use requests library")
 
         assert len(ctx.learnings) == 2

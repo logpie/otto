@@ -53,14 +53,19 @@ _LIST_PREFIX_RE = re.compile(r"^\s*(?:\d+[.)]\s*|[-*]\s+)")
 def _parse_spec_output(text: str) -> list:
     """Parse LLM output into a list of spec items.
 
-    Each item is either a plain string (backward compat) or a dict with
-    {text, verifiable}.
+    Each item is a dict with {text, binding, verifiable}.
 
     Format per line (after stripping numbering):
-      [verifiable] description text
-      [visual] description text
-      plain description text  (treated as verifiable)
+      [must] concrete requirement            → binding="must", verifiable=True
+      [should] nice-to-have suggestion       → binding="should", verifiable=False
+      plain text (no tag)                    → binding="must", verifiable=True
+
+    Backward compat:
+      [verifiable] ...                       → binding="must", verifiable=True
+      [visual] ...                           → binding="should", verifiable=False
     """
+    _MUST_RE = re.compile(r"^\[must\]\s*", re.IGNORECASE)
+    _SHOULD_RE = re.compile(r"^\[should\]\s*", re.IGNORECASE)
     _VERIFIABLE_RE = re.compile(r"^\[verifiable\]\s*", re.IGNORECASE)
     _VISUAL_RE = re.compile(r"^\[visual\]\s*", re.IGNORECASE)
 
@@ -70,19 +75,28 @@ def _parse_spec_output(text: str) -> list:
         if not stripped:
             continue
 
-        # Check for [visual] prefix
+        # Check for [should] or [visual] prefix → binding="should"
+        if _SHOULD_RE.match(stripped):
+            text_part = _SHOULD_RE.sub("", stripped).strip()
+            if text_part:
+                items.append({"text": text_part, "binding": "should", "verifiable": False})
+            continue
+
         if _VISUAL_RE.match(stripped):
             text_part = _VISUAL_RE.sub("", stripped).strip()
             if text_part:
-                items.append({"text": text_part, "verifiable": False})
+                items.append({"text": text_part, "binding": "should", "verifiable": False})
             continue
 
-        # Check for [verifiable] prefix
-        if _VERIFIABLE_RE.match(stripped):
+        # Check for [must] or [verifiable] prefix → binding="must"
+        if _MUST_RE.match(stripped):
+            stripped = _MUST_RE.sub("", stripped).strip()
+        elif _VERIFIABLE_RE.match(stripped):
             stripped = _VERIFIABLE_RE.sub("", stripped).strip()
 
+        # Default (plain text or after stripping [must]/[verifiable]) → must
         if stripped:
-            items.append({"text": stripped, "verifiable": True})
+            items.append({"text": stripped, "binding": "must", "verifiable": True})
 
     return items
 
@@ -93,11 +107,16 @@ def generate_spec(prompt: str, project_dir: Path) -> list:
     Returns a list of spec items (dicts with text/verifiable),
     or empty list on failure.
     """
-    spec, _cost = asyncio.run(_run_spec_agent(prompt, project_dir))
+    spec, _cost, _error = asyncio.run(_run_spec_agent(prompt, project_dir))
     return spec
 
 
-async def _run_spec_agent(prompt: str, project_dir: Path) -> list:
+async def async_generate_spec(prompt: str, project_dir: Path) -> tuple[list, float, str | None]:
+    """Async version of generate_spec. Returns (spec_items, cost, error)."""
+    return await _run_spec_agent(prompt, project_dir)
+
+
+async def _run_spec_agent(prompt: str, project_dir: Path) -> tuple[list, float, str | None]:
     """Run the spec generation agent.
 
     Uses a structured system prompt for constraint faithfulness,
@@ -107,45 +126,55 @@ async def _run_spec_agent(prompt: str, project_dir: Path) -> list:
         spec_file = Path(temp_file.name)
 
     system_prompt = """\
-You generate acceptance specs. Your output is the contract a coding agent must satisfy.
+You produce acceptance criteria for a coding task. Your output sets
+the minimum bar — the coding agent may EXCEED it but must not
+violate constraints.
+
+Two binding levels:
+  [must]   — gating. Task fails QA if not met. Agent may exceed.
+             Use for: functional requirements, measurable constraints,
+             error handling, API contracts, security, performance limits.
+  [should] — non-gating. QA notes but does not block merge.
+             Use for: UX preferences, style, quality suggestions,
+             "nice to have" behaviors.
 
 Rules:
 - Describe OBSERVABLE BEHAVIOR — what the user sees and experiences.
-- You MAY reference existing user-facing surfaces to anchor placement or context
-  (for example: "appears in the Weather Details panel", "shown on the checkout page").
-- Do NOT prescribe implementation: no file names, no internal component/module/class/function names,
-  no framework patterns, no "use TypeScript interfaces", no "add data-testid",
-  no "create a lib module in src/lib/". The coding agent decides how to build it.
-- Do NOT include testing/build requirements ("tests pass", "TypeScript compiles", "no regressions").
-  Those are enforced by the verification system, not by spec items.
-- Preserve every user constraint exactly. Do not weaken thresholds or add conditions.
-- Cover the full behavior depth that matters for the task: happy path, error handling,
-  negative cases ("does not", "cannot", "is not shown"), edge cases, and retained behavior
-  when existing functionality must keep working.
-- Keep specs tight. Most tasks land around 5-12 items; use fewer for small fixes,
-  and more when the behavior genuinely has multiple distinct states.
-  Each item should be a distinct user-visible behavior, not a sub-detail of another item.
-- If the task references an external site, app, or example ("like car.com"), inspect it.
-  Convert what you observe into concrete criteria about layout, hierarchy, copy, interactions,
-  spacing, or styling. Do not write vague "similar to X" criteria without stating what that means.
+- Do not prescribe implementation (no file names, no code patterns).
+- Do NOT include testing/build requirements ("tests pass", "test suite exists",
+  "tests cover X"). Those are enforced by the verification system, not by specs.
+- Each item must be a distinct user-visible behavior, not a sub-detail or
+  restatement of another item. Do not split one requirement into positive
+  and negative forms (e.g., "accepts valid input" and "rejects invalid input"
+  are one item, not two).
+- Preserve every user constraint exactly. Do not weaken thresholds.
+- Produce as many or as few criteria as the task warrants.
+  Most tasks need 5-15 items. If you have more than 15, you are probably
+  duplicating or splitting items unnecessarily.
+- Explore the codebase and research external APIs/libraries/services
+  as needed to write accurate, grounded criteria.
+- When the prompt is ambiguous, prefer [should] over [must].
+  Don't promote ambiguous preferences to hard constraints.
+  Don't invent product decisions.
 
 Output format — one item per line:
-  [verifiable] concrete, testable behavioral criterion
-  [visual] subjective criterion (style, UX, aesthetics)
-
-Write only criteria lines to the file — no headings, notes, or prose."""
+  [must] rate-limited requests return HTTP 429
+  [must] response completes within 200ms p95
+  [should] prefer inline explanation of each contributing factor
+  [should] credit source model if attribution is available"""
 
     agent_prompt = f"""TASK: {prompt}
 
 Instructions:
 - Explore the codebase as needed to understand existing user-facing surfaces and current behavior.
 - If the task references an external site/app/example, inspect it before writing the spec
-  and emit concrete visual/behavioral criteria derived from what you observed.
+  and emit concrete behavioral criteria derived from what you observed.
 - Include the necessary happy path, error cases, negative cases, edge cases, and retained behavior.
 - Reference user-visible placement when useful, but do not mention internal implementation names or file structure.
+- Tag each criterion as [must] or [should] based on binding level.
 
 Write acceptance criteria to: {spec_file}
-Write only criteria lines to the file — no headings, notes, or prose."""
+Write only [must]/[should] criteria lines to the file — no headings, notes, or prose."""
 
     # Persistent log for debugging
     log_dir = project_dir / "otto_logs"
@@ -157,7 +186,8 @@ Write only criteria lines to the file — no headings, notes, or prose."""
         agent_opts = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
             cwd=str(project_dir),
-            system_prompt=system_prompt,
+            system_prompt={"type": "preset", "preset": "claude_code",
+                           "append": system_prompt},
             setting_sources=["user", "project"],
             env=dict(os.environ),
         )
@@ -199,13 +229,14 @@ Write only criteria lines to the file — no headings, notes, or prose."""
             raise RuntimeError("Spec agent produced no output — agent may have failed to start")
 
     except Exception as e:
-        print(f"  spec agent error: {e}", flush=True)
-        log_lines.append(f"ERROR: {e}")
+        error_msg = str(e)
+        print(f"  spec agent error: {error_msg}", flush=True)
+        log_lines.append(f"ERROR: {error_msg}")
         _write_log(log_dir / "spec-agent.log", log_lines)
         # Clean up temp file on error path
         if spec_file.exists():
             spec_file.unlink(missing_ok=True)
-        return [], spec_cost
+        return [], spec_cost, error_msg
 
     _write_log(log_dir / "spec-agent.log", log_lines)
 
@@ -213,11 +244,15 @@ Write only criteria lines to the file — no headings, notes, or prose."""
     if spec_file.exists():
         text = spec_file.read_text()
         spec_file.unlink()
-        return _parse_spec_output(text), spec_cost
+        return _parse_spec_output(text), spec_cost, None
 
     # Clean up temp file if it doesn't exist (shouldn't happen, but be safe)
     spec_file.unlink(missing_ok=True)
-    return [], spec_cost
+    error_msg = "Spec agent did not write the output file"
+    print(f"  spec agent error: {error_msg}", flush=True)
+    log_lines.append(f"ERROR: {error_msg}")
+    _write_log(log_dir / "spec-agent.log", log_lines)
+    return [], spec_cost, error_msg
 
 
 def parse_markdown_tasks(md_file: Path, project_dir: Path) -> list[dict]:
@@ -275,14 +310,22 @@ Example: [{{"prompt": "Add search", "spec": ["search works", "case-insensitive"]
             cwd=str(project_dir),
         )
 
+        result_msg = None
         async for message in query(prompt=agent_prompt, options=agent_opts):
-            if AssistantMessage and isinstance(message, AssistantMessage):
+            if isinstance(message, ResultMessage):
+                result_msg = message
+            elif hasattr(message, "session_id") and hasattr(message, "is_error"):
+                result_msg = message
+            elif AssistantMessage and isinstance(message, AssistantMessage):
                 for block in message.content:
                     if TextBlock and isinstance(block, TextBlock) and block.text:
                         log_lines.append(block.text)
                     elif ToolUseBlock and isinstance(block, ToolUseBlock):
                         print_agent_tool(block, quiet=True)
                         log_lines.append(f"\u25cf {block.name}  {_tool_use_summary(block)}")
+        if result_msg and getattr(result_msg, "is_error", False):
+            error_detail = getattr(result_msg, "result", None) or "unknown error"
+            raise ValueError(f"Failed to parse markdown tasks: agent error: {error_detail}")
     except Exception as e:
         log_lines.append(f"ERROR: {e}")
         _write_log(log_dir / "markdown-agent.log", log_lines)

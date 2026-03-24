@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from otto.context import PipelineContext, TaskResult
+from otto.context import Learning, PipelineContext, TaskResult
 
 
 class TestTaskResult:
@@ -17,6 +17,7 @@ class TestTaskResult:
         assert r.qa_report == ""
         assert r.diff_summary == ""
         assert r.duration_s == 0.0
+        assert r.review_ref is None
 
     def test_full_result(self):
         r = TaskResult(
@@ -87,9 +88,21 @@ class TestPipelineContext:
 
     def test_learnings(self):
         ctx = PipelineContext()
-        ctx.learnings.append("API requires auth header")
-        ctx.learnings.append("Tests need CI=true")
+        ctx.add_learning("API requires auth header", source="task-1")
+        ctx.add_learning("Tests need CI=true", source="task-2")
         assert len(ctx.learnings) == 2
+        assert ctx.learnings[0].text == "API requires auth header"
+        assert ctx.learnings[0].source == "task-1"
+        assert ctx.learnings[0].kind == "observed"
+
+    def test_observed_learnings(self):
+        ctx = PipelineContext()
+        ctx.add_learning("project uses ESM", source="task-1", kind="observed")
+        ctx.add_learning("might need webpack", source="task-1", kind="inferred")
+        ctx.add_learning("API requires auth", source="task-2", kind="observed")
+        assert len(ctx.learnings) == 3
+        assert len(ctx.observed_learnings) == 2
+        assert all(l.kind == "observed" for l in ctx.observed_learnings)
 
     def test_session_ids(self):
         ctx = PipelineContext()

@@ -78,3 +78,27 @@
 - [IMPORTANT] AllDone telemetry doesn't reflect missing tasks — **fixed by Codex**: added `total_missing_or_interrupted` field
 - [NOTE] live-state.json racy under parallel — resolved by sequential execution
 - APPROVED. No new issues.
+
+---
+
+## Implementation Gate — 2026-03-23 — Otto v4.5 Pipeline Redesign
+
+### Round 1 — Codex
+- [CRITICAL] Merge-diverged error_code not persisted — fixed by Codex: `_result()` now accepts and persists `error_code`
+- [CRITICAL] Spec gen failure silently skips QA — fixed by Codex: fallback to prompt-only QA with synthetic spec
+- [CRITICAL] Spec gen races coding in same checkout — acknowledged: design tradeoff accepted
+- [IMPORTANT] Early return paths bypass cleanup — fixed by Codex: all post-prepare failures route through cleanup
+- [IMPORTANT] review_ref not propagated to TaskResult — fixed by Codex
+- [IMPORTANT] Candidate ref anchoring ignores failures + lexicographic sort — fixed by Codex
+- [NOTE] Tier 0 dead code — deferred: requires spec-to-test mapping
+- [NOTE] Candidate ref 0-based — fixed by Codex: 1-based attempt_num
+
+### Round 2 — Codex
+- [IMPORTANT] Prompt-only fallback QA under-tiers visual tasks — fixed by Codex: forced Tier 2
+- [IMPORTANT] review_ref not persisted/displayed — fixed by Codex: persisted + `otto show`
+- [NOTE] Spec gen before remaining check — fixed by Codex
+- [NOTE] Spec gen failure drops cost — fixed by Codex
+
+### Round 3 — Codex
+- [IMPORTANT] Stale review_ref not cleared on rerun — fixed by Codex: cleared at task start
+- APPROVED. No new issues. 406 tests pass.

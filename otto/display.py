@@ -36,9 +36,14 @@ def _truncate_at_word(text: str, max_len: int) -> str:
     return text[:cut] + "..."
 
 
+_PROJECT_DIR_RE = re.compile(r"/(?:private/)?tmp/[^\s/]+/")
+
 def _strip_temp_prefix(detail: str) -> str:
-    """Strip otto temp dir prefixes from a path/command for cleaner display."""
-    return _TEMP_DIR_PATTERNS.sub("", detail)
+    """Strip otto temp dir prefixes and project dir paths for cleaner display."""
+    detail = _TEMP_DIR_PATTERNS.sub("", detail)
+    # Strip /private/tmp/<project>/ and /tmp/<project>/ from commands
+    detail = _PROJECT_DIR_RE.sub("", detail)
+    return detail
 
 
 def _extract_tool_detail(name: str, inputs: dict) -> str:
@@ -96,7 +101,7 @@ def print_agent_tool(block, quiet: bool = False) -> str:
 
 _INTERNAL_PATTERNS = {"otto_arch/", "task-notes/"}
 
-PHASE_ORDER = ["prepare", "coding", "test", "qa", "merge"]
+PHASE_ORDER = ["prepare", "spec_gen", "coding", "test", "qa", "merge"]
 
 
 # ---------------------------------------------------------------------------
@@ -118,17 +123,22 @@ class TaskDisplay:
 
         # State (protected by _lock)
         self._current_phase: str | None = None
+        self._active_phases: set[str] = set()  # v4.5: track parallel phases
+        self._phase_details: dict[str, str] = {}  # v4.5: detail per phase
         self._current_cost: float = 0.0
         self._qa_spec_count: int = 0
         self._qa_pass_count: int = 0
         self._qa_summary_authoritative: bool = False
         self._coding_files: list[str] = []
+        self._coding_start_detail: str = ""
         self._lines_added: int = 0
         self._lines_removed: int = 0
         self._last_tool_key: str = ""
         self._last_tool_type: str = ""
         self._last_qa_label: str = ""
         self._read_count: int = 0
+        self._spec_gen_announced: bool = False
+        self._spec_items_buffer: list[str] = []
 
     def start(self) -> None:
         self._start_time = time.monotonic()
@@ -158,9 +168,12 @@ class TaskDisplay:
 
         with self._lock:
             if status == "running":
+                self._active_phases.add(name)
                 self._current_phase = name
                 self._phase_start = time.monotonic()
                 self._current_cost = 0.0
+                if detail:
+                    self._phase_details[name] = detail
                 self._last_tool_key = ""
                 self._last_tool_type = ""
                 self._last_qa_label = ""
@@ -170,31 +183,79 @@ class TaskDisplay:
                     self._qa_pass_count = 0
                     self._qa_summary_authoritative = False
                 if name == "coding":
+                    self._coding_start_detail = f"({detail})" if detail else ""
                     self._coding_files.clear()
                     self._lines_added = 0
                     self._lines_removed = 0
 
             elif status == "done":
+                self._active_phases.discard(name)
                 self._print_phase_done(name, time_s, detail, cost)
+                if name == "coding":
+                    self._coding_start_detail = ""
                 if name == self._current_phase:
-                    self._current_phase = None
+                    # Fall back to another active phase for footer
+                    self._current_phase = next(iter(self._active_phases), None)
                 self._last_qa_label = ""
 
             elif status == "fail":
+                self._active_phases.discard(name)
                 self._print_phase_fail(name, time_s, error, cost)
+                if name == "coding":
+                    self._coding_start_detail = ""
                 if name == self._current_phase:
-                    self._current_phase = None
+                    self._current_phase = next(iter(self._active_phases), None)
                 self._last_qa_label = ""
 
             if cost:
                 self._current_cost = cost
 
-        # No separate phase header — the live footer shows the active phase
-        # with a spinner + elapsed time. When done, the completion line prints
-        # permanently. Retries get a note in the completion line.
-        if status == "running" and name not in ("prepare", "merge"):
-            # Blank line for visual separation before a new phase's tool calls
-            self._console.print()
+        # Print phase start headers for v4.5 observability
+        if status == "running":
+            timestamp = time.strftime("%H:%M:%S")
+            if name == "spec_gen":
+                # Only print spec_gen start once (not on "awaiting" re-emit)
+                if detail and "awaiting" in detail:
+                    self._console.print(
+                        f"  [dim]{timestamp}  ⧗ awaiting specs before QA...[/dim]"
+                    )
+                elif not self._spec_gen_announced:
+                    self._spec_gen_announced = True
+                    self._console.print(
+                        f"  [dim]{timestamp}  ● spec gen[/dim]  [dim](parallel with coding)[/dim]"
+                    )
+            elif name == "coding":
+                # Print a permanent coding start line (not just footer)
+                label = detail if detail else ""
+                parallel = "spec_gen" in self._active_phases
+                suffix = "  [dim]· spec gen[/dim]" if parallel else ""
+                self._console.print()
+                self._console.print(
+                    f"  [cyan]{timestamp}  ● coding[/cyan]  [dim]({label}){suffix}[/dim]"
+                )
+            elif name == "qa":
+                tier_labels = {
+                    "tier 0": "skip - all specs have tests",
+                    "tier 1": "targeted - checking spec gaps",
+                    "tier 2": "full - adversarial testing",
+                }
+                tier_label = detail if detail else ""
+                human_label = tier_labels.get(tier_label, tier_label)
+                if tier_label and " — " in tier_label and human_label == tier_label:
+                    prefix, suffix = tier_label.split(" — ", 1)
+                    human_prefix = tier_labels.get(prefix, prefix)
+                    human_label = f"{human_prefix} — {suffix}"
+                self._console.print()
+                if human_label:
+                    self._console.print(
+                        f"  [cyan]{timestamp}  ● qa[/cyan]  [dim]({human_label})[/dim]"
+                    )
+                else:
+                    self._console.print(f"  [cyan]{timestamp}  ● qa[/cyan]")
+            elif name == "test":
+                pass  # test phase shown inline via done/fail, no start header needed
+            elif name not in ("prepare", "merge", "spec_gen"):
+                self._console.print()
 
     def set_qa_summary(self, total: int, passed: int, failed: int = 0) -> None:
         """Set authoritative QA counts from the runner."""
@@ -205,6 +266,18 @@ class TaskDisplay:
             self._qa_spec_count = total
             self._qa_pass_count = passed
             self._qa_summary_authoritative = True
+
+    def add_attempt_boundary(self, attempt: int, reason: str = "") -> None:
+        """Print an attempt boundary for retries."""
+        if attempt <= 1 and not reason:
+            return
+        timestamp = time.strftime("%H:%M:%S")
+        if reason:
+            self._console.print(
+                f"\n  [bold]{timestamp}  ━━ Attempt {attempt}[/bold]  [dim]({rich_escape(reason)})[/dim]"
+            )
+        else:
+            self._console.print(f"\n  [bold]{timestamp}  ━━ Attempt {attempt}[/bold]")
 
     def add_tool(self, line: str = "", name: str = "", detail: str = "",
                  data: dict | None = None) -> None:
@@ -255,9 +328,34 @@ class TaskDisplay:
                 return
             self._last_tool_key = tool_key
 
+            # Collapse consecutive reads in coding phase (show first 3, then batch)
+            if self._current_phase == "coding" and name in ("Read", "Glob", "Grep"):
+                self._read_count += 1
+                if self._read_count > 3:
+                    return  # suppress — will flush on next Write/Edit/Bash
+            elif self._current_phase == "coding" and self._read_count > 3:
+                self._console.print(f"      [dim]... explored {self._read_count} files[/dim]")
+                self._read_count = 0
+
         if self._current_phase == "qa":
             label = self._qa_tool_label(name, detail)
+            if not label:
+                return  # suppressed (temp file ops, etc.)
             with self._lock:
+                # Collapse consecutive Read/Glob/Grep into a counter
+                if name in ("Read", "Glob", "Grep"):
+                    self._read_count += 1
+                    if self._read_count <= 2:
+                        # Show first 2 reads normally
+                        pass
+                    else:
+                        # Suppress further reads — will show count on next non-read
+                        return
+                elif self._read_count > 2:
+                    # Flush collapsed reads as a single line
+                    self._console.print(f"      [dim]... read {self._read_count} files[/dim]")
+                    self._read_count = 0
+
                 if label == self._last_qa_label:
                     return
                 self._last_qa_label = label
@@ -308,6 +406,14 @@ class TaskDisplay:
 
     def _qa_tool_label(self, name: str, detail: str) -> str:
         """Build a concise, informative QA activity label from tool call data."""
+        # Suppress temp file operations (verdict file writes, etc.)
+        if detail and ("otto_qa_" in detail or "/var/folders/" in detail
+                       or "/tmp/otto_" in detail):
+            if name == "Write":
+                return "Writing verdict"
+            if name == "Bash" and ("cat " in detail or "cat>" in detail):
+                return ""  # suppress cat to temp file
+            # Let Read through but clean up the path
         short_detail = _shorten_path(detail)[:60] if detail else ""
 
         if name in ("Read", "Glob", "Grep"):
@@ -467,6 +573,45 @@ class TaskDisplay:
             sub = clean.lstrip("- ").strip()
             self._console.print(f"        [dim]{rich_escape(sub[:70])}[/dim]")
 
+    def add_spec_item(self, text: str) -> None:
+        """Buffer spec items during a live run; print directly in tests/helpers."""
+        if not text:
+            return
+        with self._lock:
+            if self._live is None and not self._active_phases:
+                print_now = True
+            else:
+                self._spec_items_buffer.append(text)
+                print_now = False
+        if print_now:
+            self._console.print(f"      [dim]{rich_escape(text)}[/dim]")
+
+    def flush_spec_summary(self) -> None:
+        """Print a collapsed summary of buffered spec items."""
+        with self._lock:
+            items = self._spec_items_buffer
+            self._spec_items_buffer = []
+        if not items:
+            return
+        must_items = [t for t in items if "[must]" in t]
+        preview = must_items[:3] or items[:3]
+        for item in preview:
+            self._console.print(f"      [dim]{rich_escape(item[:80])}[/dim]")
+        remaining = len(items) - len(preview)
+        if remaining > 0:
+            self._console.print(f"      [dim]... +{remaining} more (otto show for full list)[/dim]")
+
+    def add_qa_item_result(self, text: str, passed: bool = True, evidence: str = "") -> None:
+        """Print a QA per-item result."""
+        if not text:
+            return
+        if passed:
+            self._console.print(f"      [green]{rich_escape(text)}[/green]")
+            return
+        self._console.print(f"      [red]{rich_escape(text)}[/red]")
+        if evidence:
+            self._console.print(f"        [dim]evidence: {rich_escape(evidence)}[/dim]")
+
     # -- Private --
 
     def _print_phase_done(self, name: str, time_s: float, detail: str, cost: float) -> None:
@@ -474,13 +619,17 @@ class TaskDisplay:
         if name in ("prepare", "merge") and time_s < 1 and not detail:
             return
 
+        timestamp = time.strftime("%H:%M:%S")
+        phase_label = name.replace("_", " ")
         parts = []
         if time_s >= 1:
             parts.append(f"{time_s:.0f}s")
         if cost:
             parts.append(f"${cost:.2f}")
 
-        if name == "coding":
+        if name == "prepare" and detail:
+            parts.append(detail)
+        elif name == "coding":
             if self._coding_files:
                 line_info = ""
                 if self._lines_added or self._lines_removed:
@@ -491,6 +640,10 @@ class TaskDisplay:
                         line_parts.append(f"[red]-{self._lines_removed}[/red]")
                     line_info = f"  {' '.join(line_parts)}"
                 parts.append(f"{len(self._coding_files)} files{line_info}")
+        elif name == "spec_gen":
+            # Show spec count + binding breakdown
+            if detail:
+                parts.append(detail)
         elif name == "test" and detail:
             m = re.search(r'(\d+) passed', detail)
             if m:
@@ -501,26 +654,33 @@ class TaskDisplay:
             if self._qa_spec_count:
                 t, p = self._qa_spec_count, self._qa_pass_count
                 parts.append(f"{t} specs passed" if p == t else f"{p}/{t} specs passed")
+            tier_detail = self._phase_details.get("qa", "")
+            if tier_detail:
+                parts.append(tier_detail)
+        elif name == "candidate":
+            return
 
         info = "  ".join(parts)
-        self._console.print(f"  [green]\u2713 {name}[/green]  [dim]{info}[/dim]")
+        self._console.print(f"  [green]{timestamp}  \u2713 {phase_label}[/green]  [dim]{info}[/dim]")
 
     def _print_phase_fail(self, name: str, time_s: float, error: str, cost: float) -> None:
+        timestamp = time.strftime("%H:%M:%S")
+        phase_label = name.replace("_", " ")
         parts = []
         if time_s:
             parts.append(f"{time_s:.0f}s")
         if cost:
             parts.append(f"${cost:.2f}")
         if error:
-            parts.append(error[:42])
+            parts.append(error[:80])
         info = "  ".join(parts)
-        self._console.print(f"  [red]\u2717[/red] [bold]{name}[/bold]  [dim]{info}[/dim]")
+        self._console.print(f"  [red]{timestamp}  \u2717[/red] [bold]{phase_label}[/bold]  [dim]{info}[/dim]")
 
     _SPINNER_FRAMES = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"
 
     def _render_footer(self) -> Text:
         with self._lock:
-            if not self._current_phase:
+            if not self._active_phases:
                 return Text("")
             elapsed = time.monotonic() - self._phase_start
             mins = int(elapsed // 60)
@@ -532,8 +692,31 @@ class TaskDisplay:
             spinner = self._SPINNER_FRAMES[frame_idx]
             line = Text()
             line.append(f"  {spinner} ", style="cyan")
-            line.append(f"{self._current_phase}", style="bold cyan")
+            # Show all active phases
+            phase_labels = []
+            seen_phases = set()
+            for p in PHASE_ORDER:
+                if p in self._active_phases:
+                    label = p.replace("_", " ")
+                    if p == "coding" and self._coding_start_detail:
+                        label = f"{label} {self._coding_start_detail}"
+                    phase_labels.append(label)
+                    seen_phases.add(p)
+            # Show non-ordered phases too
+            for p in self._active_phases:
+                if p not in seen_phases:
+                    label = p.replace("_", " ")
+                    if p == "coding" and self._coding_start_detail:
+                        label = f"{label} {self._coding_start_detail}"
+                    phase_labels.append(label)
+            line.append(" · ".join(phase_labels), style="bold cyan")
             line.append(f"  {time_str}{cost_str}", style="dim")
+            if "coding" in self._active_phases and self._coding_files:
+                file_count = len(self._coding_files)
+                line_info = ""
+                if self._lines_added:
+                    line_info += f" +{self._lines_added}"
+                line.append(f"  {file_count} files{line_info}", style="dim")
             return line
 
 

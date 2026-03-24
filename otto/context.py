@@ -19,6 +19,19 @@ class TaskResult:
     qa_report: str = ""
     diff_summary: str = ""
     duration_s: float = 0.0
+    review_ref: str | None = None  # refs/otto/candidates/<key>/attempt-N for failed tasks
+
+
+@dataclass
+class Learning:
+    """A factual observation from a completed task, with provenance.
+
+    Only 'observed' learnings are injected into coding prompts.
+    'inferred' learnings are logged but not passed to agents.
+    """
+    text: str           # "project uses ESM modules"
+    source: str         # "task-1" (which task discovered this)
+    kind: str = "observed"  # "observed" (factual) vs "inferred" (interpretation)
 
 
 class PipelineContext:
@@ -29,13 +42,22 @@ class PipelineContext:
     """
 
     def __init__(self) -> None:
-        self.learnings: list[str] = []
+        self.learnings: list[Learning] = []
         self._research: dict[str, str] = {}
         self.results: dict[str, TaskResult] = {}  # task_key -> TaskResult
         self.session_ids: dict[str, str] = {}     # task_key -> session_id
         self.costs: dict[str, float] = {}         # task_key -> cost
         self.interrupted: bool = False
         self.pids: set[int] = set()               # tracked subprocess PIDs
+
+    def add_learning(self, text: str, source: str, kind: str = "observed") -> None:
+        """Add a learning observation."""
+        self.learnings.append(Learning(text=text, source=source, kind=kind))
+
+    @property
+    def observed_learnings(self) -> list[Learning]:
+        """Return only observed (factual) learnings for injection into prompts."""
+        return [l for l in self.learnings if l.kind == "observed"]
 
     def add_research(self, key: str, content: str) -> None:
         """Store research findings by key (e.g., task_key or topic)."""

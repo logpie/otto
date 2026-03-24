@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock, AsyncMock
 
 from otto.config import create_config, load_config
-from otto.runner import run_task
+from otto.runner import run_task_v45
 from otto.tasks import add_task, load_tasks
 
 
@@ -37,7 +37,7 @@ class TestEndToEnd:
     def test_task_passes_and_merges(
         self, mock_query, mock_options_cls, tmp_git_repo
     ):
-        """Full flow: add task → run_task → verify → merge to main."""
+        """Full flow: add task → run_task_v45 → verify → QA → merge to main."""
         create_config(tmp_git_repo)
         _commit_otto_config(tmp_git_repo)
 
@@ -56,8 +56,14 @@ class TestEndToEnd:
         tasks = load_tasks(tasks_path)
         task = tasks[0]
 
-        # Run single task
-        success = asyncio.run(run_task(task, config, tmp_git_repo, tasks_path))
+        with patch("otto.runner.run_qa_agent_v45", new=AsyncMock(return_value={
+            "must_passed": True,
+            "verdict": {"must_passed": True, "must_items": []},
+            "raw_report": "QA PASS",
+            "cost_usd": 0.0,
+        })):
+            result = asyncio.run(run_task_v45(task, config, tmp_git_repo, tasks_path))
+        success = result["success"]
 
         # Verify
         assert success is True
@@ -96,7 +102,8 @@ class TestEndToEnd:
         tasks = load_tasks(tasks_path)
         task = tasks[0]
 
-        success = asyncio.run(run_task(task, config, tmp_git_repo, tasks_path))
+        result = asyncio.run(run_task_v45(task, config, tmp_git_repo, tasks_path))
+        success = result["success"]
 
         assert success is False
         tasks = load_tasks(tasks_path)
@@ -124,7 +131,8 @@ class TestEndToEnd:
         add_task(tasks_path, "Task that fails during setup", spec=["it works"])
 
         task = load_tasks(tasks_path)[0]
-        success = asyncio.run(run_task(task, config, tmp_git_repo, tasks_path))
+        result = asyncio.run(run_task_v45(task, config, tmp_git_repo, tasks_path))
+        success = result["success"]
 
         assert success is False
         failed_task = load_tasks(tasks_path)[0]

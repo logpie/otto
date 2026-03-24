@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -17,7 +18,7 @@ os.environ.pop("CLAUDECODE", None)
 import click
 
 from otto.config import create_config, git_meta_dir, load_config
-from otto.display import console, rich_escape
+from otto.display import TaskDisplay, console, rich_escape
 from otto.theme import error_console
 from otto.spec import generate_spec, parse_markdown_tasks
 from otto.tasks import (
@@ -27,7 +28,7 @@ from otto.tasks import (
     load_tasks,
     reset_all_tasks,
     save_tasks,
-    spec_is_verifiable,
+    spec_binding,
     spec_text,
     update_task,
 )
@@ -81,6 +82,85 @@ def _format_cost(cost: float) -> str:
     if cost < 0.01:
         return f"${cost:.4f}"
     return f"${cost:.2f}"
+
+
+def _make_task_display_progress_callback(display: TaskDisplay):
+    """Bridge runner progress events into the live TaskDisplay."""
+
+    def _on_progress(event_type: str, data: dict) -> None:
+        try:
+            if event_type == "phase":
+                display.update_phase(
+                    name=data.get("name", ""),
+                    status=data.get("status", ""),
+                    time_s=data.get("time_s", 0.0),
+                    error=data.get("error", ""),
+                    detail=data.get("detail", ""),
+                    cost=data.get("cost", 0),
+                )
+            elif event_type == "agent_tool":
+                display.add_tool(data=data)
+            elif event_type == "agent_tool_result":
+                display.add_tool_result(data=data)
+            elif event_type == "spec_item":
+                display.add_spec_item(data.get("text", ""))
+            elif event_type == "qa_finding":
+                display.add_finding(data.get("text", ""))
+            elif event_type == "qa_item_result":
+                display.add_qa_item_result(
+                    text=data.get("text", ""),
+                    passed=data.get("passed", True),
+                    evidence=data.get("evidence", ""),
+                )
+            elif event_type == "qa_summary":
+                display.set_qa_summary(
+                    total=data.get("total", 0),
+                    passed=data.get("passed", 0),
+                    failed=data.get("failed", 0),
+                )
+        except Exception:
+            pass
+
+    return _on_progress
+
+
+async def _run_one_off_with_display(
+    task: dict,
+    config: dict,
+    project_dir: Path,
+):
+    """Run a one-off task with live progress output."""
+    from otto.runner import run_task_v45
+
+    console.print()
+    console.print(f"  ● [bold]Running[/bold]  [dim]#0  {task['key'][:8]}[/dim]")
+
+    display = TaskDisplay(console)
+    display.start()
+
+    result = None
+    try:
+        result = await run_task_v45(
+            task,
+            config,
+            project_dir,
+            tasks_file=None,
+            on_progress=_make_task_display_progress_callback(display),
+        )
+        return result
+    finally:
+        elapsed_str = display.stop()
+        cost = float((result or {}).get("cost_usd", 0.0) or 0.0)
+        if result and result.get("success"):
+            console.print(
+                f"    {time.strftime('%H:%M:%S')}  [green]✓[/green] passed  "
+                f"[dim]{elapsed_str}  {_format_cost(cost)}[/dim]"
+            )
+        else:
+            console.print(
+                f"    {time.strftime('%H:%M:%S')}  [red]✗[/red] failed  "
+                f"[dim]{elapsed_str}  {_format_cost(cost)}[/dim]"
+            )
 
 
 def _has_requirement_signal(text: str) -> bool:
@@ -342,18 +422,14 @@ def _import_tasks(import_path: Path, tasks_path: Path) -> None:
     """
     import yaml as _yaml
 
-    # Clear existing tasks — import replaces, not appends
-    if tasks_path.exists():
-        tasks_path.unlink()
-
     project_dir = Path.cwd()
     suffix = import_path.suffix.lower()
+    batch = []
 
     if suffix == ".md":
         console.print(f"Parsing {rich_escape(import_path.name)} (this may take 10-20s)...")
         parsed = parse_markdown_tasks(import_path, project_dir)
         console.print(f"Extracted {len(parsed)} tasks from markdown.\n")
-        batch = []
         for t in parsed:
             item = {"prompt": t["prompt"]}
             if t.get("spec"):
@@ -365,14 +441,11 @@ def _import_tasks(import_path: Path, tasks_path: Path) -> None:
             if t.get("depends_on") is not None:
                 item["depends_on"] = t["depends_on"]
             batch.append(item)
-        results = add_tasks(tasks_path, batch)
-        _print_imported_tasks(results)
 
     elif suffix == ".txt":
         lines = [l.strip() for l in import_path.read_text().splitlines()
                  if l.strip() and not l.strip().startswith("#")]
         console.print(f"Found {len(lines)} tasks in {rich_escape(import_path.name)}.\n")
-        batch = []
         for i, line in enumerate(lines, 1):
             console.print(f"  [dim]{i}/{len(lines)}[/dim] {rich_escape(line[:50])}")
             spec_items = _filter_generated_spec_items(generate_spec(line, project_dir))
@@ -384,14 +457,11 @@ def _import_tasks(import_path: Path, tasks_path: Path) -> None:
                 console.print(f"  no spec generated")
             batch.append(item)
         console.print()
-        results = add_tasks(tasks_path, batch)
-        _print_imported_tasks(results)
 
     else:
         data = _yaml.safe_load(import_path.read_text()) or {}
         imported = data.get("tasks", [])
         console.print(f"Found {len(imported)} tasks in {rich_escape(import_path.name)}.\n")
-        batch = []
         for i, t in enumerate(imported, 1):
             item = {"prompt": t["prompt"]}
             if t.get("spec"):
@@ -409,10 +479,25 @@ def _import_tasks(import_path: Path, tasks_path: Path) -> None:
                 item["verify"] = t["verify"]
             if t.get("max_retries") is not None:
                 item["max_retries"] = t["max_retries"]
+            if t.get("depends_on") is not None:
+                item["depends_on"] = t["depends_on"]
             batch.append(item)
         console.print()
-        results = add_tasks(tasks_path, batch)
-        _print_imported_tasks(results)
+
+    tmp_fd, tmp_name = tempfile.mkstemp(
+        dir=str(tasks_path.parent),
+        prefix=f".{tasks_path.stem}.import.",
+        suffix=tasks_path.suffix,
+    )
+    os.close(tmp_fd)
+    replacement_path = Path(tmp_name)
+    try:
+        results = add_tasks(replacement_path, batch)
+        os.replace(replacement_path, tasks_path)
+    except Exception:
+        replacement_path.unlink(missing_ok=True)
+        raise
+    _print_imported_tasks(results)
 
 
 def _print_imported_tasks(tasks: list) -> None:
@@ -432,8 +517,8 @@ def _print_imported_tasks(tasks: list) -> None:
 @click.option("--max-retries", default=None, type=int, help="Max retry attempts")
 @click.option("-f", "--file", "import_file", default=None, type=click.Path(exists=True),
               help="Import tasks from a file (.yaml, .md, .txt)")
-@click.option("--no-spec", is_flag=True, help="Skip spec generation")
-def add(prompt, verify, max_retries, import_file, no_spec):
+@click.option("--spec", "gen_spec", is_flag=True, help="Pre-generate acceptance spec (runs LLM)")
+def add(prompt, verify, max_retries, import_file, gen_spec):
     """Add a task to the queue (or import from file with -f)."""
     _require_git()
     project_dir = Path.cwd()
@@ -457,64 +542,69 @@ def add(prompt, verify, max_retries, import_file, no_spec):
         error_console.print("Error: provide a prompt or use -f to import", style="error")
         sys.exit(2)
 
-    # Generate spec unless --no-spec
-    spec = None
-    if no_spec:
-        console.print(f"[warning][bold]⚠ WARNING:[/bold][/warning] [warning]No spec → no adversarial tests → no verification gate.[/warning]")
-        console.print(f"  [warning]The coding agent's output will be merged with zero quality checks.[/warning]")
-    if not no_spec:
-        try:
-            import threading
-            _spec_start = time.time()
-            _spec_done = False
-            def _update_timer(status):
-                while not _spec_done:
-                    elapsed = int(time.time() - _spec_start)
-                    status.update(f"[dim]Generating spec... {elapsed}s[/dim]")
-                    time.sleep(1)
-            with console.status("[dim]Generating spec...[/dim]", spinner="dots") as status:
-                timer_thread = threading.Thread(target=_update_timer, args=(status,), daemon=True)
-                timer_thread.start()
-                spec_items = generate_spec(prompt, Path.cwd())
-                _spec_done = True
-        except Exception as e:
-            error_console.print(f"[error]✗[/error] Spec generation failed: {rich_escape(str(e))}")
-            error_console.print(f"[dim]Task not created. Fix the issue or use --no-spec.[/dim]")
-            sys.exit(1)
-        filtered_spec = _filter_generated_spec_items(spec_items)
-        if filtered_spec:
-            spec = filtered_spec
-            verifiable_count = sum(1 for i in spec if spec_is_verifiable(i))
-            visual_count = len(spec) - verifiable_count
-            label = f"{verifiable_count} verifiable"
-            if visual_count:
-                label += f", {visual_count} visual"
+    # Default: instant add (no LLM call). Use --spec to pre-generate.
+    if not gen_spec:
+        task = add_task(tasks_path, prompt, verify=verify, max_retries=max_retries)
+        console.print(f"[success]\u2713[/success] Added task [bold]#{task['id']}[/bold] [dim]({task['key']})[/dim]: {rich_escape(prompt[:70])}")
+        console.print(f"  [dim]Spec will be generated at run time (parallel with coding)[/dim]")
+        return
 
-            console.print(f"[success]✓[/success] Spec ([bold]{len(spec)}[/bold] criteria \u2014 {label})")
-            console.print()
-            from rich.table import Table
-            spec_table = Table(box=None, show_header=True, pad_edge=False,
-                               show_edge=False, expand=False, padding=(0, 1))
-            spec_table.add_column("#", style="dim", width=3, justify="right")
-            spec_table.add_column("", width=2)  # icon
-            spec_table.add_column("Criterion", ratio=1, no_wrap=False)
-            for idx, item in enumerate(spec, 1):
-                text = spec_text(item)
-                short = text[:80] + "..." if len(text) > 80 else text
-                if spec_is_verifiable(item):
-                    spec_table.add_row(str(idx), "\u25b8", rich_escape(short))
-                else:
-                    spec_table.add_row(str(idx), "[info]\u25c9[/info]", rich_escape(short))
-            console.print(spec_table)
-            console.print()
-        else:
-            error_console.print(f"[warning]⚠[/warning] Spec generation returned empty \u2014 task not created.")
-            error_console.print(f"[dim]Retry or use --no-spec to skip spec generation.[/dim]")
-            sys.exit(1)
+    # --spec: pre-generate acceptance spec via LLM
+    spec = None
+    try:
+        import threading
+        _spec_start = time.time()
+        _spec_done = False
+        def _update_timer(status):
+            while not _spec_done:
+                elapsed = int(time.time() - _spec_start)
+                status.update(f"[dim]Generating spec... {elapsed}s[/dim]")
+                time.sleep(1)
+        with console.status("[dim]Generating spec...[/dim]", spinner="dots") as status:
+            timer_thread = threading.Thread(target=_update_timer, args=(status,), daemon=True)
+            timer_thread.start()
+            spec_items = generate_spec(prompt, Path.cwd())
+            _spec_done = True
+    except Exception as e:
+        error_console.print(f"[error]\u2717[/error] Spec generation failed: {rich_escape(str(e))}")
+        error_console.print(f"[dim]Task not created. Fix the issue or retry without --spec.[/dim]")
+        sys.exit(1)
+    filtered_spec = _filter_generated_spec_items(spec_items)
+    if filtered_spec:
+        spec = filtered_spec
+        must_count = sum(1 for i in spec if spec_binding(i) == "must")
+        should_count = len(spec) - must_count
+        label = f"{must_count} must"
+        if should_count:
+            label += f", {should_count} should"
+
+        console.print(f"[success]\u2713[/success] Spec ([bold]{len(spec)}[/bold] criteria \u2014 {label})")
+        console.print()
+        from rich.table import Table
+        spec_table = Table(box=None, show_header=True, pad_edge=False,
+                           show_edge=False, expand=False, padding=(0, 1))
+        spec_table.add_column("#", style="dim", width=3, justify="right")
+        spec_table.add_column("", width=6)  # binding tag
+        spec_table.add_column("Criterion", ratio=1, no_wrap=False)
+        for idx, item in enumerate(spec, 1):
+            text = spec_text(item)
+            short = text[:80] + "..." if len(text) > 80 else text
+            binding = spec_binding(item)
+            if binding == "must":
+                tag = "[success]\\[must][/success]"
+            else:
+                tag = "[info]\\[should][/info]"
+            spec_table.add_row(str(idx), tag, rich_escape(short))
+        console.print(spec_table)
+        console.print()
+    else:
+        error_console.print(f"[warning]\u26a0[/warning] Spec generation returned empty \u2014 task not created.")
+        error_console.print(f"[dim]Retry or add without --spec.[/dim]")
+        sys.exit(1)
 
     task = add_task(tasks_path, prompt, verify=verify, max_retries=max_retries,
                     spec=spec)
-    console.print(f"[success]✓[/success] Added task [bold]#{task['id']}[/bold] [dim]({task['key']})[/dim]: {rich_escape(prompt[:70])}")
+    console.print(f"[success]\u2713[/success] Added task [bold]#{task['id']}[/bold] [dim]({task['key']})[/dim]: {rich_escape(prompt[:70])}")
 
 
 @main.command(context_settings=CONTEXT_SETTINGS)
@@ -525,8 +615,6 @@ def add(prompt, verify, max_retries, import_file, no_spec):
 @click.option("--pilot", is_flag=True, help="Use v3 LLM pilot (fallback)")
 def run(prompt, dry_run, no_architect, tdd, pilot):
     """Run pending tasks (or a one-off task if prompt given)."""
-    from otto.runner import run_task
-
     _require_git()
     project_dir = Path.cwd()
     config_path = project_dir / "otto.yaml"
@@ -583,9 +671,8 @@ def run(prompt, dry_run, no_architect, tdd, pilot):
                 "prompt": prompt,
                 "status": "pending",
             }
-            success = asyncio.run(
-                run_task(task, config, project_dir, tasks_file=None)
-            )
+            result = asyncio.run(_run_one_off_with_display(task, config, project_dir))
+            success = result.get("success", False)
             sys.exit(0 if success else 1)
         finally:
             fcntl.flock(lock_fh, fcntl.LOCK_UN)
@@ -690,6 +777,69 @@ def arch(show, clean):
     finally:
         fcntl.flock(lock_fh, fcntl.LOCK_UN)
         lock_fh.close()
+
+
+@main.command(context_settings=CONTEXT_SETTINGS)
+@click.option("--specs", is_flag=True, help="Also generate specs for preview")
+def plan(specs):
+    """Show execution plan without running tasks."""
+    _require_git()
+    project_dir = Path.cwd()
+    config_path = project_dir / "otto.yaml"
+    if not config_path.exists():
+        console.print("[dim]No otto.yaml found. Run 'otto init' first.[/dim]")
+        return
+
+    tasks_path = project_dir / "tasks.yaml"
+    tasks = load_tasks(tasks_path)
+    pending = [t for t in tasks if t.get("status") == "pending"]
+
+    if not pending:
+        console.print("[dim]No pending tasks.[/dim]")
+        return
+
+    console.print(f"\n  [bold]Execution Plan[/bold]  [dim]({len(pending)} tasks)[/dim]\n")
+
+    # Show dependency graph
+    from otto.planner import default_plan
+    execution_plan = default_plan(pending)
+
+    for batch_idx, batch in enumerate(execution_plan.batches):
+        batch_label = "parallel" if len(batch.tasks) > 1 else "single"
+        console.print(f"  [bold]Batch {batch_idx + 1}[/bold]  [dim]{len(batch.tasks)} tasks ({batch_label})[/dim]")
+        for tp in batch.tasks:
+            # Find the task
+            task = next((t for t in pending if t.get("key") == tp.task_key), None)
+            if task:
+                spec_count = len(task.get("spec") or [])
+                spec_str = f"  [dim]({spec_count} spec)[/dim]" if spec_count else "  [dim](no spec)[/dim]"
+                deps = task.get("depends_on", [])
+                dep_str = f" \u2192 #{', #'.join(str(d) for d in deps)}" if deps else ""
+                console.print(f"    [dim]\u25cb[/dim] [bold]#{task['id']}[/bold]  {rich_escape(task.get('prompt', '')[:55])}{spec_str}[dim]{dep_str}[/dim]")
+        console.print()
+
+    # Summary
+    console.print(f"  [dim]Run 'otto run' to execute.[/dim]")
+
+    # Optional spec preview
+    if specs:
+        console.print(f"\n  [dim]Generating specs for preview...[/dim]")
+        for task in pending:
+            if not task.get("spec"):
+                console.print(f"\n  [dim]#{task['id']}[/dim]  {rich_escape(task.get('prompt', '')[:60])}")
+                try:
+                    spec_items = generate_spec(task["prompt"], project_dir)
+                    filtered = _filter_generated_spec_items(spec_items)
+                    if filtered:
+                        for item in filtered:
+                            binding = spec_binding(item)
+                            text = spec_text(item)
+                            tag = f"[{binding}]"
+                            console.print(f"    [dim]{tag}[/dim] {rich_escape(text[:75])}")
+                    else:
+                        console.print(f"    [dim](no spec generated)[/dim]")
+                except Exception as e:
+                    console.print(f"    [error]spec gen failed: {rich_escape(str(e)[:60])}[/error]")
 
 
 def _build_status_table(tasks: list[dict], show_phase: bool = False):
@@ -1256,7 +1406,7 @@ def show(task_id):
     """Show rich details for a task including timing, QA, and diff."""
     import subprocess
     from rich.panel import Panel
-    from otto.tasks import spec_text, spec_is_verifiable
+    from otto.tasks import spec_text, spec_binding
 
     tasks_path = Path.cwd() / "tasks.yaml"
     project_dir = Path.cwd()
@@ -1310,18 +1460,22 @@ def show(task_id):
             # Prompt
             console.print(f"\n  [dim]Prompt:[/dim] {rich_escape(t['prompt'])}")
 
-            # Spec with pass/fail indicators
+            # Spec with binding indicators
             spec = t.get("spec", [])
             if spec:
-                verifiable = sum(1 for i in spec if spec_is_verifiable(i))
-                visual = len(spec) - verifiable
-                label = f"{verifiable} verifiable"
-                if visual:
-                    label += f", {visual} visual"
+                must_count = sum(1 for i in spec if spec_binding(i) == "must")
+                should_count = len(spec) - must_count
+                label = f"{must_count} must"
+                if should_count:
+                    label += f", {should_count} should"
                 console.print(f"\n  [dim]Spec ({len(spec)} criteria \u2014 {label}):[/dim]")
                 for i, item in enumerate(spec, 1):
                     text = spec_text(item)
-                    tag = "[success]\\[v][/success]" if spec_is_verifiable(item) else "[info]\\[~][/info]"
+                    binding = spec_binding(item)
+                    if binding == "must":
+                        tag = "[success]\\[must][/success]"
+                    else:
+                        tag = "[info]\\[should][/info]"
                     console.print(f"    {i}. {tag} {rich_escape(text)}")
 
             # Diff summary (files changed)
@@ -1365,6 +1519,9 @@ def show(task_id):
             # Feedback
             if t.get("feedback"):
                 console.print(f"\n  [dim]Feedback:[/dim] {rich_escape(t['feedback'])}")
+
+            if t.get("review_ref"):
+                console.print(f"\n  [dim]Review ref:[/dim] {rich_escape(t['review_ref'])}")
 
             # Error (full context for failed tasks)
             if t.get("error"):

@@ -136,12 +136,20 @@ async def run_per(
         pending_by_key = {t["key"]: t for t in pending}
         task_ids = {t["key"]: t.get("id", 0) for t in pending}
         console.print()
-        console.print(f"  [bold]{len(pending)} task{'s' if len(pending) != 1 else ''}[/bold], [dim]{total_specs} specs[/dim]  [dim](v4 PER)[/dim]")
+        spec_label = f", [dim]{total_specs} specs[/dim]" if total_specs > 0 else ""
+        console.print(
+            f"  [bold]{len(pending)} task{'s' if len(pending) != 1 else ''}[/bold]"
+            f"{spec_label}  [dim](v4.5 PER)[/dim]"
+        )
         for t in pending:
             deps = t.get("depends_on", [])
             dep_str = f" [dim]\u2192 #{', #'.join(str(d) for d in deps)}[/dim]" if deps else ""
             spec_count = len(t.get("spec") or [])
-            console.print(f"    [dim]\u25cb[/dim] [bold]#{t['id']}[/bold]  {rich_escape(t.get('prompt', '')[:55])}  [dim]({spec_count} spec){dep_str}[/dim]")
+            spec_str = f"({spec_count} spec)" if spec_count else "(spec at runtime)"
+            console.print(
+                f"    [dim]\u25cb[/dim] [bold]#{t['id']}[/bold]  "
+                f"{rich_escape(t.get('prompt', '')[:55])}  [dim]{spec_str}{dep_str}[/dim]"
+            )
         console.print()
         console.print(f"{'─' * 60}", style="dim")
 
@@ -304,7 +312,7 @@ def _record_run_history(
             "time_s": round(run_duration, 1),
             "commit": commit_sha,
             "failure_summary": failure_summary,
-            "orchestrator": "v4",
+            "orchestrator": "v4.5",
         }
         with open(history_file, "a") as hf:
             hf.write(json.dumps(entry) + "\n")

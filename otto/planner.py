@@ -342,7 +342,7 @@ async def replan(
                 parts.append(f"  QA report: {result.qa_report}")
             results_summary.append("\n".join(parts))
 
-    learnings_str = "\n".join(f"- {l}" for l in context.learnings) if context.learnings else "None"
+    learnings_str = "\n".join(f"- [{l.source}] {l.text}" for l in context.learnings) if context.learnings else "None"
 
     # Include research findings
     research_parts = []

@@ -305,6 +305,15 @@ class TestTaskDisplay:
         assert "10s" in output
         assert "$0.50" in output
 
+    def test_coding_running_prints_start_line(self):
+        buf = io.StringIO()
+        test_console = Console(file=buf, highlight=False, color_system=None)
+        td = TaskDisplay(test_console)
+        td.update_phase("coding", "running", detail="bare CC")
+        output = buf.getvalue()
+        assert "coding" in output
+        assert "bare CC" in output
+
     def test_tool_calls_print_permanently(self):
         buf = io.StringIO()
         test_console = Console(file=buf, highlight=False, color_system=None)
@@ -363,6 +372,18 @@ class TestTaskDisplay:
         assert "2/3 specs passed" in output
         assert td._qa_spec_count == 3
         assert td._qa_pass_count == 2
+
+    def test_spec_and_qa_item_helpers_render(self):
+        buf = io.StringIO()
+        test_console = Console(file=buf, highlight=False, color_system=None)
+        td = TaskDisplay(test_console)
+        td.add_spec_item("[must] Adds feature flag")
+        td.add_qa_item_result("✓ [must] Adds feature flag", passed=True)
+        td.add_qa_item_result("✗ [must] Rejects invalid input", passed=False, evidence="raised ValueError")
+        output = buf.getvalue()
+        assert "[must] Adds feature flag" in output
+        assert "Rejects invalid input" in output
+        assert "evidence: raised ValueError" in output
 
     def test_qa_tools_show_informative_labels(self):
         """QA tool calls show what's being tested, not generic categories."""

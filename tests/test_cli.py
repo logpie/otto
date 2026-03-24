@@ -1,8 +1,7 @@
 """Tests for otto.cli module."""
 
 import subprocess
-from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
@@ -33,13 +32,13 @@ class TestInit:
 class TestAdd:
     def test_adds_task(self, runner, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
-        result = runner.invoke(main, ["add", "--no-spec", "Build a login page"])
+        result = runner.invoke(main, ["add", "Build a login page"])
         assert result.exit_code == 0
         assert "Added task" in result.output
 
     def test_adds_with_verify(self, runner, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
-        result = runner.invoke(main, ["add", "--no-spec", "Optimize", "--verify", "python bench.py"])
+        result = runner.invoke(main, ["add", "Optimize", "--verify", "python bench.py"])
         assert result.exit_code == 0
         tasks = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())["tasks"]
         assert tasks[0]["verify"] == "python bench.py"
@@ -63,10 +62,12 @@ class TestAdd:
             "The dew point calculation and comfort classification logic are in a separate utility module.",
         ]
 
-        result = runner.invoke(main, ["add", "Add a dew point indicator panel"])
+        result = runner.invoke(main, ["add", "--spec", "Add a dew point indicator panel"])
 
         assert result.exit_code == 0
-        assert "Spec (7 criteria — 6 verifiable, 1 visual)" in result.output
+        # v4.5: display uses [must]/[should] binding
+        assert "Spec" in result.output
+        assert "7 criteria" in result.output
         assert "Acceptance Spec: Dew Point Indicator Panel" not in result.output
         assert "Existing card style:" not in result.output
         assert "Tests live in __tests__/" not in result.output
@@ -101,7 +102,7 @@ class TestAdd:
 class TestRetry:
     def test_resets_failed_task(self, runner, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
-        runner.invoke(main, ["add", "--no-spec", "Some task"])
+        runner.invoke(main, ["add", "Some task"])
         # Manually set to failed
         tasks = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())
         tasks["tasks"][0]["status"] = "failed"
@@ -114,7 +115,7 @@ class TestRetry:
     def test_clears_error_code_on_retry(self, runner, tmp_git_repo, monkeypatch):
         """Retry must clear error_code so diverged tasks can re-run."""
         monkeypatch.chdir(tmp_git_repo)
-        runner.invoke(main, ["add", "--no-spec", "Some task"])
+        runner.invoke(main, ["add", "Some task"])
         tasks = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())
         tasks["tasks"][0]["status"] = "failed"
         tasks["tasks"][0]["error_code"] = "merge_diverged"
@@ -127,7 +128,7 @@ class TestRetry:
 
     def test_rejects_non_failed_task(self, runner, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
-        runner.invoke(main, ["add", "--no-spec", "Some task"])
+        runner.invoke(main, ["add", "Some task"])
         result = runner.invoke(main, ["retry", "1"])
         assert result.exit_code != 0
 
@@ -137,10 +138,63 @@ class TestRun:
         monkeypatch.chdir(tmp_git_repo)
         from otto.config import create_config
         create_config(tmp_git_repo)
-        runner.invoke(main, ["add", "--no-spec", "Task 1"])
+        runner.invoke(main, ["add", "Task 1"])
         result = runner.invoke(main, ["run", "--dry-run"])
         assert result.exit_code == 0
         assert "Pending tasks: 1" in result.output
+
+    @patch("otto.runner.check_clean_tree", return_value=True)
+    @patch("otto.runner.run_task_v45")
+    @patch("otto.cli.TaskDisplay")
+    def test_one_off_mode_shows_display_output(
+        self,
+        mock_display_cls,
+        mock_run_task_v45,
+        mock_check_clean_tree,
+        runner,
+        tmp_git_repo,
+        monkeypatch,
+    ):
+        monkeypatch.chdir(tmp_git_repo)
+        from otto.config import create_config
+
+        create_config(tmp_git_repo)
+
+        mock_display = MagicMock()
+        mock_display.stop.return_value = "2s"
+        mock_display_cls.return_value = mock_display
+
+        async def fake_run_task_v45(task, config, project_dir, tasks_file=None, context=None, on_progress=None):
+            assert task["prompt"] == "Fix the broken command"
+            assert tasks_file is None
+            assert project_dir == tmp_git_repo
+            assert callable(on_progress)
+
+            on_progress("phase", {"name": "coding", "status": "running", "detail": "attempt 1"})
+            on_progress("agent_tool", {"name": "Read", "detail": "README.md"})
+            on_progress("phase", {"name": "coding", "status": "done", "time_s": 1.2, "cost": 0.03})
+
+            return {"success": True, "cost_usd": 0.03}
+
+        mock_run_task_v45.side_effect = fake_run_task_v45
+
+        result = runner.invoke(main, ["run", "Fix the broken command"])
+
+        assert result.exit_code == 0
+        assert "Running" in result.output
+        assert "passed" in result.output
+        mock_check_clean_tree.assert_called_once_with(tmp_git_repo)
+        mock_display.start.assert_called_once()
+        mock_display.stop.assert_called_once()
+        mock_display.update_phase.assert_any_call(
+            name="coding",
+            status="running",
+            time_s=0.0,
+            error="",
+            detail="attempt 1",
+            cost=0,
+        )
+        mock_display.add_tool.assert_called_once_with(data={"name": "Read", "detail": "README.md"})
 
 
 class TestStatus:
@@ -152,7 +206,7 @@ class TestStatus:
 
     def test_shows_task_table(self, runner, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
-        runner.invoke(main, ["add", "--no-spec", "First task"])
+        runner.invoke(main, ["add", "First task"])
         result = runner.invoke(main, ["status"])
         assert "First task" in result.output
         assert "pending" in result.output
@@ -161,7 +215,7 @@ class TestStatus:
 class TestReset:
     def test_resets_all_tasks(self, runner, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
-        runner.invoke(main, ["add", "--no-spec", "Task 1"])
+        runner.invoke(main, ["add", "Task 1"])
         result = runner.invoke(main, ["reset", "--yes"])
         assert result.exit_code == 0
 
@@ -171,7 +225,7 @@ class TestAddSpec:
     def test_add_generates_spec(self, mock_gen, runner, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
         mock_gen.return_value = ["criterion 1", "criterion 2"]
-        result = runner.invoke(main, ["add", "Add search"])
+        result = runner.invoke(main, ["add", "--spec", "Add search"])
         assert result.exit_code == 0
         assert "Spec" in result.output
         assert "criterion 1" in result.output
@@ -179,26 +233,44 @@ class TestAddSpec:
         assert tasks["tasks"][0]["spec"] == ["criterion 1", "criterion 2"]
 
     @patch("otto.cli.generate_spec")
-    def test_add_no_spec_flag(self, mock_gen, runner, tmp_git_repo, monkeypatch):
+    def test_add_instant_no_spec_by_default(self, mock_gen, runner, tmp_git_repo, monkeypatch):
+        """Default add is instant — no spec gen, no LLM call."""
         monkeypatch.chdir(tmp_git_repo)
-        result = runner.invoke(main, ["add", "--no-spec", "Fix typo"])
+        result = runner.invoke(main, ["add", "Fix typo"])
         assert result.exit_code == 0
         mock_gen.assert_not_called()
         tasks = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())
         assert "spec" not in tasks["tasks"][0]
+        assert "Spec will be generated at run time" in result.output
 
     @patch("otto.cli.generate_spec")
-    def test_add_empty_spec_aborts(self, mock_gen, runner, tmp_git_repo, monkeypatch):
-        """Empty spec gen should abort — no ghost task created."""
+    def test_add_empty_spec_aborts_with_spec_flag(self, mock_gen, runner, tmp_git_repo, monkeypatch):
+        """Empty spec gen with --spec should abort — no ghost task created."""
         monkeypatch.chdir(tmp_git_repo)
         mock_gen.return_value = []
-        result = runner.invoke(main, ["add", "Fix typo"])
+        result = runner.invoke(main, ["add", "--spec", "Fix typo"])
         assert result.exit_code != 0
         # Task should NOT have been created
         assert not (tmp_git_repo / "tasks.yaml").exists()
 
 
 class TestAddImport:
+    @patch("otto.cli.generate_spec")
+    def test_import_failure_preserves_existing_tasks(self, mock_gen, runner, tmp_git_repo, monkeypatch):
+        monkeypatch.chdir(tmp_git_repo)
+        from otto.tasks import add_task
+
+        add_task(tmp_git_repo / "tasks.yaml", "Existing task")
+        txt_file = tmp_git_repo / "tasks.txt"
+        txt_file.write_text("Add search\n")
+        mock_gen.side_effect = RuntimeError("spec boom")
+
+        result = runner.invoke(main, ["add", "-f", str(txt_file)])
+
+        assert result.exit_code != 0
+        tasks = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())
+        assert [task["prompt"] for task in tasks["tasks"]] == ["Existing task"]
+
     @patch("otto.cli.generate_spec")
     def test_import_txt(self, mock_gen, runner, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
@@ -243,6 +315,24 @@ class TestAddImport:
         assert tasks["tasks"][0]["spec"] == ["existing criterion"]
         # Only called for task without spec
         mock_gen.assert_called_once()
+
+    @patch("otto.cli.generate_spec")
+    def test_import_yaml_preserves_depends_on(self, mock_gen, runner, tmp_git_repo, monkeypatch):
+        monkeypatch.chdir(tmp_git_repo)
+        yaml_file = tmp_git_repo / "import.yaml"
+        yaml_file.write_text(yaml.dump({
+            "tasks": [
+                {"prompt": "Task A"},
+                {"prompt": "Task B", "depends_on": [0]},
+            ]
+        }))
+        mock_gen.return_value = []
+
+        result = runner.invoke(main, ["add", "-f", str(yaml_file)])
+
+        assert result.exit_code == 0
+        tasks = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())
+        assert tasks["tasks"][1]["depends_on"] == [1]
 
 
 class TestDiffAndShow:
@@ -488,3 +578,18 @@ class TestStatusCost:
                     cost_usd=0.42)
         result = runner.invoke(main, ["show", "1"])
         assert "$0.42" in result.output
+
+    def test_shows_review_ref_in_show(self, runner, tmp_git_repo, monkeypatch):
+        monkeypatch.chdir(tmp_git_repo)
+        from otto.tasks import add_task, load_tasks, update_task
+        add_task(tmp_git_repo / "tasks.yaml", "Task with review ref")
+        tasks = load_tasks(tmp_git_repo / "tasks.yaml")
+        update_task(
+            tmp_git_repo / "tasks.yaml",
+            tasks[0]["key"],
+            status="failed",
+            review_ref="refs/otto/candidates/abc123/attempt-2",
+        )
+        result = runner.invoke(main, ["show", "1"])
+        assert "Review ref" in result.output
+        assert "refs/otto/candidates/abc123/attempt-2" in result.output

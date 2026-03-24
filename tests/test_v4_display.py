@@ -1,8 +1,8 @@
 """Tests for v4 display wiring — verify coding_loop creates TaskDisplay and routes events.
 
-These tests mock run_task_with_qa to simulate progress events and verify
+These tests mock run_task_v45 to simulate progress events and verify
 they reach the TaskDisplay. Without this wiring, the user sees a blank
-terminal during v4 runs.
+terminal during v4.5 runs.
 """
 
 import asyncio
@@ -45,14 +45,14 @@ class TestCodingLoopDisplay:
         mock_display = MagicMock()
         mock_display.stop.return_value = "5s"
 
-        async def fake_run_task_with_qa(task, config, project_dir, tasks_file, hint=None, on_progress=None):
+        async def fake_run_task_v45(task, config, project_dir, tasks_file, context=None, on_progress=None):
             # Simulate a successful run
             from otto.tasks import update_task
             update_task(tasks_path, "abc123def456", status="passed", cost_usd=0.10)
             return {"success": True, "cost_usd": 0.10, "status": "passed",
                     "error": "", "diff_summary": "", "qa_report": ""}
 
-        with patch("otto.runner.run_task_with_qa", side_effect=fake_run_task_with_qa):
+        with patch("otto.runner.run_task_v45", side_effect=fake_run_task_v45):
             with patch("otto.display.TaskDisplay", return_value=mock_display) as mock_cls:
                 result = await coding_loop(tp, ctx, config, tmp_git_repo, telemetry, tasks_path)
 
@@ -77,7 +77,7 @@ class TestCodingLoopDisplay:
         mock_display.stop.return_value = "10s"
         phase_calls = []
 
-        async def fake_run_task_with_qa(task, config, project_dir, tasks_file, hint=None, on_progress=None):
+        async def fake_run_task_v45(task, config, project_dir, tasks_file, context=None, on_progress=None):
             # Simulate phase events
             if on_progress:
                 on_progress("phase", {"name": "prepare", "status": "running"})
@@ -89,7 +89,7 @@ class TestCodingLoopDisplay:
             return {"success": True, "cost_usd": 0.10, "status": "passed",
                     "error": "", "diff_summary": "", "qa_report": ""}
 
-        with patch("otto.runner.run_task_with_qa", side_effect=fake_run_task_with_qa):
+        with patch("otto.runner.run_task_v45", side_effect=fake_run_task_v45):
             with patch("otto.display.TaskDisplay", return_value=mock_display):
                 await coding_loop(tp, ctx, config, tmp_git_repo, telemetry, tasks_path)
 
@@ -114,7 +114,7 @@ class TestCodingLoopDisplay:
         mock_display = MagicMock()
         mock_display.stop.return_value = "5s"
 
-        async def fake_run_task_with_qa(task, config, project_dir, tasks_file, hint=None, on_progress=None):
+        async def fake_run_task_v45(task, config, project_dir, tasks_file, context=None, on_progress=None):
             if on_progress:
                 on_progress("agent_tool", {"name": "Write", "detail": "hello.py"})
                 on_progress("agent_tool", {"name": "Bash", "detail": "pytest"})
@@ -123,7 +123,7 @@ class TestCodingLoopDisplay:
             return {"success": True, "cost_usd": 0.10, "status": "passed",
                     "error": "", "diff_summary": "", "qa_report": ""}
 
-        with patch("otto.runner.run_task_with_qa", side_effect=fake_run_task_with_qa):
+        with patch("otto.runner.run_task_v45", side_effect=fake_run_task_v45):
             with patch("otto.display.TaskDisplay", return_value=mock_display):
                 await coding_loop(tp, ctx, config, tmp_git_repo, telemetry, tasks_path)
 
@@ -144,7 +144,7 @@ class TestCodingLoopDisplay:
         mock_display = MagicMock()
         mock_display.stop.return_value = "5s"
 
-        async def fake_run_task_with_qa(task, config, project_dir, tasks_file, hint=None, on_progress=None):
+        async def fake_run_task_v45(task, config, project_dir, tasks_file, context=None, on_progress=None):
             if on_progress:
                 on_progress("qa_finding", {"text": "### Spec 1: PASS"})
                 on_progress("qa_finding", {"text": "### Spec 2: FAIL"})
@@ -154,12 +154,49 @@ class TestCodingLoopDisplay:
             return {"success": False, "cost_usd": 0.10, "status": "failed",
                     "error": "QA failed", "diff_summary": "", "qa_report": ""}
 
-        with patch("otto.runner.run_task_with_qa", side_effect=fake_run_task_with_qa):
+        with patch("otto.runner.run_task_v45", side_effect=fake_run_task_v45):
             with patch("otto.display.TaskDisplay", return_value=mock_display):
                 await coding_loop(tp, ctx, config, tmp_git_repo, telemetry, tasks_path)
 
         assert mock_display.add_finding.call_count == 2
         mock_display.set_qa_summary.assert_called_once_with(total=2, passed=1, failed=1)
+
+    @pytest.mark.asyncio
+    async def test_spec_and_qa_item_events_routed_to_display(self, tmp_git_repo):
+        """Spec items and QA item verdicts should reach the dedicated display helpers."""
+        tasks_path = _setup_task(tmp_git_repo)
+        ctx = PipelineContext()
+        config = {"default_branch": "main", "max_retries": 1, "verify_timeout": 60,
+                   "effort": "high"}
+        telemetry = Telemetry(tmp_git_repo / "otto_logs")
+        tp = TaskPlan(task_key="abc123def456")
+
+        mock_display = MagicMock()
+        mock_display.stop.return_value = "5s"
+
+        async def fake_run_task_v45(task, config, project_dir, tasks_file, context=None, on_progress=None):
+            if on_progress:
+                on_progress("spec_item", {"text": "[must] Adds hello"})
+                on_progress("qa_item_result", {
+                    "text": "✗ [must] Adds hello",
+                    "passed": False,
+                    "evidence": "function missing",
+                })
+            from otto.tasks import update_task
+            update_task(tasks_path, "abc123def456", status="failed", error="QA failed")
+            return {"success": False, "cost_usd": 0.10, "status": "failed",
+                    "error": "QA failed", "diff_summary": "", "qa_report": ""}
+
+        with patch("otto.runner.run_task_v45", side_effect=fake_run_task_v45):
+            with patch("otto.display.TaskDisplay", return_value=mock_display):
+                await coding_loop(tp, ctx, config, tmp_git_repo, telemetry, tasks_path)
+
+        mock_display.add_spec_item.assert_called_once_with("[must] Adds hello")
+        mock_display.add_qa_item_result.assert_called_once_with(
+            text="✗ [must] Adds hello",
+            passed=False,
+            evidence="function missing",
+        )
 
     @pytest.mark.asyncio
     async def test_display_stopped_on_failure(self, tmp_git_repo):
@@ -174,22 +211,50 @@ class TestCodingLoopDisplay:
         mock_display = MagicMock()
         mock_display.stop.return_value = "3s"
 
-        async def fake_run_task_with_qa(task, config, project_dir, tasks_file, hint=None, on_progress=None):
+        async def fake_run_task_v45(task, config, project_dir, tasks_file, context=None, on_progress=None):
             from otto.tasks import update_task
             update_task(tasks_path, "abc123def456", status="failed", error="tests failed")
             return {"success": False, "cost_usd": 0.05, "status": "failed",
                     "error": "tests failed", "diff_summary": "", "qa_report": ""}
 
-        with patch("otto.runner.run_task_with_qa", side_effect=fake_run_task_with_qa):
+        with patch("otto.runner.run_task_v45", side_effect=fake_run_task_v45):
             with patch("otto.display.TaskDisplay", return_value=mock_display):
                 result = await coding_loop(tp, ctx, config, tmp_git_repo, telemetry, tasks_path)
 
         mock_display.stop.assert_called_once()
         assert result.success is False
+        assert result.review_ref is None
+
+    @pytest.mark.asyncio
+    async def test_failure_propagates_review_ref(self, tmp_git_repo):
+        """Failed v4.5 runs should preserve review_ref on TaskResult."""
+        tasks_path = _setup_task(tmp_git_repo)
+        ctx = PipelineContext()
+        config = {"default_branch": "main", "max_retries": 1, "verify_timeout": 60,
+                   "effort": "high"}
+        telemetry = Telemetry(tmp_git_repo / "otto_logs")
+        tp = TaskPlan(task_key="abc123def456")
+
+        mock_display = MagicMock()
+        mock_display.stop.return_value = "3s"
+
+        async def fake_run_task_v45(task, config, project_dir, tasks_file, context=None, on_progress=None):
+            from otto.tasks import update_task
+            update_task(tasks_path, "abc123def456", status="failed", error="tests failed")
+            return {"success": False, "cost_usd": 0.05, "status": "failed",
+                    "error": "tests failed", "diff_summary": "", "qa_report": "",
+                    "review_ref": "refs/otto/candidates/abc123def456/attempt-2"}
+
+        with patch("otto.runner.run_task_v45", side_effect=fake_run_task_v45):
+            with patch("otto.display.TaskDisplay", return_value=mock_display):
+                result = await coding_loop(tp, ctx, config, tmp_git_repo, telemetry, tasks_path)
+
+        assert result.success is False
+        assert result.review_ref == "refs/otto/candidates/abc123def456/attempt-2"
 
     @pytest.mark.asyncio
     async def test_display_stopped_on_exception(self, tmp_git_repo):
-        """Display should be stopped even when run_task_with_qa crashes."""
+        """Display should be stopped even when run_task_v45 crashes."""
         tasks_path = _setup_task(tmp_git_repo)
         ctx = PipelineContext()
         config = {"default_branch": "main", "max_retries": 1, "verify_timeout": 60,
@@ -203,7 +268,7 @@ class TestCodingLoopDisplay:
         async def fake_crash(*args, **kwargs):
             raise RuntimeError("agent SDK crashed")
 
-        with patch("otto.runner.run_task_with_qa", side_effect=fake_crash):
+        with patch("otto.runner.run_task_v45", side_effect=fake_crash):
             with patch("otto.display.TaskDisplay", return_value=mock_display):
                 result = await coding_loop(tp, ctx, config, tmp_git_repo, telemetry, tasks_path)
 

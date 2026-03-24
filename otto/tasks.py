@@ -26,6 +26,12 @@ def spec_is_verifiable(item) -> bool:
     return True
 
 
+def spec_binding(item) -> str:
+    """Get the binding level of a spec item ('must' or 'should')."""
+    if isinstance(item, dict):
+        return item.get("binding", "must")
+    return "must"  # plain strings default to must
+
 
 def generate_key(existing_keys: set[str]) -> str:
     """Generate a unique 12-char hex key."""
