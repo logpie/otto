@@ -16,6 +16,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "max_parallel": 3,
     "effort": "high",
     "orchestrator": "v4",
+    # Agent settings scope — controls which CC settings are loaded
+    # "user,project": loads user CLAUDE.md, skills, hooks + project settings (default)
+    # "project": loads only project settings (faster, skips user skills/hooks)
+    "agent_settings": "user,project",
 }
 
 

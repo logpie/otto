@@ -1460,8 +1460,9 @@ async def run_task_v45(
         if not spec:
             async def _spec_with_timeout():
                 try:
+                    _spec_settings = config.get("agent_settings", "user,project").split(",")
                     spec_items, spec_cost, spec_error = await asyncio.wait_for(
-                        async_generate_spec(prompt, project_dir),
+                        async_generate_spec(prompt, project_dir, setting_sources=_spec_settings),
                         timeout=300,  # 5 min max for spec gen
                     )
                     return spec_items, spec_cost, spec_error
@@ -1570,10 +1571,11 @@ async def run_task_v45(
                  detail=coding_detail)
             coding_start = time.monotonic()
             try:
+                _agent_settings = config.get("agent_settings", "user,project").split(",")
                 agent_opts = ClaudeAgentOptions(
                     permission_mode="bypassPermissions",
                     cwd=str(project_dir),
-                    setting_sources=["user", "project"],
+                    setting_sources=_agent_settings,
                     env=_subprocess_env(),
                     # Use CC's default system prompt (Glob over find, etc.)
                     # None would blank it; preset keeps CC's defaults.

@@ -101,22 +101,22 @@ def _parse_spec_output(text: str) -> list:
     return items
 
 
-def generate_spec(prompt: str, project_dir: Path) -> list:
+def generate_spec(prompt: str, project_dir: Path, setting_sources: list[str] | None = None) -> list:
     """Generate a spec for a single task using an agentic QA engineer.
 
     Returns a list of spec items (dicts with text/verifiable),
     or empty list on failure.
     """
-    spec, _cost, _error = asyncio.run(_run_spec_agent(prompt, project_dir))
+    spec, _cost, _error = asyncio.run(_run_spec_agent(prompt, project_dir, setting_sources=setting_sources))
     return spec
 
 
-async def async_generate_spec(prompt: str, project_dir: Path) -> tuple[list, float, str | None]:
+async def async_generate_spec(prompt: str, project_dir: Path, setting_sources: list[str] | None = None) -> tuple[list, float, str | None]:
     """Async version of generate_spec. Returns (spec_items, cost, error)."""
-    return await _run_spec_agent(prompt, project_dir)
+    return await _run_spec_agent(prompt, project_dir, setting_sources=setting_sources)
 
 
-async def _run_spec_agent(prompt: str, project_dir: Path) -> tuple[list, float, str | None]:
+async def _run_spec_agent(prompt: str, project_dir: Path, setting_sources: list[str] | None = None) -> tuple[list, float, str | None]:
     """Run the spec generation agent.
 
     Uses a structured system prompt for constraint faithfulness,
@@ -190,7 +190,7 @@ Write only [must]/[should] criteria lines to the file — no headings, notes, or
             cwd=str(project_dir),
             system_prompt={"type": "preset", "preset": "claude_code",
                            "append": system_prompt},
-            setting_sources=["user", "project"],
+            setting_sources=setting_sources or ["user", "project"],
             env=dict(os.environ),
         )
 

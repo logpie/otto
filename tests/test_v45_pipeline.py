@@ -320,7 +320,7 @@ class TestRunTaskV45:
                 result="ok",
             )
 
-        async def fake_spec(prompt, project_dir):
+        async def fake_spec(prompt, project_dir, **kwargs):
             raise RuntimeError("spec boom")
 
         qa_mock = AsyncMock(return_value={
@@ -479,7 +479,7 @@ class TestRunTaskV45:
                 result="ok",
             )
 
-        async def empty_spec(prompt, project_dir):
+        async def empty_spec(prompt, project_dir, **kwargs):
             return [], 0.37, None
 
         qa_mock = AsyncMock(return_value={
@@ -659,7 +659,7 @@ class TestRunTaskV45:
             "test_command": None,
         }
 
-        async def hanging_spec(prompt, project_dir):
+        async def hanging_spec(prompt, project_dir, **kwargs):
             await asyncio.Future()
 
         async def fake_query(*, prompt, options=None):
