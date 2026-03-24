@@ -1385,7 +1385,9 @@ async def run_task_v45(
         finally:
             spec_task = None
 
-        spec_elapsed = round(time.monotonic() - spec_started_at, 1) if spec_started_at else 0.0
+        # Show time only if spec gen was actively awaited (not parked in background).
+        # Wall time is misleading when spec ran in parallel with coding.
+        spec_elapsed = 0.0  # don't show wall time — it includes parked time
         total_cost += spec_cost
         if spec_items:
             spec = spec_items
@@ -1526,17 +1528,10 @@ async def run_task_v45(
 
         # Fire spec gen in background if no specs yet
         if not spec:
-            async def _spec_with_timeout():
-                _spec_timeout = 300  # 5 min max
+            async def _run_spec_gen():
                 try:
                     _spec_settings = config.get("spec_agent_settings", "project").split(",")
-                    spec_items, spec_cost, spec_error = await asyncio.wait_for(
-                        async_generate_spec(prompt, project_dir, setting_sources=_spec_settings),
-                        timeout=_spec_timeout,
-                    )
-                    return spec_items, spec_cost, spec_error
-                except asyncio.TimeoutError:
-                    return None, 0.0, f"spec generation timed out after {_spec_timeout}s"
+                    return await async_generate_spec(prompt, project_dir, setting_sources=_spec_settings)
                 except asyncio.CancelledError:
                     return None, 0.0, "spec generation cancelled"
                 except Exception as exc:
@@ -1544,7 +1539,7 @@ async def run_task_v45(
 
             emit("phase", name="spec_gen", status="running")
             spec_started_at = time.monotonic()
-            spec_task = asyncio.create_task(_spec_with_timeout())
+            spec_task = asyncio.create_task(_run_spec_gen())
 
         for attempt in range(remaining):
             attempt_num = prior_attempts + attempt + 1
