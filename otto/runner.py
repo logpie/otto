@@ -176,6 +176,20 @@ def preflight_checks(
         label = ", ".join(d.rstrip("/") for d in missing_ignores[:3])
         console.print(f"  [dim]Updated .gitignore (+{label})[/dim]")
 
+    # Ensure .git/info/exclude has otto runtime entries.
+    # Written every preflight because git reset --hard can wipe it.
+    from otto.config import git_meta_dir
+    exclude_path = git_meta_dir(project_dir) / "info" / "exclude"
+    exclude_path.parent.mkdir(parents=True, exist_ok=True)
+    existing_exclude = exclude_path.read_text() if exclude_path.exists() else ""
+    otto_excludes = ["otto_logs/", "otto_arch/", "tasks.yaml", ".tasks.lock"]
+    missing_excludes = [e for e in otto_excludes if e not in existing_exclude]
+    if missing_excludes:
+        with open(exclude_path, "a") as f:
+            f.write("\n# otto runtime files\n")
+            for entry in missing_excludes:
+                f.write(entry + "\n")
+
     # Baseline check
     test_command = config.get("test_command")
     if test_command:
@@ -440,6 +454,34 @@ def create_task_branch(
     return base_sha
 
 
+def _should_stage_untracked(rel_path: str) -> bool:
+    """Decide if an untracked file should be included in the candidate commit.
+
+    Stages all project source files. Excludes otto runtime files and
+    obvious build artifacts/caches — even if .gitignore doesn't cover them.
+    """
+    # Otto runtime files — never commit
+    _OTTO_PATHS = ("otto_logs/", "otto_arch/", "tasks.yaml", ".tasks.lock", "otto.lock")
+    if any(rel_path == p or rel_path.startswith(p) for p in _OTTO_PATHS):
+        return False
+
+    # Build artifacts and caches — never commit
+    _ARTIFACT_PATTERNS = (
+        "__pycache__/", ".pytest_cache/", ".mypy_cache/", ".ruff_cache/",
+        ".venv/", "node_modules/", ".next/", "dist/", "build/", "coverage/",
+        "target/", ".turbo/", ".egg-info",
+    )
+    if any(p in rel_path for p in _ARTIFACT_PATTERNS):
+        return False
+
+    # Compiled files
+    if rel_path.endswith((".pyc", ".pyo", ".o", ".so", ".dylib")):
+        return False
+
+    # Everything else is candidate-eligible (source files, assets, configs)
+    return True
+
+
 def build_candidate_commit(
     project_dir: Path,
     base_sha: str,
@@ -465,15 +507,15 @@ def build_candidate_commit(
         ["git", "add", "-u"],
         cwd=project_dir, capture_output=True, check=True,
     )
-    # Stage ALL untracked source files (not just agent-created ones).
-    # Pre-existing untracked files might be imported by agent code —
-    # if they're excluded, the verify worktree breaks on missing imports.
+    # Stage untracked project source files — includes both agent-created
+    # AND pre-existing untracked files (they may be imported by agent code).
+    # Excludes otto runtime files and build artifacts via _should_stage_untracked.
     untracked = subprocess.run(
         ["git", "ls-files", "--others", "--exclude-standard", "-z"],
         cwd=project_dir, capture_output=True, text=True,
     )
     for f in untracked.stdout.split("\0"):
-        if f:
+        if f and _should_stage_untracked(f):
             subprocess.run(
                 ["git", "add", "--", f],
                 cwd=project_dir, capture_output=True,
@@ -1883,9 +1925,8 @@ async def run_task_v45(
                     ["git", "ls-files", "--others", "--exclude-standard", "-z"],
                     cwd=project_dir, capture_output=True, text=True,
                 )
-                skip = pre_existing_untracked or set()
                 for f in untracked_final.stdout.split("\0"):
-                    if f and f not in skip:
+                    if f and _should_stage_untracked(f):
                         subprocess.run(
                             ["git", "add", "--", f],
                             cwd=project_dir, capture_output=True,

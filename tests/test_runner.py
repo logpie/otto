@@ -241,3 +241,34 @@ class TestRebaseAndMerge:
         result = rebase_and_merge(tmp_git_repo, "otto/task3", "main")
         assert result is True
         assert (tmp_git_repo / "simple.txt").exists()
+
+
+class TestShouldStageUntracked:
+    """Staging policy: project source files in, otto runtime and artifacts out."""
+
+    def test_stages_source_files(self):
+        from otto.runner import _should_stage_untracked
+        assert _should_stage_untracked("src/components/NewPanel.tsx") is True
+        assert _should_stage_untracked("lib/utils.py") is True
+        assert _should_stage_untracked("README.md") is True
+        assert _should_stage_untracked("src/logo.png") is True
+
+    def test_excludes_otto_runtime(self):
+        from otto.runner import _should_stage_untracked
+        assert _should_stage_untracked("otto_logs/abc123/agent.log") is False
+        assert _should_stage_untracked("otto_arch/file-plan.md") is False
+        assert _should_stage_untracked("tasks.yaml") is False
+        assert _should_stage_untracked(".tasks.lock") is False
+
+    def test_excludes_build_artifacts(self):
+        from otto.runner import _should_stage_untracked
+        assert _should_stage_untracked("__pycache__/module.cpython-311.pyc") is False
+        assert _should_stage_untracked("node_modules/lodash/index.js") is False
+        assert _should_stage_untracked(".next/server/app.js") is False
+        assert _should_stage_untracked("dist/bundle.js") is False
+        assert _should_stage_untracked(".pytest_cache/v/cache/nodeids") is False
+
+    def test_excludes_compiled_files(self):
+        from otto.runner import _should_stage_untracked
+        assert _should_stage_untracked("module.pyc") is False
+        assert _should_stage_untracked("lib.so") is False
