@@ -99,6 +99,19 @@ class TestDetermineQaTier:
         mapping = {"works": "test.py::test"}
         assert determine_qa_tier({}, spec, 0, diff_info, mapping) == 2
 
+    def test_tier2_non_verifiable_must(self):
+        """Non-verifiable [must ◈] items always require tier 2 QA."""
+        spec = [
+            {"text": "button works", "binding": "must", "verifiable": True},
+            {"text": "layout matches mock", "binding": "must", "verifiable": False},
+        ]
+        diff_info = {"files": ["src/app.py"]}
+        mapping = {
+            "button works": "test_app.py::test_button",
+            "layout matches mock": "test_app.py::test_layout",
+        }
+        assert determine_qa_tier({}, spec, 0, diff_info, mapping) == 2
+
 
 class TestFormatSpecV45:
     def test_formats_must_should(self):
@@ -505,6 +518,95 @@ class TestRunTaskV45:
         assert result["success"] is True
         assert result["cost_usd"] == pytest.approx(0.37)
         assert persisted["cost_usd"] == pytest.approx(0.37)
+
+    @pytest.mark.asyncio
+    async def test_progress_events_preserve_visual_markers_and_neutral_should_notes(self, tmp_git_repo):
+        """Spec and QA progress events should preserve ◈ markers and neutral should notes."""
+        default_branch = _current_branch(tmp_git_repo)
+        task = {
+            "id": 1,
+            "key": "taskspecqa001",
+            "prompt": "Add feature.txt",
+            "status": "pending",
+        }
+        tasks_path = _write_task(tmp_git_repo, task)
+        config = {
+            "default_branch": default_branch,
+            "max_retries": 0,
+            "verify_timeout": 30,
+            "max_task_time": 60,
+            "test_command": None,
+        }
+        progress_events = []
+
+        async def fake_query(*, prompt, options=None):
+            (tmp_git_repo / "feature.txt").write_text("hello\n")
+            yield SimpleNamespace(
+                session_id="sess-spec-qa",
+                is_error=False,
+                total_cost_usd=0.0,
+                result="ok",
+            )
+
+        def fake_spec_sync(prompt, project_dir, **kwargs):
+            return [
+                {"text": "layout matches mock", "binding": "must", "verifiable": False},
+                {"text": "colors fit theme", "binding": "should", "verifiable": False},
+            ], 0.0, None
+
+        qa_mock = AsyncMock(return_value={
+            "must_passed": True,
+            "verdict": {
+                "must_passed": True,
+                "must_items": [
+                    {
+                        "criterion": "layout matches mock",
+                        "status": "pass",
+                        "evidence": "checked in browser",
+                    }
+                ],
+                "should_notes": [
+                    {
+                        "criterion": "colors fit theme",
+                        "observation": "close to existing palette",
+                    }
+                ],
+            },
+            "raw_report": "QA PASS",
+            "cost_usd": 0.0,
+        })
+
+        def on_progress(event, data):
+            progress_events.append((event, data))
+
+        with patch("otto.runner.query", new=fake_query):
+            with patch("otto.spec.generate_spec_sync", side_effect=fake_spec_sync):
+                with patch("otto.runner.run_verification", return_value=VerifyResult(
+                    passed=True,
+                    tiers=[TierResult("tier1", True, "1 passed")],
+                )):
+                    with patch("otto.runner.run_qa_agent_v45", new=qa_mock):
+                        with patch("otto.runner.merge_to_default", return_value=True):
+                            result = await run_task_v45(
+                                task, config, tmp_git_repo, tasks_path, on_progress=on_progress,
+                            )
+
+        spec_items = [data["text"] for event, data in progress_events if event == "spec_item"]
+        qa_items = [data for event, data in progress_events if event == "qa_item_result"]
+
+        assert result["success"] is True
+        assert "[must ◈] layout matches mock" in spec_items
+        assert "[should ◈] colors fit theme" in spec_items
+        assert {
+            "text": "✓ [must ◈] layout matches mock",
+            "passed": True,
+            "evidence": "checked in browser",
+        } in qa_items
+        assert {
+            "text": "[should ◈] colors fit theme",
+            "passed": None,
+            "evidence": "close to existing palette",
+        } in qa_items
 
     @pytest.mark.asyncio
     async def test_outer_exception_cleanup_preserves_preexisting_untracked(self, tmp_git_repo):

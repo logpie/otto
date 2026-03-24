@@ -635,9 +635,17 @@ class TaskDisplay:
     def _print_spec_item(self, text: str) -> None:
         """Print a spec item with binding-level styling."""
         t = text[:80]
-        if "[must]" in t:
-            rest = rich_escape(t.replace("[must]", "", 1).strip())
-            self._console.print(f"      [cyan]\\[must][/cyan] {rest}")
+        if "[must" in t:
+            has_visual = "\u25c8" in t
+            stripped = t
+            for removal in ("[must ◈]", "[must]"):
+                stripped = stripped.replace(removal, "", 1)
+            rest = rich_escape(stripped.strip())
+            if has_visual:
+                tag = "[cyan]\\[must[/cyan] [magenta]◈[/magenta][cyan]][/cyan]"
+            else:
+                tag = "[cyan]\\[must][/cyan]"
+            self._console.print(f"      {tag} {rest}")
         else:
             self._console.print(f"      [dim]{rich_escape(t)}[/dim]")
 
@@ -648,7 +656,7 @@ class TaskDisplay:
             self._spec_items_buffer = []
         if not items:
             return
-        must_items = [t for t in items if "[must]" in t]
+        must_items = [t for t in items if "[must" in t]
         preview = must_items[:3] or items[:3]
         for item in preview:
             self._print_spec_item(item)
@@ -656,7 +664,7 @@ class TaskDisplay:
         if remaining > 0:
             self._console.print(f"      [dim]... +{remaining} more[/dim]")
 
-    def add_qa_item_result(self, text: str, passed: bool = True, evidence: str = "") -> None:
+    def add_qa_item_result(self, text: str, passed: bool | None = True, evidence: str = "") -> None:
         """Print a QA per-item result."""
         if not text:
             return
@@ -689,10 +697,15 @@ class TaskDisplay:
         else:
             display_text = rich_escape(clean)
 
-        if passed:
+        if passed is True:
             self._console.print(f"      [green]\u2713[/green] {display_text}")
-            # Show observation for [should] items (that's the useful part)
-            if "[should]" in text and evidence:
+            if clean.startswith("[should") and evidence:
+                self._console.print(f"        [dim]{rich_escape(evidence)}[/dim]")
+            return
+        if passed is None:
+            bullet = "[dim]\u00b7[/dim]"
+            self._console.print(f"      {bullet} {display_text}")
+            if clean.startswith("[should") and evidence:
                 self._console.print(f"        [dim]{rich_escape(evidence)}[/dim]")
             return
         # Failed items: red with evidence

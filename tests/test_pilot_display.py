@@ -385,6 +385,20 @@ class TestTaskDisplay:
         assert "Rejects invalid input" in output
         assert "raised ValueError" in output
 
+    def test_visual_spec_and_should_observation_render_neutrally(self):
+        buf = io.StringIO()
+        test_console = Console(file=buf, highlight=False, color_system=None)
+        td = TaskDisplay(test_console)
+        td.add_spec_item("[must ◈] Layout matches mock")
+        td.add_qa_item_result("[should ◈] Colors fit theme", passed=None, evidence="close to palette")
+        output = buf.getvalue()
+        assert "[must" in output
+        assert "◈" in output
+        assert "Layout matches mock" in output
+        assert "·" in output
+        assert "Colors fit theme" in output
+        assert "close to palette" in output
+
     def test_qa_tools_show_informative_labels(self):
         """QA tool calls show what's being tested, not generic categories."""
         buf = io.StringIO()

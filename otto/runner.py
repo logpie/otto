@@ -932,7 +932,7 @@ def determine_qa_tier(
     Tier 1: targeted QA (unmapped [must] items, cross-cutting changes)
     Tier 2: full QA with browser (visual/SPA, auth/crypto, retries)
     """
-    from otto.tasks import spec_binding
+    from otto.tasks import spec_binding, spec_is_verifiable
 
     diff_files = diff_info.get("files", [])
     spec_test_mapping = spec_test_mapping or {}
@@ -941,6 +941,10 @@ def determine_qa_tier(
     HIGH_RISK_PATTERNS = ["auth", "crypto", "permission", "migration",
                           "payment", "security", "token", "session"]
     if any(pattern in f.lower() for f in diff_files for pattern in HIGH_RISK_PATTERNS):
+        return 2
+
+    # Tier 2: non-verifiable [must] items require browser/subjective QA.
+    if any(spec_binding(item) == "must" and not spec_is_verifiable(item) for item in spec):
         return 2
 
     # Tier 2: visual/UI specs (need browser), SPA apps, or retries
@@ -1426,11 +1430,12 @@ async def run_task_v45(
                 _breakdown += " (ready)"
             emit("phase", name="spec_gen", status="done", time_s=spec_elapsed,
                  detail=_breakdown, cost=spec_cost)
-            from otto.tasks import spec_binding, spec_text
+            from otto.tasks import spec_binding, spec_is_verifiable, spec_text
             for item in spec:
                 binding = spec_binding(item)
                 text = spec_text(item)
-                emit("spec_item", text=f"[{binding}] {text}")
+                marker = "" if spec_is_verifiable(item) else " \u25c8"
+                emit("spec_item", text=f"[{binding}{marker}] {text}")
             emit("spec_items_done")
             return
 
@@ -2098,7 +2103,7 @@ async def run_task_v45(
                     marker = " ◈" if is_visual else ""
                     emit("qa_item_result",
                          text=f"[should{marker}] {criterion}",
-                         passed=True,
+                         passed=None,
                          evidence=obs)
 
                 # Persist QA report
