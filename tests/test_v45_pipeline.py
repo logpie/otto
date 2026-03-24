@@ -691,3 +691,35 @@ class TestRunTaskV45:
         assert persisted["error_code"] == "time_budget_exceeded"
         assert current_branch == default_branch
         assert branch_check.returncode != 0
+
+
+class TestSystemPromptPreset:
+    """Ensure all agents use CC's default system prompt via preset."""
+
+    def test_coding_agent_uses_preset(self):
+        """Coding agent must use preset to keep CC defaults (Glob over find, etc.)."""
+        import ast
+        import inspect
+        from otto.runner import run_task_v45
+        source = inspect.getsource(run_task_v45)
+        # Check that system_prompt uses preset pattern, not a raw string or None
+        assert '"type": "preset"' in source or "preset" in source, \
+            "Coding agent must use system_prompt preset to preserve CC defaults"
+        assert 'system_prompt=None' not in source.replace('# ', ''), \
+            "system_prompt=None blanks CC defaults — use preset instead"
+
+    def test_qa_agent_uses_preset(self):
+        """QA agent must use preset to keep CC defaults."""
+        import inspect
+        from otto.runner import run_qa_agent_v45
+        source = inspect.getsource(run_qa_agent_v45)
+        assert '"type": "preset"' in source or "preset" in source, \
+            "QA agent must use system_prompt preset to preserve CC defaults"
+
+    def test_spec_agent_uses_preset(self):
+        """Spec agent must use preset to keep CC defaults."""
+        import inspect
+        from otto.spec import _run_spec_agent
+        source = inspect.getsource(_run_spec_agent)
+        assert '"type": "preset"' in source or "preset" in source, \
+            "Spec agent must use system_prompt preset to preserve CC defaults"
