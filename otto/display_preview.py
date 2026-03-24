@@ -284,39 +284,84 @@ def _ts() -> str:
 
 
 def generate_preview(output_path: str | None = None, replay_file: str | None = None) -> Path:
-    """Generate HTML preview and return the file path."""
-    # Use 256color to match typical terminal rendering (not truecolor which
-    # shows more color differentiation than most terminals actually display)
-    console = Console(record=True, width=100, color_system="256")
+    """Generate HTML preview using xterm.js for terminal-accurate rendering."""
+    import io
+
+    # Capture raw ANSI output (not HTML) — this is what the terminal sees
+    buf = io.StringIO()
+    console = Console(file=buf, force_terminal=True, color_system="256", width=100)
 
     if replay_file:
         replay_from_jsonl(console, replay_file)
     else:
         simulate_run(console)
 
-    html_content = console.export_html(inline_styles=True)
+    ansi_output = buf.getvalue()
+    # Escape for JS string embedding
+    js_escaped = (ansi_output
+                  .replace("\\", "\\\\")
+                  .replace("`", "\\`")
+                  .replace("$", "\\$"))
 
-    # Wrap in dark background to match terminal
+    # Use xterm.js to render ANSI codes exactly like a terminal
     full_html = f"""<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 <title>Otto Display Preview</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
 <style>
 body {{
     background: #1e1e2e;
     padding: 20px;
     margin: 0;
-    font-family: 'JetBrains Mono', 'Menlo', 'Monaco', monospace;
 }}
-pre {{
-    font-size: 13px;
-    line-height: 1.5;
+#terminal {{
+    width: 100%;
 }}
 </style>
 </head>
 <body>
-{html_content}
+<div id="terminal"></div>
+<script>
+const term = new Terminal({{
+    theme: {{
+        background: '#1e1e2e',
+        foreground: '#cdd6f4',
+        cursor: '#f5e0dc',
+        black: '#45475a',
+        red: '#f38ba8',
+        green: '#a6e3a1',
+        yellow: '#f9e2af',
+        blue: '#89b4fa',
+        magenta: '#f5c2e7',
+        cyan: '#94e2d5',
+        white: '#bac2de',
+        brightBlack: '#585b70',
+        brightRed: '#f38ba8',
+        brightGreen: '#a6e3a1',
+        brightYellow: '#f9e2af',
+        brightBlue: '#89b4fa',
+        brightMagenta: '#f5c2e7',
+        brightCyan: '#94e2d5',
+        brightWhite: '#a6adc8',
+    }},
+    fontSize: 13,
+    fontFamily: "'JetBrains Mono', 'Menlo', 'Monaco', monospace",
+    cols: 100,
+    rows: 500,
+    convertEol: true,
+    scrollback: 5000,
+}});
+term.open(document.getElementById('terminal'));
+term.write(`{js_escaped}`);
+// Auto-resize to content
+const viewport = document.querySelector('.xterm-viewport');
+if (viewport) viewport.style.overflow = 'visible';
+const screen = document.querySelector('.xterm-screen');
+if (screen) document.getElementById('terminal').style.height = screen.style.height;
+</script>
 </body>
 </html>"""
 
