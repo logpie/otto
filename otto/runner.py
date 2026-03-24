@@ -139,40 +139,47 @@ def preflight_checks(
         console.print("[red]Working tree is dirty -- fix before running otto[/red]")
         return (2, [])
 
-    # Ensure .gitignore exists — agents use Glob/Read which respect it,
-    # and without it they waste time exploring build artifacts.
-    # Scan for untracked dirs that are obviously build/dependency artifacts.
+    # Ensure .gitignore covers large untracked dirs (build artifacts, deps).
+    # Runs every time — catches new dirs from agent actions or npm install.
     gitignore = project_dir / ".gitignore"
-    if not gitignore.exists():
-        # Ask git what's untracked and large — these are almost certainly
-        # build dirs or dependency caches that should be ignored.
-        ls_result = subprocess.run(
-            ["git", "ls-files", "--others", "--directory", "--exclude-standard", "-z"],
-            cwd=project_dir, capture_output=True, text=True,
+    existing_ignores = set()
+    if gitignore.exists():
+        existing_ignores = {
+            line.strip().rstrip("/")
+            for line in gitignore.read_text().splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        }
+    ls_result = subprocess.run(
+        ["git", "ls-files", "--others", "--directory", "--exclude-standard", "-z"],
+        cwd=project_dir, capture_output=True, text=True,
+    )
+    untracked_dirs = [
+        d.rstrip("/") for d in ls_result.stdout.split("\0")
+        if d.endswith("/") and d.rstrip("/") not in ("otto_logs", "otto_arch")
+    ]
+    missing_ignores = []
+    for d in untracked_dirs:
+        if d in existing_ignores:
+            continue
+        dp = project_dir / d
+        if dp.is_dir():
+            try:
+                count = sum(1 for _ in dp.rglob("*") if _.is_file())
+            except (OSError, StopIteration):
+                count = 0
+            if count > 50:
+                missing_ignores.append(d + "/")
+    if missing_ignores:
+        # Append to existing or create new
+        with open(gitignore, "a") as f:
+            f.write("\n".join(sorted(missing_ignores)) + "\n")
+        subprocess.run(["git", "add", ".gitignore"], cwd=project_dir, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "otto: update .gitignore for build artifacts"],
+            cwd=project_dir, capture_output=True,
         )
-        untracked_dirs = [
-            d.rstrip("/") for d in ls_result.stdout.split("\0")
-            if d.endswith("/") and d.rstrip("/") not in ("otto_logs", "otto_arch")
-        ]
-        # Count files in each to find big ones (>50 files = build/dep dir)
-        ignore_dirs = []
-        for d in untracked_dirs:
-            dp = project_dir / d
-            if dp.is_dir():
-                try:
-                    count = sum(1 for _ in dp.rglob("*") if _.is_file())
-                except (OSError, StopIteration):
-                    count = 0
-                if count > 50:
-                    ignore_dirs.append(d + "/")
-        if ignore_dirs:
-            gitignore.write_text("\n".join(sorted(ignore_dirs)) + "\n")
-            subprocess.run(["git", "add", ".gitignore"], cwd=project_dir, capture_output=True)
-            subprocess.run(
-                ["git", "commit", "-m", "otto: add .gitignore for build artifacts"],
-                cwd=project_dir, capture_output=True,
-            )
-            console.print(f"  [dim]Created .gitignore ({', '.join(d.rstrip('/') for d in ignore_dirs[:3])}...)[/dim]")
+        label = ", ".join(d.rstrip("/") for d in missing_ignores[:3])
+        console.print(f"  [dim]Updated .gitignore (+{label})[/dim]")
 
     # Baseline check
     test_command = config.get("test_command")
