@@ -285,7 +285,9 @@ def _ts() -> str:
 
 def generate_preview(output_path: str | None = None, replay_file: str | None = None) -> Path:
     """Generate HTML preview and return the file path."""
-    console = Console(record=True, width=100, color_system="truecolor")
+    # Use 256color to match typical terminal rendering (not truecolor which
+    # shows more color differentiation than most terminals actually display)
+    console = Console(record=True, width=100, color_system="256")
 
     if replay_file:
         replay_from_jsonl(console, replay_file)
