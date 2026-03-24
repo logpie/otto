@@ -1380,14 +1380,20 @@ async def run_task_v45(
         nonlocal spec, spec_task, total_cost, spec_generation_error
         if not spec_task or spec:
             return
+
+        # Check if spec gen already finished before we needed it
+        already_done = spec_task.done()
+        await_start = time.monotonic()
         try:
             spec_items, spec_cost, spec_error = await spec_task
         finally:
             spec_task = None
 
-        # Show time only if spec gen was actively awaited (not parked in background).
-        # Wall time is misleading when spec ran in parallel with coding.
-        spec_elapsed = 0.0  # don't show wall time — it includes parked time
+        # Track real timing:
+        # - spec_elapsed: total time from start (for cost accounting)
+        # - wait_time: how long QA had to wait (0 if already done)
+        spec_elapsed = round(time.monotonic() - spec_started_at, 1) if spec_started_at else 0.0
+        wait_time = 0.0 if already_done else round(time.monotonic() - await_start, 1)
         total_cost += spec_cost
         if spec_items:
             spec = spec_items
@@ -1400,6 +1406,10 @@ async def run_task_v45(
             _must = sum(1 for item in spec if _sb_count(item) == "must")
             _should = len(spec) - _must
             _breakdown = f"{len(spec)} items ({_must} must, {_should} should)"
+            if already_done:
+                _breakdown += " (ready)"
+            elif wait_time > 1:
+                _breakdown += f" (waited {wait_time:.0f}s)"
             emit("phase", name="spec_gen", status="done", time_s=spec_elapsed,
                  detail=_breakdown, cost=spec_cost)
             from otto.tasks import spec_binding, spec_text
@@ -1756,8 +1766,9 @@ async def run_task_v45(
                 # Wait for specs, then run QA to verify properly.
                 # If QA passes, the task passes. If QA fails, retry with findings.
                 if spec_task and not spec:
-                    emit("phase", name="spec_gen", status="running",
-                         detail="awaiting specs to verify existing code...")
+                    if not spec_task.done():
+                        emit("phase", name="spec_gen", status="running",
+                             detail="awaiting specs to verify existing code...")
                     await _await_spec_task()
 
                 qa_spec = spec
@@ -1988,8 +1999,9 @@ async def run_task_v45(
 
             # Await specs before QA (if still generating)
             if spec_task and not spec:
-                emit("phase", name="spec_gen", status="running",
-                     detail="awaiting specs before QA...")
+                if not spec_task.done():
+                    emit("phase", name="spec_gen", status="running",
+                         detail="awaiting specs before QA...")
                 await _await_spec_task()
 
             # QA — risk-based tiering
