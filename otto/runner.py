@@ -2048,15 +2048,11 @@ async def run_task_v45(
                         passed=passed,
                         evidence=evidence,
                     )
-                for item in verdict.get("should_notes", []):
-                    emit(
-                        "qa_item_result",
-                        text=(
-                            f"  [should] {item.get('criterion', '')[:70]} — "
-                            f"{item.get('observation', '')[:50]}"
-                        ),
-                        passed=True,
-                    )
+                should_count = len(verdict.get("should_notes", []))
+                if should_count:
+                    emit("qa_item_result",
+                         text=f"  [should] {should_count} items noted",
+                         passed=True)
 
                 # Persist QA report
                 try:

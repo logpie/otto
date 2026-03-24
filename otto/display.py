@@ -389,14 +389,20 @@ class TaskDisplay:
             total_lines = data.get("total_lines", 0)
 
             if name == "Edit" and (old_lines or new_lines):
-                for ol in old_lines:
-                    self._console.print(f"        [red]- {rich_escape(ol)}[/red]")
-                if old_total > len(old_lines):
-                    self._console.print(f"        [dim]  ...{old_total - len(old_lines)} more[/dim]")
-                for nl in new_lines:
-                    self._console.print(f"        [green]+ {rich_escape(nl)}[/green]")
-                if new_total > len(new_lines):
-                    self._console.print(f"        [dim]  ...{new_total - len(new_lines)} more[/dim]")
+                # For large edits (>20 lines), just show summary
+                if old_total + new_total > 20:
+                    self._console.print(
+                        f"        [dim][red]-{old_total}[/red] [green]+{new_total}[/green] lines[/dim]"
+                    )
+                else:
+                    for ol in old_lines:
+                        self._console.print(f"        [red]- {rich_escape(ol)}[/red]")
+                    if old_total > len(old_lines):
+                        self._console.print(f"        [dim]  ...{old_total - len(old_lines)} more[/dim]")
+                    for nl in new_lines:
+                        self._console.print(f"        [green]+ {rich_escape(nl)}[/green]")
+                    if new_total > len(new_lines):
+                        self._console.print(f"        [dim]  ...{new_total - len(new_lines)} more[/dim]")
 
             elif name == "Write" and preview:
                 for pl in preview:
@@ -599,15 +605,17 @@ class TaskDisplay:
             self._console.print(f"      [dim]{rich_escape(item[:80])}[/dim]")
         remaining = len(items) - len(preview)
         if remaining > 0:
-            self._console.print(f"      [dim]... +{remaining} more (otto show for full list)[/dim]")
+            self._console.print(f"      [dim]... +{remaining} more[/dim]")
 
     def add_qa_item_result(self, text: str, passed: bool = True, evidence: str = "") -> None:
         """Print a QA per-item result."""
         if not text:
             return
         if passed:
-            self._console.print(f"      [green]{rich_escape(text)}[/green]")
+            # Passed items: dim with green checkmark (not all-green)
+            self._console.print(f"      [dim]{rich_escape(text)}[/dim]")
             return
+        # Failed items: red with evidence
         self._console.print(f"      [red]{rich_escape(text)}[/red]")
         if evidence:
             self._console.print(f"        [dim]evidence: {rich_escape(evidence)}[/dim]")
