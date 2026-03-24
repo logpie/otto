@@ -1527,15 +1527,18 @@ async def run_task_v45(
         # Fire spec gen in background if no specs yet
         if not spec:
             async def _spec_with_timeout():
+                _spec_timeout = 300  # 5 min max
                 try:
                     _spec_settings = config.get("spec_agent_settings", "project").split(",")
                     spec_items, spec_cost, spec_error = await asyncio.wait_for(
                         async_generate_spec(prompt, project_dir, setting_sources=_spec_settings),
-                        timeout=300,  # 5 min max for spec gen
+                        timeout=_spec_timeout,
                     )
                     return spec_items, spec_cost, spec_error
                 except asyncio.TimeoutError:
-                    return None, 0.0, "spec generation timed out after 300s"
+                    return None, 0.0, f"spec generation timed out after {_spec_timeout}s"
+                except asyncio.CancelledError:
+                    return None, 0.0, "spec generation cancelled"
                 except Exception as exc:
                     return None, 0.0, f"spec generation failed: {exc}"
 
