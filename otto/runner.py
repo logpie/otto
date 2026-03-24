@@ -1081,6 +1081,7 @@ async def run_qa_agent_v45(
     diff: str,
     tier: int = 1,
     focus_items: list | None = None,
+    prev_failed: list[str] | None = None,
     on_progress: Any = None,
 ) -> dict[str, Any]:
     """v4.5 QA agent — structured JSON verdict, risk-based tiering.
@@ -1113,7 +1114,11 @@ async def run_qa_agent_v45(
 
     # Build focus section for targeted QA
     focus_section = ""
-    if focus_items:
+    if prev_failed:
+        focus_section += "\n\nPRIORITY — These items failed in the previous QA round. Verify they are fixed FIRST:\n"
+        focus_section += "\n".join(f"  - {c}" for c in prev_failed)
+        focus_section += "\nThen verify remaining items haven't regressed."
+    elif focus_items:
         focus_texts = [spec_text(item) for item in focus_items]
         focus_section = "\n\nFocus your testing on these items that lack test coverage:\n"
         focus_section += "\n".join(f"  - {t}" for t in focus_texts)
@@ -1321,6 +1326,7 @@ async def run_task_v45(
     session_id = None
     last_error = None
     last_error_source = None
+    _prev_failed_criteria: list[str] = []  # QA failures from previous attempt
     prior_attempts = task.get("attempts", 0) or 0
     total_attempts = prior_attempts
     # empty_retries removed — prompt now includes working dir, should not happen
@@ -1638,6 +1644,9 @@ async def run_task_v45(
                     coding_prompt += f"\n  Source: {last_error_source}"
                     coding_prompt += (
                         f"\n  Raw output:\n{_fence_untrusted_text(last_error)}"
+                    )
+                    coding_prompt += (
+                        f"\n\nFix the specific failures above. Do not regress items that were passing."
                     )
                 if context and hasattr(context, 'observed_learnings') and context.observed_learnings:
                     coding_prompt += f"\n\nFactual observations from prior tasks:\n"
@@ -2053,6 +2062,7 @@ async def run_task_v45(
                     diff=diff_info["full_diff"],
                     tier=qa_tier,
                     focus_items=focus_items,
+                    prev_failed=_prev_failed_criteria if _prev_failed_criteria else None,
                     on_progress=on_progress,
                 )
                 qa_elapsed = round(time.monotonic() - qa_start, 1)
@@ -2108,13 +2118,28 @@ async def run_task_v45(
                         fail_summary = first_line if first_line else "QA did not pass"
                     emit("phase", name="qa", status="fail", time_s=qa_elapsed,
                          error=f"QA: {fail_summary}"[:80])
-                    # Reset for retry
+                    # Reset for retry — send structured failure info, not raw report
                     subprocess.run(
                         ["git", "reset", "--mixed", base_sha],
                         cwd=project_dir, capture_output=True,
                     )
-                    last_error = qa_report
+                    # Build targeted error with just the failed items + evidence
+                    failure_lines = []
+                    for item in failed_musts:
+                        criterion = item.get("criterion", "")
+                        evidence = item.get("evidence", "")
+                        failure_lines.append(f"- [must] {criterion}")
+                        if evidence:
+                            failure_lines.append(f"  evidence: {evidence}")
+                    if failure_lines:
+                        last_error = "QA found these issues:\n" + "\n".join(failure_lines)
+                    else:
+                        last_error = qa_report  # fallback to raw report
                     last_error_source = "qa"
+                    # Track which items failed for QA retry prioritization
+                    _prev_failed_criteria = [
+                        item.get("criterion", "") for item in failed_musts
+                    ]
                     continue
                 else:
                     emit("phase", name="qa", status="done", time_s=qa_elapsed,
