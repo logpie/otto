@@ -463,14 +463,15 @@ def build_candidate_commit(
         ["git", "add", "-u"],
         cwd=project_dir, capture_output=True, check=True,
     )
-    # Stage agent-created untracked files (excluding ignored and pre-existing)
+    # Stage ALL untracked source files (not just agent-created ones).
+    # Pre-existing untracked files might be imported by agent code —
+    # if they're excluded, the verify worktree breaks on missing imports.
     untracked = subprocess.run(
         ["git", "ls-files", "--others", "--exclude-standard", "-z"],
         cwd=project_dir, capture_output=True, text=True,
     )
-    skip = pre_existing_untracked or set()
     for f in untracked.stdout.split("\0"):
-        if f and f not in skip:
+        if f:
             subprocess.run(
                 ["git", "add", "--", f],
                 cwd=project_dir, capture_output=True,
@@ -1552,7 +1553,10 @@ async def run_task_v45(
                         f"- [{l.source}] {l.text}" for l in context.observed_learnings
                     )
 
-            coding_prompt += f"\n\nYou are working in {project_dir}. Do not create git commits."
+            coding_prompt += (
+                f"\n\nYou are working in {project_dir}. Do not create git commits."
+                f" Do not ask questions — make decisions yourself and implement."
+            )
 
             # Run coding agent — NO custom system prompt (bare CC)
             if attempt == 0 and not last_error:
