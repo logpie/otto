@@ -1340,6 +1340,7 @@ async def run_task_v45(
     pre_existing_untracked: set[str] | None = None
     spec_task: asyncio.Task | None = None
     spec_started_at: float | None = None
+    _spec_finish_time: float | None = None  # set by spec gen thread on completion
     spec_generation_error = ""
     _result_error_code_unset = object()
 
@@ -1412,8 +1413,13 @@ async def run_task_v45(
         finally:
             spec_task = None
 
-        # With to_thread, spec gen runs in its own thread — wall time = actual runtime
-        spec_elapsed = round(time.monotonic() - spec_started_at, 1) if spec_started_at else 0.0
+        # Use the thread's own finish timestamp for accurate runtime
+        if _spec_finish_time and spec_started_at:
+            spec_elapsed = round(_spec_finish_time - spec_started_at, 1)
+        elif spec_started_at:
+            spec_elapsed = round(time.monotonic() - spec_started_at, 1)
+        else:
+            spec_elapsed = 0.0
         total_cost += spec_cost
         if spec_items:
             spec = spec_items
@@ -1564,9 +1570,13 @@ async def run_task_v45(
             _spec_settings = config.get("spec_agent_settings", "project").split(",")
 
             def _run_spec_gen_thread():
+                nonlocal _spec_finish_time
                 try:
-                    return generate_spec_sync(prompt, project_dir, setting_sources=_spec_settings)
+                    result = generate_spec_sync(prompt, project_dir, setting_sources=_spec_settings)
+                    _spec_finish_time = time.monotonic()
+                    return result
                 except Exception as exc:
+                    _spec_finish_time = time.monotonic()
                     return None, 0.0, f"spec generation failed: {exc}"
 
             emit("phase", name="spec_gen", status="running")
