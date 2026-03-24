@@ -203,6 +203,9 @@ def create_config(project_dir: Path) -> Path:
     lines += f"# max_parallel: 3               # max parallel tasks (future)\n"
     lines += f"# researcher_model: sonnet       # model for research subagent (sonnet/haiku/opus)\n"
     lines += f"# max_task_time: 900             # max seconds per task (prevents unbounded retries)\n"
+    lines += f"# coding_agent_settings: user,project  # CC settings for coding agent (user,project or project)\n"
+    lines += f"# spec_agent_settings: project         # CC settings for spec agent\n"
+    lines += f"# qa_agent_settings: project           # CC settings for QA agent\n"
     config_path.write_text(lines + "\n")
 
     # Update .git/info/exclude for runtime files (use git_meta_dir for linked worktrees)
