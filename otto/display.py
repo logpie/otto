@@ -139,6 +139,8 @@ class TaskDisplay:
         self._read_count: int = 0
         self._spec_gen_announced: bool = False
         self._spec_items_buffer: list[str] = []
+        self._edit_streak: int = 0
+        self._edit_streak_first: str = ""
 
     def start(self) -> None:
         self._start_time = time.monotonic()
@@ -336,6 +338,23 @@ class TaskDisplay:
             elif self._current_phase == "coding" and self._read_count > 3:
                 self._console.print(f"      [dim]... explored {self._read_count} files[/dim]")
                 self._read_count = 0
+
+            # Collapse consecutive similar edits (e.g., adding same field to 20 test files)
+            if self._current_phase == "coding" and name == "Edit":
+                self._edit_streak += 1
+                if self._edit_streak == 1:
+                    self._edit_streak_first = detail
+                elif self._edit_streak <= 2:
+                    pass  # show first 2 normally
+                else:
+                    return  # suppress — will flush on next non-Edit
+            elif self._edit_streak > 2:
+                self._console.print(
+                    f"      [dim]... edited {self._edit_streak} files (similar changes)[/dim]"
+                )
+                self._edit_streak = 0
+            else:
+                self._edit_streak = 0
 
         if self._current_phase == "qa":
             label = self._qa_tool_label(name, detail)
