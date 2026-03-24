@@ -139,40 +139,35 @@ def preflight_checks(
         console.print("[red]Working tree is dirty -- fix before running otto[/red]")
         return (2, [])
 
-    # Ensure .gitignore covers large untracked dirs (build artifacts, deps).
-    # Runs every time — catches new dirs from agent actions or npm install.
+    # Ensure .gitignore covers known build/dependency dirs.
+    # Uses framework detection (not size heuristics) — only auto-adds
+    # from a curated allowlist keyed off project manifest files.
+    _FRAMEWORK_IGNORES: dict[str, list[str]] = {
+        "package.json": ["node_modules/", ".next/", "dist/", "build/", "coverage/", ".turbo/"],
+        "pyproject.toml": ["__pycache__/", ".venv/", "dist/", ".pytest_cache/", "*.egg-info"],
+        "requirements.txt": ["__pycache__/", ".venv/", ".pytest_cache/"],
+        "setup.py": ["__pycache__/", ".venv/", "dist/", "*.egg-info", "build/"],
+        "Cargo.toml": ["target/"],
+        "go.mod": ["vendor/"],
+        "Gemfile": ["vendor/bundle/"],
+    }
     gitignore = project_dir / ".gitignore"
-    existing_ignores = set()
-    if gitignore.exists():
-        existing_ignores = {
-            line.strip().rstrip("/")
-            for line in gitignore.read_text().splitlines()
-            if line.strip() and not line.strip().startswith("#")
-        }
-    ls_result = subprocess.run(
-        ["git", "ls-files", "--others", "--directory", "--exclude-standard", "-z"],
-        cwd=project_dir, capture_output=True, text=True,
-    )
-    untracked_dirs = [
-        d.rstrip("/") for d in ls_result.stdout.split("\0")
-        if d.endswith("/") and d.rstrip("/") not in ("otto_logs", "otto_arch")
-    ]
+    existing_text = gitignore.read_text() if gitignore.exists() else ""
+    existing_ignores = {
+        line.strip() for line in existing_text.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    }
     missing_ignores = []
-    for d in untracked_dirs:
-        if d in existing_ignores:
-            continue
-        dp = project_dir / d
-        if dp.is_dir():
-            try:
-                count = sum(1 for _ in dp.rglob("*") if _.is_file())
-            except (OSError, StopIteration):
-                count = 0
-            if count > 50:
-                missing_ignores.append(d + "/")
+    for manifest, dirs in _FRAMEWORK_IGNORES.items():
+        if (project_dir / manifest).exists():
+            for d in dirs:
+                if d not in existing_ignores and d.rstrip("/") not in existing_ignores:
+                    missing_ignores.append(d)
     if missing_ignores:
-        # Append to existing or create new
         with open(gitignore, "a") as f:
-            f.write("\n".join(sorted(missing_ignores)) + "\n")
+            if existing_text and not existing_text.endswith("\n"):
+                f.write("\n")
+            f.write("\n".join(sorted(set(missing_ignores))) + "\n")
         subprocess.run(["git", "add", ".gitignore"], cwd=project_dir, capture_output=True)
         subprocess.run(
             ["git", "commit", "-m", "otto: update .gitignore for build artifacts"],
