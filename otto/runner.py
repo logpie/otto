@@ -679,6 +679,11 @@ async def coding_loop(
                 display.flush_spec_summary()
             elif event_type == "qa_finding":
                 display.add_finding(data.get("text", ""))
+            elif event_type == "qa_status":
+                # QA reasoning narration — show as dim status line
+                text = data.get("text", "")
+                if text:
+                    console.print(f"      [dim]{rich_escape(text[:80])}[/dim]")
             elif event_type == "qa_item_result":
                 display.add_qa_item_result(
                     text=data.get("text", ""),
@@ -1182,17 +1187,37 @@ Write your JSON verdict to: {verdict_file}
                             if on_progress:
                                 for line in block.text.splitlines():
                                     line_s = line.strip()
-                                    if line_s and any(m in line_s for m in
+                                    if not line_s or len(line_s) < 10:
+                                        continue
+                                    # PASS/FAIL/verdict lines → structured findings
+                                    has_verdict = any(m in line_s for m in
                                                       ["PASS", "FAIL", "must", "should",
-                                                       "✅", "❌"]):
+                                                       "✅", "❌", "✓", "✗"])
+                                    if has_verdict:
                                         try:
                                             on_progress("qa_finding", {"text": line_s[:200]})
+                                        except Exception:
+                                            pass
+                                    else:
+                                        # Reasoning narration → status line
+                                        try:
+                                            on_progress("qa_status", {"text": line_s[:120]})
                                         except Exception:
                                             pass
                         elif ToolUseBlock and isinstance(block, ToolUseBlock):
                             if on_progress:
                                 try:
                                     event = _build_agent_tool_event(block)
+                                    # Also capture browser/MCP tools
+                                    if not event and block.name.startswith("mcp__"):
+                                        action = block.name.split("__")[-1]
+                                        detail = ""
+                                        inp = block.input or {}
+                                        if "url" in inp:
+                                            detail = inp["url"][:60]
+                                        elif "selector" in inp:
+                                            detail = inp["selector"][:60]
+                                        event = {"name": f"Browser:{action}", "detail": detail}
                                     if event:
                                         on_progress("agent_tool", event)
                                 except Exception:
