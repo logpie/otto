@@ -29,6 +29,7 @@ from otto.tasks import (
     reset_all_tasks,
     save_tasks,
     spec_binding,
+    spec_is_verifiable,
     spec_text,
     update_task,
 )
@@ -590,10 +591,12 @@ def add(prompt, verify, max_retries, import_file, gen_spec):
             text = spec_text(item)
             short = text[:80] + "..." if len(text) > 80 else text
             binding = spec_binding(item)
+            verifiable = spec_is_verifiable(item)
+            marker = "" if verifiable else " \u25c8"
             if binding == "must":
-                tag = "[success]\\[must][/success]"
+                tag = f"[success]\\[must{marker}][/success]"
             else:
-                tag = "[info]\\[should][/info]"
+                tag = f"[info]\\[should{marker}][/info]"
             spec_table.add_row(str(idx), tag, rich_escape(short))
         console.print(spec_table)
         console.print()
@@ -834,7 +837,8 @@ def plan(specs):
                         for item in filtered:
                             binding = spec_binding(item)
                             text = spec_text(item)
-                            tag = f"[{binding}]"
+                            marker = "" if spec_is_verifiable(item) else " \u25c8"
+                            tag = f"[{binding}{marker}]"
                             console.print(f"    [dim]{tag}[/dim] {rich_escape(text[:75])}")
                     else:
                         console.print(f"    [dim](no spec generated)[/dim]")
@@ -1472,10 +1476,12 @@ def show(task_id):
                 for i, item in enumerate(spec, 1):
                     text = spec_text(item)
                     binding = spec_binding(item)
+                    verifiable = spec_is_verifiable(item)
+                    marker = "" if verifiable else " \u25c8"
                     if binding == "must":
-                        tag = "[success]\\[must][/success]"
+                        tag = f"[success]\\[must{marker}][/success]"
                     else:
-                        tag = "[info]\\[should][/info]"
+                        tag = f"[info]\\[should{marker}][/info]"
                     console.print(f"    {i}. {tag} {rich_escape(text)}")
 
             # Diff summary (files changed)

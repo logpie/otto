@@ -855,13 +855,17 @@ Kill any servers you started (by PID, not pkill)."""
 
 
 def format_spec_v45(spec: list) -> str:
-    """Format spec items with [must]/[should] binding for prompt injection."""
-    from otto.tasks import spec_text, spec_binding
+    """Format spec items with [must]/[should] binding for prompt injection.
+
+    Non-verifiable (subjective) items get a ◈ marker: [must ◈], [should ◈].
+    """
+    from otto.tasks import spec_text, spec_binding, spec_is_verifiable
     lines = []
     for item in spec:
         text = spec_text(item)
         binding = spec_binding(item)
-        lines.append(f"  [{binding}] {text}")
+        marker = "" if spec_is_verifiable(item) else " \u25c8"  # ◈
+        lines.append(f"  [{binding}{marker}] {text}")
     return "\n".join(lines)
 
 
