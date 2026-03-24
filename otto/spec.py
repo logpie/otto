@@ -130,6 +130,14 @@ def generate_spec(prompt: str, project_dir: Path, setting_sources: list[str] | N
     return spec
 
 
+def generate_spec_sync(prompt: str, project_dir: Path, setting_sources: list[str] | None = None) -> tuple[list, float, str | None]:
+    """Sync version returning full (spec_items, cost, error) tuple.
+
+    Safe to call from asyncio.to_thread() — creates its own event loop.
+    """
+    return asyncio.run(_run_spec_agent(prompt, project_dir, setting_sources=setting_sources))
+
+
 async def async_generate_spec(prompt: str, project_dir: Path, setting_sources: list[str] | None = None) -> tuple[list, float, str | None]:
     """Async version of generate_spec. Returns (spec_items, cost, error)."""
     return await _run_spec_agent(prompt, project_dir, setting_sources=setting_sources)

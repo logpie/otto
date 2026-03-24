@@ -1312,7 +1312,7 @@ async def run_task_v45(
     Returns {success, status, cost_usd, error, diff_summary, qa_report,
              phase_timings, review_ref}.
     """
-    from otto.spec import async_generate_spec
+    from otto.spec import async_generate_spec  # noqa: F401 — kept for backward compat
 
     key = task["key"]
     task_id = task["id"]
@@ -1403,17 +1403,13 @@ async def run_task_v45(
 
         # Check if spec gen already finished before we needed it
         already_done = spec_task.done()
-        await_start = time.monotonic()
         try:
             spec_items, spec_cost, spec_error = await spec_task
         finally:
             spec_task = None
 
-        # Track real timing:
-        # - spec_elapsed: total time from start (for cost accounting)
-        # - wait_time: how long QA had to wait (0 if already done)
+        # With to_thread, spec gen runs in its own thread — wall time = actual runtime
         spec_elapsed = round(time.monotonic() - spec_started_at, 1) if spec_started_at else 0.0
-        wait_time = 0.0 if already_done else round(time.monotonic() - await_start, 1)
         total_cost += spec_cost
         if spec_items:
             spec = spec_items
@@ -1426,14 +1422,9 @@ async def run_task_v45(
             _must = sum(1 for item in spec if _sb_count(item) == "must")
             _should = len(spec) - _must
             _breakdown = f"{len(spec)} items ({_must} must, {_should} should)"
-            # Show critical-path wait (how much it blocked QA), not wall time
             if already_done:
-                _breakdown += f" (ready, background {spec_elapsed:.0f}s)"
-                critical_wait = 0.0
-            else:
-                _breakdown += f" (waited {wait_time:.0f}s, background {spec_elapsed:.0f}s)"
-                critical_wait = wait_time
-            emit("phase", name="spec_gen", status="done", time_s=critical_wait,
+                _breakdown += " (ready)"
+            emit("phase", name="spec_gen", status="done", time_s=spec_elapsed,
                  detail=_breakdown, cost=spec_cost)
             from otto.tasks import spec_binding, spec_text
             for item in spec:
@@ -1559,20 +1550,23 @@ async def run_task_v45(
             )
             return _result(False, "failed", error=error, error_code="max_retries")
 
-        # Fire spec gen in background if no specs yet
+        # Fire spec gen in a separate thread for true parallelism.
+        # asyncio.create_task shares the event loop and gets starved by coding.
+        # to_thread runs generate_spec_sync() with its own event loop.
         if not spec:
-            async def _run_spec_gen():
+            from otto.spec import generate_spec_sync
+
+            _spec_settings = config.get("spec_agent_settings", "project").split(",")
+
+            def _run_spec_gen_thread():
                 try:
-                    _spec_settings = config.get("spec_agent_settings", "project").split(",")
-                    return await async_generate_spec(prompt, project_dir, setting_sources=_spec_settings)
-                except asyncio.CancelledError:
-                    return None, 0.0, "spec generation cancelled"
+                    return generate_spec_sync(prompt, project_dir, setting_sources=_spec_settings)
                 except Exception as exc:
                     return None, 0.0, f"spec generation failed: {exc}"
 
             emit("phase", name="spec_gen", status="running")
             spec_started_at = time.monotonic()
-            spec_task = asyncio.create_task(_run_spec_gen())
+            spec_task = asyncio.create_task(asyncio.to_thread(_run_spec_gen_thread))
 
         for attempt in range(remaining):
             attempt_num = prior_attempts + attempt + 1

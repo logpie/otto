@@ -320,7 +320,7 @@ class TestRunTaskV45:
                 result="ok",
             )
 
-        async def fake_spec(prompt, project_dir, **kwargs):
+        def fake_spec_sync(prompt, project_dir, **kwargs):
             raise RuntimeError("spec boom")
 
         qa_mock = AsyncMock(return_value={
@@ -331,7 +331,7 @@ class TestRunTaskV45:
         })
 
         with patch("otto.runner.query", new=fake_query):
-            with patch("otto.spec.async_generate_spec", side_effect=fake_spec):
+            with patch("otto.spec.generate_spec_sync", side_effect=fake_spec_sync):
                 with patch("otto.runner.run_verification", return_value=VerifyResult(
                     passed=True,
                     tiers=[TierResult("tier1", True, "1 passed")],
@@ -479,7 +479,7 @@ class TestRunTaskV45:
                 result="ok",
             )
 
-        async def empty_spec(prompt, project_dir, **kwargs):
+        def empty_spec_sync(prompt, project_dir, **kwargs):
             return [], 0.37, None
 
         qa_mock = AsyncMock(return_value={
@@ -490,7 +490,7 @@ class TestRunTaskV45:
         })
 
         with patch("otto.runner.query", new=fake_query):
-            with patch("otto.spec.async_generate_spec", side_effect=empty_spec):
+            with patch("otto.spec.generate_spec_sync", side_effect=empty_spec_sync):
                 with patch("otto.runner.run_verification", return_value=VerifyResult(
                     passed=True,
                     tiers=[TierResult("tier1", True, "1 passed")],
@@ -659,8 +659,9 @@ class TestRunTaskV45:
             "test_command": None,
         }
 
-        async def hanging_spec(prompt, project_dir, **kwargs):
-            await asyncio.Future()
+        def hanging_spec_sync(prompt, project_dir, **kwargs):
+            import time as _time
+            _time.sleep(3600)  # simulate hang — will be interrupted by task timeout
 
         async def fake_query(*, prompt, options=None):
             yield SimpleNamespace(
@@ -670,7 +671,7 @@ class TestRunTaskV45:
                 result="ok",
             )
 
-        with patch("otto.spec.async_generate_spec", side_effect=hanging_spec):
+        with patch("otto.spec.generate_spec_sync", side_effect=hanging_spec_sync):
             with patch("otto.runner.query", new=fake_query):
                 with patch("otto.runner.build_candidate_commit", return_value="candidate-sha"):
                     with patch("otto.runner.run_verification", return_value=VerifyResult(
