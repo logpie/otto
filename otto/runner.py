@@ -1102,10 +1102,11 @@ Write your JSON verdict to: {verdict_file}
             except Exception:
                 pass
 
+    _qa_settings = config.get("qa_agent_settings", "project").split(",")
     qa_opts = ClaudeAgentOptions(
         permission_mode="bypassPermissions",
         cwd=str(project_dir),
-        setting_sources=["project"],
+        setting_sources=_qa_settings,
         env=_subprocess_env(),
         # Keep CC's default prompt (Glob over find, etc.) + append QA instructions
         system_prompt={"type": "preset", "preset": "claude_code",
@@ -1460,7 +1461,7 @@ async def run_task_v45(
         if not spec:
             async def _spec_with_timeout():
                 try:
-                    _spec_settings = config.get("agent_settings", "user,project").split(",")
+                    _spec_settings = config.get("spec_agent_settings", "project").split(",")
                     spec_items, spec_cost, spec_error = await asyncio.wait_for(
                         async_generate_spec(prompt, project_dir, setting_sources=_spec_settings),
                         timeout=300,  # 5 min max for spec gen
@@ -1571,11 +1572,11 @@ async def run_task_v45(
                  detail=coding_detail)
             coding_start = time.monotonic()
             try:
-                _agent_settings = config.get("agent_settings", "user,project").split(",")
+                _coding_settings = config.get("coding_agent_settings", "user,project").split(",")
                 agent_opts = ClaudeAgentOptions(
                     permission_mode="bypassPermissions",
                     cwd=str(project_dir),
-                    setting_sources=_agent_settings,
+                    setting_sources=_coding_settings,
                     env=_subprocess_env(),
                     # Use CC's default system prompt (Glob over find, etc.)
                     # None would blank it; preset keeps CC's defaults.
