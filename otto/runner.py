@@ -164,30 +164,8 @@ def preflight_checks(
             for entry in missing_excludes:
                 f.write(entry + "\n")
 
-    # Baseline check
-    test_command = config.get("test_command")
-    if test_command:
-        _log_info("Running baseline check...")
-        baseline_env = _subprocess_env()
-        baseline_env["CI"] = "true"
-        try:
-            result = subprocess.run(
-                test_command, shell=True, cwd=project_dir,
-                capture_output=True, timeout=config["verify_timeout"],
-                env=baseline_env,
-            )
-        except subprocess.TimeoutExpired:
-            console.print("  [yellow]Warning: Baseline tests timed out (interactive runner?) -- proceeding[/yellow]")
-            result = None
-        if result is not None:
-            if result.returncode not in (0, 5):
-                console.print("  [yellow]Warning: Baseline tests failing -- recorded, proceeding[/yellow]")
-            elif result.returncode == 0:
-                import re as _re
-                stdout_text = (result.stdout or b"").decode(errors="replace")
-                match = _re.search(r"(\d+) passed", stdout_text)
-                count = f" ({match.group(1)} tests)" if match else ""
-                console.print(f"  [green]\u2713[/green] Baseline passing{count}", style="dim")
+    # Baseline check moved to run_task_v45() — runs after branch creation
+    # with auto-detected test command for consistent results.
 
     # Recover stale "running" tasks
     tasks = load_tasks(tasks_file)
@@ -630,12 +608,12 @@ async def run_task_v45(
         scratch_dir.mkdir(exist_ok=True)
 
         verify_cmd = task.get("verify")
-        test_command = config.get("test_command")
 
-        # Auto-detect test_command
-        if not test_command:
-            detected = detect_test_command(project_dir)
-            test_command = detected if detected else None
+        # Auto-detect test_command only if not explicitly set in config
+        if "test_command" in config:
+            test_command = config["test_command"]  # respect explicit null
+        else:
+            test_command = detect_test_command(project_dir)
 
         # Baseline test check
         baseline_detail = ""
