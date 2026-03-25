@@ -146,6 +146,13 @@ def build_agent_tool_event(block) -> dict | None:
             return None
         return {"name": "Read", "detail": raw_detail[:80]}
 
+    # Show Agent/Skill/TodoWrite dispatches for visibility
+    if name == "Agent":
+        desc = inputs.get("description") or inputs.get("prompt", "")[:60] or "subagent"
+        return {"name": "Agent", "detail": desc[:80]}
+    if name in ("Skill", "TodoWrite", "ToolSearch"):
+        return {"name": name, "detail": (inputs.get("skill") or inputs.get("query") or "")[:60]}
+
     if name not in ("Read", "Write", "Edit", "Bash"):
         return None
     if not _should_emit_tool(name, raw_detail):
