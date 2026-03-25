@@ -791,30 +791,18 @@ contradict what the codebase actually does. Deduplicate."""
 
     prompt = f"""Write a CLAUDE.md for a coding agent working on this project.
 
-CLAUDE.md is a routing table — every line should change where the agent looks
-next. It is NOT a reference doc. Think: "what would cause the agent to waste
-time or make mistakes without this guidance?"
+CLAUDE.md tells the agent what it needs to know to work effectively here.
+Include: build/test commands, project structure, key conventions, and anything
+that would cause mistakes without guidance.
 
 Project files:
 {chr(10).join(context_parts)}
 {merge_section}
 
-Structure:
-
-1. **Commands** — build, test, lint. Commands only, no descriptions.
-2. **Project structure** — 3-5 bullets. Identify the primary codebase.
-   Call out directories to ignore (demos, generated output, vendored code).
-3. **Key coupling points** — which files/dirs change together? Where are the
-   cross-file dependencies the agent must check after edits?
-4. **Conventions** — point to WHERE patterns live, don't inline them:
-   - "Card styling — see any card in src/components/"
-   - NOT "Cards use bg-white/15 backdrop-blur-lg..."
-5. **Test patterns** — where tests live, name the shared fixture file/factory.
-
-Rules:
-- Every principle must point to a file or directory. No generic advice.
-- Prefer repo-specific watchouts over general best practices.
-- Under 25 lines. If a line doesn't change the agent's behavior, cut it.
+Guidelines:
+- Point to files/directories rather than inlining specifics that go stale.
+- Avoid counts, version numbers, or facts that change frequently.
+- Keep it concise — the agent reads code well, just orient it.
 Output ONLY the markdown content."""
 
     try:
