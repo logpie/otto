@@ -727,10 +727,13 @@ def setup():
         else:
             mode = "merge"
 
-    # Back up existing CLAUDE.md so the agent doesn't just echo it
-    _backup_content = None
+    # Back up existing CLAUDE.md to temp file (safe — survives crashes)
+    _backup_path = None
     if mode == "generate" and claude_md.exists():
-        _backup_content = _read_text_if_possible(claude_md, 10000)
+        import tempfile as _tf
+        fd, _backup_path = _tf.mkstemp(suffix=".md", prefix="claude_md_backup_")
+        os.close(fd)
+        Path(_backup_path).write_text(claude_md.read_text())
         claude_md.unlink()
 
     # Gather project context for the LLM
@@ -855,11 +858,14 @@ Output ONLY the markdown content."""
         claude_md.write_text(content.strip() + "\n")
         console.print(f"[green]✓[/green] Wrote CLAUDE.md ({len(content)} chars)")
         console.print("[dim]  Commit it so the coding agent can read it.[/dim]")
+        # Clean up backup
+        if _backup_path and Path(_backup_path).exists():
+            Path(_backup_path).unlink()
     else:
         # Restore backup if user cancelled
-        if _backup_content:
-            claude_md.write_text(_backup_content)
-        console.print("[dim]Cancelled[/dim]")
+        if _backup_path and Path(_backup_path).exists():
+            Path(_backup_path).rename(claude_md)
+        console.print("[dim]Cancelled — original CLAUDE.md restored[/dim]")
 
 
 async def _run_setup(prompt: str, project_dir: Path) -> str:
@@ -873,7 +879,6 @@ async def _run_setup(prompt: str, project_dir: Path) -> str:
         permission_mode="bypassPermissions",
         cwd=str(project_dir),
         setting_sources=[],
-        max_turns=5,
         system_prompt="You are a project analyst. Output ONLY the markdown content for CLAUDE.md. No explanation, no preamble, no tool use.",
     )
     result_text = ""
