@@ -96,6 +96,79 @@ def print_agent_tool(block, quiet: bool = False) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Agent tool event helpers (used by runner + QA agent loops)
+# ---------------------------------------------------------------------------
+
+
+def _tool_use_summary(block) -> str:
+    """Return a one-line summary of a tool use for logging."""
+    inputs = block.input or {}
+    name = block.name
+    if name in ("Read", "Glob", "Grep"):
+        return inputs.get("file_path") or inputs.get("path") or inputs.get("pattern") or ""
+    elif name in ("Edit", "Write"):
+        return inputs.get("file_path") or ""
+    elif name == "Bash":
+        cmd = inputs.get("command") or ""
+        return _truncate_at_word(cmd, 120)
+    return ""
+
+
+def build_agent_tool_event(block) -> dict | None:
+    """Build a progress event dict for a tool use block.
+
+    Returns None if the tool call should not be displayed.
+    """
+    def _should_emit_tool(tool_name: str, detail: str) -> bool:
+        if tool_name in ("Write", "Edit"):
+            return bool(detail)
+        if tool_name == "Read":
+            return any(ext in detail for ext in (".py", ".ts", ".tsx", ".js", ".jsx", ".rs", ".go"))
+        if tool_name == "Bash":
+            cmd = detail.strip()
+            first_word = cmd.split()[0] if cmd else ""
+            if first_word in ("python", "python3", "node") and any(flag in cmd for flag in (" -c ", " -e ")):
+                return False
+            return first_word in (
+                "pytest", "python", "python3", "npx", "npm", "jest",
+                "make", "cargo", "go", "ruby", "dotnet", "node",
+                "cat", "ls", "find", "grep", "head", "tail",
+                "pnpm", "yarn", "uv", "bash", "sh", "tsc",
+            )
+        return True
+
+    name = block.name
+    inputs = block.input or {}
+    raw_detail = _tool_use_summary(block)
+
+    if name == "Glob":
+        if not _should_emit_tool("Read", raw_detail):
+            return None
+        return {"name": "Read", "detail": raw_detail[:80]}
+
+    if name not in ("Read", "Write", "Edit", "Bash"):
+        return None
+    if not _should_emit_tool(name, raw_detail):
+        return None
+
+    event: dict = {"name": name, "detail": raw_detail[:80]}
+    if name == "Edit":
+        old = inputs.get("old_string", "")
+        new = inputs.get("new_string", "")
+        if old or new:
+            event["old_lines"] = old.splitlines()[:4]
+            event["new_lines"] = new.splitlines()[:4]
+            event["old_total"] = old.count("\n") + 1 if old else 0
+            event["new_total"] = new.count("\n") + 1 if new else 0
+    elif name == "Write":
+        content = inputs.get("content", "")
+        if content:
+            event["preview_lines"] = content.splitlines()[:3]
+            event["total_lines"] = content.count("\n") + 1
+    return event
+
+
+# ---------------------------------------------------------------------------
 # Internal file patterns to suppress
 # ---------------------------------------------------------------------------
 

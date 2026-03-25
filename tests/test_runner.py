@@ -131,8 +131,8 @@ class TestCleanupBranch:
 
 
 class TestWorkspaceCleanup:
-    @patch("otto.runner._log_warn")
-    @patch("otto.runner.subprocess.run")
+    @patch("otto.git_ops._log_warn")
+    @patch("otto.git_ops.subprocess.run")
     def test_restore_workspace_logs_warning_on_git_reset_failure(self, mock_run, mock_warn, tmp_git_repo):
         mock_run.return_value = MagicMock(returncode=1, stderr="reset failed", stdout="")
 
