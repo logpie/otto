@@ -529,8 +529,10 @@ def add(prompt, verify, max_retries, import_file, gen_spec):
     if not config_path.exists():
         create_config(project_dir)
         config = load_config(config_path)
-        console.print(f"[success]✓[/success] Auto-initialized otto  [dim](default_branch: {config['default_branch']}, max_retries: {config['max_retries']})[/dim]")
-        console.print(f"  [dim]Tip: commit otto.yaml and customize settings if needed[/dim]")
+        console.print(f"[yellow]First run — created otto.yaml[/yellow]")
+        console.print(f"  Run [bold]otto setup[/bold] to generate CLAUDE.md with project conventions.")
+        console.print(f"  The coding agent follows CLAUDE.md — it makes a real difference.")
+        console.print()
 
     tasks_path = project_dir / "tasks.yaml"
 
@@ -620,7 +622,9 @@ def run(prompt, dry_run):
     config_path = project_dir / "otto.yaml"
     if not config_path.exists():
         create_config(project_dir)
-        console.print(f"[success]✓[/success] Auto-initialized otto")
+        console.print(f"[yellow]First run — created otto.yaml[/yellow]")
+        console.print(f"  Run [bold]otto setup[/bold] to generate CLAUDE.md with project conventions.")
+        console.print()
     config = load_config(config_path)
 
     if dry_run:
