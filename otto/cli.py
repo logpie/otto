@@ -803,6 +803,10 @@ Guidelines:
 - Point to files/directories rather than inlining specifics that go stale.
 - Avoid counts, version numbers, or facts that change frequently.
 - Keep it concise — the agent reads code well, just orient it.
+- Include these principles if relevant to the project:
+  - Check for existing patterns before writing new code
+  - After changing a shared type/interface, check all consumers
+  - Fix root causes — don't add workarounds or special cases
 Output ONLY the markdown content."""
 
     try:
