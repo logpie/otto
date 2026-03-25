@@ -727,6 +727,12 @@ def setup():
         else:
             mode = "merge"
 
+    # Back up existing CLAUDE.md so the agent doesn't just echo it
+    _backup_content = None
+    if mode == "generate" and claude_md.exists():
+        _backup_content = _read_text_if_possible(claude_md, 10000)
+        claude_md.unlink()
+
     # Gather project context for the LLM
     context_parts = []
 
@@ -782,33 +788,36 @@ contradict what the codebase actually does. Deduplicate."""
 
     prompt = f"""Write a CLAUDE.md for a coding agent working on this project.
 
-CLAUDE.md is NOT a reference doc or project wiki. It's a short, opinionated
-guide that helps an AI coding agent make better decisions. Think: "what would
-a senior developer tell a new teammate on day 1?"
+CLAUDE.md is a MAP — it tells the agent where to look and what to follow.
+It is NOT a reference doc. The agent can read files for specifics.
+Think: "what would a senior developer tell a new teammate on day 1?"
 
 Project files:
 {chr(10).join(context_parts)}
 {merge_section}
 
-Structure (in this order, under 30 lines total):
+Structure (in this order):
 
-1. **Commands** — build, test, lint. Just the commands, nothing else.
-2. **Coding principles** — 3-5 rules that prevent common mistakes:
-   - Always check for existing patterns before writing new code
-   - After changing a type/interface, check all files that use it
+1. **Commands** — build, test, lint. Just the commands.
+2. **Project structure** — key directories and what lives where. 2-3 lines max.
+   The agent navigates by this map.
+3. **Coding principles** — 3-5 rules that prevent common mistakes:
+   - Check for existing patterns before writing new code
+   - After changing a shared type, check all consumers
    - Fix root causes, not symptoms
-   - Add any project-specific principles you observe (e.g., reuse patterns)
-3. **Conventions** — the 3-4 most important patterns to follow:
-   - Styling pattern (e.g., Tailwind classes used for cards)
-   - File organization (where new components/tests go)
-   - Import conventions (path aliases, etc.)
-4. **Test hygiene** — how tests work in this project:
-   - Reuse existing fixtures/factories — name them
-   - Extend existing test files over creating new ones
+   - Add project-specific principles you observe
+4. **Conventions** — point to WHERE to find patterns, don't spell them out:
+   - "Cards use glassmorphism — see any card in src/components/ for the pattern"
+   - NOT "Cards use bg-white/15 backdrop-blur-lg rounded-2xl..."
+   - "Import via @/ path alias" (short, the agent knows what to do)
+5. **Test hygiene** — where tests live, what factory/fixture to reuse.
+   Point to an example file, don't paste the code.
 
-Do NOT list every helper function or file — the agent can discover those.
-Do NOT include generic SWE advice not grounded in the codebase.
-Every line should help the agent avoid a specific mistake or follow a specific pattern.
+Rules:
+- Under 25 lines total. Every line earns its place.
+- Point to files ("see X for the pattern") instead of inlining details.
+- The agent reads code well — just tell it WHERE to look.
+- No listing every helper/utility — the agent discovers those.
 Output ONLY the markdown content."""
 
     try:
@@ -819,6 +828,10 @@ Output ONLY the markdown content."""
     console.print("[dim]Generating CLAUDE.md...[/dim]")
     result_text = asyncio.run(_run_setup(prompt, project_dir))
 
+    # The agent might have written CLAUDE.md directly via tool use
+    # instead of returning text. Check for that.
+    if not result_text.strip() and claude_md.exists():
+        result_text = _read_text_if_possible(claude_md, 10000) or ""
     if not result_text.strip():
         error_console.print("[red]Failed to generate CLAUDE.md content[/red]")
         return
@@ -843,6 +856,9 @@ Output ONLY the markdown content."""
         console.print(f"[green]✓[/green] Wrote CLAUDE.md ({len(content)} chars)")
         console.print("[dim]  Commit it so the coding agent can read it.[/dim]")
     else:
+        # Restore backup if user cancelled
+        if _backup_content:
+            claude_md.write_text(_backup_content)
         console.print("[dim]Cancelled[/dim]")
 
 
@@ -857,7 +873,7 @@ async def _run_setup(prompt: str, project_dir: Path) -> str:
         permission_mode="bypassPermissions",
         cwd=str(project_dir),
         setting_sources=[],
-        max_turns=1,  # single turn — no tool use, just output
+        max_turns=5,
         system_prompt="You are a project analyst. Output ONLY the markdown content for CLAUDE.md. No explanation, no preamble, no tool use.",
     )
     result_text = ""
