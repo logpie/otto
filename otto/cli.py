@@ -118,6 +118,7 @@ def _make_task_display_progress_callback(display: TaskDisplay):
                     total=data.get("total", 0),
                     passed=data.get("passed", 0),
                     failed=data.get("failed", 0),
+                    proof_count=data.get("proof_count", 0),
                 )
         except Exception:
             pass
@@ -1599,6 +1600,59 @@ def show(task_id):
                         console.print(f"\n  [dim]QA:[/dim] [{qa_style}]{qa['passed']}/{qa['total']} specs passed[/{qa_style}]")
                     for line in qa["summary_lines"]:
                         console.print(f"    [dim]{rich_escape(line)}[/dim]")
+
+                # Proof artifacts
+                proofs_dir = log_dir / "qa-proofs"
+                if proofs_dir.exists():
+                    proof_files = list(proofs_dir.iterdir())
+                    proof_report = proofs_dir / "proof-report.md"
+                    regression = proofs_dir / "regression-check.sh"
+                    must_proofs = sorted(proofs_dir.glob("must-*.md"))
+
+                    parts = []
+                    if must_proofs:
+                        parts.append(f"{len(must_proofs)} must-item proofs")
+                    if regression.exists():
+                        parts.append("regression-check.sh")
+                    if proof_report.exists():
+                        parts.append("proof-report.md")
+                    if parts:
+                        console.print(f"\n  [dim]Proofs:[/dim]  {', '.join(parts)}")
+                        console.print(f"    [dim]{proofs_dir.relative_to(project_dir)}/[/dim]")
+
+                    # Show proof report content
+                    if proof_report.exists():
+                        try:
+                            content = proof_report.read_text()
+                            lines = content.strip().splitlines()
+                            # Show first 20 lines
+                            for line in lines[:20]:
+                                console.print(f"    {line}")
+                            if len(lines) > 20:
+                                console.print(f"    [dim]... ({len(lines) - 20} more lines)[/dim]")
+                        except OSError:
+                            pass
+
+                # Claim verification
+                claims_files = sorted(log_dir.glob("attempt-*-claims.md"))
+                if claims_files:
+                    latest = claims_files[-1]
+                    try:
+                        content = latest.read_text()
+                        has_failures = "FAILURES" in content
+                        has_warnings = "Warnings" in content
+                        if has_failures:
+                            console.print(f"\n  [error]Claims:[/error] evidence contradicts agent claims")
+                        elif has_warnings:
+                            console.print(f"\n  [warning]Claims:[/warning] unaddressed issues found")
+                        else:
+                            console.print(f"\n  [dim]Claims:[/dim] all verified")
+                        # Show failure lines
+                        for line in content.splitlines():
+                            if line.startswith("- ") and ("claimed" in line.lower() or "evidence" in line.lower()):
+                                console.print(f"    [dim]{rich_escape(line[:90])}[/dim]")
+                    except OSError:
+                        pass
 
                 # Verify summary
                 verify_str = _get_verify_summary(log_dir)

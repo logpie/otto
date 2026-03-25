@@ -55,6 +55,8 @@ from otto.qa import (
     _parse_qa_verdict_json,
     run_qa_agent_v45,
 )
+from otto.claim_verify import verify_claims, format_claim_findings
+from otto.retry_excerpt import build_retry_excerpt
 from otto.tasks import load_tasks, update_task
 from otto.verify import run_verification, _subprocess_env
 
@@ -343,6 +345,7 @@ async def coding_loop(
                     total=data.get("total", 0),
                     passed=data.get("passed", 0),
                     failed=data.get("failed", 0),
+                    proof_count=data.get("proof_count", 0),
                 )
             elif event_type == "attempt_boundary":
                 display.add_attempt_boundary(
@@ -402,6 +405,11 @@ async def coding_loop(
                 parts.append(f"{attempts} attempts")
             if parts:
                 console.print(f"    {' · '.join(parts)}")
+
+            # Show proof report path if qa-proofs exist
+            proof_report = project_dir / "otto_logs" / task_key / "qa-proofs" / "proof-report.md"
+            if proof_report.exists():
+                console.print(f"    [dim]proofs: otto_logs/{task_key}/qa-proofs/[/dim]")
 
             # Emit TaskMerged NOW (not deferred to batch loop)
             telemetry.log(TaskMerged(
@@ -504,8 +512,6 @@ async def run_task_v45(
     task_start = time.monotonic()
     total_cost = 0.0
     session_id = None
-    _prev_session_cost: float = 0.0  # tracks cumulative SDK cost for delta calculation
-    _prev_session_id: str | None = None  # tracks which session the cost belongs to
     last_error = None
     last_error_source = None
     _prev_failed_criteria: list[str] = []  # QA failures from previous attempt
@@ -813,6 +819,31 @@ async def run_task_v45(
             if attempt > 0 and spec_task and not spec:
                 await _await_spec_task()
 
+            # Regression proofs — run previous QA's regression-check.sh before retry
+            if attempt > 0:
+                regression_script = log_dir / "qa-proofs" / "regression-check.sh"
+                if regression_script.exists():
+                    try:
+                        reg_result = subprocess.run(
+                            ["bash", str(regression_script)],
+                            cwd=str(project_dir),
+                            capture_output=True, text=True,
+                            timeout=120,
+                            env=_subprocess_env(),
+                        )
+                        if reg_result.returncode != 0:
+                            # Some previous QA checks regressed
+                            emit("phase", name="qa", status="fail", time_s=0,
+                                 error="regression: previous QA checks fail")
+                            # Pass regression info to coding agent
+                            regression_info = reg_result.stdout[-500:] + reg_result.stderr[-500:]
+                            if last_error:
+                                last_error += f"\n\nRegression check failed:\n{regression_info}"
+                            else:
+                                last_error = f"Regression check failed:\n{regression_info}"
+                    except (subprocess.TimeoutExpired, OSError):
+                        pass  # regression check is best-effort
+
             # Build prompt for this attempt
             feedback = task.get("feedback", "")
             if attempt == 0 and not last_error:
@@ -836,8 +867,10 @@ async def run_task_v45(
                 if last_error:
                     coding_prompt += f"\n\nPrevious attempt failed."
                     coding_prompt += f"\n  Source: {last_error_source}"
+                    # Hard cap as defense in depth (should already be excerpted at source)
+                    error_text = last_error if len(last_error) <= 12_000 else build_retry_excerpt(last_error)
                     coding_prompt += (
-                        f"\n  Raw output:\n{_fence_untrusted_text(last_error)}"
+                        f"\n  Failure excerpt:\n{_fence_untrusted_text(error_text)}"
                     )
                     coding_prompt += (
                         f"\n\nFix the specific failures above. Do not regress items that were passing."
@@ -924,10 +957,9 @@ async def run_task_v45(
                                     emit("agent_tool", **event)
 
                 # Persist agent log
+                agent_log_path = log_dir / f"attempt-{attempt_num}-agent.log"
                 try:
-                    (log_dir / f"attempt-{attempt_num}-agent.log").write_text(
-                        "\n".join(agent_log_lines)
-                    )
+                    agent_log_path.write_text("\n".join(agent_log_lines))
                 except OSError:
                     pass
 
@@ -937,20 +969,9 @@ async def run_task_v45(
                         update_task(tasks_file, key, session_id=session_id)
 
                 # Extract this attempt's cost from SDK result.
-                # SDK's total_cost_usd is cumulative within a session.
-                # If session_id changed, it's a new session — use raw cost.
-                # If same session (resumed), compute delta from previous.
+                # total_cost_usd is the cost for this query() invocation.
                 raw_cost = getattr(result_msg, "total_cost_usd", None)
-                session_cost = float(raw_cost) if isinstance(raw_cost, (int, float)) else 0.0
-                current_session = getattr(result_msg, "session_id", None)
-                if current_session and current_session == _prev_session_id:
-                    # Same session (resumed) — cost is cumulative, use delta
-                    attempt_cost = max(0, session_cost - _prev_session_cost)
-                else:
-                    # New session — raw cost is this attempt's cost
-                    attempt_cost = session_cost
-                _prev_session_cost = session_cost
-                _prev_session_id = current_session
+                attempt_cost = float(raw_cost) if isinstance(raw_cost, (int, float)) else 0.0
                 total_cost += attempt_cost
 
                 coding_elapsed = round(time.monotonic() - coding_start, 1)
@@ -1031,6 +1052,7 @@ async def run_task_v45(
                     tier=qa_tier_nc,
                     focus_items=focus_nc,
                     on_progress=on_progress,
+                    log_dir=log_dir,
                 )
                 qa_elapsed_nc = round(time.monotonic() - qa_start_nc, 1)
                 total_cost += qa_result_nc.get("cost_usd", 0.0)
@@ -1107,7 +1129,7 @@ async def run_task_v45(
                 if not pre_check.passed and not pre_check.skipped:
                     emit("phase", name="coding", status="fail", time_s=coding_elapsed,
                          error="tests fail in working dir", cost=attempt_cost)
-                    last_error = pre_check.output or "tests failed locally"
+                    last_error = build_retry_excerpt(pre_check.output or "tests failed locally")
                     last_error_source = "verify"
                     # Reset for retry
                     subprocess.run(
@@ -1168,7 +1190,7 @@ async def run_task_v45(
                         ["git", "reset", "--mixed", base_sha],
                         cwd=project_dir, capture_output=True,
                     )
-                    last_error = verify_result.failure_output
+                    last_error = build_retry_excerpt(verify_result.failure_output or "verification failed")
                     last_error_source = "verify"
                     continue
 
@@ -1231,6 +1253,30 @@ async def run_task_v45(
             except OSError:
                 pass
 
+            # Claim verification — audit-only (write claims.md, emit phase, but don't block).
+            # Skip when local pre-check passed but cold-worktree verify failed:
+            # in that case the verify log is known-bad for this candidate and
+            # can create false contradictions against the agent's true local run.
+            verify_overridden_by_precheck = bool(
+                pre_check and pre_check.passed and not verify_result.passed
+            )
+            verify_log_path = log_dir / f"attempt-{attempt_num}-verify.log"
+            if not verify_overridden_by_precheck:
+                try:
+                    claim_findings = verify_claims(agent_log_path, verify_log_path)
+                    hard_fails = [f for f in claim_findings
+                                  if not f["verified"] and f["severity"] == "hard"]
+                    if claim_findings:
+                        report_text = format_claim_findings(claim_findings)
+                        (log_dir / f"attempt-{attempt_num}-claims.md").write_text(report_text)
+                    if hard_fails:
+                        # Log claim mismatch for audit trail, but proceed to QA
+                        fail_desc = hard_fails[0]["claim"]
+                        emit("phase", name="claim_audit", status="warn",
+                             detail=f"claim mismatch: {fail_desc[:60]}")
+                except Exception:
+                    pass  # claim verification is best-effort
+
             # Await specs before QA (if still generating)
             if spec_task and not spec:
                 if not spec_task.done():
@@ -1276,14 +1322,38 @@ async def run_task_v45(
                     focus_items=focus_items,
                     prev_failed=_prev_failed_criteria if _prev_failed_criteria else None,
                     on_progress=on_progress,
+                    log_dir=log_dir,
                 )
                 qa_elapsed = round(time.monotonic() - qa_start, 1)
                 phase_timings["qa"] = phase_timings.get("qa", 0) + qa_elapsed
                 total_cost += qa_result.get("cost_usd", 0.0)
+
+                # Infrastructure error (API 500, connection drop) — retry QA once
+                if qa_result.get("infrastructure_error") and not qa_result.get("_retried"):
+                    emit("phase", name="qa", status="fail", time_s=qa_elapsed,
+                         error="QA infrastructure error — retrying")
+                    import asyncio as _aio
+                    await _aio.sleep(5)  # brief backoff
+                    qa_retry_start = time.monotonic()
+                    qa_result = await run_qa_agent_v45(
+                        task, qa_spec, config, project_dir,
+                        original_prompt=prompt,
+                        diff=diff_info["full_diff"],
+                        tier=qa_tier,
+                        focus_items=focus_items,
+                        prev_failed=_prev_failed_criteria,
+                        on_progress=on_progress,
+                        log_dir=log_dir,
+                    )
+                    qa_result["_retried"] = True
+                    retry_elapsed = round(time.monotonic() - qa_retry_start, 1)
+                    qa_elapsed += retry_elapsed
+                    phase_timings["qa"] = phase_timings.get("qa", 0) + retry_elapsed
+                    total_cost += qa_result.get("cost_usd", 0.0)
                 qa_report = qa_result.get("raw_report", "")
                 if qa_warning:
                     qa_report = f"[warning] {qa_warning}\n\n{qa_report}".strip()
-                verdict = qa_result.get("verdict", {})
+                verdict = qa_result.get("verdict") or {}
                 # Build spec lookup for ◈ marker — fuzzy match since QA paraphrases
                 _visual_specs: list[str] = []  # normalized non-verifiable spec texts
                 if qa_spec:
@@ -1325,7 +1395,7 @@ async def run_task_v45(
                          passed=None,
                          evidence=obs)
 
-                # Persist QA report
+                # Persist QA report from the final QA result only.
                 try:
                     (log_dir / "qa-report.md").write_text(qa_report or "No QA output")
                     if verdict:
@@ -1334,25 +1404,6 @@ async def run_task_v45(
                         )
                 except OSError:
                     pass
-
-                # Infrastructure error (API 500, connection drop) — retry QA once
-                if qa_result.get("infrastructure_error") and not qa_result.get("_retried"):
-                    emit("phase", name="qa", status="fail", time_s=qa_elapsed,
-                         error="QA infrastructure error — retrying")
-                    import asyncio as _aio
-                    await _aio.sleep(5)  # brief backoff
-                    qa_result = await run_qa_agent_v45(
-                        task, qa_spec, config, project_dir,
-                        original_prompt=prompt,
-                        diff=diff_info["full_diff"],
-                        tier=qa_tier,
-                        focus_items=focus_items,
-                        prev_failed_criteria=_prev_failed_criteria,
-                        on_progress=emit,
-                    )
-                    qa_result["_retried"] = True
-                    total_cost += qa_result.get("cost_usd", 0.0)
-                    qa_elapsed += round(time.monotonic() - qa_start, 1)
 
                 if not qa_result["must_passed"]:
                     failed_musts = [
@@ -1391,7 +1442,7 @@ async def run_task_v45(
                     if failure_lines:
                         last_error = "QA found these issues:\n" + "\n".join(failure_lines)
                     else:
-                        last_error = qa_report  # fallback to raw report
+                        last_error = build_retry_excerpt(qa_report or "QA did not pass")
                     last_error_source = "qa"
                     # Track which items failed for QA retry prioritization
                     _prev_failed_criteria = [
@@ -1485,6 +1536,7 @@ def _print_summary(
     integration_passed: bool | None = None,
     total_cost: float = 0.0,
     task_progress: dict[str, list[dict]] | None = None,
+    project_dir: Path | None = None,
 ) -> None:
     """Print summary of all tasks after a run.
 
@@ -1557,6 +1609,12 @@ def _print_summary(
                 if len(diff_files) > 5:
                     files_str += f"  (+{len(diff_files) - 5} more)"
                 console.print(f"       {files_str}", style="dim")
+
+        # Show proof report path for passed tasks
+        if success and project_dir and task_key:
+            proof_report = project_dir / "otto_logs" / task_key / "qa-proofs" / "proof-report.md"
+            if proof_report.exists():
+                console.print(f"       [dim]proofs: otto_logs/{task_key}/qa-proofs/[/dim]")
 
     console.print()
     if failed == 0:

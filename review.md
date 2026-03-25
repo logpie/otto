@@ -102,3 +102,56 @@
 ### Round 3 — Codex
 - [IMPORTANT] Stale review_ref not cleared on rerun — fixed by Codex: cleared at task start
 - APPROVED. No new issues. 406 tests pass.
+
+## Implementation Gate — 2026-03-25 — otto setup + CLAUDE.md suggestion
+
+### Round 1 — Codex
+- [IMPORTANT] setting_sources=["project"] loads existing CLAUDE.md on overwrite — fixed by Codex: setting_sources=[]
+- [IMPORTANT] No error handling on file reads — fixed by Codex: _read_text_if_possible wrapper
+- [IMPORTANT] glob recursive=True missing — fixed by Codex
+- [IMPORTANT] grep -rl not cross-platform — fixed by Codex: pure Python rglob
+- [NOTE] find subprocess not cross-platform — fixed by Codex: os.walk
+
+### Round 2 — Codex
+- [IMPORTANT] _suggest_claude_md reads entire files with no size/count cap — fixed: 20 file cap, 5KB read limit, 50KB file skip
+- [NOTE] No test coverage for setup command — accepted, manual e2e tested
+- APPROVED after fix.
+
+## Implementation Gate — 2026-03-25 — Proof-of-Work + Claim Verification
+
+### Round 1 — Codex
+- [CRITICAL] Regression script replays server-start/background commands — fixed by Codex: expanded denylist (npm run dev, flask run, uvicorn, gunicorn, nohup, etc.)
+- [CRITICAL] QA infrastructure retry reads stale verdict (verdict=None → crash) — fixed by Codex: check infrastructure_error before reading verdict, rebind all variables after retry
+- [IMPORTANT] Claim verification uses failing worktree log when pre-check overrides — fixed by Codex: skip claim verify when verify_overridden_by_precheck
+- [IMPORTANT] Pattern 3 (unacknowledged test failure) rarely fires in production — documented limitation, kept for future log format expansion
+- [IMPORTANT] Stale proof files from previous attempts not cleaned — fixed by Codex: rmtree + mkdir at start of _write_proof_artifacts()
+
+### Round 2 — Codex
+- [IMPORTANT] `"&" in cmd` too broad — catches `2>&1` and `&&` — fixed by Codex: regex for standalone trailing `&` only
+- [NOTE] `"npx next"` too broad — catches `npx next build` — fixed by Codex: narrowed to `npx next dev` and `npx next start`
+
+### Round 3 — Codex
+- APPROVED. No new issues. 344 tests pass.
+
+## Implementation Gate — 2026-03-25 — Retry excerpt (bloated retry prompt fix)
+
+### Round 1 — Codex
+- [IMPORTANT] Go `ok\t` in _SUMMARY_RE retains all passing lines — fixed by Codex: moved to _PASS_NOISE_RE
+- [IMPORTANT] KEEP_AFTER=25 drops middle of large failure blocks — fixed by Codex: continuation-aware window extension + merge
+- [IMPORTANT] `console.error` suppressed too broadly — fixed by Codex: only suppress when followed by React act() pattern
+
+### Round 2 — Codex
+- [IMPORTANT] Plain unindented text in failure bodies still truncated — fixed by Codex: delimiter-based extension with _FAILURE_BLOCK_END_RE
+- [NOTE] ACT_WARNING_RE phrase-based false positive risk — accepted
+
+### Round 3 — Codex
+- [NOTE] 200-line max extension cap is intentional tradeoff
+- APPROVED. 372 tests pass.
+
+## Implementation Gate — 2026-03-25 — Cost delta fix (per-invocation, not cumulative)
+
+### Round 1 — Codex
+- [NOTE] Fix matches documented SDK contract (per-query cost, not session-cumulative)
+- [NOTE] No other code depends on old cumulative assumption
+- [NOTE] Future drift risk if SDK changes — no regression test locks the contract
+- APPROVED. 372 tests pass.

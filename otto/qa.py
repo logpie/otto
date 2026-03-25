@@ -3,6 +3,7 @@
 import asyncio
 import json
 import re
+import shutil
 import tempfile
 import time
 from pathlib import Path
@@ -188,6 +189,7 @@ async def run_qa_agent_v45(
     focus_items: list | None = None,
     prev_failed: list[str] | None = None,
     on_progress: Any = None,
+    log_dir: Path | None = None,
 ) -> dict[str, Any]:
     """v4.5 QA agent — structured JSON verdict, risk-based tiering.
 
@@ -290,12 +292,15 @@ Write your JSON verdict to: {verdict_file}
     qa_timeout = config.get("qa_timeout", 3600)
     report_lines: list[str] = []
     qa_cost = 0.0
+    # Track QA verification actions for proof artifacts
+    qa_actions: list[dict[str, str]] = []
+    _last_tool_name = ""
 
     from otto.display import build_agent_tool_event as _build_agent_tool_event
 
     try:
         async def _run_qa():
-            nonlocal report_lines, qa_cost
+            nonlocal report_lines, qa_cost, _last_tool_name
             _result_msg = None
             async for message in query(prompt=qa_prompt, options=qa_opts):
                 if isinstance(message, ResultMessage):
@@ -304,6 +309,14 @@ Write your JSON verdict to: {verdict_file}
                     _result_msg = message
                 elif AssistantMessage and isinstance(message, AssistantMessage):
                     for block in message.content:
+                        if ToolResultBlock and isinstance(block, ToolResultBlock):
+                            # Capture Bash output for proof scripts
+                            if _last_tool_name == "Bash":
+                                content = str(getattr(block, "content", ""))
+                                if qa_actions and qa_actions[-1]["type"] == "bash":
+                                    qa_actions[-1]["output"] = content[:2000]
+                            _last_tool_name = ""
+                            continue
                         if TextBlock and isinstance(block, TextBlock) and block.text:
                             report_lines.append(block.text)
                             if on_progress:
@@ -327,6 +340,33 @@ Write your JSON verdict to: {verdict_file}
                                         except Exception:
                                             pass
                         elif ToolUseBlock and isinstance(block, ToolUseBlock):
+                            _last_tool_name = block.name
+                            inp = block.input or {}
+                            # Collect Bash commands for proof scripts
+                            if block.name == "Bash":
+                                cmd = inp.get("command", "")
+                                if cmd:
+                                    qa_actions.append({
+                                        "type": "bash",
+                                        "command": cmd,
+                                        "output": "",
+                                    })
+                            # Collect Browser/MCP actions for proof report
+                            elif block.name.startswith("mcp__"):
+                                action = block.name.split("__")[-1]
+                                detail = ""
+                                if action == "take_screenshot":
+                                    detail = inp.get("filePath", inp.get("url", ""))[:120]
+                                elif "url" in inp:
+                                    detail = inp["url"][:120]
+                                elif "selector" in inp:
+                                    detail = inp["selector"][:120]
+                                qa_actions.append({
+                                    "type": "browser",
+                                    "action": action,
+                                    "detail": detail,
+                                })
+
                             if on_progress:
                                 try:
                                     event = _build_agent_tool_event(block)
@@ -334,7 +374,6 @@ Write your JSON verdict to: {verdict_file}
                                     if not event and block.name.startswith("mcp__"):
                                         action = block.name.split("__")[-1]
                                         detail = ""
-                                        inp = block.input or {}
                                         if "url" in inp:
                                             detail = inp["url"][:60]
                                         elif "selector" in inp:
@@ -403,6 +442,16 @@ Write your JSON verdict to: {verdict_file}
 
     must_passed = verdict.get("must_passed", False)
 
+    # Write proof artifacts if log_dir provided
+    proof_count = 0
+    if log_dir:
+        try:
+            proof_count = _write_proof_artifacts(
+                log_dir, verdict, qa_actions, task, original_prompt, qa_cost,
+            )
+        except Exception:
+            pass  # proof writing is best-effort
+
     # Emit summary for display
     if on_progress:
         try:
@@ -413,6 +462,7 @@ Write your JSON verdict to: {verdict_file}
                 "total": total,
                 "passed": passed,
                 "failed": total - passed,
+                "proof_count": proof_count,
             })
         except Exception:
             pass
@@ -422,4 +472,178 @@ Write your JSON verdict to: {verdict_file}
         "verdict": verdict,
         "raw_report": raw_report,
         "cost_usd": qa_cost,
+        "proof_count": proof_count,
     }
+
+
+def _write_proof_artifacts(
+    log_dir: Path,
+    verdict: dict[str, Any],
+    qa_actions: list[dict[str, str]],
+    task: dict[str, Any],
+    original_prompt: str,
+    cost_usd: float,
+) -> int:
+    """Write proof artifacts to log_dir/qa-proofs/.
+
+    Returns the number of proof files written.
+    """
+    proofs_dir = log_dir / "qa-proofs"
+    if proofs_dir.exists():
+        shutil.rmtree(proofs_dir, ignore_errors=True)
+    proofs_dir.mkdir(parents=True, exist_ok=True)
+    count = 0
+
+    must_items = verdict.get("must_items", [])
+
+    # Write per-must-item proof files
+    for i, item in enumerate(must_items):
+        proof_path = proofs_dir / f"must-{i + 1}.md"
+        proof_path.write_text(
+            f"# {item.get('criterion', 'Unknown criterion')}\n"
+            f"Status: {item.get('status', 'unknown')}\n"
+            f"Evidence: {item.get('evidence', 'none')}\n"
+        )
+        count += 1
+
+    # Filter out QA-internal commands (verdict file writes, temp file ops)
+    _QA_INTERNAL_PATTERNS = ("otto_qa_", "/var/folders/", "/tmp/otto_")
+    bash_commands = [
+        a for a in qa_actions
+        if a["type"] == "bash" and a.get("command")
+        and not any(p in a["command"] for p in _QA_INTERNAL_PATTERNS)
+    ]
+    if bash_commands:
+        replay_skip_substrings = (
+            "kill ",
+            "pkill ",
+            "rm -rf",
+            "git push",
+            "npm run dev",
+            "npm start",
+            "next dev",
+            "npx next dev",
+            "npx next start",
+            "python -m http",
+            "python3 -m http",
+            "node server",
+            "serve ",
+            "flask run",
+            "uvicorn",
+            "gunicorn",
+            "nohup",
+        )
+        lines = [
+            "#!/bin/bash",
+            "# Re-run all QA verification commands",
+            "# Generated by otto QA proof-of-work system",
+            "set -e",
+            "",
+        ]
+        for cmd_info in bash_commands:
+            cmd = cmd_info["command"]
+            lower_cmd = cmd.lower()
+            has_trailing_background = re.search(r"(?<![>&])\s*&\s*$", cmd) is not None
+            # Skip commands that can hang, daemonize, or mutate external state.
+            if has_trailing_background or any(skip in lower_cmd for skip in replay_skip_substrings):
+                lines.append(f"# Skipped (non-replayable): {cmd[:60]}")
+                continue
+            label = cmd.replace("\n", " ")[:60].replace('"', '\\"')
+            lines.append(f'echo "Testing: {label}"')
+            lines.append(cmd)
+            lines.append("")
+        regression_script = proofs_dir / "regression-check.sh"
+        regression_script.write_text("\n".join(lines))
+        regression_script.chmod(0o755)
+        count += 1
+
+    # Write proof-report.md — human-readable summary
+    must_passed = verdict.get("must_passed", False)
+    status_icon = "\u2713 passed" if must_passed else "\u2717 failed"
+    passed_count = sum(1 for m in must_items if m.get("status") == "pass")
+
+    report_lines = [
+        f"# Proof of Work: {original_prompt[:80]}",
+        f"Task: {task.get('key', '?')} | {status_icon} | {passed_count}/{len(must_items)} must | QA ${cost_usd:.2f}",
+        "",
+    ]
+
+    # Commands section — listed once, not per-item
+    if bash_commands:
+        report_lines.append("## Verification Commands")
+        for cmd_info in bash_commands:
+            cmd = cmd_info["command"]
+            output = cmd_info.get("output", "")
+            # Show full command (multi-line preserved as-is)
+            report_lines.append(f"```")
+            report_lines.append(f"$ {cmd}")
+            if output:
+                # Show last meaningful output line
+                for oline in reversed(output.splitlines()):
+                    stripped = oline.strip()
+                    if stripped and len(stripped) > 5:
+                        report_lines.append(f"\u2192 {stripped[:120]}")
+                        break
+            report_lines.append(f"```")
+        report_lines.append("")
+
+    # Per-must-item results
+    for i, item in enumerate(must_items):
+        criterion = item.get("criterion", "")
+        status = item.get("status", "unknown")
+        evidence = item.get("evidence", "")
+        is_visual = "\u25c8" in criterion
+
+        icon = "\u2713" if status == "pass" else "\u2717"
+        marker = " \u25c8" if is_visual else ""
+        report_lines.append(f"## {icon} [must{marker}] {criterion}")
+        report_lines.append(f"**Evidence:** {evidence}")
+        report_lines.append("")
+
+    # Copy screenshots into qa-proofs/ and build reference list
+    browser_actions = [a for a in qa_actions if a["type"] == "browser"]
+    screenshot_num = 0
+    screenshot_refs: list[str] = []  # filenames of copied screenshots
+    for action in browser_actions:
+        if action.get("action") == "take_screenshot" and action.get("detail"):
+            src = Path(action["detail"])
+            if src.exists() and src.is_file():
+                screenshot_num += 1
+                dest_name = f"screenshot-{screenshot_num}.png"
+                dest = proofs_dir / dest_name
+                try:
+                    shutil.copy2(str(src), str(dest))
+                    screenshot_refs.append(dest_name)
+                    count += 1
+                except OSError:
+                    pass
+
+    # Browser actions section
+    if browser_actions:
+        report_lines.append("## Browser Verification")
+        ss_idx = 0
+        for action in browser_actions:
+            act = action.get("action", "")
+            detail = action.get("detail", "")
+            if act == "take_screenshot" and ss_idx < len(screenshot_refs):
+                report_lines.append(f"- {act}: {detail}  → [{screenshot_refs[ss_idx]}]({screenshot_refs[ss_idx]})")
+                ss_idx += 1
+            else:
+                report_lines.append(f"- {act}: {detail}")
+        report_lines.append("")
+
+    # Should notes
+    should_notes = verdict.get("should_notes", [])
+    if should_notes:
+        report_lines.append("## Should Notes")
+        for note in should_notes:
+            criterion = note.get("criterion", "")
+            obs = note.get("observation", "")
+            report_lines.append(f"- {criterion}: {obs}")
+        report_lines.append("")
+
+    proof_report = proofs_dir / "proof-report.md"
+    proof_report.write_text("\n".join(report_lines))
+    count += 1
+
+    return count

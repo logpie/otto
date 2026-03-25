@@ -251,7 +251,8 @@ async def run_per(
                 results.append((t, t.get("status") == "passed"))
 
         try:
-            _print_summary(results, run_duration, total_cost=context.total_cost)
+            _print_summary(results, run_duration, total_cost=context.total_cost,
+                           project_dir=project_dir)
         except Exception as exc:
             console.print(f"  [yellow]Warning: summary display error: {exc}[/yellow]")
 

@@ -208,6 +208,7 @@ class TaskDisplay:
         self._current_cost: float = 0.0
         self._qa_spec_count: int = 0
         self._qa_pass_count: int = 0
+        self._qa_proof_count: int = 0
         self._qa_summary_authoritative: bool = False
         self._coding_files: list[str] = []
         self._coding_start_detail: str = ""
@@ -339,7 +340,8 @@ class TaskDisplay:
             elif name not in ("prepare", "merge", "spec_gen"):
                 self._console.print()
 
-    def set_qa_summary(self, total: int, passed: int, failed: int = 0) -> None:
+    def set_qa_summary(self, total: int, passed: int, failed: int = 0,
+                       proof_count: int = 0) -> None:
         """Set authoritative QA counts from the runner."""
         with self._lock:
             total = max(0, int(total))
@@ -347,6 +349,7 @@ class TaskDisplay:
             failed = max(0, min(int(failed), total - passed))
             self._qa_spec_count = total
             self._qa_pass_count = passed
+            self._qa_proof_count = max(0, int(proof_count))
             self._qa_summary_authoritative = True
 
     def add_attempt_boundary(self, attempt: int, reason: str = "") -> None:
@@ -859,6 +862,8 @@ class TaskDisplay:
                     highlight.append(f"[green]{t} specs passed[/green]")
                 else:
                     highlight.append(f"{p}/{t} specs passed")
+            if self._qa_proof_count:
+                highlight.append(f"{self._qa_proof_count} proofs saved")
             tier_detail = self._phase_details.get("qa", "")
             if tier_detail:
                 meta.append(tier_detail)

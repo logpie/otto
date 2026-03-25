@@ -124,6 +124,9 @@ def simulate_run(console: Console) -> None:
     display.add_qa_item_result("[should ◈] Responsive on mobile viewport",
                                passed=True, evidence="Tested 375px width")
 
+    # QA summary with proof count
+    display.set_qa_summary(total=8, passed=8, proof_count=5)
+
     # QA done
     display.update_phase("qa", "done", time_s=90.0, cost=0.67)
 
@@ -272,6 +275,7 @@ def replay_from_jsonl(console: Console, jsonl_path: str) -> None:
                 total=evt.get("total", 0),
                 passed=evt.get("passed", 0),
                 failed=evt.get("failed", 0),
+                proof_count=evt.get("proof_count", 0),
             )
 
         elif event_type == "spec_item":
