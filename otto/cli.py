@@ -780,21 +780,36 @@ contradict what the codebase actually does. Deduplicate."""
     else:
         merge_section = ""
 
-    prompt = f"""Analyze this project and write a CLAUDE.md file with conventions for a coding agent.
+    prompt = f"""Write a CLAUDE.md for a coding agent working on this project.
+
+CLAUDE.md is NOT a reference doc or project wiki. It's a short, opinionated
+guide that helps an AI coding agent make better decisions. Think: "what would
+a senior developer tell a new teammate on day 1?"
 
 Project files:
 {chr(10).join(context_parts)}
 {merge_section}
 
-Write a concise CLAUDE.md (under 40 lines) covering:
-1. Key coding principles for this project (reuse patterns, test hygiene)
-2. Project-specific conventions (styling, file structure, naming)
-3. Important utilities/helpers to reuse (with file paths)
-4. Test patterns (shared fixtures, preferred test style)
+Structure (in this order, under 30 lines total):
 
-Be specific to THIS project — reference actual file paths, function names, class names you see.
-Do NOT include generic advice. Every line should be grounded in the codebase.
-Output ONLY the markdown content, no explanation."""
+1. **Commands** — build, test, lint. Just the commands, nothing else.
+2. **Coding principles** — 3-5 rules that prevent common mistakes:
+   - Always check for existing patterns before writing new code
+   - After changing a type/interface, check all files that use it
+   - Fix root causes, not symptoms
+   - Add any project-specific principles you observe (e.g., reuse patterns)
+3. **Conventions** — the 3-4 most important patterns to follow:
+   - Styling pattern (e.g., Tailwind classes used for cards)
+   - File organization (where new components/tests go)
+   - Import conventions (path aliases, etc.)
+4. **Test hygiene** — how tests work in this project:
+   - Reuse existing fixtures/factories — name them
+   - Extend existing test files over creating new ones
+
+Do NOT list every helper function or file — the agent can discover those.
+Do NOT include generic SWE advice not grounded in the codebase.
+Every line should help the agent avoid a specific mistake or follow a specific pattern.
+Output ONLY the markdown content."""
 
     try:
         from claude_agent_sdk import query, ClaudeAgentOptions
