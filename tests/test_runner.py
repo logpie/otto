@@ -277,3 +277,10 @@ class TestShouldStageUntracked:
         from otto.runner import _should_stage_untracked
         assert _should_stage_untracked(".otto-scratch/test_verify.py") is False
         assert _should_stage_untracked(".otto-scratch/probes/check.sh") is False
+
+    def test_stages_test_files(self):
+        """Test files are staged — prompt guidance handles test hygiene, not the gate."""
+        from otto.runner import _should_stage_untracked
+        assert _should_stage_untracked("__tests__/myFeature.test.tsx") is True
+        assert _should_stage_untracked("tests/test_calculator.py") is True
+        assert _should_stage_untracked("src/utils.test.ts") is True

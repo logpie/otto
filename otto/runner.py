@@ -624,6 +624,10 @@ async def run_task_v45(
         log_dir = project_dir / "otto_logs" / key
         log_dir.mkdir(parents=True, exist_ok=True)
 
+        # Create scratch area for ephemeral test verification
+        scratch_dir = project_dir / ".otto-scratch"
+        scratch_dir.mkdir(exist_ok=True)
+
         verify_cmd = task.get("verify")
         test_command = config.get("test_command")
 
@@ -797,11 +801,10 @@ async def run_task_v45(
                 f"\n\nYou are working in {project_dir}. Do not create git commits."
                 f" Do not ask questions — make decisions yourself and implement."
                 f"\n\nTest hygiene:"
-                f"\n- Use .otto-scratch/ for throwaway test scripts and verification probes."
-                f"\n- Only write to the project's test directories (tests/, __tests__/) for"
-                f" permanent regression tests that protect important new behavior."
+                f"\n- Use .otto-scratch/ for throwaway verification scripts."
+                f"\n- Follow the repo's existing test conventions for permanent tests."
                 f"\n- Reuse existing test helpers and mock data factories — do not duplicate."
-                f"\n- Extend existing test files rather than creating new ones when possible."
+                f"\n- Prefer extending existing test files over creating new ones."
             )
 
             # Run coding agent — NO custom system prompt (bare CC)
