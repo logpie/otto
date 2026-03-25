@@ -320,11 +320,28 @@ Write your JSON verdict to: {verdict_file}
                                 raw_content = getattr(block, "content", None)
                                 if isinstance(raw_content, list):
                                     for part in raw_content:
-                                        if isinstance(part, dict) and part.get("type") == "image":
-                                            b64 = part.get("data", "")
+                                        if not isinstance(part, dict):
+                                            continue
+                                        # Direct image block: {"type": "image", "source": {"data": "..."}}
+                                        if part.get("type") == "image":
+                                            src = part.get("source", {})
+                                            b64 = src.get("data", "") if isinstance(src, dict) else ""
+                                            if not b64:
+                                                b64 = part.get("data", "")
                                             if b64 and qa_actions and qa_actions[-1].get("action") == "take_screenshot":
                                                 qa_actions[-1]["image_b64"] = b64
                                                 break
+                                        # Nested in tool_result: {"type": "tool_result", "content": [...]}
+                                        if part.get("type") == "tool_result":
+                                            inner = part.get("content", [])
+                                            if isinstance(inner, list):
+                                                for sub in inner:
+                                                    if isinstance(sub, dict) and sub.get("type") == "image":
+                                                        src = sub.get("source", {})
+                                                        b64 = src.get("data", "") if isinstance(src, dict) else ""
+                                                        if b64 and qa_actions and qa_actions[-1].get("action") == "take_screenshot":
+                                                            qa_actions[-1]["image_b64"] = b64
+                                                            break
                             _last_tool_name = ""
                             continue
                         if TextBlock and isinstance(block, TextBlock) and block.text:
