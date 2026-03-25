@@ -495,6 +495,9 @@ class TaskDisplay:
         elif name == "Bash":
             # Commands: cyan bullet + name, visible detail
             self._console.print(f"      [bold cyan]\u25cf {name}[/bold cyan]  {short}")
+        elif name in ("Agent", "Skill", "TodoWrite", "ToolSearch"):
+            # CC overhead — visible so user can see what's happening
+            self._console.print(f"      [bold]\u25cf {name}[/bold]  {short}")
         else:
             # Read/Glob/Grep: dim bullet + name + detail (background exploration)
             self._console.print(f"      [dim]\u25cf {name}  {short}[/dim]")
@@ -515,14 +518,28 @@ class TaskDisplay:
                         f"        [dim][red]-{old_total}[/red] [green]+{new_total}[/green] lines[/dim]"
                     )
                 else:
-                    for ol in old_lines:
+                    # Skip identical leading lines — show where change starts
+                    skip = 0
+                    while (skip < len(old_lines) and skip < len(new_lines)
+                           and old_lines[skip] == new_lines[skip]):
+                        skip += 1
+                    if skip > 0:
+                        # Show context: last identical line before the change
+                        ctx = max(0, skip - 1)
+                        for ol in old_lines[ctx:skip]:
+                            self._console.print(f"        [dim]  {rich_escape(ol)}[/dim]")
+                        if skip > 1:
+                            self._console.print(f"        [dim]  ...{skip - 1} more[/dim]")
+                    for ol in old_lines[skip:]:
                         self._console.print(f"        [red]- {rich_escape(ol)}[/red]")
-                    if old_total > len(old_lines):
-                        self._console.print(f"        [dim]  ...{old_total - len(old_lines)} more[/dim]")
-                    for nl in new_lines:
+                    remaining_old = old_total - len(old_lines)
+                    if remaining_old > 0:
+                        self._console.print(f"        [dim]  ...{remaining_old} more[/dim]")
+                    for nl in new_lines[skip:]:
                         self._console.print(f"        [green]+ {rich_escape(nl)}[/green]")
-                    if new_total > len(new_lines):
-                        self._console.print(f"        [dim]  ...{new_total - len(new_lines)} more[/dim]")
+                    remaining_new = new_total - len(new_lines)
+                    if remaining_new > 0:
+                        self._console.print(f"        [dim]  ...{remaining_new} more[/dim]")
 
             elif name == "Write" and preview:
                 for pl in preview:
