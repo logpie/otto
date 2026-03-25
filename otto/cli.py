@@ -403,18 +403,6 @@ def main():
     pass
 
 
-@main.command(context_settings=CONTEXT_SETTINGS)
-def init():
-    """Initialize otto for this project."""
-    _require_git()
-    project_dir = Path.cwd()
-    config_path = create_config(project_dir)
-    config = load_config(config_path)
-    console.print(f"[success]✓[/success] Created [bold]{rich_escape(config_path.name)}[/bold]")
-    console.print(f"  [dim]default_branch:[/dim] {config['default_branch']}")
-    console.print(f"  [dim]max_retries:[/dim]    {config['max_retries']}")
-    console.print(f"\n[dim]Commit otto.yaml to share config with your team.[/dim]")
-
 
 def _import_tasks(import_path: Path, tasks_path: Path) -> None:
     """Import tasks from .md, .txt, or .yaml files with spec generation.

@@ -15,19 +15,6 @@ def runner():
     return CliRunner()
 
 
-class TestInit:
-    def test_creates_config(self, runner, tmp_git_repo, monkeypatch):
-        monkeypatch.chdir(tmp_git_repo)
-        result = runner.invoke(main, ["init"])
-        assert result.exit_code == 0
-        assert (tmp_git_repo / "otto.yaml").exists()
-
-    def test_shows_detected_settings(self, runner, tmp_git_repo, monkeypatch):
-        monkeypatch.chdir(tmp_git_repo)
-        result = runner.invoke(main, ["init"])
-        assert "default_branch" in result.output
-        assert "max_retries" in result.output
-
 
 class TestAdd:
     def test_adds_task(self, runner, tmp_git_repo, monkeypatch):
