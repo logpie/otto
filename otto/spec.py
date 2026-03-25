@@ -175,9 +175,9 @@ Rules:
   and negative forms (e.g., "accepts valid input" and "rejects invalid input"
   are one item, not two).
 - Preserve every user constraint exactly. Do not weaken thresholds.
-- Produce as many or as few criteria as the task warrants.
-  Most tasks need 5-15 items. If you have more than 15, you are probably
-  duplicating or splitting items unnecessarily.
+- Produce as few criteria as needed to cover the task.
+  Most tasks need 3-8 items. More than 10 usually means you are
+  splitting or specifying standard behaviors unnecessarily.
 - Explore the codebase and research external APIs/libraries/services
   as needed to write accurate, grounded criteria.
 - When the prompt is ambiguous, prefer [should] over [must].
@@ -197,7 +197,8 @@ Instructions:
   for context. Do not read every file in the project.
 - If the task references an external site/app/example, inspect it before writing the spec
   and emit concrete behavioral criteria derived from what you observed.
-- Include the necessary happy path, error cases, negative cases, edge cases, and retained behavior.
+- Cover the core behavior. Add error/edge cases only when non-obvious or task-specific.
+  Standard UI behaviors (click-outside, escape key, toggle) don't need specs unless the task calls them out.
 - Reference user-visible placement when useful, but do not mention internal implementation names or file structure.
 - Tag each criterion as [must] or [should] based on binding level.
 - For visual/subjective items that need browser inspection (not code-testable),
