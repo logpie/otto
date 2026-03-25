@@ -676,6 +676,195 @@ def run(prompt, dry_run):
 
 
 @main.command(context_settings=CONTEXT_SETTINGS)
+def setup():
+    """Generate CLAUDE.md with project conventions for the coding agent."""
+    _require_git()
+    project_dir = Path.cwd()
+
+    def _read_text_if_possible(path: Path, max_chars: int) -> str | None:
+        try:
+            return path.read_text()[:max_chars]
+        except (OSError, UnicodeDecodeError):
+            return None
+
+    def _build_file_tree(limit: int) -> str:
+        tree_lines = ["."]
+        excluded_dirs = {".git", "node_modules", "__pycache__"}
+
+        for root, dirs, files in os.walk(project_dir):
+            root_path = Path(root)
+            rel_root = root_path.relative_to(project_dir)
+            depth = len(rel_root.parts)
+
+            dirs[:] = sorted(d for d in dirs if d not in excluded_dirs)
+            if depth >= 2:
+                dirs[:] = []
+
+            base = Path() if depth == 0 else rel_root
+            entries = [base / d for d in dirs]
+            entries.extend(base / f for f in sorted(files))
+
+            for entry in entries:
+                if len(entry.parts) <= 2:
+                    tree_lines.append(entry.as_posix())
+
+        return "\n".join(tree_lines)[:limit]
+
+    # Create otto.yaml if missing
+    config_path = project_dir / "otto.yaml"
+    if not config_path.exists():
+        create_config(project_dir)
+        console.print(f"[green]✓[/green] Created otto.yaml")
+
+    claude_md = project_dir / "CLAUDE.md"
+    existing_content = None
+    mode = "generate"  # generate | merge
+
+    if claude_md.exists():
+        existing_content = _read_text_if_possible(claude_md, 5000)
+        console.print(f"[dim]CLAUDE.md already exists ({claude_md.stat().st_size} bytes)[/dim]")
+        console.print("  [bold]1[/bold] Merge (keep your rules, add new conventions)")
+        console.print("  [bold]2[/bold] Regenerate (replace entirely)")
+        console.print("  [bold]3[/bold] Keep existing")
+        choice = click.prompt("Choice", type=click.IntRange(1, 3), default=1)
+        if choice == 3:
+            return
+        elif choice == 2:
+            existing_content = None
+            mode = "generate"
+        else:
+            mode = "merge"
+
+    # Gather project context for the LLM
+    context_parts = []
+
+    # Read key files for convention detection
+    for name in ("package.json", "pyproject.toml", "tsconfig.json",
+                 "Cargo.toml", "go.mod"):
+        f = project_dir / name
+        if f.exists():
+            content = _read_text_if_possible(f, 2000)
+            if content is not None:
+                context_parts.append(f"--- {name} ---\n{content}")
+
+    # Sample a component/source file for style patterns
+    import glob
+    for pattern in ("src/components/*.tsx", "src/components/*.vue",
+                    "src/**/*.py", "lib/**/*.ts", "app/**/*.rb"):
+        matches = sorted(glob.glob(str(project_dir / pattern), recursive=True))
+        if matches:
+            sample = Path(matches[0])
+            content = _read_text_if_possible(sample, 2000)
+            if content is not None:
+                context_parts.append(f"--- {sample.relative_to(project_dir)} ---\n{content}")
+                break
+
+    # Sample a test file for test patterns
+    for pattern in ("__tests__/*.test.*", "tests/test_*.py", "test/**/*.test.*"):
+        matches = sorted(glob.glob(str(project_dir / pattern), recursive=True))
+        if matches:
+            sample = Path(matches[0])
+            content = _read_text_if_possible(sample, 1500)
+            if content is not None:
+                context_parts.append(f"--- {sample.relative_to(project_dir)} (test) ---\n{content}")
+                break
+
+    # File tree (top-level + src/)
+    tree = _build_file_tree(limit=2000)
+    context_parts.append(f"--- file tree ---\n{tree}")
+
+    console.print("[dim]Scanning project...[/dim]")
+
+    if existing_content:
+        merge_section = f"""
+--- existing CLAUDE.md ---
+{existing_content}
+---
+
+Merge the existing CLAUDE.md with fresh conventions from the codebase.
+Keep all user-written rules and principles. Add new project-specific
+conventions discovered from the code. Remove outdated entries that
+contradict what the codebase actually does. Deduplicate."""
+    else:
+        merge_section = ""
+
+    prompt = f"""Analyze this project and write a CLAUDE.md file with conventions for a coding agent.
+
+Project files:
+{chr(10).join(context_parts)}
+{merge_section}
+
+Write a concise CLAUDE.md (under 40 lines) covering:
+1. Key coding principles for this project (reuse patterns, test hygiene)
+2. Project-specific conventions (styling, file structure, naming)
+3. Important utilities/helpers to reuse (with file paths)
+4. Test patterns (shared fixtures, preferred test style)
+
+Be specific to THIS project — reference actual file paths, function names, class names you see.
+Do NOT include generic advice. Every line should be grounded in the codebase.
+Output ONLY the markdown content, no explanation."""
+
+    try:
+        from claude_agent_sdk import query, ClaudeAgentOptions
+    except ImportError:
+        from otto._agent_stub import query, ClaudeAgentOptions
+
+    console.print("[dim]Generating CLAUDE.md...[/dim]")
+    result_text = asyncio.run(_run_setup(prompt, project_dir))
+
+    if not result_text.strip():
+        error_console.print("[red]Failed to generate CLAUDE.md content[/red]")
+        return
+
+    # Strip markdown code fences if present
+    content = result_text.strip()
+    if content.startswith("```"):
+        content = "\n".join(content.split("\n")[1:])
+    if content.endswith("```"):
+        content = "\n".join(content.split("\n")[:-1])
+
+    # Show preview
+    console.print()
+    console.print("[bold]Generated CLAUDE.md:[/bold]")
+    console.print("─" * 60)
+    console.print(content)
+    console.print("─" * 60)
+    console.print()
+
+    if click.confirm("Write to CLAUDE.md?", default=True):
+        claude_md.write_text(content.strip() + "\n")
+        console.print(f"[green]✓[/green] Wrote CLAUDE.md ({len(content)} chars)")
+        console.print("[dim]  Commit it so the coding agent can read it.[/dim]")
+    else:
+        console.print("[dim]Cancelled[/dim]")
+
+
+async def _run_setup(prompt: str, project_dir: Path) -> str:
+    """Run a single LLM query for setup and return the text result."""
+    try:
+        from claude_agent_sdk import query, ClaudeAgentOptions
+    except ImportError:
+        from otto._agent_stub import query, ClaudeAgentOptions
+
+    opts = ClaudeAgentOptions(
+        permission_mode="bypassPermissions",
+        cwd=str(project_dir),
+        setting_sources=[],
+        max_turns=1,  # single turn — no tool use, just output
+        system_prompt="You are a project analyst. Output ONLY the markdown content for CLAUDE.md. No explanation, no preamble, no tool use.",
+    )
+    result_text = ""
+    async for message in query(prompt=prompt, options=opts):
+        if hasattr(message, "result") and message.result:
+            result_text = message.result
+        elif hasattr(message, "content"):
+            for block in getattr(message, "content", []):
+                if hasattr(block, "text"):
+                    result_text += block.text
+    return result_text
+
+
+@main.command(context_settings=CONTEXT_SETTINGS)
 @click.option("--specs", is_flag=True, help="Also generate specs for preview")
 def plan(specs):
     """Show execution plan without running tasks."""

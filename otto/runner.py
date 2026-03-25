@@ -62,6 +62,7 @@ from otto.verify import run_verification, _subprocess_env
 def _suggest_claude_md(project_dir: Path) -> None:
     """Suggest CLAUDE.md content based on project structure."""
     hints = []
+    test_helper_pattern = re.compile(r"createMock|mock.*factory|fixture", re.IGNORECASE)
 
     # Detect project type
     has_pkg = (project_dir / "package.json").exists()
@@ -85,16 +86,26 @@ def _suggest_claude_md(project_dir: Path) -> None:
             pass
 
     if has_tests:
-        # Check for shared test helpers
+        # Check for shared test helpers (lightweight — cap files and read size)
         for test_dir in ("__tests__", "tests", "test"):
             d = project_dir / test_dir
             if d.exists():
-                import subprocess as _sp
-                result = _sp.run(
-                    ["grep", "-rl", "createMock\\|mock.*factory\\|fixture", str(d)],
-                    capture_output=True, text=True
-                )
-                if result.stdout.strip():
+                found_test_helper = False
+                checked = 0
+                for path in d.rglob("*"):
+                    if not path.is_file() or path.stat().st_size > 50_000:
+                        continue
+                    checked += 1
+                    if checked > 20:  # only scan first 20 files
+                        break
+                    try:
+                        content = path.read_text()[:5000]  # first 5KB only
+                    except (OSError, UnicodeDecodeError):
+                        continue
+                    if test_helper_pattern.search(content):
+                        found_test_helper = True
+                        break
+                if found_test_helper:
                     hints.append("Has test helpers — reuse existing mock/fixture factories")
                 break
 
