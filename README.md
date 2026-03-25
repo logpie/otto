@@ -2,24 +2,70 @@
 
 Autonomous coding agent that makes Claude safe to run unattended.
 
-Otto wraps Claude Code in a reliability harness: task queue, git isolation, external verification, smart retry, and behavioral testing. You describe what you want, Otto handles the infrastructure to make it happen autonomously.
+Otto wraps Claude Code in a reliability harness: task queue, git isolation, structured QA, and evidence-based verification. You describe what you want, Otto handles the rest.
 
 ## How it works
 
 ```
-otto add "Add search that matches case-insensitively"    →  spec generated
-otto run                                                  →  pilot orchestrates everything
+otto add "Add search that matches case-insensitively"
+otto run
 ```
 
 For each task, Otto:
 
-1. **Generates acceptance spec** — testable criteria from your task description, classified as verifiable or visual
-2. **Runs a coding agent** — unconstrained Claude that plans, implements, writes tests (red-green TDD), and iterates
-3. **Verifies externally** — runs all tests in a clean disposable worktree
-4. **Behavioral testing** — pilot browses the app like a real user (screenshots, clicks, edge cases via chrome-devtools MCP)
-5. **Merges** — squash merge to main, clean git history
+1. **Runs a bare CC coding agent** — raw prompt, no spec bottleneck. The coding agent explores the codebase, implements the feature, and runs tests on its own.
+2. **Generates acceptance spec in parallel** — `[must]` (gating) and `[should]` (advisory) criteria with `◈` markers for visual/subjective items. Runs in a separate thread alongside coding.
+3. **Verifies externally** — runs all tests in a clean disposable worktree.
+4. **QA agent reviews** — adversarial testing against spec + original prompt. Risk-based tiering: skip QA when all specs have tests (tier 0), targeted checks (tier 1), or full adversarial testing with browser (tier 2).
+5. **Merges** — squash merge to main, clean git history.
 
-The coding agent has full autonomy — it reads the codebase, writes its own tests, runs them, and fixes failures. Otto controls the infrastructure around it: branches, worktrees, verification, retry, and cleanup.
+Failed tasks get structured retry: the coding agent receives specific failure criteria and evidence, not raw error dumps.
+
+## What you see
+
+```
+  ● Running  #1  abc12345
+  17:08:20  ✓ prepare  16s  baseline: 109 tests passing
+
+  17:08:20  ● coding  (bare CC)  · spec gen
+      ● Bash  find src -type f -name "*.tsx" | sort
+      ● Read  src/types/weather.ts
+      ... explored 13 files
+      ● Write  src/components/Feature.tsx
+        + "use client";
+        + import { getData } from "@/lib/data";
+          ...60 more lines
+      ● Edit  src/components/App.tsx
+        - import OldComponent from "./OldComponent";
+        + import Feature from "./Feature";
+      ● Bash  npx next build 2>&1 | tail -20
+  17:11:14  ✓ coding  174s  $0.81  3 files  +92  -10
+  17:11:52  ✓ test  22s  838 passed
+  17:11:52  ✓ spec gen  68s  $0.26  8 items (5 must, 3 should) (ready)
+      [must] A large emoji is displayed based on current conditions
+      [must] The emoji has a visible repeating pulse animation
+      ... +5 more
+
+  17:11:52  ● qa  (full - adversarial testing)
+      Reading src/components/Feature.tsx
+      Testing: npx jest --no-coverage 2>&1 | tail -30
+      Building project
+      ✓ [must] Feature renders correctly
+        Component maps weather codes to emojis: 0→☀️, 3→☁️, 45-48→🌫️
+      ✓ [must] Animation runs continuously
+        globals.css defines --animate-weatherPulse: 3s ease-in-out infinite
+      ✓ [must ◈] Positioned prominently in weather section
+        Uses text-6xl, placed between condition name and temperature
+      · [should ◈] Animation is subtle and smooth
+        ease-in-out over 3s with modest scale(1.08)
+      · [should] Accessible with aria-label
+        role='img' and aria-label present
+  17:13:41  ✓ qa  109s  $0.39  tier 2  5 specs passed
+  17:13:41  ✓ passed  5m36s  $1.47
+    3 files · 8 specs verified
+
+  1/1 tasks passed
+```
 
 ## Quick start
 
@@ -27,143 +73,102 @@ The coding agent has full autonomy — it reads the codebase, writes its own tes
 # Install
 uv pip install -e .
 
-# In any git repo — add tasks naturally
+# In any git repo — add tasks
 cd your-project
 otto add "Add a search function that matches case-insensitively"
-otto add "Fix the slow API response time — must be under 300ms"
+otto add "Fix the slow API response — must be under 300ms"
 
-# Or import from markdown
-otto add -f features.md
-
-# Run — watch the pilot orchestrate
+# Run
 otto run
 ```
 
 No `otto init` needed — auto-initializes on first `add` or `run`.
 
-## What you see
-
-```
-────────────────────────────────────────────────────────────
-  Pilot taking control — LLM-driven execution
-  The pilot will drive coding → verify → merge
-
-  📋 Loading task state
-
-  🔨 Coding  task abc123
-    ✓ passed · $0.31
-
-  Spec Compliance Check:
-  ✓ [verifiable] search is case-insensitive — test: test_case_insensitive
-  ✓ [verifiable] returns matching results — test: test_search_returns_matches
-  ◉ [visual] clean UI with no layout issues
-
-  Behavioral Testing:
-  ✓ Behavioral: search "hello" works, "New Jersey" shows US results
-  ✓ Behavioral: empty search handled gracefully
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Run complete  2m6s  $0.31
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  ✓ #1  Add search functionality
-
-  1/1 tasks passed
-```
-
 ## CLI reference
 
 ```
-otto add "prompt"       Add a task (auto-generates spec with classification)
-otto add --no-spec      Skip spec generation
+otto add "prompt"       Add a task (spec generated at runtime, parallel with coding)
+otto add --spec "prompt"  Pre-generate spec before run
 otto add -f file        Import from .md/.txt/.yaml
 otto run                Run all pending tasks
-otto run --dry-run      Show what would run
-otto run --tdd          Generate adversarial tests before coding (optional)
-otto status             Show task table
-otto show <id>          Show task details
+otto run "prompt"       One-off: add + run in single command
+otto plan               Show execution plan without running
+otto status             Show task table with specs, cost, timing
+otto show <id>          Show task details + QA verdict
 otto retry <id>         Reset a failed task to pending
 otto retry --force <id> "feedback"  Reset any task with feedback
-otto delete <id>        Remove a task
-otto logs <id>          Show logs for a task
+otto logs <id>          Show agent logs for a task
 otto diff <id>          Show git diff for a task
-otto arch               Analyze codebase (for humans, standalone)
 otto reset              Clear all tasks, branches, logs
 otto reset --hard       Also revert otto commits
 ```
 
 ## Architecture
 
-### Reliability harness
+### v4.5 pipeline
 
 Otto is infrastructure, not intelligence. The intelligence is Claude's. Otto provides:
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                    otto v3                              │
-│  "Reliability harness that makes Claude safe to run     │
-│   unattended while you sleep"                          │
+│                    otto v4.5                             │
+│  "Attempt 1 matches bare CC. Otto adds evidence-based   │
+│   verification on top."                                 │
 └──────────────┬──────────────────────────────────────────┘
                │
-    ┌──────────▼──────────┐
-    │   Pilot Agent       │   (LLM — strategic decisions)
-    │                     │
-    │ • Task ordering     │
-    │ • Spec compliance   │
-    │ • Behavioral test   │
-    │ • Smart retry       │
-    │ • Doom-loop detect  │
-    └──────────┬──────────┘
-               │
-    ┌──────────▼────────────────────────────────┐
-    │     Per-Task Loop                         │
-    │                                           │
-    │  1. Create branch                         │
-    │  2. Coding Agent (UNCONSTRAINED)          │
-    │     - reads codebase                      │
-    │     - writes tests first (red-green TDD)  │
-    │     - implements feature                  │
-    │     - runs tests, fixes failures          │
-    │  3. External verify (clean worktree)      │
-    │  4. Pass → squash merge to main           │
-    │     Fail → pilot decides retry strategy   │
-    └───────────────────────────────────────────┘
+    ┌──────────▼──────────────────────────────────┐
+    │     Per-Task Loop                           │
+    │                                             │
+    │  1. Preflight (baseline tests, .gitignore)  │
+    │  2. Coding Agent (BARE CC — no custom       │
+    │     system prompt, SDK preset only)          │
+    │     + Spec Gen (parallel, separate thread)  │
+    │  3. External verify (clean worktree)        │
+    │  4. QA Agent (adversarial, risk-tiered)     │
+    │     - Tier 0: skip (all specs have tests)   │
+    │     - Tier 1: targeted (spec gaps only)     │
+    │     - Tier 2: full + browser (visual/◈)     │
+    │  5. Pass → squash merge to main             │
+    │     Fail → structured retry with evidence   │
+    └─────────────────────────────────────────────┘
 ```
 
-### Spec classification
+### Spec binding model
 
-Each spec item is classified as verifiable or visual:
+Each spec item has a binding level and verifiability marker:
 
-```yaml
-spec:
-  - text: "search is case-insensitive"
-    verifiable: true
-    test_hint: "search 'HELLO' and 'hello', verify same results"
-  - text: "Apple Weather-style gradient backgrounds"
-    verifiable: false
+- **`[must]`** — gating. QA blocks merge if failed.
+- **`[must ◈]`** — gating + visual/subjective. Requires browser verification.
+- **`[should]`** — advisory. QA notes observations but doesn't block.
+- **`[should ◈]`** — advisory + visual. Noted with evidence.
+
+### QA verdict
+
+QA produces structured JSON with per-item evidence:
+
+```json
+{
+  "must_passed": true,
+  "must_items": [
+    {"criterion": "...", "status": "pass", "evidence": "tests pass, curl returns 200"}
+  ],
+  "should_notes": [
+    {"criterion": "...", "observation": "uses consistent styling"}
+  ]
+}
 ```
 
-- **Verifiable** — coding agent must write a test that proves it
-- **Visual** — pilot judges via browser screenshots (chrome-devtools MCP)
+### Display
 
-### Behavioral testing
+Semantic color hierarchy for scannability:
 
-After a task passes verification, the pilot uses the app like a real user:
-
-- **Web apps**: opens browser via chrome-devtools MCP, navigates, clicks, takes screenshots
-- **CLI tools**: runs commands with real inputs, checks output
-- **APIs**: curls endpoints with real payloads
-
-Findings are documented in `otto_logs/<task_key>/behavioral-test.md`.
-
-### Verification
-
-Three layers:
-
-1. **Agent's own tests** — the coding agent writes and runs tests during implementation
-2. **Existing test suite** — run in a clean disposable worktree after the agent finishes
-3. **Custom verify command** — user-provided validation (`otto add --verify "curl localhost:8080/health"`)
-
-Test framework auto-detected: pytest, npm test, go test, cargo test, maven, gradle, cmake, make. Mixed-language projects chain all detected commands.
+- **Green `● Write`/`● Edit`** — code changes (key actions)
+- **Cyan `● Bash`** — commands
+- **Dim `● Read`** — background exploration
+- **Cyan `[must]`** — gating requirements
+- **Magenta `◈`** — visual/subjective marker
+- **Bold `Testing:`/`Curl:`** — QA verification actions
+- **Bold magenta `Browser:`** — visual testing
 
 ## Configuration
 
@@ -172,31 +177,33 @@ Test framework auto-detected: pytest, npm test, go test, cargo test, maven, grad
 ```yaml
 max_retries: 3
 default_branch: main
-verify_timeout: 300
-max_turns: 200          # coding agent turn limit
-effort: high            # coding agent thinking effort
+verify_timeout: 300       # seconds for test suite
+max_task_time: 3600       # 1hr circuit breaker per task
+qa_timeout: 3600          # QA agent timeout
+
+# Per-agent setting scopes (comma-separated: user, project)
+coding_agent_settings: "user,project"   # reads user + project CLAUDE.md
+spec_agent_settings: "project"          # project CLAUDE.md only
+qa_agent_settings: "project"            # project CLAUDE.md only
 ```
 
-Auto-detected: test_command, default_branch. Override anything by adding to `otto.yaml`:
-
-```yaml
-model: opus
-test_command: "npm test && pytest"
-```
+Auto-detected: test_command, default_branch. Override anything in `otto.yaml`.
 
 ## Project structure
 
 ```
 otto/
-  cli.py        — CLI (add, run, status, retry, logs, reset, arch)
-  runner.py     — Core execution loop, red-green TDD, agent streaming
-  pilot.py      — LLM pilot orchestrator, behavioral testing, MCP tools
-  spec.py       — Spec generation with constraint classification
-  verify.py     — Verification in disposable worktrees
-  tasks.py      — Task CRUD with file locking
-  config.py     — Config loading, multi-framework test detection
-  architect.py  — Codebase analysis (standalone, for humans)
-  testgen.py    — Test generation (used in --tdd mode)
+  cli.py             — CLI (add, run, plan, status, show, retry, logs, reset)
+  runner.py           — v4.5 pipeline: bare CC coding, structured QA, retry
+  spec.py             — Spec generation with [must]/[should]/◈ classification
+  verify.py           — Verification in disposable worktrees
+  tasks.py            — Task CRUD with file locking
+  config.py           — Config loading, multi-framework test detection
+  orchestrator.py     — Multi-task batch execution, integration branch
+  display.py          — Live terminal display with semantic color hierarchy
+  display_preview.py  — HTML preview tool for display debugging
+  context.py          — Cross-task learnings with provenance
+  theme.py            — Shared console and styling constants
 ```
 
 ## Requirements
@@ -204,8 +211,7 @@ otto/
 - Python 3.11+
 - [Claude Code CLI](https://claude.ai/code) installed and authenticated
 - Git repository
-- `mcp` Python package (`pip install mcp`)
-- Optional: chrome-devtools MCP for browser-based behavioral testing
+- Optional: chrome-devtools MCP for browser-based QA testing
 
 ## License
 
