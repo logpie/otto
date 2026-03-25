@@ -581,8 +581,9 @@ def _write_proof_artifacts(
     passed_count = sum(1 for m in must_items if m.get("status") == "pass")
 
     report_lines = [
-        f"# Proof of Work: {original_prompt[:80]}",
-        f"Task: {task.get('key', '?')} | {status_icon} | {passed_count}/{len(must_items)} must | QA ${cost_usd:.2f}",
+        f"# Proof of Work",
+        f"**Task:** {original_prompt}",
+        f"**Result:** {task.get('key', '?')} | {status_icon} | {passed_count}/{len(must_items)} must | QA ${cost_usd:.2f}",
         "",
     ]
 

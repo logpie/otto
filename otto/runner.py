@@ -1459,6 +1459,18 @@ async def run_task_v45(
                 merge_elapsed = round(time.monotonic() - merge_start, 1)
                 phase_timings["merge"] = merge_elapsed
                 emit("phase", name="merge", status="done", time_s=merge_elapsed)
+                # Append commit SHA + cost to proof report
+                proof_report = log_dir / "qa-proofs" / "proof-report.md"
+                if proof_report.exists():
+                    try:
+                        commit_sha = subprocess.run(
+                            ["git", "rev-parse", "--short", "HEAD"],
+                            cwd=project_dir, capture_output=True, text=True,
+                        ).stdout.strip()
+                        with open(proof_report, "a") as f:
+                            f.write(f"\n## Commit\n`{commit_sha}` on `{default_branch}` | total ${total_cost:.2f} | {round(time.monotonic() - task_start)}s\n")
+                    except Exception:
+                        pass
                 testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / key
                 if testgen_dir.exists():
                     shutil.rmtree(testgen_dir, ignore_errors=True)
