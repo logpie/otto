@@ -13,12 +13,14 @@ try:
     from claude_agent_sdk import ClaudeAgentOptions, query
     from claude_agent_sdk.types import (
         AssistantMessage, ResultMessage, TextBlock, ToolResultBlock, ToolUseBlock,
+        UserMessage,
     )
 except ImportError:
     from otto._agent_stub import ClaudeAgentOptions, query, ResultMessage
     AssistantMessage = None  # type: ignore[assignment,misc]
     TextBlock = None  # type: ignore[assignment,misc]
     ToolUseBlock = None  # type: ignore[assignment,misc]
+    UserMessage = None  # type: ignore[assignment,misc]
     ToolResultBlock = None  # type: ignore[assignment,misc]
 
 from otto.theme import console
@@ -307,43 +309,30 @@ Write your JSON verdict to: {verdict_file}
                     _result_msg = message
                 elif hasattr(message, "session_id") and hasattr(message, "is_error"):
                     _result_msg = message
+                elif UserMessage and isinstance(message, UserMessage):
+                    # UserMessage contains ToolResultBlock — extract Bash output + screenshots
+                    for block in message.content:
+                        if not (ToolResultBlock and isinstance(block, ToolResultBlock)):
+                            continue
+                        raw_content = getattr(block, "content", None)
+                        if _last_tool_name == "Bash":
+                            text = str(raw_content) if raw_content else ""
+                            if qa_actions and qa_actions[-1]["type"] == "bash":
+                                qa_actions[-1]["output"] = text[:2000]
+                        elif _last_tool_name.endswith("take_screenshot"):
+                            # Extract base64 image from tool result content
+                            if isinstance(raw_content, list):
+                                for part in raw_content:
+                                    if not isinstance(part, dict) or part.get("type") != "image":
+                                        continue
+                                    src = part.get("source", {})
+                                    b64 = src.get("data", "") if isinstance(src, dict) else ""
+                                    if b64 and qa_actions and qa_actions[-1].get("action") == "take_screenshot":
+                                        qa_actions[-1]["image_b64"] = b64
+                                        break
+                        _last_tool_name = ""
                 elif AssistantMessage and isinstance(message, AssistantMessage):
                     for block in message.content:
-                        if ToolResultBlock and isinstance(block, ToolResultBlock):
-                            # Capture Bash output for proof scripts
-                            if _last_tool_name == "Bash":
-                                content = str(getattr(block, "content", ""))
-                                if qa_actions and qa_actions[-1]["type"] == "bash":
-                                    qa_actions[-1]["output"] = content[:2000]
-                            # Capture screenshot image data from tool results
-                            elif _last_tool_name.endswith("take_screenshot"):
-                                raw_content = getattr(block, "content", None)
-                                if isinstance(raw_content, list):
-                                    for part in raw_content:
-                                        if not isinstance(part, dict):
-                                            continue
-                                        # Direct image block: {"type": "image", "source": {"data": "..."}}
-                                        if part.get("type") == "image":
-                                            src = part.get("source", {})
-                                            b64 = src.get("data", "") if isinstance(src, dict) else ""
-                                            if not b64:
-                                                b64 = part.get("data", "")
-                                            if b64 and qa_actions and qa_actions[-1].get("action") == "take_screenshot":
-                                                qa_actions[-1]["image_b64"] = b64
-                                                break
-                                        # Nested in tool_result: {"type": "tool_result", "content": [...]}
-                                        if part.get("type") == "tool_result":
-                                            inner = part.get("content", [])
-                                            if isinstance(inner, list):
-                                                for sub in inner:
-                                                    if isinstance(sub, dict) and sub.get("type") == "image":
-                                                        src = sub.get("source", {})
-                                                        b64 = src.get("data", "") if isinstance(src, dict) else ""
-                                                        if b64 and qa_actions and qa_actions[-1].get("action") == "take_screenshot":
-                                                            qa_actions[-1]["image_b64"] = b64
-                                                            break
-                            _last_tool_name = ""
-                            continue
                         if TextBlock and isinstance(block, TextBlock) and block.text:
                             report_lines.append(block.text)
                             if on_progress:
