@@ -25,9 +25,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "coding_agent_settings": "project",
     "spec_agent_settings": "project",
     "qa_agent_settings": "project",
-
-    # Internal
-    "orchestrator": "v4",
+    "planner_agent_settings": "project",
 }
 
 
@@ -203,16 +201,17 @@ def create_config(project_dir: Path) -> Path:
     lines = yaml.dump(config, default_flow_style=False, sort_keys=False).rstrip()
     lines += "\n"
     lines += "\n# Timeouts:\n"
-    lines += f"# verify_timeout: 120            # seconds for test suite in verify\n"
+    lines += f"# verify_timeout: 300            # seconds for test suite in verify\n"
     lines += f"# max_task_time: 3600            # 1hr circuit breaker per task\n"
     lines += f"# qa_timeout: 3600               # 1hr circuit breaker for QA agent\n"
     lines += "\n# Model:\n"
     lines += f"# model: null                    # override Claude model (e.g. sonnet)\n"
     lines += "\n# Agent settings scope (project or user,project):\n"
-    lines += f"# coding_agent_settings: project   # project CLAUDE.md only (default)\n"
-    lines += f"# spec_agent_settings: project     # project CLAUDE.md only\n"
-    lines += f"# qa_agent_settings: project       # project CLAUDE.md only\n"
-    lines += f"# Set to 'user,project' to also load ~/.claude/CLAUDE.md (adds user skills/hooks)\n"
+    lines += f"# coding_agent_settings: project     # project CLAUDE.md only (default)\n"
+    lines += f"# spec_agent_settings: project       # project CLAUDE.md only\n"
+    lines += f"# qa_agent_settings: project         # project CLAUDE.md only\n"
+    lines += f"# planner_agent_settings: project    # project CLAUDE.md only\n"
+    lines += f"# Set to 'user,project' to also load ~/.claude/CLAUDE.md\n"
     config_path.write_text(lines + "\n")
 
     # Update .git/info/exclude for runtime files (use git_meta_dir for linked worktrees)

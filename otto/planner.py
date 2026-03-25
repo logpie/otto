@@ -281,7 +281,7 @@ Respect depends_on constraints."""
         agent_opts = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
             cwd=str(project_dir),
-            setting_sources=["project"],
+            setting_sources=config.get("planner_agent_settings", "project").split(","),
             env=_subprocess_env(),
             effort="low",
             system_prompt=_PLANNER_SYSTEM_PROMPT,
@@ -379,7 +379,7 @@ Output the JSON execution plan for REMAINING tasks only."""
         agent_opts = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
             cwd=str(project_dir),
-            setting_sources=["project"],
+            setting_sources=config.get("planner_agent_settings", "project").split(","),
             env=_subprocess_env(),
             effort="low",
             system_prompt=_PLANNER_SYSTEM_PROMPT,

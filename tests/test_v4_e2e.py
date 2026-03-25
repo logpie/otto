@@ -482,19 +482,12 @@ class TestWorktreeCleanupE2E:
 # ---------------------------------------------------------------------------
 
 class TestConfigDefault:
-    def test_v4_is_default_orchestrator(self):
+    def test_agent_settings_default_to_project(self):
         from otto.config import DEFAULT_CONFIG
-        assert DEFAULT_CONFIG["orchestrator"] == "v4"
-
-    def test_v3_fallback_config(self):
-        """orchestrator: v3 in config should trigger pilot."""
-        from otto.config import load_config
-        import tempfile
-        with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False) as f:
-            yaml.dump({"orchestrator": "v3", "default_branch": "main"}, f)
-            f.flush()
-            config = load_config(Path(f.name))
-        assert config["orchestrator"] == "v3"
+        assert DEFAULT_CONFIG["coding_agent_settings"] == "project"
+        assert DEFAULT_CONFIG["spec_agent_settings"] == "project"
+        assert DEFAULT_CONFIG["qa_agent_settings"] == "project"
+        assert DEFAULT_CONFIG["planner_agent_settings"] == "project"
 
 
 # ---------------------------------------------------------------------------
