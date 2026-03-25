@@ -229,28 +229,6 @@ def preflight_checks(
         console.print("No pending tasks", style="dim")
         return (0, [])
 
-    # Inject dependencies from file-plan.md
-    if not config.get("no_architect", False) and len(pending) >= 2:
-        from otto.architect import parse_file_plan
-        arch_deps = parse_file_plan(project_dir)
-        if arch_deps:
-            tasks = load_tasks(tasks_file)
-            pending = [t for t in tasks if t.get("status") == "pending"]
-            pending_by_id = {t["id"]: t for t in pending}
-            injected = 0
-            for dep_id, on_id in arch_deps:
-                task = pending_by_id.get(dep_id)
-                if task:
-                    deps = list(task.get("depends_on") or [])
-                    if on_id not in deps:
-                        deps.append(on_id)
-                        update_task(tasks_file, task["key"], depends_on=deps)
-                        injected += 1
-            if injected:
-                console.print(f"  Injected {injected} dependencies from file-plan.md", style="dim")
-            # Reload after injecting deps
-            tasks = load_tasks(tasks_file)
-            pending = [t for t in tasks if t.get("status") == "pending"]
 
     return (None, pending)
 
