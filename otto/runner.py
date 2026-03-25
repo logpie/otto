@@ -113,6 +113,13 @@ def preflight_checks(
         console.print("[red]Working tree is dirty -- fix before running otto[/red]")
         return (2, [])
 
+    # Suggest CLAUDE.md if missing — coding agents read it for project conventions
+    if not (project_dir / "CLAUDE.md").exists():
+        console.print(
+            "  [yellow]Tip:[/yellow] No CLAUDE.md found. Create one with project conventions,"
+            " coding principles, and guidelines — the coding agent will follow them."
+        )
+
     # Ensure .gitignore covers known build/dependency dirs.
     # Uses framework detection (not size heuristics) — only auto-adds
     # from a curated allowlist keyed off project manifest files.
