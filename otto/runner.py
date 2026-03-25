@@ -156,7 +156,7 @@ def preflight_checks(
     exclude_path = git_meta_dir(project_dir) / "info" / "exclude"
     exclude_path.parent.mkdir(parents=True, exist_ok=True)
     existing_exclude = exclude_path.read_text() if exclude_path.exists() else ""
-    otto_excludes = ["otto_logs/", "otto_arch/", "tasks.yaml", ".tasks.lock"]
+    otto_excludes = ["otto_logs/", "otto_arch/", ".otto-scratch/", "tasks.yaml", ".tasks.lock"]
     missing_excludes = [e for e in otto_excludes if e not in existing_exclude]
     if missing_excludes:
         with open(exclude_path, "a") as f:
@@ -796,6 +796,12 @@ async def run_task_v45(
             coding_prompt += (
                 f"\n\nYou are working in {project_dir}. Do not create git commits."
                 f" Do not ask questions — make decisions yourself and implement."
+                f"\n\nTest hygiene:"
+                f"\n- Use .otto-scratch/ for throwaway test scripts and verification probes."
+                f"\n- Only write to the project's test directories (tests/, __tests__/) for"
+                f" permanent regression tests that protect important new behavior."
+                f"\n- Reuse existing test helpers and mock data factories — do not duplicate."
+                f"\n- Extend existing test files rather than creating new ones when possible."
             )
 
             # Run coding agent — NO custom system prompt (bare CC)

@@ -1540,11 +1540,12 @@ def reset(yes, hard):
             if branch:
                 subprocess.run(["git", "branch", "-D", branch], capture_output=True)
 
-        # Clean logs
+        # Clean logs and scratch area
         import shutil
-        log_dir = project_dir / "otto_logs"
-        if log_dir.exists():
-            shutil.rmtree(log_dir)
+        for cleanup_dir in ("otto_logs", ".otto-scratch"):
+            d = project_dir / cleanup_dir
+            if d.exists():
+                shutil.rmtree(d)
 
         msg = f"[success]✓[/success] Reset [bold]{count}[/bold] tasks. Cleaned branches and logs."
         if hard:

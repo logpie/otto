@@ -216,7 +216,8 @@ def _should_stage_untracked(rel_path: str) -> bool:
     obvious build artifacts/caches — even if .gitignore doesn't cover them.
     """
     # Otto runtime files — never commit
-    _OTTO_PATHS = ("otto_logs/", "otto_arch/", "tasks.yaml", ".tasks.lock", "otto.lock")
+    _OTTO_PATHS = ("otto_logs/", "otto_arch/", ".otto-scratch/",
+                   "tasks.yaml", ".tasks.lock", "otto.lock")
     if any(rel_path == p or rel_path.startswith(p) for p in _OTTO_PATHS):
         return False
 

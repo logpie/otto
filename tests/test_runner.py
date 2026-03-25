@@ -272,3 +272,8 @@ class TestShouldStageUntracked:
         from otto.runner import _should_stage_untracked
         assert _should_stage_untracked("module.pyc") is False
         assert _should_stage_untracked("lib.so") is False
+
+    def test_excludes_scratch_area(self):
+        from otto.runner import _should_stage_untracked
+        assert _should_stage_untracked(".otto-scratch/test_verify.py") is False
+        assert _should_stage_untracked(".otto-scratch/probes/check.sh") is False
