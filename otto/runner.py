@@ -869,6 +869,9 @@ async def run_task_v45(
                 raw_cost = getattr(result_msg, "total_cost_usd", None)
                 session_cost = float(raw_cost) if isinstance(raw_cost, (int, float)) else 0.0
                 attempt_cost = session_cost - _prev_session_cost
+                if attempt_cost < 0:
+                    # Session wasn't resumed — fresh session, use raw cost
+                    attempt_cost = session_cost
                 _prev_session_cost = session_cost
                 total_cost += attempt_cost
 
