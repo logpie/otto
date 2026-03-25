@@ -523,23 +523,28 @@ class TaskDisplay:
                     while (skip < len(old_lines) and skip < len(new_lines)
                            and old_lines[skip] == new_lines[skip]):
                         skip += 1
-                    if skip > 0:
-                        # Show context: last identical line before the change
-                        ctx = max(0, skip - 1)
-                        for ol in old_lines[ctx:skip]:
-                            self._console.print(f"        [dim]  {rich_escape(ol)}[/dim]")
-                        if skip > 1:
-                            self._console.print(f"        [dim]  ...{skip - 1} more[/dim]")
-                    for ol in old_lines[skip:]:
-                        self._console.print(f"        [red]- {rich_escape(ol)}[/red]")
-                    remaining_old = old_total - len(old_lines)
-                    if remaining_old > 0:
-                        self._console.print(f"        [dim]  ...{remaining_old} more[/dim]")
-                    for nl in new_lines[skip:]:
-                        self._console.print(f"        [green]+ {rich_escape(nl)}[/green]")
-                    remaining_new = new_total - len(new_lines)
-                    if remaining_new > 0:
-                        self._console.print(f"        [dim]  ...{remaining_new} more[/dim]")
+
+                    # If ALL preview lines are identical, change is beyond preview
+                    if skip >= len(old_lines) and skip >= len(new_lines):
+                        self._console.print(
+                            f"        [dim][red]-{old_total}[/red] [green]+{new_total}[/green] lines[/dim]"
+                        )
+                    else:
+                        if skip > 0:
+                            # Show one context line before the change
+                            self._console.print(f"        [dim]  {rich_escape(old_lines[skip - 1])}[/dim]")
+                            if skip > 1:
+                                self._console.print(f"        [dim]  ...{skip - 1} more[/dim]")
+                        for ol in old_lines[skip:]:
+                            self._console.print(f"        [red]- {rich_escape(ol)}[/red]")
+                        remaining_old = old_total - len(old_lines)
+                        if remaining_old > 0:
+                            self._console.print(f"        [dim]  ...{remaining_old} more[/dim]")
+                        for nl in new_lines[skip:]:
+                            self._console.print(f"        [green]+ {rich_escape(nl)}[/green]")
+                        remaining_new = new_total - len(new_lines)
+                        if remaining_new > 0:
+                            self._console.print(f"        [dim]  ...{remaining_new} more[/dim]")
 
             elif name == "Write" and preview:
                 for pl in preview:
