@@ -10,13 +10,15 @@ from unittest.mock import AsyncMock, patch
 import pytest
 import yaml
 
-from otto.runner import (
+from otto.qa import (
     determine_qa_tier,
+    _parse_qa_verdict_json,
+    format_spec_v45,
+)
+from otto.runner import (
     _anchor_candidate_ref,
     _find_best_candidate_ref,
     _get_diff_info,
-    _parse_qa_verdict_json,
-    format_spec_v45,
     run_task_v45,
 )
 from otto.tasks import load_tasks
@@ -222,7 +224,7 @@ class TestCandidateRefs:
 
     def test_anchor_raises_when_update_ref_fails(self, tmp_git_repo):
         """Anchoring failures should surface instead of being ignored."""
-        with patch("otto.runner.subprocess.run") as run_mock:
+        with patch("otto.git_ops.subprocess.run") as run_mock:
             run_mock.return_value = subprocess.CompletedProcess(
                 ["git", "update-ref"], 1, stdout="", stderr="boom",
             )
@@ -814,7 +816,7 @@ class TestSystemPromptPreset:
     def test_qa_agent_uses_preset(self):
         """QA agent must use preset to keep CC defaults."""
         import inspect
-        from otto.runner import run_qa_agent_v45
+        from otto.qa import run_qa_agent_v45
         source = inspect.getsource(run_qa_agent_v45)
         assert '"type": "preset"' in source or "preset" in source, \
             "QA agent must use system_prompt preset to preserve CC defaults"
