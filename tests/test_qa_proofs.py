@@ -80,7 +80,8 @@ class TestWriteProofArtifacts:
         script = log_dir / "qa-proofs" / "regression-check.sh"
         content = script.read_text()
         assert "npx jest" in content
-        assert "# Skipped (non-replayable): kill" in content
+        # kill is pre-filtered by _QA_INFRA_PREFIXES — not in script at all
+        assert "kill" not in content
         assert "# Skipped (non-replayable): rm -rf" in content
 
     def test_regression_script_skips_server_and_background_commands(self, tmp_path):

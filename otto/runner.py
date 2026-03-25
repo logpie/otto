@@ -406,11 +406,6 @@ async def coding_loop(
             if parts:
                 console.print(f"    {' · '.join(parts)}")
 
-            # Show proof report path if qa-proofs exist
-            proof_report = project_dir / "otto_logs" / task_key / "qa-proofs" / "proof-report.md"
-            if proof_report.exists():
-                console.print(f"    [dim]proofs: otto_logs/{task_key}/qa-proofs/[/dim]")
-
             # Emit TaskMerged NOW (not deferred to batch loop)
             telemetry.log(TaskMerged(
                 task_key=task_key, task_id=task_id,
@@ -1614,7 +1609,7 @@ def _print_summary(
         if success and project_dir and task_key:
             proof_report = project_dir / "otto_logs" / task_key / "qa-proofs" / "proof-report.md"
             if proof_report.exists():
-                console.print(f"       [dim]proofs: otto_logs/{task_key}/qa-proofs/[/dim]")
+                console.print(f"       [dim]proofs: {proof_report}[/dim]")
 
     console.print()
     if failed == 0:

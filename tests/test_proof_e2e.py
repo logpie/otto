@@ -270,7 +270,7 @@ class TestProofOfWorkE2E:
             ],
         )
         qa_actions1 = [
-            {"type": "bash", "command": "echo attempt1", "output": "attempt1"},
+            {"type": "bash", "command": "npx jest --testPathPattern=attempt1", "output": "attempt1"},
         ]
         task = {"key": "RETRY-1"}
         _write_proof_artifacts(log_dir, verdict1, qa_actions1, task, "Prompt A", 0.30)
@@ -290,7 +290,7 @@ class TestProofOfWorkE2E:
             ],
         )
         qa_actions2 = [
-            {"type": "bash", "command": "echo attempt2", "output": "attempt2"},
+            {"type": "bash", "command": "npx jest --testPathPattern=attempt2", "output": "attempt2"},
         ]
         _write_proof_artifacts(log_dir, verdict2, qa_actions2, task, "Prompt B", 0.55)
 
@@ -326,8 +326,8 @@ class TestProofOfWorkE2E:
             ],
         )
         qa_actions = [
-            {"type": "bash", "command": "echo 'hello world'", "output": "hello world"},
-            {"type": "bash", "command": "true", "output": ""},
+            {"type": "bash", "command": "node -e 'console.log(1+1)'", "output": "2"},
+            {"type": "bash", "command": "npx jest --version", "output": "29.7.0"},
         ]
         task = {"key": "RUN-1"}
         _write_proof_artifacts(log_dir, verdict, qa_actions, task, "Test runnable", 0.01)
@@ -341,7 +341,7 @@ class TestProofOfWorkE2E:
             capture_output=True, text=True, timeout=10,
         )
         assert result.returncode == 0
-        assert "hello world" in result.stdout
+        assert "2" in result.stdout  # node -e 'console.log(1+1)' outputs 2
 
     # ------------------------------------------------------------------
     # Scenario 8: Regression script fails on regression
@@ -553,23 +553,24 @@ class TestProofOfWorkE2E:
         assert "npm run lint && npm test" in script
         assert 'node -e "console.log(1+1)"' in script
 
-        # --- SKIPPED commands (appear as comments) ---
+        # --- SKIPPED commands (appear as comments in script) ---
         assert "# Skipped (non-replayable): npm run dev" in script
-        assert "# Skipped (non-replayable): kill -9 12345" in script
         assert "# Skipped (non-replayable): python -m http.server 8000" in script
         assert "# Skipped (non-replayable): npm start" in script
         assert "# Skipped (non-replayable): uvicorn app:app --reload" in script
         assert "# Skipped (non-replayable): gunicorn app:app" in script
-        assert "# Skipped (non-replayable): rm -rf /tmp/test" in script
-        assert "# Skipped (non-replayable): git push origin main" in script
         assert "# Skipped (non-replayable): npx next dev" in script
         assert "# Skipped (non-replayable): serve dist" in script
         assert "# Skipped (non-replayable): flask run --port 5000" in script
         assert "# Skipped (non-replayable): python3 -m http.server 9090" in script
         assert "# Skipped (non-replayable): node server.js" in script
-        assert "# Skipped (non-replayable): pkill -f node" in script
-        # nohup ... & is skipped for TWO reasons: nohup substring AND trailing &
         assert "# Skipped (non-replayable): nohup node server.js &" in script
+        # These start with infra prefixes — pre-filtered entirely
+        assert "kill -9 12345" not in script
+        assert "pkill -f node" not in script
+        # These are caught by _is_non_replayable — appear as skip comments
+        assert "# Skipped (non-replayable): rm -rf" in script
+        assert "# Skipped (non-replayable): git push" in script
 
     def test_regression_script_escapes_quotes_in_echo(self, tmp_path):
         """Commands with double quotes don't break the echo label in the script."""

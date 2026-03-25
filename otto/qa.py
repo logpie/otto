@@ -486,6 +486,26 @@ Write your JSON verdict to: {verdict_file}
     }
 
 
+_REPLAY_SKIP_SUBSTRINGS = (
+    "kill ", "pkill ", "rm -rf", "git push",
+    "npm run dev", "npm start", "next dev",
+    "npx next dev", "npx next start",
+    "python -m http", "python3 -m http",
+    "node server", "serve ", "flask run",
+    "uvicorn", "gunicorn", "nohup",
+)
+
+
+def _is_non_replayable(cmd: str) -> bool:
+    """Check if a command is non-replayable (server start, destructive, background)."""
+    lower = cmd.lower()
+    if any(skip in lower for skip in _REPLAY_SKIP_SUBSTRINGS):
+        return True
+    if re.search(r"(?<![>&])\s*&\s*$", cmd):
+        return True
+    return False
+
+
 def _write_proof_artifacts(
     log_dir: Path,
     verdict: dict[str, Any],
@@ -516,33 +536,18 @@ def _write_proof_artifacts(
         )
         count += 1
 
-    # Filter out QA-internal commands (verdict file writes, temp file ops)
+    # Filter out QA-internal and non-verification commands
     _QA_INTERNAL_PATTERNS = ("otto_qa_", "/var/folders/", "/tmp/otto_")
+    _QA_INFRA_PREFIXES = (
+        "sleep ", "lsof ", "echo ", "cat >", "kill ", "pkill ",
+    )
     bash_commands = [
         a for a in qa_actions
         if a["type"] == "bash" and a.get("command")
         and not any(p in a["command"] for p in _QA_INTERNAL_PATTERNS)
+        and not a["command"].strip().startswith(_QA_INFRA_PREFIXES)
     ]
     if bash_commands:
-        replay_skip_substrings = (
-            "kill ",
-            "pkill ",
-            "rm -rf",
-            "git push",
-            "npm run dev",
-            "npm start",
-            "next dev",
-            "npx next dev",
-            "npx next start",
-            "python -m http",
-            "python3 -m http",
-            "node server",
-            "serve ",
-            "flask run",
-            "uvicorn",
-            "gunicorn",
-            "nohup",
-        )
         lines = [
             "#!/bin/bash",
             "# Re-run all QA verification commands",
@@ -552,10 +557,7 @@ def _write_proof_artifacts(
         ]
         for cmd_info in bash_commands:
             cmd = cmd_info["command"]
-            lower_cmd = cmd.lower()
-            has_trailing_background = re.search(r"(?<![>&])\s*&\s*$", cmd) is not None
-            # Skip commands that can hang, daemonize, or mutate external state.
-            if has_trailing_background or any(skip in lower_cmd for skip in replay_skip_substrings):
+            if _is_non_replayable(cmd):
                 lines.append(f"# Skipped (non-replayable): {cmd[:60]}")
                 continue
             label = cmd.replace("\n", " ")[:60].replace('"', '\\"')
@@ -578,10 +580,12 @@ def _write_proof_artifacts(
         "",
     ]
 
-    # Commands section — listed once, not per-item
-    if bash_commands:
+    # Commands section — only replayable verification commands
+    replayable = [c for c in bash_commands
+                  if not _is_non_replayable(c["command"])]
+    if replayable:
         report_lines.append("## Verification Commands")
-        for cmd_info in bash_commands:
+        for cmd_info in replayable:
             cmd = cmd_info["command"]
             output = cmd_info.get("output", "")
             # Show full command (multi-line preserved as-is)
