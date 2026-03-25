@@ -315,6 +315,16 @@ Write your JSON verdict to: {verdict_file}
                                 content = str(getattr(block, "content", ""))
                                 if qa_actions and qa_actions[-1]["type"] == "bash":
                                     qa_actions[-1]["output"] = content[:2000]
+                            # Capture screenshot image data from tool results
+                            elif _last_tool_name.endswith("take_screenshot"):
+                                raw_content = getattr(block, "content", None)
+                                if isinstance(raw_content, list):
+                                    for part in raw_content:
+                                        if isinstance(part, dict) and part.get("type") == "image":
+                                            b64 = part.get("data", "")
+                                            if b64 and qa_actions and qa_actions[-1].get("action") == "take_screenshot":
+                                                qa_actions[-1]["image_b64"] = b64
+                                                break
                             _last_tool_name = ""
                             continue
                         if TextBlock and isinstance(block, TextBlock) and block.text:
@@ -601,22 +611,30 @@ def _write_proof_artifacts(
         report_lines.append("")
 
     # Copy screenshots into qa-proofs/ and build reference list
+    import base64 as _b64
     browser_actions = [a for a in qa_actions if a["type"] == "browser"]
     screenshot_num = 0
     screenshot_refs: list[str] = []  # filenames of copied screenshots
     for action in browser_actions:
-        if action.get("action") == "take_screenshot" and action.get("detail"):
-            src = Path(action["detail"])
-            if src.exists() and src.is_file():
-                screenshot_num += 1
-                dest_name = f"screenshot-{screenshot_num}.png"
-                dest = proofs_dir / dest_name
-                try:
-                    shutil.copy2(str(src), str(dest))
-                    screenshot_refs.append(dest_name)
-                    count += 1
-                except OSError:
-                    pass
+        if action.get("action") != "take_screenshot":
+            continue
+        screenshot_num += 1
+        dest_name = f"screenshot-{screenshot_num}.png"
+        dest = proofs_dir / dest_name
+        try:
+            # Option 1: QA specified filePath → copy file
+            src_path = action.get("detail", "")
+            if src_path and Path(src_path).exists() and Path(src_path).is_file():
+                shutil.copy2(src_path, str(dest))
+                screenshot_refs.append(dest_name)
+                count += 1
+            # Option 2: screenshot returned as base64 in tool result
+            elif action.get("image_b64"):
+                dest.write_bytes(_b64.b64decode(action["image_b64"]))
+                screenshot_refs.append(dest_name)
+                count += 1
+        except (OSError, Exception):
+            pass
 
     # Browser actions section
     if browser_actions:
