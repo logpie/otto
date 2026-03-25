@@ -12,7 +12,7 @@ import yaml
 def pytest_collection_modifyitems(items):
     """Remove collected items that are imported from non-test modules.
 
-    Prevents functions like `test_file_path` (imported from otto.testgen)
+    Prevents functions like `test_file_path` (imported from otto modules)
     from being collected as tests when imported into test modules.
     """
     filtered = []

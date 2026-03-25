@@ -72,15 +72,6 @@ class TestCLIDispatch:
         assert result.exit_code == 0
         assert "Pending tasks: 0" in result.output
 
-    def test_pilot_flag_in_help(self):
-        """--pilot flag should appear in help."""
-        import click.testing
-        from otto.cli import main
-        runner = click.testing.CliRunner()
-        result = runner.invoke(main, ["run", "--help"])
-        assert "--pilot" in result.output
-        assert "v3 LLM pilot" in result.output
-
 
 # ---------------------------------------------------------------------------
 # E2E: Preflight checks

@@ -14,7 +14,6 @@ from otto.verify import (
     VerifyResult,
     _install_deps,
     run_tier1,
-    run_tier2,
     run_tier3,
     run_integration_gate,
     run_verification,
@@ -65,29 +64,6 @@ class TestRunTier1:
             call(4321, signal.SIGKILL),
         ]
 
-
-class TestRunTier2:
-    def test_passes_with_passing_test(self, tmp_git_repo):
-        tests_dir = tmp_git_repo / "tests"
-        tests_dir.mkdir()
-        test_file = tests_dir / "test_otto_test123.py"
-        test_file.write_text("def test_ok(): assert True\n")
-        result = run_tier2(tmp_git_repo, test_file, "pytest", timeout=60)
-        assert result.passed
-
-    def test_fails_with_failing_test(self, tmp_git_repo):
-        tests_dir = tmp_git_repo / "tests"
-        tests_dir.mkdir()
-        test_file = tests_dir / "test_otto_test123.py"
-        test_file.write_text("def test_bad(): assert False\n")
-        result = run_tier2(tmp_git_repo, test_file, "pytest", timeout=60)
-        assert not result.passed
-        assert result.output
-
-    def test_skips_when_no_file(self, tmp_git_repo):
-        result = run_tier2(tmp_git_repo, None, "pytest", timeout=60)
-        assert result.passed
-        assert result.skipped
 
 
 class TestRunTier3:

@@ -613,10 +613,7 @@ def add(prompt, verify, max_retries, import_file, gen_spec):
 @main.command(context_settings=CONTEXT_SETTINGS)
 @click.argument("prompt", required=False)
 @click.option("--dry-run", is_flag=True, help="Show what would run without executing")
-@click.option("--no-architect", is_flag=True, help="Skip architect agent (no codebase analysis)")
-@click.option("--tdd", is_flag=True, help="Generate adversarial tests before coding (optional)")
-@click.option("--pilot", is_flag=True, help="Use v3 LLM pilot (fallback)")
-def run(prompt, dry_run, no_architect, tdd, pilot):
+def run(prompt, dry_run):
     """Run pending tasks (or a one-off task if prompt given)."""
     _require_git()
     project_dir = Path.cwd()
@@ -625,10 +622,6 @@ def run(prompt, dry_run, no_architect, tdd, pilot):
         create_config(project_dir)
         console.print(f"[success]✓[/success] Auto-initialized otto")
     config = load_config(config_path)
-    if no_architect:
-        config["no_architect"] = True
-    if tdd:
-        config["tdd"] = True
 
     if dry_run:
         tasks_path = project_dir / "tasks.yaml"
@@ -643,13 +636,9 @@ def run(prompt, dry_run, no_architect, tdd, pilot):
 
     if prompt:
         # One-off mode — adhoc-<timestamp>-<pid> per spec
-        # Still acquires process lock to prevent concurrent runs
         import fcntl
         import os
         import time
-
-        if tdd:
-            error_console.print(f"[warning]⚠[/warning] --tdd ignored for one-off prompts (no spec). Use 'otto add' + 'otto run --tdd'.")
 
         lock_path = git_meta_dir(project_dir) / "otto.lock"
         lock_path.touch()
@@ -661,7 +650,6 @@ def run(prompt, dry_run, no_architect, tdd, pilot):
             sys.exit(2)
 
         try:
-            # Dirty-tree protection
             from otto.runner import check_clean_tree
             if not check_clean_tree(project_dir):
                 error_console.print(f"[error]✗[/error] Working tree is dirty \u2014 fix before running otto")
@@ -682,104 +670,9 @@ def run(prompt, dry_run, no_architect, tdd, pilot):
             lock_fh.close()
     else:
         tasks_path = project_dir / "tasks.yaml"
-        if pilot or config.get("orchestrator") == "v3":
-            # v3 LLM pilot (fallback)
-            try:
-                import importlib
-                importlib.import_module("mcp")
-            except ImportError:
-                error_console.print("Error: mcp library required for --pilot. Install with: pip install mcp", style="error")
-                sys.exit(2)
-            from otto.pilot_v3 import run_piloted
-            exit_code = asyncio.run(run_piloted(config, tasks_path, project_dir))
-        else:
-            # v4 PER orchestrator (default)
-            from otto.orchestrator import run_per
-            exit_code = asyncio.run(run_per(config, tasks_path, project_dir))
+        from otto.orchestrator import run_per
+        exit_code = asyncio.run(run_per(config, tasks_path, project_dir))
         sys.exit(exit_code)
-
-
-@main.command(context_settings=CONTEXT_SETTINGS)
-@click.option("--show", is_flag=True, help="Print summary of current architect docs")
-@click.option("--clean", is_flag=True, help="Delete otto_arch/")
-def arch(show, clean):
-    """Analyze codebase and establish shared conventions for agents."""
-    import shutil
-
-    project_dir = Path.cwd()
-    arch_dir = project_dir / "otto_arch"
-
-    if clean:
-        import fcntl
-        _require_git()
-        lock_path = git_meta_dir(project_dir) / "otto.lock"
-        lock_path.touch()
-        lock_fh = open(lock_path, "r")
-        try:
-            fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            error_console.print("Cannot clean architect docs while otto is running", style="error")
-            sys.exit(2)
-        try:
-            if arch_dir.exists():
-                shutil.rmtree(arch_dir)
-                console.print(f"[success]✓[/success] Deleted otto_arch/")
-            else:
-                console.print(f"[dim]No otto_arch/ to clean[/dim]")
-        finally:
-            fcntl.flock(lock_fh, fcntl.LOCK_UN)
-            lock_fh.close()
-        return
-
-    if show:
-        if not arch_dir.exists():
-            console.print(f"[dim]No otto_arch/ found. Run 'otto arch' to create.[/dim]")
-            return
-        for f in sorted(arch_dir.iterdir()):
-            if f.name.startswith("."):
-                continue
-            rule = "\u2500" * 40
-            console.print(f"\n[bold]{rule}[/bold]")
-            console.print(f"[bold]  {rich_escape(f.name)}[/bold]")
-            console.print(f"[bold]{rule}[/bold]")
-            console.print(f.read_text())
-        return
-
-    # Acquire process lock — prevent concurrent arch + run
-    import fcntl
-    _require_git()
-    lock_path = git_meta_dir(project_dir) / "otto.lock"
-    lock_path.touch()
-    lock_fh = open(lock_path, "r")
-    try:
-        fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        error_console.print("Cannot run architect while otto is running", style="error")
-        sys.exit(2)
-
-    try:
-        tasks_path = project_dir / "tasks.yaml"
-        from otto.tasks import load_tasks
-        tasks = load_tasks(tasks_path) if tasks_path.exists() else []
-        pending = [t for t in tasks if t.get("status") == "pending"]
-
-        action = "Updating" if arch_dir.exists() else "Analyzing codebase"
-        console.print(f"[dim]{action}...[/dim]")
-
-        from otto.architect import run_architect_agent
-        result = asyncio.run(run_architect_agent(pending, project_dir))
-        if result:
-            console.print(f"[success]✓[/success] Architecture docs ready in [bold]otto_arch/[/bold]")
-            for f in sorted(result.iterdir()):
-                if f.name.startswith("."):
-                    continue
-                console.print(f"  [dim]-[/dim] {rich_escape(f.name)}")
-        else:
-            error_console.print(f"[error]✗[/error] Architect agent failed")
-            sys.exit(1)
-    finally:
-        fcntl.flock(lock_fh, fcntl.LOCK_UN)
-        lock_fh.close()
 
 
 @main.command(context_settings=CONTEXT_SETTINGS)
@@ -994,14 +887,12 @@ def _build_live_phase_lines() -> list:
         except (json.JSONDecodeError, OSError):
             pass
     else:
-        # Fallback: check run-state.json for high-level phase
-        state_file = Path.cwd() / "otto_arch" / "run-state.json"
+        # Fallback: check progress events for high-level phase
+        state_file = Path.cwd() / "otto_logs" / "v4_events.jsonl"
         if state_file.exists():
             try:
-                state = json.loads(state_file.read_text())
-                phase = state.get("phase", "")
-                if phase:
-                    lines.append(Text.from_markup(f"  [info]Phase:[/info] {rich_escape(phase)}"))
+                # Read last event for current phase
+                pass  # TODO: extract from v4_events if needed
             except (json.JSONDecodeError, OSError):
                 pass
 
@@ -1649,40 +1540,13 @@ def reset(yes, hard):
             if branch:
                 subprocess.run(["git", "branch", "-D", branch], capture_output=True)
 
-        # Clean logs and architect docs (hard only)
+        # Clean logs
         import shutil
         log_dir = project_dir / "otto_logs"
         if log_dir.exists():
             shutil.rmtree(log_dir)
-        if hard:
-            arch_dir = project_dir / "otto_arch"
-            if arch_dir.exists():
-                shutil.rmtree(arch_dir)
 
-        # Clean testgen artifacts (use git_meta_dir for linked worktree support)
-        testgen_dir = git_meta_dir(project_dir) / "otto"
-        if testgen_dir.exists():
-            shutil.rmtree(testgen_dir)
-
-        # Clean committed otto test files (git rm so tree stays clean)
-        import glob
-        otto_test_files = (
-            glob.glob(str(project_dir / "tests" / "test_otto_*.py"))
-            + glob.glob(str(project_dir / "tests" / "otto_verify_*.py"))
-            + [str(project_dir / "tests" / "otto_integration.py")]
-        )
-        removed_any = False
-        for f in otto_test_files:
-            if Path(f).exists():
-                subprocess.run(["git", "rm", "-f", f], cwd=project_dir, capture_output=True)
-                removed_any = True
-        if removed_any:
-            subprocess.run(
-                ["git", "commit", "-m", "otto: clean up test files"],
-                cwd=project_dir, capture_output=True,
-            )
-
-        msg = f"[success]✓[/success] Reset [bold]{count}[/bold] tasks. Cleaned branches, logs, and testgen."
+        msg = f"[success]✓[/success] Reset [bold]{count}[/bold] tasks. Cleaned branches and logs."
         if hard:
             msg += " Reverted otto commits."
         console.print(msg)
