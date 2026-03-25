@@ -354,7 +354,33 @@ Write your JSON verdict to: {verdict_file}
     except asyncio.TimeoutError:
         report_lines.append(f"\n[QA agent timed out after {qa_timeout}s]")
     except Exception as e:
-        report_lines.append(f"\n[QA agent error: {e}]")
+        error_str = str(e)
+        report_lines.append(f"\n[QA agent error: {error_str}]")
+        # Check if QA already wrote a verdict before crashing
+        if verdict_file.exists():
+            try:
+                partial = json.loads(verdict_file.read_text().strip())
+                if "must_passed" in partial:
+                    # QA completed verdict before crash — use it
+                    return {
+                        "must_passed": partial["must_passed"],
+                        "verdict": partial,
+                        "raw_report": "\n".join(report_lines),
+                        "cost_usd": qa_cost,
+                    }
+            except (json.JSONDecodeError, OSError):
+                pass
+        # No verdict written — flag as infrastructure error for retry
+        is_infra = any(kw in error_str.lower() for kw in
+                       ("api_error", "internal server", "stream closed"))
+        if is_infra:
+            return {
+                "must_passed": None,
+                "verdict": None,
+                "raw_report": "\n".join(report_lines),
+                "cost_usd": qa_cost,
+                "infrastructure_error": True,
+            }
 
     raw_report = "\n".join(report_lines)
 

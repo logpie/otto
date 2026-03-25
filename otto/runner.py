@@ -441,6 +441,7 @@ async def run_task_v45(
     total_cost = 0.0
     session_id = None
     _prev_session_cost: float = 0.0  # tracks cumulative SDK cost for delta calculation
+    _prev_session_id: str | None = None  # tracks which session the cost belongs to
     last_error = None
     last_error_source = None
     _prev_failed_criteria: list[str] = []  # QA failures from previous attempt
@@ -871,15 +872,21 @@ async def run_task_v45(
                     if tasks_file:
                         update_task(tasks_file, key, session_id=session_id)
 
-                # SDK's total_cost_usd is cumulative across resumed sessions.
-                # Subtract previous session cost to get this attempt's delta.
+                # Extract this attempt's cost from SDK result.
+                # SDK's total_cost_usd is cumulative within a session.
+                # If session_id changed, it's a new session — use raw cost.
+                # If same session (resumed), compute delta from previous.
                 raw_cost = getattr(result_msg, "total_cost_usd", None)
                 session_cost = float(raw_cost) if isinstance(raw_cost, (int, float)) else 0.0
-                attempt_cost = session_cost - _prev_session_cost
-                if attempt_cost < 0:
-                    # Session wasn't resumed — fresh session, use raw cost
+                current_session = getattr(result_msg, "session_id", None)
+                if current_session and current_session == _prev_session_id:
+                    # Same session (resumed) — cost is cumulative, use delta
+                    attempt_cost = max(0, session_cost - _prev_session_cost)
+                else:
+                    # New session — raw cost is this attempt's cost
                     attempt_cost = session_cost
                 _prev_session_cost = session_cost
+                _prev_session_id = current_session
                 total_cost += attempt_cost
 
                 coding_elapsed = round(time.monotonic() - coding_start, 1)
@@ -1263,6 +1270,25 @@ async def run_task_v45(
                         )
                 except OSError:
                     pass
+
+                # Infrastructure error (API 500, connection drop) — retry QA once
+                if qa_result.get("infrastructure_error") and not qa_result.get("_retried"):
+                    emit("phase", name="qa", status="fail", time_s=qa_elapsed,
+                         error="QA infrastructure error — retrying")
+                    import asyncio as _aio
+                    await _aio.sleep(5)  # brief backoff
+                    qa_result = await run_qa_agent_v45(
+                        task, qa_spec, config, project_dir,
+                        original_prompt=prompt,
+                        diff=diff_info["full_diff"],
+                        tier=qa_tier,
+                        focus_items=focus_items,
+                        prev_failed_criteria=_prev_failed_criteria,
+                        on_progress=emit,
+                    )
+                    qa_result["_retried"] = True
+                    total_cost += qa_result.get("cost_usd", 0.0)
+                    qa_elapsed += round(time.monotonic() - qa_start, 1)
 
                 if not qa_result["must_passed"]:
                     failed_musts = [
