@@ -791,36 +791,30 @@ contradict what the codebase actually does. Deduplicate."""
 
     prompt = f"""Write a CLAUDE.md for a coding agent working on this project.
 
-CLAUDE.md is a MAP — it tells the agent where to look and what to follow.
-It is NOT a reference doc. The agent can read files for specifics.
-Think: "what would a senior developer tell a new teammate on day 1?"
+CLAUDE.md is a routing table — every line should change where the agent looks
+next. It is NOT a reference doc. Think: "what would cause the agent to waste
+time or make mistakes without this guidance?"
 
 Project files:
 {chr(10).join(context_parts)}
 {merge_section}
 
-Structure (in this order):
+Structure:
 
-1. **Commands** — build, test, lint. Just the commands.
-2. **Project structure** — key directories and what lives where. 2-3 lines max.
-   The agent navigates by this map.
-3. **Coding principles** — 3-5 rules that prevent common mistakes:
-   - Check for existing patterns before writing new code
-   - After changing a shared type, check all consumers
-   - Fix root causes, not symptoms
-   - Add project-specific principles you observe
-4. **Conventions** — point to WHERE to find patterns, don't spell them out:
-   - "Cards use glassmorphism — see any card in src/components/ for the pattern"
-   - NOT "Cards use bg-white/15 backdrop-blur-lg rounded-2xl..."
-   - "Import via @/ path alias" (short, the agent knows what to do)
-5. **Test hygiene** — where tests live, what factory/fixture to reuse.
-   Point to an example file, don't paste the code.
+1. **Commands** — build, test, lint. Commands only, no descriptions.
+2. **Project structure** — 3-5 bullets. Identify the primary codebase.
+   Call out directories to ignore (demos, generated output, vendored code).
+3. **Key coupling points** — which files/dirs change together? Where are the
+   cross-file dependencies the agent must check after edits?
+4. **Conventions** — point to WHERE patterns live, don't inline them:
+   - "Card styling — see any card in src/components/"
+   - NOT "Cards use bg-white/15 backdrop-blur-lg..."
+5. **Test patterns** — where tests live, name the shared fixture file/factory.
 
 Rules:
-- Under 25 lines total. Every line earns its place.
-- Point to files ("see X for the pattern") instead of inlining details.
-- The agent reads code well — just tell it WHERE to look.
-- No listing every helper/utility — the agent discovers those.
+- Every principle must point to a file or directory. No generic advice.
+- Prefer repo-specific watchouts over general best practices.
+- Under 25 lines. If a line doesn't change the agent's behavior, cut it.
 Output ONLY the markdown content."""
 
     try:
