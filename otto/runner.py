@@ -59,6 +59,62 @@ from otto.tasks import load_tasks, update_task
 from otto.verify import run_verification, _subprocess_env
 
 
+def _suggest_claude_md(project_dir: Path) -> None:
+    """Suggest CLAUDE.md content based on project structure."""
+    hints = []
+
+    # Detect project type
+    has_pkg = (project_dir / "package.json").exists()
+    has_py = any((project_dir / f).exists() for f in
+                 ("pyproject.toml", "requirements.txt", "setup.py"))
+    has_tests = any((project_dir / d).exists() for d in
+                    ("__tests__", "tests", "test"))
+
+    if has_pkg:
+        # Check for common patterns
+        try:
+            import json as _json
+            pkg = _json.loads((project_dir / "package.json").read_text())
+            if "tailwindcss" in str(pkg.get("dependencies", {})) + str(pkg.get("devDependencies", {})):
+                hints.append("Uses Tailwind CSS — match existing class patterns")
+            if "next" in pkg.get("dependencies", {}):
+                hints.append("Next.js project — components in src/components/")
+            if "react" in pkg.get("dependencies", {}):
+                hints.append("React project — follow existing component patterns")
+        except Exception:
+            pass
+
+    if has_tests:
+        # Check for shared test helpers
+        for test_dir in ("__tests__", "tests", "test"):
+            d = project_dir / test_dir
+            if d.exists():
+                import subprocess as _sp
+                result = _sp.run(
+                    ["grep", "-rl", "createMock\\|mock.*factory\\|fixture", str(d)],
+                    capture_output=True, text=True
+                )
+                if result.stdout.strip():
+                    hints.append("Has test helpers — reuse existing mock/fixture factories")
+                break
+
+    # Print suggestion
+    if hints:
+        console.print(
+            f"  [yellow]Tip:[/yellow] No CLAUDE.md found. Detected patterns:"
+        )
+        for h in hints:
+            console.print(f"    [dim]- {h}[/dim]")
+        console.print(
+            f"  [dim]Create CLAUDE.md with project conventions — the coding agent will follow them.[/dim]"
+        )
+    else:
+        console.print(
+            "  [yellow]Tip:[/yellow] No CLAUDE.md found. Create one with project conventions"
+            " — the coding agent will follow them."
+        )
+
+
 def _fence_untrusted_text(text: str) -> str:
     """Wrap untrusted model/input text in a code fence."""
     text = text or ""
@@ -115,10 +171,7 @@ def preflight_checks(
 
     # Suggest CLAUDE.md if missing — coding agents read it for project conventions
     if not (project_dir / "CLAUDE.md").exists():
-        console.print(
-            "  [yellow]Tip:[/yellow] No CLAUDE.md found. Create one with project conventions,"
-            " coding principles, and guidelines — the coding agent will follow them."
-        )
+        _suggest_claude_md(project_dir)
 
     # Ensure .gitignore covers known build/dependency dirs.
     # Uses framework detection (not size heuristics) — only auto-adds
