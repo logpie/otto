@@ -220,7 +220,7 @@ Write only [must]/[should] criteria lines to the file — no headings, notes, or
             cwd=str(project_dir),
             system_prompt={"type": "preset", "preset": "claude_code",
                            "append": system_prompt},
-            setting_sources=setting_sources or ["user", "project"],
+            setting_sources=setting_sources or ["project"],
             env=dict(os.environ),
         )
 

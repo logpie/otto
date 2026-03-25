@@ -20,14 +20,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "qa_timeout": 3600,             # 1hr circuit breaker for QA agent
 
     # Agent CC settings scope — what settings each agent loads
-    # "user,project": loads user CLAUDE.md, skills, hooks + project settings
-    # "project": project settings only (faster, no user skills/hooks)
-    "coding_agent_settings": "user,project",
+    # "project": project CLAUDE.md only (default — no user skills/hooks overhead)
+    # "user,project": also loads user CLAUDE.md, skills, hooks
+    "coding_agent_settings": "project",
     "spec_agent_settings": "project",
     "qa_agent_settings": "project",
 
-    # Internal (not exposed in otto.yaml)
-    "orchestrator": "v4",           # v3 pilot (legacy) or v4 PER
+    # Internal
+    "orchestrator": "v4",
 }
 
 
@@ -208,17 +208,18 @@ def create_config(project_dir: Path) -> Path:
     lines += f"# qa_timeout: 3600               # 1hr circuit breaker for QA agent\n"
     lines += "\n# Model:\n"
     lines += f"# model: null                    # override Claude model (e.g. sonnet)\n"
-    lines += "\n# Agent settings scope (user,project or project):\n"
-    lines += f"# coding_agent_settings: user,project  # coding loads user CLAUDE.md + skills\n"
-    lines += f"# spec_agent_settings: project         # spec needs only project context\n"
-    lines += f"# qa_agent_settings: project            # QA needs only project context\n"
+    lines += "\n# Agent settings scope (project or user,project):\n"
+    lines += f"# coding_agent_settings: project   # project CLAUDE.md only (default)\n"
+    lines += f"# spec_agent_settings: project     # project CLAUDE.md only\n"
+    lines += f"# qa_agent_settings: project       # project CLAUDE.md only\n"
+    lines += f"# Set to 'user,project' to also load ~/.claude/CLAUDE.md (adds user skills/hooks)\n"
     config_path.write_text(lines + "\n")
 
     # Update .git/info/exclude for runtime files (use git_meta_dir for linked worktrees)
     exclude_path = git_meta_dir(project_dir) / "info" / "exclude"
     exclude_path.parent.mkdir(parents=True, exist_ok=True)
     existing = exclude_path.read_text() if exclude_path.exists() else ""
-    entries = ["tasks.yaml", ".tasks.lock", "otto_logs/", "otto.lock", "otto_arch/"]
+    entries = ["tasks.yaml", ".tasks.lock", "otto_logs/", "otto.lock", "otto_arch/", ".otto-scratch/"]
     to_add = [e for e in entries if e not in existing]
     if to_add:
         with open(exclude_path, "a") as f:

@@ -818,7 +818,7 @@ async def run_task_v45(
                  detail=coding_detail)
             coding_start = time.monotonic()
             try:
-                _coding_settings = config.get("coding_agent_settings", "user,project").split(",")
+                _coding_settings = config.get("coding_agent_settings", "project").split(",")
                 agent_opts = ClaudeAgentOptions(
                     permission_mode="bypassPermissions",
                     cwd=str(project_dir),
