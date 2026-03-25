@@ -296,15 +296,12 @@ Write your JSON verdict to: {verdict_file}
     try:
         async def _run_qa():
             nonlocal report_lines, qa_cost
+            _result_msg = None
             async for message in query(prompt=qa_prompt, options=qa_opts):
                 if isinstance(message, ResultMessage):
-                    raw_cost = getattr(message, "total_cost_usd", None)
-                    if isinstance(raw_cost, (int, float)):
-                        qa_cost = float(raw_cost)
+                    _result_msg = message
                 elif hasattr(message, "session_id") and hasattr(message, "is_error"):
-                    raw_cost = getattr(message, "total_cost_usd", None)
-                    if isinstance(raw_cost, (int, float)):
-                        qa_cost = float(raw_cost)
+                    _result_msg = message
                 elif AssistantMessage and isinstance(message, AssistantMessage):
                     for block in message.content:
                         if TextBlock and isinstance(block, TextBlock) and block.text:
@@ -347,6 +344,11 @@ Write your JSON verdict to: {verdict_file}
                                         on_progress("agent_tool", event)
                                 except Exception:
                                     pass
+            # Extract cost from the final result (after stream completes)
+            if _result_msg:
+                raw_cost = getattr(_result_msg, "total_cost_usd", None)
+                if isinstance(raw_cost, (int, float)):
+                    qa_cost = float(raw_cost)
 
         await asyncio.wait_for(_run_qa(), timeout=qa_timeout)
     except asyncio.TimeoutError:

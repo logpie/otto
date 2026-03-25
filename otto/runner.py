@@ -455,6 +455,7 @@ async def run_task_v45(
     task_start = time.monotonic()
     total_cost = 0.0
     session_id = None
+    _prev_session_cost: float = 0.0  # tracks cumulative SDK cost for delta calculation
     last_error = None
     last_error_source = None
     _prev_failed_criteria: list[str] = []  # QA failures from previous attempt
@@ -885,8 +886,12 @@ async def run_task_v45(
                     if tasks_file:
                         update_task(tasks_file, key, session_id=session_id)
 
+                # SDK's total_cost_usd is cumulative across resumed sessions.
+                # Subtract previous session cost to get this attempt's delta.
                 raw_cost = getattr(result_msg, "total_cost_usd", None)
-                attempt_cost = float(raw_cost) if isinstance(raw_cost, (int, float)) else 0.0
+                session_cost = float(raw_cost) if isinstance(raw_cost, (int, float)) else 0.0
+                attempt_cost = session_cost - _prev_session_cost
+                _prev_session_cost = session_cost
                 total_cost += attempt_cost
 
                 coding_elapsed = round(time.monotonic() - coding_start, 1)
