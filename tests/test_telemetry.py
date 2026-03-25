@@ -126,14 +126,19 @@ class TestTelemetry:
         assert data["success"] is False
         assert data["error"] == "boom"
 
-    def test_legacy_clears_stale(self, tmp_path):
+    def test_legacy_preserves_results_clears_live_state(self, tmp_path):
         log_dir = tmp_path / "logs"
         log_dir.mkdir()
-        stale = log_dir / "pilot_results.jsonl"
-        stale.write_text("old data\n")
+        # pilot_results.jsonl is append-only — should NOT be cleared
+        results = log_dir / "pilot_results.jsonl"
+        results.write_text("old data\n")
+        # live-state.json is current snapshot — should be cleared
+        live_state = log_dir / "live-state.json"
+        live_state.write_text("{}")
         t = Telemetry(log_dir)
         t.enable_legacy_write()
-        assert not stale.exists() or stale.read_text() == ""
+        assert results.exists() and results.read_text() == "old data\n"
+        assert not live_state.exists()
 
     def test_fire_and_forget(self, tmp_path):
         """Log should never raise, even with bad directory."""

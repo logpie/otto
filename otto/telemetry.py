@@ -131,13 +131,13 @@ class Telemetry:
     def enable_legacy_write(self) -> None:
         """Enable dual-write to v3 formats."""
         self._legacy_enabled = True
-        # Clear stale files from previous runs
-        for p in (self._legacy_results_path, self._legacy_live_state_path):
-            if p.exists():
-                try:
-                    p.unlink()
-                except OSError:
-                    pass
+        # Clear live-state (current snapshot, not historical)
+        # pilot_results.jsonl is append-only — don't clear it
+        if self._legacy_live_state_path.exists():
+            try:
+                self._legacy_live_state_path.unlink()
+            except OSError:
+                pass
 
     def log(self, event: TelemetryEvent) -> None:
         """Append an event to the JSONL log. Fire-and-forget — never raises."""
