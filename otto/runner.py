@@ -1715,6 +1715,15 @@ async def run_task_v45(
                 pre_existing_untracked=pre_existing_untracked,
             )
 
+            # QA may leave commits or workspace drift behind. Restore the
+            # verified candidate before merge so the branch HEAD matches the
+            # exact state that passed testing.
+            _restore_workspace_state(
+                project_dir,
+                reset_ref=candidate_sha,
+                pre_existing_untracked=pre_existing_untracked,
+            )
+
             # ── Merge ───────────────────────────────────────────────────
             emit("phase", name="merge", status="running")
             merge_start = time.monotonic()

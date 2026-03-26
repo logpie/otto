@@ -44,6 +44,10 @@ Testing order — test in the order listed:
 Items marked ◈ cannot be verified by code alone. Visual items MUST use browser.
 Always run existing tests before writing the verdict.
 
+When taking browser screenshots, ALWAYS save to a file path:
+  take_screenshot(filePath="<proof_dir>/screenshot-<name>.png")
+Do NOT take screenshots without filePath — inline screenshots break the message pipe.
+
 Also check:
 - Does the implementation contradict the ORIGINAL task prompt?
 - Does it break existing functionality?
@@ -559,7 +563,12 @@ DIFF:
 {diff}
 
 Write your JSON verdict to: {verdict_file}
+Save any browser screenshots to: {log_dir / "qa-proofs" if log_dir else "/tmp"}/screenshot-<name>.png
 """
+
+    # Ensure qa-proofs dir exists before QA so agent can save screenshots there
+    if log_dir:
+        (log_dir / "qa-proofs").mkdir(parents=True, exist_ok=True)
 
     # Configure MCP servers for browser testing (tier 2)
     qa_mcp_servers = {}
