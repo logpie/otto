@@ -180,7 +180,7 @@ def create_task_branch(
         if task and task.get("status") == "failed" and task.get("error_code") == "merge_diverged":
             raise RuntimeError(
                 f"Branch otto/{key} preserved from diverge failure — "
-                f"manually resolve or run 'otto reset' first"
+                f"manually resolve or run 'otto drop --all' first"
             )
         # Delete stale branch
         subprocess.run(

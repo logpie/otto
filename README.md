@@ -100,8 +100,10 @@ otto retry <id>         Reset a failed task to pending
 otto retry --force <id> "feedback"  Reset any task with feedback
 otto logs <id>          Show agent logs for a task
 otto diff <id>          Show git diff for a task
-otto reset              Clear all tasks, branches, logs
-otto reset --revert-commits  Also revert otto commits
+otto drop <id>          Remove a task from the queue (code stays on main)
+otto drop --all         Remove all tasks + clean otto/* branches
+otto revert <id>        Undo one task's git commit on main
+otto revert --all       Undo all otto commits + clear queue
 ```
 
 ## Architecture

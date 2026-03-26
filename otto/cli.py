@@ -545,16 +545,28 @@ def retry(task_id, feedback, force):
 
 
 @main.command(context_settings=CONTEXT_SETTINGS)
-@click.argument("task_id", type=int)
-def delete(task_id):
-    """Remove a task from the status list (does NOT revert code).
+@click.argument("task_id", type=int, required=False)
+@click.option("--all", "drop_all", is_flag=True, help="Remove all tasks and clean otto/* branches")
+@click.option("--yes", is_flag=True, help="Skip confirmation")
+def drop(task_id, drop_all, yes):
+    """Remove task(s) from the queue (does NOT revert code).
 
-    For pending tasks: removes the task before it runs.
-    For passed tasks: only removes from tracking — merged code stays on main.
-    For failed tasks: removes from tracking (branch already cleaned up).
+    Drop a single task:
+      otto drop 3
 
-    To undo all otto code changes, use 'otto reset --revert-commits'.
+    Drop all tasks and clean branches:
+      otto drop --all
+
+    To undo code changes, use 'otto revert'.
     """
+    if drop_all:
+        _drop_all(yes)
+        return
+
+    if task_id is None:
+        error_console.print("Provide a task ID or use --all", style="error")
+        sys.exit(2)
+
     tasks_path = Path.cwd() / "tasks.yaml"
     tasks = load_tasks(tasks_path)
     target = None
@@ -568,13 +580,14 @@ def delete(task_id):
 
     task_status = target.get("status", "pending")
     if task_status == "running":
-        error_console.print(f"[error]✗[/error] Cannot delete a running task. Wait for it to finish or reset.")
+        error_console.print(f"[error]\u2717[/error] Cannot drop a running task. Wait for it to finish or retry.")
         sys.exit(1)
     if task_status == "passed":
-        console.print(f"[warning]⚠[/warning] Task already merged \u2014 this only removes it from the status list.")
-        console.print(f"  [dim]Code, commits, and test files stay on main.[/dim]")
-        console.print(f"  [dim]To undo code changes: 'otto reset --revert-commits' or 'git revert'.[/dim]")
-        click.confirm("  Continue?", abort=True)
+        console.print(f"[warning]\u26a0[/warning] This only removes task [bold]#{task_id}[/bold] from the queue. "
+                       f"The code it committed stays on main.")
+        console.print(f"  [dim]Use 'otto revert {task_id}' to undo the code.[/dim]")
+        if not yes:
+            click.confirm("  Continue?", abort=True)
 
     # Warn if other pending tasks depend on this one
     dependents = [
@@ -585,11 +598,78 @@ def delete(task_id):
     ]
     if dependents:
         dep_ids = ", ".join(f"#{t['id']}" for t in dependents)
-        console.print(f"[warning]⚠[/warning] Pending tasks depend on this one: {dep_ids}")
-        click.confirm("  Continue?", abort=True)
+        console.print(f"[warning]\u26a0[/warning] Pending tasks depend on this one: {dep_ids}")
+        if not yes:
+            click.confirm("  Continue?", abort=True)
 
     delete_task(tasks_path, task_id)
-    console.print(f"[success]✓[/success] Deleted task [bold]#{task_id}[/bold]: {rich_escape(target['prompt'][:60])}")
+    console.print(f"[success]\u2713[/success] Dropped task [bold]#{task_id}[/bold]: {rich_escape(target['prompt'][:60])}")
+
+
+def _drop_all(yes: bool) -> None:
+    """Drop all tasks and clean otto/* branches (no code revert)."""
+    import fcntl
+    import subprocess
+
+    project_dir = Path.cwd()
+
+    # Acquire process lock — refuse while a worker is active
+    lock_path = git_meta_dir(project_dir) / "otto.lock"
+    lock_path.touch()
+    lock_fh = open(lock_path, "r")
+    try:
+        fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        error_console.print("Cannot drop while otto is running", style="error")
+        sys.exit(2)
+
+    try:
+        tasks_path = project_dir / "tasks.yaml"
+        count = 0
+        if tasks_path.exists():
+            count = len(load_tasks(tasks_path))
+
+        # Count otto/* branches
+        branch_result = subprocess.run(
+            ["git", "branch", "--list", "otto/*"],
+            capture_output=True, text=True, cwd=project_dir,
+        )
+        branches = [b.strip() for b in branch_result.stdout.strip().splitlines() if b.strip()]
+
+        if not yes:
+            console.print(f"[warning]\u26a0[/warning] Dropping ALL {count} tasks from the queue.")
+            console.print(f"  Code on main: [bold]NOT affected[/bold]")
+            console.print(f"  Otto logs: [bold]preserved[/bold] in otto_logs/")
+            if branches:
+                console.print(f"  Git branches: {len(branches)} otto/* will be deleted")
+            click.confirm("  Continue?", abort=True)
+
+        # Delete tasks.yaml + .tasks.lock
+        if tasks_path.exists():
+            tasks_path.unlink()
+        tasks_lock = tasks_path.parent / ".tasks.lock"
+        if tasks_lock.exists():
+            tasks_lock.unlink()
+
+        # Delete otto/* branches
+        for branch in branches:
+            subprocess.run(["git", "branch", "-D", branch], capture_output=True, cwd=project_dir)
+
+        console.print(f"[success]\u2713[/success] Dropped [bold]{count}[/bold] tasks. Cleaned {len(branches)} branches.")
+    finally:
+        fcntl.flock(lock_fh, fcntl.LOCK_UN)
+        lock_fh.close()
+
+
+# Hidden alias: 'otto delete' -> 'otto drop' (backward compat)
+@main.command("delete", hidden=True, context_settings=CONTEXT_SETTINGS)
+@click.argument("task_id", type=int, required=False)
+@click.option("--all", "drop_all", is_flag=True, hidden=True)
+@click.option("--yes", is_flag=True, hidden=True)
+@click.pass_context
+def delete_alias(ctx, task_id, drop_all, yes):
+    """Alias for 'otto drop' (deprecated)."""
+    ctx.invoke(drop, task_id=task_id, drop_all=drop_all, yes=yes)
 
 
 
@@ -603,91 +683,178 @@ register_log_commands(main)
 
 
 @main.command(context_settings=CONTEXT_SETTINGS)
+@click.argument("task_id", type=int, required=False)
+@click.option("--all", "revert_all", is_flag=True, help="Revert ALL otto commits")
 @click.option("--yes", is_flag=True, help="Skip confirmation")
-@click.option("--revert-commits", is_flag=True, help="Also revert otto commits from git history")
-@click.option("--hard", "revert_commits_compat", is_flag=True, hidden=True,
-              help="Alias for --revert-commits (deprecated)")
-def reset(yes, revert_commits, revert_commits_compat):
-    """Reset all tasks and clean up branches.
+def revert(task_id, revert_all, yes):
+    """Undo otto's git commits (destructive).
 
-    --revert-commits also reverts otto's git commits, restoring the codebase
-    to the state before otto ran.
+    Revert one task's commit:
+      otto revert 3
+
+    Revert all otto commits:
+      otto revert --all
     """
-    # Support --hard as backward-compat alias
-    hard = revert_commits or revert_commits_compat
-    if not yes:
-        msg = "Reset all tasks and delete otto/* branches?"
-        if hard:
-            msg = "HARD RESET: revert all otto commits and restore codebase?"
-        click.confirm(msg, abort=True)
+    if revert_all:
+        _revert_all(yes)
+        return
 
+    if task_id is None:
+        error_console.print("Provide a task ID or use --all", style="error")
+        sys.exit(2)
+
+    _revert_one(task_id, yes)
+
+
+def _revert_one(task_id: int, yes: bool) -> None:
+    """Revert the git commit for a single task and remove it from the queue."""
+    import subprocess
+
+    project_dir = Path.cwd()
+    tasks_path = project_dir / "tasks.yaml"
+    tasks = load_tasks(tasks_path)
+
+    target = None
+    for t in tasks:
+        if t.get("id") == task_id:
+            target = t
+            break
+    if not target:
+        error_console.print(f"Task #{task_id} not found", style="error")
+        sys.exit(1)
+
+    if target.get("status") == "running":
+        error_console.print(f"[error]\u2717[/error] Cannot revert a running task.", style="error")
+        sys.exit(1)
+
+    # Find the commit for this task
+    result = subprocess.run(
+        ["git", "log", "--oneline", "--all", f"--grep=(#{task_id})"],
+        capture_output=True, text=True, cwd=project_dir,
+    )
+    commits = [line for line in result.stdout.strip().splitlines() if line]
+
+    if not commits:
+        error_console.print(f"No git commit found for task #{task_id}", style="error")
+        error_console.print(f"  [dim]Use 'otto drop {task_id}' to just remove from queue.[/dim]")
+        sys.exit(1)
+
+    commit_hash = commits[0].split()[0]
+    commit_msg = " ".join(commits[0].split()[1:])
+
+    if not yes:
+        console.print(f"[warning]\u26a0[/warning] Reverting task [bold]#{task_id}[/bold]: {rich_escape(target['prompt'][:60])}")
+        console.print(f"  This will undo commit {commit_hash} on main.")
+        console.print(f"  The task will also be removed from the queue.")
+        click.confirm("  Continue?", abort=True)
+
+    # git revert --no-edit
+    revert_result = subprocess.run(
+        ["git", "revert", "--no-edit", commit_hash],
+        capture_output=True, text=True, cwd=project_dir,
+    )
+    if revert_result.returncode != 0:
+        error_console.print(f"[error]\u2717[/error] git revert failed:")
+        error_console.print(f"  {revert_result.stderr.strip()}")
+        error_console.print(f"  [dim]Resolve manually: git revert {commit_hash}[/dim]")
+        sys.exit(1)
+
+    # Remove from tasks.yaml
+    delete_task(tasks_path, task_id)
+
+    console.print(f"[success]\u2713[/success] Reverted commit {commit_hash} and dropped task [bold]#{task_id}[/bold]")
+
+
+def _revert_all(yes: bool) -> None:
+    """Revert all otto commits, clear tasks and branches."""
     import fcntl
     import subprocess
 
     project_dir = Path.cwd()
 
-    # Acquire process lock — refuse to reset while a worker is active
+    # Acquire process lock
     lock_path = git_meta_dir(project_dir) / "otto.lock"
     lock_path.touch()
     lock_fh = open(lock_path, "r")
     try:
         fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        error_console.print("Cannot reset while otto is running", style="error")
+        error_console.print("Cannot revert while otto is running", style="error")
         sys.exit(2)
 
     try:
-        # Delete tasks.yaml entirely (not just reset status)
+        # Find all otto commits
+        result = subprocess.run(
+            ["git", "log", "--oneline", "--all", "--grep=otto:"],
+            capture_output=True, text=True, cwd=project_dir,
+        )
+        otto_commits = [line.split()[0] for line in result.stdout.strip().splitlines() if line]
+
         tasks_path = project_dir / "tasks.yaml"
         count = 0
         if tasks_path.exists():
-            from otto.tasks import load_tasks
             count = len(load_tasks(tasks_path))
+
+        if not yes:
+            console.print(f"[warning]\u26a0[/warning] Reverting ALL {len(otto_commits)} otto commits and restoring the codebase.")
+            console.print(f"  Tasks: {count} will be removed from queue")
+            console.print(f"  Otto logs: [bold]preserved[/bold] in otto_logs/")
+            console.print(f"  [bold]This cannot be undone.[/bold]")
+            click.confirm("  Continue?", abort=True)
+
+        # Hard reset: reset to before the first otto commit
+        if otto_commits:
+            oldest = otto_commits[-1]  # last in the list = oldest
+            parent = subprocess.run(
+                ["git", "rev-parse", f"{oldest}^"],
+                cwd=project_dir, capture_output=True, text=True,
+            )
+            if parent.returncode == 0 and parent.stdout.strip():
+                subprocess.run(
+                    ["git", "reset", "--hard", parent.stdout.strip()],
+                    cwd=project_dir, capture_output=True,
+                )
+                console.print(f"  [dim]Reset to before first otto commit ({len(otto_commits)} commits removed)[/dim]")
+            else:
+                error_console.print(f"[warning]\u26a0[/warning] Could not find parent of oldest otto commit")
+
+        # Delete tasks.yaml + .tasks.lock
+        if tasks_path.exists():
             tasks_path.unlink()
         tasks_lock = tasks_path.parent / ".tasks.lock"
         if tasks_lock.exists():
             tasks_lock.unlink()
 
-        # Hard reset: reset to before the first otto commit
-        if hard:
-            result = subprocess.run(
-                ["git", "log", "--oneline", "--all", "--grep=otto:"],
-                capture_output=True, text=True, cwd=project_dir,
-            )
-            otto_commits = [line.split()[0] for line in result.stdout.strip().splitlines() if line]
-            if otto_commits:
-                # Find the parent of the oldest otto commit
-                oldest = otto_commits[-1]  # last in the list = oldest
-                parent = subprocess.run(
-                    ["git", "rev-parse", f"{oldest}^"],
-                    cwd=project_dir, capture_output=True, text=True,
-                )
-                if parent.returncode == 0 and parent.stdout.strip():
-                    subprocess.run(
-                        ["git", "reset", "--hard", parent.stdout.strip()],
-                        cwd=project_dir, capture_output=True,
-                    )
-                    console.print(f"  [dim]Reset to before first otto commit ({len(otto_commits)} commits removed)[/dim]")
-                else:
-                    error_console.print(f"[warning]⚠[/warning] Could not find parent of oldest otto commit")
-
         # Delete otto/* branches
-        result = subprocess.run(
+        branch_result = subprocess.run(
             ["git", "branch", "--list", "otto/*"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, cwd=project_dir,
         )
-        for branch in result.stdout.strip().split("\n"):
+        for branch in branch_result.stdout.strip().split("\n"):
             branch = branch.strip()
             if branch:
-                subprocess.run(["git", "branch", "-D", branch], capture_output=True)
+                subprocess.run(["git", "branch", "-D", branch], capture_output=True, cwd=project_dir)
 
-        msg = f"[success]✓[/success] Reset [bold]{count}[/bold] tasks. Cleaned branches."
-        if hard:
-            msg += " Reverted otto commits."
-        console.print(msg)
+        console.print(f"[success]\u2713[/success] Reverted {len(otto_commits)} commits. "
+                       f"Dropped {count} tasks. Cleaned branches.")
     finally:
         fcntl.flock(lock_fh, fcntl.LOCK_UN)
         lock_fh.close()
+
+
+# Hidden alias: 'otto reset' -> backward compat
+@main.command("reset", hidden=True, context_settings=CONTEXT_SETTINGS)
+@click.option("--yes", is_flag=True, hidden=True)
+@click.option("--revert-commits", is_flag=True, hidden=True)
+@click.option("--hard", "revert_commits_compat", is_flag=True, hidden=True)
+@click.pass_context
+def reset_alias(ctx, yes, revert_commits, revert_commits_compat):
+    """Alias for 'otto drop --all' or 'otto revert --all' (deprecated)."""
+    hard = revert_commits or revert_commits_compat
+    if hard:
+        ctx.invoke(revert, task_id=None, revert_all=True, yes=yes)
+    else:
+        ctx.invoke(drop, task_id=None, drop_all=True, yes=yes)
 
 
 

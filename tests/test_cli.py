@@ -199,11 +199,131 @@ class TestStatus:
         assert "pending" in result.output
 
 
-class TestReset:
-    def test_resets_all_tasks(self, runner, tmp_git_repo, monkeypatch):
+class TestDrop:
+    def test_drops_pending_task(self, runner, tmp_git_repo, monkeypatch):
+        monkeypatch.chdir(tmp_git_repo)
+        runner.invoke(main, ["add", "Task 1"])
+        result = runner.invoke(main, ["drop", "--yes", "1"])
+        assert result.exit_code == 0
+        assert "Dropped task" in result.output
+        tasks = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text()) if (tmp_git_repo / "tasks.yaml").exists() else {"tasks": []}
+        assert len(tasks.get("tasks", [])) == 0
+
+    def test_drop_passed_warns_about_code(self, runner, tmp_git_repo, monkeypatch):
+        monkeypatch.chdir(tmp_git_repo)
+        runner.invoke(main, ["add", "Task 1"])
+        tasks = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())
+        tasks["tasks"][0]["status"] = "passed"
+        (tmp_git_repo / "tasks.yaml").write_text(yaml.dump(tasks))
+        result = runner.invoke(main, ["drop", "--yes", "1"])
+        assert result.exit_code == 0
+        assert "stays on main" in result.output
+        assert "otto revert" in result.output
+
+    def test_drop_running_task_rejected(self, runner, tmp_git_repo, monkeypatch):
+        monkeypatch.chdir(tmp_git_repo)
+        runner.invoke(main, ["add", "Task 1"])
+        tasks = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())
+        tasks["tasks"][0]["status"] = "running"
+        (tmp_git_repo / "tasks.yaml").write_text(yaml.dump(tasks))
+        result = runner.invoke(main, ["drop", "1"])
+        assert result.exit_code != 0
+
+    def test_drop_all(self, runner, tmp_git_repo, monkeypatch):
+        monkeypatch.chdir(tmp_git_repo)
+        runner.invoke(main, ["add", "Task 1"])
+        runner.invoke(main, ["add", "Task 2"])
+        result = runner.invoke(main, ["drop", "--all", "--yes"])
+        assert result.exit_code == 0
+        assert "Dropped" in result.output
+        assert not (tmp_git_repo / "tasks.yaml").exists()
+
+    def test_drop_not_found(self, runner, tmp_git_repo, monkeypatch):
+        monkeypatch.chdir(tmp_git_repo)
+        result = runner.invoke(main, ["drop", "999"])
+        assert result.exit_code != 0
+
+    def test_drop_no_args(self, runner, tmp_git_repo, monkeypatch):
+        monkeypatch.chdir(tmp_git_repo)
+        result = runner.invoke(main, ["drop"])
+        assert result.exit_code != 0
+
+
+class TestRevert:
+    def test_revert_one_task(self, runner, tmp_git_repo, monkeypatch):
+        """Revert undoes a specific task's commit and removes from queue."""
+        monkeypatch.chdir(tmp_git_repo)
+        # Create a commit that looks like otto's
+        (tmp_git_repo / "feature.py").write_text("# feature\n")
+        subprocess.run(["git", "add", "feature.py"], cwd=tmp_git_repo, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "otto: Add feature (#3)"],
+            cwd=tmp_git_repo, capture_output=True,
+        )
+        # Add a task with id=3
+        from otto.tasks import add_task
+        task = add_task(tmp_git_repo / "tasks.yaml", "Add feature")
+        # Manually set id to 3 and status to passed
+        tasks_data = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())
+        tasks_data["tasks"][0]["id"] = 3
+        tasks_data["tasks"][0]["status"] = "passed"
+        (tmp_git_repo / "tasks.yaml").write_text(yaml.dump(tasks_data))
+
+        result = runner.invoke(main, ["revert", "--yes", "3"])
+        assert result.exit_code == 0
+        assert "Reverted commit" in result.output
+        # feature.py should no longer exist (reverted)
+        assert not (tmp_git_repo / "feature.py").exists()
+
+    def test_revert_no_commit_found(self, runner, tmp_git_repo, monkeypatch):
+        monkeypatch.chdir(tmp_git_repo)
+        runner.invoke(main, ["add", "Task 1"])
+        result = runner.invoke(main, ["revert", "--yes", "1"])
+        assert result.exit_code != 0
+        assert "No git commit found" in result.output
+
+    def test_revert_running_rejected(self, runner, tmp_git_repo, monkeypatch):
+        monkeypatch.chdir(tmp_git_repo)
+        runner.invoke(main, ["add", "Task 1"])
+        tasks = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())
+        tasks["tasks"][0]["status"] = "running"
+        (tmp_git_repo / "tasks.yaml").write_text(yaml.dump(tasks))
+        result = runner.invoke(main, ["revert", "1"])
+        assert result.exit_code != 0
+
+    def test_revert_all(self, runner, tmp_git_repo, monkeypatch):
+        monkeypatch.chdir(tmp_git_repo)
+        runner.invoke(main, ["add", "Task 1"])
+        result = runner.invoke(main, ["revert", "--all", "--yes"])
+        assert result.exit_code == 0
+
+    def test_revert_no_args(self, runner, tmp_git_repo, monkeypatch):
+        monkeypatch.chdir(tmp_git_repo)
+        result = runner.invoke(main, ["revert"])
+        assert result.exit_code != 0
+
+
+class TestResetAlias:
+    def test_reset_alias_works(self, runner, tmp_git_repo, monkeypatch):
+        """'otto reset --yes' should work as alias for 'otto drop --all --yes'."""
         monkeypatch.chdir(tmp_git_repo)
         runner.invoke(main, ["add", "Task 1"])
         result = runner.invoke(main, ["reset", "--yes"])
+        assert result.exit_code == 0
+
+    def test_reset_revert_commits_alias(self, runner, tmp_git_repo, monkeypatch):
+        """'otto reset --revert-commits --yes' should work as alias for 'otto revert --all --yes'."""
+        monkeypatch.chdir(tmp_git_repo)
+        result = runner.invoke(main, ["reset", "--revert-commits", "--yes"])
+        assert result.exit_code == 0
+
+
+class TestDeleteAlias:
+    def test_delete_alias_works(self, runner, tmp_git_repo, monkeypatch):
+        """'otto delete 1' should work as alias for 'otto drop 1'."""
+        monkeypatch.chdir(tmp_git_repo)
+        runner.invoke(main, ["add", "Task 1"])
+        result = runner.invoke(main, ["delete", "--yes", "1"])
         assert result.exit_code == 0
 
 
