@@ -744,6 +744,82 @@ class TestRunTaskV45:
         assert "review_ref" not in persisted
 
     @pytest.mark.asyncio
+    async def test_merge_restores_verified_candidate_after_qa_drift(self, tmp_git_repo):
+        """Merge should run from the verified candidate, not QA's leftover branch state."""
+        default_branch = _current_branch(tmp_git_repo)
+        task = {
+            "id": 1,
+            "key": "taskmerge01",
+            "prompt": "Add feature.txt",
+            "status": "pending",
+            "spec": [{"text": "Creates feature.txt", "binding": "must"}],
+            "max_retries": 0,
+        }
+        tasks_path = _write_task(tmp_git_repo, task)
+        config = {
+            "default_branch": default_branch,
+            "max_retries": 0,
+            "verify_timeout": 30,
+            "max_task_time": 60,
+            "test_command": None,
+        }
+
+        async def fake_query(*, prompt, options=None):
+            (tmp_git_repo / "feature.txt").write_text("candidate\n")
+            yield SimpleNamespace(
+                session_id="sess-merge-restore",
+                is_error=False,
+                total_cost_usd=0.0,
+                result="ok",
+            )
+
+        async def fake_qa(*args, **kwargs):
+            (tmp_git_repo / "feature.txt").write_text("qa drift\n")
+            subprocess.run(
+                ["git", "add", "feature.txt"],
+                cwd=tmp_git_repo, capture_output=True, check=True,
+            )
+            subprocess.run(
+                ["git", "commit", "-m", "qa drift"],
+                cwd=tmp_git_repo, capture_output=True, check=True,
+            )
+            (tmp_git_repo / "qa.tmp").write_text("left behind\n")
+            return {
+                "must_passed": True,
+                "verdict": {"must_passed": True, "must_items": []},
+                "raw_report": "QA PASS",
+                "cost_usd": 0.0,
+            }
+
+        def fake_merge(project_dir, key, default_branch):
+            candidate_sha = subprocess.run(
+                ["git", "rev-parse", f"refs/otto/candidates/{key}/attempt-1"],
+                cwd=project_dir, capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            head_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=project_dir, capture_output=True, text=True, check=True,
+            ).stdout.strip()
+
+            assert head_sha == candidate_sha
+            assert (project_dir / "feature.txt").read_text() == "candidate\n"
+            assert not (project_dir / "qa.tmp").exists()
+            return True
+
+        with patch("otto.runner.query", new=fake_query):
+            with patch("otto.runner.run_verification", return_value=VerifyResult(
+                passed=True,
+                tiers=[TierResult("tier1", True, "1 passed")],
+            )):
+                with patch("otto.runner.run_qa_agent_v45", new=fake_qa):
+                    with patch("otto.runner.merge_to_default", side_effect=fake_merge):
+                        result = await run_task_v45(
+                            task, config, tmp_git_repo, tasks_path,
+                        )
+
+        assert result["success"] is True
+
+    @pytest.mark.asyncio
     async def test_time_budget_early_return_cleans_up_and_cancels_spec(self, tmp_git_repo):
         """Time-budget early return should clean up and cancel background spec generation."""
         default_branch = _current_branch(tmp_git_repo)
