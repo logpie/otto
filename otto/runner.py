@@ -521,16 +521,12 @@ def _build_qa_retry_error(failed_musts: list[dict], qa_report: str) -> str:
     for item in failed_musts:
         criterion = item.get("criterion", "")
         evidence = item.get("evidence", "")
-        proof = [str(p).strip() for p in (item.get("proof") or []) if str(p).strip()]
+        has_proof = bool([p for p in (item.get("proof") or []) if str(p).strip()])
         lines.append(f"- [must] {criterion}")
-        if proof:
-            lines.append(f"  proof recorded: QA tested this and it failed ({proof[0][:120]})")
-        else:
-            lines.append(
-                "  proof gap: QA did not record proof for this criterion; this may be a QA coverage issue"
-            )
         if evidence:
-            lines.append(f"  evidence: {evidence}")
+            lines.append(f"  why it failed: {evidence}")
+        if not has_proof:
+            lines.append("  note: QA did not record proof for this criterion")
     return "\n".join(lines)
 
 

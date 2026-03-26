@@ -161,9 +161,9 @@ class TestQaProofHelpers:
             },
         ], "QA FAIL")
 
-        assert "proof gap: QA did not record proof" in message
-        assert "QA tested this and it failed" in message
-        assert "curl loop returned 200 on request 11" in message
+        assert "QA did not record proof" in message  # no-proof item
+        assert "why it failed: response was plain text" in message  # evidence shown
+        assert "why it failed: 11th request returned 200" in message  # evidence for item with proof
 
     @patch("otto.runner._log_warn")
     def test_audits_missing_proof_and_visual_screenshot_without_blocking(self, mock_warn, tmp_path):
