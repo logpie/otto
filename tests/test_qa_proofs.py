@@ -80,9 +80,9 @@ class TestWriteProofArtifacts:
         script = log_dir / "qa-proofs" / "regression-check.sh"
         content = script.read_text()
         assert "npx jest" in content
-        # kill is pre-filtered by _QA_INFRA_PREFIXES — not in script at all
+        # destructive / infra commands are excluded entirely
         assert "kill" not in content
-        assert "# Skipped (non-replayable): rm -rf" in content
+        assert "rm -rf" not in content
 
     def test_regression_script_skips_server_and_background_commands(self, tmp_path):
         log_dir = tmp_path / "logs"
@@ -102,11 +102,11 @@ class TestWriteProofArtifacts:
         script = log_dir / "qa-proofs" / "regression-check.sh"
         content = script.read_text()
         assert "npx jest --runInBand" in content
-        assert "# Skipped (non-replayable): npm run dev" in content
-        assert "# Skipped (non-replayable): python -m http.server 8000" in content
-        assert "# Skipped (non-replayable): uvicorn app:app --reload" in content
-        assert "# Skipped (non-replayable): nohup npm start >/tmp/app.log 2>&1" in content
-        assert "# Skipped (non-replayable): serve dist &" in content
+        assert "npm run dev" not in content
+        assert "python -m http.server 8000" not in content
+        assert "uvicorn app:app --reload" not in content
+        assert "nohup npm start >/tmp/app.log 2>&1" not in content
+        assert "serve dist &" not in content
 
     def test_regression_script_allows_replayable_ampersand_and_next_build_commands(self, tmp_path):
         log_dir = tmp_path / "logs"
@@ -127,29 +127,48 @@ class TestWriteProofArtifacts:
         assert "npm test 2>&1" in content
         assert "npm run lint && npm test" in content
         assert "npx next build" in content
-        assert "# Skipped (non-replayable): npx next dev" in content
-        assert "# Skipped (non-replayable): npx next start" in content
+        assert "npx next dev" not in content
+        assert "npx next start" not in content
 
     def test_writes_proof_report(self, tmp_path):
         log_dir = tmp_path / "logs"
         log_dir.mkdir()
         verdict = self._make_verdict()
         task = {"key": "test123"}
+        proofs_dir = log_dir / "qa-proofs"
+        proofs_dir.mkdir()
+        screenshot = proofs_dir / "screenshot-banner.png"
+        screenshot.write_bytes(b"png")
         qa_actions = [
             {"type": "bash", "command": "npx jest", "output": "14 passed"},
-            {"type": "browser", "action": "take_screenshot", "detail": "http://localhost:3000"},
+            {
+                "type": "browser",
+                "action": "evaluate_script",
+                "detail": ".banner",
+                "input": "{\"function\":\"() => getComputedStyle(document.querySelector('.banner')).backgroundColor\"}",
+                "output": "rgba(255, 0, 0, 0.2)",
+            },
+            {
+                "type": "browser",
+                "action": "take_screenshot",
+                "detail": "Severity banner visible",
+                "path": str(screenshot),
+            },
         ]
         _write_proof_artifacts(log_dir, verdict, qa_actions, task, "Test prompt", 0.50)
 
-        report = log_dir / "qa-proofs" / "proof-report.md"
+        report = proofs_dir / "proof-report.md"
         assert report.exists()
         content = report.read_text()
-        assert "Proof of Work" in content
+        assert "Proof Report" in content
         assert "test123" in content
         assert "$0.50" in content
         assert "Function returns correct value" in content
-        assert "Browser Verification" in content
-        assert "take_screenshot" in content
+        assert "Browser Assertions" in content
+        assert "rgba(255, 0, 0, 0.2)" in content
+        assert "Severity banner visible" in content
+        assert "[screenshot-banner.png](screenshot-banner.png)" in content
+        assert "Good variable names" not in content
 
     def test_no_bash_commands_no_script(self, tmp_path):
         log_dir = tmp_path / "logs"
@@ -202,3 +221,25 @@ class TestWriteProofArtifacts:
         assert not (proofs_dir / "extra.txt").exists()
         assert (proofs_dir / "must-1.md").exists()
         assert (proofs_dir / "proof-report.md").exists()
+
+    def test_filters_exploration_commands_from_report_and_script(self, tmp_path):
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        verdict = self._make_verdict()
+        task = {"key": "test123"}
+        qa_actions = [
+            {"type": "bash", "command": "find . -name '*.test.ts'", "output": "tests/foo.test.ts"},
+            {"type": "bash", "command": "git diff main...HEAD --name-only", "output": "src/app.ts"},
+            {"type": "bash", "command": "npx jest --runInBand", "output": "14 passed"},
+        ]
+
+        _write_proof_artifacts(log_dir, verdict, qa_actions, task, "Test prompt", 0.50)
+
+        report = (log_dir / "qa-proofs" / "proof-report.md").read_text()
+        script = (log_dir / "qa-proofs" / "regression-check.sh").read_text()
+        assert "find . -name" not in report
+        assert "git diff main...HEAD --name-only" not in report
+        assert "find . -name" not in script
+        assert "git diff main...HEAD --name-only" not in script
+        assert "npx jest --runInBand" in report
+        assert "npx jest --runInBand" in script

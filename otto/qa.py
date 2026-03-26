@@ -324,10 +324,13 @@ Save any browser screenshots to: {log_dir / "qa-proofs" if log_dir else "/tmp"}/
                         if not (ToolResultBlock and isinstance(block, ToolResultBlock)):
                             continue
                         raw_content = getattr(block, "content", None)
+                        text = str(raw_content) if raw_content else ""
                         if _last_tool_name == "Bash":
-                            text = str(raw_content) if raw_content else ""
                             if qa_actions and qa_actions[-1]["type"] == "bash":
                                 qa_actions[-1]["output"] = text[:2000]
+                        elif _last_tool_name.startswith("mcp__"):
+                            if qa_actions and qa_actions[-1]["type"] == "browser":
+                                qa_actions[-1]["output"] = text[:4000]
                         # Screenshot data is too large for the message pipe
                         # (>1MB base64 crashes the SDK). QA prompt instructs
                         # the agent to save screenshots via filePath instead.
@@ -373,7 +376,11 @@ Save any browser screenshots to: {log_dir / "qa-proofs" if log_dir else "/tmp"}/
                                 action = block.name.split("__")[-1]
                                 detail = ""
                                 if action == "take_screenshot":
-                                    detail = inp.get("filePath", inp.get("url", ""))[:120]
+                                    detail = (
+                                        inp.get("selector")
+                                        or inp.get("url")
+                                        or inp.get("filePath", "")
+                                    )[:120]
                                 elif "url" in inp:
                                     detail = inp["url"][:120]
                                 elif "selector" in inp:
@@ -382,6 +389,9 @@ Save any browser screenshots to: {log_dir / "qa-proofs" if log_dir else "/tmp"}/
                                     "type": "browser",
                                     "action": action,
                                     "detail": detail,
+                                    "path": str(inp.get("filePath", ""))[:400],
+                                    "input": json.dumps(inp, sort_keys=True, default=str)[:4000],
+                                    "output": "",
                                 })
 
                             if on_progress:
@@ -513,6 +523,136 @@ def _is_non_replayable(cmd: str) -> bool:
     return False
 
 
+_EXPLORATION_COMMAND_PREFIXES = (
+    "find ", "grep ", "rg ", "git diff", "git log", "git show", "git status",
+    "git rev-parse", "wc ", "ls ", "pwd", "cd ", "cat ", "sed ", "head ",
+    "tail ", "sort ", "uniq ", "stat ", "file ", "tree ", "basename ",
+    "dirname ", "realpath ", "which ", "locate ", "readlink ",
+)
+
+_VERIFICATION_COMMAND_PATTERNS = (
+    r"(^|[;&( ])(?:uv run )?pytest(?:\s|$)",
+    r"(^|[;&( ])python(?:3)? -m pytest(?:\s|$)",
+    r"(^|[;&( ])(?:npx )?jest(?:\s|$)",
+    r"(^|[;&( ])(?:npx )?vitest(?:\s|$)",
+    r"(^|[;&( ])(?:bun x )?playwright test(?:\s|$)",
+    r"(^|[;&( ])cypress run(?:\s|$)",
+    r"(^|[;&( ])(?:npm|pnpm|yarn|bun) (?:run )?(?:test|lint|typecheck|check|build)\b",
+    r"(^|[;&( ])tsc(?:\s|$)",
+    r"(^|[;&( ])mypy(?:\s|$)",
+    r"(^|[;&( ])ruff(?:\s|$)",
+    r"(^|[;&( ])eslint(?:\s|$)",
+    r"(^|[;&( ])cargo (?:test|check|build)\b",
+    r"(^|[;&( ])go (?:test|build)\b",
+    r"(^|[;&( ])(?:mvn|gradle|./gradlew) (?:test|check|build)\b",
+    r"(^|[;&( ])dotnet (?:test|build)\b",
+    r"(^|[;&( ])curl(?:\s|$)",
+    r"(^|[;&( ])http(?:\s|$)",
+    r"(^|[;&( ])node -e(?:\s|$)",
+    r"(^|[;&( ])python(?:3)? -c(?:\s|$)",
+    r"(^|[;&( ])python(?:3)?\s+-\s+<<",
+    r"(^|[;&( ])node\s+<<",
+    r"(^|[;&( ])(?:test|\[|true|false)(?:\s|$)",
+)
+
+_BROWSER_TRACE_ACTIONS = {
+    "navigate", "navigate_page", "click", "fill", "fill_form", "type",
+    "press_key", "hover", "select", "wait_for", "wait_for_load_state",
+    "go_back", "go_forward", "reload",
+}
+
+
+def _is_verification_command(cmd: str) -> bool:
+    """Keep only replayable commands that generate hard verification evidence."""
+    stripped = cmd.strip()
+    if not stripped or _is_non_replayable(stripped):
+        return False
+
+    lower = stripped.lower()
+    if re.search(r"(^|[ \t])(--version|--help)([ \t]|$)", lower):
+        return False
+    if any(lower.startswith(prefix) for prefix in _EXPLORATION_COMMAND_PREFIXES):
+        return False
+
+    if any(re.search(pattern, lower) for pattern in _VERIFICATION_COMMAND_PATTERNS):
+        return True
+
+    return bool(re.search(
+        r"(^|[;&( ])(?:\./)?[\w./-]*(?:test|spec|check|verify|assert|lint|typecheck|build)[\w./-]*(?:\s|$)",
+        lower,
+    ))
+
+
+def _trim_evidence_output(text: str, max_lines: int = 12, max_chars: int = 1600) -> str:
+    """Return a compact but reproducible output excerpt."""
+    if not text:
+        return ""
+
+    lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return ""
+
+    excerpt = "\n".join(lines[-max_lines:])
+    if len(excerpt) <= max_chars:
+        return excerpt
+    return excerpt[-max_chars:]
+
+
+def _load_browser_input(action: dict[str, str]) -> dict[str, Any]:
+    raw = action.get("input", "")
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+        return value if isinstance(value, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def _browser_assertion_input(action: dict[str, str]) -> str:
+    data = _load_browser_input(action)
+    for key in ("function", "expression", "script"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    if data:
+        return json.dumps(data, indent=2, sort_keys=True)
+    return action.get("detail", "").strip()
+
+
+def _is_browser_assertion(action: dict[str, str]) -> bool:
+    action_name = action.get("action", "")
+    if action_name == "take_screenshot" or action_name in _BROWSER_TRACE_ACTIONS:
+        return False
+    return bool(action.get("output", "").strip())
+
+
+def _looks_like_path(value: str) -> bool:
+    return value.endswith((".png", ".jpg", ".jpeg"))
+
+
+def _resolve_screenshot_file(
+    action: dict[str, str],
+    available: set[str],
+) -> str | None:
+    for candidate in (action.get("path", ""), action.get("detail", "")):
+        if not candidate:
+            continue
+        name = Path(candidate).name
+        if name in available and _looks_like_path(name):
+            return name
+    return None
+
+
+def _screenshot_caption(action: dict[str, str], filename: str) -> str:
+    detail = action.get("detail", "").strip()
+    if detail and Path(detail).name != filename:
+        return detail
+    stem = Path(filename).stem
+    stem = stem.removeprefix("screenshot-").replace("-", " ").replace("_", " ").strip()
+    return stem or "Browser screenshot"
+
+
 def _write_proof_artifacts(
     log_dir: Path,
     verdict: dict[str, Any],
@@ -546,19 +686,20 @@ def _write_proof_artifacts(
         )
         count += 1
 
-    # Filter out QA-internal and non-verification commands
+    # Filter out QA-internal and keep only replayable verification commands
     _QA_INTERNAL_PATTERNS = ("otto_qa_", "/var/folders/", "/tmp/otto_")
     _QA_INFRA_PREFIXES = (
         "sleep ", "lsof ", "echo ", "cat >", "cat ", "kill ", "pkill ",
         "mkdir ", "ls ", "pwd", "cd ", "curl -s -o /dev/null",
     )
-    bash_commands = [
+    verification_commands = [
         a for a in qa_actions
         if a["type"] == "bash" and a.get("command")
         and not any(p in a["command"] for p in _QA_INTERNAL_PATTERNS)
         and not a["command"].strip().startswith(_QA_INFRA_PREFIXES)
+        and _is_verification_command(a["command"])
     ]
-    if bash_commands:
+    if verification_commands:
         lines = [
             "#!/bin/bash",
             "# Re-run all QA verification commands",
@@ -566,7 +707,7 @@ def _write_proof_artifacts(
             "set -e",
             "",
         ]
-        for cmd_info in bash_commands:
+        for cmd_info in verification_commands:
             cmd = cmd_info["command"]
             if _is_non_replayable(cmd):
                 lines.append(f"# Skipped (non-replayable): {cmd[:60]}")
@@ -580,82 +721,105 @@ def _write_proof_artifacts(
         regression_script.chmod(0o755)
         count += 1
 
-    # Write proof-report.md — human-readable summary
+    # Write proof-report.md — human-readable, reproducible evidence only
     must_passed = verdict.get("must_passed", False)
     status_icon = "\u2713 passed" if must_passed else "\u2717 failed"
     passed_count = sum(1 for m in must_items if m.get("status") == "pass")
 
     report_lines = [
-        f"# Proof of Work",
+        f"# Proof Report",
         f"**Task:** {original_prompt}",
         f"**Result:** {task.get('key', '?')} | {status_icon} | {passed_count}/{len(must_items)} must | QA ${cost_usd:.2f}",
         "",
     ]
 
-    # Commands section — only replayable verification commands
-    replayable = [c for c in bash_commands
+    report_lines.append("## Must Verdict")
+    for item in must_items:
+        criterion = item.get("criterion", "")
+        status = item.get("status", "unknown")
+        icon = "\u2713" if status == "pass" else "\u2717"
+        report_lines.append(f"- {icon} {criterion}")
+    if not must_items:
+        report_lines.append("- No [must] items recorded")
+    report_lines.append("")
+
+    replayable = [c for c in verification_commands
                   if not _is_non_replayable(c["command"])]
     if replayable:
         report_lines.append("## Verification Commands")
-        for cmd_info in replayable:
+        for idx, cmd_info in enumerate(replayable, start=1):
             cmd = cmd_info["command"]
-            output = cmd_info.get("output", "")
-            # Show full command (multi-line preserved as-is)
-            report_lines.append(f"```")
-            report_lines.append(f"$ {cmd}")
+            output = _trim_evidence_output(cmd_info.get("output", ""))
+            report_lines.append(f"### VC{idx}")
+            report_lines.append("```bash")
+            report_lines.append(cmd)
+            report_lines.append("```")
             if output:
-                # Show last meaningful output line
-                for oline in reversed(output.splitlines()):
-                    stripped = oline.strip()
-                    if stripped and len(stripped) > 5:
-                        report_lines.append(f"\u2192 {stripped[:120]}")
-                        break
-            report_lines.append(f"```")
-        report_lines.append("")
+                report_lines.append("Observed output:")
+                report_lines.append("```text")
+                report_lines.append(output)
+                report_lines.append("```")
+            else:
+                report_lines.append("Observed output: not captured")
+            report_lines.append("")
 
-    # Per-must-item results
-    for i, item in enumerate(must_items):
-        criterion = item.get("criterion", "")
-        status = item.get("status", "unknown")
-        evidence = item.get("evidence", "")
-        is_visual = "\u25c8" in criterion
+    browser_assertions = [
+        action for action in qa_actions
+        if action.get("type") == "browser" and _is_browser_assertion(action)
+    ]
+    if browser_assertions:
+        report_lines.append("## Browser Assertions")
+        for idx, action in enumerate(browser_assertions, start=1):
+            action_name = action.get("action", "browser_action")
+            assertion_input = _browser_assertion_input(action)
+            output = _trim_evidence_output(action.get("output", ""), max_lines=20, max_chars=2400)
+            report_lines.append(f"### BA{idx} `{action_name}`")
+            if assertion_input:
+                report_lines.append("Input:")
+                report_lines.append("```text")
+                report_lines.append(assertion_input)
+                report_lines.append("```")
+            if output:
+                report_lines.append("Observed output:")
+                report_lines.append("```text")
+                report_lines.append(output)
+                report_lines.append("```")
+            else:
+                report_lines.append("Observed output: not captured")
+            report_lines.append("")
 
-        icon = "\u2713" if status == "pass" else "\u2717"
-        marker = " \u25c8" if is_visual else ""
-        report_lines.append(f"## {icon} [must{marker}] {criterion}")
-        report_lines.append(f"**Evidence:** {evidence}")
-        report_lines.append("")
-
-    # Collect screenshots saved by QA agent to qa-proofs/
-    # (QA prompt instructs agent to save via filePath to this directory)
+    # Collect screenshots saved by QA agent to qa-proofs/ and map by filePath
     browser_actions = [a for a in qa_actions if a["type"] == "browser"]
     screenshot_refs = sorted(
         f.name for f in proofs_dir.glob("screenshot-*.png") if f.is_file()
     )
     count += len(screenshot_refs)
+    available_refs = set(screenshot_refs)
+    matched_refs: set[str] = set()
+    screenshot_lines: list[str] = []
+    ss_counter = 1
+    for action in browser_actions:
+        if action.get("action") != "take_screenshot":
+            continue
+        ref = _resolve_screenshot_file(action, available_refs)
+        if not ref:
+            continue
+        matched_refs.add(ref)
+        caption = _screenshot_caption(action, ref)
+        screenshot_lines.append(f"- SS{ss_counter} [{ref}]({ref})")
+        screenshot_lines.append(f"  Description: {caption}")
+        ss_counter += 1
 
-    # Browser actions section
-    if browser_actions:
-        report_lines.append("## Browser Verification")
-        ss_idx = 0
-        for action in browser_actions:
-            act = action.get("action", "")
-            detail = action.get("detail", "")
-            if act == "take_screenshot" and ss_idx < len(screenshot_refs):
-                report_lines.append(f"- {act}: {detail}  → [{screenshot_refs[ss_idx]}]({screenshot_refs[ss_idx]})")
-                ss_idx += 1
-            else:
-                report_lines.append(f"- {act}: {detail}")
-        report_lines.append("")
+    for ref in screenshot_refs:
+        if ref in matched_refs:
+            continue
+        screenshot_lines.append(f"- SS{ss_counter} [{ref}]({ref})")
+        screenshot_lines.append("  Description: QA browser screenshot")
+        ss_counter += 1
 
-    # Should notes
-    should_notes = verdict.get("should_notes", [])
-    if should_notes:
-        report_lines.append("## Should Notes")
-        for note in should_notes:
-            criterion = note.get("criterion", "")
-            obs = note.get("observation", "")
-            report_lines.append(f"- {criterion}: {obs}")
+    if screenshot_lines:
+        report_lines.append("## Screenshots")
+        report_lines.extend(screenshot_lines)
         report_lines.append("")
 
     proof_report = proofs_dir / "proof-report.md"

@@ -165,6 +165,10 @@ class TestProofOfWorkE2E:
     def test_mixed_bash_and_browser_actions(self, tmp_path):
         """Browser actions appear in report but NOT in regression script."""
         log_dir = _make_log_dir(tmp_path)
+        proofs_dir = log_dir / "qa-proofs"
+        proofs_dir.mkdir()
+        screenshot = proofs_dir / "screenshot-form.png"
+        screenshot.write_bytes(b"png")
         verdict = _make_verdict(
             must_passed=True,
             must_items=[
@@ -175,19 +179,30 @@ class TestProofOfWorkE2E:
         qa_actions = [
             {"type": "bash", "command": "npx jest --runInBand", "output": "2 passed"},
             {"type": "browser", "action": "navigate", "detail": "http://localhost:3000"},
-            {"type": "browser", "action": "take_screenshot", "detail": "http://localhost:3000/form"},
+            {
+                "type": "browser",
+                "action": "evaluate_script",
+                "detail": ".form-status",
+                "input": json.dumps({"function": "() => document.querySelector('.form-status').textContent"}),
+                "output": "Submitted",
+            },
+            {
+                "type": "browser",
+                "action": "take_screenshot",
+                "detail": "Form success state",
+                "path": str(screenshot),
+            },
             {"type": "bash", "command": "curl http://localhost:3000/api/health", "output": "ok"},
         ]
         task = {"key": "UI-7"}
         _write_proof_artifacts(log_dir, verdict, qa_actions, task, "Build form page", 1.20)
 
-        proofs_dir = log_dir / "qa-proofs"
-
-        # proof-report.md has Browser Verification section
         report = (proofs_dir / "proof-report.md").read_text()
-        assert "Browser Verification" in report
-        assert "navigate" in report
-        assert "take_screenshot" in report
+        assert "Browser Assertions" in report
+        assert "Submitted" in report
+        assert "Screenshots" in report
+        assert "Form success state" in report
+        assert "navigate" not in report
 
         # regression-check.sh has only bash commands (no browser)
         script = (proofs_dir / "regression-check.sh").read_text()
@@ -327,7 +342,7 @@ class TestProofOfWorkE2E:
         )
         qa_actions = [
             {"type": "bash", "command": "node -e 'console.log(1+1)'", "output": "2"},
-            {"type": "bash", "command": "npx jest --version", "output": "29.7.0"},
+            {"type": "bash", "command": "python -c 'print(3)'", "output": "3"},
         ]
         task = {"key": "RUN-1"}
         _write_proof_artifacts(log_dir, verdict, qa_actions, task, "Test runnable", 0.01)
@@ -342,6 +357,7 @@ class TestProofOfWorkE2E:
         )
         assert result.returncode == 0
         assert "2" in result.stdout  # node -e 'console.log(1+1)' outputs 2
+        assert "3" in result.stdout
 
     # ------------------------------------------------------------------
     # Scenario 8: Regression script fails on regression
@@ -434,7 +450,7 @@ class TestProofOfWorkE2E:
         content = proof_report.read_text()
         lines = content.strip().splitlines()
         assert len(lines) > 0
-        assert "Proof of Work" in lines[0]
+        assert "Proof Report" in lines[0]
 
         # Verify claims display logic
         claims_files = sorted(log_dir.glob("attempt-*-claims.md"))
@@ -508,7 +524,7 @@ class TestProofOfWorkE2E:
     # Scenario 12: Command filtering in regression script
     # ------------------------------------------------------------------
     def test_command_filtering_in_regression_script(self, tmp_path):
-        """Verify which commands are kept and which are commented out."""
+        """Only reproducible verification commands should survive filtering."""
         log_dir = _make_log_dir(tmp_path)
         verdict = _make_verdict(
             must_passed=True,
@@ -523,7 +539,9 @@ class TestProofOfWorkE2E:
             {"type": "bash", "command": "tsc --noEmit", "output": ""},
             {"type": "bash", "command": "npm run lint && npm test", "output": "ok"},
             {"type": "bash", "command": "node -e \"console.log(1+1)\"", "output": "2"},
-            # Should be SKIPPED (non-replayable)
+            # Should be EXCLUDED (non-replayable or exploration)
+            {"type": "bash", "command": "find . -name '*.tsx'", "output": "src/App.tsx"},
+            {"type": "bash", "command": "git diff main...HEAD --name-only", "output": "src/App.tsx"},
             {"type": "bash", "command": "npm run dev", "output": ""},
             {"type": "bash", "command": "kill -9 12345", "output": ""},
             {"type": "bash", "command": "python -m http.server 8000", "output": ""},
@@ -546,31 +564,30 @@ class TestProofOfWorkE2E:
         script = (log_dir / "qa-proofs" / "regression-check.sh").read_text()
 
         # --- KEPT commands (appear as real commands, not commented) ---
-        # We check they appear as actual commands (after "echo" label lines)
         assert "npx jest --runInBand" in script
         assert "curl -s http://localhost:3000/api" in script
         assert "tsc --noEmit" in script
         assert "npm run lint && npm test" in script
         assert 'node -e "console.log(1+1)"' in script
 
-        # --- SKIPPED commands (appear as comments in script) ---
-        assert "# Skipped (non-replayable): npm run dev" in script
-        assert "# Skipped (non-replayable): python -m http.server 8000" in script
-        assert "# Skipped (non-replayable): npm start" in script
-        assert "# Skipped (non-replayable): uvicorn app:app --reload" in script
-        assert "# Skipped (non-replayable): gunicorn app:app" in script
-        assert "# Skipped (non-replayable): npx next dev" in script
-        assert "# Skipped (non-replayable): serve dist" in script
-        assert "# Skipped (non-replayable): flask run --port 5000" in script
-        assert "# Skipped (non-replayable): python3 -m http.server 9090" in script
-        assert "# Skipped (non-replayable): node server.js" in script
-        assert "# Skipped (non-replayable): nohup node server.js &" in script
-        # These start with infra prefixes — pre-filtered entirely
+        # --- EXCLUDED commands ---
+        assert "find . -name '*.tsx'" not in script
+        assert "git diff main...HEAD --name-only" not in script
+        assert "npm run dev" not in script
+        assert "python -m http.server 8000" not in script
+        assert "npm start" not in script
+        assert "uvicorn app:app --reload" not in script
+        assert "gunicorn app:app" not in script
+        assert "npx next dev" not in script
+        assert "serve dist" not in script
+        assert "flask run --port 5000" not in script
+        assert "python3 -m http.server 9090" not in script
+        assert "node server.js" not in script
+        assert "nohup node server.js &" not in script
         assert "kill -9 12345" not in script
         assert "pkill -f node" not in script
-        # These are caught by _is_non_replayable — appear as skip comments
-        assert "# Skipped (non-replayable): rm -rf" in script
-        assert "# Skipped (non-replayable): git push" in script
+        assert "rm -rf /tmp/test" not in script
+        assert "git push origin main" not in script
 
     def test_regression_script_escapes_quotes_in_echo(self, tmp_path):
         """Commands with double quotes don't break the echo label in the script."""
@@ -596,3 +613,42 @@ class TestProofOfWorkE2E:
             timeout=10,
         )
         assert result.returncode == 0, f"Script failed: {result.stderr}"
+
+    def test_screenshot_mapping_uses_action_filepath_not_sorted_order(self, tmp_path):
+        log_dir = _make_log_dir(tmp_path)
+        proofs_dir = log_dir / "qa-proofs"
+        proofs_dir.mkdir()
+        alpha = proofs_dir / "screenshot-alpha.png"
+        zeta = proofs_dir / "screenshot-zeta.png"
+        alpha.write_bytes(b"alpha")
+        zeta.write_bytes(b"zeta")
+
+        verdict = _make_verdict(
+            must_passed=True,
+            must_items=[
+                {"criterion": "Screenshots captured", "status": "pass", "evidence": "See screenshots"},
+            ],
+        )
+        qa_actions = [
+            {
+                "type": "browser",
+                "action": "take_screenshot",
+                "detail": "Zeta state",
+                "path": str(zeta),
+            },
+            {
+                "type": "browser",
+                "action": "take_screenshot",
+                "detail": "Alpha state",
+                "path": str(alpha),
+            },
+        ]
+
+        _write_proof_artifacts(log_dir, verdict, qa_actions, {"key": "SS-1"}, "Capture screenshots", 0.0)
+
+        report = (proofs_dir / "proof-report.md").read_text()
+        zeta_index = report.index("SS1 [screenshot-zeta.png](screenshot-zeta.png)")
+        alpha_index = report.index("SS2 [screenshot-alpha.png](screenshot-alpha.png)")
+        assert zeta_index < alpha_index
+        assert "Description: Zeta state" in report
+        assert "Description: Alpha state" in report
