@@ -1391,9 +1391,12 @@ async def run_task_v45(
         duration = time.monotonic() - task_start
         if tasks_file:
             try:
+                from datetime import datetime, timezone
                 updates: dict[str, Any] = {"status": status, "cost_usd": total_cost}
                 if duration > 0:
                     updates["duration_s"] = round(duration, 1)
+                if status in ("passed", "failed", "blocked"):
+                    updates["completed_at"] = datetime.now(timezone.utc).isoformat()
                 if error:
                     updates["error"] = error
                 if error_code is not _result_error_code_unset:

@@ -984,56 +984,133 @@ def format_cost(cost: float) -> str:
 # Status table (used by `otto status` and `otto status -w`)
 # ---------------------------------------------------------------------------
 
-def build_status_table(tasks: list[dict], show_phase: bool = False):
-    """Build a Rich renderable (Table + summary + optional live phase info)."""
-    import json
+def _relative_time(iso_timestamp: str) -> str:
+    """Convert ISO timestamp to relative time string."""
+    from datetime import datetime, timezone
+    try:
+        # Normalize: replace Z suffix and ensure timezone awareness
+        ts = iso_timestamp.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(ts)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        delta = datetime.now(timezone.utc) - dt
+        seconds = int(delta.total_seconds())
+        if seconds < 60:
+            return "just now"
+        minutes = seconds // 60
+        if minutes < 60:
+            return f"{minutes}min ago"
+        hours = minutes // 60
+        if hours < 24:
+            return f"{hours}hr ago"
+        days = hours // 24
+        if days == 1:
+            return "yesterday"
+        return f"{days} days ago"
+    except (ValueError, TypeError):
+        return ""
+
+
+def _read_proof_coverage(task_key: str) -> str:
+    """Read proof coverage from qa-proofs/proof-report.md on disk.
+
+    Returns a string like "4/5 proved" or "" if not available.
+    """
     from pathlib import Path
-    from rich.table import Table
+    proof_report = Path.cwd() / "otto_logs" / task_key / "qa-proofs" / "proof-report.md"
+    if not proof_report.exists():
+        return ""
+    try:
+        content = proof_report.read_text()
+        # Look for "Proof coverage: N/M" pattern
+        m = re.search(r"[Pp]roof [Cc]overage:\s*(\d+/\d+)", content)
+        if m:
+            return f"{m.group(1)} proved"
+    except OSError:
+        pass
+    return ""
+
+
+def build_status_table(tasks: list[dict], show_phase: bool = False):
+    """Build a Rich renderable — card-style task list with summary."""
+    from pathlib import Path
     from rich.console import Group
 
-    table = Table(show_header=True, box=None, pad_edge=False, show_edge=False, expand=False)
-    table.add_column("#", style="bold", min_width=2, justify="right")
-    table.add_column("Status", min_width=7)
-    table.add_column("Att", min_width=3, justify="right")
-    table.add_column("Spec", min_width=4, justify="right")
-    table.add_column("Cost", min_width=6, justify="right", style="dim")
-    table.add_column("Time", min_width=5, justify="right", style="dim")
-    table.add_column("Prompt", ratio=1, no_wrap=True)
+    _STATUS_ICONS = {
+        "passed": "[green]\u2713[/green]",
+        "failed": "[red]\u2717[/red]",
+        "blocked": "[red]\u2717[/red]",
+        "running": "[cyan]\u25cf[/cyan]",
+        "pending": "[dim]\u25cb[/dim]",
+    }
 
+    _SEP = " \u00b7 "  # middle dot separator for detail lines
+
+    lines: list[str] = []
     for t in tasks:
         status_str = t.get("status", "?")
+        task_id = t.get("id", "?")
+        prompt_text = _truncate_at_word(t["prompt"], 80)
+        icon = _STATUS_ICONS.get(status_str, "[dim]?[/dim]")
         spec_count = len(t.get("spec", []))
         cost = t.get("cost_usd", 0.0)
-        cost_str = f"${cost:.2f}" if cost else ""
         dur = t.get("duration_s", 0.0)
-        dur_str = format_duration(dur) if dur else ""
+        attempts = t.get("attempts", 0)
+        task_key = t.get("key", "")
 
-        status_styles = {
-            "passed": "success", "failed": "error", "blocked": "error",
-            "running": "info", "pending": "dim",
-        }
-        status_style = status_styles.get(status_str, "dim")
-        status_text = Text(status_str, style=status_style)
+        # Line 1: icon + id + prompt
+        if status_str in ("passed",):
+            lines.append(f"  {icon} [bold]#{task_id}[/bold]  {rich_escape(prompt_text)}")
+        elif status_str in ("failed", "blocked"):
+            lines.append(f"  {icon} [bold]#{task_id}[/bold]  {rich_escape(prompt_text)}")
+        elif status_str == "running":
+            lines.append(f"  {icon} [bold]#{task_id}[/bold]  {rich_escape(prompt_text)}")
+        else:
+            lines.append(f"  {icon} [dim]#{task_id}[/dim]  [dim]{rich_escape(prompt_text)}[/dim]")
 
-        row_style = ""
-        if status_str in ("pending", "failed"):
-            row_style = "dim"
+        # Line 2: detail line (status-dependent)
+        detail_parts: list[str] = []
+        if status_str in ("passed", "failed", "blocked"):
+            # Relative time from completed_at
+            completed_at = t.get("completed_at", "")
+            rel = _relative_time(completed_at) if completed_at else ""
+            if rel:
+                detail_parts.append(f"{status_str} {rel}")
+            else:
+                detail_parts.append(status_str)
+            if attempts:
+                att_s = "s" if attempts != 1 else ""
+                detail_parts.append(f"{attempts} attempt{att_s}")
+            if cost:
+                detail_parts.append(f"${cost:.2f}")
+            if dur:
+                detail_parts.append(format_duration(dur))
+            if status_str == "passed":
+                if spec_count:
+                    detail_parts.append(f"{spec_count} specs")
+                # Check proof coverage from disk
+                proof_cov = _read_proof_coverage(task_key) if task_key else ""
+                if proof_cov:
+                    detail_parts.append(proof_cov)
+            lines.append(f"    [dim]{_SEP.join(detail_parts)}[/dim]")
+        elif status_str == "running":
+            detail_parts.append("running")
+            if dur:
+                detail_parts.append(f"{format_duration(dur)} elapsed")
+            if cost:
+                detail_parts.append(f"${cost:.2f}")
+            lines.append(f"    [dim]{_SEP.join(detail_parts)}[/dim]")
+        else:
+            # pending
+            detail_parts.append("pending")
+            if spec_count:
+                detail_parts.append(f"{spec_count} specs")
+            lines.append(f"    [dim]{_SEP.join(detail_parts)}[/dim]")
 
-        prompt_text = t['prompt'][:50]
-        error_suffix = ""
+        # Line 3: error line for failed/blocked
         if status_str in ("failed", "blocked") and t.get("error"):
-            error_suffix = f"\n        [error]\u21b3 {rich_escape(t['error'][:70])}[/error]"
-
-        table.add_row(
-            str(t.get("id", "?")),
-            status_text,
-            str(t.get("attempts", 0)),
-            str(spec_count) if spec_count else "",
-            cost_str,
-            dur_str,
-            rich_escape(prompt_text) + error_suffix,
-            style=row_style,
-        )
+            error_text = t["error"].splitlines()[0][:70] if t.get("error") else ""
+            lines.append(f"    [red]\u21b3 {rich_escape(error_text)}[/red]")
 
     # Summary line
     counts: dict[str, int] = {}
@@ -1047,15 +1124,15 @@ def build_status_table(tasks: list[dict], show_phase: bool = False):
 
     parts = []
     if counts.get("passed"):
-        parts.append(f"[success]{counts['passed']} passed[/success]")
+        parts.append(f"[green]{counts['passed']} passed[/green]")
     if counts.get("failed"):
-        parts.append(f"[error]{counts['failed']} failed[/error]")
+        parts.append(f"[red]{counts['failed']} failed[/red]")
     if counts.get("blocked"):
-        parts.append(f"[error]{counts['blocked']} blocked[/error]")
+        parts.append(f"[red]{counts['blocked']} blocked[/red]")
     if counts.get("pending"):
         parts.append(f"[dim]{counts['pending']} pending[/dim]")
     if counts.get("running"):
-        parts.append(f"[info]{counts['running']} running[/info]")
+        parts.append(f"[cyan]{counts['running']} running[/cyan]")
     summary = ", ".join(parts)
     extras = []
     if total_cost > 0:
@@ -1063,9 +1140,13 @@ def build_status_table(tasks: list[dict], show_phase: bool = False):
     if total_dur > 0:
         extras.append(format_duration(total_dur))
     if extras:
-        summary += f"  [dim]\u2014 {', '.join(extras)}[/dim]"
+        summary += f" [dim]\u2014 {', '.join(extras)}[/dim]"
 
-    renderables = [table, Text(""), Text.from_markup(f"  {summary}")]
+    lines.append("")
+    lines.append(f"  {summary}")
+
+    markup = "\n".join(lines)
+    renderables = [Text.from_markup(markup)]
 
     if show_phase:
         live_lines = _build_live_phase_lines()

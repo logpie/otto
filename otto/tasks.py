@@ -6,6 +6,7 @@ import os
 import tempfile
 import uuid
 from contextlib import suppress
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -96,6 +97,7 @@ def add_task(
             "key": generate_key(existing_keys),
             "prompt": prompt,
             "status": "pending",
+            "created_at": datetime.now(timezone.utc).isoformat(),
         }
         if verify is not None:
             task["verify"] = verify
@@ -126,6 +128,7 @@ def add_tasks(
         max_id = max((t.get("id", 0) for t in tasks), default=0)
 
         # First pass: assign IDs and keys
+        now = datetime.now(timezone.utc).isoformat()
         new_tasks: list[tuple[dict[str, Any], dict[str, Any]]] = []
         for item in batch:
             max_id += 1
@@ -134,6 +137,7 @@ def add_tasks(
                 "key": generate_key(existing_keys),
                 "prompt": item["prompt"],
                 "status": "pending",
+                "created_at": now,
             }
             existing_keys.add(task["key"])
             for field in ("verify", "max_retries", "spec"):
@@ -219,6 +223,7 @@ def reset_all_tasks(tasks_path: Path) -> int:
             t.pop("error", None)
             t.pop("error_code", None)
             t.pop("changed_files", None)
+            t.pop("completed_at", None)
         return len(tasks)
 
     return _locked_rw(tasks_path, _reset)

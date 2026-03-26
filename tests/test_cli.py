@@ -659,8 +659,8 @@ class TestStatusSpec:
         add_task(tmp_git_repo / "tasks.yaml", "Task without spec")
         result = runner.invoke(main, ["status"])
         assert result.exit_code == 0
-        # Should show spec count column
-        assert "Spec" in result.output
+        # Card layout shows spec count in detail line
+        assert "3 specs" in result.output
 
 
 class TestStatusCost:
