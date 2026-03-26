@@ -7,6 +7,7 @@ through in-memory shared state. Tasks execute sequentially within each batch.
 Entry point: run_per()
 """
 import fcntl
+import json
 import shutil
 import signal
 import subprocess
@@ -16,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from otto.config import git_meta_dir
-from otto.context import PipelineContext, TaskResult
+from otto.context import Learning, PipelineContext, TaskResult
 from otto.display import console, rich_escape
 from otto.planner import (
     ExecutionPlan,
@@ -36,6 +37,84 @@ from otto.telemetry import (
     PlanCreated,
     Telemetry,
 )
+
+
+def load_learnings(project_dir: Path, context: PipelineContext) -> None:
+    """Load persisted learnings from otto_logs/learnings.jsonl into context.
+
+    Deduplicates by text — only adds entries not already present.
+    """
+    learnings_file = project_dir / "otto_logs" / "learnings.jsonl"
+    if not learnings_file.exists():
+        return
+    existing_texts = {l.text for l in context.learnings}
+    try:
+        for line in learnings_file.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            text = entry.get("text", "")
+            if text and text not in existing_texts:
+                context.add_learning(
+                    text=text,
+                    source=entry.get("source", "prior-run"),
+                    kind=entry.get("kind", "observed"),
+                )
+                existing_texts.add(text)
+    except OSError:
+        pass
+
+
+def persist_learnings(project_dir: Path, context: PipelineContext) -> None:
+    """Append new observed learnings to otto_logs/learnings.jsonl.
+
+    Deduplicates by text — only appends entries not already in the file.
+    """
+    learnings = context.observed_learnings
+    if not learnings:
+        return
+
+    learnings_file = project_dir / "otto_logs" / "learnings.jsonl"
+    learnings_file.parent.mkdir(parents=True, exist_ok=True)
+
+    # Load existing texts for dedup
+    existing_texts: set[str] = set()
+    if learnings_file.exists():
+        try:
+            for line in learnings_file.read_text().splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                    existing_texts.add(entry.get("text", ""))
+                except json.JSONDecodeError:
+                    continue
+        except OSError:
+            pass
+
+    # Append new entries
+    new_entries = [l for l in learnings if l.text not in existing_texts]
+    if not new_entries:
+        return
+
+    try:
+        from datetime import datetime
+        with open(learnings_file, "a") as f:
+            for l in new_entries:
+                entry = {
+                    "text": l.text,
+                    "source": l.source,
+                    "kind": l.kind,
+                    "timestamp": datetime.now().isoformat(timespec="seconds"),
+                }
+                f.write(json.dumps(entry) + "\n")
+    except OSError:
+        pass
 
 
 def cleanup_orphaned_worktrees(project_dir: Path) -> None:
@@ -94,6 +173,7 @@ async def run_per(
 
     # Set up context and telemetry
     context = PipelineContext()
+    load_learnings(project_dir, context)
     log_dir = project_dir / "otto_logs"
     telemetry = Telemetry(log_dir)
     telemetry.enable_legacy_write()
@@ -198,6 +278,9 @@ async def run_per(
                 else:
                     context.add_failure(result)
                     batch_failed += 1
+
+            # Persist any new learnings after each batch
+            persist_learnings(project_dir, context)
 
             telemetry.log(BatchCompleted(
                 batch_index=batch_idx - 1,

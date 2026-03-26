@@ -101,7 +101,7 @@ otto retry --force <id> "feedback"  Reset any task with feedback
 otto logs <id>          Show agent logs for a task
 otto diff <id>          Show git diff for a task
 otto reset              Clear all tasks, branches, logs
-otto reset --hard       Also revert otto commits
+otto reset --revert-commits  Also revert otto commits
 ```
 
 ## Architecture

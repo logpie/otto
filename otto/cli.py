@@ -553,7 +553,7 @@ def delete(task_id):
     For passed tasks: only removes from tracking — merged code stays on main.
     For failed tasks: removes from tracking (branch already cleaned up).
 
-    To undo all otto code changes, use 'otto reset --hard'.
+    To undo all otto code changes, use 'otto reset --revert-commits'.
     """
     tasks_path = Path.cwd() / "tasks.yaml"
     tasks = load_tasks(tasks_path)
@@ -573,7 +573,7 @@ def delete(task_id):
     if task_status == "passed":
         console.print(f"[warning]⚠[/warning] Task already merged \u2014 this only removes it from the status list.")
         console.print(f"  [dim]Code, commits, and test files stay on main.[/dim]")
-        console.print(f"  [dim]To undo code changes: 'otto reset --hard' or 'git revert'.[/dim]")
+        console.print(f"  [dim]To undo code changes: 'otto reset --revert-commits' or 'git revert'.[/dim]")
         click.confirm("  Continue?", abort=True)
 
     # Warn if other pending tasks depend on this one
@@ -604,13 +604,17 @@ register_log_commands(main)
 
 @main.command(context_settings=CONTEXT_SETTINGS)
 @click.option("--yes", is_flag=True, help="Skip confirmation")
-@click.option("--hard", is_flag=True, help="Also revert otto commits from git history")
-def reset(yes, hard):
+@click.option("--revert-commits", is_flag=True, help="Also revert otto commits from git history")
+@click.option("--hard", "revert_commits_compat", is_flag=True, hidden=True,
+              help="Alias for --revert-commits (deprecated)")
+def reset(yes, revert_commits, revert_commits_compat):
     """Reset all tasks and clean up branches.
 
-    --hard also reverts otto's git commits, restoring the codebase
+    --revert-commits also reverts otto's git commits, restoring the codebase
     to the state before otto ran.
     """
+    # Support --hard as backward-compat alias
+    hard = revert_commits or revert_commits_compat
     if not yes:
         msg = "Reset all tasks and delete otto/* branches?"
         if hard:
@@ -677,14 +681,7 @@ def reset(yes, hard):
             if branch:
                 subprocess.run(["git", "branch", "-D", branch], capture_output=True)
 
-        # Clean logs and scratch area
-        import shutil
-        for cleanup_dir in ("otto_logs", ".otto-scratch"):
-            d = project_dir / cleanup_dir
-            if d.exists():
-                shutil.rmtree(d)
-
-        msg = f"[success]✓[/success] Reset [bold]{count}[/bold] tasks. Cleaned branches and logs."
+        msg = f"[success]✓[/success] Reset [bold]{count}[/bold] tasks. Cleaned branches."
         if hard:
             msg += " Reverted otto commits."
         console.print(msg)
