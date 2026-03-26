@@ -1135,9 +1135,7 @@ async def run_task_v45(
                     only_flaky = failures_are_baseline_only(baseline_failures, current_failures)
                     if only_flaky and current_failures:
                         # All failures existed in baseline — not caused by coding agent
-                        emit("phase", name="coding", status="done", time_s=coding_elapsed,
-                             cost=attempt_cost,
-                             detail=f"pre-existing flaky: {', '.join(list(current_failures)[:2])}")
+                        # Don't re-emit coding done (already emitted above)
                         # Treat as passed — proceed to verify worktree
                         pre_check = type(pre_check)(
                             tier=pre_check.tier, passed=True,
