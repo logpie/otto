@@ -56,6 +56,7 @@ from otto.qa import (
     run_qa_agent_v45,
 )
 from otto.claim_verify import verify_claims, format_claim_findings
+from otto.flaky import extract_failing_tests, failures_are_baseline_only
 from otto.retry_excerpt import build_retry_excerpt
 from otto.tasks import load_tasks, update_task
 from otto.verify import run_verification, _subprocess_env
@@ -690,6 +691,7 @@ async def run_task_v45(
 
         # Baseline test check
         baseline_detail = ""
+        baseline_failures: set[str] = set()
         if test_command:
             from otto.verify import run_tier1
             import re as _re_baseline
@@ -717,11 +719,16 @@ async def run_task_v45(
                     )
                     return _result(False, "failed",
                                    error=f"BASELINE_FAIL: test infrastructure broken\n{output[-500:]}")
+                # Record baseline failures for flaky test detection
+                baseline_failures = extract_failing_tests(output)
             # Extract test count for display
             if baseline.output:
                 m = _re_baseline.search(r"(\d+) passed", baseline.output)
                 if m:
                     baseline_detail = f"baseline: {m.group(1)} tests passing"
+                # Also record flaky tests from passing baseline (timing failures)
+                if baseline.passed and not baseline_failures:
+                    baseline_failures = extract_failing_tests(baseline.output or "")
 
         prep_elapsed = round(time.monotonic() - prep_start, 1)
         phase_timings["prepare"] = prep_elapsed
@@ -1122,16 +1129,30 @@ async def run_task_v45(
                 from otto.verify import run_tier1
                 pre_check = run_tier1(project_dir, test_command, timeout)
                 if not pre_check.passed and not pre_check.skipped:
-                    emit("phase", name="coding", status="fail", time_s=coding_elapsed,
-                         error="tests fail in working dir", cost=attempt_cost)
-                    last_error = build_retry_excerpt(pre_check.output or "tests failed locally")
-                    last_error_source = "verify"
-                    # Reset for retry
-                    subprocess.run(
-                        ["git", "reset", "--mixed", base_sha],
-                        cwd=project_dir, capture_output=True,
-                    )
-                    continue
+                    # Check if failures are only pre-existing (flaky) tests
+                    current_failures = extract_failing_tests(pre_check.output or "")
+                    only_flaky = failures_are_baseline_only(baseline_failures, current_failures)
+                    if only_flaky and current_failures:
+                        # All failures existed in baseline — not caused by coding agent
+                        emit("phase", name="coding", status="done", time_s=coding_elapsed,
+                             cost=attempt_cost,
+                             detail=f"pre-existing flaky: {', '.join(list(current_failures)[:2])}")
+                        # Treat as passed — proceed to verify worktree
+                        pre_check = type(pre_check)(
+                            tier=pre_check.tier, passed=True,
+                            output=pre_check.output, skipped=False,
+                        )
+                    else:
+                        emit("phase", name="coding", status="fail", time_s=coding_elapsed,
+                             error="tests fail in working dir", cost=attempt_cost)
+                        last_error = build_retry_excerpt(pre_check.output or "tests failed locally")
+                        last_error_source = "verify"
+                        # Reset for retry
+                        subprocess.run(
+                            ["git", "reset", "--mixed", base_sha],
+                            cwd=project_dir, capture_output=True,
+                        )
+                        continue
 
             # VERIFY — clean worktree, deterministic
             emit("phase", name="test", status="running")
