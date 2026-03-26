@@ -527,7 +527,10 @@ def _write_proof_artifacts(
     """
     proofs_dir = log_dir / "qa-proofs"
     if proofs_dir.exists():
-        shutil.rmtree(proofs_dir, ignore_errors=True)
+        # Clean stale proof files but preserve screenshots saved by QA agent
+        for old in proofs_dir.iterdir():
+            if old.suffix not in (".png", ".jpg", ".jpeg"):
+                old.unlink(missing_ok=True)
     proofs_dir.mkdir(parents=True, exist_ok=True)
     count = 0
 
