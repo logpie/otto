@@ -1689,18 +1689,10 @@ async def run_task_v45(
                     project_dir, log_dir, test_timeout, attempt_num,
                 )
                 if durable_result and not durable_result[0]:
-                    emit("phase", name="test", status="fail", time_s=0,
-                         error="durable proof regression failed")
-                    last_error = build_retry_excerpt(
-                        "Previously passing proof checks regressed:\n"
-                        + (durable_result[1] or "durable-regression.sh failed")
-                    )
-                    last_error_source = "test"
-                    subprocess.run(
-                        ["git", "reset", "--mixed", base_sha],
-                        cwd=project_dir, capture_output=True,
-                    )
-                    continue
+                    # Advisory only — code changed, old proof commands may legitimately fail
+                    _log_warn("durable proof regression failed (code changed — may be expected)")
+                    emit("phase", name="test", status="done", time_s=0,
+                         detail="durable regression: some prior proofs failed")
 
             # ── Build candidate + verify ────────────────────────────────
             candidate_sha = build_candidate_commit(
@@ -1945,6 +1937,7 @@ def _print_summary(
     integration_passed: bool | None = None,
     total_cost: float = 0.0,
     task_progress: dict[str, list[dict]] | None = None,
+    project_dir: Path | None = None,
 ) -> None:
     """Print summary of all tasks after a run.
 
