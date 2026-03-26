@@ -946,10 +946,172 @@ def format_duration(seconds: float) -> str:
         return f"{seconds:.0f}s"
     minutes = int(seconds // 60)
     secs = int(seconds % 60)
-    return f"{minutes}m{secs}s"
+    return f"{minutes}m{secs:02d}s"
 
 
 def format_cost(cost: float) -> str:
     if cost < 0.01:
         return f"${cost:.4f}"
     return f"${cost:.2f}"
+
+
+# ---------------------------------------------------------------------------
+# Status table (used by `otto status` and `otto status -w`)
+# ---------------------------------------------------------------------------
+
+def build_status_table(tasks: list[dict], show_phase: bool = False):
+    """Build a Rich renderable (Table + summary + optional live phase info)."""
+    import json
+    from pathlib import Path
+    from rich.table import Table
+    from rich.console import Group
+
+    table = Table(show_header=True, box=None, pad_edge=False, show_edge=False, expand=False)
+    table.add_column("#", style="bold", min_width=2, justify="right")
+    table.add_column("Status", min_width=7)
+    table.add_column("Att", min_width=3, justify="right")
+    table.add_column("Spec", min_width=4, justify="right")
+    table.add_column("Cost", min_width=6, justify="right", style="dim")
+    table.add_column("Time", min_width=5, justify="right", style="dim")
+    table.add_column("Prompt", ratio=1, no_wrap=True)
+
+    for t in tasks:
+        status_str = t.get("status", "?")
+        spec_count = len(t.get("spec", []))
+        cost = t.get("cost_usd", 0.0)
+        cost_str = f"${cost:.2f}" if cost else ""
+        dur = t.get("duration_s", 0.0)
+        dur_str = format_duration(dur) if dur else ""
+
+        status_styles = {
+            "passed": "success", "failed": "error", "blocked": "error",
+            "running": "info", "pending": "dim",
+        }
+        status_style = status_styles.get(status_str, "dim")
+        status_text = Text(status_str, style=status_style)
+
+        row_style = ""
+        if status_str in ("pending", "failed"):
+            row_style = "dim"
+
+        prompt_text = t['prompt'][:50]
+        error_suffix = ""
+        if status_str in ("failed", "blocked") and t.get("error"):
+            error_suffix = f"\n        [error]\u21b3 {rich_escape(t['error'][:70])}[/error]"
+
+        table.add_row(
+            str(t.get("id", "?")),
+            status_text,
+            str(t.get("attempts", 0)),
+            str(spec_count) if spec_count else "",
+            cost_str,
+            dur_str,
+            rich_escape(prompt_text) + error_suffix,
+            style=row_style,
+        )
+
+    # Summary line
+    counts: dict[str, int] = {}
+    total_cost = 0.0
+    total_dur = 0.0
+    for t in tasks:
+        s = t.get("status", "?")
+        counts[s] = counts.get(s, 0) + 1
+        total_cost += t.get("cost_usd", 0.0)
+        total_dur += t.get("duration_s", 0.0)
+
+    parts = []
+    if counts.get("passed"):
+        parts.append(f"[success]{counts['passed']} passed[/success]")
+    if counts.get("failed"):
+        parts.append(f"[error]{counts['failed']} failed[/error]")
+    if counts.get("blocked"):
+        parts.append(f"[error]{counts['blocked']} blocked[/error]")
+    if counts.get("pending"):
+        parts.append(f"[dim]{counts['pending']} pending[/dim]")
+    if counts.get("running"):
+        parts.append(f"[info]{counts['running']} running[/info]")
+    summary = ", ".join(parts)
+    extras = []
+    if total_cost > 0:
+        extras.append(f"${total_cost:.2f}")
+    if total_dur > 0:
+        extras.append(format_duration(total_dur))
+    if extras:
+        summary += f"  [dim]\u2014 {', '.join(extras)}[/dim]"
+
+    renderables = [table, Text(""), Text.from_markup(f"  {summary}")]
+
+    if show_phase:
+        live_lines = _build_live_phase_lines()
+        if live_lines:
+            renderables.append(Text(""))
+            renderables.extend(live_lines)
+
+    return Group(*renderables)
+
+
+def _build_live_phase_lines() -> list:
+    """Build Rich Text lines showing live progress from live-state.json."""
+    import json
+    from pathlib import Path
+
+    lines = []
+    live_file = Path.cwd() / "otto_logs" / "live-state.json"
+    if not live_file.exists():
+        return lines
+    try:
+        live = json.loads(live_file.read_text())
+        tid = live.get("task_id", "?")
+        prompt = live.get("prompt", "")[:50]
+        elapsed = live.get("elapsed_s", 0)
+        cost = live.get("cost_usd", 0)
+        elapsed_str = format_duration(elapsed)
+        lines.append(Text.from_markup(f"  [info]▸ Task #{tid}:[/info] {rich_escape(prompt)}"))
+        phases = live.get("phases", {})
+        _icons = {
+            "done": "[success]✓[/success]",
+            "fail": "[error]✗[/error]",
+            "running": "[info]●[/info]",
+            "pending": "[dim]◦[/dim]",
+        }
+        for pname in ["prepare", "coding", "test", "qa", "merge"]:
+            pdata = phases.get(pname, {})
+            pstatus = pdata.get("status", "pending")
+            icon = _icons.get(pstatus, "◦")
+            ptime = pdata.get("time_s", 0)
+            extra = ""
+            if pstatus == "running":
+                extra = f"  [dim]{elapsed_str}[/dim]"
+            elif pstatus == "done" and ptime:
+                extra = f"  [dim]{ptime:.0f}s[/dim]"
+            elif pstatus == "fail":
+                err = rich_escape(pdata.get("error", "")[:40])
+                extra = f"  [error]{err}[/error]"
+            lines.append(Text.from_markup(f"    {icon} {pname:<10}{extra}"))
+        tools = live.get("recent_tools", [])
+        for tool_line in tools[-3:]:
+            lines.append(Text.from_markup(f"        [dim]{rich_escape(tool_line[:60])}[/dim]"))
+        if cost > 0:
+            lines.append(Text.from_markup(f"    [dim]${cost:.2f} so far[/dim]"))
+    except (json.JSONDecodeError, OSError):
+        pass
+
+    return lines
+
+
+def watch_status(tasks_loader, console_obj=None) -> None:
+    """Auto-refresh status display every 2 seconds using Rich Live."""
+    c = console_obj or console
+
+    def render():
+        tasks = tasks_loader()
+        return build_status_table(tasks, show_phase=True)
+
+    try:
+        with Live(render(), refresh_per_second=0.5, console=c) as live:
+            while True:
+                time.sleep(2)
+                live.update(render())
+    except KeyboardInterrupt:
+        c.print(f"\n[dim]Stopped.[/dim]")
