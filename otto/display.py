@@ -1068,31 +1068,33 @@ def build_status_table(tasks: list[dict], show_phase: bool = False):
         else:
             lines.append(f"  {icon} [dim]#{task_id}[/dim]  [dim]{rich_escape(prompt_text)}[/dim]")
 
-        # Line 2: detail line (status-dependent)
+        # Line 2: detail line (status-dependent, colorized key info)
         detail_parts: list[str] = []
         if status_str in ("passed", "failed", "blocked"):
             # Relative time from completed_at
             completed_at = t.get("completed_at", "")
             rel = _relative_time(completed_at) if completed_at else ""
-            if rel:
-                detail_parts.append(f"{status_str} {rel}")
+            if status_str == "passed":
+                status_label = f"[green]passed[/green]"
+            elif status_str == "failed":
+                status_label = f"[red]failed[/red]"
             else:
-                detail_parts.append(status_str)
-            if attempts:
-                att_s = "s" if attempts != 1 else ""
-                detail_parts.append(f"{attempts} attempt{att_s}")
+                status_label = f"[red]{status_str}[/red]"
+            detail_parts.append(f"{status_label} {rel}" if rel else status_label)
+            if attempts and attempts > 1:
+                detail_parts.append(f"[yellow]{attempts} attempts[/yellow]")
             if cost:
-                detail_parts.append(f"${cost:.2f}")
+                detail_parts.append(f"[dim]${cost:.2f}[/dim]")
             if dur:
-                detail_parts.append(format_duration(dur))
+                detail_parts.append(f"[dim]{format_duration(dur)}[/dim]")
             if status_str == "passed":
                 if spec_count:
-                    detail_parts.append(f"{spec_count} specs")
-                # Check proof coverage from disk
+                    detail_parts.append(f"[dim]{spec_count} specs[/dim]")
+                # Check proof coverage from disk — show as "N must proved"
                 proof_cov = _read_proof_coverage(task_key) if task_key else ""
                 if proof_cov:
-                    detail_parts.append(proof_cov)
-            lines.append(f"    [dim]{_SEP.join(detail_parts)}[/dim]")
+                    detail_parts.append(f"[green]{proof_cov.replace('proved', 'must proved')}[/green]")
+            lines.append(f"    {_SEP.join(detail_parts)}")
         elif status_str == "running":
             detail_parts.append("running")
             if dur:
