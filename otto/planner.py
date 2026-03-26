@@ -253,10 +253,7 @@ async def plan(
         # Single task — no need for LLM planning
         return default_plan(tasks)
 
-    try:
-        from claude_agent_sdk import ClaudeAgentOptions, query as sdk_query
-    except ImportError:
-        return default_plan(tasks)
+    from otto.agent import ClaudeAgentOptions, _subprocess_env, run_agent_query
 
     # Build task summary for the planner
     task_lines = []
@@ -277,7 +274,6 @@ Produce the JSON execution plan. Group independent tasks into parallel batches.
 Respect depends_on constraints."""
 
     try:
-        from otto.verify import _subprocess_env
         agent_opts = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
             cwd=str(project_dir),
@@ -288,15 +284,7 @@ Respect depends_on constraints."""
             model="sonnet",
         )
 
-        # Collect all text output
-        text_parts: list[str] = []
-        async for message in sdk_query(prompt=prompt, options=agent_opts):
-            if hasattr(message, "content"):
-                for block in message.content:
-                    if hasattr(block, "text") and block.text:
-                        text_parts.append(block.text)
-
-        raw_output = "\n".join(text_parts)
+        raw_output, _cost, _result = await run_agent_query(prompt, agent_opts)
         result = parse_plan_json(raw_output)
         if result and not result.is_empty:
             return result
@@ -322,10 +310,7 @@ async def replan(
     if remaining_plan.is_empty:
         return remaining_plan
 
-    try:
-        from claude_agent_sdk import ClaudeAgentOptions, query as sdk_query
-    except ImportError:
-        return remaining_plan
+    from otto.agent import ClaudeAgentOptions, _subprocess_env, run_agent_query
 
     # Build rich context — pass raw environmental feedback, not summaries
     results_summary = []
@@ -375,7 +360,6 @@ Update strategies based on what we learned.
 Output the JSON execution plan for REMAINING tasks only."""
 
     try:
-        from otto.verify import _subprocess_env
         agent_opts = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
             cwd=str(project_dir),
@@ -386,14 +370,7 @@ Output the JSON execution plan for REMAINING tasks only."""
             model="sonnet",
         )
 
-        text_parts: list[str] = []
-        async for message in sdk_query(prompt=prompt, options=agent_opts):
-            if hasattr(message, "content"):
-                for block in message.content:
-                    if hasattr(block, "text") and block.text:
-                        text_parts.append(block.text)
-
-        raw_output = "\n".join(text_parts)
+        raw_output, _cost, _result = await run_agent_query(prompt, agent_opts)
         result = parse_plan_json(raw_output)
         if result and not result.is_empty:
             return result

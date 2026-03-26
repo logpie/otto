@@ -3,28 +3,21 @@
 import asyncio
 import json
 import re
-import shutil
 import tempfile
 import time
 from pathlib import Path
 from typing import Any
 
-try:
-    from claude_agent_sdk import ClaudeAgentOptions, query
-    from claude_agent_sdk.types import (
-        AssistantMessage, ResultMessage, TextBlock, ToolResultBlock, ToolUseBlock,
-        UserMessage,
-    )
-except ImportError:
-    from otto._agent_stub import ClaudeAgentOptions, query, ResultMessage
-    AssistantMessage = None  # type: ignore[assignment,misc]
-    TextBlock = None  # type: ignore[assignment,misc]
-    ToolUseBlock = None  # type: ignore[assignment,misc]
-    UserMessage = None  # type: ignore[assignment,misc]
-    ToolResultBlock = None  # type: ignore[assignment,misc]
-
+from otto.agent import (
+    AssistantMessage,
+    ClaudeAgentOptions,
+    ResultMessage,
+    TextBlock,
+    ToolUseBlock,
+    _subprocess_env,
+    query,
+)
 from otto.theme import console
-from otto.verify import _subprocess_env
 
 
 QA_SYSTEM_PROMPT_V45 = """\
@@ -44,10 +37,6 @@ Testing order — test in the order listed:
 Items marked ◈ cannot be verified by code alone. Visual items MUST use browser.
 Always run existing tests before writing the verdict.
 
-When taking browser screenshots, ALWAYS save to a file path:
-  take_screenshot(filePath="<proof_dir>/screenshot-<name>.png")
-Do NOT take screenshots without filePath — inline screenshots break the message pipe.
-
 Also check:
 - Does the implementation contradict the ORIGINAL task prompt?
 - Does it break existing functionality?
@@ -56,13 +45,7 @@ Write your verdict to the output file as JSON:
 {
   "must_passed": true/false,
   "must_items": [
-    {
-      "spec_id": N,
-      "criterion": "...",
-      "status": "pass/fail",
-      "evidence": "...",
-      "proof": ["what you did to verify — test names, browser checks, screenshots"]
-    }
+    {"criterion": "...", "status": "pass/fail", "evidence": "..."}
   ],
   "should_notes": [
     {"criterion": "...", "observation": "...", "screenshot": "path or null"}
@@ -71,13 +54,6 @@ Write your verdict to the output file as JSON:
   "prompt_intent": "Implementation matches/diverges from original prompt because...",
   "extras": ["Agent added contributing factor explanations — improves UX"]
 }
-
-For each [must] item, include spec_id (matching the criterion number above)
-and a "proof" array — short strings describing what you did to verify:
-  "ran jest weatherAlerts: 'shows banner for high wind' passes"
-  "browser: banner visible with wind=80 injected"
-  "screenshot: qa-proofs/screenshot-banner.png shows red banner"
-Only cite proof that directly verifies THAT criterion, not exploration.
 
 Kill any servers you started (by PID, not pkill)."""
 
@@ -208,7 +184,6 @@ async def run_qa_agent_v45(
     focus_items: list | None = None,
     prev_failed: list[str] | None = None,
     on_progress: Any = None,
-    log_dir: Path | None = None,
 ) -> dict[str, Any]:
     """v4.5 QA agent — structured JSON verdict, risk-based tiering.
 
@@ -268,12 +243,7 @@ DIFF:
 {diff}
 
 Write your JSON verdict to: {verdict_file}
-Save any browser screenshots to: {log_dir / "qa-proofs" if log_dir else "/tmp"}/screenshot-<name>.png
 """
-
-    # Ensure qa-proofs dir exists before QA so agent can save screenshots there
-    if log_dir:
-        (log_dir / "qa-proofs").mkdir(parents=True, exist_ok=True)
 
     # Configure MCP servers for browser testing (tier 2)
     qa_mcp_servers = {}
@@ -316,9 +286,6 @@ Save any browser screenshots to: {log_dir / "qa-proofs" if log_dir else "/tmp"}/
     qa_timeout = config.get("qa_timeout", 3600)
     report_lines: list[str] = []
     qa_cost = 0.0
-    # Track QA verification actions for proof artifacts
-    qa_actions: list[dict[str, str]] = []
-    pending_tool_actions: dict[str, int] = {}
 
     from otto.display import build_agent_tool_event as _build_agent_tool_event
 
@@ -331,24 +298,6 @@ Save any browser screenshots to: {log_dir / "qa-proofs" if log_dir else "/tmp"}/
                     _result_msg = message
                 elif hasattr(message, "session_id") and hasattr(message, "is_error"):
                     _result_msg = message
-                elif UserMessage and isinstance(message, UserMessage):
-                    # UserMessage contains ToolResultBlock — extract Bash output
-                    for block in message.content:
-                        if not (ToolResultBlock and isinstance(block, ToolResultBlock)):
-                            continue
-                        tool_use_id = getattr(block, "tool_use_id", "")
-                        action_idx = pending_tool_actions.pop(tool_use_id, None)
-                        if action_idx is None or not (0 <= action_idx < len(qa_actions)):
-                            continue
-                        action = qa_actions[action_idx]
-                        text = _extract_tool_result_text(getattr(block, "content", None))
-                        if action["type"] == "bash":
-                            action["output"] = text[:2000]
-                        elif action["type"] == "browser":
-                            action["output"] = text[:4000]
-                        # Screenshot data is too large for the message pipe
-                        # (>1MB base64 crashes the SDK). QA prompt instructs
-                        # the agent to save screenshots via filePath instead.
                 elif AssistantMessage and isinstance(message, AssistantMessage):
                     for block in message.content:
                         if TextBlock and isinstance(block, TextBlock) and block.text:
@@ -374,46 +323,6 @@ Save any browser screenshots to: {log_dir / "qa-proofs" if log_dir else "/tmp"}/
                                         except Exception:
                                             pass
                         elif ToolUseBlock and isinstance(block, ToolUseBlock):
-                            inp = block.input or {}
-                            action_idx: int | None = None
-                            # Collect Bash commands for proof scripts
-                            if block.name == "Bash":
-                                cmd = inp.get("command", "")
-                                if cmd:
-                                    qa_actions.append({
-                                        "type": "bash",
-                                        "command": cmd,
-                                        "output": "",
-                                    })
-                                    action_idx = len(qa_actions) - 1
-                            # Collect Browser/MCP actions for proof report
-                            elif block.name.startswith("mcp__"):
-                                action = block.name.split("__")[-1]
-                                detail = ""
-                                if action == "take_screenshot":
-                                    detail = (
-                                        inp.get("selector")
-                                        or inp.get("url")
-                                        or inp.get("filePath", "")
-                                    )[:120]
-                                elif "url" in inp:
-                                    detail = inp["url"][:120]
-                                elif "selector" in inp:
-                                    detail = inp["selector"][:120]
-                                qa_actions.append({
-                                    "type": "browser",
-                                    "action": action,
-                                    "detail": detail,
-                                    "path": str(inp.get("filePath", ""))[:400],
-                                    "input": json.dumps(inp, sort_keys=True, default=str)[:4000],
-                                    "output": "",
-                                })
-                                action_idx = len(qa_actions) - 1
-
-                            block_id = getattr(block, "id", "")
-                            if action_idx is not None and block_id:
-                                pending_tool_actions[block_id] = action_idx
-
                             if on_progress:
                                 try:
                                     event = _build_agent_tool_event(block)
@@ -421,6 +330,7 @@ Save any browser screenshots to: {log_dir / "qa-proofs" if log_dir else "/tmp"}/
                                     if not event and block.name.startswith("mcp__"):
                                         action = block.name.split("__")[-1]
                                         detail = ""
+                                        inp = block.input or {}
                                         if "url" in inp:
                                             detail = inp["url"][:60]
                                         elif "selector" in inp:
@@ -489,17 +399,6 @@ Save any browser screenshots to: {log_dir / "qa-proofs" if log_dir else "/tmp"}/
 
     must_passed = verdict.get("must_passed", False)
 
-    # Write proof artifacts if log_dir provided
-    proof_count = 0
-    proof_coverage = ""
-    if log_dir:
-        try:
-            proof_count, proof_coverage = _write_proof_artifacts(
-                log_dir, verdict, qa_actions, task, original_prompt, qa_cost,
-            )
-        except Exception:
-            pass  # proof writing is best-effort
-
     # Emit summary for display
     if on_progress:
         try:
@@ -510,8 +409,6 @@ Save any browser screenshots to: {log_dir / "qa-proofs" if log_dir else "/tmp"}/
                 "total": total,
                 "passed": passed,
                 "failed": total - passed,
-                "proof_count": proof_count,
-                "proof_coverage": proof_coverage,
             })
         except Exception:
             pass
@@ -521,375 +418,4 @@ Save any browser screenshots to: {log_dir / "qa-proofs" if log_dir else "/tmp"}/
         "verdict": verdict,
         "raw_report": raw_report,
         "cost_usd": qa_cost,
-        "proof_count": proof_count,
-        "proof_coverage": proof_coverage,
     }
-
-
-_REPLAY_SKIP_SUBSTRINGS = (
-    "kill ", "pkill ", "rm -rf", "git push",
-    "npm run dev", "npm start", "next dev",
-    "npx next dev", "npx next start",
-    "python -m http", "python3 -m http",
-    "node server", "serve ", "flask run",
-    "uvicorn", "gunicorn", "nohup",
-)
-
-
-def _is_non_replayable(cmd: str) -> bool:
-    """Check if a command is non-replayable (server start, destructive, background)."""
-    lower = cmd.lower()
-    if any(skip in lower for skip in _REPLAY_SKIP_SUBSTRINGS):
-        return True
-    if re.search(r"(?<![>&])\s*&\s*$", cmd):
-        return True
-    return False
-
-
-_EXPLORATION_COMMAND_PREFIXES = (
-    "find ", "grep ", "rg ", "git diff", "git log", "git show", "git status",
-    "git rev-parse", "wc ", "ls ", "pwd", "cd ", "cat ", "sed ", "head ",
-    "tail ", "sort ", "uniq ", "stat ", "file ", "tree ", "basename ",
-    "dirname ", "realpath ", "which ", "locate ", "readlink ",
-)
-
-_VERIFICATION_COMMAND_PATTERNS = (
-    r"(^|[;&( ])(?:uv run )?pytest(?:\s|$)",
-    r"(^|[;&( ])python(?:3)? -m pytest(?:\s|$)",
-    r"(^|[;&( ])(?:npx )?jest(?:\s|$)",
-    r"(^|[;&( ])(?:npx )?vitest(?:\s|$)",
-    r"(^|[;&( ])(?:bun x )?playwright test(?:\s|$)",
-    r"(^|[;&( ])cypress run(?:\s|$)",
-    r"(^|[;&( ])(?:npm|pnpm|yarn|bun) (?:run )?(?:test|lint|typecheck|check|build)\b",
-    r"(^|[;&( ])tsc(?:\s|$)",
-    r"(^|[;&( ])mypy(?:\s|$)",
-    r"(^|[;&( ])ruff(?:\s|$)",
-    r"(^|[;&( ])eslint(?:\s|$)",
-    r"(^|[;&( ])cargo (?:test|check|build)\b",
-    r"(^|[;&( ])go (?:test|build)\b",
-    r"(^|[;&( ])(?:mvn|gradle|./gradlew) (?:test|check|build)\b",
-    r"(^|[;&( ])dotnet (?:test|build)\b",
-    r"(^|[;&( ])curl(?:\s|$)",
-    r"(^|[;&( ])http(?:\s|$)",
-    r"(^|[;&( ])node -e(?:\s|$)",
-    r"(^|[;&( ])python(?:3)? -c(?:\s|$)",
-    r"(^|[;&( ])python(?:3)?\s+-\s+<<",
-    r"(^|[;&( ])node\s+<<",
-    r"(^|[;&( ])(?:test|\[|true|false)(?:\s|$)",
-)
-
-_BROWSER_TRACE_ACTIONS = {
-    "navigate", "navigate_page", "click", "fill", "fill_form", "type",
-    "press_key", "hover", "select", "wait_for", "wait_for_load_state",
-    "go_back", "go_forward", "reload", "new_page", "select_page",
-    "close_page", "list_pages", "resize_page", "emulate",
-}
-
-
-def _is_verification_command(cmd: str) -> bool:
-    """Keep only replayable commands that generate hard verification evidence."""
-    stripped = cmd.strip()
-    if not stripped or _is_non_replayable(stripped):
-        return False
-
-    lower = stripped.lower()
-    if re.search(r"(^|[ \t])(--version|--help)([ \t]|$)", lower):
-        return False
-    if any(lower.startswith(prefix) for prefix in _EXPLORATION_COMMAND_PREFIXES):
-        return False
-
-    if any(re.search(pattern, lower) for pattern in _VERIFICATION_COMMAND_PATTERNS):
-        return True
-
-    return bool(re.search(
-        r"(^|[;&( ])(?:\./)?[\w./-]*(?:test|spec|check|verify|assert|lint|typecheck|build)[\w./-]*(?:\s|$)",
-        lower,
-    ))
-
-
-def _trim_evidence_output(text: str, max_lines: int = 12, max_chars: int = 1600) -> str:
-    """Return a compact but reproducible output excerpt."""
-    if not text:
-        return ""
-
-    lines = [line.rstrip() for line in text.splitlines() if line.strip()]
-    if not lines:
-        return ""
-
-    excerpt = "\n".join(lines[-max_lines:])
-    if len(excerpt) <= max_chars:
-        return excerpt
-    return excerpt[-max_chars:]
-
-
-def _extract_tool_result_text(raw_content: Any) -> str:
-    """Unwrap Claude SDK tool result payloads into plain text."""
-    if raw_content is None:
-        return ""
-    if isinstance(raw_content, str):
-        return raw_content
-    if isinstance(raw_content, list):
-        parts: list[str] = []
-        for item in raw_content:
-            if isinstance(item, str):
-                parts.append(item)
-                continue
-            if isinstance(item, dict):
-                text = item.get("text")
-                if isinstance(text, str):
-                    parts.append(text)
-                continue
-            text = getattr(item, "text", None)
-            if isinstance(text, str):
-                parts.append(text)
-        joined = "\n".join(part for part in parts if part)
-        if joined:
-            return joined
-    return str(raw_content)
-
-
-def _normalize_report_prompt(original_prompt: str) -> str:
-    """Collapse multiline shell prompts into a single readable line."""
-    return re.sub(r"\s+", " ", original_prompt).strip()
-
-
-def _load_browser_input(action: dict[str, str]) -> dict[str, Any]:
-    raw = action.get("input", "")
-    if not raw:
-        return {}
-    try:
-        value = json.loads(raw)
-        return value if isinstance(value, dict) else {}
-    except json.JSONDecodeError:
-        return {}
-
-
-def _browser_assertion_input(action: dict[str, str]) -> str:
-    data = _load_browser_input(action)
-    for key in ("function", "expression", "script"):
-        value = data.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    if data:
-        return json.dumps(data, indent=2, sort_keys=True)
-    return action.get("detail", "").strip()
-
-
-def _is_browser_assertion(action: dict[str, str]) -> bool:
-    action_name = action.get("action", "")
-    if action_name == "take_screenshot" or action_name in _BROWSER_TRACE_ACTIONS:
-        return False
-    return bool(action.get("output", "").strip())
-
-
-def _looks_like_path(value: str) -> bool:
-    return value.endswith((".png", ".jpg", ".jpeg"))
-
-
-def _resolve_screenshot_file(
-    action: dict[str, str],
-    available: set[str],
-) -> str | None:
-    for candidate in (action.get("path", ""), action.get("detail", "")):
-        if not candidate:
-            continue
-        name = Path(candidate).name
-        if name in available and _looks_like_path(name):
-            return name
-    return None
-
-
-def _screenshot_caption(action: dict[str, str], filename: str) -> str:
-    detail = action.get("detail", "").strip()
-    if detail and Path(detail).name != filename:
-        return detail
-    stem = Path(filename).stem
-    stem = stem.removeprefix("screenshot-").replace("-", " ").replace("_", " ").strip()
-    return stem or "Browser screenshot"
-
-
-def _write_proof_artifacts(
-    log_dir: Path,
-    verdict: dict[str, Any],
-    qa_actions: list[dict[str, str]],
-    task: dict[str, Any],
-    original_prompt: str,
-    cost_usd: float,
-) -> int:
-    """Write proof artifacts to log_dir/qa-proofs/.
-
-    Returns the number of proof files written.
-    """
-    proofs_dir = log_dir / "qa-proofs"
-    if proofs_dir.exists():
-        # Clean stale proof files but preserve screenshots saved by QA agent
-        for old in proofs_dir.iterdir():
-            if old.suffix not in (".png", ".jpg", ".jpeg"):
-                old.unlink(missing_ok=True)
-    proofs_dir.mkdir(parents=True, exist_ok=True)
-    count = 0
-
-    must_items = verdict.get("must_items", [])
-
-    # Write per-must-item proof files
-    for i, item in enumerate(must_items):
-        proof_path = proofs_dir / f"must-{i + 1}.md"
-        proof_path.write_text(
-            f"# {item.get('criterion', 'Unknown criterion')}\n"
-            f"Status: {item.get('status', 'unknown')}\n"
-            f"Evidence: {item.get('evidence', 'none')}\n"
-        )
-        count += 1
-
-    # Filter out QA-internal and keep only replayable verification commands
-    _QA_INTERNAL_PATTERNS = ("otto_qa_", "/var/folders/", "/tmp/otto_")
-    _QA_INFRA_PREFIXES = (
-        "sleep ", "lsof ", "echo ", "cat >", "cat ", "kill ", "pkill ",
-        "mkdir ", "ls ", "pwd", "cd ", "curl -s -o /dev/null",
-    )
-    verification_commands = [
-        a for a in qa_actions
-        if a["type"] == "bash" and a.get("command")
-        and not any(p in a["command"] for p in _QA_INTERNAL_PATTERNS)
-        and not a["command"].strip().startswith(_QA_INFRA_PREFIXES)
-        and _is_verification_command(a["command"])
-    ]
-    if verification_commands:
-        lines = [
-            "#!/bin/bash",
-            "# Re-run all QA verification commands",
-            "# Generated by otto QA proof-of-work system",
-            "set -e",
-            "",
-        ]
-        for cmd_info in verification_commands:
-            cmd = cmd_info["command"]
-            if _is_non_replayable(cmd):
-                lines.append(f"# Skipped (non-replayable): {cmd[:60]}")
-                continue
-            label = cmd.replace("\n", " ")[:60].replace('"', '\\"')
-            lines.append(f'echo "Testing: {label}"')
-            lines.append(cmd)
-            lines.append("")
-        regression_script = proofs_dir / "regression-check.sh"
-        regression_script.write_text("\n".join(lines))
-        regression_script.chmod(0o755)
-        count += 1
-
-    # Write proof-report.md — human-readable, reproducible evidence only
-    must_passed = verdict.get("must_passed", False)
-    status_icon = "\u2713 passed" if must_passed else "\u2717 failed"
-    passed_count = sum(1 for m in must_items if m.get("status") == "pass")
-    normalized_prompt = _normalize_report_prompt(original_prompt)
-
-    report_lines = [
-        f"# Proof Report",
-        f"**Task:** {normalized_prompt}",
-        f"**Result:** {task.get('key', '?')} | {status_icon} | {passed_count}/{len(must_items)} must | QA ${cost_usd:.2f}",
-        "",
-    ]
-
-    # Per-item proof sections
-    proof_coverage = 0
-    available_screenshots = {f.name for f in proofs_dir.glob("screenshot-*.png") if f.is_file()}
-
-    for item in must_items:
-        spec_id = item.get("spec_id", "")
-        criterion = item.get("criterion", "")
-        status = item.get("status", "unknown")
-        evidence = item.get("evidence", "")
-        proof = item.get("proof", [])
-        icon = "\u2713" if status == "pass" else "\u2717"
-
-        id_str = f"[{spec_id}] " if spec_id else ""
-        report_lines.append(f"## {icon} {id_str}{criterion}")
-        if evidence:
-            report_lines.append(f"**Evidence:** {evidence}")
-
-        if proof and isinstance(proof, list):
-            proof_coverage += 1
-            report_lines.append("**Proof:**")
-            for p in proof:
-                p_str = str(p).strip()
-                # Check if this is a screenshot reference
-                if "screenshot" in p_str.lower() and "qa-proofs/" in p_str:
-                    # Extract filename
-                    for part in p_str.split():
-                        fname = Path(part).name if "/" in part else part
-                        if fname in available_screenshots:
-                            desc = p_str.split(fname)[-1].strip().lstrip("—-: ")
-                            report_lines.append(f"- [{fname}]({fname}){' — ' + desc if desc else ''}")
-                            break
-                    else:
-                        # No matching file
-                        report_lines.append(f"- {p_str} (missing)")
-                else:
-                    report_lines.append(f"- {p_str}")
-        else:
-            report_lines.append("**Proof:** (none recorded)")
-        report_lines.append("")
-
-    if not must_items:
-        report_lines.append("- No [must] items recorded")
-        report_lines.append("")
-
-    # Verification commands section (ground truth from captured actions)
-    replayable = [c for c in verification_commands
-                  if not _is_non_replayable(c["command"])]
-    if replayable:
-        report_lines.append("## Verification Commands (ground truth)")
-        for cmd_info in replayable:
-            cmd = cmd_info["command"]
-            output = _trim_evidence_output(cmd_info.get("output", ""))
-            report_lines.append(f"- `{cmd.replace(chr(10), ' ')[:100]}`")
-            if output:
-                last_line = output.strip().splitlines()[-1].strip()[:80]
-                report_lines.append(f"  → {last_line}")
-        report_lines.append("")
-
-    # Proof coverage summary
-    report_lines.append(f"---")
-    report_lines.append(f"**Proof coverage:** {proof_coverage}/{len(must_items)} must items have proof recorded")
-    report_lines.append(f"Proof descriptions are QA's account. Regression script is independently runnable.")
-    report_lines.append("")
-
-    # Collect screenshots saved by QA agent to qa-proofs/ and map by filePath
-    browser_actions = [a for a in qa_actions if a["type"] == "browser"]
-    screenshot_refs = sorted(
-        f.name for f in proofs_dir.glob("screenshot-*.png") if f.is_file()
-    )
-    count += len(screenshot_refs)
-    available_refs = set(screenshot_refs)
-    matched_refs: set[str] = set()
-    screenshot_lines: list[str] = []
-    ss_counter = 1
-    for action in browser_actions:
-        if action.get("action") != "take_screenshot":
-            continue
-        ref = _resolve_screenshot_file(action, available_refs)
-        if not ref:
-            continue
-        matched_refs.add(ref)
-        caption = _screenshot_caption(action, ref)
-        screenshot_lines.append(f"- SS{ss_counter} [{ref}]({ref})")
-        screenshot_lines.append(f"  Description: {caption}")
-        ss_counter += 1
-
-    for ref in screenshot_refs:
-        if ref in matched_refs:
-            continue
-        screenshot_lines.append(f"- SS{ss_counter} [{ref}]({ref})")
-        screenshot_lines.append("  Description: QA browser screenshot")
-        ss_counter += 1
-
-    if screenshot_lines:
-        report_lines.append("## Screenshots")
-        report_lines.extend(screenshot_lines)
-        report_lines.append("")
-
-    proof_report = proofs_dir / "proof-report.md"
-    proof_report.write_text("\n".join(report_lines))
-    count += 1
-
-    coverage_str = f"{proof_coverage}/{len(must_items)}" if must_items else ""
-    return count, coverage_str
