@@ -549,7 +549,8 @@ def _write_proof_artifacts(
     # Filter out QA-internal and non-verification commands
     _QA_INTERNAL_PATTERNS = ("otto_qa_", "/var/folders/", "/tmp/otto_")
     _QA_INFRA_PREFIXES = (
-        "sleep ", "lsof ", "echo ", "cat >", "kill ", "pkill ",
+        "sleep ", "lsof ", "echo ", "cat >", "cat ", "kill ", "pkill ",
+        "mkdir ", "ls ", "pwd", "cd ", "curl -s -o /dev/null",
     )
     bash_commands = [
         a for a in qa_actions
