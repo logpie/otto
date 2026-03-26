@@ -28,17 +28,22 @@ class TestCheckCleanTree:
     def test_clean_repo_passes(self, tmp_git_repo):
         assert check_clean_tree(tmp_git_repo) is True
 
-    def test_dirty_repo_auto_stashes(self, tmp_git_repo):
-        """Dirty tracked files get auto-stashed, returning True."""
+    def test_dirty_repo_refuses(self, tmp_git_repo):
+        """Dirty tracked user files cause check to return False (no stash)."""
         (tmp_git_repo / "dirty.txt").write_text("dirty")
         subprocess.run(["git", "add", "dirty.txt"], cwd=tmp_git_repo, capture_output=True)
+        assert check_clean_tree(tmp_git_repo) is False
+
+    def test_otto_owned_files_ignored(self, tmp_git_repo):
+        """Changes to otto_logs/ and .otto-scratch/ don't block runs."""
+        # Create and track an otto_logs file, then modify it
+        otto_dir = tmp_git_repo / "otto_logs"
+        otto_dir.mkdir()
+        (otto_dir / "test.log").write_text("original")
+        subprocess.run(["git", "add", "otto_logs/"], cwd=tmp_git_repo, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "add logs"], cwd=tmp_git_repo, capture_output=True)
+        (otto_dir / "test.log").write_text("modified")
         assert check_clean_tree(tmp_git_repo) is True
-        # Verify stash was created
-        stash = subprocess.run(
-            ["git", "stash", "list"], cwd=tmp_git_repo,
-            capture_output=True, text=True,
-        )
-        assert "otto: auto-stash" in stash.stdout
 
     def test_ignores_tasks_yaml(self, tmp_git_repo):
         """Modified tasks.yaml should not count as dirty."""
@@ -55,18 +60,13 @@ class TestCheckCleanTree:
         (tmp_git_repo / "scratch.py").write_text("x = 1")
         assert check_clean_tree(tmp_git_repo) is True
 
-    def test_dirty_tracked_file_auto_stashes(self, tmp_git_repo):
-        """Modified tracked files get auto-stashed, returning True."""
+    def test_dirty_tracked_user_file_refuses(self, tmp_git_repo):
+        """Modified tracked user files cause check to return False."""
         (tmp_git_repo / "real.py").write_text("x = 1")
         subprocess.run(["git", "add", "real.py"], cwd=tmp_git_repo, capture_output=True)
         subprocess.run(["git", "commit", "-m", "add real"], cwd=tmp_git_repo, capture_output=True)
         (tmp_git_repo / "real.py").write_text("x = 2")
-        assert check_clean_tree(tmp_git_repo) is True
-        stash = subprocess.run(
-            ["git", "stash", "list"], cwd=tmp_git_repo,
-            capture_output=True, text=True,
-        )
-        assert "otto: auto-stash" in stash.stdout
+        assert check_clean_tree(tmp_git_repo) is False
 
 
 class TestCreateTaskBranch:

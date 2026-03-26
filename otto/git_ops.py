@@ -18,12 +18,25 @@ def _log_warn(msg: str) -> None:
     console.print(f"  [yellow]Warning: {rich_escape(msg)}[/yellow]")
 
 
-def check_clean_tree(project_dir: Path) -> bool:
-    """Check that tracked files have no uncommitted changes.
+# Otto-owned paths — dirty changes to these are ignored (not user code).
+# Prefix-based: anything under these directories is otto-owned.
+_OTTO_OWNED_FILES = {"tasks.yaml", ".tasks.lock"}
+_OTTO_OWNED_PREFIXES = ("otto_logs/", "otto_arch/", ".otto-scratch/", ".otto/")
 
-    Only checks tracked files — untracked files are fine.
-    Otto runtime files (tasks.yaml, .tasks.lock) are ignored.
-    If the tree is dirty with non-otto changes, auto-stash them.
+
+def _is_otto_owned(filepath: str) -> bool:
+    """Check if a file path belongs to otto runtime (not user code)."""
+    return filepath in _OTTO_OWNED_FILES or any(
+        filepath.startswith(p) for p in _OTTO_OWNED_PREFIXES
+    )
+
+
+def check_clean_tree(project_dir: Path) -> bool:
+    """Check that tracked files have no uncommitted user changes.
+
+    Otto-owned files (otto_logs/, tasks.yaml, etc.) are ignored.
+    Returns False if user files are dirty — caller should refuse to run.
+    No auto-stash — dirty user files are the user's responsibility.
     """
     result = subprocess.run(
         ["git", "status", "--porcelain", "-uno"],
@@ -34,28 +47,15 @@ def check_clean_tree(project_dir: Path) -> bool:
     if result.returncode != 0:
         return False
 
-    otto_runtime = {"tasks.yaml", ".tasks.lock"}
-    has_non_otto_changes = False
     for line in result.stdout.strip().splitlines():
+        if not line.strip():
+            continue
         parts = line.split(maxsplit=1)
         if len(parts) < 2:
-            has_non_otto_changes = True
-            break
+            return False  # can't parse — assume dirty
         filename = parts[1].strip('"')
-        if filename not in otto_runtime:
-            has_non_otto_changes = True
-            break
-
-    if has_non_otto_changes:
-        # Auto-stash non-otto changes so we can proceed
-        stash = subprocess.run(
-            ["git", "stash", "push", "-m", "otto: auto-stash before run"],
-            cwd=project_dir, capture_output=True, text=True,
-        )
-        if stash.returncode == 0 and "No local changes" not in stash.stdout:
-            console.print("  Auto-stashed uncommitted changes", style="dim")
-            return True
-        return False
+        if not _is_otto_owned(filename):
+            return False
 
     return True
 
