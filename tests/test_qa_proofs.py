@@ -1,8 +1,14 @@
 """Tests for QA proof artifact generation."""
 
+import asyncio
+import json
+import re
+from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
-from otto.qa import _write_proof_artifacts
+from otto.qa import _write_proof_artifacts, run_qa_agent_v45
 
 
 class TestWriteProofArtifacts:
@@ -243,3 +249,145 @@ class TestWriteProofArtifacts:
         assert "git diff main...HEAD --name-only" not in script
         assert "npx jest --runInBand" in report
         assert "npx jest --runInBand" in script
+
+    def test_new_page_is_not_reported_as_browser_assertion(self, tmp_path):
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        verdict = self._make_verdict()
+        task = {"key": "test123"}
+        qa_actions = [
+            {
+                "type": "browser",
+                "action": "new_page",
+                "detail": "http://localhost:3000",
+                "output": "Opened a new page",
+            },
+            {
+                "type": "browser",
+                "action": "evaluate_script",
+                "detail": ".banner",
+                "input": "{\"function\":\"() => document.querySelector('.banner').textContent\"}",
+                "output": "Ready",
+            },
+        ]
+
+        _write_proof_artifacts(log_dir, verdict, qa_actions, task, "Test prompt", 0.50)
+
+        report = (log_dir / "qa-proofs" / "proof-report.md").read_text()
+        assert "Browser Assertions" in report
+        assert "evaluate_script" in report
+        assert "Ready" in report
+        assert "new_page" not in report
+        assert "Opened a new page" not in report
+
+    def test_normalizes_prompt_whitespace_in_report_header(self, tmp_path):
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        verdict = self._make_verdict()
+        task = {"key": "test123"}
+        prompt = "Build CLI command\n   with multiline   input"
+
+        _write_proof_artifacts(log_dir, verdict, [], task, prompt, 0.50)
+
+        report = (log_dir / "qa-proofs" / "proof-report.md").read_text()
+        assert "**Task:** Build CLI command with multiline input" in report
+        assert "**Task:** Build CLI command\n   with multiline   input" not in report
+
+
+class TestRunQaAgentStreamCapture:
+    def test_captures_bash_output_by_tool_use_id_and_unwraps_browser_text(self, tmp_path):
+        @dataclass
+        class FakeToolUseBlock:
+            id: str
+            name: str
+            input: dict
+
+        @dataclass
+        class FakeToolResultBlock:
+            tool_use_id: str
+            content: object
+            is_error: bool | None = None
+
+        @dataclass
+        class FakeAssistantMessage:
+            content: list
+
+        @dataclass
+        class FakeUserMessage:
+            content: list
+
+        async def fake_query(*, prompt, options=None):
+            match = re.search(r"Write your JSON verdict to: (.+\.json)", prompt)
+            assert match, "QA prompt should include verdict file path"
+            Path(match.group(1)).write_text(json.dumps({
+                "must_passed": True,
+                "must_items": [
+                    {"criterion": "Tests pass", "status": "pass", "evidence": "pytest output"},
+                ],
+                "should_notes": [],
+                "regressions": [],
+            }))
+
+            yield FakeAssistantMessage(content=[
+                FakeToolUseBlock(
+                    id="bash-1",
+                    name="Bash",
+                    input={"command": "uv run pytest tests/test_cli.py"},
+                ),
+            ])
+            yield FakeAssistantMessage(content=[
+                FakeToolUseBlock(
+                    id="read-1",
+                    name="Read",
+                    input={"file_path": "README.md"},
+                ),
+            ])
+            yield FakeUserMessage(content=[
+                FakeToolResultBlock(
+                    tool_use_id="bash-1",
+                    content="==================== 1 passed in 0.12s ====================",
+                ),
+            ])
+            yield FakeAssistantMessage(content=[
+                FakeToolUseBlock(
+                    id="browser-1",
+                    name="mcp__chrome-devtools__evaluate_script",
+                    input={"function": "() => document.body.dataset.state"},
+                ),
+            ])
+            yield FakeUserMessage(content=[
+                FakeToolResultBlock(
+                    tool_use_id="browser-1",
+                    content=[{
+                        "type": "text",
+                        "text": "Script ran on page...\n```json\n{\"state\":\"ready\"}\n```",
+                    }],
+                ),
+            ])
+            yield SimpleNamespace(session_id="qa-session", is_error=False, total_cost_usd=0.25)
+
+        with patch.multiple(
+            "otto.qa",
+            query=fake_query,
+            ToolUseBlock=FakeToolUseBlock,
+            ToolResultBlock=FakeToolResultBlock,
+            AssistantMessage=FakeAssistantMessage,
+            UserMessage=FakeUserMessage,
+        ):
+            result = asyncio.run(run_qa_agent_v45(
+                task={"key": "QA-1"},
+                spec=[],
+                config={},
+                project_dir=tmp_path,
+                original_prompt="Check the CLI output",
+                diff="diff --git a/app.py b/app.py",
+                log_dir=tmp_path / "logs",
+            ))
+
+        report = (tmp_path / "logs" / "qa-proofs" / "proof-report.md").read_text()
+        assert result["must_passed"] is True
+        assert "Observed output: not captured" not in report
+        assert "1 passed in 0.12s" in report
+        assert "Script ran on page..." in report
+        assert "{\"state\":\"ready\"}" in report
+        assert "[{'type': 'text'" not in report

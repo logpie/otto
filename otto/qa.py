@@ -305,13 +305,13 @@ Save any browser screenshots to: {log_dir / "qa-proofs" if log_dir else "/tmp"}/
     qa_cost = 0.0
     # Track QA verification actions for proof artifacts
     qa_actions: list[dict[str, str]] = []
-    _last_tool_name = ""
+    pending_tool_actions: dict[str, int] = {}
 
     from otto.display import build_agent_tool_event as _build_agent_tool_event
 
     try:
         async def _run_qa():
-            nonlocal report_lines, qa_cost, _last_tool_name
+            nonlocal report_lines, qa_cost
             _result_msg = None
             async for message in query(prompt=qa_prompt, options=qa_opts):
                 if isinstance(message, ResultMessage):
@@ -323,18 +323,19 @@ Save any browser screenshots to: {log_dir / "qa-proofs" if log_dir else "/tmp"}/
                     for block in message.content:
                         if not (ToolResultBlock and isinstance(block, ToolResultBlock)):
                             continue
-                        raw_content = getattr(block, "content", None)
-                        text = str(raw_content) if raw_content else ""
-                        if _last_tool_name == "Bash":
-                            if qa_actions and qa_actions[-1]["type"] == "bash":
-                                qa_actions[-1]["output"] = text[:2000]
-                        elif _last_tool_name.startswith("mcp__"):
-                            if qa_actions and qa_actions[-1]["type"] == "browser":
-                                qa_actions[-1]["output"] = text[:4000]
+                        tool_use_id = getattr(block, "tool_use_id", "")
+                        action_idx = pending_tool_actions.pop(tool_use_id, None)
+                        if action_idx is None or not (0 <= action_idx < len(qa_actions)):
+                            continue
+                        action = qa_actions[action_idx]
+                        text = _extract_tool_result_text(getattr(block, "content", None))
+                        if action["type"] == "bash":
+                            action["output"] = text[:2000]
+                        elif action["type"] == "browser":
+                            action["output"] = text[:4000]
                         # Screenshot data is too large for the message pipe
                         # (>1MB base64 crashes the SDK). QA prompt instructs
                         # the agent to save screenshots via filePath instead.
-                        _last_tool_name = ""
                 elif AssistantMessage and isinstance(message, AssistantMessage):
                     for block in message.content:
                         if TextBlock and isinstance(block, TextBlock) and block.text:
@@ -360,8 +361,8 @@ Save any browser screenshots to: {log_dir / "qa-proofs" if log_dir else "/tmp"}/
                                         except Exception:
                                             pass
                         elif ToolUseBlock and isinstance(block, ToolUseBlock):
-                            _last_tool_name = block.name
                             inp = block.input or {}
+                            action_idx: int | None = None
                             # Collect Bash commands for proof scripts
                             if block.name == "Bash":
                                 cmd = inp.get("command", "")
@@ -371,6 +372,7 @@ Save any browser screenshots to: {log_dir / "qa-proofs" if log_dir else "/tmp"}/
                                         "command": cmd,
                                         "output": "",
                                     })
+                                    action_idx = len(qa_actions) - 1
                             # Collect Browser/MCP actions for proof report
                             elif block.name.startswith("mcp__"):
                                 action = block.name.split("__")[-1]
@@ -393,6 +395,11 @@ Save any browser screenshots to: {log_dir / "qa-proofs" if log_dir else "/tmp"}/
                                     "input": json.dumps(inp, sort_keys=True, default=str)[:4000],
                                     "output": "",
                                 })
+                                action_idx = len(qa_actions) - 1
+
+                            block_id = getattr(block, "id", "")
+                            if action_idx is not None and block_id:
+                                pending_tool_actions[block_id] = action_idx
 
                             if on_progress:
                                 try:
@@ -558,7 +565,8 @@ _VERIFICATION_COMMAND_PATTERNS = (
 _BROWSER_TRACE_ACTIONS = {
     "navigate", "navigate_page", "click", "fill", "fill_form", "type",
     "press_key", "hover", "select", "wait_for", "wait_for_load_state",
-    "go_back", "go_forward", "reload",
+    "go_back", "go_forward", "reload", "new_page", "select_page",
+    "close_page", "list_pages", "resize_page", "emulate",
 }
 
 
@@ -596,6 +604,37 @@ def _trim_evidence_output(text: str, max_lines: int = 12, max_chars: int = 1600)
     if len(excerpt) <= max_chars:
         return excerpt
     return excerpt[-max_chars:]
+
+
+def _extract_tool_result_text(raw_content: Any) -> str:
+    """Unwrap Claude SDK tool result payloads into plain text."""
+    if raw_content is None:
+        return ""
+    if isinstance(raw_content, str):
+        return raw_content
+    if isinstance(raw_content, list):
+        parts: list[str] = []
+        for item in raw_content:
+            if isinstance(item, str):
+                parts.append(item)
+                continue
+            if isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+                continue
+            text = getattr(item, "text", None)
+            if isinstance(text, str):
+                parts.append(text)
+        joined = "\n".join(part for part in parts if part)
+        if joined:
+            return joined
+    return str(raw_content)
+
+
+def _normalize_report_prompt(original_prompt: str) -> str:
+    """Collapse multiline shell prompts into a single readable line."""
+    return re.sub(r"\s+", " ", original_prompt).strip()
 
 
 def _load_browser_input(action: dict[str, str]) -> dict[str, Any]:
@@ -725,10 +764,11 @@ def _write_proof_artifacts(
     must_passed = verdict.get("must_passed", False)
     status_icon = "\u2713 passed" if must_passed else "\u2717 failed"
     passed_count = sum(1 for m in must_items if m.get("status") == "pass")
+    normalized_prompt = _normalize_report_prompt(original_prompt)
 
     report_lines = [
         f"# Proof Report",
-        f"**Task:** {original_prompt}",
+        f"**Task:** {normalized_prompt}",
         f"**Result:** {task.get('key', '?')} | {status_icon} | {passed_count}/{len(must_items)} must | QA ${cost_usd:.2f}",
         "",
     ]
