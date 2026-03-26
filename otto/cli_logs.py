@@ -150,8 +150,8 @@ def _get_agent_log_highlights(log_dir: Path) -> tuple[list[str], list[str]]:
     return (first, last)
 
 
-def _get_verify_summary(log_dir: Path) -> str:
-    """Get a one-line verify summary from the most recent verify log."""
+def _get_test_summary(log_dir: Path) -> str:
+    """Get a one-line test summary from the most recent test log."""
     verify_file = log_dir / "verify.log"
     if verify_file.exists():
         content = verify_file.read_text().strip()
@@ -303,10 +303,10 @@ def register_log_commands(main: click.Group) -> None:
         # Structured mode
         console.print(f"\n[bold]Logs for Task #{task_id}[/bold]  [dim]({rich_escape(target['key'])})[/dim]")
 
-        # 1. Verify logs
+        # 1. Test logs
         verify_logs = sorted(log_dir.glob("attempt-*-verify.log"))
         if verify_logs:
-            console.print(f"\n[bold]  Verification[/bold]")
+            console.print(f"\n[bold]  Testing[/bold]")
             for vlog in verify_logs:
                 attempt = vlog.stem.split("-")[1] if "-" in vlog.stem else "?"
                 try:
@@ -334,7 +334,7 @@ def register_log_commands(main: click.Group) -> None:
             try:
                 content = verify_file.read_text().strip()
                 if content == "PASSED":
-                    console.print(f"\n[bold]  Verification[/bold]")
+                    console.print(f"\n[bold]  Testing[/bold]")
                     console.print(f"    [success]PASSED[/success]")
             except OSError:
                 pass
@@ -504,9 +504,9 @@ def register_log_commands(main: click.Group) -> None:
                         for line in qa["summary_lines"]:
                             console.print(f"    [dim]{rich_escape(line)}[/dim]")
 
-                    verify_str = _get_verify_summary(log_dir)
-                    if verify_str:
-                        console.print(f"\n  [dim]Verify:[/dim] {verify_str}")
+                    test_str = _get_test_summary(log_dir)
+                    if test_str:
+                        console.print(f"\n  [dim]Tests:[/dim] {test_str}")
 
                     first_lines, last_lines = _get_agent_log_highlights(log_dir)
                     if first_lines:
@@ -537,7 +537,7 @@ def register_log_commands(main: click.Group) -> None:
                                 if any(kw in l.upper() for kw in ["FAIL", "ERROR", "ASSERT"])
                             ]
                             if fail_lines:
-                                console.print(f"\n  [dim]Last verify errors:[/dim]")
+                                console.print(f"\n  [dim]Last test errors:[/dim]")
                                 for fl in fail_lines[-5:]:
                                     console.print(f"    [error]{rich_escape(fl[:100])}[/error]")
                         except OSError:

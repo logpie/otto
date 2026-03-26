@@ -48,7 +48,10 @@ from otto.qa import (
     run_qa_agent_v45,
 )
 from otto.tasks import load_tasks, update_task
-from otto.verify import run_verification, _subprocess_env
+from otto.testing import run_test_suite, _subprocess_env
+from otto.claim_verify import verify_claims, format_claim_findings
+from otto.retry_excerpt import build_retry_excerpt
+from otto.flaky import extract_failing_tests, failures_are_baseline_only
 
 
 def _suggest_claude_md(project_dir: Path) -> None:
@@ -335,6 +338,8 @@ async def coding_loop(
                     total=data.get("total", 0),
                     passed=data.get("passed", 0),
                     failed=data.get("failed", 0),
+                    proof_count=data.get("proof_count", 0),
+                    proof_coverage=data.get("proof_coverage", ""),
                 )
             elif event_type == "attempt_boundary":
                 display.add_attempt_boundary(
@@ -672,63 +677,63 @@ def _check_agent_changes(
     return no_changes, new_untracked
 
 
-def _run_pre_verify(
+def _run_pre_test(
     project_dir: Path,
     test_command: str | None,
     timeout: int,
 ) -> Any | None:
-    """Run pre-verification (quick local test) if test_command is set.
+    """Run pre-test (quick local test) if test_command is set.
 
     Returns the check result, or None if skipped.
     """
     if not test_command:
         return None
-    from otto.verify import run_tier1
-    return run_tier1(project_dir, test_command, timeout)
+    from otto.testing import run_local_tests
+    return run_local_tests(project_dir, test_command, timeout)
 
 
-def _run_full_verification(
+def _run_full_test_suite(
     project_dir: Path,
     candidate_sha: str,
     test_command: str | None,
-    verify_cmd: str | None,
+    custom_test_cmd: str | None,
     timeout: int,
     log_dir: Path,
     attempt_num: int,
 ) -> tuple[Any, float, str]:
-    """Run clean-worktree verification and write logs.
+    """Run clean-worktree test suite and write logs.
 
-    Returns (verify_result, elapsed, detail_string).
+    Returns (test_result, elapsed, detail_string).
     """
-    verify_start = time.monotonic()
-    verify_result = run_verification(
+    test_start = time.monotonic()
+    test_result = run_test_suite(
         project_dir=project_dir,
         candidate_sha=candidate_sha,
         test_command=test_command,
-        verify_cmd=verify_cmd,
+        custom_test_cmd=custom_test_cmd,
         timeout=timeout,
     )
-    verify_elapsed = round(time.monotonic() - verify_start, 1)
+    test_elapsed = round(time.monotonic() - test_start, 1)
 
-    # Write verify log
+    # Write test log
     _write_log_safe(
         log_dir, f"attempt-{attempt_num}-verify.log",
         "\n".join(f"{t.tier}: {'PASS' if t.passed else 'FAIL'}\n{t.output}"
-                  for t in verify_result.tiers),
+                  for t in test_result.tiers),
     )
 
-    verify_detail = ""
-    for tier in verify_result.tiers:
+    test_detail = ""
+    for tier in test_result.tiers:
         if tier.output:
             for line in reversed(tier.output.splitlines()):
                 ls = line.strip()
                 if any(kw in ls.lower() for kw in
                        ["passed", "failed", "error", "tests:", "test suites:"]):
                     if any(c.isdigit() for c in ls):
-                        verify_detail = ls[:70]
+                        test_detail = ls[:70]
                         break
 
-    return verify_result, verify_elapsed, verify_detail
+    return test_result, test_elapsed, test_detail
 
 
 def _squash_and_commit(
@@ -778,7 +783,7 @@ def _build_retry_reason(last_error: str | None, last_error_source: str | None) -
     if not last_error:
         return ""
     source = last_error_source or "unknown"
-    if source == "verify":
+    if source == "test":
         # Find "N failed" or first error line
         m = re.search(r"\d+ (?:failed|error)", last_error)
         reason_text = m.group(0) if m else last_error.strip().splitlines()[0][:50]
@@ -918,6 +923,7 @@ async def _run_qa(
         focus_items=focus_items,
         prev_failed=prev_failed_criteria if prev_failed_criteria else None,
         on_progress=on_progress,
+        log_dir=log_dir,
     )
     qa_elapsed = round(time.monotonic() - qa_start, 1)
     total_qa_cost = qa_result.get("cost_usd", 0.0)
@@ -926,11 +932,6 @@ async def _run_qa(
     if qa_warning:
         qa_report = f"[warning] {qa_warning}\n\n{qa_report}".strip()
     verdict = qa_result.get("verdict", {})
-
-    _emit_qa_item_results(emit, verdict, qa_spec)
-
-    # Persist QA report
-    _persist_qa_results(log_dir, qa_report, verdict)
 
     # Infrastructure error (API 500, connection drop) — retry QA once
     if qa_result.get("infrastructure_error") and not qa_result.get("_retried"):
@@ -943,14 +944,24 @@ async def _run_qa(
             diff=diff_info["full_diff"],
             tier=qa_tier,
             focus_items=focus_items,
-            prev_failed_criteria=prev_failed_criteria,
-            on_progress=emit,
+            prev_failed=prev_failed_criteria,
+            on_progress=on_progress,
+            log_dir=log_dir,
         )
         qa_result["_retried"] = True
         retry_qa_cost = qa_result.get("cost_usd", 0.0)
         add_cost(retry_qa_cost)
         total_qa_cost += retry_qa_cost
         qa_elapsed += round(time.monotonic() - qa_start, 1)
+        qa_report = qa_result.get("raw_report", "")
+        if qa_warning:
+            qa_report = f"[warning] {qa_warning}\n\n{qa_report}".strip()
+        verdict = qa_result.get("verdict", {})
+
+    _emit_qa_item_results(emit, verdict, qa_spec)
+
+    # Persist the final QA report, including retried runs.
+    _persist_qa_results(log_dir, qa_report, verdict)
 
     failed_musts = [
         item for item in verdict.get("must_items", [])
@@ -989,6 +1000,8 @@ async def _run_qa(
         "prev_failed_criteria": [
             item.get("criterion", "") for item in failed_musts
         ],
+        "proof_count": qa_result.get("proof_count", 0),
+        "proof_coverage": qa_result.get("proof_coverage", ""),
     }
 
 
@@ -1067,6 +1080,7 @@ async def _handle_no_changes(
         tier=qa_tier_nc,
         focus_items=focus_nc,
         on_progress=on_progress,
+        log_dir=log_dir,
     )
     qa_elapsed_nc = round(time.monotonic() - qa_start_nc, 1)
     qa_cost_nc = qa_result_nc.get("cost_usd", 0.0)
@@ -1151,7 +1165,7 @@ async def run_task_v45(
     max_retries = task.get("max_retries", config["max_retries"])
     max_task_time = config.get("max_task_time", 3600)  # 1 hour circuit breaker
     default_branch = config["default_branch"]
-    timeout = config["verify_timeout"]
+    test_timeout = config["verify_timeout"]
 
     task_start = time.monotonic()
     total_cost = 0.0
@@ -1336,7 +1350,7 @@ async def run_task_v45(
         scratch_dir = project_dir / ".otto-scratch"
         scratch_dir.mkdir(exist_ok=True)
 
-        verify_cmd = task.get("verify")
+        custom_test_cmd = task.get("verify")
 
         # Auto-detect test_command only if not explicitly set in config
         if "test_command" in config:
@@ -1346,9 +1360,12 @@ async def run_task_v45(
 
         # Baseline test check
         baseline_detail = ""
+        baseline_failures: set[str] = set()
         if test_command:
-            from otto.verify import run_tier1
-            baseline = run_tier1(project_dir, test_command, timeout)
+            from otto.testing import run_local_tests
+            baseline = run_local_tests(project_dir, test_command, test_timeout)
+            if baseline.output:
+                baseline_failures = extract_failing_tests(baseline.output)
             if not baseline.passed and not baseline.skipped:
                 output = baseline.output or ""
                 infra_keywords = [
@@ -1558,47 +1575,53 @@ async def run_task_v45(
                 if detected:
                     test_command = detected
 
-            # PRE-VERIFY: quick sanity check in the working directory
-            pre_check = _run_pre_verify(project_dir, test_command, timeout)
-            if pre_check and not pre_check.passed and not pre_check.skipped:
-                emit("phase", name="coding", status="fail", time_s=coding_elapsed,
-                     error="tests fail in working dir", cost=attempt_cost)
-                last_error = pre_check.output or "tests failed locally"
-                last_error_source = "verify"
-                subprocess.run(
-                    ["git", "reset", "--mixed", base_sha],
-                    cwd=project_dir, capture_output=True,
-                )
-                continue
-
-            # VERIFY — clean worktree, deterministic
-            emit("phase", name="test", status="running")
-            verify_result, verify_elapsed, verify_detail = _run_full_verification(
-                project_dir, candidate_sha, test_command, verify_cmd,
-                timeout, log_dir, attempt_num,
-            )
-            phase_timings["test"] = phase_timings.get("test", 0) + verify_elapsed
-
-            if not verify_result.passed:
-                if test_command and pre_check and pre_check.passed:
-                    # Tests pass locally but fail in cold worktree — trust local
-                    emit("phase", name="test", status="done", time_s=verify_elapsed,
-                         detail=verify_detail)
-                    # Fall through to the verify-passed path below
+            # PRE-TEST: quick sanity check in the working directory
+            pre_test = _run_pre_test(project_dir, test_command, test_timeout)
+            if pre_test and not pre_test.passed and not pre_test.skipped:
+                # Check if failures are only pre-existing (flaky) baseline failures
+                current_failures = extract_failing_tests(pre_test.output or "")
+                if baseline_failures and failures_are_baseline_only(baseline_failures, current_failures):
+                    # Only flaky/baseline failures — proceed instead of retrying
+                    pass
                 else:
-                    emit("phase", name="test", status="fail", time_s=verify_elapsed,
-                         error=(verify_result.failure_output or "")[:80], detail=verify_detail)
+                    emit("phase", name="coding", status="fail", time_s=coding_elapsed,
+                         error="tests fail in working dir", cost=attempt_cost)
+                    last_error = build_retry_excerpt(pre_test.output or "tests failed locally")
+                    last_error_source = "test"
                     subprocess.run(
                         ["git", "reset", "--mixed", base_sha],
                         cwd=project_dir, capture_output=True,
                     )
-                    last_error = verify_result.failure_output
-                    last_error_source = "verify"
                     continue
 
-            if verify_result.passed:
-                emit("phase", name="test", status="done", time_s=verify_elapsed,
-                     detail=verify_detail)
+            # TEST — clean worktree, deterministic
+            emit("phase", name="test", status="running")
+            test_result, test_elapsed, test_detail = _run_full_test_suite(
+                project_dir, candidate_sha, test_command, custom_test_cmd,
+                test_timeout, log_dir, attempt_num,
+            )
+            phase_timings["test"] = phase_timings.get("test", 0) + test_elapsed
+
+            if not test_result.passed:
+                if test_command and pre_test and pre_test.passed:
+                    # Tests pass locally but fail in cold worktree — trust local
+                    emit("phase", name="test", status="done", time_s=test_elapsed,
+                         detail=test_detail)
+                    # Fall through to the test-passed path below
+                else:
+                    emit("phase", name="test", status="fail", time_s=test_elapsed,
+                         error=(test_result.failure_output or "")[:80], detail=test_detail)
+                    subprocess.run(
+                        ["git", "reset", "--mixed", base_sha],
+                        cwd=project_dir, capture_output=True,
+                    )
+                    last_error = build_retry_excerpt(test_result.failure_output or "")
+                    last_error_source = "test"
+                    continue
+
+            if test_result.passed:
+                emit("phase", name="test", status="done", time_s=test_elapsed,
+                     detail=test_detail)
 
             # ANCHOR verified candidate as durable git ref
             ref_name = _anchor_candidate_ref(project_dir, key, attempt_num, candidate_sha)
@@ -1624,6 +1647,17 @@ async def run_task_v45(
             diff_info = _get_diff_info(project_dir, base_sha)
 
             _write_log_safe(log_dir, "verify.log", "PASSED")
+
+            # ── Claim verification (audit-only, non-blocking) ─────────
+            try:
+                agent_log_path = log_dir / f"attempt-{attempt_num}-agent.log"
+                test_log_path = log_dir / f"attempt-{attempt_num}-verify.log"
+                claim_findings = verify_claims(agent_log_path, test_log_path)
+                if claim_findings:
+                    claims_text = format_claim_findings(claim_findings)
+                    _write_log_safe(log_dir, f"attempt-{attempt_num}-claims.md", claims_text)
+            except Exception:
+                pass
 
             # ── QA ──────────────────────────────────────────────────────
             # Await specs before QA (if still generating)
@@ -1671,6 +1705,13 @@ async def run_task_v45(
                 _prev_failed_criteria = qa_out["prev_failed_criteria"]
                 continue
 
+            # ── Restore workspace before merge ──────────────────────────
+            _restore_workspace_state(
+                project_dir,
+                reset_ref=candidate_sha,
+                pre_existing_untracked=pre_existing_untracked,
+            )
+
             # ── Merge ───────────────────────────────────────────────────
             emit("phase", name="merge", status="running")
             merge_start = time.monotonic()
@@ -1681,6 +1722,18 @@ async def run_task_v45(
                 testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / key
                 if testgen_dir.exists():
                     shutil.rmtree(testgen_dir, ignore_errors=True)
+                # Append commit SHA to proof report
+                try:
+                    commit_sha = subprocess.run(
+                        ["git", "rev-parse", "HEAD"],
+                        cwd=project_dir, capture_output=True, text=True,
+                    ).stdout.strip()
+                    proof_report_path = log_dir / "qa-proofs" / "proof-report.md"
+                    if proof_report_path.exists() and commit_sha:
+                        with open(proof_report_path, "a") as f:
+                            f.write(f"\n**Commit:** {commit_sha}\n")
+                except Exception:
+                    pass
                 return _result(True, "passed", diff_summary=diff_summary, qa_report=qa_report)
             else:
                 merge_elapsed = round(time.monotonic() - merge_start, 1)
@@ -1822,6 +1875,12 @@ def _print_summary(
                 if len(diff_files) > 5:
                     files_str += f"  (+{len(diff_files) - 5} more)"
                 console.print(f"       {files_str}", style="dim")
+
+        # Show proof path for passed tasks
+        if success:
+            proof_report = Path("otto_logs") / task_key / "qa-proofs" / "proof-report.md"
+            if proof_report.exists():
+                console.print(f"       [dim]proof: {proof_report}[/dim]")
 
     console.print()
     if failed == 0:

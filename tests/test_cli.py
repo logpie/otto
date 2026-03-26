@@ -516,7 +516,7 @@ class TestLogs:
 
         result = runner.invoke(main, ["logs", "1"])
         assert result.exit_code == 0
-        assert "Verification" in result.output
+        assert "Testing" in result.output
         assert "PASS" in result.output
         assert "Agent Activity" in result.output
         assert "2 tool calls" in result.output

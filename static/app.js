@@ -166,11 +166,12 @@ function renderTasks() {
     let verifyHtml = '';
     if (verifyGoal || verifyCmd) {
       const lastError = t.last_error || '';
-      const verifyFailed = t.status === 'failed' && lastError.includes('Verification');
+      // Note: error_source not available in task status; detect test failures by known patterns
+      const verifyFailed = t.status === 'failed' && (lastError.includes('tests fail') || lastError.includes('test infrastructure') || lastError.includes('BASELINE_FAIL'));
       const verifyPassed = t.status === 'completed' && verifyCmd;
       let statusLine = '';
-      if (verifyPassed) statusLine = '<span class="verify-status pass">verified</span>';
-      else if (verifyFailed) statusLine = '<span class="verify-status fail">verify failed</span>';
+      if (verifyPassed) statusLine = '<span class="verify-status pass">tested</span>';
+      else if (verifyFailed) statusLine = '<span class="verify-status fail">testing failed</span>';
       else if (isRunning) statusLine = '<span class="verify-status pending">running...</span>';
       verifyHtml = `
         <div class="task-verify">
@@ -179,13 +180,13 @@ function renderTasks() {
         </div>`;
     }
 
-    // Inline verify editor for completed/failed tasks without verification
+    // Inline testing editor for completed/failed tasks without testing details
     let verifyEditor = '';
     if (showVerifyEdit) {
       verifyEditor = `
         <div class="verify-editor">
           <input type="text" id="verify-goal-${t.id}"
-                 placeholder="How to verify it works..."
+                 placeholder="How to test it works..."
                  value="${esc(verifyGoal)}"
                  onkeydown="if(event.key==='Enter'){event.preventDefault();addVerifyAndRetry('${t.id}')}">
           <div class="verify-editor-actions">
@@ -212,7 +213,7 @@ function renderTasks() {
         <div class="task-actions">
           <button class="btn secondary tiny" onclick="toggleLog('${t.id}')">Log</button>
           ${isTerminal
-            ? `<button class="btn secondary tiny" onclick="toggleVerifyEdit('${t.id}')">${verifyGoal ? 'Edit verify' : 'Add verify'}</button>`
+            ? `<button class="btn secondary tiny" onclick="toggleVerifyEdit('${t.id}')">${verifyGoal ? 'Edit testing' : 'Add testing'}</button>`
             : ''}
           ${isTerminal
             ? `<button class="btn primary tiny" onclick="retryTask('${t.id}')">Retry</button>`
@@ -330,7 +331,7 @@ async function updateTaskVerify(id) {
   const goalEl = document.getElementById('verify-goal-' + id);
   const verifyPrompt = goalEl ? goalEl.value.trim() : '';
   if (!verifyPrompt) {
-    notify('error', 'Enter a verification goal');
+    notify('error', 'Enter a testing goal');
     return;
   }
 
@@ -345,14 +346,14 @@ async function updateTaskVerify(id) {
     notify('error', data.error || 'Failed to update task');
     return;
   }
-  notify('info', 'Verification updated');
+  notify('info', 'Testing updated');
 }
 
 async function addVerifyAndRetry(id) {
   const goalEl = document.getElementById('verify-goal-' + id);
   const verifyPrompt = goalEl ? goalEl.value.trim() : '';
   if (!verifyPrompt) {
-    notify('error', 'Enter a verification goal');
+    notify('error', 'Enter a testing goal');
     return;
   }
 
@@ -375,7 +376,7 @@ async function addVerifyAndRetry(id) {
     notify('error', data.error || 'Failed to retry task');
     return;
   }
-  notify('info', 'Verification added, retrying task');
+  notify('info', 'Testing added, retrying task');
   autoStartWorkerIfNeeded();
 }
 

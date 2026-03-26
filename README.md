@@ -241,7 +241,7 @@ otto/
   cli.py             — CLI (add, run, plan, status, show, retry, logs, reset)
   runner.py           — v4.5 pipeline: bare CC coding, structured QA, retry
   spec.py             — Spec generation with [must]/[should]/◈ classification
-  verify.py           — Verification in disposable worktrees
+  testing.py          — Testing in disposable worktrees
   tasks.py            — Task CRUD with file locking
   config.py           — Config loading, multi-framework test detection
   orchestrator.py     — Multi-task batch execution, integration branch

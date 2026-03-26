@@ -13,11 +13,18 @@ from otto.agent import (
     ClaudeAgentOptions,
     ResultMessage,
     TextBlock,
+    ToolResultBlock,
     ToolUseBlock,
     _subprocess_env,
     query,
 )
 from otto.theme import console
+
+# UserMessage may not exist in all SDK versions — used for tool-result capture
+try:
+    from claude_agent_sdk.types import UserMessage  # noqa: F401
+except (ImportError, AttributeError):
+    UserMessage = None  # type: ignore[assignment,misc]
 
 
 QA_SYSTEM_PROMPT_V45 = """\
@@ -41,11 +48,14 @@ Also check:
 - Does the implementation contradict the ORIGINAL task prompt?
 - Does it break existing functionality?
 
+For each [must] item, include spec_id (matching the criterion number) and a "proof" array — short strings describing what you did to verify.
+Only cite proof that directly verifies THAT criterion, not exploration.
+
 Write your verdict to the output file as JSON:
 {
   "must_passed": true/false,
   "must_items": [
-    {"criterion": "...", "status": "pass/fail", "evidence": "..."}
+    {"spec_id": 1, "criterion": "...", "status": "pass/fail", "evidence": "...", "proof": ["ran jest: 5 passed", "curl /api returns 200"]}
   ],
   "should_notes": [
     {"criterion": "...", "observation": "...", "screenshot": "path or null"}
@@ -173,6 +183,311 @@ def _parse_qa_verdict_json(report: str) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Proof artifact helpers
+# ---------------------------------------------------------------------------
+
+def _is_verification_command(cmd: str) -> bool:
+    """Return True if the command is a test/build/curl verification command.
+
+    Filters out exploration commands (find, ls, cat, git diff, etc.)
+    and destructive commands (kill, rm, git push, etc.).
+    """
+    cmd_stripped = cmd.strip()
+    if not cmd_stripped:
+        return False
+    first_word = cmd_stripped.split()[0]
+    # Destructive / infra commands — never include
+    if first_word in ("kill", "pkill", "rm", "git") or cmd_stripped.startswith("rm "):
+        return False
+    # Exploration commands — not verification
+    if first_word in ("find", "ls", "cat", "head", "tail", "wc", "grep", "rg",
+                       "tree", "less", "file", "stat", "which", "type", "pwd",
+                       "cd", "echo", "printf", "read", "true"):
+        return False
+    if "git diff" in cmd_stripped or "git log" in cmd_stripped or "git show" in cmd_stripped:
+        return False
+    # Verification commands — include
+    VERIFY_PREFIXES = (
+        "npx jest", "npx vitest", "npx next build", "npx tsc", "npx mocha",
+        "pytest", "python -m pytest", "python3 -m pytest",
+        "cargo test", "cargo build", "cargo check",
+        "go test", "go build", "go vet",
+        "npm test", "npm run lint", "npm run build", "npm run test",
+        "pnpm test", "pnpm run lint", "pnpm run build",
+        "yarn test", "yarn lint", "yarn build",
+        "tsc", "node -e", "python -c", "python3 -c",
+        "curl", "wget",
+        "make test", "make check", "make build",
+        "uv run pytest", "uv run python",
+        "dotnet test", "dotnet build",
+        "ruby", "bundle exec",
+        "false", "true",  # used in tests
+    )
+    if any(cmd_stripped.startswith(p) for p in VERIFY_PREFIXES):
+        return True
+    # Chained commands like "npm run lint && npm test"
+    if " && " in cmd_stripped:
+        parts = [p.strip() for p in cmd_stripped.split("&&")]
+        return any(_is_verification_command(p) for p in parts)
+    # Redirected commands like "npm test 2>&1"
+    base = re.sub(r'\s+\d*>&?\d+', '', cmd_stripped).strip()
+    if base != cmd_stripped and _is_verification_command(base):
+        return True
+    return False
+
+
+def _is_non_replayable(cmd: str) -> bool:
+    """Return True if the command starts a server or runs in background.
+
+    These are non-replayable in a regression script.
+    """
+    cmd_stripped = cmd.strip()
+    lower = cmd_stripped.lower()
+
+    # Background / nohup
+    if cmd_stripped.endswith(" &") or "nohup " in lower:
+        # Exception: "2>&1" is a redirect, not background
+        if cmd_stripped.endswith(">&1") or cmd_stripped.endswith(">&2"):
+            return False
+        return True
+
+    # Server start commands — long-running processes
+    SERVER_PATTERNS = (
+        "npm run dev", "npm start", "npm run start",
+        "npx next dev", "npx next start",
+        "python -m http.server", "python3 -m http.server",
+        "uvicorn ", "gunicorn ", "flask run",
+        "serve ", "node server",
+        "npx serve", "http-server",
+    )
+    for pattern in SERVER_PATTERNS:
+        if lower.startswith(pattern) or f" {pattern}" in f" {lower}":
+            # Exception: "npx next build" is OK (not a server)
+            if "next build" in lower:
+                return False
+            return True
+
+    # Kill/signal commands
+    if lower.startswith(("kill ", "pkill ")):
+        return True
+
+    return False
+
+
+def _write_proof_artifacts(
+    log_dir: Path,
+    verdict: dict,
+    qa_actions: list[dict],
+    task: dict,
+    original_prompt: str,
+    cost_usd: float,
+) -> tuple[int, str]:
+    """Write proof artifacts from QA verdict and captured actions.
+
+    Creates qa-proofs/ directory with:
+    - must-N.md per must item
+    - proof-report.md summarizing all proofs
+    - regression-check.sh with replayable verification commands
+
+    Returns (file_count, coverage_string) e.g. (5, "3/4").
+    """
+    import shutil
+    import stat
+
+    proofs_dir = log_dir / "qa-proofs"
+
+    # Preserve screenshots but clean everything else
+    screenshots: list[tuple[str, bytes]] = []
+    if proofs_dir.exists():
+        for f in proofs_dir.iterdir():
+            if f.suffix in (".png", ".jpg", ".jpeg", ".gif", ".webp"):
+                try:
+                    screenshots.append((f.name, f.read_bytes()))
+                except OSError:
+                    pass
+        shutil.rmtree(proofs_dir, ignore_errors=True)
+
+    proofs_dir.mkdir(parents=True, exist_ok=True)
+
+    # Restore screenshots
+    for name, data in screenshots:
+        try:
+            (proofs_dir / name).write_bytes(data)
+        except OSError:
+            pass
+
+    must_items = verdict.get("must_items", [])
+    file_count = 0
+
+    # Write must-N.md files
+    for i, item in enumerate(must_items, 1):
+        criterion = item.get("criterion", "")
+        status_str = item.get("status", "unknown")
+        evidence = item.get("evidence", "")
+        proof = item.get("proof", [])
+        content = f"# Must Item {i}\n\n"
+        content += f"Criterion: {criterion}\n"
+        content += f"Status: {status_str}\n"
+        content += f"Evidence: {evidence}\n"
+        if proof:
+            content += "\nProof:\n"
+            for p in proof:
+                content += f"- {p}\n"
+        try:
+            (proofs_dir / f"must-{i}.md").write_text(content)
+            file_count += 1
+        except OSError:
+            pass
+
+    # Build regression-check.sh from verification commands
+    verification_cmds: list[str] = []
+    for action in qa_actions:
+        if action.get("type") == "bash":
+            cmd = action.get("command", "")
+            if cmd and _is_verification_command(cmd) and not _is_non_replayable(cmd):
+                verification_cmds.append(cmd)
+
+    if verification_cmds:
+        script_lines = ["#!/bin/bash", "set -e", ""]
+        for cmd in verification_cmds:
+            # Escape double quotes in echo label
+            safe_label = cmd.replace('"', '\\"')
+            script_lines.append(f'echo "Running: {safe_label}"')
+            script_lines.append(cmd)
+            script_lines.append("")
+        script_lines.append('echo "All regression checks passed."')
+        script_path = proofs_dir / "regression-check.sh"
+        try:
+            script_path.write_text("\n".join(script_lines) + "\n")
+            script_path.chmod(script_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+            file_count += 1
+        except OSError:
+            pass
+
+    # Build proof-report.md
+    task_key = task.get("key", "unknown")
+    # Normalize prompt whitespace
+    clean_prompt = re.sub(r'\s+', ' ', original_prompt).strip()
+    must_total = len(must_items)
+    must_passed_count = sum(1 for item in must_items if item.get("status") == "pass")
+    result_icon = "\u2713" if must_passed_count == must_total else "\u2717"
+
+    report_lines_list: list[str] = []
+    report_lines_list.append("# Proof Report")
+    report_lines_list.append(f"**Task:** {clean_prompt}")
+    report_lines_list.append(
+        f"**Result:** {task_key} | {result_icon} | "
+        f"{must_passed_count}/{must_total} must | QA ${cost_usd:.2f}"
+    )
+    report_lines_list.append("")
+
+    # Per-item proofs
+    items_with_proof = 0
+    for i, item in enumerate(must_items, 1):
+        criterion = item.get("criterion", "")
+        status_str = item.get("status", "unknown")
+        evidence = item.get("evidence", "")
+        proof = item.get("proof", [])
+        icon = "\u2713" if status_str == "pass" else "\u2717"
+        report_lines_list.append(f"## {icon} [{i}] {criterion}")
+        report_lines_list.append(f"Evidence: {evidence}")
+        if proof:
+            items_with_proof += 1
+            report_lines_list.append("Proof:")
+            for p in proof:
+                report_lines_list.append(f"- {p}")
+        report_lines_list.append("")
+        report_lines_list.append("---")
+
+    # Add verification commands section
+    if verification_cmds:
+        report_lines_list.append("")
+        report_lines_list.append("## Verification Commands")
+        for cmd in verification_cmds:
+            # Find matching qa_action to get output
+            output = ""
+            for action in qa_actions:
+                if action.get("type") == "bash" and action.get("command") == cmd:
+                    output = action.get("output", "")
+                    break
+            report_lines_list.append(f"- `{cmd}`")
+            if output:
+                report_lines_list.append(f"  Output: {output[:200]}")
+        report_lines_list.append("")
+
+    # Screenshots section
+    screenshot_actions = [
+        a for a in qa_actions
+        if a.get("type") == "browser" and a.get("action") == "take_screenshot"
+    ]
+    existing_screenshots = sorted(proofs_dir.glob("screenshot-*"))
+    if screenshot_actions or existing_screenshots:
+        report_lines_list.append("## Screenshots")
+        # Use action order (not sorted filesystem order)
+        for idx, action in enumerate(screenshot_actions, 1):
+            path = action.get("path", "")
+            detail = action.get("detail", "")
+            if path:
+                fname = Path(path).name
+                report_lines_list.append(f"SS{idx} [{fname}]({fname})")
+                if detail:
+                    report_lines_list.append(f"Description: {detail}")
+        # If there are screenshots on disk not in actions, list them too
+        action_paths = {Path(a.get("path", "")).name for a in screenshot_actions if a.get("path")}
+        for ss in existing_screenshots:
+            if ss.name not in action_paths:
+                report_lines_list.append(f"[{ss.name}]({ss.name})")
+        report_lines_list.append("")
+
+    # Browser evaluate_script results
+    browser_evals = [
+        a for a in qa_actions
+        if a.get("type") == "browser" and a.get("action") == "evaluate_script"
+    ]
+    if browser_evals:
+        report_lines_list.append("## Browser Evaluations")
+        for ev in browser_evals:
+            detail = ev.get("detail", "")
+            output = ev.get("output", "")
+            report_lines_list.append(f"- `{detail}`: {output[:200]}")
+        report_lines_list.append("")
+
+    # Proof coverage
+    coverage_str = f"{items_with_proof}/{must_total}" if must_total > 0 else "0/0"
+    report_lines_list.append(f"Proof coverage: {coverage_str} must items have proof recorded")
+
+    try:
+        (proofs_dir / "proof-report.md").write_text("\n".join(report_lines_list) + "\n")
+        file_count += 1
+    except OSError:
+        pass
+
+    return file_count, coverage_str
+
+
+def _unwrap_tool_result_content(content: Any) -> str:
+    """Extract text from a ToolResultBlock's content.
+
+    The SDK content can be a string, a list of dicts with {type, text}, etc.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict) and "text" in item:
+                parts.append(item["text"])
+            elif isinstance(item, str):
+                parts.append(item)
+            elif hasattr(item, "text"):
+                parts.append(str(item.text))
+        return "\n".join(parts)
+    if hasattr(content, "text"):
+        return str(content.text)
+    return str(content) if content else ""
+
+
 async def run_qa_agent_v45(
     task: dict[str, Any],
     spec: list,
@@ -184,10 +499,11 @@ async def run_qa_agent_v45(
     focus_items: list | None = None,
     prev_failed: list[str] | None = None,
     on_progress: Any = None,
+    log_dir: Path | None = None,
 ) -> dict[str, Any]:
     """v4.5 QA agent — structured JSON verdict, risk-based tiering.
 
-    Returns {must_passed, verdict, raw_report, cost_usd}.
+    Returns {must_passed, verdict, raw_report, cost_usd, proof_count, proof_coverage}.
     """
     from otto.tasks import spec_text, spec_binding, spec_is_verifiable
 
@@ -286,6 +602,8 @@ Write your JSON verdict to: {verdict_file}
     qa_timeout = config.get("qa_timeout", 3600)
     report_lines: list[str] = []
     qa_cost = 0.0
+    qa_actions: list[dict] = []
+    _pending_tool_uses: dict[str, dict] = {}  # tool_use_id -> action dict
 
     from otto.display import build_agent_tool_event as _build_agent_tool_event
 
@@ -323,23 +641,68 @@ Write your JSON verdict to: {verdict_file}
                                         except Exception:
                                             pass
                         elif ToolUseBlock and isinstance(block, ToolUseBlock):
+                            # Capture QA actions for proof artifacts
+                            tool_id = getattr(block, "id", None)
+                            inp = block.input or {}
+                            if block.name == "Bash":
+                                action = {
+                                    "type": "bash",
+                                    "command": inp.get("command", ""),
+                                    "output": "",
+                                }
+                                qa_actions.append(action)
+                                if tool_id:
+                                    _pending_tool_uses[tool_id] = action
+                            elif block.name.startswith("mcp__"):
+                                mcp_action = block.name.split("__")[-1]
+                                action = {
+                                    "type": "browser",
+                                    "action": mcp_action,
+                                    "detail": inp.get("url", "") or inp.get("selector", "") or inp.get("function", ""),
+                                    "input": json.dumps(inp) if inp else "",
+                                    "output": "",
+                                }
+                                if mcp_action == "take_screenshot":
+                                    # Store path from input if available
+                                    action["path"] = inp.get("path", "")
+                                    action["detail"] = inp.get("description", "") or inp.get("detail", "")
+                                qa_actions.append(action)
+                                if tool_id:
+                                    _pending_tool_uses[tool_id] = action
                             if on_progress:
                                 try:
                                     event = _build_agent_tool_event(block)
                                     # Also capture browser/MCP tools
                                     if not event and block.name.startswith("mcp__"):
-                                        action = block.name.split("__")[-1]
+                                        action_name = block.name.split("__")[-1]
                                         detail = ""
-                                        inp = block.input or {}
                                         if "url" in inp:
                                             detail = inp["url"][:60]
                                         elif "selector" in inp:
                                             detail = inp["selector"][:60]
-                                        event = {"name": f"Browser:{action}", "detail": detail}
+                                        event = {"name": f"Browser:{action_name}", "detail": detail}
                                     if event:
                                         on_progress("agent_tool", event)
                                 except Exception:
                                     pass
+                        elif ToolResultBlock and isinstance(block, ToolResultBlock):
+                            # Match result to pending tool use by tool_use_id
+                            tid = getattr(block, "tool_use_id", None)
+                            if tid and tid in _pending_tool_uses:
+                                raw_content = _unwrap_tool_result_content(
+                                    getattr(block, "content", "")
+                                )
+                                _pending_tool_uses[tid]["output"] = raw_content
+                # Handle UserMessage containing ToolResultBlocks
+                elif UserMessage and isinstance(message, UserMessage):
+                    for block in getattr(message, "content", []):
+                        if ToolResultBlock and isinstance(block, ToolResultBlock):
+                            tid = getattr(block, "tool_use_id", None)
+                            if tid and tid in _pending_tool_uses:
+                                raw_content = _unwrap_tool_result_content(
+                                    getattr(block, "content", "")
+                                )
+                                _pending_tool_uses[tid]["output"] = raw_content
             # Extract cost from the final result (after stream completes)
             if _result_msg:
                 raw_cost = getattr(_result_msg, "total_cost_usd", None)
@@ -399,6 +762,18 @@ Write your JSON verdict to: {verdict_file}
 
     must_passed = verdict.get("must_passed", False)
 
+    # Write proof artifacts if log_dir is provided
+    proof_count = 0
+    proof_coverage = ""
+    if log_dir:
+        try:
+            proof_count, proof_coverage = _write_proof_artifacts(
+                log_dir, verdict, qa_actions, task,
+                original_prompt, qa_cost,
+            )
+        except Exception:
+            pass
+
     # Emit summary for display
     if on_progress:
         try:
@@ -409,6 +784,8 @@ Write your JSON verdict to: {verdict_file}
                 "total": total,
                 "passed": passed,
                 "failed": total - passed,
+                "proof_count": proof_count,
+                "proof_coverage": proof_coverage,
             })
         except Exception:
             pass
@@ -418,4 +795,6 @@ Write your JSON verdict to: {verdict_file}
         "verdict": verdict,
         "raw_report": raw_report,
         "cost_usd": qa_cost,
+        "proof_count": proof_count,
+        "proof_coverage": proof_coverage,
     }

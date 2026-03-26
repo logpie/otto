@@ -1,4 +1,4 @@
-"""Otto verification — tiered verification in disposable worktree."""
+"""Otto testing — run test suites in disposable worktrees."""
 
 import os
 import signal
@@ -47,7 +47,7 @@ def _verification_env(venv_bin: str | None = None) -> dict:
 
 
 def _install_deps(worktree_path: Path, timeout: int) -> str | None:
-    """Auto-detect and install project dependencies in the verify worktree.
+    """Auto-detect and install project dependencies in the test worktree.
 
     Creates an isolated venv inside the worktree for Python projects to prevent
     contaminating otto's own venv (e.g., a test project named 'python-dotenv'
@@ -132,7 +132,9 @@ class TierResult:
 
 
 @dataclass
-class VerifyResult:
+class TestSuiteResult:
+    __test__ = False  # prevent pytest from trying to collect this dataclass
+
     passed: bool
     tiers: list[TierResult] = field(default_factory=list)
 
@@ -201,7 +203,7 @@ def _run_shell_command(
     )
 
 
-def run_tier1(
+def run_local_tests(
     workdir: Path,
     test_command: str | None,
     timeout: int,
@@ -228,43 +230,43 @@ def run_tier1(
 
 def run_tier3(
     workdir: Path,
-    verify_cmd: str | None,
+    custom_test_cmd: str | None,
     timeout: int,
     env: dict | None = None,
 ) -> TierResult:
-    """Run custom verify command."""
-    if not verify_cmd:
-        return TierResult(tier="custom_verify", passed=True, skipped=True)
+    """Run custom test command."""
+    if not custom_test_cmd:
+        return TierResult(tier="custom_test", passed=True, skipped=True)
     try:
         result = _run_shell_command(
-            verify_cmd,
+            custom_test_cmd,
             workdir,
             timeout,
             executable="/bin/bash",
             env=env,
         )
         return TierResult(
-            tier="custom_verify",
+            tier="custom_test",
             passed=result.returncode == 0,
             output=result.stdout + result.stderr,
         )
     except subprocess.TimeoutExpired:
         return TierResult(
-            tier="custom_verify",
+            tier="custom_test",
             passed=False,
             output=f"Timeout after {timeout}s",
         )
 
 
-def run_verification(
+def run_test_suite(
     project_dir: Path,
     candidate_sha: str,
     test_command: str | None,
-    verify_cmd: str | None,
+    custom_test_cmd: str | None,
     timeout: int,
     exclude_test_files: list[Path] | None = None,
-) -> VerifyResult:
-    """Run all verification tiers in a disposable worktree.
+) -> TestSuiteResult:
+    """Run all test tiers in a disposable worktree.
 
     exclude_test_files: paths (relative to project root) to delete from
     the disposable worktree before running tests. Used in parallel mode
@@ -290,22 +292,22 @@ def run_verification(
                     excl.unlink()
 
         # Install project dependencies in the disposable worktree.
-        # Without this, projects using third-party libs fail verification.
+        # Without this, projects using third-party libs fail testing.
         venv_bin = _install_deps(worktree_path, timeout)
         env = _verification_env(venv_bin)
 
         # Run all tests (existing + spec-generated) in one pass
-        t1 = run_tier1(worktree_path, test_command, timeout, env=env)
+        t1 = run_local_tests(worktree_path, test_command, timeout, env=env)
         tiers.append(t1)
         if not t1.passed and not t1.skipped:
-            return VerifyResult(passed=False, tiers=tiers)
+            return TestSuiteResult(passed=False, tiers=tiers)
 
-        # Custom verify command (if provided)
-        t3 = run_tier3(worktree_path, verify_cmd, timeout, env=env)
+        # Custom test command (if provided)
+        t3 = run_tier3(worktree_path, custom_test_cmd, timeout, env=env)
         tiers.append(t3)
 
         all_passed = all(t.passed for t in tiers)
-        return VerifyResult(passed=all_passed, tiers=tiers)
+        return TestSuiteResult(passed=all_passed, tiers=tiers)
 
     finally:
         # Always clean up the worktree
@@ -323,7 +325,7 @@ def run_integration_gate(
     test_command: str | None,
     integration_test_file: Path | None,
     timeout: int,
-) -> VerifyResult:
+) -> TestSuiteResult:
     """Run integration gate in a clean disposable worktree.
 
     Tests HEAD of the current branch (all tasks already merged).
@@ -354,11 +356,11 @@ def run_integration_gate(
         env = _verification_env(venv_bin)
 
         # Run full test suite (regression + integration tests in one pass)
-        t1 = run_tier1(worktree_path, test_command, timeout, env=env)
+        t1 = run_local_tests(worktree_path, test_command, timeout, env=env)
         tiers.append(t1)
 
         all_passed = all(t.passed for t in tiers)
-        return VerifyResult(passed=all_passed, tiers=tiers)
+        return TestSuiteResult(passed=all_passed, tiers=tiers)
 
     finally:
         subprocess.run(

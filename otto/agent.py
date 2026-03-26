@@ -40,9 +40,9 @@ except (ImportError, AttributeError):
     AgentDefinition = None  # type: ignore[assignment,misc]
 
 # Re-export _subprocess_env so callers can import from one place.
-# The canonical implementation lives in verify.py (used there for non-agent
+# The canonical implementation lives in testing.py (used there for non-agent
 # subprocess calls too).
-from otto.verify import _subprocess_env  # noqa: F401
+from otto.testing import _subprocess_env  # noqa: F401
 
 
 # ---------------------------------------------------------------------------

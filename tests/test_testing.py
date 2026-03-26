@@ -1,4 +1,4 @@
-"""Tests for otto.verify module."""
+"""Tests for otto.testing module."""
 
 import os
 import signal
@@ -9,41 +9,41 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 
-from otto.verify import (
+from otto.testing import (
     TierResult,
-    VerifyResult,
+    TestSuiteResult,
     _install_deps,
-    run_tier1,
+    run_local_tests,
     run_tier3,
     run_integration_gate,
-    run_verification,
+    run_test_suite,
 )
 
 
-class TestRunTier1:
+class TestRunLocalTests:
     def test_passes_when_tests_pass(self, tmp_git_repo):
         # Create a passing test
         tests_dir = tmp_git_repo / "tests"
         tests_dir.mkdir()
         (tests_dir / "test_basic.py").write_text("def test_ok(): assert True\n")
-        result = run_tier1(tmp_git_repo, "pytest", timeout=60)
+        result = run_local_tests(tmp_git_repo, "pytest", timeout=60)
         assert result.passed
 
     def test_fails_when_tests_fail(self, tmp_git_repo):
         tests_dir = tmp_git_repo / "tests"
         tests_dir.mkdir()
         (tests_dir / "test_basic.py").write_text("def test_bad(): assert False\n")
-        result = run_tier1(tmp_git_repo, "pytest", timeout=60)
+        result = run_local_tests(tmp_git_repo, "pytest", timeout=60)
         assert not result.passed
         assert result.output  # Should capture error output
 
     def test_skips_when_no_command(self, tmp_git_repo):
-        result = run_tier1(tmp_git_repo, None, timeout=60)
+        result = run_local_tests(tmp_git_repo, None, timeout=60)
         assert result.passed  # Skip = not a failure
         assert result.skipped
 
-    @patch("otto.verify.os.killpg")
-    @patch("otto.verify.subprocess.Popen")
+    @patch("otto.testing.os.killpg")
+    @patch("otto.testing.subprocess.Popen")
     def test_timeout_kills_process_group(self, mock_popen, mock_killpg, tmp_git_repo):
         proc = MagicMock()
         proc.pid = 4321
@@ -55,7 +55,7 @@ class TestRunTier1:
         ]
         mock_popen.return_value = proc
 
-        result = run_tier1(tmp_git_repo, "pytest", timeout=1)
+        result = run_local_tests(tmp_git_repo, "pytest", timeout=1)
 
         assert not result.passed
         assert "timeout" in result.output.lower()
@@ -80,8 +80,8 @@ class TestRunTier3:
         assert not result.passed
         assert "timeout" in result.output.lower()
 
-    @patch("otto.verify.os.killpg")
-    @patch("otto.verify.subprocess.Popen")
+    @patch("otto.testing.os.killpg")
+    @patch("otto.testing.subprocess.Popen")
     def test_timeout_uses_bash_and_terminates_process_group(self, mock_popen, mock_killpg, tmp_git_repo):
         proc = MagicMock()
         proc.pid = 9876
@@ -100,7 +100,7 @@ class TestRunTier3:
         assert mock_killpg.call_args_list == [call(9876, signal.SIGTERM)]
 
 
-class TestRunVerification:
+class TestRunTestSuite:
     def _make_commit(self, repo):
         """Helper: create a commit and return its SHA."""
         (repo / "hello.py").write_text("print('hello')\n")
@@ -116,11 +116,11 @@ class TestRunVerification:
     def test_creates_and_cleans_up_worktree(self, tmp_git_repo):
         """Verify that a disposable worktree is created and removed."""
         head = self._make_commit(tmp_git_repo)
-        result = run_verification(
+        result = run_test_suite(
             project_dir=tmp_git_repo,
             candidate_sha=head,
             test_command=None,
-            verify_cmd=None,
+            custom_test_cmd=None,
             timeout=60,
         )
         assert result.passed
@@ -147,11 +147,11 @@ class TestRunVerification:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
 
-        result = run_verification(
+        result = run_test_suite(
             project_dir=tmp_git_repo,
             candidate_sha=head,
             test_command="pytest",
-            verify_cmd="echo should_not_run",
+            custom_test_cmd="echo should_not_run",
             timeout=60,
         )
         assert not result.passed
@@ -160,38 +160,38 @@ class TestRunVerification:
         assert result.tiers[0].tier == "existing_tests"
         assert result.failure_output  # Should have meaningful content
 
-    @patch("otto.verify.run_tier3")
-    @patch("otto.verify.run_tier1")
-    @patch("otto.verify._install_deps")
+    @patch("otto.testing.run_tier3")
+    @patch("otto.testing.run_local_tests")
+    @patch("otto.testing._install_deps")
     def test_threads_worktree_venv_env_into_tiers(
         self,
         mock_install_deps,
-        mock_run_tier1,
+        mock_run_local_tests,
         mock_run_tier3,
         tmp_git_repo,
     ):
         head = self._make_commit(tmp_git_repo)
         mock_install_deps.return_value = "/tmp/worktree/.venv/bin"
-        mock_run_tier1.return_value = TierResult(tier="existing_tests", passed=True)
-        mock_run_tier3.return_value = TierResult(tier="custom_verify", passed=True)
+        mock_run_local_tests.return_value = TierResult(tier="existing_tests", passed=True)
+        mock_run_tier3.return_value = TierResult(tier="custom_test", passed=True)
 
-        result = run_verification(
+        result = run_test_suite(
             project_dir=tmp_git_repo,
             candidate_sha=head,
             test_command="pytest",
-            verify_cmd="echo ok",
+            custom_test_cmd="echo ok",
             timeout=60,
         )
 
         assert result.passed
-        tier1_env = mock_run_tier1.call_args.kwargs["env"]
+        tier1_env = mock_run_local_tests.call_args.kwargs["env"]
         tier3_env = mock_run_tier3.call_args.kwargs["env"]
         assert tier1_env["PATH"].split(os.pathsep)[0] == "/tmp/worktree/.venv/bin"
         assert tier3_env["PATH"].split(os.pathsep)[0] == "/tmp/worktree/.venv/bin"
 
 
 class TestInstallDeps:
-    @patch("otto.verify.subprocess.run")
+    @patch("otto.testing.subprocess.run")
     def test_skips_pip_install_when_venv_creation_fails(self, mock_run, tmp_path):
         """When venv can't be created, skip pip install entirely to avoid
         contaminating otto's venv."""
@@ -212,11 +212,11 @@ class TestInstallDeps:
 
 
 class TestIntegrationGate:
-    @patch("otto.verify.run_tier1")
-    @patch("otto.verify._install_deps")
-    def test_installs_deps_and_threads_env(self, mock_install_deps, mock_run_tier1, tmp_git_repo):
+    @patch("otto.testing.run_local_tests")
+    @patch("otto.testing._install_deps")
+    def test_installs_deps_and_threads_env(self, mock_install_deps, mock_run_local_tests, tmp_git_repo):
         mock_install_deps.return_value = "/tmp/worktree/.venv/bin"
-        mock_run_tier1.return_value = TierResult(tier="existing_tests", passed=True)
+        mock_run_local_tests.return_value = TierResult(tier="existing_tests", passed=True)
 
         result = run_integration_gate(
             project_dir=tmp_git_repo,
@@ -227,5 +227,5 @@ class TestIntegrationGate:
 
         assert result.passed
         mock_install_deps.assert_called_once()
-        env = mock_run_tier1.call_args.kwargs["env"]
+        env = mock_run_local_tests.call_args.kwargs["env"]
         assert env["PATH"].split(os.pathsep)[0] == "/tmp/worktree/.venv/bin"
