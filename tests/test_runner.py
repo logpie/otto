@@ -9,7 +9,6 @@ import pytest
 from otto.runner import (
     _audit_proof_sufficiency,
     _build_qa_retry_error,
-    _run_durable_regression,
     _restore_workspace_state,
     check_clean_tree,
     create_task_branch,
@@ -195,20 +194,6 @@ class TestQaProofHelpers:
         assert "Passed [must ◈] missing screenshot in qa-proofs/: Layout matches mock" in report
         assert mock_warn.call_count == 2
         assert ("qa_finding", {"text": "[warning] Passed [must] missing proof: API returns JSON"}) in emit_events
-
-    def test_runs_durable_regression_script(self, tmp_path):
-        log_dir = tmp_path / "logs"
-        proofs_dir = log_dir / "qa-proofs"
-        proofs_dir.mkdir(parents=True)
-        script = proofs_dir / "durable-regression.sh"
-        script.write_text("#!/bin/bash\nset -e\n\necho replay\nfalse\n")
-
-        result = _run_durable_regression(tmp_path, log_dir, timeout=5, attempt_num=2)
-
-        assert result is not None
-        assert result[0] is False
-        assert "replay" in result[1]
-        assert (log_dir / "attempt-2-durable-regression.log").exists()
 
 
 class TestTamperDetection:

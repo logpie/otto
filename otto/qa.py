@@ -288,28 +288,6 @@ def _is_non_replayable(cmd: str) -> bool:
     return False
 
 
-def _read_regression_commands(script_path: Path) -> list[str]:
-    """Read command lines back out of a generated regression script."""
-    if not script_path.exists():
-        return []
-    try:
-        lines = script_path.read_text().splitlines()
-    except OSError:
-        return []
-
-    commands: list[str] = []
-    for line in lines:
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if stripped.startswith("#!") or stripped == "set -e":
-            continue
-        if stripped.startswith('echo "Running:') or stripped == 'echo "All regression checks passed."':
-            continue
-        commands.append(stripped)
-    return commands
-
-
 def _dedupe_commands(commands: list[str]) -> list[str]:
     """Deduplicate commands while preserving order."""
     seen: set[str] = set()
@@ -365,10 +343,8 @@ def _write_proof_artifacts(
     import shutil
 
     proofs_dir = log_dir / "qa-proofs"
-    durable_script_path = proofs_dir / "durable-regression.sh"
-    durable_commands = _read_regression_commands(durable_script_path)
 
-    # Preserve screenshots and durable regression commands but clean everything else
+    # Preserve screenshots but clean everything else
     screenshots: list[tuple[str, bytes]] = []
     if proofs_dir.exists():
         for f in proofs_dir.iterdir():
@@ -413,21 +389,21 @@ def _write_proof_artifacts(
 
     # Build regression-check.sh from verification commands
     verification_cmds: list[str] = []
-    durable_new_cmds: list[str] = []
     for action in qa_actions:
         if action.get("type") == "bash":
             cmd = action.get("command", "")
-            if cmd and _is_verification_command(cmd) and not _is_non_replayable(cmd):
+            if (
+                cmd
+                and not action.get("is_error", False)
+                and _is_verification_command(cmd)
+                and not _is_non_replayable(cmd)
+            ):
                 verification_cmds.append(cmd)
-                if not action.get("is_error", False):
-                    durable_new_cmds.append(cmd)
 
     verification_cmds = _dedupe_commands(verification_cmds)
-    durable_commands = _dedupe_commands(durable_commands + durable_new_cmds)
 
     if _write_regression_script(proofs_dir / "regression-check.sh", verification_cmds):
         file_count += 1
-    _write_regression_script(proofs_dir / "durable-regression.sh", durable_commands)
 
     # Build proof-report.md
     task_key = task.get("key", "unknown")

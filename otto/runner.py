@@ -575,36 +575,6 @@ def _audit_proof_sufficiency(
     return warnings
 
 
-def _run_durable_regression(
-    project_dir: Path,
-    log_dir: Path,
-    timeout: int,
-    attempt_num: int,
-) -> tuple[bool, str] | None:
-    """Replay durable proof commands from earlier QA attempts on retries."""
-    script_path = log_dir / "qa-proofs" / "durable-regression.sh"
-    if not script_path.exists():
-        return None
-
-    try:
-        result = subprocess.run(
-            ["bash", str(script_path)],
-            cwd=project_dir,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-        output = "\n".join(part for part in [result.stdout, result.stderr] if part).strip()
-    except subprocess.TimeoutExpired as exc:
-        output = "\n".join(part for part in [exc.stdout or "", exc.stderr or ""] if part).strip()
-        output = f"durable regression timed out after {timeout}s\n{output}".strip()
-        _write_log_safe(log_dir, f"attempt-{attempt_num}-durable-regression.log", output)
-        return False, output
-
-    _write_log_safe(log_dir, f"attempt-{attempt_num}-durable-regression.log", output or "PASS")
-    return result.returncode == 0, output
-
-
 def _build_coding_prompt(
     prompt: str,
     project_dir: Path,
@@ -1683,16 +1653,6 @@ async def run_task_v45(
             # Coding succeeded — agent produced changes
             emit("phase", name="coding", status="done", time_s=coding_elapsed,
                  cost=attempt_cost, attempt=attempt_num)
-
-            if attempt > 0:
-                durable_result = _run_durable_regression(
-                    project_dir, log_dir, test_timeout, attempt_num,
-                )
-                if durable_result and not durable_result[0]:
-                    # Advisory only — code changed, old proof commands may legitimately fail
-                    _log_warn("durable proof regression failed (code changed — may be expected)")
-                    emit("phase", name="test", status="done", time_s=0,
-                         detail="durable regression: some prior proofs failed")
 
             # ── Build candidate + verify ────────────────────────────────
             candidate_sha = build_candidate_commit(
