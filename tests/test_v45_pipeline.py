@@ -881,8 +881,8 @@ class TestSystemPromptPreset:
         """Coding agent must use preset to keep CC defaults (Glob over find, etc.)."""
         import ast
         import inspect
-        from otto.runner import run_task_v45
-        source = inspect.getsource(run_task_v45)
+        from otto.runner import _run_coding_agent
+        source = inspect.getsource(_run_coding_agent)
         # Check that system_prompt uses preset pattern, not a raw string or None
         assert '"type": "preset"' in source or "preset" in source, \
             "Coding agent must use system_prompt preset to preserve CC defaults"
