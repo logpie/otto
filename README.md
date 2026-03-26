@@ -19,7 +19,7 @@ For each task, Otto:
 4. **QA agent reviews** — adversarial testing against spec + original prompt. Risk-based tiering: skip QA when all specs have tests (tier 0), targeted checks (tier 1), or full adversarial testing with browser (tier 2).
 5. **Merges** — squash merge to main, clean git history.
 
-Failed tasks get structured retry: the coding agent receives specific failure criteria and evidence, not raw error dumps.
+Failed tasks get structured retry: the coding agent receives a focused failure excerpt (not 847K of raw test output), and pre-existing flaky tests are excluded from retry decisions.
 
 ## What you see
 
@@ -60,9 +60,10 @@ Failed tasks get structured retry: the coding agent receives specific failure cr
         ease-in-out over 3s with modest scale(1.08)
       · [should] Accessible with aria-label
         role='img' and aria-label present
-  17:13:41  ✓ qa  109s  $0.39  tier 2  5 specs passed
+  17:13:41  ✓ qa  109s  $0.39  tier 2  5 specs passed  5/5 proved
   17:13:41  ✓ passed  5m36s  $1.47
     3 files · 8 specs verified
+       proofs: /tmp/project/otto_logs/abc12345/qa-proofs/proof-report.md
 
   1/1 tasks passed
 ```
@@ -144,18 +145,58 @@ Each spec item has a binding level and verifiability marker:
 
 ### QA verdict
 
-QA produces structured JSON with per-item evidence:
+QA produces structured JSON with per-item evidence and proof:
 
 ```json
 {
   "must_passed": true,
   "must_items": [
-    {"criterion": "...", "status": "pass", "evidence": "tests pass, curl returns 200"}
-  ],
-  "should_notes": [
-    {"criterion": "...", "observation": "uses consistent styling"}
+    {
+      "spec_id": 1,
+      "criterion": "Banner appears when wind > 60 km/h",
+      "status": "pass",
+      "evidence": "detectSeverityConditions checks all 4 thresholds",
+      "proof": [
+        "ran jest weatherAlerts: 'detects wind > 60 km/h' passes",
+        "browser: banner visible after injecting extreme data",
+        "screenshot: qa-proofs/screenshot-banner.png"
+      ]
+    }
   ]
 }
+```
+
+### Proof of work
+
+Each task produces reproducible evidence in `otto_logs/<key>/qa-proofs/`:
+
+```
+qa-proofs/
+  proof-report.md          Human-readable proof per must item
+  regression-check.sh      Re-runnable verification commands
+  must-1.md ... must-N.md  Per-item criterion + status + evidence
+  screenshot-*.png         Browser screenshots (visual ◈ items)
+```
+
+The **proof report** shows per-item proof with coverage:
+
+```markdown
+## ✓ [1] Banner appears when wind > 60 km/h
+Evidence: detectSeverityConditions checks all 4 thresholds
+Proof:
+- ran jest weatherAlerts: 'detects wind > 60 km/h' passes
+- browser: banner visible after injecting extreme data
+- screenshot-banner.png — Red banner at top with all conditions
+
+---
+Proof coverage: 6/6 must items have proof recorded
+```
+
+The **regression script** is independently runnable ground truth — a third party can re-run it without trusting the agent:
+
+```bash
+bash otto_logs/<key>/qa-proofs/regression-check.sh
+# → Test Suites: 43 passed, Tests: 997 passed
 ```
 
 ### Display
@@ -202,6 +243,9 @@ otto/
   orchestrator.py     — Multi-task batch execution, integration branch
   display.py          — Live terminal display with semantic color hierarchy
   display_preview.py  — HTML preview tool for display debugging
+  claim_verify.py     — Regex audit of agent log vs verify evidence
+  retry_excerpt.py    — Failure extraction from test output for retries
+  flaky.py            — Pre-existing flaky test detection
   context.py          — Cross-task learnings with provenance
   theme.py            — Shared console and styling constants
 ```
