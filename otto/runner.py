@@ -347,6 +347,7 @@ async def coding_loop(
                     passed=data.get("passed", 0),
                     failed=data.get("failed", 0),
                     proof_count=data.get("proof_count", 0),
+                    proof_coverage=data.get("proof_coverage", ""),
                 )
             elif event_type == "attempt_boundary":
                 display.add_attempt_boundary(

@@ -159,7 +159,7 @@ class TestCodingLoopDisplay:
                 await coding_loop(tp, ctx, config, tmp_git_repo, telemetry, tasks_path)
 
         assert mock_display.add_finding.call_count == 2
-        mock_display.set_qa_summary.assert_called_once_with(total=2, passed=1, failed=1, proof_count=0)
+        mock_display.set_qa_summary.assert_called_once_with(total=2, passed=1, failed=1, proof_count=0, proof_coverage="")
 
     @pytest.mark.asyncio
     async def test_spec_and_qa_item_events_routed_to_display(self, tmp_git_repo):

@@ -30,7 +30,7 @@ class TestWriteProofArtifacts:
         log_dir.mkdir()
         verdict = self._make_verdict()
         task = {"key": "test123"}
-        count = _write_proof_artifacts(log_dir, verdict, [], task, "Test prompt", 0.50)
+        count, _coverage = _write_proof_artifacts(log_dir, verdict, [], task, "Test prompt", 0.50)
         assert (log_dir / "qa-proofs").is_dir()
         assert count > 0
 
@@ -170,10 +170,10 @@ class TestWriteProofArtifacts:
         assert "test123" in content
         assert "$0.50" in content
         assert "Function returns correct value" in content
-        assert "Browser Assertions" in content
-        assert "rgba(255, 0, 0, 0.2)" in content
-        assert "Severity banner visible" in content
+        # Screenshots section
+        assert "Screenshots" in content
         assert "[screenshot-banner.png](screenshot-banner.png)" in content
+        # should notes NOT in proof report (they're in must-N.md only)
         assert "Good variable names" not in content
 
     def test_no_bash_commands_no_script(self, tmp_path):
@@ -185,7 +185,7 @@ class TestWriteProofArtifacts:
         qa_actions = [
             {"type": "browser", "action": "navigate", "detail": "http://localhost:3000"},
         ]
-        count = _write_proof_artifacts(log_dir, verdict, qa_actions, task, "Test prompt", 0.50)
+        count, _coverage = _write_proof_artifacts(log_dir, verdict, qa_actions, task, "Test prompt", 0.50)
 
         # Should have must proofs + report but no regression script
         assert (log_dir / "qa-proofs" / "must-1.md").exists()
@@ -197,7 +197,7 @@ class TestWriteProofArtifacts:
         log_dir.mkdir()
         verdict = {"must_passed": True, "must_items": [], "should_notes": []}
         task = {"key": "test123"}
-        count = _write_proof_artifacts(log_dir, verdict, [], task, "Test prompt", 0.0)
+        count, _coverage = _write_proof_artifacts(log_dir, verdict, [], task, "Test prompt", 0.0)
         # Should write proof-report.md at minimum
         assert (log_dir / "qa-proofs" / "proof-report.md").exists()
         assert count >= 1
@@ -250,35 +250,20 @@ class TestWriteProofArtifacts:
         assert "npx jest --runInBand" in report
         assert "npx jest --runInBand" in script
 
-    def test_new_page_is_not_reported_as_browser_assertion(self, tmp_path):
+    def test_new_page_not_in_regression_script(self, tmp_path):
+        """Navigation actions (new_page) should not appear in regression script."""
         log_dir = tmp_path / "logs"
         log_dir.mkdir()
         verdict = self._make_verdict()
         task = {"key": "test123"}
         qa_actions = [
-            {
-                "type": "browser",
-                "action": "new_page",
-                "detail": "http://localhost:3000",
-                "output": "Opened a new page",
-            },
-            {
-                "type": "browser",
-                "action": "evaluate_script",
-                "detail": ".banner",
-                "input": "{\"function\":\"() => document.querySelector('.banner').textContent\"}",
-                "output": "Ready",
-            },
+            {"type": "browser", "action": "new_page", "detail": "http://localhost:3000", "output": "Opened"},
+            {"type": "bash", "command": "npx jest", "output": "ok"},
         ]
-
         _write_proof_artifacts(log_dir, verdict, qa_actions, task, "Test prompt", 0.50)
-
-        report = (log_dir / "qa-proofs" / "proof-report.md").read_text()
-        assert "Browser Assertions" in report
-        assert "evaluate_script" in report
-        assert "Ready" in report
-        assert "new_page" not in report
-        assert "Opened a new page" not in report
+        script = (log_dir / "qa-proofs" / "regression-check.sh").read_text()
+        assert "new_page" not in script
+        assert "npx jest" in script
 
     def test_normalizes_prompt_whitespace_in_report_header(self, tmp_path):
         log_dir = tmp_path / "logs"
@@ -386,8 +371,7 @@ class TestRunQaAgentStreamCapture:
 
         report = (tmp_path / "logs" / "qa-proofs" / "proof-report.md").read_text()
         assert result["must_passed"] is True
-        assert "Observed output: not captured" not in report
+        # Bash output captured and shown in verification commands
         assert "1 passed in 0.12s" in report
-        assert "Script ran on page..." in report
-        assert "{\"state\":\"ready\"}" in report
+        # Raw SDK list format NOT in report
         assert "[{'type': 'text'" not in report

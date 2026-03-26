@@ -119,6 +119,7 @@ def _make_task_display_progress_callback(display: TaskDisplay):
                     passed=data.get("passed", 0),
                     failed=data.get("failed", 0),
                     proof_count=data.get("proof_count", 0),
+                    proof_coverage=data.get("proof_coverage", ""),
                 )
         except Exception:
             pass

@@ -70,7 +70,7 @@ class TestProofOfWorkE2E:
         task = {"key": "CALC-101"}
         prompt = "Implement calculator functions: add, subtract, multiply"
 
-        count = _write_proof_artifacts(log_dir, verdict, qa_actions, task, prompt, 0.42)
+        count, _coverage = _write_proof_artifacts(log_dir, verdict, qa_actions, task, prompt, 0.42)
 
         proofs_dir = log_dir / "qa-proofs"
         assert proofs_dir.is_dir()
@@ -138,7 +138,7 @@ class TestProofOfWorkE2E:
             {"type": "bash", "command": "curl -s http://localhost:3000/api/data", "output": "200 OK"},
         ]
         task = {"key": "API-42"}
-        count = _write_proof_artifacts(
+        count, _coverage = _write_proof_artifacts(
             log_dir, verdict, qa_actions, task,
             "Implement data API with rate limiting", 0.85,
         )
@@ -172,8 +172,10 @@ class TestProofOfWorkE2E:
         verdict = _make_verdict(
             must_passed=True,
             must_items=[
-                {"criterion": "Page loads", "status": "pass", "evidence": "200 OK"},
-                {"criterion": "Form submits", "status": "pass", "evidence": "Screenshot confirms"},
+                {"criterion": "Page loads", "status": "pass", "evidence": "200 OK",
+                 "proof": ["jest: 2 passed", "curl health check returns ok"]},
+                {"criterion": "Form submits", "status": "pass", "evidence": "Screenshot confirms",
+                 "proof": ["browser: form-status shows 'Submitted'", "screenshot: qa-proofs/screenshot-form.png"]},
             ],
         )
         qa_actions = [
@@ -198,11 +200,13 @@ class TestProofOfWorkE2E:
         _write_proof_artifacts(log_dir, verdict, qa_actions, task, "Build form page", 1.20)
 
         report = (proofs_dir / "proof-report.md").read_text()
-        assert "Browser Assertions" in report
-        assert "Submitted" in report
+        # Per-item proof from verdict
+        assert "jest: 2 passed" in report
+        assert "form-status shows" in report
         assert "Screenshots" in report
-        assert "Form success state" in report
-        assert "navigate" not in report
+        assert "Form success state" in report or "screenshot-form.png" in report
+        # Proof coverage
+        assert "2/2" in report
 
         # regression-check.sh has only bash commands (no browser)
         script = (proofs_dir / "regression-check.sh").read_text()
@@ -506,7 +510,7 @@ class TestProofOfWorkE2E:
         )
         # No qa_actions at all
         task = {"key": "REVIEW-1"}
-        count = _write_proof_artifacts(log_dir, verdict, [], task, "Code review task", 0.10)
+        count, _coverage = _write_proof_artifacts(log_dir, verdict, [], task, "Code review task", 0.10)
 
         proofs_dir = log_dir / "qa-proofs"
 

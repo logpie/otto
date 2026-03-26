@@ -56,7 +56,13 @@ Write your verdict to the output file as JSON:
 {
   "must_passed": true/false,
   "must_items": [
-    {"criterion": "...", "status": "pass/fail", "evidence": "..."}
+    {
+      "spec_id": N,
+      "criterion": "...",
+      "status": "pass/fail",
+      "evidence": "...",
+      "proof": ["what you did to verify — test names, browser checks, screenshots"]
+    }
   ],
   "should_notes": [
     {"criterion": "...", "observation": "...", "screenshot": "path or null"}
@@ -65,6 +71,13 @@ Write your verdict to the output file as JSON:
   "prompt_intent": "Implementation matches/diverges from original prompt because...",
   "extras": ["Agent added contributing factor explanations — improves UX"]
 }
+
+For each [must] item, include spec_id (matching the criterion number above)
+and a "proof" array — short strings describing what you did to verify:
+  "ran jest weatherAlerts: 'shows banner for high wind' passes"
+  "browser: banner visible with wind=80 injected"
+  "screenshot: qa-proofs/screenshot-banner.png shows red banner"
+Only cite proof that directly verifies THAT criterion, not exploration.
 
 Kill any servers you started (by PID, not pkill)."""
 
@@ -478,9 +491,10 @@ Save any browser screenshots to: {log_dir / "qa-proofs" if log_dir else "/tmp"}/
 
     # Write proof artifacts if log_dir provided
     proof_count = 0
+    proof_coverage = ""
     if log_dir:
         try:
-            proof_count = _write_proof_artifacts(
+            proof_count, proof_coverage = _write_proof_artifacts(
                 log_dir, verdict, qa_actions, task, original_prompt, qa_cost,
             )
         except Exception:
@@ -497,6 +511,7 @@ Save any browser screenshots to: {log_dir / "qa-proofs" if log_dir else "/tmp"}/
                 "passed": passed,
                 "failed": total - passed,
                 "proof_count": proof_count,
+                "proof_coverage": proof_coverage,
             })
         except Exception:
             pass
@@ -507,6 +522,7 @@ Save any browser screenshots to: {log_dir / "qa-proofs" if log_dir else "/tmp"}/
         "raw_report": raw_report,
         "cost_usd": qa_cost,
         "proof_count": proof_count,
+        "proof_coverage": proof_coverage,
     }
 
 
@@ -773,60 +789,69 @@ def _write_proof_artifacts(
         "",
     ]
 
-    report_lines.append("## Must Verdict")
+    # Per-item proof sections
+    proof_coverage = 0
+    available_screenshots = {f.name for f in proofs_dir.glob("screenshot-*.png") if f.is_file()}
+
     for item in must_items:
+        spec_id = item.get("spec_id", "")
         criterion = item.get("criterion", "")
         status = item.get("status", "unknown")
+        evidence = item.get("evidence", "")
+        proof = item.get("proof", [])
         icon = "\u2713" if status == "pass" else "\u2717"
-        report_lines.append(f"- {icon} {criterion}")
+
+        id_str = f"[{spec_id}] " if spec_id else ""
+        report_lines.append(f"## {icon} {id_str}{criterion}")
+        if evidence:
+            report_lines.append(f"**Evidence:** {evidence}")
+
+        if proof and isinstance(proof, list):
+            proof_coverage += 1
+            report_lines.append("**Proof:**")
+            for p in proof:
+                p_str = str(p).strip()
+                # Check if this is a screenshot reference
+                if "screenshot" in p_str.lower() and "qa-proofs/" in p_str:
+                    # Extract filename
+                    for part in p_str.split():
+                        fname = Path(part).name if "/" in part else part
+                        if fname in available_screenshots:
+                            desc = p_str.split(fname)[-1].strip().lstrip("—-: ")
+                            report_lines.append(f"- [{fname}]({fname}){' — ' + desc if desc else ''}")
+                            break
+                    else:
+                        # No matching file
+                        report_lines.append(f"- {p_str} (missing)")
+                else:
+                    report_lines.append(f"- {p_str}")
+        else:
+            report_lines.append("**Proof:** (none recorded)")
+        report_lines.append("")
+
     if not must_items:
         report_lines.append("- No [must] items recorded")
-    report_lines.append("")
+        report_lines.append("")
 
+    # Verification commands section (ground truth from captured actions)
     replayable = [c for c in verification_commands
                   if not _is_non_replayable(c["command"])]
     if replayable:
-        report_lines.append("## Verification Commands")
-        for idx, cmd_info in enumerate(replayable, start=1):
+        report_lines.append("## Verification Commands (ground truth)")
+        for cmd_info in replayable:
             cmd = cmd_info["command"]
             output = _trim_evidence_output(cmd_info.get("output", ""))
-            report_lines.append(f"### VC{idx}")
-            report_lines.append("```bash")
-            report_lines.append(cmd)
-            report_lines.append("```")
+            report_lines.append(f"- `{cmd.replace(chr(10), ' ')[:100]}`")
             if output:
-                report_lines.append("Observed output:")
-                report_lines.append("```text")
-                report_lines.append(output)
-                report_lines.append("```")
-            else:
-                report_lines.append("Observed output: not captured")
-            report_lines.append("")
+                last_line = output.strip().splitlines()[-1].strip()[:80]
+                report_lines.append(f"  → {last_line}")
+        report_lines.append("")
 
-    browser_assertions = [
-        action for action in qa_actions
-        if action.get("type") == "browser" and _is_browser_assertion(action)
-    ]
-    if browser_assertions:
-        report_lines.append("## Browser Assertions")
-        for idx, action in enumerate(browser_assertions, start=1):
-            action_name = action.get("action", "browser_action")
-            assertion_input = _browser_assertion_input(action)
-            output = _trim_evidence_output(action.get("output", ""), max_lines=20, max_chars=2400)
-            report_lines.append(f"### BA{idx} `{action_name}`")
-            if assertion_input:
-                report_lines.append("Input:")
-                report_lines.append("```text")
-                report_lines.append(assertion_input)
-                report_lines.append("```")
-            if output:
-                report_lines.append("Observed output:")
-                report_lines.append("```text")
-                report_lines.append(output)
-                report_lines.append("```")
-            else:
-                report_lines.append("Observed output: not captured")
-            report_lines.append("")
+    # Proof coverage summary
+    report_lines.append(f"---")
+    report_lines.append(f"**Proof coverage:** {proof_coverage}/{len(must_items)} must items have proof recorded")
+    report_lines.append(f"Proof descriptions are QA's account. Regression script is independently runnable.")
+    report_lines.append("")
 
     # Collect screenshots saved by QA agent to qa-proofs/ and map by filePath
     browser_actions = [a for a in qa_actions if a["type"] == "browser"]
@@ -866,4 +891,5 @@ def _write_proof_artifacts(
     proof_report.write_text("\n".join(report_lines))
     count += 1
 
-    return count
+    coverage_str = f"{proof_coverage}/{len(must_items)}" if must_items else ""
+    return count, coverage_str
