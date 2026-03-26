@@ -173,6 +173,12 @@ async def run_per(
 
     # Set up context and telemetry
     context = PipelineContext()
+
+    # Discover project facts (deterministic, no LLM) and add as learnings
+    from otto.config import discover_project_facts
+    for fact in discover_project_facts(project_dir):
+        context.add_learning(text=fact, source="project-scan", kind="observed")
+
     load_learnings(project_dir, context)
     log_dir = project_dir / "otto_logs"
     telemetry = Telemetry(log_dir)

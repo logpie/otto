@@ -148,6 +148,77 @@ def detect_test_command(project_dir: Path) -> str | None:
     return " && ".join(candidates)
 
 
+def discover_project_facts(project_dir: Path) -> list[str]:
+    """Discover deterministic project facts for cross-run learnings.
+
+    Returns canonical fact strings derived from files on disk. No LLM.
+    Facts are refreshed each run — not accumulated.
+    """
+    facts: list[str] = []
+
+    # Package manager
+    if (project_dir / "package-lock.json").exists():
+        facts.append("package manager: npm")
+    elif (project_dir / "pnpm-lock.yaml").exists():
+        facts.append("package manager: pnpm")
+    elif (project_dir / "yarn.lock").exists():
+        facts.append("package manager: yarn")
+    elif (project_dir / "bun.lockb").exists():
+        facts.append("package manager: bun")
+
+    # Framework
+    pkg_json = project_dir / "package.json"
+    if pkg_json.exists():
+        try:
+            pkg = json.loads(pkg_json.read_text())
+            deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
+            if "next" in deps:
+                facts.append("framework: Next.js")
+            elif "nuxt" in deps:
+                facts.append("framework: Nuxt")
+            elif "react" in deps and "next" not in deps:
+                facts.append("framework: React (no Next.js)")
+            elif "vue" in deps:
+                facts.append("framework: Vue")
+            elif "svelte" in deps or "@sveltejs/kit" in deps:
+                facts.append("framework: Svelte")
+            # Module type
+            if pkg.get("type") == "module":
+                facts.append("module system: ESM (package.json type=module)")
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    if (project_dir / "pyproject.toml").exists():
+        facts.append("python project: has pyproject.toml")
+
+    # Test directory
+    for test_dir in ("__tests__", "tests", "test", "spec"):
+        if (project_dir / test_dir).is_dir():
+            facts.append(f"test directory: {test_dir}/")
+            break
+
+    # Test command
+    test_cmd = detect_test_command(project_dir)
+    if test_cmd:
+        facts.append(f"test command: {test_cmd}")
+
+    # TypeScript
+    if (project_dir / "tsconfig.json").exists():
+        facts.append("language: TypeScript")
+
+    # CSS framework
+    if pkg_json.exists():
+        try:
+            pkg = json.loads(pkg_json.read_text())
+            deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
+            if "tailwindcss" in deps:
+                facts.append("styling: Tailwind CSS")
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    return facts
+
+
 def detect_default_branch(project_dir: Path) -> str:
     """Detect the default branch name. Fallback to 'main'."""
     try:
