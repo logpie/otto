@@ -1507,7 +1507,7 @@ async def run_task_v45(
         # Fire spec gen in a separate thread for true parallelism.
         # asyncio.create_task shares the event loop and gets starved by coding.
         # to_thread runs generate_spec_sync() with its own event loop.
-        if not spec:
+        if not spec and not config.get("skip_spec"):
             from otto.spec import generate_spec_sync
 
             _spec_settings = config.get("spec_agent_settings", "project").split(",")
@@ -1665,7 +1665,7 @@ async def run_task_v45(
                     test_command = detected
 
             # PRE-TEST: quick sanity check in the working directory
-            pre_test = _run_pre_test(project_dir, test_command, test_timeout)
+            pre_test = None if config.get("skip_test") else _run_pre_test(project_dir, test_command, test_timeout)
             if pre_test and not pre_test.passed and not pre_test.skipped:
                 # Check if failures are only pre-existing (flaky) baseline failures
                 current_failures = extract_failing_tests(pre_test.output or "")
@@ -1684,11 +1684,19 @@ async def run_task_v45(
                     continue
 
             # TEST — clean worktree, deterministic
-            emit("phase", name="test", status="running")
-            test_result, test_elapsed, test_detail = _run_full_test_suite(
-                project_dir, candidate_sha, test_command, custom_test_cmd,
-                test_timeout, log_dir, attempt_num,
-            )
+            if config.get("skip_test"):
+                from otto.testing import TierResult, TestSuiteResult
+                emit("phase", name="test", status="done", time_s=0,
+                     detail="skipped (skip_test)")
+                test_result = TestSuiteResult(passed=True, tiers=[], failure_output=None)
+                test_elapsed = 0.0
+                test_detail = "skipped"
+            else:
+                emit("phase", name="test", status="running")
+                test_result, test_elapsed, test_detail = _run_full_test_suite(
+                    project_dir, candidate_sha, test_command, custom_test_cmd,
+                    test_timeout, log_dir, attempt_num,
+                )
             phase_timings["test"] = phase_timings.get("test", 0) + test_elapsed
 
             if not test_result.passed:
@@ -1749,43 +1757,49 @@ async def run_task_v45(
                 pass
 
             # ── QA ──────────────────────────────────────────────────────
-            # Await specs before QA (if still generating)
-            if spec_task and not spec:
-                if not spec_task.done():
-                    emit("phase", name="spec_gen", status="running",
-                         detail="awaiting specs before QA...")
-                await _await_spec_task()
+            qa_report = ""
+            if config.get("skip_qa"):
+                await _cancel_spec_task()
+                emit("phase", name="qa", status="done", time_s=0,
+                     detail="skipped (skip_qa)")
+            else:
+                # Await specs before QA (if still generating)
+                if spec_task and not spec:
+                    if not spec_task.done():
+                        emit("phase", name="spec_gen", status="running",
+                             detail="awaiting specs before QA...")
+                    await _await_spec_task()
 
-            qa_out = await _run_qa(
-                task, config, project_dir,
-                prompt=prompt,
-                spec=spec,
-                spec_generation_error=spec_generation_error,
-                diff_info=diff_info,
-                attempt=attempt,
-                prev_failed_criteria=_prev_failed_criteria,
-                emit=emit,
-                on_progress=on_progress,
-                log_dir=log_dir,
-                add_cost=_add_cost,
-            )
-            qa_report = qa_out["qa_report"]
-            phase_timings["qa"] = phase_timings.get("qa", 0) + qa_out["qa_elapsed"]
-
-            if not qa_out["must_passed"]:
-                # Reset for retry — send structured failure info
-                subprocess.run(
-                    ["git", "reset", "--mixed", base_sha],
-                    cwd=project_dir, capture_output=True,
+                qa_out = await _run_qa(
+                    task, config, project_dir,
+                    prompt=prompt,
+                    spec=spec,
+                    spec_generation_error=spec_generation_error,
+                    diff_info=diff_info,
+                    attempt=attempt,
+                    prev_failed_criteria=_prev_failed_criteria,
+                    emit=emit,
+                    on_progress=on_progress,
+                    log_dir=log_dir,
+                    add_cost=_add_cost,
                 )
-                failed_musts = qa_out["failed_musts"]
-                if failed_musts:
-                    last_error = _build_qa_retry_error(failed_musts, qa_report)
-                else:
-                    last_error = qa_report  # fallback to raw report
-                last_error_source = "qa"
-                _prev_failed_criteria = qa_out["prev_failed_criteria"]
-                continue
+                qa_report = qa_out["qa_report"]
+                phase_timings["qa"] = phase_timings.get("qa", 0) + qa_out["qa_elapsed"]
+
+                if not qa_out["must_passed"]:
+                    # Reset for retry — send structured failure info
+                    subprocess.run(
+                        ["git", "reset", "--mixed", base_sha],
+                        cwd=project_dir, capture_output=True,
+                    )
+                    failed_musts = qa_out["failed_musts"]
+                    if failed_musts:
+                        last_error = _build_qa_retry_error(failed_musts, qa_report)
+                    else:
+                        last_error = qa_report  # fallback to raw report
+                    last_error_source = "qa"
+                    _prev_failed_criteria = qa_out["prev_failed_criteria"]
+                    continue
 
             # ── Restore workspace before merge ──────────────────────────
             _restore_workspace_state(
@@ -1803,7 +1817,8 @@ async def run_task_v45(
                 pre_existing_untracked=pre_existing_untracked,
             )
 
-            _audit_proof_sufficiency(qa_out["verdict"], spec, log_dir / "qa-proofs", emit)
+            if not config.get("skip_qa"):
+                _audit_proof_sufficiency(qa_out["verdict"], spec, log_dir / "qa-proofs", emit)
 
             # ── Merge ───────────────────────────────────────────────────
             emit("phase", name="merge", status="running")

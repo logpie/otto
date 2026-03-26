@@ -19,6 +19,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "max_task_time": 3600,          # 1hr circuit breaker per task
     "qa_timeout": 3600,             # 1hr circuit breaker for QA agent
 
+    # Harness toggles — disable phases for debugging/benchmarking
+    "skip_spec": False,             # skip spec generation (no acceptance criteria)
+    "skip_qa": False,               # skip QA agent (merge after tests pass)
+    "skip_test": False,             # skip testing phase (merge after coding)
+
     # Agent CC settings scope — what settings each agent loads
     # "project": project CLAUDE.md only (default — no user skills/hooks overhead)
     # "user,project": also loads user CLAUDE.md, skills, hooks
@@ -277,6 +282,10 @@ def create_config(project_dir: Path) -> Path:
     lines += f"# qa_timeout: 3600               # 1hr circuit breaker for QA agent\n"
     lines += "\n# Model:\n"
     lines += f"# model: null                    # override Claude model (e.g. sonnet)\n"
+    lines += "\n# Harness toggles (disable phases for debugging):\n"
+    lines += f"# skip_spec: false               # skip spec generation\n"
+    lines += f"# skip_qa: false                 # skip QA (merge after tests pass)\n"
+    lines += f"# skip_test: false               # skip testing (merge after coding)\n"
     lines += "\n# Agent settings scope (project or user,project):\n"
     lines += f"# coding_agent_settings: project     # project CLAUDE.md only (default)\n"
     lines += f"# spec_agent_settings: project       # project CLAUDE.md only\n"

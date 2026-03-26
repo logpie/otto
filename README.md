@@ -93,6 +93,9 @@ otto add --spec "prompt"  Pre-generate spec before run
 otto add -f file        Import from .md/.txt/.yaml
 otto run                Run all pending tasks
 otto run "prompt"       One-off: add + run in single command
+otto run --no-spec      Skip spec generation
+otto run --no-qa        Skip QA (merge after tests pass)
+otto run --no-test      Skip testing (merge after coding)
 otto plan               Show execution plan without running
 otto status             Show task table with specs, cost, timing
 otto show <id>          Show task details + QA verdict

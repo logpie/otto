@@ -329,7 +329,10 @@ def add(prompt, verify, max_retries, import_file, gen_spec):
 @main.command(context_settings=CONTEXT_SETTINGS)
 @click.argument("prompt", required=False)
 @click.option("--dry-run", is_flag=True, help="Show what would run without executing")
-def run(prompt, dry_run):
+@click.option("--no-spec", is_flag=True, help="Skip spec generation")
+@click.option("--no-qa", is_flag=True, help="Skip QA (merge after tests pass)")
+@click.option("--no-test", is_flag=True, help="Skip testing (merge after coding)")
+def run(prompt, dry_run, no_spec, no_qa, no_test):
     """Run pending tasks (or a one-off task if prompt given)."""
     require_git()
     project_dir = Path.cwd()
@@ -340,6 +343,14 @@ def run(prompt, dry_run):
         console.print(f"  Run [bold]otto setup[/bold] to generate CLAUDE.md with project conventions.")
         console.print()
     config = load_config(config_path)
+
+    # CLI flags override config
+    if no_spec:
+        config["skip_spec"] = True
+    if no_qa:
+        config["skip_qa"] = True
+    if no_test:
+        config["skip_test"] = True
 
     if dry_run:
         tasks_path = project_dir / "tasks.yaml"
