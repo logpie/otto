@@ -1,13 +1,10 @@
 """Otto CLI — entrypoint for all otto commands."""
 
 import asyncio
-import json
 import os
-import re
 import sys
 import tempfile
 import time
-from datetime import datetime
 from pathlib import Path
 
 # Clear CLAUDECODE at startup so otto can run from inside Claude Code sessions.
@@ -17,17 +14,15 @@ os.environ.pop("CLAUDECODE", None)
 
 import click
 
-from otto.config import create_config, git_meta_dir, load_config
-from otto.display import TaskDisplay, console, rich_escape
+from otto.config import create_config, git_meta_dir, load_config, require_git
+from otto.display import TaskDisplay, build_status_table, console, format_cost, rich_escape, watch_status
 from otto.theme import error_console
-from otto.spec import generate_spec, parse_markdown_tasks
+from otto.spec import filter_generated_spec_items, generate_spec, parse_markdown_tasks
 from otto.tasks import (
     add_task,
     add_tasks,
     delete_task,
     load_tasks,
-    reset_all_tasks,
-    save_tasks,
     spec_binding,
     spec_is_verifiable,
     spec_text,
@@ -37,52 +32,7 @@ from otto.tasks import (
 
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 
-_SPEC_SEPARATOR_RE = re.compile(r"^[-=*_`#\s]+$")
-_SPEC_LABEL_RE = re.compile(r"^[A-Z][A-Za-z0-9 /()_-]{1,40}:")
-_SPEC_TITLE_RE = re.compile(r"^[A-Z][A-Za-z0-9()/'-]*(?: [A-Z][A-Za-z0-9()/'-]*){0,7}$")
-_SPEC_REQUIREMENT_RE = re.compile(
-    r"\b("
-    r"must|should|shall|will|can|"
-    r"display(?:ed|s)?|render(?:ed|s)?|show(?:n|s)?|"
-    r"calculate(?:d|s)?|compute(?:d|s)?|convert(?:ed|s)?|format(?:ted|s)?|"
-    r"classif(?:y|ied|ies)|match(?:es|ed)?|cover(?:ed|s)?|"
-    r"respect(?:s|ed)?|handle(?:d|s)?|support(?:ed|s)?|"
-    r"pass(?:es|ed)?|fail(?:s|ed)?|raise(?:s|d)?|"
-    r"return(?:s|ed)?|update(?:s|d)?|store(?:s|d)?|"
-    r"use(?:s|d)?|include(?:s|d)?|"
-    r"is displayed|is rendered|is calculated|is shown|"
-    r"are displayed|are rendered|are calculated|are shown"
-    r")\b",
-    re.IGNORECASE,
-)
-_SPEC_CONTEXT_PHRASES = (
-    "existing ",
-    "already ",
-    "available on",
-    "available in",
-    "always arrives",
-    "tests live in",
-    "tests use",
-    "using jest",
-    "current.",
-    "from api",
-    "from the api",
-)
 
-
-def _format_duration(seconds: float) -> str:
-    if seconds < 60:
-        return f"{seconds:.0f}s"
-    minutes = int(seconds // 60)
-    secs = int(seconds % 60)
-    return f"{minutes}m{secs:02d}s"
-
-
-def _format_cost(cost: float) -> str:
-    """Format cost for display."""
-    if cost < 0.01:
-        return f"${cost:.4f}"
-    return f"${cost:.2f}"
 
 
 def _make_task_display_progress_callback(display: TaskDisplay):
@@ -155,243 +105,17 @@ async def _run_one_off_with_display(
         if result and result.get("success"):
             console.print(
                 f"    {time.strftime('%H:%M:%S')}  [green]✓[/green] passed  "
-                f"[dim]{elapsed_str}  {_format_cost(cost)}[/dim]"
+                f"[dim]{elapsed_str}  {format_cost(cost)}[/dim]"
             )
         else:
             console.print(
                 f"    {time.strftime('%H:%M:%S')}  [red]✗[/red] failed  "
-                f"[dim]{elapsed_str}  {_format_cost(cost)}[/dim]"
+                f"[dim]{elapsed_str}  {format_cost(cost)}[/dim]"
             )
 
 
-def _has_requirement_signal(text: str) -> bool:
-    """Heuristic: real acceptance criteria usually describe required behavior."""
-    lower = text.lower()
-    if lower.startswith(("the ", "a ", "an ", "when ", "if ")):
-        return True
-    return bool(_SPEC_REQUIREMENT_RE.search(text))
 
 
-def _is_preamble(item) -> bool:
-    """Detect generated spec preamble/context rows that should not be treated as criteria."""
-    text = " ".join(spec_text(item).split()).strip()
-    if not text:
-        return True
-
-    lower = text.lower()
-    has_requirement = _has_requirement_signal(text)
-
-    if _SPEC_SEPARATOR_RE.fullmatch(text):
-        return True
-    if lower.startswith(("acceptance spec", "acceptance criteria", "context:", "overview:")):
-        return True
-    if _SPEC_LABEL_RE.match(text) and not has_requirement:
-        return True
-    if len(text) < 40 and not has_requirement and _SPEC_TITLE_RE.fullmatch(text):
-        return True
-    if any(phrase in lower for phrase in _SPEC_CONTEXT_PHRASES) and not has_requirement:
-        return True
-
-    return False
-
-
-def _filter_generated_spec_items(spec_items: list) -> list:
-    """Drop title/context rows from generated specs before display or storage."""
-    return [item for item in spec_items if not _is_preamble(item)]
-
-
-# ---------------------------------------------------------------------------
-# Log parsing helpers (shared by show/logs commands)
-# ---------------------------------------------------------------------------
-
-def _load_progress_events(log_dir: Path) -> list[dict]:
-    """Load progress events from pilot_results.jsonl that match this task key."""
-    results_file = log_dir.parent / "pilot_results.jsonl"
-    task_key = log_dir.name
-    events = []
-    if not results_file.exists():
-        return events
-    try:
-        for line in results_file.read_text().splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                data = json.loads(line)
-                if data.get("task_key") == task_key:
-                    events.append(data)
-            except json.JSONDecodeError:
-                continue
-    except OSError:
-        pass
-    return events
-
-
-def _extract_phase_timings(events: list[dict]) -> dict[str, float]:
-    """Extract per-phase timings from progress events."""
-    timings: dict[str, float] = {}
-    for evt in events:
-        if evt.get("event") == "phase" and evt.get("status") in ("done", "fail"):
-            name = evt.get("name", "")
-            time_s = evt.get("time_s", 0.0)
-            if name and time_s:
-                timings[name] = timings.get(name, 0) + time_s
-    return timings
-
-
-def _parse_qa_report(log_dir: Path, events: list[dict]) -> dict:
-    """Parse QA report from file or progress events.
-
-    Returns dict with keys: exists, passed, total, summary_lines.
-    """
-    result = {"exists": False, "passed": 0, "total": 0, "summary_lines": []}
-
-    # Try qa-report.md file first
-    qa_file = log_dir / "qa-report.md"
-    if qa_file.exists():
-        result["exists"] = True
-        content = qa_file.read_text()
-        lines = content.strip().splitlines()
-        # Extract pass/fail counts from markdown checkboxes or verdict lines
-        passed = 0
-        total = 0
-        summary = []
-        for line in lines:
-            stripped = line.strip()
-            if stripped.startswith("- [x]") or stripped.startswith("- [X]"):
-                total += 1
-                passed += 1
-            elif stripped.startswith("- [ ]"):
-                total += 1
-            # Capture layer summaries
-            if stripped.lower().startswith("layer") or stripped.lower().startswith("## layer"):
-                summary.append(stripped.lstrip("#").strip())
-            # Capture verdict line
-            if "verdict" in stripped.lower() or "result" in stripped.lower():
-                summary.append(stripped.lstrip("#").strip())
-        result["passed"] = passed
-        result["total"] = total
-        result["summary_lines"] = summary[:5]
-        return result
-
-    # Fall back to progress events for qa_report field
-    for evt in reversed(events):
-        if evt.get("tool") == "run_task_with_qa":
-            qa_text = evt.get("qa_report", "")
-            if qa_text:
-                result["exists"] = True
-                # Parse pass/fail from the report text
-                passed = 0
-                total = 0
-                summary = []
-                for line in qa_text.splitlines():
-                    stripped = line.strip()
-                    if stripped.startswith("- [x]") or stripped.startswith("- [X]"):
-                        total += 1
-                        passed += 1
-                    elif stripped.startswith("- [ ]"):
-                        total += 1
-                    if "PASS" in stripped.upper() and ("/" in stripped or "of" in stripped):
-                        summary.append(stripped)
-                    if stripped.lower().startswith("layer") or stripped.lower().startswith("## layer"):
-                        summary.append(stripped.lstrip("#").strip())
-                result["passed"] = passed
-                result["total"] = total
-                result["summary_lines"] = summary[:5]
-            break
-
-    return result
-
-
-def _get_diff_stat(task_id: int, project_dir: Path) -> list[str]:
-    """Get diff --stat lines for a task's commit."""
-    import subprocess
-    result = subprocess.run(
-        ["git", "log", "--oneline", "--all", f"--grep=(#{task_id})"],
-        capture_output=True, text=True, cwd=project_dir,
-    )
-    if not result.stdout.strip():
-        return []
-    sha = result.stdout.strip().splitlines()[0].split()[0]
-    stat = subprocess.run(
-        ["git", "diff", "--stat", f"{sha}~1", sha],
-        capture_output=True, text=True, cwd=project_dir,
-    )
-    if stat.returncode != 0:
-        return []
-    return [l.strip() for l in stat.stdout.strip().splitlines() if l.strip()]
-
-
-def _get_agent_log_highlights(log_dir: Path) -> tuple[list[str], list[str]]:
-    """Get first and last few lines of the most recent agent log.
-
-    Returns (first_lines, last_lines).
-    """
-    logs = sorted(log_dir.glob("attempt-*-agent.log"), reverse=True)
-    if not logs:
-        return ([], [])
-    try:
-        content = logs[0].read_text()
-    except OSError:
-        return ([], [])
-    lines = [l for l in content.splitlines() if l.strip()]
-    if not lines:
-        return ([], [])
-    first = lines[:3]
-    last = lines[-3:] if len(lines) > 6 else []
-    return (first, last)
-
-
-def _get_verify_summary(log_dir: Path) -> str:
-    """Get a one-line verify summary from the most recent verify log.
-
-    Returns a Rich-markup string.
-    """
-    # Check verify.log first (written on pass)
-    verify_file = log_dir / "verify.log"
-    if verify_file.exists():
-        content = verify_file.read_text().strip()
-        if content == "PASSED":
-            return "[success]PASSED[/success]"
-
-    # Check attempt verify logs
-    logs = sorted(log_dir.glob("attempt-*-verify.log"), reverse=True)
-    if not logs:
-        return ""
-    try:
-        content = logs[0].read_text()
-    except OSError:
-        return ""
-
-    # Parse tier results
-    passed = content.count(": PASS")
-    failed = content.count(": FAIL")
-    total = passed + failed
-    if total == 0:
-        return ""
-
-    # Count tests if available (look for "N passed" or "N tests")
-    import re
-    test_count = ""
-    m = re.search(r"(\d+)\s+passed", content)
-    if m:
-        test_count = f" ({m.group(1)} tests)"
-
-    if failed == 0:
-        return f"[success]PASSED[/success][dim]{test_count}[/dim]"
-    return f"[error]FAILED[/error][dim] ({passed}/{total} tiers){test_count}[/dim]"
-
-
-def _require_git():
-    """Exit with a friendly error if not in a git repo."""
-    import subprocess
-    result = subprocess.run(
-        ["git", "rev-parse", "--git-dir"],
-        capture_output=True, cwd=Path.cwd(),
-    )
-    if result.returncode != 0:
-        error_console.print("Error: not a git repository. Run 'git init' first.", style="error")
-        sys.exit(2)
 
 
 @click.group(context_settings=CONTEXT_SETTINGS)
@@ -437,7 +161,7 @@ def _import_tasks(import_path: Path, tasks_path: Path) -> None:
         console.print(f"Found {len(lines)} tasks in {rich_escape(import_path.name)}.\n")
         for i, line in enumerate(lines, 1):
             console.print(f"  [dim]{i}/{len(lines)}[/dim] {rich_escape(line[:50])}")
-            spec_items = _filter_generated_spec_items(generate_spec(line, project_dir))
+            spec_items = filter_generated_spec_items(generate_spec(line, project_dir))
             item = {"prompt": line}
             if spec_items:
                 item["spec"] = spec_items
@@ -458,7 +182,7 @@ def _import_tasks(import_path: Path, tasks_path: Path) -> None:
                 console.print(f"  [dim]{i}/{len(imported)}[/dim] {rich_escape(t['prompt'][:50])}")
             else:
                 console.print(f"  [dim]{i}/{len(imported)}[/dim] {rich_escape(t['prompt'][:50])}")
-                spec_items = _filter_generated_spec_items(generate_spec(t["prompt"], project_dir))
+                spec_items = filter_generated_spec_items(generate_spec(t["prompt"], project_dir))
                 if spec_items:
                     item["spec"] = spec_items
                     console.print(f"  {len(spec_items)} criteria generated")
@@ -509,7 +233,7 @@ def _print_imported_tasks(tasks: list) -> None:
 @click.option("--spec", "gen_spec", is_flag=True, help="Pre-generate acceptance spec (runs LLM)")
 def add(prompt, verify, max_retries, import_file, gen_spec):
     """Add a task to the queue (or import from file with -f)."""
-    _require_git()
+    require_git()
     project_dir = Path.cwd()
 
     # Auto-init if otto.yaml doesn't exist
@@ -560,7 +284,7 @@ def add(prompt, verify, max_retries, import_file, gen_spec):
         error_console.print(f"[error]\u2717[/error] Spec generation failed: {rich_escape(str(e))}")
         error_console.print(f"[dim]Task not created. Fix the issue or retry without --spec.[/dim]")
         sys.exit(1)
-    filtered_spec = _filter_generated_spec_items(spec_items)
+    filtered_spec = filter_generated_spec_items(spec_items)
     if filtered_spec:
         spec = filtered_spec
         must_count = sum(1 for i in spec if spec_binding(i) == "must")
@@ -605,7 +329,7 @@ def add(prompt, verify, max_retries, import_file, gen_spec):
 @click.option("--dry-run", is_flag=True, help="Show what would run without executing")
 def run(prompt, dry_run):
     """Run pending tasks (or a one-off task if prompt given)."""
-    _require_git()
+    require_git()
     project_dir = Path.cwd()
     config_path = project_dir / "otto.yaml"
     if not config_path.exists():
@@ -668,221 +392,10 @@ def run(prompt, dry_run):
 
 
 @main.command(context_settings=CONTEXT_SETTINGS)
-def setup():
-    """Generate CLAUDE.md with project conventions for the coding agent."""
-    _require_git()
-    project_dir = Path.cwd()
-
-    def _read_text_if_possible(path: Path, max_chars: int) -> str | None:
-        try:
-            return path.read_text()[:max_chars]
-        except (OSError, UnicodeDecodeError):
-            return None
-
-    def _build_file_tree(limit: int) -> str:
-        tree_lines = ["."]
-        excluded_dirs = {".git", "node_modules", "__pycache__"}
-
-        for root, dirs, files in os.walk(project_dir):
-            root_path = Path(root)
-            rel_root = root_path.relative_to(project_dir)
-            depth = len(rel_root.parts)
-
-            dirs[:] = sorted(d for d in dirs if d not in excluded_dirs)
-            if depth >= 2:
-                dirs[:] = []
-
-            base = Path() if depth == 0 else rel_root
-            entries = [base / d for d in dirs]
-            entries.extend(base / f for f in sorted(files))
-
-            for entry in entries:
-                if len(entry.parts) <= 2:
-                    tree_lines.append(entry.as_posix())
-
-        return "\n".join(tree_lines)[:limit]
-
-    # Create otto.yaml if missing
-    config_path = project_dir / "otto.yaml"
-    if not config_path.exists():
-        create_config(project_dir)
-        console.print(f"[green]✓[/green] Created otto.yaml")
-
-    claude_md = project_dir / "CLAUDE.md"
-    existing_content = None
-    mode = "generate"  # generate | merge
-
-    if claude_md.exists():
-        existing_content = _read_text_if_possible(claude_md, 5000)
-        console.print(f"[dim]CLAUDE.md already exists ({claude_md.stat().st_size} bytes)[/dim]")
-        console.print("  [bold]1[/bold] Merge (keep your rules, add new conventions)")
-        console.print("  [bold]2[/bold] Regenerate (replace entirely)")
-        console.print("  [bold]3[/bold] Keep existing")
-        choice = click.prompt("Choice", type=click.IntRange(1, 3), default=1)
-        if choice == 3:
-            return
-        elif choice == 2:
-            existing_content = None
-            mode = "generate"
-        else:
-            mode = "merge"
-
-    # Back up existing CLAUDE.md to temp file (safe — survives crashes)
-    _backup_path = None
-    if mode == "generate" and claude_md.exists():
-        import tempfile as _tf
-        fd, _backup_path = _tf.mkstemp(suffix=".md", prefix="claude_md_backup_")
-        os.close(fd)
-        Path(_backup_path).write_text(claude_md.read_text())
-        claude_md.unlink()
-
-    # Gather project context for the LLM
-    context_parts = []
-
-    # Read key files for convention detection
-    for name in ("package.json", "pyproject.toml", "tsconfig.json",
-                 "Cargo.toml", "go.mod"):
-        f = project_dir / name
-        if f.exists():
-            content = _read_text_if_possible(f, 2000)
-            if content is not None:
-                context_parts.append(f"--- {name} ---\n{content}")
-
-    # Sample a component/source file for style patterns
-    import glob
-    for pattern in ("src/components/*.tsx", "src/components/*.vue",
-                    "src/**/*.py", "lib/**/*.ts", "app/**/*.rb"):
-        matches = sorted(glob.glob(str(project_dir / pattern), recursive=True))
-        if matches:
-            sample = Path(matches[0])
-            content = _read_text_if_possible(sample, 2000)
-            if content is not None:
-                context_parts.append(f"--- {sample.relative_to(project_dir)} ---\n{content}")
-                break
-
-    # Sample a test file for test patterns
-    for pattern in ("__tests__/*.test.*", "tests/test_*.py", "test/**/*.test.*"):
-        matches = sorted(glob.glob(str(project_dir / pattern), recursive=True))
-        if matches:
-            sample = Path(matches[0])
-            content = _read_text_if_possible(sample, 1500)
-            if content is not None:
-                context_parts.append(f"--- {sample.relative_to(project_dir)} (test) ---\n{content}")
-                break
-
-    # File tree (top-level + src/)
-    tree = _build_file_tree(limit=2000)
-    context_parts.append(f"--- file tree ---\n{tree}")
-
-    console.print("[dim]Scanning project...[/dim]")
-
-    if existing_content:
-        merge_section = f"""
---- existing CLAUDE.md ---
-{existing_content}
----
-
-Merge the existing CLAUDE.md with fresh conventions from the codebase.
-Keep all user-written rules and principles. Add new project-specific
-conventions discovered from the code. Remove outdated entries that
-contradict what the codebase actually does. Deduplicate."""
-    else:
-        merge_section = ""
-
-    prompt = f"""Write a CLAUDE.md for a coding agent working on this project.
-
-CLAUDE.md tells the agent what it needs to know to work effectively here.
-Include: build/test commands, project structure, key conventions, and anything
-that would cause mistakes without guidance.
-
-Project files:
-{chr(10).join(context_parts)}
-{merge_section}
-
-Guidelines:
-- Point to files/directories rather than inlining specifics that go stale.
-- Avoid counts, version numbers, or facts that change frequently.
-- Keep it concise — the agent reads code well, just orient it.
-- Include these principles if relevant to the project:
-  - Check for existing patterns before writing new code
-  - After changing a shared type/interface, check all consumers
-  - Fix root causes — don't add workarounds or special cases
-Output ONLY the markdown content."""
-
-    try:
-        from claude_agent_sdk import query, ClaudeAgentOptions
-    except ImportError:
-        from otto._agent_stub import query, ClaudeAgentOptions
-
-    console.print("[dim]Generating CLAUDE.md...[/dim]")
-    result_text = asyncio.run(_run_setup(prompt, project_dir))
-
-    # The agent might have written CLAUDE.md directly via tool use
-    # instead of returning text. Check for that.
-    if not result_text.strip() and claude_md.exists():
-        result_text = _read_text_if_possible(claude_md, 10000) or ""
-    if not result_text.strip():
-        error_console.print("[red]Failed to generate CLAUDE.md content[/red]")
-        return
-
-    # Strip markdown code fences if present
-    content = result_text.strip()
-    if content.startswith("```"):
-        content = "\n".join(content.split("\n")[1:])
-    if content.endswith("```"):
-        content = "\n".join(content.split("\n")[:-1])
-
-    # Show preview
-    console.print()
-    console.print("[bold]Generated CLAUDE.md:[/bold]")
-    console.print("─" * 60)
-    console.print(content)
-    console.print("─" * 60)
-    console.print()
-
-    if click.confirm("Write to CLAUDE.md?", default=True):
-        claude_md.write_text(content.strip() + "\n")
-        console.print(f"[green]✓[/green] Wrote CLAUDE.md ({len(content)} chars)")
-        console.print("[dim]  Commit it so the coding agent can read it.[/dim]")
-        # Clean up backup
-        if _backup_path and Path(_backup_path).exists():
-            Path(_backup_path).unlink()
-    else:
-        # Restore backup if user cancelled
-        if _backup_path and Path(_backup_path).exists():
-            Path(_backup_path).rename(claude_md)
-        console.print("[dim]Cancelled — original CLAUDE.md restored[/dim]")
-
-
-async def _run_setup(prompt: str, project_dir: Path) -> str:
-    """Run a single LLM query for setup and return the text result."""
-    try:
-        from claude_agent_sdk import query, ClaudeAgentOptions
-    except ImportError:
-        from otto._agent_stub import query, ClaudeAgentOptions
-
-    opts = ClaudeAgentOptions(
-        permission_mode="bypassPermissions",
-        cwd=str(project_dir),
-        setting_sources=[],
-        system_prompt="You are a project analyst. Output ONLY the markdown content for CLAUDE.md. No explanation, no preamble, no tool use.",
-    )
-    result_text = ""
-    async for message in query(prompt=prompt, options=opts):
-        if hasattr(message, "result") and message.result:
-            result_text = message.result
-        elif hasattr(message, "content"):
-            for block in getattr(message, "content", []):
-                if hasattr(block, "text"):
-                    result_text += block.text
-    return result_text
-
-
-@main.command(context_settings=CONTEXT_SETTINGS)
 @click.option("--specs", is_flag=True, help="Also generate specs for preview")
 def plan(specs):
     """Show execution plan without running tasks."""
-    _require_git()
+    require_git()
     project_dir = Path.cwd()
     config_path = project_dir / "otto.yaml"
     if not config_path.exists():
@@ -928,7 +441,7 @@ def plan(specs):
                 console.print(f"\n  [dim]#{task['id']}[/dim]  {rich_escape(task.get('prompt', '')[:60])}")
                 try:
                     spec_items = generate_spec(task["prompt"], project_dir)
-                    filtered = _filter_generated_spec_items(spec_items)
+                    filtered = filter_generated_spec_items(spec_items)
                     if filtered:
                         for item in filtered:
                             binding = spec_binding(item)
@@ -940,166 +453,6 @@ def plan(specs):
                         console.print(f"    [dim](no spec generated)[/dim]")
                 except Exception as e:
                     console.print(f"    [error]spec gen failed: {rich_escape(str(e)[:60])}[/error]")
-
-
-def _build_status_table(tasks: list[dict], show_phase: bool = False):
-    """Build a Rich Table for task status display.
-
-    Returns a Rich renderable (Table + optional extras via Group).
-    """
-    from rich.table import Table
-    from rich.text import Text
-    from rich.console import Group
-
-    table = Table(show_header=True, box=None, pad_edge=False, show_edge=False, expand=False)
-    table.add_column("#", style="bold", min_width=2, justify="right")
-    table.add_column("Status", min_width=7)
-    table.add_column("Att", min_width=3, justify="right")
-    table.add_column("Spec", min_width=4, justify="right")
-    table.add_column("Cost", min_width=6, justify="right", style="dim")
-    table.add_column("Time", min_width=5, justify="right", style="dim")
-    table.add_column("Prompt", ratio=1, no_wrap=True)
-
-    for t in tasks:
-        status_str = t.get("status", "?")
-        spec_count = len(t.get("spec", []))
-        cost = t.get("cost_usd", 0.0)
-        cost_str = f"${cost:.2f}" if cost else ""
-        dur = t.get("duration_s", 0.0)
-        dur_str = _format_duration(dur) if dur else ""
-
-        # Style the status text
-        status_styles = {
-            "passed": "success",
-            "failed": "error",
-            "blocked": "error",
-            "running": "info",
-            "pending": "dim",
-        }
-        status_style = status_styles.get(status_str, "dim")
-        status_text = Text(status_str, style=status_style)
-
-        # Determine row style
-        row_style = ""
-        if status_str == "pending":
-            row_style = "dim"
-        elif status_str == "failed":
-            row_style = "dim"
-
-        prompt_text = t['prompt'][:50]
-        # For failed/blocked, append error on same prompt line
-        error_suffix = ""
-        if status_str in ("failed", "blocked") and t.get("error"):
-            error_suffix = f"\n        [error]\u21b3 {rich_escape(t['error'][:70])}[/error]"
-
-        table.add_row(
-            str(t.get("id", "?")),
-            status_text,
-            str(t.get("attempts", 0)),
-            str(spec_count) if spec_count else "",
-            cost_str,
-            dur_str,
-            rich_escape(prompt_text) + error_suffix,
-            style=row_style,
-        )
-
-    # Summary line
-    counts: dict[str, int] = {}
-    total_cost = 0.0
-    total_dur = 0.0
-    for t in tasks:
-        s = t.get("status", "?")
-        counts[s] = counts.get(s, 0) + 1
-        total_cost += t.get("cost_usd", 0.0)
-        total_dur += t.get("duration_s", 0.0)
-
-    parts = []
-    if counts.get("passed"):
-        parts.append(f"[success]{counts['passed']} passed[/success]")
-    if counts.get("failed"):
-        parts.append(f"[error]{counts['failed']} failed[/error]")
-    if counts.get("blocked"):
-        parts.append(f"[error]{counts['blocked']} blocked[/error]")
-    if counts.get("pending"):
-        parts.append(f"[dim]{counts['pending']} pending[/dim]")
-    if counts.get("running"):
-        parts.append(f"[info]{counts['running']} running[/info]")
-    summary = ", ".join(parts)
-    extras = []
-    if total_cost > 0:
-        extras.append(f"${total_cost:.2f}")
-    if total_dur > 0:
-        extras.append(_format_duration(total_dur))
-    if extras:
-        summary += f"  [dim]\u2014 {', '.join(extras)}[/dim]"
-
-    renderables = [table, Text(""), Text.from_markup(f"  {summary}")]
-
-    # Show live task progress from live-state.json if available
-    if show_phase:
-        live_lines = _build_live_phase_lines()
-        if live_lines:
-            renderables.append(Text(""))
-            renderables.extend(live_lines)
-
-    return Group(*renderables)
-
-
-def _build_live_phase_lines() -> list:
-    """Build Rich Text lines for live phase progress."""
-    from rich.text import Text
-
-    lines = []
-    live_file = Path.cwd() / "otto_logs" / "live-state.json"
-    if live_file.exists():
-        try:
-            live = json.loads(live_file.read_text())
-            tid = live.get("task_id", "?")
-            prompt = live.get("prompt", "")[:50]
-            elapsed = live.get("elapsed_s", 0)
-            cost = live.get("cost_usd", 0)
-            elapsed_str = _format_duration(elapsed)
-            lines.append(Text.from_markup(f"  [info]▸ Task #{tid}:[/info] {rich_escape(prompt)}"))
-            phases = live.get("phases", {})
-            _icons = {
-                "done": "[success]✓[/success]",
-                "fail": "[error]✗[/error]",
-                "running": "[info]●[/info]",
-                "pending": "[dim]◦[/dim]",
-            }
-            for pname in ["prepare", "coding", "test", "qa", "merge"]:
-                pdata = phases.get(pname, {})
-                pstatus = pdata.get("status", "pending")
-                icon = _icons.get(pstatus, "◦")
-                ptime = pdata.get("time_s", 0)
-                extra = ""
-                if pstatus == "running":
-                    extra = f"  [dim]{elapsed_str}[/dim]"
-                elif pstatus == "done" and ptime:
-                    extra = f"  [dim]{ptime:.0f}s[/dim]"
-                elif pstatus == "fail":
-                    err = rich_escape(pdata.get("error", "")[:40])
-                    extra = f"  [error]{err}[/error]"
-                lines.append(Text.from_markup(f"    {icon} {pname:<10}{extra}"))
-            # Show recent tools
-            tools = live.get("recent_tools", [])
-            for tool_line in tools[-3:]:
-                lines.append(Text.from_markup(f"        [dim]{rich_escape(tool_line[:60])}[/dim]"))
-            if cost > 0:
-                lines.append(Text.from_markup(f"    [dim]${cost:.2f} so far[/dim]"))
-        except (json.JSONDecodeError, OSError):
-            pass
-    else:
-        # Fallback: check progress events for high-level phase
-        state_file = Path.cwd() / "otto_logs" / "v4_events.jsonl"
-        if state_file.exists():
-            try:
-                # Read last event for current phase
-                pass  # TODO: extract from v4_events if needed
-            except (json.JSONDecodeError, OSError):
-                pass
-
-    return lines
 
 
 @main.command(context_settings=CONTEXT_SETTINGS)
@@ -1133,27 +486,10 @@ def status(watch):
             console.print()
 
     if watch:
-        _watch_status(tasks_path)
+        watch_status(lambda: load_tasks(tasks_path), console)
         return
 
-    console.print(_build_status_table(tasks, show_phase=True))
-
-
-def _watch_status(tasks_path: Path) -> None:
-    """Auto-refresh status display every 2 seconds using Rich Live."""
-    from rich.live import Live
-
-    def render():
-        tasks = load_tasks(tasks_path)
-        return _build_status_table(tasks, show_phase=True)
-
-    try:
-        with Live(render(), refresh_per_second=0.5, console=console) as live:
-            while True:
-                time.sleep(2)
-                live.update(render())
-    except KeyboardInterrupt:
-        console.print(f"\n[dim]Stopped.[/dim]")
+    console.print(build_status_table(tasks, show_phase=True))
 
 
 @main.command(context_settings=CONTEXT_SETTINGS)
@@ -1254,418 +590,14 @@ def delete(task_id):
     console.print(f"[success]✓[/success] Deleted task [bold]#{task_id}[/bold]: {rich_escape(target['prompt'][:60])}")
 
 
-@main.command(context_settings=CONTEXT_SETTINGS)
-@click.argument("task_id", type=int)
-@click.option("--raw", is_flag=True, help="Dump all log files without formatting")
-@click.option("-f", "--follow", is_flag=True, help="Tail logs in real-time (useful during runs)")
-def logs(task_id, raw, follow):
-    """Show structured logs for a task."""
-    import re
 
-    tasks_path = Path.cwd() / "tasks.yaml"
-    tasks = load_tasks(tasks_path)
-    target = None
-    for t in tasks:
-        if t.get("id") == task_id:
-            target = t
-            break
-    if not target:
-        error_console.print(f"Task #{task_id} not found", style="error")
-        sys.exit(1)
+# Setup command (registered from otto/cli_setup.py)
+from otto.cli_setup import register_setup_command
+register_setup_command(main)
 
-    log_dir = Path.cwd() / "otto_logs" / target["key"]
-    if not log_dir.exists():
-        console.print(f"[dim]No logs for task #{task_id}[/dim]")
-        return
-
-    # Follow mode: tail the most recent agent log
-    if follow:
-        _tail_logs(log_dir, task_id)
-        return
-
-    # Raw mode: dump everything (old behavior)
-    if raw:
-        for log_file in sorted(log_dir.iterdir()):
-            if log_file.is_file():
-                rule = "\u2501" * 40
-                console.print(f"\n[bold]{rule}[/bold]")
-                console.print(f"[bold]  {rich_escape(log_file.name)}[/bold]")
-                console.print(f"[bold]{rule}[/bold]")
-                try:
-                    content = log_file.read_text()
-                    console.print(content)
-                except (OSError, UnicodeDecodeError):
-                    console.print(f"  [dim](binary or unreadable)[/dim]")
-        return
-
-    # Structured mode: show sections with formatting
-    console.print(f"\n[bold]Logs for Task #{task_id}[/bold]  [dim]({rich_escape(target['key'])})[/dim]")
-
-    # 1. Verify logs — show result only
-    verify_logs = sorted(log_dir.glob("attempt-*-verify.log"))
-    if verify_logs:
-        console.print(f"\n[bold]  Verification[/bold]")
-        for vlog in verify_logs:
-            attempt = vlog.stem.split("-")[1] if "-" in vlog.stem else "?"
-            try:
-                content = vlog.read_text()
-                passed = content.count(": PASS")
-                failed = content.count(": FAIL")
-                # Extract test count
-                test_count = ""
-                m = re.search(r"(\d+)\s+passed", content)
-                if m:
-                    test_count = f" ({m.group(1)} tests)"
-                if failed == 0 and passed > 0:
-                    console.print(f"    [success]Attempt {attempt}: PASS[/success][dim]{test_count}[/dim]")
-                elif failed > 0:
-                    console.print(f"    [error]Attempt {attempt}: FAIL[/error][dim] ({passed}/{passed+failed} tiers){test_count}[/dim]")
-                    # Show failure lines
-                    for line in content.splitlines():
-                        if ": FAIL" in line:
-                            console.print(f"      [error]{rich_escape(line.strip()[:100])}[/error]")
-                else:
-                    console.print(f"    [dim]Attempt {attempt}: {rich_escape(content[:80])}[/dim]")
-            except OSError:
-                console.print(f"    [dim]Attempt {attempt}: (unreadable)[/dim]")
-
-    # Also check verify.log (written on final pass)
-    verify_file = log_dir / "verify.log"
-    if verify_file.exists() and not verify_logs:
-        try:
-            content = verify_file.read_text().strip()
-            if content == "PASSED":
-                console.print(f"\n[bold]  Verification[/bold]")
-                console.print(f"    [success]PASSED[/success]")
-        except OSError:
-            pass
-
-    # 2. Agent logs — show tool calls only
-    agent_logs = sorted(log_dir.glob("attempt-*-agent.log"))
-    if agent_logs:
-        console.print(f"\n[bold]  Agent Activity[/bold]")
-        for alog in agent_logs:
-            attempt = alog.stem.split("-")[1] if "-" in alog.stem else "?"
-            try:
-                content = alog.read_text()
-                lines = content.splitlines()
-                # Filter to tool calls (lines starting with bullet)
-                tool_lines = [l for l in lines if l.strip().startswith("\u25cf") or l.strip().startswith("*")]
-                if tool_lines:
-                    console.print(f"    [dim]Attempt {attempt} \u2014 {len(tool_lines)} tool calls:[/dim]")
-                    for tl in tool_lines[:10]:
-                        console.print(f"      [dim]{rich_escape(tl.strip()[:90])}[/dim]")
-                    if len(tool_lines) > 10:
-                        console.print(f"      [dim]... ({len(tool_lines) - 10} more)[/dim]")
-                else:
-                    # No structured tool calls, show first/last few lines
-                    console.print(f"    [dim]Attempt {attempt} \u2014 {len(lines)} lines:[/dim]")
-                    for l in lines[:3]:
-                        console.print(f"      [dim]{rich_escape(l[:90])}[/dim]")
-                    if len(lines) > 6:
-                        console.print(f"      [dim]...[/dim]")
-                        for l in lines[-3:]:
-                            console.print(f"      [dim]{rich_escape(l[:90])}[/dim]")
-            except OSError:
-                console.print(f"    [dim]Attempt {attempt}: (unreadable)[/dim]")
-
-    # 3. QA report
-    qa_file = log_dir / "qa-report.md"
-    if qa_file.exists():
-        console.print(f"\n[bold]  QA Report[/bold]")
-        try:
-            content = qa_file.read_text()
-            # Show formatted (truncated to ~30 lines)
-            lines = content.strip().splitlines()
-            for line in lines[:30]:
-                console.print(f"    {line}")
-            if len(lines) > 30:
-                console.print(f"    [dim]... ({len(lines) - 30} more lines)[/dim]")
-        except OSError:
-            console.print(f"    [dim](unreadable)[/dim]")
-
-    # 4. Pilot debug log (if present)
-    debug_log = log_dir.parent / "pilot_debug.log"
-    if debug_log.exists():
-        try:
-            content = debug_log.read_text()
-            if content.strip():
-                console.print(f"\n[bold]  Pilot Debug[/bold]  [dim](use --raw for full output)[/dim]")
-                lines = content.strip().splitlines()
-                console.print(f"    [dim]{len(lines)} lines \u2014 last 5:[/dim]")
-                for line in lines[-5:]:
-                    console.print(f"    [dim]{rich_escape(line[:100])}[/dim]")
-        except OSError:
-            pass
-
-    console.print()
-
-
-def _tail_logs(log_dir: Path, task_id: int) -> None:
-    """Tail the most recent agent log and progress events in real-time."""
-    import select
-
-    console.print(f"[bold]Tailing logs for task #{task_id}[/bold]  [dim](Ctrl+C to stop)[/dim]\n")
-
-    # Files to watch
-    results_file = log_dir.parent / "pilot_results.jsonl"
-    results_pos = results_file.stat().st_size if results_file.exists() else 0
-
-    # Find latest agent log or wait for one
-    agent_pos = 0
-    last_agent_log = None
-
-    try:
-        while True:
-            # Check for new agent logs
-            agent_logs = sorted(log_dir.glob("attempt-*-agent.log"))
-            if agent_logs and agent_logs[-1] != last_agent_log:
-                last_agent_log = agent_logs[-1]
-                agent_pos = 0
-
-            # Read new agent log content
-            if last_agent_log and last_agent_log.exists():
-                try:
-                    with open(last_agent_log) as f:
-                        f.seek(agent_pos)
-                        new = f.read()
-                        agent_pos = f.tell()
-                    if new:
-                        for line in new.splitlines():
-                            if line.strip():
-                                console.print(f"  [dim]{rich_escape(line[:120])}[/dim]")
-                except OSError:
-                    pass
-
-            # Read new progress events
-            if results_file.exists():
-                try:
-                    with open(results_file) as f:
-                        f.seek(results_pos)
-                        new_lines = f.readlines()
-                        results_pos = f.tell()
-                    task_key = log_dir.name
-                    for rline in new_lines:
-                        rline = rline.strip()
-                        if not rline:
-                            continue
-                        try:
-                            data = json.loads(rline)
-                            if data.get("task_key") != task_key:
-                                continue
-                            evt = data.get("event", "")
-                            if evt == "phase":
-                                name = data.get("name", "")
-                                phase_status = data.get("status", "")
-                                time_s = data.get("time_s", 0)
-                                if phase_status == "running":
-                                    console.print(f"  [info]{rich_escape(name)}[/info] started")
-                                elif phase_status == "done":
-                                    console.print(f"  [success]{rich_escape(name)}[/success] done  [dim]{_format_duration(time_s)}[/dim]")
-                                elif phase_status == "fail":
-                                    err = rich_escape(data.get("error", "")[:60])
-                                    console.print(f"  [error]{rich_escape(name)}[/error] failed  [dim]{err}[/dim]")
-                            elif evt == "agent_tool":
-                                name = data.get("name", "")
-                                detail = data.get("detail", "")[:60]
-                                console.print(f"    [dim]{rich_escape(name)}  {rich_escape(detail)}[/dim]")
-                        except json.JSONDecodeError:
-                            pass
-                except OSError:
-                    pass
-
-            time.sleep(0.5)
-    except KeyboardInterrupt:
-        console.print(f"\n[dim]Stopped.[/dim]")
-
-
-@main.command(context_settings=CONTEXT_SETTINGS)
-@click.argument("task_id", type=int)
-def diff(task_id):
-    """Show the git diff for a task's commit."""
-    import subprocess
-    # Find commit by message pattern
-    result = subprocess.run(
-        ["git", "log", "--oneline", "--all", f"--grep=(#{task_id})"],
-        capture_output=True, text=True,
-    )
-    commits = result.stdout.strip().splitlines()
-    if not commits:
-        error_console.print(f"No commit found for task #{task_id}", style="error")
-        sys.exit(1)
-    sha = commits[0].split()[0]
-    # Show the diff
-    subprocess.run(["git", "show", sha])
-
-
-@main.command(context_settings=CONTEXT_SETTINGS)
-@click.argument("task_id", type=int)
-def show(task_id):
-    """Show rich details for a task including timing, QA, and diff."""
-    import subprocess
-    from rich.panel import Panel
-    from otto.tasks import spec_text, spec_binding
-
-    tasks_path = Path.cwd() / "tasks.yaml"
-    project_dir = Path.cwd()
-    tasks = load_tasks(tasks_path)
-    for t in tasks:
-        if t.get("id") == task_id:
-            key = t.get("key", "?")
-            task_status = t.get("status", "?")
-            log_dir = project_dir / "otto_logs" / key
-
-            # Color the status
-            status_styles = {
-                "passed": "success", "failed": "error", "blocked": "error",
-                "running": "info", "pending": "dim",
-            }
-            status_style = status_styles.get(task_status, "")
-            status_styled = f"[{status_style}]{task_status}[/{status_style}]" if status_style else task_status
-
-            att = t.get("attempts", 0)
-            cost = t.get("cost_usd", 0.0)
-            cost_str = _format_cost(cost) if cost else "n/a"
-            dur = t.get("duration_s", 0.0)
-            dur_str = _format_duration(dur) if dur else "n/a"
-
-            # Header panel
-            console.print(Panel(
-                f"Status: {status_styled}  [dim]|[/dim]  Attempts: {att}  [dim]|[/dim]  Cost: {cost_str}\n"
-                f"Time: {dur_str}",
-                title=f"[bold]Task #{task_id}[/bold]  {rich_escape(t['prompt'][:50])}",
-                border_style="dim",
-                expand=False,
-            ))
-
-            # Duration per-phase timing
-            if dur:
-                # Try to get per-phase breakdown
-                events = _load_progress_events(log_dir) if log_dir.exists() else []
-                timings = _extract_phase_timings(events)
-                if timings:
-                    phase_order = ["prepare", "coding", "test", "qa", "merge"]
-                    parts = []
-                    for p in phase_order:
-                        pt = timings.get(p, 0.0)
-                        parts.append(f"{_format_duration(pt)} {p}")
-                    console.print(f"  [dim]Phases:[/dim]   {dur_str}  [dim]({' + '.join(parts)})[/dim]")
-
-            deps = t.get("depends_on") or []
-            if deps:
-                console.print(f"  [dim]Deps:[/dim]     {', '.join(f'#{d}' for d in deps)}")
-
-            # Prompt
-            console.print(f"\n  [dim]Prompt:[/dim] {rich_escape(t['prompt'])}")
-
-            # Spec with binding indicators
-            spec = t.get("spec", [])
-            if spec:
-                must_count = sum(1 for i in spec if spec_binding(i) == "must")
-                should_count = len(spec) - must_count
-                label = f"{must_count} must"
-                if should_count:
-                    label += f", {should_count} should"
-                console.print(f"\n  [dim]Spec ({len(spec)} criteria \u2014 {label}):[/dim]")
-                for i, item in enumerate(spec, 1):
-                    text = spec_text(item)
-                    binding = spec_binding(item)
-                    verifiable = spec_is_verifiable(item)
-                    marker = "" if verifiable else " \u25c8"
-                    if binding == "must":
-                        tag = f"[success]\\[must{marker}][/success]"
-                    else:
-                        tag = f"[info]\\[should{marker}][/info]"
-                    console.print(f"    {i}. {tag} {rich_escape(text)}")
-
-            # Diff summary (files changed)
-            diff_lines = _get_diff_stat(task_id, project_dir)
-            if diff_lines:
-                console.print(f"\n  [dim]Files changed:[/dim]")
-                # Show individual file lines (not the summary line)
-                for dl in diff_lines:
-                    if "|" in dl:
-                        console.print(f"    [dim]{rich_escape(dl)}[/dim]")
-                    elif "changed" in dl or "insertion" in dl or "deletion" in dl:
-                        console.print(f"    [dim]{rich_escape(dl)}[/dim]")
-
-            # QA report summary
-            if log_dir.exists():
-                events = _load_progress_events(log_dir)
-                qa = _parse_qa_report(log_dir, events)
-                if qa["exists"]:
-                    if qa["total"] > 0:
-                        qa_style = "success" if qa["passed"] == qa["total"] else "error"
-                        console.print(f"\n  [dim]QA:[/dim] [{qa_style}]{qa['passed']}/{qa['total']} specs passed[/{qa_style}]")
-                    for line in qa["summary_lines"]:
-                        console.print(f"    [dim]{rich_escape(line)}[/dim]")
-
-                # Verify summary
-                verify_str = _get_verify_summary(log_dir)
-                if verify_str:
-                    console.print(f"\n  [dim]Verify:[/dim] {verify_str}")
-
-                # Agent log highlights
-                first_lines, last_lines = _get_agent_log_highlights(log_dir)
-                if first_lines:
-                    console.print(f"\n  [dim]Agent log (latest attempt):[/dim]")
-                    for line in first_lines:
-                        console.print(f"    [dim]{rich_escape(line[:90])}[/dim]")
-                    if last_lines:
-                        console.print(f"    [dim]...[/dim]")
-                        for line in last_lines:
-                            console.print(f"    [dim]{rich_escape(line[:90])}[/dim]")
-
-            # Feedback
-            if t.get("feedback"):
-                console.print(f"\n  [dim]Feedback:[/dim] {rich_escape(t['feedback'])}")
-
-            if t.get("review_ref"):
-                console.print(f"\n  [dim]Review ref:[/dim] {rich_escape(t['review_ref'])}")
-
-            # Error (full context for failed tasks)
-            if t.get("error"):
-                console.print(f"\n  [error]Error:[/error] {rich_escape(t['error'])}")
-
-            # Last error from verify/agent logs
-            if task_status == "failed" and log_dir.exists():
-                # Show last few lines from the most recent verify log
-                verify_logs = sorted(log_dir.glob("attempt-*-verify.log"), reverse=True)
-                if verify_logs:
-                    try:
-                        verify_content = verify_logs[0].read_text()
-                        fail_lines = [
-                            l for l in verify_content.splitlines()
-                            if any(kw in l.upper() for kw in ["FAIL", "ERROR", "ASSERT"])
-                        ]
-                        if fail_lines:
-                            console.print(f"\n  [dim]Last verify errors:[/dim]")
-                            for fl in fail_lines[-5:]:
-                                console.print(f"    [error]{rich_escape(fl[:100])}[/error]")
-                    except OSError:
-                        pass
-
-            # Commit
-            result = subprocess.run(
-                ["git", "log", "--oneline", "--all", f"--grep=(#{task_id})"],
-                capture_output=True, text=True, cwd=project_dir,
-            )
-            if result.stdout.strip():
-                console.print(f"\n  [dim]Commit:[/dim] {rich_escape(result.stdout.strip().splitlines()[0])}")
-
-            # Test file
-            test_file = project_dir / "tests" / f"test_otto_{key}.py"
-            if test_file.exists():
-                console.print(f"  [dim]Test file:[/dim] {rich_escape(str(test_file.relative_to(project_dir)))}")
-
-            # Logs dir
-            if log_dir.exists():
-                console.print(f"  [dim]Logs:[/dim]     {rich_escape(str(log_dir.relative_to(project_dir)))}/")
-
-            console.print()
-            return
-    error_console.print(f"Task #{task_id} not found", style="error")
-    sys.exit(1)
+# Log/show/diff commands (registered from otto/cli_logs.py)
+from otto.cli_logs import register_log_commands
+register_log_commands(main)
 
 
 @main.command(context_settings=CONTEXT_SETTINGS)
@@ -1759,285 +691,7 @@ def reset(yes, hard):
         lock_fh.close()
 
 
-# ---------------------------------------------------------------------------
-# Run history
-# ---------------------------------------------------------------------------
 
-HISTORY_FILE = "otto_logs/run-history.jsonl"
-
-
-@main.command(context_settings=CONTEXT_SETTINGS)
-@click.option("-n", "--limit", "limit_", default=20, help="Number of runs to show")
-def history(limit_):
-    """Show past run history."""
-    from rich.table import Table
-
-    project_dir = Path.cwd()
-    history_path = project_dir / HISTORY_FILE
-
-    if not history_path.exists():
-        console.print(f"[dim]No run history found. History is recorded after each 'otto run'.[/dim]")
-        return
-
-    entries = []
-    try:
-        for line in history_path.read_text().splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-    except OSError:
-        error_console.print(f"Error reading history file", style="error")
-        sys.exit(1)
-
-    if not entries:
-        console.print(f"[dim]No run history found.[/dim]")
-        return
-
-    # Show most recent first
-    entries.reverse()
-    entries = entries[:limit_]
-
-    table = Table(show_header=True, box=None, pad_edge=False, show_edge=False, expand=False)
-    table.add_column("Date", width=20)
-    table.add_column("Tasks", width=6, justify="right")
-    table.add_column("Pass", width=5, justify="right")
-    table.add_column("Fail", width=5, justify="right")
-    table.add_column("Cost", width=8, justify="right", style="dim")
-    table.add_column("Time", width=8, justify="right", style="dim")
-    table.add_column("Detail", ratio=1, no_wrap=True)
-
-    for entry in entries:
-        ts = entry.get("timestamp", "?")
-        # Format timestamp
-        try:
-            dt = datetime.fromisoformat(ts)
-            ts_str = dt.strftime("%Y-%m-%d %H:%M")
-        except (ValueError, TypeError):
-            ts_str = str(ts)[:16]
-
-        total = entry.get("tasks_total", 0)
-        passed = entry.get("tasks_passed", 0)
-        failed = entry.get("tasks_failed", 0)
-        cost = entry.get("cost_usd", 0.0)
-        time_s = entry.get("time_s", 0.0)
-
-        tasks_str = f"{passed + failed}/{total}" if total else "0"
-        pass_style = "success" if passed > 0 else "dim"
-        fail_style = "error" if failed > 0 else "dim"
-        cost_str = _format_cost(cost) if cost > 0 else ""
-        time_str = _format_duration(time_s) if time_s > 0 else ""
-
-        # Failure detail
-        fail_detail = ""
-        if failed > 0 and entry.get("failure_summary"):
-            fail_detail = f"[error]({rich_escape(entry['failure_summary'][:50])})[/error]"
-
-        from rich.text import Text
-        pass_text = Text(str(passed), style=pass_style)
-        fail_text = Text(str(failed), style=fail_style)
-
-        table.add_row(
-            ts_str,
-            tasks_str,
-            pass_text,
-            fail_text,
-            cost_str,
-            time_str,
-            fail_detail,
-        )
-
-    console.print()
-    console.print(table)
-    console.print()
-
-
-# ---------------------------------------------------------------------------
-# Benchmark subcommands
-# ---------------------------------------------------------------------------
-
-@main.group(context_settings=CONTEXT_SETTINGS)
-def bench():
-    """Benchmark system — measure and compare pipeline effectiveness."""
-    pass
-
-
-def _get_bench_dir() -> Path:
-    """Locate the bench/ directory (in the otto repo root)."""
-    # Walk up from CWD or use the otto package location
-    otto_root = Path(__file__).parent.parent
-    bench_dir = otto_root / "bench"
-    if not bench_dir.exists():
-        error_console.print("Error: bench/ directory not found.", style="error")
-        sys.exit(2)
-    return bench_dir
-
-
-def _get_runner(name: str):
-    """Import and instantiate a runner by name."""
-    import importlib.util
-
-    bench_dir = _get_bench_dir()
-    runner_files = {
-        "otto": "otto_runner.py",
-        "bare-cc": "bare_cc_runner.py",
-        "ralph": "ralph_runner.py",
-        "self-test": "self_test_runner.py",
-    }
-    runner_classes = {
-        "otto": "OttoRunner",
-        "bare-cc": "BareClaudeRunner",
-        "ralph": "RalphRunner",
-        "self-test": "SelfTestRunner",
-    }
-
-    if name not in runner_files:
-        error_console.print(f"Unknown runner: {name}. Available: {', '.join(runner_files)}", style="error")
-        sys.exit(2)
-
-    runner_path = bench_dir / "runners" / runner_files[name]
-    if not runner_path.exists():
-        error_console.print(f"Runner file not found: {rich_escape(str(runner_path))}", style="error")
-        sys.exit(2)
-
-    spec = importlib.util.spec_from_file_location(f"bench_runner_{name}", runner_path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    cls = getattr(mod, runner_classes[name])
-    return cls()
-
-
-@bench.command("run", context_settings=CONTEXT_SETTINGS)
-@click.option("--task", "task_names", multiple=True, help="Run specific task(s) by name")
-@click.option("--runner", "runner_name", default="otto", help="Runner to use (otto, bare-cc, ralph, self-test)")
-@click.option("--label", default="", help="Label for this run (for comparison)")
-@click.option("--difficulty", type=click.Choice(["easy", "medium", "hard"]), help="Filter by difficulty")
-@click.option("--suite", "suite_file", default="suite.yaml", help="Suite file (default: suite.yaml)")
-def bench_run(task_names, runner_name, label, difficulty, suite_file):
-    """Run benchmark tasks and save results."""
-    from otto.bench import filter_tasks, load_suite, run_bench, save_results
-
-    bench_dir = _get_bench_dir()
-    suite_path = bench_dir / suite_file
-
-    if not suite_path.exists():
-        error_console.print(f"Error: {rich_escape(str(suite_path))} not found.", style="error")
-        sys.exit(2)
-
-    tasks = load_suite(suite_path)
-    if not tasks:
-        error_console.print("No tasks found in suite.", style="error")
-        sys.exit(2)
-
-    # Apply filters
-    tasks = filter_tasks(
-        tasks,
-        difficulty=difficulty,
-        names=list(task_names) if task_names else None,
-    )
-    if not tasks:
-        error_console.print("No tasks match the given filters.", style="error")
-        sys.exit(2)
-
-    runner = _get_runner(runner_name)
-    console.print(f"[bold]Otto Bench[/bold] \u2014 {len(tasks)} tasks, runner: [info]{rich_escape(runner_name)}[/info]")
-    if label:
-        console.print(f"  Label: {rich_escape(label)}")
-    console.print()
-
-    run = asyncio.run(run_bench(bench_dir, tasks, runner, label=label))
-
-    # Save results
-    results_dir = bench_dir / "results"
-    out_path = save_results(run, results_dir)
-
-    # Print summary
-    s = run.summary
-    rule = "\u2501" * 50
-    console.print(f"\n{rule}")
-    console.print(f"[bold]Results:[/bold] {rich_escape(out_path.name)}")
-    console.print(f"  Success: [success]{s['passed']}[/success]/{s['total']}  ({s['success_rate'] * 100:.1f}%)")
-    console.print(f"  Cost:    ${s['total_cost']:.2f}  (${s['cost_per_success']:.2f}/success)")
-    console.print(f"  Time:    {s['total_time_s']:.0f}s  ({s['time_per_success_s']:.0f}s/success)")
-    if s["mean_mutation_score"] > 0:
-        console.print(f"  Mutation: {s['mean_mutation_score']:.3f}")
-
-
-@bench.command("compare", context_settings=CONTEXT_SETTINGS)
-@click.argument("baseline")
-@click.argument("current")
-def bench_compare(baseline, current):
-    """Compare two benchmark runs.
-
-    Arguments are result filenames or labels. Searches bench/results/ for matches.
-    """
-    from otto.bench import compare_runs, load_results, list_results
-
-    bench_dir = _get_bench_dir()
-    results_dir = bench_dir / "results"
-
-    def _find_result(query: str) -> Path:
-        """Find a result file by filename or label."""
-        # Try exact filename
-        exact = results_dir / query
-        if exact.exists():
-            return exact
-        # Try with .json suffix
-        with_ext = results_dir / f"{query}.json"
-        if with_ext.exists():
-            return with_ext
-        # Search by label
-        for name, run in list_results(results_dir):
-            if run.label == query or run.run_id == query:
-                return results_dir / name
-        error_console.print(f"Result not found: {rich_escape(query)}", style="error")
-        sys.exit(2)
-
-    baseline_path = _find_result(baseline)
-    current_path = _find_result(current)
-
-    baseline_run = load_results(baseline_path)
-    current_run = load_results(current_path)
-
-    console.print(compare_runs(baseline_run, current_run))
-
-
-@bench.command("history", context_settings=CONTEXT_SETTINGS)
-@click.option("--limit", "-n", default=20, help="Number of runs to show")
-def bench_history(limit):
-    """Show recent benchmark run history."""
-    from rich.table import Table
-    from otto.bench import list_results
-
-    bench_dir = _get_bench_dir()
-    results_dir = bench_dir / "results"
-
-    runs = list_results(results_dir)
-    if not runs:
-        console.print(f"[dim]No benchmark results found.[/dim]")
-        return
-
-    table = Table(show_header=True, box=None, pad_edge=False, show_edge=False, expand=False)
-    table.add_column("Run ID", width=24)
-    table.add_column("Runner", width=10)
-    table.add_column("Label", width=20)
-    table.add_column("Pass", width=6, justify="right")
-    table.add_column("Cost", width=8, justify="right", style="dim")
-    table.add_column("Time", width=8, justify="right", style="dim")
-
-    for name, run in runs[:limit]:
-        s = run.summary
-        sr = s["success_rate"] * 100
-        table.add_row(
-            run.run_id,
-            run.runner,
-            run.label,
-            f"{s['passed']}/{s['total']} {sr:.0f}%",
-            f"${s['total_cost']:.2f}",
-            f"{s['total_time_s']:.0f}s",
-        )
-
-    console.print(table)
+# Bench subcommands (registered from otto/cli_bench.py)
+from otto.cli_bench import register_bench_commands
+register_bench_commands(main)

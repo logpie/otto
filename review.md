@@ -102,3 +102,51 @@
 ### Round 3 — Codex
 - [IMPORTANT] Stale review_ref not cleared on rerun — fixed by Codex: cleared at task start
 - APPROVED. No new issues. 406 tests pass.
+
+## Implementation Gate — 2026-03-25 — CLI refactor: extract monolithic cli.py
+
+### Round 1 — Codex
+- [IMPORTANT] Duration formatting changed: display.py `format_duration` returns `2m0s` vs original `2m00s` — fixed: zero-padded seconds
+- [NOTE] cli_setup.py imports `_require_git` from cli.py creating back-edge — fixed: moved to config.py
+
+### Round 2 — Codex
+- [NOTE] `require_git()` uses `print(stderr)` instead of original `error_console.print(style="error")` — fixed: uses error_console
+
+### Round 3 — Codex
+- APPROVED. No new issues.
+
+## Implementation Gate — 2026-03-25 — SDK boilerplate extraction (otto/agent.py)
+
+Worktree: /Users/yuxuan/work/cc-autonomous/.claude/worktrees/agent-a99163b9
+
+### Round 1 — Codex
+- [IMPORTANT] run_agent_query() joins text with "\n" instead of "" — fixed: use "".join()
+- [NOTE] tool_use_summary() truncates mid-word vs old _truncate_at_word — fixed: word-boundary truncation
+- [NOTE] worker.py not migrated — out of scope (top-level entry point)
+- [NOTE] _subprocess_env awkward home in verify.py — acknowledged tech debt
+
+### Round 2 — Codex
+- APPROVED. No new issues.
+
+## Implementation Gate — 2026-03-25 — runner.py decomposition (run_task_v45)
+
+Worktree: /Users/yuxuan/work/cc-autonomous/.claude/worktrees/agent-a424edc5
+
+### Round 1 — Codex
+- [CRITICAL] _handle_no_changes() uses stale spec after await — fixed by Codex: capture return value
+- [IMPORTANT] No-changes QA tier hardcodes attempt=0 — fixed by Codex: thread attempt param
+- [IMPORTANT] QA cost applied late, stale in live-state — fixed by Codex: add_cost callback
+
+### Round 2 — Codex
+- APPROVED. 323 tests pass.
+
+## Implementation Gate — 2026-03-25 — display.py cleanup (add_tool/add_finding)
+
+Worktree: /Users/yuxuan/work/cc-autonomous/.claude/worktrees/agent-a352153a
+
+### Round 1 — Codex
+- [IMPORTANT] Edit streak not flushed at phase boundary — fixed by Codex: _flush_edit_streak_locked()
+- [IMPORTANT] Phase snapshot captured outside lock — fixed by Codex: snapshot in first locked section
+
+### Round 2 — Codex
+- APPROVED. 323 tests pass.

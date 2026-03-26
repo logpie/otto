@@ -227,3 +227,16 @@ def create_config(project_dir: Path) -> Path:
                 f.write(f"{entry}\n")
 
     return config_path
+
+
+def require_git() -> None:
+    """Exit with a friendly error if not in a git repo."""
+    import sys
+    result = subprocess.run(
+        ["git", "rev-parse", "--git-dir"],
+        capture_output=True, cwd=Path.cwd(),
+    )
+    if result.returncode != 0:
+        from otto.theme import error_console
+        error_console.print("Error: not a git repository. Run 'git init' first.", style="error")
+        sys.exit(2)

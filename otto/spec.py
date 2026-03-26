@@ -398,3 +398,79 @@ Example: [{{"prompt": "Add search", "spec": ["search works", "case-insensitive"]
             task["depends_on"] = [int(d) for d in deps]
 
     return tasks
+
+
+# ---------------------------------------------------------------------------
+# Spec preamble filtering — detect generated headings/context that aren't
+# real acceptance criteria.
+# ---------------------------------------------------------------------------
+
+_SPEC_SEPARATOR_RE = re.compile(r"^[-=*_`#\s]+$")
+_SPEC_LABEL_RE = re.compile(r"^[A-Z][A-Za-z0-9 /()_-]{1,40}:")
+_SPEC_TITLE_RE = re.compile(r"^[A-Z][A-Za-z0-9()/'-]*(?: [A-Z][A-Za-z0-9()/'-]*){0,7}$")
+_SPEC_REQUIREMENT_RE = re.compile(
+    r"\b("
+    r"must|should|shall|will|can|"
+    r"display(?:ed|s)?|render(?:ed|s)?|show(?:n|s)?|"
+    r"calculate(?:d|s)?|compute(?:d|s)?|convert(?:ed|s)?|format(?:ted|s)?|"
+    r"classif(?:y|ied|ies)|match(?:es|ed)?|cover(?:ed|s)?|"
+    r"respect(?:s|ed)?|handle(?:d|s)?|support(?:ed|s)?|"
+    r"pass(?:es|ed)?|fail(?:s|ed)?|raise(?:s|d)?|"
+    r"return(?:s|ed)?|update(?:s|d)?|store(?:s|d)?|"
+    r"use(?:s|d)?|include(?:s|d)?|"
+    r"is displayed|is rendered|is calculated|is shown|"
+    r"are displayed|are rendered|are calculated|are shown"
+    r")\b",
+    re.IGNORECASE,
+)
+_SPEC_CONTEXT_PHRASES = (
+    "existing ",
+    "already ",
+    "available on",
+    "available in",
+    "always arrives",
+    "tests live in",
+    "tests use",
+    "using jest",
+    "current.",
+    "from api",
+    "from the api",
+)
+
+
+def _has_requirement_signal(text: str) -> bool:
+    """Heuristic: real acceptance criteria usually describe required behavior."""
+    lower = text.lower()
+    if lower.startswith(("the ", "a ", "an ", "when ", "if ")):
+        return True
+    return bool(_SPEC_REQUIREMENT_RE.search(text))
+
+
+def _is_preamble(item) -> bool:
+    """Detect generated spec preamble/context rows that should not be treated as criteria."""
+    from otto.tasks import spec_text
+
+    text = " ".join(spec_text(item).split()).strip()
+    if not text:
+        return True
+
+    lower = text.lower()
+    has_requirement = _has_requirement_signal(text)
+
+    if _SPEC_SEPARATOR_RE.fullmatch(text):
+        return True
+    if lower.startswith(("acceptance spec", "acceptance criteria", "context:", "overview:")):
+        return True
+    if _SPEC_LABEL_RE.match(text) and not has_requirement:
+        return True
+    if len(text) < 40 and not has_requirement and _SPEC_TITLE_RE.fullmatch(text):
+        return True
+    if any(phrase in lower for phrase in _SPEC_CONTEXT_PHRASES) and not has_requirement:
+        return True
+
+    return False
+
+
+def filter_generated_spec_items(spec_items: list) -> list:
+    """Drop title/context rows from generated specs before display or storage."""
+    return [item for item in spec_items if not _is_preamble(item)]
