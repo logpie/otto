@@ -111,27 +111,31 @@ otto reset --hard       Also revert otto commits
 Otto is infrastructure, not intelligence. The intelligence is Claude's. Otto provides:
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    otto v4.5                             │
-│  "Attempt 1 matches bare CC. Otto adds evidence-based   │
-│   verification on top."                                 │
-└──────────────┬──────────────────────────────────────────┘
-               │
-    ┌──────────▼──────────────────────────────────┐
-    │     Per-Task Loop                           │
-    │                                             │
-    │  1. Preflight (baseline tests, .gitignore)  │
-    │  2. Coding Agent (BARE CC — no custom       │
-    │     system prompt, SDK preset only)          │
-    │     + Spec Gen (parallel, separate thread)  │
-    │  3. External verify (clean worktree)        │
-    │  4. QA Agent (adversarial, risk-tiered)     │
-    │     - Tier 0: skip (all specs have tests)   │
-    │     - Tier 1: targeted (spec gaps only)     │
-    │     - Tier 2: full + browser (visual/◈)     │
-    │  5. Pass → squash merge to main             │
-    │     Fail → structured retry with evidence   │
-    └─────────────────────────────────────────────┘
+    ┌─────────────────────────────────────────────────────────┐
+    │  1. Preflight                                           │
+    │     Baseline tests (jest + pytest), .gitignore,         │
+    │     record flaky test names for later comparison        │
+    │                                                         │
+    │  2. Coding Agent  ──────────  Spec Gen (parallel)       │
+    │     Bare CC, no custom          [must]/[should]/◈       │
+    │     system prompt               classification          │
+    │                                                         │
+    │  3. Pre-verify                                          │
+    │     Run tests in working dir. If failures match         │
+    │     baseline flaky set → proceed. New failures → retry. │
+    │                                                         │
+    │  4. External verify (clean disposable worktree)         │
+    │     + Claim verification: audit agent log vs evidence   │
+    │                                                         │
+    │  5. QA Agent (adversarial, risk-tiered)                 │
+    │     Tier 0: skip │ Tier 1: targeted │ Tier 2: browser   │
+    │     Writes per-item proof + screenshots to qa-proofs/   │
+    │                                                         │
+    │  6. Post-QA restore (reset to verified candidate SHA)   │
+    │                                                         │
+    │  7. Pass → squash merge + proof report with commit SHA  │
+    │     Fail → retry with failure excerpt (not raw output)  │
+    └─────────────────────────────────────────────────────────┘
 ```
 
 ### Spec binding model
