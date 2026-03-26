@@ -102,16 +102,8 @@ def print_agent_tool(block, quiet: bool = False) -> str:
 
 def _tool_use_summary(block) -> str:
     """Return a one-line summary of a tool use for logging."""
-    inputs = block.input or {}
-    name = block.name
-    if name in ("Read", "Glob", "Grep"):
-        return inputs.get("file_path") or inputs.get("path") or inputs.get("pattern") or ""
-    elif name in ("Edit", "Write"):
-        return inputs.get("file_path") or ""
-    elif name == "Bash":
-        cmd = inputs.get("command") or ""
-        return _truncate_at_word(cmd, 120)
-    return ""
+    from otto.agent import tool_use_summary
+    return tool_use_summary(block)
 
 
 def build_agent_tool_event(block) -> dict | None:

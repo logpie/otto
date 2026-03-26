@@ -809,11 +809,6 @@ Guidelines:
   - Fix root causes — don't add workarounds or special cases
 Output ONLY the markdown content."""
 
-    try:
-        from claude_agent_sdk import query, ClaudeAgentOptions
-    except ImportError:
-        from otto._agent_stub import query, ClaudeAgentOptions
-
     console.print("[dim]Generating CLAUDE.md...[/dim]")
     result_text = asyncio.run(_run_setup(prompt, project_dir))
 
@@ -856,10 +851,7 @@ Output ONLY the markdown content."""
 
 async def _run_setup(prompt: str, project_dir: Path) -> str:
     """Run a single LLM query for setup and return the text result."""
-    try:
-        from claude_agent_sdk import query, ClaudeAgentOptions
-    except ImportError:
-        from otto._agent_stub import query, ClaudeAgentOptions
+    from otto.agent import ClaudeAgentOptions, run_agent_query
 
     opts = ClaudeAgentOptions(
         permission_mode="bypassPermissions",
@@ -868,14 +860,16 @@ async def _run_setup(prompt: str, project_dir: Path) -> str:
         system_prompt="You are a project analyst. Output ONLY the markdown content for CLAUDE.md. No explanation, no preamble, no tool use.",
     )
     result_text = ""
-    async for message in query(prompt=prompt, options=opts):
-        if hasattr(message, "result") and message.result:
-            result_text = message.result
-        elif hasattr(message, "content"):
-            for block in getattr(message, "content", []):
-                if hasattr(block, "text"):
-                    result_text += block.text
-    return result_text
+
+    def _on_result(msg):
+        nonlocal result_text
+        r = getattr(msg, "result", None)
+        if r:
+            result_text = r
+
+    collected, _cost, _msg = await run_agent_query(prompt, opts, on_result=_on_result)
+    # If we got a result message with text, prefer that; otherwise use collected text blocks
+    return result_text or collected
 
 
 @main.command(context_settings=CONTEXT_SETTINGS)

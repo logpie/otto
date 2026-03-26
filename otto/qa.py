@@ -8,20 +8,16 @@ import time
 from pathlib import Path
 from typing import Any
 
-try:
-    from claude_agent_sdk import ClaudeAgentOptions, query
-    from claude_agent_sdk.types import (
-        AssistantMessage, ResultMessage, TextBlock, ToolResultBlock, ToolUseBlock,
-    )
-except ImportError:
-    from otto._agent_stub import ClaudeAgentOptions, query, ResultMessage
-    AssistantMessage = None  # type: ignore[assignment,misc]
-    TextBlock = None  # type: ignore[assignment,misc]
-    ToolUseBlock = None  # type: ignore[assignment,misc]
-    ToolResultBlock = None  # type: ignore[assignment,misc]
-
+from otto.agent import (
+    AssistantMessage,
+    ClaudeAgentOptions,
+    ResultMessage,
+    TextBlock,
+    ToolUseBlock,
+    _subprocess_env,
+    query,
+)
 from otto.theme import console
-from otto.verify import _subprocess_env
 
 
 QA_SYSTEM_PROMPT_V45 = """\

@@ -9,27 +9,19 @@ import time
 from pathlib import Path
 from typing import Any
 
-try:
-    from claude_agent_sdk import ClaudeAgentOptions, query
-    from claude_agent_sdk.types import (
-        AssistantMessage, ResultMessage, TextBlock, ToolResultBlock, ToolUseBlock,
-    )
-except ImportError:
-    from otto._agent_stub import ClaudeAgentOptions, query, ResultMessage
-    AssistantMessage = None  # type: ignore[assignment,misc]
-    TextBlock = None  # type: ignore[assignment,misc]
-    ToolUseBlock = None  # type: ignore[assignment,misc]
-    ToolResultBlock = None  # type: ignore[assignment,misc]
-
-# Optional imports (may not exist in older SDK versions)
-try:
-    from claude_agent_sdk.types import AgentDefinition
-except (ImportError, AttributeError):
-    AgentDefinition = None  # type: ignore[assignment,misc]
-try:
-    from claude_agent_sdk.types import ThinkingBlock
-except (ImportError, AttributeError):
-    ThinkingBlock = None  # type: ignore[assignment,misc]
+from otto.agent import (
+    AgentDefinition,
+    AssistantMessage,
+    ClaudeAgentOptions,
+    ResultMessage,
+    TextBlock,
+    ThinkingBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    _subprocess_env,
+    query,
+    tool_use_summary as _tool_use_summary,
+)
 
 from otto.config import git_meta_dir, detect_test_command
 from otto.display import _truncate_at_word, console, format_cost, format_duration, rich_escape
@@ -56,7 +48,7 @@ from otto.qa import (
     run_qa_agent_v45,
 )
 from otto.tasks import load_tasks, update_task
-from otto.verify import run_verification, _subprocess_env
+from otto.verify import run_verification
 
 
 def _suggest_claude_md(project_dir: Path) -> None:
@@ -463,7 +455,6 @@ def _log_warn(msg: str) -> None:
     console.print(f"  [yellow]Warning: {rich_escape(msg)}[/yellow]")
 
 
-from otto.display import _tool_use_summary  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

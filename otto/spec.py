@@ -7,35 +7,17 @@ import re
 import tempfile
 from pathlib import Path
 
-try:
-    from claude_agent_sdk import ClaudeAgentOptions, query
-    from claude_agent_sdk.types import AssistantMessage, ResultMessage, TextBlock, ToolUseBlock
-except ImportError:
-    from otto._agent_stub import ClaudeAgentOptions, query, ResultMessage
-    AssistantMessage = None  # type: ignore[assignment,misc]
-    TextBlock = None  # type: ignore[assignment,misc]
-    ToolUseBlock = None  # type: ignore[assignment,misc]
-
-try:
-    from claude_agent_sdk.types import ThinkingBlock
-except (ImportError, AttributeError):
-    ThinkingBlock = None  # type: ignore[assignment,misc]
-
+from otto.agent import (
+    AssistantMessage,
+    ClaudeAgentOptions,
+    ResultMessage,
+    TextBlock,
+    ThinkingBlock,
+    ToolUseBlock,
+    query,
+    tool_use_summary as _tool_use_summary,
+)
 from otto.display import print_agent_tool
-
-
-def _tool_use_summary(block) -> str:
-    """One-line summary of a tool use for logging."""
-    inputs = block.input or {}
-    name = block.name
-    if name in ("Read", "Glob", "Grep"):
-        return inputs.get("file_path") or inputs.get("path") or inputs.get("pattern") or ""
-    elif name in ("Edit", "Write"):
-        return inputs.get("file_path") or ""
-    elif name == "Bash":
-        cmd = inputs.get("command") or ""
-        return cmd[:120]
-    return ""
 
 
 def _write_log(path: Path, lines: list[str]) -> None:
