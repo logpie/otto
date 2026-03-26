@@ -214,7 +214,6 @@ class TaskDisplay:
         self._spec_gen_announced: bool = False
         self._spec_items_buffer: list[str] = []
         self._edit_streak: int = 0
-        self._edit_streak_first: str = ""
 
     def start(self) -> None:
         self._start_time = time.monotonic()
@@ -396,7 +395,10 @@ class TaskDisplay:
         tool_key = f"{name}:{detail}"
 
         with self._lock:
-            if self._current_phase == "coding" and name in ("Write", "Edit"):
+            phase = self._current_phase
+            if phase != "coding" or name != "Edit":
+                self._flush_edit_streak_locked()
+            if phase == "coding" and name in ("Write", "Edit"):
                 if detail and detail not in self._coding_files:
                     self._coding_files.append(detail)
                 # Track line counts from event data
@@ -410,67 +412,86 @@ class TaskDisplay:
                 return
             self._last_tool_key = tool_key
 
-            # Collapse consecutive reads in coding phase (show first 3, then batch)
-            if self._current_phase == "coding" and name in ("Read", "Glob", "Grep"):
-                self._read_count += 1
-                if self._read_count > 3:
-                    return  # suppress — will flush on next Write/Edit/Bash
-            elif self._current_phase == "coding" and self._read_count > 3:
-                self._console.print(f"      [dim]... explored {self._read_count} files[/dim]")
-                self._read_count = 0
+        # Dispatch to phase-specific renderer
+        if phase == "coding":
+            self._render_tool_coding(name, detail, data)
+        elif phase == "qa":
+            self._render_tool_qa(name, detail)
+        else:
+            self._render_tool_default(name, detail, data)
+
+    def _flush_edit_streak_locked(self) -> None:
+        """Flush a collapsed edit streak. Call with self._lock held."""
+        if self._edit_streak > 2:
+            self._console.print(
+                f"      [dim]... edited {self._edit_streak} files (similar changes)[/dim]"
+            )
+        self._edit_streak = 0
+
+    def _collapse_reads(self, name: str, threshold: int, flush_label: str) -> bool | None:
+        """Collapse consecutive Read/Glob/Grep calls under a threshold.
+
+        Call with self._lock held. Returns:
+          True  — suppress this tool (over threshold)
+          False — show this tool normally (at or under threshold)
+          None  — not a read tool; flushes collapsed reads if any pending
+        """
+        if name in ("Read", "Glob", "Grep"):
+            self._read_count += 1
+            return self._read_count > threshold
+        if self._read_count > threshold:
+            self._console.print(f"      [dim]... {flush_label} {self._read_count} files[/dim]")
+            self._read_count = 0
+        return None
+
+    def _render_tool_coding(self, name: str, detail: str, data: dict | None) -> None:
+        """Render a tool call during the coding phase."""
+        with self._lock:
+            # Collapse consecutive reads (show first 3, then batch)
+            collapse = self._collapse_reads(name, threshold=3, flush_label="explored")
+            if collapse is True:
+                return  # suppress — will flush on next Write/Edit/Bash
 
             # Collapse consecutive similar edits (e.g., adding same field to 20 test files)
-            if self._current_phase == "coding" and name == "Edit":
+            if name == "Edit":
                 self._edit_streak += 1
-                if self._edit_streak == 1:
-                    self._edit_streak_first = detail
-                elif self._edit_streak <= 2:
+                if self._edit_streak <= 2:
                     pass  # show first 2 normally
                 else:
                     return  # suppress — will flush on next non-Edit
-            elif self._edit_streak > 2:
-                self._console.print(
-                    f"      [dim]... edited {self._edit_streak} files (similar changes)[/dim]"
-                )
-                self._edit_streak = 0
             else:
                 self._edit_streak = 0
 
-        if self._current_phase == "qa":
-            label = self._qa_tool_label(name, detail)
-            if not label:
-                return  # suppressed (temp file ops, etc.)
-            with self._lock:
-                # Collapse consecutive Read/Glob/Grep into a counter
-                if name in ("Read", "Glob", "Grep"):
-                    self._read_count += 1
-                    if self._read_count <= 2:
-                        # Show first 2 reads normally
-                        pass
-                    else:
-                        # Suppress further reads — will show count on next non-read
-                        return
-                elif self._read_count > 2:
-                    # Flush collapsed reads as a single line
-                    self._console.print(f"      [dim]... read {self._read_count} files[/dim]")
-                    self._read_count = 0
+        self._render_tool_default(name, detail, data)
 
-                if label == self._last_qa_label:
-                    return
-                self._last_qa_label = label
+    def _render_tool_qa(self, name: str, detail: str) -> None:
+        """Render a tool call during the QA phase."""
+        label = self._qa_tool_label(name, detail)
+        if not label:
+            return  # suppressed (temp file ops, etc.)
+        with self._lock:
+            # Collapse consecutive reads (show first 2, then batch)
+            collapse = self._collapse_reads(name, threshold=2, flush_label="read")
+            if collapse is True:
+                return
 
-            # Style QA activity by type — key actions bold, reads dim, narration dim
-            if label.startswith(("Testing:", "Curl:")):
-                self._console.print(f"      [bold]{label}[/bold]")
-            elif label.startswith("Browser:"):
-                self._console.print(f"      [bold magenta]{label}[/bold magenta]")
-            elif label.startswith(("Reading", "Writing verdict")):
-                self._console.print(f"      [dim]{label}[/dim]")
-            else:
-                # Other tool actions (building, starting server, etc.)
-                self._console.print(f"      {label}")
-            return
+            if label == self._last_qa_label:
+                return
+            self._last_qa_label = label
 
+        # Style QA activity by type — key actions bold, reads dim, narration dim
+        if label.startswith(("Testing:", "Curl:")):
+            self._console.print(f"      [bold]{label}[/bold]")
+        elif label.startswith("Browser:"):
+            self._console.print(f"      [bold magenta]{label}[/bold magenta]")
+        elif label.startswith(("Reading", "Writing verdict")):
+            self._console.print(f"      [dim]{label}[/dim]")
+        else:
+            # Other tool actions (building, starting server, etc.)
+            self._console.print(f"      {label}")
+
+    def _render_tool_default(self, name: str, detail: str, data: dict | None) -> None:
+        """Render a tool call with per-type styling + inline diff/preview."""
         # Truncate Bash commands at first newline (multi-line node -e commands)
         if name == "Bash":
             first_line = detail.split("\n")[0].strip()
@@ -478,9 +499,9 @@ class TaskDisplay:
         else:
             short = rich_escape(_shorten_path(detail)[:68])
 
-        # Breathing room on tool type change (Read→Bash, Write→Read, etc.)
+        # Breathing room on tool type change (Read->Bash, Write->Read, etc.)
         with self._lock:
-            prev_type = getattr(self, '_last_tool_type', "")
+            prev_type = self._last_tool_type
             self._last_tool_type = name
         if prev_type and prev_type != name:
             self._console.print()
@@ -501,53 +522,57 @@ class TaskDisplay:
 
         # Inline diff/preview below tool call (like CC)
         if data:
-            old_lines = data.get("old_lines", [])
-            new_lines = data.get("new_lines", [])
-            old_total = data.get("old_total", 0)
-            new_total = data.get("new_total", 0)
-            preview = data.get("preview_lines", [])
-            total_lines = data.get("total_lines", 0)
+            self._render_inline_diff(name, data)
 
-            if name == "Edit" and (old_lines or new_lines):
-                # For large edits (>20 lines), just show summary
-                if old_total + new_total > 20:
+    def _render_inline_diff(self, name: str, data: dict) -> None:
+        """Render inline diff/preview below a tool call (like CC)."""
+        old_lines = data.get("old_lines", [])
+        new_lines = data.get("new_lines", [])
+        old_total = data.get("old_total", 0)
+        new_total = data.get("new_total", 0)
+        preview = data.get("preview_lines", [])
+        total_lines = data.get("total_lines", 0)
+
+        if name == "Edit" and (old_lines or new_lines):
+            # For large edits (>20 lines), just show summary
+            if old_total + new_total > 20:
+                self._console.print(
+                    f"        [dim][red]-{old_total}[/red] [green]+{new_total}[/green] lines[/dim]"
+                )
+            else:
+                # Skip identical leading lines — show where change starts
+                skip = 0
+                while (skip < len(old_lines) and skip < len(new_lines)
+                       and old_lines[skip] == new_lines[skip]):
+                    skip += 1
+
+                # If ALL preview lines are identical, change is beyond preview
+                if skip >= len(old_lines) and skip >= len(new_lines):
                     self._console.print(
                         f"        [dim][red]-{old_total}[/red] [green]+{new_total}[/green] lines[/dim]"
                     )
                 else:
-                    # Skip identical leading lines — show where change starts
-                    skip = 0
-                    while (skip < len(old_lines) and skip < len(new_lines)
-                           and old_lines[skip] == new_lines[skip]):
-                        skip += 1
+                    if skip > 0:
+                        # Show one context line before the change
+                        self._console.print(f"        [dim]  {rich_escape(old_lines[skip - 1])}[/dim]")
+                        if skip > 1:
+                            self._console.print(f"        [dim]  ...{skip - 1} more[/dim]")
+                    for ol in old_lines[skip:]:
+                        self._console.print(f"        [red]- {rich_escape(ol)}[/red]")
+                    remaining_old = old_total - len(old_lines)
+                    if remaining_old > 0:
+                        self._console.print(f"        [dim]  ...{remaining_old} more[/dim]")
+                    for nl in new_lines[skip:]:
+                        self._console.print(f"        [green]+ {rich_escape(nl)}[/green]")
+                    remaining_new = new_total - len(new_lines)
+                    if remaining_new > 0:
+                        self._console.print(f"        [dim]  ...{remaining_new} more[/dim]")
 
-                    # If ALL preview lines are identical, change is beyond preview
-                    if skip >= len(old_lines) and skip >= len(new_lines):
-                        self._console.print(
-                            f"        [dim][red]-{old_total}[/red] [green]+{new_total}[/green] lines[/dim]"
-                        )
-                    else:
-                        if skip > 0:
-                            # Show one context line before the change
-                            self._console.print(f"        [dim]  {rich_escape(old_lines[skip - 1])}[/dim]")
-                            if skip > 1:
-                                self._console.print(f"        [dim]  ...{skip - 1} more[/dim]")
-                        for ol in old_lines[skip:]:
-                            self._console.print(f"        [red]- {rich_escape(ol)}[/red]")
-                        remaining_old = old_total - len(old_lines)
-                        if remaining_old > 0:
-                            self._console.print(f"        [dim]  ...{remaining_old} more[/dim]")
-                        for nl in new_lines[skip:]:
-                            self._console.print(f"        [green]+ {rich_escape(nl)}[/green]")
-                        remaining_new = new_total - len(new_lines)
-                        if remaining_new > 0:
-                            self._console.print(f"        [dim]  ...{remaining_new} more[/dim]")
-
-            elif name == "Write" and preview:
-                for pl in preview:
-                    self._console.print(f"        [green]+ {rich_escape(pl)}[/green]")
-                if total_lines > len(preview):
-                    self._console.print(f"        [dim]  ...{total_lines - len(preview)} more lines[/dim]")
+        elif name == "Write" and preview:
+            for pl in preview:
+                self._console.print(f"        [green]+ {rich_escape(pl)}[/green]")
+            if total_lines > len(preview):
+                self._console.print(f"        [dim]  ...{total_lines - len(preview)} more lines[/dim]")
 
     def _qa_tool_label(self, name: str, detail: str) -> str:
         """Build a concise, informative QA activity label from tool call data."""
@@ -607,6 +632,18 @@ class TaskDisplay:
             return
         style = "green" if passed else "red"
         self._console.print(f"        [{style}]{rich_escape(detail)}[/{style}]")
+
+    @staticmethod
+    def _get_check_icon(passed: bool) -> str:
+        """Return a Rich-markup icon for a pass/fail check."""
+        return "[green]\u2713[/green]" if passed else "[red]\u2717[/red]"
+
+    @staticmethod
+    def _clean_finding_text(text: str, *remove_words: str, strip_chars: str = ": \u2014-*()") -> str:
+        """Strip result keywords and leading punctuation from finding text."""
+        for word in remove_words:
+            text = text.replace(word, "")
+        return text.lstrip(strip_chars).strip()
 
     def add_finding(self, text: str) -> None:
         """Print a QA finding permanently. Handles all QA output formats."""
@@ -676,7 +713,7 @@ class TaskDisplay:
             spec_text = clean.lstrip("# ").strip()
             for s in [": \u2705 PASS", ": \u274c FAIL", "\u2705", "\u274c"]:
                 spec_text = spec_text.replace(s, "").rstrip(": ").strip()
-            icon = "[green]\u2713[/green]" if has_pass else "[red]\u2717[/red]" if has_fail else " "
+            icon = self._get_check_icon(has_pass) if (has_pass or has_fail) else " "
             self._console.print(f"      {icon} {rich_escape(spec_text[:68])}")
 
         elif is_table_row:
@@ -685,34 +722,30 @@ class TaskDisplay:
                 desc = f"{parts[0]}  {parts[1]}"[:55]
             else:
                 desc = parts[0][:55] if parts else clean[:55]
-            icon = "[green]\u2713[/green]" if has_pass else "[red]\u2717[/red]"
-            self._console.print(f"      {icon} {rich_escape(desc)}")
+            self._console.print(f"      {self._get_check_icon(has_pass)} {rich_escape(desc)}")
 
         elif is_numbered_check:
             # "✓ 4. LIFO order  Pushed..." or "✗ 2. Edge case..."
             check_pass = clean[0] in ("\u2713", "\u2705")
             desc = clean[1:].lstrip().lstrip("0123456789").lstrip(".").strip()[:62]
-            icon = "[green]\u2713[/green]" if check_pass else "[red]\u2717[/red]"
-            self._console.print(f"      {icon} {rich_escape(desc)}")
+            self._console.print(f"      {self._get_check_icon(check_pass)} {rich_escape(desc)}")
 
         elif is_result_line and has_pass:
             # "**RESULT**: ✅ PASS — detail" or "**PASS** — detail"
-            detail_text = clean.replace("RESULT", "").replace("PASS", "").replace("\u2705", "")
-            detail_text = detail_text.lstrip(": \u2014-*()").strip()
+            detail_text = self._clean_finding_text(clean, "RESULT", "PASS", "\u2705")
             if detail_text:
                 short = detail_text[:60] + "..." if len(detail_text) > 60 else detail_text
-                self._console.print(f"        [green]\u2713[/green] [dim]{rich_escape(short)}[/dim]")
+                self._console.print(f"        {self._get_check_icon(True)} [dim]{rich_escape(short)}[/dim]")
 
         elif is_result_line and has_fail:
-            detail_text = clean.replace("RESULT", "").replace("FAIL", "").replace("\u274c", "")
-            detail_text = detail_text.lstrip(": \u2014-*()").strip()
+            detail_text = self._clean_finding_text(clean, "RESULT", "FAIL", "\u274c")
             short = detail_text[:60] + "..." if len(detail_text) > 60 else detail_text
-            self._console.print(f"        [red]\u2717[/red] {rich_escape(short)}")
+            self._console.print(f"        {self._get_check_icon(False)} {rich_escape(short)}")
 
         elif has_fail and text.startswith(("**FAIL", "FAIL")):
-            detail_text = clean.replace("FAIL", "").replace("\u274c", "").lstrip(" \u2014-()").strip()
+            detail_text = self._clean_finding_text(clean, "FAIL", "\u274c", strip_chars=" \u2014-()")
             short = detail_text[:62] + "..." if len(detail_text) > 62 else detail_text
-            self._console.print(f"        [red]\u2717[/red] {rich_escape(short)}")
+            self._console.print(f"        {self._get_check_icon(False)} {rich_escape(short)}")
 
         elif text.startswith("- **("):
             sub = clean.lstrip("- ").strip()
