@@ -7,6 +7,9 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from otto.runner import (
+    _audit_proof_sufficiency,
+    _build_qa_retry_error,
+    _run_durable_regression,
     _restore_workspace_state,
     check_clean_tree,
     create_task_branch,
@@ -140,6 +143,72 @@ class TestWorkspaceCleanup:
 
         mock_warn.assert_called_once()
         assert "git reset --hard" in mock_warn.call_args.args[0]
+
+
+class TestQaProofHelpers:
+    def test_builds_retry_error_with_proof_gap_context(self):
+        message = _build_qa_retry_error([
+            {
+                "criterion": "API returns JSON",
+                "status": "fail",
+                "evidence": "response was plain text",
+                "proof": [],
+            },
+            {
+                "criterion": "Rate limiting works",
+                "status": "fail",
+                "evidence": "11th request returned 200",
+                "proof": ["curl loop returned 200 on request 11"],
+            },
+        ], "QA FAIL")
+
+        assert "proof gap: QA did not record proof" in message
+        assert "QA tested this and it failed" in message
+        assert "curl loop returned 200 on request 11" in message
+
+    @patch("otto.runner._log_warn")
+    def test_audits_missing_proof_and_visual_screenshot_without_blocking(self, mock_warn, tmp_path):
+        proofs_dir = tmp_path / "qa-proofs"
+        proofs_dir.mkdir(parents=True)
+        emit_events = []
+        verdict = {
+            "must_items": [
+                {"criterion": "API returns JSON", "status": "pass", "proof": []},
+                {"criterion": "Layout matches mock", "status": "pass", "proof": ["checked in browser"]},
+            ]
+        }
+        qa_spec = [
+            {"text": "API returns JSON", "binding": "must", "verifiable": True},
+            {"text": "Layout matches mock", "binding": "must", "verifiable": False},
+        ]
+
+        warnings = _audit_proof_sufficiency(
+            verdict,
+            qa_spec,
+            proofs_dir,
+            lambda event, **data: emit_events.append((event, data)),
+        )
+
+        report = (proofs_dir / "proof-report.md").read_text()
+        assert len(warnings) == 2
+        assert "Passed [must] missing proof: API returns JSON" in report
+        assert "Passed [must ◈] missing screenshot in qa-proofs/: Layout matches mock" in report
+        assert mock_warn.call_count == 2
+        assert ("qa_finding", {"text": "[warning] Passed [must] missing proof: API returns JSON"}) in emit_events
+
+    def test_runs_durable_regression_script(self, tmp_path):
+        log_dir = tmp_path / "logs"
+        proofs_dir = log_dir / "qa-proofs"
+        proofs_dir.mkdir(parents=True)
+        script = proofs_dir / "durable-regression.sh"
+        script.write_text("#!/bin/bash\nset -e\n\necho replay\nfalse\n")
+
+        result = _run_durable_regression(tmp_path, log_dir, timeout=5, attempt_num=2)
+
+        assert result is not None
+        assert result[0] is False
+        assert "replay" in result[1]
+        assert (log_dir / "attempt-2-durable-regression.log").exists()
 
 
 class TestTamperDetection:

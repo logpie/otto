@@ -489,6 +489,122 @@ def _persist_qa_results(
         _write_log_safe(log_dir, "qa-verdict.json", json.dumps(verdict, indent=2))
 
 
+def _normalize_criterion_text(text: str) -> str:
+    """Normalize criterion text for fuzzy matching."""
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", (text or "").lower())).strip()
+
+
+def _is_visual_must_criterion(criterion: str, qa_spec: list | None) -> bool:
+    """Return True when a QA criterion maps to a non-verifiable [must] spec."""
+    if not qa_spec or not criterion:
+        return False
+    from otto.tasks import spec_binding, spec_is_verifiable, spec_text
+
+    norm_criterion = _normalize_criterion_text(criterion)
+    for item in qa_spec:
+        if spec_binding(item) != "must" or spec_is_verifiable(item):
+            continue
+        norm_spec = _normalize_criterion_text(spec_text(item))
+        if not norm_spec:
+            continue
+        if norm_spec[:40] in norm_criterion or norm_criterion[:40] in norm_spec:
+            return True
+    return False
+
+
+def _build_qa_retry_error(failed_musts: list[dict], qa_report: str) -> str:
+    """Build retry guidance that distinguishes tested failures from proof gaps."""
+    if not failed_musts:
+        return qa_report
+
+    lines = ["QA found these issues:"]
+    for item in failed_musts:
+        criterion = item.get("criterion", "")
+        evidence = item.get("evidence", "")
+        proof = [str(p).strip() for p in (item.get("proof") or []) if str(p).strip()]
+        lines.append(f"- [must] {criterion}")
+        if proof:
+            lines.append(f"  proof recorded: QA tested this and it failed ({proof[0][:120]})")
+        else:
+            lines.append(
+                "  proof gap: QA did not record proof for this criterion; this may be a QA coverage issue"
+            )
+        if evidence:
+            lines.append(f"  evidence: {evidence}")
+    return "\n".join(lines)
+
+
+def _audit_proof_sufficiency(
+    verdict: dict,
+    qa_spec: list | None,
+    proofs_dir: Path,
+    emit: Any,
+) -> list[str]:
+    """Warn when passed must items lack proof or required screenshots."""
+    warnings: list[str] = []
+    screenshot_files = [
+        p for pattern in ("*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp")
+        for p in proofs_dir.glob(pattern)
+    ]
+
+    for item in verdict.get("must_items", []):
+        if item.get("status") != "pass":
+            continue
+        criterion = item.get("criterion", "").strip() or "Unnamed criterion"
+        proof = [str(p).strip() for p in (item.get("proof") or []) if str(p).strip()]
+        if not proof:
+            warnings.append(f"Passed [must] missing proof: {criterion}")
+        if _is_visual_must_criterion(criterion, qa_spec) and not screenshot_files:
+            warnings.append(f"Passed [must ◈] missing screenshot in qa-proofs/: {criterion}")
+
+    if warnings:
+        for warning in warnings:
+            _log_warn(warning)
+            emit("qa_finding", text=f"[warning] {warning}")
+        proof_report = proofs_dir / "proof-report.md"
+        prefix = "" if proof_report.exists() else "# Proof Report\n\n"
+        proof_lines = ["## Proof Sufficiency Warnings", *[f"- {warning}" for warning in warnings], ""]
+        try:
+            with open(proof_report, "a") as f:
+                if prefix:
+                    f.write(prefix)
+                f.write("\n".join(proof_lines))
+        except OSError:
+            pass
+
+    return warnings
+
+
+def _run_durable_regression(
+    project_dir: Path,
+    log_dir: Path,
+    timeout: int,
+    attempt_num: int,
+) -> tuple[bool, str] | None:
+    """Replay durable proof commands from earlier QA attempts on retries."""
+    script_path = log_dir / "qa-proofs" / "durable-regression.sh"
+    if not script_path.exists():
+        return None
+
+    try:
+        result = subprocess.run(
+            ["bash", str(script_path)],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        output = "\n".join(part for part in [result.stdout, result.stderr] if part).strip()
+    except subprocess.TimeoutExpired as exc:
+        output = "\n".join(part for part in [exc.stdout or "", exc.stderr or ""] if part).strip()
+        output = f"durable regression timed out after {timeout}s\n{output}".strip()
+        _write_log_safe(log_dir, f"attempt-{attempt_num}-durable-regression.log", output)
+        return False, output
+
+    _write_log_safe(log_dir, f"attempt-{attempt_num}-durable-regression.log", output or "PASS")
+    return result.returncode == 0, output
+
+
 def _build_coding_prompt(
     prompt: str,
     project_dir: Path,
@@ -1103,6 +1219,7 @@ async def _handle_no_changes(
 
     if qa_result_nc["must_passed"]:
         # QA confirms feature exists and works — pass
+        _audit_proof_sufficiency(verdict_nc, qa_spec, log_dir / "qa-proofs", emit)
         emit("phase", name="qa", status="done", time_s=qa_elapsed_nc,
              cost=qa_cost_nc)
         emit("phase", name="merge", status="done", time_s=0,
@@ -1133,7 +1250,7 @@ async def _handle_no_changes(
          error="existing code doesn't satisfy spec")
     return {
         "action": "retry",
-        "last_error": f"No code changes produced. QA found gaps:\n{qa_report_nc}",
+        "last_error": _build_qa_retry_error(failed_musts, qa_report_nc),
         "last_error_source": "qa",
         "cost_usd": qa_cost_nc,
     }
@@ -1567,6 +1684,24 @@ async def run_task_v45(
             emit("phase", name="coding", status="done", time_s=coding_elapsed,
                  cost=attempt_cost, attempt=attempt_num)
 
+            if attempt > 0:
+                durable_result = _run_durable_regression(
+                    project_dir, log_dir, test_timeout, attempt_num,
+                )
+                if durable_result and not durable_result[0]:
+                    emit("phase", name="test", status="fail", time_s=0,
+                         error="durable proof regression failed")
+                    last_error = build_retry_excerpt(
+                        "Previously passing proof checks regressed:\n"
+                        + (durable_result[1] or "durable-regression.sh failed")
+                    )
+                    last_error_source = "test"
+                    subprocess.run(
+                        ["git", "reset", "--mixed", base_sha],
+                        cwd=project_dir, capture_output=True,
+                    )
+                    continue
+
             # ── Build candidate + verify ────────────────────────────────
             candidate_sha = build_candidate_commit(
                 project_dir, base_sha, pre_existing_untracked,
@@ -1693,15 +1828,8 @@ async def run_task_v45(
                     cwd=project_dir, capture_output=True,
                 )
                 failed_musts = qa_out["failed_musts"]
-                failure_lines = []
-                for item in failed_musts:
-                    criterion = item.get("criterion", "")
-                    evidence = item.get("evidence", "")
-                    failure_lines.append(f"- [must] {criterion}")
-                    if evidence:
-                        failure_lines.append(f"  evidence: {evidence}")
-                if failure_lines:
-                    last_error = "QA found these issues:\n" + "\n".join(failure_lines)
+                if failed_musts:
+                    last_error = _build_qa_retry_error(failed_musts, qa_report)
                 else:
                     last_error = qa_report  # fallback to raw report
                 last_error_source = "qa"
@@ -1723,6 +1851,8 @@ async def run_task_v45(
                 reset_ref=candidate_sha,
                 pre_existing_untracked=pre_existing_untracked,
             )
+
+            _audit_proof_sufficiency(qa_out["verdict"], spec, log_dir / "qa-proofs", emit)
 
             # ── Merge ───────────────────────────────────────────────────
             emit("phase", name="merge", status="running")

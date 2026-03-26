@@ -288,6 +288,63 @@ def _is_non_replayable(cmd: str) -> bool:
     return False
 
 
+def _read_regression_commands(script_path: Path) -> list[str]:
+    """Read command lines back out of a generated regression script."""
+    if not script_path.exists():
+        return []
+    try:
+        lines = script_path.read_text().splitlines()
+    except OSError:
+        return []
+
+    commands: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#!") or stripped == "set -e":
+            continue
+        if stripped.startswith('echo "Running:') or stripped == 'echo "All regression checks passed."':
+            continue
+        commands.append(stripped)
+    return commands
+
+
+def _dedupe_commands(commands: list[str]) -> list[str]:
+    """Deduplicate commands while preserving order."""
+    seen: set[str] = set()
+    unique: list[str] = []
+    for cmd in commands:
+        if cmd in seen:
+            continue
+        seen.add(cmd)
+        unique.append(cmd)
+    return unique
+
+
+def _write_regression_script(script_path: Path, commands: list[str]) -> bool:
+    """Write a replayable regression shell script."""
+    import stat
+
+    if not commands:
+        return False
+
+    script_lines = ["#!/bin/bash", "set -e", ""]
+    for cmd in commands:
+        safe_label = cmd.replace('"', '\\"')
+        script_lines.append(f'echo "Running: {safe_label}"')
+        script_lines.append(cmd)
+        script_lines.append("")
+    script_lines.append('echo "All regression checks passed."')
+
+    try:
+        script_path.write_text("\n".join(script_lines) + "\n")
+        script_path.chmod(script_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        return True
+    except OSError:
+        return False
+
+
 def _write_proof_artifacts(
     log_dir: Path,
     verdict: dict,
@@ -306,11 +363,12 @@ def _write_proof_artifacts(
     Returns (file_count, coverage_string) e.g. (5, "3/4").
     """
     import shutil
-    import stat
 
     proofs_dir = log_dir / "qa-proofs"
+    durable_script_path = proofs_dir / "durable-regression.sh"
+    durable_commands = _read_regression_commands(durable_script_path)
 
-    # Preserve screenshots but clean everything else
+    # Preserve screenshots and durable regression commands but clean everything else
     screenshots: list[tuple[str, bytes]] = []
     if proofs_dir.exists():
         for f in proofs_dir.iterdir():
@@ -355,28 +413,21 @@ def _write_proof_artifacts(
 
     # Build regression-check.sh from verification commands
     verification_cmds: list[str] = []
+    durable_new_cmds: list[str] = []
     for action in qa_actions:
         if action.get("type") == "bash":
             cmd = action.get("command", "")
             if cmd and _is_verification_command(cmd) and not _is_non_replayable(cmd):
                 verification_cmds.append(cmd)
+                if not action.get("is_error", False):
+                    durable_new_cmds.append(cmd)
 
-    if verification_cmds:
-        script_lines = ["#!/bin/bash", "set -e", ""]
-        for cmd in verification_cmds:
-            # Escape double quotes in echo label
-            safe_label = cmd.replace('"', '\\"')
-            script_lines.append(f'echo "Running: {safe_label}"')
-            script_lines.append(cmd)
-            script_lines.append("")
-        script_lines.append('echo "All regression checks passed."')
-        script_path = proofs_dir / "regression-check.sh"
-        try:
-            script_path.write_text("\n".join(script_lines) + "\n")
-            script_path.chmod(script_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-            file_count += 1
-        except OSError:
-            pass
+    verification_cmds = _dedupe_commands(verification_cmds)
+    durable_commands = _dedupe_commands(durable_commands + durable_new_cmds)
+
+    if _write_regression_script(proofs_dir / "regression-check.sh", verification_cmds):
+        file_count += 1
+    _write_regression_script(proofs_dir / "durable-regression.sh", durable_commands)
 
     # Build proof-report.md
     task_key = task.get("key", "unknown")
@@ -667,6 +718,7 @@ Save any browser screenshots to: {log_dir / "qa-proofs" if log_dir else "/tmp"}/
                                     "type": "bash",
                                     "command": inp.get("command", ""),
                                     "output": "",
+                                    "is_error": False,
                                 }
                                 qa_actions.append(action)
                                 if tool_id:
@@ -711,6 +763,9 @@ Save any browser screenshots to: {log_dir / "qa-proofs" if log_dir else "/tmp"}/
                                     getattr(block, "content", "")
                                 )
                                 _pending_tool_uses[tid]["output"] = raw_content
+                                _pending_tool_uses[tid]["is_error"] = bool(
+                                    getattr(block, "is_error", False)
+                                )
                 # Handle UserMessage containing ToolResultBlocks
                 elif UserMessage and isinstance(message, UserMessage):
                     for block in getattr(message, "content", []):
@@ -721,6 +776,9 @@ Save any browser screenshots to: {log_dir / "qa-proofs" if log_dir else "/tmp"}/
                                     getattr(block, "content", "")
                                 )
                                 _pending_tool_uses[tid]["output"] = raw_content
+                                _pending_tool_uses[tid]["is_error"] = bool(
+                                    getattr(block, "is_error", False)
+                                )
             # Extract cost from the final result (after stream completes)
             if _result_msg:
                 raw_cost = getattr(_result_msg, "total_cost_usd", None)

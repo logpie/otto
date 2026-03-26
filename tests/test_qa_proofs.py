@@ -228,6 +228,59 @@ class TestWriteProofArtifacts:
         assert (proofs_dir / "must-1.md").exists()
         assert (proofs_dir / "proof-report.md").exists()
 
+    def test_preserves_and_accumulates_durable_regression_commands(self, tmp_path):
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        proofs_dir = log_dir / "qa-proofs"
+        proofs_dir.mkdir()
+        (proofs_dir / "durable-regression.sh").write_text(
+            "#!/bin/bash\nset -e\n\necho \"Running: pytest tests/test_old.py\"\npytest tests/test_old.py\n"
+        )
+
+        verdict = self._make_verdict()
+        task = {"key": "test123"}
+        qa_actions = [
+            {"type": "bash", "command": "pytest tests/test_old.py", "output": "ok", "is_error": False},
+            {"type": "bash", "command": "pytest tests/test_new.py", "output": "ok", "is_error": False},
+            {"type": "bash", "command": "pytest tests/test_failing.py", "output": "fail", "is_error": True},
+        ]
+
+        _write_proof_artifacts(log_dir, verdict, qa_actions, task, "Test prompt", 0.50)
+
+        durable = (proofs_dir / "durable-regression.sh").read_text()
+        durable_commands = [
+            line.strip()
+            for line in durable.splitlines()
+            if line.strip().startswith("pytest ")
+        ]
+        assert "pytest tests/test_old.py" in durable
+        assert "pytest tests/test_new.py" in durable
+        assert durable_commands.count("pytest tests/test_old.py") == 1
+        assert "pytest tests/test_failing.py" not in durable
+
+    def test_preserves_durable_regression_when_current_run_has_no_commands(self, tmp_path):
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        proofs_dir = log_dir / "qa-proofs"
+        proofs_dir.mkdir()
+        original = "#!/bin/bash\nset -e\n\necho \"Running: pytest tests/test_saved.py\"\npytest tests/test_saved.py\n"
+        (proofs_dir / "durable-regression.sh").write_text(original)
+
+        verdict = self._make_verdict()
+        task = {"key": "test123"}
+        _write_proof_artifacts(
+            log_dir,
+            verdict,
+            [{"type": "browser", "action": "navigate", "detail": "http://localhost:3000"}],
+            task,
+            "Test prompt",
+            0.50,
+        )
+
+        durable = proofs_dir / "durable-regression.sh"
+        assert durable.exists()
+        assert "pytest tests/test_saved.py" in durable.read_text()
+
     def test_filters_exploration_commands_from_report_and_script(self, tmp_path):
         log_dir = tmp_path / "logs"
         log_dir.mkdir()
