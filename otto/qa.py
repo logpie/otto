@@ -42,7 +42,15 @@ Testing order — test in the order listed:
 3. [should] items — note observations, do not block merge.
 
 Items marked ◈ cannot be verified by code alone. Visual items MUST use browser.
-Always run existing tests before writing the verdict.
+Run the full existing test suite once for broad regression coverage.
+
+Then for each [must] item you verify, record at least one targeted proof
+tied to that spec_id. Prefer a deterministic targeted command when available
+(single test file/test case, curl, node -e script). If no targeted command
+exists, record the best direct proof available and explain why.
+A single targeted command may satisfy multiple [must] items if it directly
+verifies them. If a blocking [must] fails, you may stop after recording
+proof for the checked items.
 
 When taking browser screenshots, ALWAYS save to a file path:
   take_screenshot(filePath="<proof_dir>/screenshot-<name>.png")
@@ -52,7 +60,8 @@ Also check:
 - Does the implementation contradict the ORIGINAL task prompt?
 - Does it break existing functionality?
 
-For each [must] item, include spec_id (matching the criterion number) and a "proof" array — short strings describing what you did to verify.
+For each [must] item, include spec_id (matching the criterion number) and
+a "proof" array — short strings describing what you did to verify.
 Only cite proof that directly verifies THAT criterion, not exploration.
 
 Write your verdict to the output file as JSON:
