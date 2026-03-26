@@ -405,24 +405,20 @@ def _write_proof_artifacts(
     if _write_regression_script(proofs_dir / "regression-check.sh", verification_cmds):
         file_count += 1
 
-    # Build proof-report.md
+    # Build proof-report.md — designed for human review
     task_key = task.get("key", "unknown")
-    # Normalize prompt whitespace
     clean_prompt = re.sub(r'\s+', ' ', original_prompt).strip()
     must_total = len(must_items)
     must_passed_count = sum(1 for item in must_items if item.get("status") == "pass")
-    result_icon = "\u2713" if must_passed_count == must_total else "\u2717"
+    result_icon = "\u2713 PASSED" if must_passed_count == must_total else "\u2717 FAILED"
 
-    report_lines_list: list[str] = []
-    report_lines_list.append("# Proof Report")
-    report_lines_list.append(f"**Task:** {clean_prompt}")
-    report_lines_list.append(
-        f"**Result:** {task_key} | {result_icon} | "
-        f"{must_passed_count}/{must_total} must | QA ${cost_usd:.2f}"
-    )
-    report_lines_list.append("")
+    r: list[str] = []
+    r.append(f"# {clean_prompt}")
+    r.append("")
+    r.append(f"**{result_icon}** — {must_passed_count}/{must_total} must items — QA ${cost_usd:.2f}")
+    r.append("")
 
-    # Per-item proofs
+    # Per-item: criterion → evidence → proof
     items_with_proof = 0
     for i, item in enumerate(must_items, 1):
         criterion = item.get("criterion", "")
@@ -430,75 +426,52 @@ def _write_proof_artifacts(
         evidence = item.get("evidence", "")
         proof = item.get("proof", [])
         icon = "\u2713" if status_str == "pass" else "\u2717"
-        report_lines_list.append(f"## {icon} [{i}] {criterion}")
-        report_lines_list.append(f"Evidence: {evidence}")
+        r.append(f"### {icon} {criterion}")
+        if evidence:
+            r.append(f"> {evidence}")
         if proof:
             items_with_proof += 1
-            report_lines_list.append("Proof:")
+            r.append("")
             for p in proof:
-                report_lines_list.append(f"- {p}")
-        report_lines_list.append("")
-        report_lines_list.append("---")
+                r.append(f"- {p}")
+        else:
+            r.append("\n*No proof recorded*")
+        r.append("")
 
-    # Add verification commands section
-    if verification_cmds:
-        report_lines_list.append("")
-        report_lines_list.append("## Verification Commands")
-        for cmd in verification_cmds:
-            # Find matching qa_action to get output
-            output = ""
-            for action in qa_actions:
-                if action.get("type") == "bash" and action.get("command") == cmd:
-                    output = action.get("output", "")
-                    break
-            report_lines_list.append(f"- `{cmd}`")
-            if output:
-                report_lines_list.append(f"  Output: {output[:200]}")
-        report_lines_list.append("")
-
-    # Screenshots section
+    # Screenshots (inline, not a separate section)
     screenshot_actions = [
         a for a in qa_actions
         if a.get("type") == "browser" and a.get("action") == "take_screenshot"
     ]
     existing_screenshots = sorted(proofs_dir.glob("screenshot-*"))
     if screenshot_actions or existing_screenshots:
-        report_lines_list.append("## Screenshots")
-        # Use action order (not sorted filesystem order)
-        for idx, action in enumerate(screenshot_actions, 1):
+        r.append("### Screenshots")
+        for action in screenshot_actions:
             path = action.get("path", "")
             detail = action.get("detail", "")
             if path:
                 fname = Path(path).name
-                report_lines_list.append(f"SS{idx} [{fname}]({fname})")
-                if detail:
-                    report_lines_list.append(f"Description: {detail}")
-        # If there are screenshots on disk not in actions, list them too
+                caption = detail or fname
+                r.append(f"- [{caption}]({fname})")
         action_paths = {Path(a.get("path", "")).name for a in screenshot_actions if a.get("path")}
         for ss in existing_screenshots:
             if ss.name not in action_paths:
-                report_lines_list.append(f"[{ss.name}]({ss.name})")
-        report_lines_list.append("")
+                r.append(f"- [{ss.name}]({ss.name})")
+        r.append("")
 
-    # Browser evaluate_script results
-    browser_evals = [
-        a for a in qa_actions
-        if a.get("type") == "browser" and a.get("action") == "evaluate_script"
-    ]
-    if browser_evals:
-        report_lines_list.append("## Browser Evaluations")
-        for ev in browser_evals:
-            detail = ev.get("detail", "")
-            output = ev.get("output", "")
-            report_lines_list.append(f"- `{detail}`: {output[:200]}")
-        report_lines_list.append("")
+    # Regression script reference
+    if verification_cmds:
+        r.append("### Regression Script")
+        r.append(f"`regression-check.sh` — {len(verification_cmds)} commands, independently runnable")
+        r.append("")
 
-    # Proof coverage
+    # Footer
     coverage_str = f"{items_with_proof}/{must_total}" if must_total > 0 else "0/0"
-    report_lines_list.append(f"Proof coverage: {coverage_str} must items have proof recorded")
+    r.append("---")
+    r.append(f"Proof coverage: {coverage_str} · Task: `{task_key}`")
 
     try:
-        (proofs_dir / "proof-report.md").write_text("\n".join(report_lines_list) + "\n")
+        (proofs_dir / "proof-report.md").write_text("\n".join(r) + "\n")
         file_count += 1
     except OSError:
         pass

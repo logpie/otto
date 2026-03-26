@@ -166,13 +166,13 @@ class TestWriteProofArtifacts:
         report = proofs_dir / "proof-report.md"
         assert report.exists()
         content = report.read_text()
-        assert "Proof Report" in content
+        assert content.startswith("#")  # report starts with task heading
         assert "test123" in content
         assert "$0.50" in content
         assert "Function returns correct value" in content
         # Screenshots section
         assert "Screenshots" in content
-        assert "[screenshot-banner.png](screenshot-banner.png)" in content
+        assert "screenshot-banner.png" in content
         # should notes NOT in proof report (they're in must-N.md only)
         assert "Good variable names" not in content
 
@@ -288,12 +288,13 @@ class TestWriteProofArtifacts:
 
         report = (log_dir / "qa-proofs" / "proof-report.md").read_text()
         script = (log_dir / "qa-proofs" / "regression-check.sh").read_text()
-        assert "find . -name" not in report
-        assert "git diff main...HEAD --name-only" not in report
+        # Exploration commands excluded from both
         assert "find . -name" not in script
         assert "git diff main...HEAD --name-only" not in script
-        assert "npx jest --runInBand" in report
+        # Verification command in script
         assert "npx jest --runInBand" in script
+        # Report references the script
+        assert "regression-check.sh" in report
 
     def test_new_page_not_in_regression_script(self, tmp_path):
         """Navigation actions (new_page) should not appear in regression script."""
@@ -320,7 +321,7 @@ class TestWriteProofArtifacts:
         _write_proof_artifacts(log_dir, verdict, [], task, prompt, 0.50)
 
         report = (log_dir / "qa-proofs" / "proof-report.md").read_text()
-        assert "**Task:** Build CLI command with multiline input" in report
+        assert "Build CLI command with multiline input" in report
         assert "**Task:** Build CLI command\n   with multiline   input" not in report
 
 
@@ -416,7 +417,7 @@ class TestRunQaAgentStreamCapture:
 
         report = (tmp_path / "logs" / "qa-proofs" / "proof-report.md").read_text()
         assert result["must_passed"] is True
-        # Bash output captured and shown in verification commands
-        assert "1 passed in 0.12s" in report
+        # Report references regression script (commands not inline)
+        assert "regression-check.sh" in report
         # Raw SDK list format NOT in report
         assert "[{'type': 'text'" not in report

@@ -454,7 +454,7 @@ class TestProofOfWorkE2E:
         content = proof_report.read_text()
         lines = content.strip().splitlines()
         assert len(lines) > 0
-        assert "Proof Report" in lines[0]
+        assert lines[0].startswith("#")  # report starts with task as heading
 
         # Verify claims display logic
         claims_files = sorted(log_dir.glob("attempt-*-claims.md"))
@@ -651,8 +651,7 @@ class TestProofOfWorkE2E:
         _write_proof_artifacts(log_dir, verdict, qa_actions, {"key": "SS-1"}, "Capture screenshots", 0.0)
 
         report = (proofs_dir / "proof-report.md").read_text()
-        zeta_index = report.index("SS1 [screenshot-zeta.png](screenshot-zeta.png)")
-        alpha_index = report.index("SS2 [screenshot-alpha.png](screenshot-alpha.png)")
+        # Zeta should appear before alpha (action order, not sorted)
+        zeta_index = report.index("[Zeta state](screenshot-zeta.png)")
+        alpha_index = report.index("[Alpha state](screenshot-alpha.png)")
         assert zeta_index < alpha_index
-        assert "Description: Zeta state" in report
-        assert "Description: Alpha state" in report
