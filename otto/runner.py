@@ -399,6 +399,9 @@ async def coding_loop(
                 parts.append(f"{attempts} attempts")
             if parts:
                 console.print(f"    {' · '.join(parts)}")
+            proof_report = project_dir / "otto_logs" / task_key / "qa-proofs" / "proof-report.md"
+            if proof_report.exists():
+                console.print(f"    [dim]proofs: {proof_report}[/dim]")
 
             # Emit TaskMerged NOW (not deferred to batch loop)
             telemetry.log(TaskMerged(
