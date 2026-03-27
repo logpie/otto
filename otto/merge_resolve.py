@@ -107,6 +107,27 @@ def _has_conflict_markers(text: str) -> bool:
     return re.search(r"(?m)^(<<<<<<<|=======|>>>>>>>)", text) is not None
 
 
+def _count_conflict_hunks(text: str) -> int:
+    """Count number of conflict regions in a file."""
+    return len(re.findall(r"(?m)^<<<<<<<", text))
+
+
+def _estimate_conflict_complexity(content: str | None) -> str:
+    """Pick model based on conflict complexity.
+
+    Haiku (~$0.02): simple conflicts — few hunks, small diffs, additive changes.
+    Sonnet (~$0.10): complex conflicts — many hunks, large diffs, refactors.
+    """
+    if not content:
+        return "haiku"
+    hunks = _count_conflict_hunks(content)
+    lines = content.count("\n")
+    # Many conflict regions or large file = likely complex refactor
+    if hunks >= 3 or lines > 500:
+        return "sonnet"
+    return "haiku"
+
+
 def _resolve_one(repo_root: Path, filepath: str) -> str | None:
     # Skip binary/non-text files — LLM can't resolve these
     if not _is_text_file(repo_root, filepath):
@@ -123,13 +144,15 @@ def _resolve_one(repo_root: Path, filepath: str) -> str | None:
         theirs_content,
     )
 
+    model = _estimate_conflict_complexity(conflicted_content)
+
     try:
         result = subprocess.run(
             [
                 "claude",
                 "--print",
                 "--model",
-                "haiku",
+                model,
                 "--permission-mode",
                 "default",
                 "--tools",
