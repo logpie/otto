@@ -19,6 +19,8 @@ For each task, Otto:
 4. **QA agent reviews** — adversarial testing against spec + original prompt. Risk-based tiering: skip QA when all specs have tests (tier 0), targeted checks (tier 1), or full adversarial testing with browser (tier 2).
 5. **Merges** — squash merge to main, clean git history.
 
+Independent tasks within a batch run **in parallel** using git worktrees. Each task gets its own worktree, codes and verifies concurrently, then merges serially. Merge conflicts are auto-retried on updated main.
+
 Failed tasks get structured retry: the coding agent receives a focused failure excerpt (not 847K of raw test output), and pre-existing flaky tests are excluded from retry decisions.
 
 ## What you see
@@ -91,11 +93,12 @@ No `otto init` needed — auto-initializes on first `add` or `run`.
 otto add "prompt"       Add a task (spec generated at runtime, parallel with coding)
 otto add --spec "prompt"  Pre-generate spec before run
 otto add -f file        Import from .md/.txt/.yaml
-otto run                Run all pending tasks
+otto run                Run all pending tasks (parallel if max_parallel > 1)
 otto run "prompt"       One-off: add + run in single command
 otto run --no-spec      Skip spec generation
 otto run --no-qa        Skip QA (merge after tests pass)
 otto run --no-test      Skip testing (merge after coding)
+otto run --max-parallel N  Override max_parallel for this run
 otto plan               Show execution plan without running
 otto status             Show task table with specs, cost, timing
 otto show <id>          Show task details + QA verdict
@@ -117,6 +120,8 @@ Otto is infrastructure, not intelligence. The intelligence is Claude's. Otto pro
 
 ```
     ┌─────────────────────────────────────────────────────────┐
+    │  Per-task pipeline (runs in parallel worktrees):        │
+    │                                                         │
     │  1. Preflight                                           │
     │     Baseline tests (jest + pytest), .gitignore,         │
     │     record flaky test names for later comparison        │
@@ -137,11 +142,36 @@ Otto is infrastructure, not intelligence. The intelligence is Claude's. Otto pro
     │     Writes per-item proof + screenshots to qa-proofs/   │
     │                                                         │
     │  6. Post-QA restore (reset to verified candidate SHA)   │
+    │     Task state: verified                                │
+    ├─────────────────────────────────────────────────────────┤
+    │  Serial merge phase (after all parallel tasks finish):  │
     │                                                         │
-    │  7. Pass → squash merge + proof report with commit SHA  │
+    │  7. Merge each verified task onto main (in order)       │
+    │     Post-merge test verification per task               │
+    │     Conflict → auto-retry task on updated main          │
+    │                                                         │
+    │  8. Pass → merge + proof report with commit SHA         │
     │     Fail → retry with failure excerpt (not raw output)  │
     └─────────────────────────────────────────────────────────┘
 ```
+
+### Parallel batch execution
+
+Independent tasks within a batch run concurrently in git worktrees:
+
+```
+Batch 1: [task A, task B, task C]  ← independent → run in PARALLEL
+          ↓ all verified, then merge serially
+Batch 2: [task D]                  ← depends on A+B → runs AFTER batch 1
+```
+
+- **Within-batch** = parallel (tasks are independent, each in its own worktree)
+- **Cross-batch** = serial (later batches depend on earlier results)
+- **Merge phase** = serial (verified tasks merge one-by-one onto main)
+- **Conflict auto-retry** = merge-failed tasks re-run on updated main
+
+Task states: `pending → running → verified → merge_pending → passed`
+(or `→ failed` / `→ merge_failed` on errors)
 
 ### Spec binding model
 
@@ -230,6 +260,8 @@ default_branch: main
 verify_timeout: 300       # seconds for test suite
 max_task_time: 3600       # 1hr circuit breaker per task
 qa_timeout: 3600          # QA agent timeout
+max_parallel: 1           # 1 = serial (default), 2+ = parallel worktrees
+install_timeout: 120      # seconds for npm ci / pip install in worktrees
 
 # Per-agent setting scopes (comma-separated: user, project)
 coding_agent_settings: "user,project"   # reads user + project CLAUDE.md
@@ -239,17 +271,21 @@ qa_agent_settings: "project"            # project CLAUDE.md only
 
 Auto-detected: test_command, default_branch. Override anything in `otto.yaml`.
 
+### Parallel execution
+
+Set `max_parallel: 2` (or higher) to run independent tasks concurrently. Each task gets its own git worktree at `.otto-worktrees/otto-task-<key>/`. Worktrees are cleaned up after each run. Serial is the default — parallel is opt-in.
+
 ## Project structure
 
 ```
 otto/
-  cli.py             — CLI (add, run, plan, status, show, retry, logs, reset)
+  cli.py             — CLI (add, run, plan, status, show, retry, drop, revert, logs)
   runner.py           — v4.5 pipeline: bare CC coding, structured QA, retry
   spec.py             — Spec generation with [must]/[should]/◈ classification
   testing.py          — Testing in disposable worktrees
   tasks.py            — Task CRUD with file locking
   config.py           — Config loading, multi-framework test detection
-  orchestrator.py     — Multi-task batch execution, integration branch
+  orchestrator.py     — Batch execution: parallel worktrees, serial merge, auto-retry
   display.py          — Live terminal display with semantic color hierarchy
   display_preview.py  — HTML preview tool for display debugging
   claim_verify.py     — Regex audit of agent log vs verify evidence

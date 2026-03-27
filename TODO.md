@@ -40,7 +40,7 @@
   - Expand on failure only: compact single-line per task on success, multi-line with test output + diff on failure
 - [ ] **Pilot speed optimization**: Overhead is ~3-5 min per run (ToolSearch, reasoning between tools). Investigate: (1) pre-load MCP tools to avoid ToolSearch, (2) reduce pilot reasoning turns, (3) batch save_run_state.
 - [ ] **Pilot structured system prompt**: If pilot starts dodging responsibilities (skipping compliance checks, not doing behavioral testing), apply the same structured system_prompt treatment as spec/coding agents (XML tags, anti-examples, compliance self-check). Currently not needed — pilot follows instructions well. Monitor for: over-exploration before simple tasks, skipping behavioral testing, declaring tasks passed without checking.
-- [ ] **Run time reporting**: `otto status` only shows coding time, not total run time. Should track per-phase timing.
+- [x] **Run time reporting**: `otto status` shows per-phase timing (prepare, coding, test, qa, merge) and total elapsed time.
 - [x] **Coding agent CC parity**: max_turns=200 and effort="high" (both configurable in otto.yaml), setting_sources=["project"] for CLAUDE.md, env=os.environ for API keys/PATH. See v3 design Phase 9.
 
 ### Medium Priority
@@ -49,7 +49,7 @@
 - [ ] **Refactor: testgen.py cleanup** — only used via `--tdd` now, but still has 4 near-duplicate functions. Consolidate into a shared `_run_testgen_core()`.
 - [x] **Refactor: runner.py is 2300 lines** — v3 reduced to ~1140 lines. `run_all()`, cross-task review, reconciliation, integration gate all removed. Only `run_task()` + git utilities remain.
 - [ ] **Refactor: pilot.py MCP script is embedded string** — ~400 lines of Python inside an f-string with double-brace escaping. Extract to `otto/pilot_mcp_server.py` as a real module, pass config via env vars or temp JSON file instead of baking into the script.
-- [ ] **BUG: `reset --hard` destroys user commits**: Currently uses `git reset --hard` to parent of oldest otto commit, which nukes interleaved user commits (e.g., `features.md`). Should use `git revert` on otto commits only, or at minimum only reset otto-prefixed commits while preserving user history.
+- [x] **BUG: `reset --hard` destroys user commits**: Fixed. Replaced `reset`/`delete` with `drop` (remove from queue, code stays) and `revert` (git revert specific otto commits). No more `git reset --hard`.
 - [ ] **Task history**: `otto add -f` wipes all tasks — no way to see past runs. Add `otto history` or archive old tasks before re-import so devs can review prior results/costs.
 - [ ] **Retry UX**: `otto retry` without `--force` for stale tasks, cascade to blocked dependents, `--run` flag to combine retry+run. See `docs/superpowers/plans/2026-03-15-retry-ux.md`.
 - [ ] **`otto retry --respec`**: Regenerate spec when retrying a task. Currently `otto retry` keeps the old spec, which may have been the problem (e.g., softened constraints from old spec agent). Also consider `otto spec <id>` to regenerate spec for any task without resetting status.
@@ -58,7 +58,7 @@
 - [x] **Coding agent subagents**: Added `researcher` (haiku, read-only investigation) and `explorer` (haiku, codebase search) subagents via AgentDefinition. Coding agent can spawn these to parallelize exploration within a task.
 - [ ] **`--fast` mode**: Pre-load context into prompt, tell agent "start writing immediately." Cuts tool calls. Expected: ~25s instead of ~68s. Keeps self-validation.
 - [x] **Parallel tasks**: Run independent tasks concurrently in git worktrees. `depends_on` field, topological ordering, blocked status. *(v3: parallel execution removed from default path — pilot runs tasks sequentially. Can be re-added as optimization.)*
-- [ ] **Re-add parallel execution**: Pilot currently runs tasks sequentially. Re-add parallel worktree execution as an optimization for independent tasks.
+- [x] **Re-add parallel execution**: `max_parallel: N` in otto.yaml. Independent tasks run in parallel worktrees, merge serially. Merge conflicts auto-retry on updated main. Pressure-tested: 8 runs, 13 tasks, 0 bugs.
 - [ ] **Parallel TUI**: `rich.Live` panels with per-task workzone boxes for parallel execution. Keypress toggles for compact/panel/focus modes. See `docs/superpowers/plans/2026-03-15-parallel-tui.md`.
 - [ ] **Watch mode**: `otto watch` auto-reimports and reruns on file changes.
 - [ ] **Progress bar**: Show overall progress (3/5 tasks) during run.

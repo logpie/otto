@@ -1,3 +1,20 @@
+## Implementation Gate — 2026-03-26 — Parallel batch execution (post-phase-3 fixes)
+
+### Round 1 — Codex
+- [IMPORTANT] Stale error_code not cleared on merge-retry reset — fixed by Codex: added error_code field to TaskResult, cleared on reset
+- [IMPORTANT] attempts=0 gives fresh retry budget on merge-failed rerun — fixed by Codex: removed attempts=0 from reset
+- [NOTE] Merge-failure detection is stringly typed — fixed by Codex: uses r.error_code == "merge_failed"
+- [REFACTOR] Function still named cherry_pick_candidate — fixed: renamed to merge_candidate, all docs/comments/tests updated
+
+### Round 2 — Codex
+- [IMPORTANT] attempts=0 in run_task_v45() wipes prior count on rerun — fixed by Codex: removed attempts=0 from task start
+- [NOTE] Remaining cherry-pick/post-rebase references — fixed by Codex: full terminology pass
+
+### Round 3 — Codex
+- APPROVED. No new issues.
+
+---
+
 ## Implementation Gate — 2026-03-21 — Rich display rewrite + already-merged fix
 
 ### Round 1 — Codex
