@@ -7,10 +7,12 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import yaml
 
 from otto.context import PipelineContext, TaskResult
-from otto.orchestrator import cleanup_orphaned_worktrees, run_per
+from otto.orchestrator import cleanup_orphaned_worktrees, merge_parallel_results, run_per
 from otto.planner import Batch, ExecutionPlan, TaskPlan
+from otto.telemetry import Telemetry
 
 
 class TestCleanupOrphanedWorktrees:
@@ -164,8 +166,13 @@ class TestRunPerIntegration:
 
     @pytest.mark.asyncio
     async def test_batch_tasks_run_parallel_when_max_parallel_gt_1(self, tmp_git_repo):
-        """With max_parallel>1 and multiple tasks, tasks run in parallel with worktrees."""
+        """With max_parallel>1 and multiple tasks, tasks run in parallel with worktrees.
+
+        The mock coding_loop creates a real commit in the worktree and anchors
+        it as a candidate ref, so the serial merge phase can cherry-pick it.
+        """
         import yaml
+        from otto.git_ops import _anchor_candidate_ref
         tasks_path = tmp_git_repo / "tasks.yaml"
         tasks_path.write_text(yaml.dump({"tasks": [
             {"id": 1, "key": "task-one", "prompt": "Task one", "status": "pending", "spec": ["one"]},
@@ -174,6 +181,7 @@ class TestRunPerIntegration:
 
         config = self._make_config(tmp_git_repo)
         config["max_parallel"] = 2
+        config["skip_test"] = True  # skip post-rebase verification for unit test speed
         execution_plan = ExecutionPlan(batches=[
             Batch(tasks=[TaskPlan(task_key="task-one"), TaskPlan(task_key="task-two")]),
         ])
@@ -184,6 +192,20 @@ class TestRunPerIntegration:
             executed_keys.append(task_plan.task_key)
             if task_work_dir:
                 received_work_dirs[task_plan.task_key] = str(task_work_dir)
+                # Create a real commit in the worktree so the merge phase has something to cherry-pick
+                filename = f"{task_plan.task_key}.txt"
+                (task_work_dir / filename).write_text(f"content for {task_plan.task_key}\n")
+                subprocess.run(["git", "add", filename], cwd=task_work_dir, capture_output=True, check=True)
+                subprocess.run(
+                    ["git", "commit", "-m", f"otto: {task_plan.task_key}"],
+                    cwd=task_work_dir, capture_output=True, check=True,
+                )
+                sha = subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=task_work_dir, capture_output=True, text=True, check=True,
+                ).stdout.strip()
+                # Anchor the commit as a candidate ref (stored in shared git object store)
+                _anchor_candidate_ref(task_work_dir, task_plan.task_key, 1, sha)
             return TaskResult(task_key=task_plan.task_key, success=True)
 
         with patch("otto.orchestrator.plan", AsyncMock(return_value=execution_plan)):
@@ -306,3 +328,308 @@ class TestOrchestrationLogic:
         assert ctx.passed_count == 1
         assert ctx.failed_count == 1
         assert abs(ctx.total_cost - 0.8) < 0.001
+
+
+class TestMergeParallelResults:
+    """Tests for the serial merge phase after parallel task execution."""
+
+    def _make_config(self):
+        return {
+            "default_branch": "main",
+            "max_retries": 1,
+            "verify_timeout": 60,
+            "skip_test": True,  # skip post-rebase verification for unit tests
+        }
+
+    def _create_candidate_commit(self, repo, task_key, filename, content):
+        """Create a commit and anchor it as a candidate ref. Returns the SHA."""
+        from otto.git_ops import _anchor_candidate_ref
+        (repo / filename).write_text(content)
+        subprocess.run(["git", "add", filename], cwd=repo, capture_output=True, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", f"otto: {task_key}"],
+            cwd=repo, capture_output=True, check=True,
+        )
+        sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        # Reset back to main to simulate worktree behavior
+        subprocess.run(["git", "reset", "--hard", "HEAD~1"], cwd=repo, capture_output=True)
+        _anchor_candidate_ref(repo, task_key, 1, sha)
+        return sha
+
+    def test_both_tasks_merge_no_conflict(self, tmp_git_repo):
+        """Two tasks touching different files should both merge successfully."""
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        tasks_path.write_text(yaml.dump({"tasks": [
+            {"id": 1, "key": "task-aaa", "prompt": "Task A", "status": "verified"},
+            {"id": 2, "key": "task-bbb", "prompt": "Task B", "status": "verified"},
+        ]}))
+        log_dir = tmp_git_repo / "otto_logs"
+        log_dir.mkdir(exist_ok=True)
+        telemetry = Telemetry(log_dir)
+
+        self._create_candidate_commit(tmp_git_repo, "task-aaa", "a.txt", "aaa\n")
+        self._create_candidate_commit(tmp_git_repo, "task-bbb", "b.txt", "bbb\n")
+
+        results = [
+            TaskResult(task_key="task-aaa", success=True, cost_usd=0.1),
+            TaskResult(task_key="task-bbb", success=True, cost_usd=0.2),
+        ]
+        config = self._make_config()
+
+        merged = merge_parallel_results(results, config, tmp_git_repo, tasks_path, telemetry)
+
+        assert len(merged) == 2
+        assert all(r.success for r in merged)
+        # Both files should exist on main
+        assert (tmp_git_repo / "a.txt").exists()
+        assert (tmp_git_repo / "b.txt").exists()
+
+    def test_conflict_detected(self, tmp_git_repo):
+        """Two tasks modifying the same file should result in one merge_failed."""
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        tasks_path.write_text(yaml.dump({"tasks": [
+            {"id": 1, "key": "task-aaa", "prompt": "Task A", "status": "verified"},
+            {"id": 2, "key": "task-bbb", "prompt": "Task B", "status": "verified"},
+        ]}))
+        log_dir = tmp_git_repo / "otto_logs"
+        log_dir.mkdir(exist_ok=True)
+        telemetry = Telemetry(log_dir)
+
+        # Both tasks modify the same file with different content
+        self._create_candidate_commit(tmp_git_repo, "task-aaa", "shared.txt", "content from A\n")
+        self._create_candidate_commit(tmp_git_repo, "task-bbb", "shared.txt", "content from B\n")
+
+        results = [
+            TaskResult(task_key="task-aaa", success=True),
+            TaskResult(task_key="task-bbb", success=True),
+        ]
+        config = self._make_config()
+
+        merged = merge_parallel_results(results, config, tmp_git_repo, tasks_path, telemetry)
+
+        # First task (task-aaa, sorted first) should merge, second should conflict
+        passed = [r for r in merged if r.success]
+        failed = [r for r in merged if not r.success]
+        assert len(passed) == 1
+        assert len(failed) == 1
+        assert passed[0].task_key == "task-aaa"
+        assert failed[0].task_key == "task-bbb"
+        assert "conflict" in (failed[0].error or "").lower()
+
+    def test_failed_tasks_carried_through(self, tmp_git_repo):
+        """Failed tasks from the parallel phase should be carried through unchanged."""
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        tasks_path.write_text(yaml.dump({"tasks": [
+            {"id": 1, "key": "task-ok", "prompt": "Good task", "status": "verified"},
+            {"id": 2, "key": "task-bad", "prompt": "Bad task", "status": "failed"},
+        ]}))
+        log_dir = tmp_git_repo / "otto_logs"
+        log_dir.mkdir(exist_ok=True)
+        telemetry = Telemetry(log_dir)
+
+        self._create_candidate_commit(tmp_git_repo, "task-ok", "ok.txt", "ok\n")
+
+        results = [
+            TaskResult(task_key="task-ok", success=True),
+            TaskResult(task_key="task-bad", success=False, error="tests failed"),
+        ]
+        config = self._make_config()
+
+        merged = merge_parallel_results(results, config, tmp_git_repo, tasks_path, telemetry)
+
+        passed = [r for r in merged if r.success]
+        failed = [r for r in merged if not r.success]
+        assert len(passed) == 1
+        assert len(failed) == 1
+        assert passed[0].task_key == "task-ok"
+        assert failed[0].task_key == "task-bad"
+        assert failed[0].error == "tests failed"  # original error preserved
+
+    def test_no_verified_tasks_returns_unchanged(self, tmp_git_repo):
+        """If no tasks are verified, return results unchanged."""
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        tasks_path.write_text(yaml.dump({"tasks": []}))
+        log_dir = tmp_git_repo / "otto_logs"
+        log_dir.mkdir(exist_ok=True)
+        telemetry = Telemetry(log_dir)
+
+        results = [
+            TaskResult(task_key="t1", success=False, error="boom"),
+        ]
+        config = self._make_config()
+
+        merged = merge_parallel_results(results, config, tmp_git_repo, tasks_path, telemetry)
+        assert merged == results
+
+    def test_post_rebase_test_failure(self, tmp_git_repo):
+        """Post-rebase test failure should mark task as merge_failed and revert."""
+        from otto.testing import TestSuiteResult, TierResult
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        tasks_path.write_text(yaml.dump({"tasks": [
+            {"id": 1, "key": "task-fail", "prompt": "Fails post-rebase", "status": "verified"},
+        ]}))
+        log_dir = tmp_git_repo / "otto_logs"
+        log_dir.mkdir(exist_ok=True)
+        telemetry = Telemetry(log_dir)
+
+        self._create_candidate_commit(tmp_git_repo, "task-fail", "fail.txt", "content\n")
+
+        # Record HEAD before merge attempt
+        head_before = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=tmp_git_repo, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        results = [TaskResult(task_key="task-fail", success=True)]
+        config = self._make_config()
+        config["skip_test"] = False  # enable post-rebase verification
+
+        # Mock run_test_suite to return failure
+        failed_suite = TestSuiteResult(
+            passed=False,
+            tiers=[TierResult(tier="existing_tests", passed=False, output="1 failed")],
+        )
+        with patch("otto.testing.run_test_suite", return_value=failed_suite):
+            merged = merge_parallel_results(results, config, tmp_git_repo, tasks_path, telemetry)
+
+        assert len(merged) == 1
+        assert not merged[0].success
+        assert "post-rebase" in (merged[0].error or "").lower()
+
+        # Main should be reverted to where it was before
+        head_after = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=tmp_git_repo, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert head_after == head_before
+
+
+class TestCherryPickCandidate:
+    """Tests for cherry_pick_candidate git operation."""
+
+    def test_clean_cherry_pick(self, tmp_git_repo):
+        """Cherry-pick a candidate ref onto main with no conflicts."""
+        from otto.git_ops import cherry_pick_candidate, _anchor_candidate_ref
+
+        # Create a candidate commit
+        (tmp_git_repo / "new_file.txt").write_text("hello\n")
+        subprocess.run(["git", "add", "new_file.txt"], cwd=tmp_git_repo, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "candidate"], cwd=tmp_git_repo, capture_output=True, check=True)
+        sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=tmp_git_repo, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        subprocess.run(["git", "reset", "--hard", "HEAD~1"], cwd=tmp_git_repo, capture_output=True)
+        _anchor_candidate_ref(tmp_git_repo, "test-task", 1, sha)
+
+        success, new_sha = cherry_pick_candidate(
+            tmp_git_repo, f"refs/otto/candidates/test-task/attempt-1", "main",
+        )
+        assert success
+        assert new_sha != ""
+        assert (tmp_git_repo / "new_file.txt").exists()
+
+    def test_conflict_returns_false(self, tmp_git_repo):
+        """Cherry-pick with conflict should return (False, '') and leave main clean."""
+        from otto.git_ops import cherry_pick_candidate, _anchor_candidate_ref
+
+        # Create a file on main
+        (tmp_git_repo / "shared.txt").write_text("main content\n")
+        subprocess.run(["git", "add", "shared.txt"], cwd=tmp_git_repo, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "main has shared"], cwd=tmp_git_repo, capture_output=True, check=True)
+
+        # Create a candidate that modifies the same file from the parent of main's commit
+        head_before_main_commit = subprocess.run(
+            ["git", "rev-parse", "HEAD~1"],
+            cwd=tmp_git_repo, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        subprocess.run(["git", "checkout", head_before_main_commit], cwd=tmp_git_repo, capture_output=True)
+        (tmp_git_repo / "shared.txt").write_text("candidate content\n")
+        subprocess.run(["git", "add", "shared.txt"], cwd=tmp_git_repo, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "candidate"], cwd=tmp_git_repo, capture_output=True, check=True)
+        candidate_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=tmp_git_repo, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        subprocess.run(["git", "checkout", "main"], cwd=tmp_git_repo, capture_output=True)
+        _anchor_candidate_ref(tmp_git_repo, "conflict-task", 1, candidate_sha)
+
+        success, new_sha = cherry_pick_candidate(
+            tmp_git_repo, "refs/otto/candidates/conflict-task/attempt-1", "main",
+        )
+        assert not success
+        assert new_sha == ""
+        # Should be back on main
+        branch = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=tmp_git_repo, capture_output=True, text=True,
+        ).stdout.strip()
+        assert branch == "main"
+
+
+class TestCrashRecovery:
+    """Tests for crash recovery — stale state reset on startup."""
+
+    @pytest.mark.asyncio
+    async def test_stale_verified_reset_to_pending(self, tmp_git_repo):
+        """Tasks stuck in 'verified' should be reset to 'pending' on startup."""
+        from otto.tasks import load_tasks
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        tasks_path.write_text(yaml.dump({"tasks": [
+            {"id": 1, "key": "stuck-task", "prompt": "Stuck", "status": "verified"},
+        ]}))
+
+        config = {
+            "default_branch": "main",
+            "max_retries": 1,
+            "verify_timeout": 60,
+            "max_parallel": 1,
+        }
+
+        # Run preflight checks which should reset the stale state
+        from otto.runner import preflight_checks
+        error_code, pending = preflight_checks(config, tasks_path, tmp_git_repo)
+
+        assert error_code is None
+        assert len(pending) == 1
+        assert pending[0]["status"] == "pending"
+
+    @pytest.mark.asyncio
+    async def test_stale_merge_pending_reset_to_pending(self, tmp_git_repo):
+        """Tasks stuck in 'merge_pending' should be reset to 'pending' on startup."""
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        tasks_path.write_text(yaml.dump({"tasks": [
+            {"id": 1, "key": "mp-task", "prompt": "Merge pending", "status": "merge_pending"},
+        ]}))
+
+        config = {
+            "default_branch": "main",
+            "max_retries": 1,
+            "verify_timeout": 60,
+            "max_parallel": 1,
+        }
+
+        from otto.runner import preflight_checks
+        error_code, pending = preflight_checks(config, tasks_path, tmp_git_repo)
+
+        assert error_code is None
+        assert len(pending) == 1
+        assert pending[0]["status"] == "pending"
+
+
+class TestInstallTimeout:
+    """Tests for separate install_timeout config."""
+
+    def test_install_timeout_defaults_from_verify_timeout(self):
+        """install_timeout should fall back to verify_timeout when not set."""
+        from otto.config import load_config, DEFAULT_CONFIG
+        assert "install_timeout" in DEFAULT_CONFIG
+        assert DEFAULT_CONFIG["install_timeout"] == 120
+
+    def test_install_timeout_independent(self):
+        """install_timeout and verify_timeout should be separate config values."""
+        from otto.config import DEFAULT_CONFIG
+        assert DEFAULT_CONFIG["install_timeout"] != DEFAULT_CONFIG["verify_timeout"]

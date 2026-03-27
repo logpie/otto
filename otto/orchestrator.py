@@ -32,11 +32,13 @@ from otto.runner import (
     coding_loop,
     preflight_checks,
 )
-from otto.tasks import load_tasks
+from otto.tasks import load_tasks, update_task
 from otto.telemetry import (
     AllDone,
     BatchCompleted,
     PlanCreated,
+    TaskMerged,
+    TaskFailed,
     Telemetry,
 )
 
@@ -186,10 +188,10 @@ async def run_per(
     telemetry = Telemetry(log_dir)
     telemetry.enable_legacy_write()
 
-    # Signal handling
+    # Signal handling — clean up worktrees on interrupt
     def _signal_handler(signum, frame):
         if context.interrupted:
-            console.print("\nForce exit", style="red")
+            console.print("\nForce exit — cleaning up worktrees", style="red")
             # Kill tracked subprocesses
             for pid in context.pids:
                 try:
@@ -197,9 +199,14 @@ async def run_per(
                     os.kill(pid, signal.SIGTERM)
                 except (ProcessLookupError, OSError):
                     pass
+            # Best-effort worktree cleanup on force exit
+            try:
+                cleanup_orphaned_worktrees(project_dir)
+            except Exception:
+                pass
             sys.exit(1)
         context.interrupted = True
-        console.print("\n[yellow]Warning: Interrupted — finishing current task[/yellow]")
+        console.print("\n[yellow]Warning: Interrupted — finishing current task, will clean up worktrees[/yellow]")
         # Send SIGTERM to tracked subprocesses
         for pid in context.pids:
             try:
@@ -274,6 +281,11 @@ async def run_per(
                     batch, context, config, project_dir, telemetry, tasks_file,
                     max_parallel=max_parallel,
                 )
+                # Serial merge phase: cherry-pick verified candidates onto main
+                if not context.interrupted:
+                    batch_results = merge_parallel_results(
+                        batch_results, config, project_dir, tasks_file, telemetry,
+                    )
             else:
                 # Serial execution — tasks share the main checkout
                 batch_results: list[TaskResult] = []
@@ -375,6 +387,171 @@ async def run_per(
         lock_fh.close()
 
 
+def merge_parallel_results(
+    results: list[TaskResult],
+    config: dict[str, Any],
+    project_dir: Path,
+    tasks_file: Path,
+    telemetry: Any,
+) -> list[TaskResult]:
+    """Serial merge phase: cherry-pick verified candidates onto main sequentially.
+
+    For each verified task (sorted by task_key for determinism):
+      1. Cherry-pick the candidate ref onto current main HEAD
+      2. If conflict -> mark merge_failed
+      3. Run test suite on the cherry-picked result (post-rebase verification)
+      4. If tests fail -> mark merge_failed
+      5. Fast-forward main to the new commit
+      6. Mark task passed
+
+    Returns a new list of TaskResults with updated success/error fields.
+    """
+    from otto.git_ops import (
+        cherry_pick_candidate,
+        _find_best_candidate_ref,
+    )
+    from otto.testing import run_test_suite
+    from otto.config import detect_test_command
+
+    default_branch = config["default_branch"]
+    test_timeout = config["verify_timeout"]
+    test_command = config.get("test_command") or detect_test_command(project_dir)
+    custom_test_cmd = None  # no per-task custom cmd in merge phase
+
+    # Ensure we're on default branch
+    subprocess.run(
+        ["git", "checkout", default_branch],
+        cwd=project_dir, capture_output=True, check=True,
+    )
+
+    # Separate verified (successful) from failed results
+    verified_results = [r for r in results if r.success]
+    failed_results = [r for r in results if not r.success]
+
+    # Sort verified tasks by key for deterministic merge order
+    verified_results.sort(key=lambda r: r.task_key)
+
+    if not verified_results:
+        return results  # nothing to merge
+
+    console.print()
+    console.print(f"  [bold]Merging[/bold]  [dim]{len(verified_results)} verified tasks[/dim]")
+
+    merged_results: list[TaskResult] = list(failed_results)  # carry forward failed tasks
+
+    for result in verified_results:
+        task_key = result.task_key
+        # Find the best candidate ref for this task
+        candidate_ref = _find_best_candidate_ref(project_dir, task_key)
+        if not candidate_ref:
+            console.print(f"    [red]\u2717[/red] #{task_key[:8]}  no candidate ref found")
+            error = "merge_failed: no candidate ref"
+            try:
+                update_task(tasks_file, task_key, status="merge_failed", error=error)
+            except Exception:
+                pass
+            merged_results.append(TaskResult(
+                task_key=task_key, success=False,
+                error=error, cost_usd=result.cost_usd,
+                duration_s=result.duration_s,
+            ))
+            continue
+
+        # Cherry-pick candidate onto main
+        success, new_sha = cherry_pick_candidate(
+            project_dir, candidate_ref, default_branch,
+        )
+        if not success:
+            console.print(f"    [red]\u2717[/red] #{task_key[:8]}  merge conflict")
+            error = "merge_failed: cherry-pick conflict"
+            try:
+                update_task(tasks_file, task_key, status="merge_failed",
+                            error=error, error_code="merge_conflict")
+            except Exception:
+                pass
+            telemetry.log(TaskFailed(
+                task_key=task_key, task_id=0,
+                error=error, cost_usd=result.cost_usd,
+            ))
+            merged_results.append(TaskResult(
+                task_key=task_key, success=False,
+                error=error, cost_usd=result.cost_usd,
+                duration_s=result.duration_s,
+                diff_summary=result.diff_summary,
+                qa_report=result.qa_report,
+            ))
+            continue
+
+        # Post-rebase verification: run test suite in a fresh disposable worktree.
+        # This tests the exact commit that will become main HEAD.
+        # Strict mode: no "local pass beats worktree fail" heuristic.
+        if not config.get("skip_test"):
+            test_result = run_test_suite(
+                project_dir=project_dir,
+                candidate_sha=new_sha,
+                test_command=test_command,
+                custom_test_cmd=custom_test_cmd,
+                timeout=test_timeout,
+            )
+            if not test_result.passed:
+                # Revert: reset main back to before the cherry-pick
+                subprocess.run(
+                    ["git", "reset", "--hard", "HEAD~1"],
+                    cwd=project_dir, capture_output=True,
+                )
+                failure_output = test_result.failure_output or "post-rebase tests failed"
+                console.print(
+                    f"    [red]\u2717[/red] #{task_key[:8]}  post-rebase test failure"
+                )
+                error = f"merge_failed: post-rebase tests failed\n{failure_output[:500]}"
+                try:
+                    update_task(tasks_file, task_key, status="merge_failed",
+                                error=error, error_code="post_rebase_test_fail")
+                except Exception:
+                    pass
+                telemetry.log(TaskFailed(
+                    task_key=task_key, task_id=0,
+                    error=error, cost_usd=result.cost_usd,
+                ))
+                merged_results.append(TaskResult(
+                    task_key=task_key, success=False,
+                    error=error, cost_usd=result.cost_usd,
+                    duration_s=result.duration_s,
+                    diff_summary=result.diff_summary,
+                    qa_report=result.qa_report,
+                ))
+                continue
+
+        # Merge succeeded
+        console.print(f"    [green]\u2713[/green] #{task_key[:8]}  merged ({new_sha[:7]})")
+        try:
+            # Load the task to get task_id for telemetry
+            tasks = load_tasks(tasks_file)
+            task_meta = next((t for t in tasks if t.get("key") == task_key), {})
+            task_id = task_meta.get("id", 0)
+            update_task(tasks_file, task_key, status="passed")
+        except Exception:
+            task_id = 0
+
+        telemetry.log(TaskMerged(
+            task_key=task_key, task_id=task_id,
+            cost_usd=result.cost_usd,
+            duration_s=result.duration_s,
+            diff_summary=result.diff_summary,
+        ))
+
+        merged_results.append(TaskResult(
+            task_key=task_key, success=True,
+            commit_sha=new_sha,
+            cost_usd=result.cost_usd,
+            duration_s=result.duration_s,
+            diff_summary=result.diff_summary,
+            qa_report=result.qa_report,
+        ))
+
+    return merged_results
+
+
 async def _run_batch_parallel(
     batch: Any,  # planner.Batch
     context: Any,  # PipelineContext
@@ -395,7 +572,7 @@ async def _run_batch_parallel(
     from otto.testing import _install_deps
 
     default_branch = config["default_branch"]
-    install_timeout = config.get("verify_timeout", 300)
+    install_timeout = config.get("install_timeout", config.get("verify_timeout", 300))
 
     # Get base SHA (current HEAD on default branch)
     base_sha = subprocess.run(

@@ -383,16 +383,24 @@ async def coding_loop(
         elapsed_str = display.stop()
 
         if result.get("success"):
+            is_verified_only = result.get("status") == "verified"
+
             commit_sha = subprocess.run(
                 ["git", "rev-parse", "HEAD"],
                 cwd=task_work_dir, capture_output=True, text=True,
             ).stdout.strip()
 
             # Print task result — same indentation level as phase completions
-            console.print(
-                f"  [green]{time.strftime('%H:%M:%S')}  \u2713 passed[/green]  "
-                f"[dim]{elapsed_str}  ${cost:.2f}[/dim]"
-            )
+            if is_verified_only:
+                console.print(
+                    f"  [blue]{time.strftime('%H:%M:%S')}  \u25c9 verified[/blue]  "
+                    f"[dim]{elapsed_str}  ${cost:.2f}  (merge pending)[/dim]"
+                )
+            else:
+                console.print(
+                    f"  [green]{time.strftime('%H:%M:%S')}  \u2713 passed[/green]  "
+                    f"[dim]{elapsed_str}  ${cost:.2f}[/dim]"
+                )
             task_meta = task
             if tasks_file:
                 updated_tasks = load_tasks(tasks_file)
@@ -414,12 +422,13 @@ async def coding_loop(
             if proof_report.exists():
                 console.print(f"    [dim]proofs: {proof_report}[/dim]")
 
-            # Emit TaskMerged NOW (not deferred to batch loop)
-            telemetry.log(TaskMerged(
-                task_key=task_key, task_id=task_id,
-                cost_usd=cost, duration_s=duration,
-                diff_summary=result.get("diff_summary", ""),
-            ))
+            if not is_verified_only:
+                # Emit TaskMerged NOW (not deferred to batch loop)
+                telemetry.log(TaskMerged(
+                    task_key=task_key, task_id=task_id,
+                    cost_usd=cost, duration_s=duration,
+                    diff_summary=result.get("diff_summary", ""),
+                ))
 
             return TaskResult(
                 task_key=task_key, success=True,
@@ -1120,6 +1129,7 @@ async def _handle_no_changes(
     attempt: int,
     add_cost: Any,
     await_spec: Any,  # async callable
+    parallel: bool = False,
 ) -> dict[str, Any] | None:
     """Handle the case where coding agent made no changes.
 
@@ -1199,11 +1209,15 @@ async def _handle_no_changes(
         _audit_proof_sufficiency(verdict_nc, qa_spec, log_dir / "qa-proofs", emit)
         emit("phase", name="qa", status="done", time_s=qa_elapsed_nc,
              cost=qa_cost_nc)
-        emit("phase", name="merge", status="done", time_s=0,
-             detail="no changes needed")
-        subprocess.run(["git", "checkout", default_branch],
-                       cwd=project_dir, capture_output=True)
-        cleanup_branch(project_dir, key, default_branch)
+        if parallel:
+            emit("phase", name="merge", status="pending",
+                 detail="no changes needed — deferred to merge phase")
+        else:
+            emit("phase", name="merge", status="done", time_s=0,
+                 detail="no changes needed")
+            subprocess.run(["git", "checkout", default_branch],
+                           cwd=project_dir, capture_output=True)
+            cleanup_branch(project_dir, key, default_branch)
         return {
             "action": "pass",
             "qa_report": qa_report_nc,
@@ -1440,6 +1454,8 @@ async def run_task_v45(
         nonlocal total_cost
         total_cost += amount
 
+    is_parallel = task_work_dir != project_dir
+
     try:
         # ── Step 1: Prepare ─────────────────────────────────────────────
         emit("phase", name="prepare", status="running")
@@ -1448,7 +1464,16 @@ async def run_task_v45(
         if tasks_file:
             update_task(tasks_file, key, status="running", attempts=0, review_ref=None)
 
-        base_sha = create_task_branch(task_work_dir, key, default_branch, task=task)
+        if is_parallel:
+            # Parallel mode: worktree is already at base_sha (detached HEAD).
+            # No branch needed — agent works on detached HEAD, candidate is
+            # anchored as a ref. Merge happens in the orchestrator.
+            base_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=task_work_dir, capture_output=True, text=True, check=True,
+            ).stdout.strip()
+        else:
+            base_sha = create_task_branch(task_work_dir, key, default_branch, task=task)
         pre_existing_untracked = _snapshot_untracked(task_work_dir)
 
         log_dir = project_dir / "otto_logs" / key
@@ -1494,6 +1519,7 @@ async def run_task_v45(
                         error_code="baseline_fail",
                         cost_usd=total_cost,
                         duration_s=time.monotonic() - task_start,
+                        parallel=is_parallel,
                     )
                     return _result(False, "failed",
                                    error=f"BASELINE_FAIL: test infrastructure broken\n{output[-500:]}")
@@ -1520,6 +1546,7 @@ async def run_task_v45(
                 error_code="max_retries",
                 cost_usd=total_cost,
                 duration_s=time.monotonic() - task_start,
+                parallel=is_parallel,
             )
             return _result(False, "failed", error=error, error_code="max_retries")
 
@@ -1568,6 +1595,7 @@ async def run_task_v45(
                     error_code="time_budget_exceeded",
                     cost_usd=total_cost,
                     duration_s=time.monotonic() - task_start,
+                    parallel=is_parallel,
                 )
                 return _result(False, "failed", error=error, error_code="time_budget_exceeded")
 
@@ -1655,12 +1683,14 @@ async def run_task_v45(
                     attempt=attempt,
                     add_cost=_add_cost,
                     await_spec=_await_spec_task,
+                    parallel=is_parallel,
                 )
                 # _handle_no_changes may have awaited spec, update local ref
                 if not spec_task or (spec_task and spec_task.done()):
                     spec_task = None
                 if nc_result["action"] == "pass":
-                    return _result(True, "passed",
+                    status = "verified" if is_parallel else "passed"
+                    return _result(True, status,
                                    qa_report=nc_result["qa_report"],
                                    diff_summary=nc_result["diff_summary"])
                 else:  # retry
@@ -1757,6 +1787,7 @@ async def run_task_v45(
                     error_code="internal_error",
                     cost_usd=total_cost,
                     duration_s=time.monotonic() - task_start,
+                    parallel=is_parallel,
                 )
                 return _result(False, "failed", error=f"squash commit failed: {stderr}")
 
@@ -1839,7 +1870,17 @@ async def run_task_v45(
             if not config.get("skip_qa"):
                 _audit_proof_sufficiency(qa_out["verdict"], spec, log_dir / "qa-proofs", emit)
 
-            # ── Merge ───────────────────────────────────────────────────
+            # ── Parallel mode: stop at verified, merge happens later ───
+            is_parallel = task_work_dir != project_dir
+            if is_parallel:
+                # In parallel mode, the orchestrator handles merge after all
+                # tasks complete. Return as "verified" with the candidate ref.
+                emit("phase", name="merge", status="pending",
+                     detail="deferred to merge phase")
+                return _result(True, "verified",
+                               diff_summary=diff_summary, qa_report=qa_report)
+
+            # ── Merge (serial mode only) ───────────────────────────────
             emit("phase", name="merge", status="running")
             merge_start = time.monotonic()
             if merge_to_default(task_work_dir, key, default_branch):
@@ -1883,6 +1924,7 @@ async def run_task_v45(
             error=f"max retries exhausted{last_err_detail}", error_code="max_retries",
             cost_usd=total_cost,
             duration_s=time.monotonic() - task_start,
+            parallel=is_parallel,
         )
         return _result(
             False, "failed",
@@ -1900,6 +1942,7 @@ async def run_task_v45(
                 error=f"unexpected error: {e}", error_code="internal_error",
                 cost_usd=total_cost,
                 duration_s=duration,
+                parallel=is_parallel,
             )
         except Exception:
             pass

@@ -447,6 +447,92 @@ def rebase_and_merge(project_dir: Path, task_branch: str, default_branch: str) -
     return False
 
 
+def cherry_pick_candidate(
+    repo_root: Path,
+    candidate_ref: str,
+    default_branch: str,
+) -> tuple[bool, str]:
+    """Cherry-pick a candidate ref onto the current HEAD of default_branch.
+
+    Creates a temporary branch, cherry-picks the candidate, and fast-forwards
+    default_branch. Used in the serial merge phase for parallel tasks.
+
+    Returns (success, new_head_sha). On conflict, aborts and returns (False, "").
+    """
+    temp_branch = f"otto/_merge_temp_{candidate_ref.replace('/', '_')}"
+
+    # Resolve the candidate ref to a SHA
+    resolve = subprocess.run(
+        ["git", "rev-parse", candidate_ref],
+        cwd=repo_root, capture_output=True, text=True,
+    )
+    if resolve.returncode != 0:
+        return False, ""
+    candidate_sha = resolve.stdout.strip()
+
+    # Ensure we're on default branch
+    subprocess.run(
+        ["git", "checkout", default_branch],
+        cwd=repo_root, capture_output=True, check=True,
+    )
+
+    # Create temp branch from current HEAD
+    subprocess.run(
+        ["git", "branch", "-D", temp_branch],
+        cwd=repo_root, capture_output=True,  # ignore if not exists
+    )
+    subprocess.run(
+        ["git", "checkout", "-b", temp_branch],
+        cwd=repo_root, capture_output=True, check=True,
+    )
+
+    # Cherry-pick the candidate
+    pick = subprocess.run(
+        ["git", "cherry-pick", candidate_sha],
+        cwd=repo_root, capture_output=True, text=True,
+    )
+    if pick.returncode != 0:
+        # Abort cherry-pick and clean up
+        subprocess.run(
+            ["git", "cherry-pick", "--abort"],
+            cwd=repo_root, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "checkout", default_branch],
+            cwd=repo_root, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "branch", "-D", temp_branch],
+            cwd=repo_root, capture_output=True,
+        )
+        return False, ""
+
+    # Get the new HEAD sha
+    new_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_root, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    # Fast-forward default branch to temp branch
+    subprocess.run(
+        ["git", "checkout", default_branch],
+        cwd=repo_root, capture_output=True, check=True,
+    )
+    ff = subprocess.run(
+        ["git", "merge", "--ff-only", temp_branch],
+        cwd=repo_root, capture_output=True,
+    )
+    # Clean up temp branch
+    subprocess.run(
+        ["git", "branch", "-D", temp_branch],
+        cwd=repo_root, capture_output=True,
+    )
+
+    if ff.returncode != 0:
+        return False, ""
+    return True, new_sha
+
+
 def _cleanup_task_failure(
     project_dir: Path,
     key: str,
@@ -457,18 +543,24 @@ def _cleanup_task_failure(
     error_code: str = "unknown",
     cost_usd: float = 0.0,
     duration_s: float = 0.0,
+    parallel: bool = False,
 ) -> None:
-    """Unified cleanup for all task failure paths: retries exhausted, interruption, exceptions."""
+    """Unified cleanup for all task failure paths: retries exhausted, interruption, exceptions.
+
+    In parallel mode (parallel=True), skips branch checkout/deletion since the
+    task runs in a detached-HEAD worktree that the orchestrator cleans up.
+    """
     _restore_workspace_state(
         project_dir,
         pre_existing_untracked=pre_existing_untracked,
     )
-    _run_cleanup_git_command(
-        project_dir,
-        ["git", "checkout", default_branch],
-        f"git checkout {default_branch}",
-    )
-    cleanup_branch(project_dir, key, default_branch)
+    if not parallel:
+        _run_cleanup_git_command(
+            project_dir,
+            ["git", "checkout", default_branch],
+            f"git checkout {default_branch}",
+        )
+        cleanup_branch(project_dir, key, default_branch)
     if tasks_file:
         try:
             updates: dict[str, Any] = {
