@@ -709,8 +709,8 @@ async def _run_batch_parallel(
                     await asyncio.to_thread(
                         cleanup_task_worktree, project_dir, task_key,
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    console.print(f"[yellow]⚠ Worktree cleanup failed for {task_key}: {e}[/yellow]")
 
     # Launch all tasks concurrently
     tasks = [_run_one(tp) for tp in batch.tasks]

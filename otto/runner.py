@@ -1057,7 +1057,7 @@ async def _run_qa(
         retry_qa_cost = qa_result.get("cost_usd", 0.0)
         add_cost(retry_qa_cost)
         total_qa_cost += retry_qa_cost
-        qa_elapsed += round(time.monotonic() - qa_start, 1)
+        qa_elapsed = round(time.monotonic() - qa_start, 1)
         qa_report = qa_result.get("raw_report", "")
         if qa_warning:
             qa_report = f"[warning] {qa_warning}\n\n{qa_report}".strip()
