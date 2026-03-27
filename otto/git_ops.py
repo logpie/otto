@@ -452,10 +452,10 @@ def cherry_pick_candidate(
     candidate_ref: str,
     default_branch: str,
 ) -> tuple[bool, str]:
-    """Cherry-pick a candidate ref onto the current HEAD of default_branch.
+    """Merge a candidate ref onto the current HEAD of default_branch.
 
-    Creates a temporary branch and cherry-picks the candidate there. Used in
-    the serial merge phase for parallel tasks.
+    Uses git merge (not cherry-pick) which auto-resolves more conflicts
+    like both tasks adding to the same file in different locations.
 
     Returns (success, new_head_sha). On conflict, aborts and returns (False, "").
     The caller is responsible for fast-forwarding default_branch to new_head_sha
@@ -488,15 +488,15 @@ def cherry_pick_candidate(
         cwd=repo_root, capture_output=True, check=True,
     )
 
-    # Cherry-pick the candidate
-    pick = subprocess.run(
-        ["git", "cherry-pick", candidate_sha],
+    # Merge the candidate (not cherry-pick — handles concurrent additions better)
+    merge = subprocess.run(
+        ["git", "merge", "--no-edit", candidate_sha],
         cwd=repo_root, capture_output=True, text=True,
     )
-    if pick.returncode != 0:
-        # Abort cherry-pick and clean up
+    if merge.returncode != 0:
+        # Abort merge and clean up
         subprocess.run(
-            ["git", "cherry-pick", "--abort"],
+            ["git", "merge", "--abort"],
             cwd=repo_root, capture_output=True,
         )
         subprocess.run(
