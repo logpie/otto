@@ -886,22 +886,69 @@ async def run_batch_qa_agent(
     log_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Run exhaustive QA over a merged batch."""
-    with tempfile.NamedTemporaryFile(suffix=".json", prefix="otto_batch_qa_", delete=False) as tf:
-        verdict_file = Path(tf.name)
+    return await _run_batch_qa_agent(
+        tasks_with_specs,
+        config,
+        project_dir,
+        diff=diff,
+        on_progress=on_progress,
+        log_dir=log_dir,
+    )
 
-    screenshot_dir = log_dir / "qa-proofs" if log_dir else Path("/tmp")
-    screenshot_dir.mkdir(parents=True, exist_ok=True)
 
+async def run_targeted_batch_qa_agent(
+    tasks_with_specs: list[dict[str, Any]],
+    config: dict[str, Any],
+    project_dir: Path,
+    *,
+    diff: str,
+    retried_task_keys: set[str],
+    on_progress: Any = None,
+    log_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Run a second-round batch QA focused on retried tasks."""
+    return await _run_batch_qa_agent(
+        tasks_with_specs,
+        config,
+        project_dir,
+        diff=diff,
+        retried_task_keys=retried_task_keys,
+        on_progress=on_progress,
+        log_dir=log_dir,
+    )
+
+
+def _build_batch_qa_prompt(
+    tasks_with_specs: list[dict[str, Any]],
+    project_dir: Path,
+    verdict_file: Path,
+    screenshot_dir: Path,
+    diff: str,
+    *,
+    retried_task_keys: set[str] | None = None,
+) -> str:
     task_list = "\n".join(
         f"- #{task.get('id', '?')} {task.get('prompt', '')} (task_key: {task.get('key', 'unknown')})"
         for task in tasks_with_specs
     )
-    qa_prompt = f"""You are running BATCH QA on the integrated result of multiple tasks.
+    retry_focus = ""
+    if retried_task_keys:
+        focus_list = ", ".join(sorted(retried_task_keys))
+        retry_focus = f"""
+
+RETRY ROUND:
+Focus the must-item re-check on these retried task(s): {focus_list}
+- Re-check ALL [must] items for those task(s), not only the previously failing items.
+- Re-run cross-task checks that involve those task(s) or shared files they touch.
+- Keep the full test suite as a regression backstop.
+"""
+
+    return f"""You are running BATCH QA on the integrated result of multiple tasks.
 
 Verify ALL [must] items exhaustively. Do not stop at the first failure.
 Every verdict item must include the owning task_key for attribution.
 Generate and run cross-task integration tests for interactions between these tasks.
-Run the full existing test suite as a regression check.
+Run the full existing test suite as a regression check.{retry_focus}
 
 You are working in {project_dir}. All project files are in this directory. Do not search outside it.
 
@@ -930,14 +977,8 @@ Use this JSON structure:
   "test_suite_passed": true
 }}"""
 
-    qa_result = await _run_qa_prompt(
-        qa_prompt=qa_prompt,
-        config=config,
-        project_dir=project_dir,
-        verdict_file=verdict_file,
-        on_progress=on_progress,
-        enable_browser=True,
-    )
+
+def _finalize_batch_qa_result(qa_result: dict[str, Any]) -> dict[str, Any]:
     verdict = qa_result.get("verdict", {}) or {}
     integration_findings = verdict.get("integration_findings", []) or []
     integration_failed = any(item.get("status") == "fail" for item in integration_findings)
@@ -964,3 +1005,40 @@ Use this JSON structure:
         "failed_task_keys": sorted(failed_task_keys),
         "test_suite_passed": bool(test_suite_passed),
     }
+
+
+async def _run_batch_qa_agent(
+    tasks_with_specs: list[dict[str, Any]],
+    config: dict[str, Any],
+    project_dir: Path,
+    *,
+    diff: str,
+    retried_task_keys: set[str] | None = None,
+    on_progress: Any = None,
+    log_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Run exhaustive QA over a merged batch."""
+    with tempfile.NamedTemporaryFile(suffix=".json", prefix="otto_batch_qa_", delete=False) as tf:
+        verdict_file = Path(tf.name)
+
+    screenshot_dir = log_dir / "qa-proofs" if log_dir else Path("/tmp")
+    screenshot_dir.mkdir(parents=True, exist_ok=True)
+
+    qa_prompt = _build_batch_qa_prompt(
+        tasks_with_specs,
+        project_dir,
+        verdict_file,
+        screenshot_dir,
+        diff,
+        retried_task_keys=retried_task_keys,
+    )
+
+    qa_result = await _run_qa_prompt(
+        qa_prompt=qa_prompt,
+        config=config,
+        project_dir=project_dir,
+        verdict_file=verdict_file,
+        on_progress=on_progress,
+        enable_browser=True,
+    )
+    return _finalize_batch_qa_result(qa_result)

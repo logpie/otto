@@ -32,7 +32,7 @@ from otto.runner import (
     coding_loop,
     preflight_checks,
 )
-from otto.qa import run_batch_qa_agent
+from otto.qa import run_batch_qa_agent, run_targeted_batch_qa_agent
 from otto.tasks import load_tasks, update_task
 from otto.telemetry import (
     AllDone,
@@ -167,6 +167,8 @@ async def _run_batch_qa(
     tasks_file: Path,
     telemetry: Any,
     context: Any,
+    *,
+    focus_task_keys: set[str] | None = None,
 ) -> dict:
     """Run combined QA on integrated codebase. Returns verdict."""
     if not merged_tasks:
@@ -211,13 +213,23 @@ async def _run_batch_qa(
     log_dir = project_dir / "otto_logs" / "batch-qa"
     log_dir.mkdir(parents=True, exist_ok=True)
     diff = "Integrated codebase after batch merge. Inspect repository state directly."
-    qa_result = await run_batch_qa_agent(
-        tasks_with_specs,
-        config,
-        project_dir,
-        diff=diff,
-        log_dir=log_dir,
-    )
+    if focus_task_keys:
+        qa_result = await run_targeted_batch_qa_agent(
+            tasks_with_specs,
+            config,
+            project_dir,
+            diff=diff,
+            retried_task_keys=focus_task_keys,
+            log_dir=log_dir,
+        )
+    else:
+        qa_result = await run_batch_qa_agent(
+            tasks_with_specs,
+            config,
+            project_dir,
+            diff=diff,
+            log_dir=log_dir,
+        )
     total_cost = spec_cost + float(qa_result.get("cost_usd", 0.0) or 0.0)
     raw_report = qa_result.get("raw_report", "")
     if spec_errors:
@@ -254,6 +266,84 @@ def _summarize_batch_qa_failure(batch_qa: dict[str, Any]) -> str:
         if stripped and len(stripped) > 10 and not stripped.startswith("["):
             return f"batch QA failed: {stripped[:120]}"
     return "batch QA failed"
+
+
+def _build_batch_qa_feedback(task_key: str, batch_qa: dict[str, Any]) -> str:
+    """Build retry feedback for one task from a batch QA verdict."""
+    verdict = batch_qa.get("verdict", {}) or {}
+    lines = [
+        "Batch QA found issues after your task was merged onto current main.",
+        "Fix these issues without regressing the other merged tasks.",
+    ]
+
+    must_failures = [
+        item for item in verdict.get("must_items", []) or []
+        if item.get("status") == "fail" and item.get("task_key") == task_key
+    ]
+    integration_failures = [
+        item for item in verdict.get("integration_findings", []) or []
+        if item.get("status") == "fail" and task_key in (item.get("tasks_involved") or [])
+    ]
+    regressions = verdict.get("regressions", []) or []
+
+    if must_failures:
+        lines.append("")
+        lines.append("Failed [must] items:")
+        for item in must_failures:
+            criterion = (item.get("criterion") or "unspecified criterion").strip()
+            evidence = (item.get("evidence") or "").strip()
+            proof = [str(entry).strip() for entry in (item.get("proof") or []) if str(entry).strip()]
+            lines.append(f"- {criterion}")
+            if evidence:
+                lines.append(f"  evidence: {evidence[:400]}")
+            if proof:
+                lines.append(f"  proof: {'; '.join(proof[:3])[:400]}")
+
+    if integration_failures:
+        lines.append("")
+        lines.append("Cross-task failures involving this task:")
+        for item in integration_failures:
+            desc = (item.get("description") or "integration failure").strip()
+            test = (item.get("test") or "").strip()
+            lines.append(f"- {desc}")
+            if test:
+                lines.append(f"  test: {test[:400]}")
+
+    if regressions:
+        lines.append("")
+        lines.append("Regression notes:")
+        for regression in regressions[:5]:
+            lines.append(f"- {str(regression).strip()[:400]}")
+
+    raw_report = (batch_qa.get("raw_report") or "").strip()
+    if raw_report and not must_failures and not integration_failures:
+        lines.append("")
+        lines.append("QA report excerpt:")
+        for line in raw_report.splitlines():
+            line = line.strip()
+            if line:
+                lines.append(f"- {line[:400]}")
+                if len(lines) >= 8:
+                    break
+
+    return "\n".join(lines)
+
+
+def _combine_task_results(previous: TaskResult, current: TaskResult) -> TaskResult:
+    """Carry forward prior cost/time when a task is retried within the same batch."""
+    return TaskResult(
+        task_key=current.task_key,
+        success=current.success,
+        commit_sha=current.commit_sha,
+        worktree=current.worktree,
+        cost_usd=(previous.cost_usd or 0.0) + (current.cost_usd or 0.0),
+        error=current.error,
+        error_code=current.error_code,
+        qa_report=current.qa_report or previous.qa_report,
+        diff_summary=current.diff_summary or previous.diff_summary,
+        duration_s=(previous.duration_s or 0.0) + (current.duration_s or 0.0),
+        review_ref=current.review_ref or previous.review_ref,
+    )
 
 
 async def run_per(
@@ -377,8 +467,8 @@ async def run_per(
         # Step 3: PER loop
         max_parallel = config.get("max_parallel", 1) or 1
         batch_idx = 0
-        integration_failed = False
-        integration_failure_output = ""
+        post_run_suite_failed = False
+        post_run_suite_output = ""
         while not execution_plan.is_empty and not context.interrupted:
             batch = execution_plan.batches[0]
             batch_idx += 1
@@ -538,6 +628,8 @@ async def run_per(
 
                 if qa_mode == QAMode.BATCH and not context.interrupted:
                     batch_keys = {tp.task_key for tp in batch.tasks}
+                    batch_qa_costs: dict[str, float] = {}
+                    qa_reports_by_task: dict[str, str] = {}
                     persisted_tasks = {
                         task["key"]: task
                         for task in load_tasks(tasks_file)
@@ -548,56 +640,168 @@ async def run_per(
                         if task.get("status") == "merged"
                     ]
                     if merged_tasks:
+                        merged_keys = {task["key"] for task in merged_tasks}
                         console.print(f"\n  [bold]Batch QA[/bold]  [dim]{len(merged_tasks)} merged task(s)[/dim]")
                         batch_qa = await _run_batch_qa(
                             merged_tasks, config, project_dir, tasks_file, telemetry, context,
                         )
-                        failed_keys = set(batch_qa.get("failed_task_keys") or [])
+                        initial_share = float(batch_qa.get("cost_usd", 0.0) or 0.0) / max(len(merged_tasks), 1)
+                        for key in merged_keys:
+                            batch_qa_costs[key] = batch_qa_costs.get(key, 0.0) + initial_share
+                            qa_reports_by_task[key] = batch_qa.get("raw_report", "")
+
+                        final_batch_qa = batch_qa
+                        qa_failed_keys = set(batch_qa.get("failed_task_keys") or [])
                         if not batch_qa.get("must_passed"):
-                            if not failed_keys:
-                                failed_keys = {task["key"] for task in merged_tasks}
+                            if not qa_failed_keys:
+                                qa_failed_keys = set(merged_keys)
                             failure_summary = _summarize_batch_qa_failure(batch_qa)
-                            for task in merged_tasks:
-                                kwargs = {
-                                    "status": "merged",
-                                    "error": None,
-                                    "error_code": None,
-                                    "feedback": None,
-                                }
-                                if task["key"] in failed_keys:
-                                    kwargs["error"] = failure_summary
-                                    kwargs["error_code"] = "batch_qa_failed"
-                                try:
-                                    update_task(tasks_file, task["key"], **kwargs)
-                                except Exception:
-                                    pass
-                            batch_results = [
-                                TaskResult(
-                                    task_key=result.task_key,
-                                    success=result.success and result.task_key not in failed_keys,
-                                    commit_sha=result.commit_sha,
-                                    worktree=result.worktree,
-                                    cost_usd=result.cost_usd + (
-                                        float(batch_qa.get("cost_usd", 0.0) or 0.0) / max(len(merged_tasks), 1)
-                                        if result.task_key in {task["key"] for task in merged_tasks}
-                                        else 0.0
-                                    ),
-                                    error=failure_summary if result.task_key in failed_keys else result.error,
-                                    error_code="batch_qa_failed" if result.task_key in failed_keys else result.error_code,
-                                    qa_report=batch_qa.get("raw_report", "") if result.task_key in {task["key"] for task in merged_tasks} else result.qa_report,
-                                    diff_summary=result.diff_summary,
-                                    duration_s=result.duration_s,
-                                    review_ref=result.review_ref,
-                                )
-                                for result in batch_results
-                            ]
-                        else:
-                            merged_keys = {task["key"] for task in merged_tasks}
-                            for task in merged_tasks:
+
+                            for fkey in qa_failed_keys:
+                                feedback = _build_batch_qa_feedback(fkey, batch_qa)
                                 try:
                                     update_task(
                                         tasks_file,
-                                        task["key"],
+                                        fkey,
+                                        status="merged",
+                                        error=failure_summary,
+                                        error_code="batch_qa_failed",
+                                        feedback=feedback,
+                                        session_id=None,
+                                    )
+                                except Exception:
+                                    pass
+
+                            retried_keys: set[str] = set()
+                            for fkey in sorted(qa_failed_keys):
+                                if context.interrupted:
+                                    break
+                                task_plan = next((t for t in batch.tasks if t.task_key == fkey), None)
+                                previous_result = next((r for r in batch_results if r.task_key == fkey), None)
+                                if not task_plan or previous_result is None:
+                                    continue
+
+                                feedback = _build_batch_qa_feedback(fkey, batch_qa)
+                                try:
+                                    update_task(
+                                        tasks_file,
+                                        fkey,
+                                        status="pending",
+                                        error=None,
+                                        error_code=None,
+                                        feedback=feedback,
+                                        session_id=None,
+                                    )
+                                except Exception:
+                                    pass
+
+                                raw_retry_result = await coding_loop(
+                                    task_plan,
+                                    context,
+                                    config,
+                                    project_dir,
+                                    telemetry,
+                                    tasks_file,
+                                    qa_mode=qa_mode,
+                                )
+                                retry_result = _combine_task_results(previous_result, raw_retry_result)
+                                if raw_retry_result.success:
+                                    rerun_merged = merge_parallel_results(
+                                        [raw_retry_result], config, project_dir, tasks_file, telemetry,
+                                        qa_mode=qa_mode,
+                                    )
+                                    retry_result = _combine_task_results(previous_result, rerun_merged[0])
+                                    retried_keys.add(fkey)
+                                else:
+                                    try:
+                                        update_task(
+                                            tasks_file,
+                                            fkey,
+                                            status="failed",
+                                            error=retry_result.error,
+                                            error_code=retry_result.error_code,
+                                        )
+                                    except Exception:
+                                        pass
+
+                                batch_results = [
+                                    retry_result if r.task_key == fkey else r
+                                    for r in batch_results
+                                ]
+
+                            persisted_tasks = {
+                                task["key"]: task
+                                for task in load_tasks(tasks_file)
+                                if task.get("key") in batch_keys
+                            }
+                            retried_merged_keys = {
+                                key for key in retried_keys
+                                if persisted_tasks.get(key, {}).get("status") == "merged"
+                            }
+                            if retried_merged_keys and not context.interrupted:
+                                merged_tasks = [
+                                    task for task in persisted_tasks.values()
+                                    if task.get("status") == "merged"
+                                ]
+                                console.print(
+                                    f"\n  [bold]Batch QA Retry[/bold]  [dim]{len(retried_merged_keys)} retried task(s)[/dim]"
+                                )
+                                final_batch_qa = await _run_batch_qa(
+                                    merged_tasks,
+                                    config,
+                                    project_dir,
+                                    tasks_file,
+                                    telemetry,
+                                    context,
+                                    focus_task_keys=retried_merged_keys,
+                                )
+                                retry_share = float(final_batch_qa.get("cost_usd", 0.0) or 0.0) / max(len(retried_merged_keys), 1)
+                                for key in retried_merged_keys:
+                                    batch_qa_costs[key] = batch_qa_costs.get(key, 0.0) + retry_share
+                                    qa_reports_by_task[key] = final_batch_qa.get("raw_report", "")
+
+                        final_failed_keys: set[str] = {
+                            result.task_key for result in batch_results if not result.success
+                        }
+                        final_failure_summary = None
+                        if not final_batch_qa.get("must_passed"):
+                            final_failed_keys.update(final_batch_qa.get("failed_task_keys") or [])
+                            if not final_failed_keys:
+                                final_failed_keys = set(merged_keys)
+                            final_failure_summary = _summarize_batch_qa_failure(final_batch_qa)
+
+                        for task_key in merged_keys:
+                            if task_key in final_failed_keys:
+                                final_result = next((r for r in batch_results if r.task_key == task_key), None)
+                                retry_failed = bool(final_result) and not final_result.success and final_result.error_code not in (None, "batch_qa_failed")
+                                feedback = _build_batch_qa_feedback(task_key, final_batch_qa)
+                                try:
+                                    update_task(
+                                        tasks_file,
+                                        task_key,
+                                        status="failed",
+                                        error=(
+                                            final_result.error
+                                            if retry_failed and final_result and final_result.error
+                                            else final_failure_summary or next(
+                                                (r.error for r in batch_results if r.task_key == task_key and r.error),
+                                                "batch QA failed",
+                                            )
+                                        ),
+                                        error_code=(
+                                            final_result.error_code
+                                            if retry_failed and final_result
+                                            else "batch_qa_failed"
+                                        ),
+                                        feedback=feedback,
+                                    )
+                                except Exception:
+                                    pass
+                            else:
+                                try:
+                                    update_task(
+                                        tasks_file,
+                                        task_key,
                                         status="passed",
                                         error=None,
                                         error_code=None,
@@ -605,26 +809,32 @@ async def run_per(
                                     )
                                 except Exception:
                                     pass
-                            batch_results = [
-                                TaskResult(
-                                    task_key=result.task_key,
-                                    success=result.success,
-                                    commit_sha=result.commit_sha,
-                                    worktree=result.worktree,
-                                    cost_usd=result.cost_usd + (
-                                        float(batch_qa.get("cost_usd", 0.0) or 0.0) / max(len(merged_tasks), 1)
-                                        if result.task_key in merged_keys
-                                        else 0.0
-                                    ),
-                                    error=result.error,
-                                    error_code=result.error_code,
-                                    qa_report=batch_qa.get("raw_report", "") if result.task_key in merged_keys else result.qa_report,
-                                    diff_summary=result.diff_summary,
-                                    duration_s=result.duration_s,
-                                    review_ref=result.review_ref,
-                                )
-                                for result in batch_results
-                            ]
+
+                        batch_results = [
+                            TaskResult(
+                                task_key=result.task_key,
+                                success=result.success and result.task_key not in final_failed_keys,
+                                commit_sha=result.commit_sha,
+                                worktree=result.worktree,
+                                cost_usd=result.cost_usd + batch_qa_costs.get(result.task_key, 0.0),
+                                error=(
+                                    final_failure_summary
+                                    if result.task_key in final_failed_keys and result.success
+                                    else result.error
+                                ),
+                                error_code=(
+                                    "batch_qa_failed"
+                                    if result.task_key in final_failed_keys
+                                    and (result.success or result.error_code == "batch_qa_failed")
+                                    else result.error_code
+                                ),
+                                qa_report=qa_reports_by_task.get(result.task_key, result.qa_report),
+                                diff_summary=result.diff_summary,
+                                duration_s=result.duration_s,
+                                review_ref=result.review_ref,
+                            )
+                            for result in batch_results
+                        ]
 
             # Process results (TaskMerged/TaskFailed already emitted by coding_loop)
             batch_passed = 0
@@ -671,13 +881,12 @@ async def run_per(
                     console.print("  [yellow]Replan returned invalid task coverage; keeping existing remaining plan[/yellow]")
                     execution_plan = remaining_plan
 
-        # Step 4: Post-run integration test
-        # After ALL batches complete, run the full test suite on final main
-        # to catch cross-task interaction bugs. Per-task verification only tests
-        # each task in isolation — combined changes may break invariants neither
-        # task's tests check (e.g., foreign key constraints, shared state).
+        # Step 4: Post-run test suite
+        # Batch QA already covers integration/regression testing for normal runs.
+        # Keep the deterministic final test suite only for --no-qa mode.
         total_passed = context.passed_count
         if (
+            qa_mode == QAMode.SKIP and
             total_passed >= 2
             and context.failed_count == 0
             and not config.get("skip_test")
@@ -687,33 +896,29 @@ async def run_per(
             test_command = config.get("test_command")
             test_timeout = config.get("verify_timeout", 300)
             if test_command:
-                console.print("\n  [bold]Post-run integration test[/bold]")
-                integration_result = run_test_suite(
+                console.print("\n  [bold]Post-run test suite[/bold]")
+                final_test_result = run_test_suite(
                     project_dir=project_dir,
                     candidate_sha="HEAD",
                     test_command=test_command,
                     custom_test_cmd=None,
                     timeout=test_timeout,
                 )
-                if integration_result.passed:
-                    console.print("    [green]\u2713[/green] integration tests passed")
+                if final_test_result.passed:
+                    console.print("    [green]\u2713[/green] test suite passed")
                 else:
-                    failure_output = integration_result.failure_output or "integration tests failed"
-                    integration_failed = True
-                    integration_failure_output = failure_output[:500]
+                    failure_output = final_test_result.failure_output or "post-run test suite failed"
+                    post_run_suite_failed = True
+                    post_run_suite_output = failure_output[:500]
                     console.print(
-                        f"    [red]\u2717[/red] integration tests failed — cross-task conflict detected"
-                    )
-                    console.print(
-                        "    [yellow]Task statuses were left unchanged; choose which task(s) "
-                        "to re-apply based on the integration failure output[/yellow]"
+                        "    [red]\u2717[/red] post-run test suite failed"
                     )
 
         # Step 5: Summary
         run_duration = time.monotonic() - run_start
         missing_keys = pending_keys - set(context.results)
 
-        # AllDone is intentionally task-scoped; run-level integration failures
+        # AllDone is intentionally task-scoped; run-level post-run suite failures
         # are surfaced via the summary, run history, and exit code instead.
         telemetry.log(AllDone(
             total_passed=context.passed_count,
@@ -735,19 +940,19 @@ async def run_per(
             _print_summary(
                 results,
                 run_duration,
-                integration_passed=not integration_failed,
+                integration_passed=not post_run_suite_failed,
                 total_cost=context.total_cost,
                 project_dir=project_dir,
             )
         except Exception as exc:
             console.print(f"  [yellow]Warning: summary display error: {exc}[/yellow]")
 
-        if integration_failed:
+        if post_run_suite_failed:
             console.print(
-                "  [yellow]Run exited non-zero due to post-run integration failure[/yellow]"
+                "  [yellow]Run exited non-zero due to post-run test suite failure[/yellow]"
             )
-            if integration_failure_output:
-                console.print(f"  [dim]{rich_escape(integration_failure_output)}[/dim]")
+            if post_run_suite_output:
+                console.print(f"  [dim]{rich_escape(post_run_suite_output)}[/dim]")
 
         # Record run history
         _record_run_history(
@@ -755,13 +960,13 @@ async def run_per(
             results,
             run_duration,
             context.total_cost,
-            integration_failed=integration_failed,
-            integration_failure_output=integration_failure_output,
+            post_run_suite_failed=post_run_suite_failed,
+            post_run_suite_output=post_run_suite_output,
         )
 
         return 1 if (
             context.failed_count > 0
-            or integration_failed
+            or post_run_suite_failed
             or context.interrupted
             or missing_keys
         ) else 0
@@ -1110,8 +1315,8 @@ def _record_run_history(
     results: list[tuple[dict, bool]],
     run_duration: float,
     total_cost: float,
-    integration_failed: bool = False,
-    integration_failure_output: str = "",
+    post_run_suite_failed: bool = False,
+    post_run_suite_output: str = "",
 ) -> None:
     """Record run to otto_logs/run-history.jsonl."""
     import json
@@ -1130,17 +1335,17 @@ def _record_run_history(
                 failure_summary = f"task #{ft.get('id', '?')} failed: {ft.get('error', 'unknown')[:40]}"
             else:
                 failure_summary = f"{tasks_failed} tasks failed"
-        elif integration_failed:
-            failure_summary = "post-run integration failed"
-            if integration_failure_output:
+        elif post_run_suite_failed:
+            failure_summary = "post-run test suite failed"
+            if post_run_suite_output:
                 detail = next(
-                    (line.strip() for line in reversed(integration_failure_output.splitlines()) if line.strip()),
+                    (line.strip() for line in reversed(post_run_suite_output.splitlines()) if line.strip()),
                     "",
                 )
                 if detail:
-                    integration_failure_output = detail
+                    post_run_suite_output = detail
                 failure_summary = (
-                    f"{failure_summary}: {integration_failure_output[:40]}"
+                    f"{failure_summary}: {post_run_suite_output[:40]}"
                 )
         commit_sha = ""
         try:
