@@ -164,6 +164,7 @@ async def scoped_reapply(
             return False, ""
         if _verify_result(task_key, new_sha, config, project_dir, tasks_file):
             _git(project_dir, "checkout", default_branch, check=True)
+            _git(project_dir, "branch", "-D", temp_branch)
             return True, new_sha
         _cleanup_failure(project_dir, default_branch, temp_branch)
         return False, ""
@@ -219,6 +220,7 @@ async def scoped_reapply(
 
     if _verify_result(task_key, new_sha, config, project_dir, tasks_file):
         _git(project_dir, "checkout", default_branch, check=True)
+        _git(project_dir, "branch", "-D", temp_branch)
         return True, new_sha
 
     _cleanup_failure(project_dir, default_branch, temp_branch)
