@@ -19,7 +19,7 @@ For each task, Otto:
 4. **QA agent reviews** — adversarial testing against spec + original prompt. Risk-based tiering: skip QA when all specs have tests (tier 0), targeted checks (tier 1), or full adversarial testing with browser (tier 2).
 5. **Merges** — squash merge to main, clean git history.
 
-Independent tasks within a batch run **in parallel** using git worktrees. Each task gets its own worktree, codes and verifies concurrently, then merges serially. Merge conflicts are auto-retried on updated main.
+Independent tasks run **in parallel** using git worktrees (`max_parallel: 2+`). Merge conflicts are resolved by re-running the coding agent on updated main with the previous diff as context — same intelligence, full retry budget.
 
 Failed tasks get structured retry: the coding agent receives a focused failure excerpt (not 847K of raw test output), and pre-existing flaky tests are excluded from retry decisions.
 
@@ -150,7 +150,9 @@ Otto is infrastructure, not intelligence. The intelligence is Claude's. Otto pro
     │                                                         │
     │  7. Merge each verified task onto main (in order)       │
     │     Post-merge test verification per task               │
-    │     Conflict → auto-retry task on updated main          │
+    │     Conflict or test fail → re-run coding agent on      │
+    │     updated main with previous diff as context          │
+    │     (same agent, same intelligence, full retry budget)   │
     │                                                         │
     │  8. Pass → merge + proof report with commit SHA         │
     │     Fail → retry with failure excerpt (not raw output)  │
@@ -170,10 +172,10 @@ Batch 2: [task D]                  ← depends on A+B → runs AFTER batch 1
 - **Within-batch** = parallel (tasks are independent, each in its own worktree)
 - **Cross-batch** = serial (later batches depend on earlier results)
 - **Merge phase** = serial (verified tasks merge one-by-one onto main)
-- **Conflict auto-retry** = merge-failed tasks re-run on updated main
+- **Merge conflict** = re-run coding agent on updated main with previous diff as guidance (no separate resolver — the coding agent IS the resolver, with full tool access, tests, and QA)
 
 Task states: `pending → running → verified → merge_pending → passed`
-(or `→ failed` / `→ merge_failed` on errors)
+(or `→ failed` / `→ merge_failed → auto-retry → pending`)
 
 ### Spec binding model
 

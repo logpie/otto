@@ -15,13 +15,16 @@ otto run
   │     │     │
   │     │     ├─ PARALLEL (max_parallel > 1, batch_size > 1)
   │     │     │    Each task → own git worktree → coding_loop()
-  │     │     │    Then → serial merge phase
+  │     │     │    Then → serial merge phase (git merge one-by-one)
   │     │     │
   │     │     └─ SERIAL (max_parallel = 1 or single task)
   │     │          Each task → otto/{key} branch → coding_loop()
   │     │
-  │     ├─ Merge results
-  │     ├─ Auto-retry post-merge test failures
+  │     ├─ Auto-retry merge failures:
+  │     │    Merge conflict or post-merge test failure?
+  │     │    → Re-run coding agent on updated main with previous diff
+  │     │      (same coding_loop: full retry budget, no max_turns, runs tests + QA)
+  │     │
   │     └─ Replan remaining batches if failures occurred
   │
   └─ 4. Summary + exit
@@ -295,6 +298,8 @@ merge_parallel_results()
 
 When merge fails (conflict or post-merge test failure), the coding agent re-runs
 on updated main. No separate conflict resolver — the coding agent IS the resolver.
+It gets the same full pipeline: unlimited coding turns, up to max_retries attempts,
+testing, and QA.
 
 ```
 After merge phase:
@@ -302,14 +307,23 @@ After merge phase:
   ├─ Any merge_conflict or post_merge_test_fail tasks?
   │    │
   │    └─ For each:
+  │         │
   │         ├─ Inject previous diff as feedback:
   │         │    "Your previous implementation passed all tests but caused
   │         │     a merge conflict with another task. Re-apply your changes
   │         │     on the updated codebase. Here is your previous diff: ..."
+  │         │
   │         ├─ Reset task to pending (preserve attempt count)
+  │         │
   │         ├─ Re-run full coding_loop() on updated main
-  │         │    Agent sees sibling tasks' code, applies changes naturally
-  │         │    Runs tests + QA on the integrated result
+  │         │    ├─ Fresh agent session (new session_id)
+  │         │    ├─ Reads current main (sibling tasks' code is there)
+  │         │    ├─ Previous diff in feedback → knows what to implement
+  │         │    ├─ No max_turns — agent finishes naturally
+  │         │    ├─ Up to max_retries attempts if tests/QA fail
+  │         │    ├─ Full testing (pre-test + clean worktree)
+  │         │    └─ Full QA (same tier logic, proof generation)
+  │         │
   │         └─ Replace result in batch_results
   │
   ├─ Remove completed batch from plan
@@ -329,33 +343,38 @@ After merge phase:
 
 ```
                            ┌─────────┐
-                           │ pending  │
-                           └────┬─────┘
-                                │ run starts
-                           ┌────▼─────┐
-                           │ running   │
-                           └────┬─────┘
-                                │
-                 ┌──────────────┼──────────────┐
-                 │              │               │
-          (parallel)      (serial)        (all modes)
-                 │              │               │
-          ┌──────▼──────┐      │         ┌─────▼─────┐
-          │  verified    │      │         │  failed    │
-          └──────┬──────┘      │         └───────────┘
-                 │              │         max_retries
-          ┌──────▼──────┐      │         exhausted,
-          │merge_pending │      │         timeout,
-          └──────┬──────┘      │         baseline fail
-                 │              │
-          ┌──────┼──────┐      │
-          │             │      │
-   ┌──────▼──────┐  ┌───▼─────▼───┐
-   │merge_failed  │  │   passed     │
-   └─────────────┘  └──────────────┘
-   conflict,         merge succeeded,
-   post-merge        all tests pass
-   test fail
+                           │ pending  │◄─────────────────────────┐
+                           └────┬─────┘                          │
+                                │ run starts                     │
+                           ┌────▼─────┐                          │
+                           │ running   │                          │
+                           └────┬─────┘                          │
+                                │                                │
+                 ┌──────────────┼──────────────┐                 │
+                 │              │               │                 │
+          (parallel)      (serial)        (all modes)            │
+                 │              │               │                 │
+          ┌──────▼──────┐      │         ┌─────▼─────┐          │
+          │  verified    │      │         │  failed    │          │
+          └──────┬──────┘      │         └───────────┘          │
+                 │              │         max_retries             │
+          ┌──────▼──────┐      │         exhausted,              │
+          │merge_pending │      │         timeout,                │
+          └──────┬──────┘      │         baseline fail           │
+                 │              │                                 │
+          ┌──────┼──────┐      │                                 │
+          │             │      │                                 │
+   ┌──────▼──────┐  ┌───▼─────▼───┐                             │
+   │merge_failed  │  │   passed     │                             │
+   └──────┬──────┘  └──────────────┘                             │
+          │          merge succeeded,                             │
+          │          all tests pass                               │
+          │                                                      │
+          └──► auto-retry: re-run coding_loop() ─────────────────┘
+               on updated main with previous
+               diff as feedback (full pipeline:
+               coding + tests + QA, no max_turns,
+               up to max_retries attempts)
 ```
 
 ---
@@ -369,7 +388,7 @@ After merge phase:
 | **Spec gen** | Sonnet | ~$0.15-0.30 | Once per task (background thread) |
 | **Coding agent** | CC default | ~$0.50-1.50 | Per attempt (resumes session) |
 | **QA agent** | CC default | ~$0.30-1.00 | Per attempt (tier-dependent) |
-| **Merge re-apply** | CC default | ~$0.50-1.50 | Coding agent re-applies on updated main (rare) |
+| **Merge re-apply** | CC default | ~$0.50-1.50 | Full coding_loop on updated main with diff feedback (rare) |
 | **Typical task** | | **~$1.00-2.50** | Single attempt, no retries |
 | **With retry** | | **~$2.50-4.00** | Coding + QA + retry coding + retry QA |
 
