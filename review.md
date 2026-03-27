@@ -1,3 +1,30 @@
+## Implementation Gate — 2026-03-26 — LLM-based merge conflict resolution
+
+### Round 1 — Codex
+- [CRITICAL] Agent SDK used for untrusted file content — fixed by Codex: plain `claude` CLI subprocess, no tools
+- [IMPORTANT] error_code mismatch (merge_failed vs post_merge_test_fail) — fixed by Codex
+- [IMPORTANT] Prompt needs base/ours/theirs 3-way view — fixed by Codex: git show :1/:2/:3
+- [IMPORTANT] Partial resolution leaves repo dirty — fixed by Codex: all-or-nothing
+- [IMPORTANT] Async complexity unnecessary — fixed by Codex: plain subprocess.run
+- [REFACTOR] Extract from git_ops — fixed by Codex: new otto/merge_resolve.py
+
+### Round 2 — Codex
+- error_code already fixed in worktree (Codex read main repo)
+
+### Round 3 — Codex
+- [IMPORTANT] File corruption on non-UTF-8/binary — fixed: skip non-text files, no errors="replace"
+- [IMPORTANT] Cleanup unverified — fixed: check MERGE_HEAD, fallback to hard reset
+- [NOTE] Triple-backtick delimiters brittle — fixed: unique sentinels
+
+### Round 4 — Codex
+- [IMPORTANT] Prompt as argv exceeds OS limit on large files — fixed: send via stdin
+- [IMPORTANT] MERGE_HEAD path wrong in linked worktrees — fixed: git rev-parse --git-path
+
+### Round 5 — Codex
+- APPROVED. No new issues.
+
+---
+
 ## Implementation Gate — 2026-03-26 — Parallel batch execution (post-phase-3 fixes)
 
 ### Round 1 — Codex
