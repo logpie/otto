@@ -3,6 +3,8 @@
 import asyncio
 import json
 import subprocess
+import threading
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -10,7 +12,12 @@ import pytest
 import yaml
 
 from otto.context import PipelineContext, TaskResult
-from otto.orchestrator import cleanup_orphaned_worktrees, merge_parallel_results, run_per
+from otto.orchestrator import (
+    _run_batch_parallel,
+    cleanup_orphaned_worktrees,
+    merge_parallel_results,
+    run_per,
+)
 from otto.planner import Batch, ExecutionPlan, TaskPlan
 from otto.telemetry import Telemetry
 
@@ -464,6 +471,23 @@ class TestMergeParallelResults:
         merged = merge_parallel_results(results, config, tmp_git_repo, tasks_path, telemetry)
         assert merged == results
 
+    def test_already_passed_parallel_result_skips_merge_phase(self, tmp_git_repo):
+        """Parallel no-change passes should bypass the merge phase entirely."""
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        tasks_path.write_text(yaml.dump({"tasks": [
+            {"id": 1, "key": "task-pass", "prompt": "No-op", "status": "passed"},
+        ]}))
+        log_dir = tmp_git_repo / "otto_logs"
+        log_dir.mkdir(exist_ok=True)
+        telemetry = Telemetry(log_dir)
+        results = [TaskResult(task_key="task-pass", success=True)]
+
+        with patch("otto.git_ops.cherry_pick_candidate") as cherry_pick_mock:
+            merged = merge_parallel_results(results, self._make_config(), tmp_git_repo, tasks_path, telemetry)
+
+        assert merged == results
+        cherry_pick_mock.assert_not_called()
+
     def test_post_rebase_test_failure(self, tmp_git_repo):
         """Post-rebase test failure should mark task as merge_failed and revert."""
         from otto.testing import TestSuiteResult, TierResult
@@ -506,6 +530,64 @@ class TestMergeParallelResults:
         ).stdout.strip()
         assert head_after == head_before
 
+    def test_post_rebase_verification_uses_task_verify_command(self, tmp_git_repo):
+        """Merge verification should forward each task's custom verify command."""
+        from otto.testing import TestSuiteResult, TierResult
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        tasks_path.write_text(yaml.dump({"tasks": [
+            {
+                "id": 1,
+                "key": "task-verify",
+                "prompt": "Verify task",
+                "status": "verified",
+                "verify": "bin/task-verify",
+            },
+        ]}))
+        log_dir = tmp_git_repo / "otto_logs"
+        log_dir.mkdir(exist_ok=True)
+        telemetry = Telemetry(log_dir)
+
+        self._create_candidate_commit(tmp_git_repo, "task-verify", "verify.txt", "content\n")
+        results = [TaskResult(task_key="task-verify", success=True)]
+        config = self._make_config()
+        config["skip_test"] = False
+
+        passed_suite = TestSuiteResult(
+            passed=True,
+            tiers=[TierResult(tier="existing_tests", passed=True, output="ok")],
+        )
+        with patch("otto.testing.run_test_suite", return_value=passed_suite) as run_suite_mock:
+            merge_parallel_results(results, config, tmp_git_repo, tasks_path, telemetry)
+
+        assert run_suite_mock.call_args.kwargs["custom_test_cmd"] == "bin/task-verify"
+
+    def test_merge_marks_task_merge_pending_before_passing(self, tmp_git_repo):
+        """Tasks should persist merge_pending while actively merging."""
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        tasks_path.write_text(yaml.dump({"tasks": [
+            {"id": 1, "key": "task-merge", "prompt": "Task merge", "status": "verified"},
+        ]}))
+        log_dir = tmp_git_repo / "otto_logs"
+        log_dir.mkdir(exist_ok=True)
+        telemetry = Telemetry(log_dir)
+
+        self._create_candidate_commit(tmp_git_repo, "task-merge", "merge.txt", "ok\n")
+        results = [TaskResult(task_key="task-merge", success=True)]
+
+        from otto.tasks import update_task as real_update_task
+        status_updates: list[str] = []
+
+        def tracking_update_task(*args, **kwargs):
+            if "status" in kwargs:
+                status_updates.append(kwargs["status"])
+            return real_update_task(*args, **kwargs)
+
+        with patch("otto.orchestrator.update_task", side_effect=tracking_update_task):
+            merge_parallel_results(results, self._make_config(), tmp_git_repo, tasks_path, telemetry)
+
+        assert "merge_pending" in status_updates
+        assert status_updates.index("merge_pending") < status_updates.index("passed")
+
 
 class TestCherryPickCandidate:
     """Tests for cherry_pick_candidate git operation."""
@@ -530,7 +612,12 @@ class TestCherryPickCandidate:
         )
         assert success
         assert new_sha != ""
-        assert (tmp_git_repo / "new_file.txt").exists()
+        assert not (tmp_git_repo / "new_file.txt").exists()
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=tmp_git_repo, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert head != new_sha
 
     def test_conflict_returns_false(self, tmp_git_repo):
         """Cherry-pick with conflict should return (False, '') and leave main clean."""
@@ -568,6 +655,85 @@ class TestCherryPickCandidate:
             cwd=tmp_git_repo, capture_output=True, text=True,
         ).stdout.strip()
         assert branch == "main"
+
+
+class TestRunBatchParallel:
+    @pytest.mark.asyncio
+    async def test_setup_failures_persist_to_tasks_file(self, tmp_git_repo):
+        """Parallel setup failures should be recorded on disk."""
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        tasks_path.write_text(yaml.dump({"tasks": [
+            {"id": 1, "key": "task-boom", "prompt": "boom", "status": "pending"},
+        ]}))
+        batch = Batch(tasks=[TaskPlan(task_key="task-boom")])
+        config = {"default_branch": "main", "verify_timeout": 60}
+        telemetry = Telemetry(tmp_git_repo / "otto_logs")
+        context = PipelineContext()
+
+        with patch("otto.git_ops.create_task_worktree", side_effect=RuntimeError("setup boom")):
+            results = await _run_batch_parallel(
+                batch, context, config, tmp_git_repo, telemetry, tasks_path, max_parallel=1,
+            )
+
+        assert len(results) == 1
+        assert not results[0].success
+        persisted = yaml.safe_load(tasks_path.read_text())["tasks"][0]
+        assert persisted["status"] == "failed"
+        assert persisted["error_code"] == "parallel_setup_failed"
+        assert "setup boom" in persisted["error"]
+
+    @pytest.mark.asyncio
+    async def test_semaphore_bounds_setup_concurrency(self, tmp_git_repo):
+        """Worktree creation and install should respect max_parallel."""
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        tasks_path.write_text(yaml.dump({"tasks": [
+            {"id": 1, "key": "task-one", "prompt": "one", "status": "pending"},
+            {"id": 2, "key": "task-two", "prompt": "two", "status": "pending"},
+        ]}))
+        batch = Batch(tasks=[TaskPlan(task_key="task-one"), TaskPlan(task_key="task-two")])
+        config = {"default_branch": "main", "verify_timeout": 60}
+        telemetry = Telemetry(tmp_git_repo / "otto_logs")
+        context = PipelineContext()
+
+        active_setup = 0
+        max_active_setup = 0
+        lock = threading.Lock()
+
+        def fake_create_task_worktree(project_dir, task_key, base_sha):
+            nonlocal active_setup, max_active_setup
+            with lock:
+                active_setup += 1
+                max_active_setup = max(max_active_setup, active_setup)
+            time.sleep(0.05)
+            worktree = project_dir / ".otto-worktrees" / task_key
+            worktree.mkdir(parents=True, exist_ok=True)
+            with lock:
+                active_setup -= 1
+            return worktree
+
+        def fake_install_deps(worktree_path, timeout):
+            nonlocal active_setup, max_active_setup
+            with lock:
+                active_setup += 1
+                max_active_setup = max(max_active_setup, active_setup)
+            time.sleep(0.05)
+            with lock:
+                active_setup -= 1
+            return None
+
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, task_work_dir=None):
+            return TaskResult(task_key=task_plan.task_key, success=True)
+
+        with patch("otto.git_ops.create_task_worktree", side_effect=fake_create_task_worktree):
+            with patch("otto.testing._install_deps", side_effect=fake_install_deps):
+                with patch("otto.git_ops.cleanup_task_worktree"):
+                    with patch("otto.orchestrator.coding_loop", side_effect=fake_coding_loop):
+                        results = await _run_batch_parallel(
+                            batch, context, config, tmp_git_repo, telemetry, tasks_path, max_parallel=1,
+                        )
+
+        assert all(result.success for result in results)
+        assert max_active_setup == 1
 
 
 class TestCrashRecovery:

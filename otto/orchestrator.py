@@ -416,7 +416,6 @@ def merge_parallel_results(
     default_branch = config["default_branch"]
     test_timeout = config["verify_timeout"]
     test_command = config.get("test_command") or detect_test_command(project_dir)
-    custom_test_cmd = None  # no per-task custom cmd in merge phase
 
     # Ensure we're on default branch
     subprocess.run(
@@ -424,9 +423,17 @@ def merge_parallel_results(
         cwd=project_dir, capture_output=True, check=True,
     )
 
-    # Separate verified (successful) from failed results
-    verified_results = [r for r in results if r.success]
-    failed_results = [r for r in results if not r.success]
+    tasks_by_key = {task.get("key"): task for task in load_tasks(tasks_file)}
+
+    # Separate verified (needs merge) from already-passed and failed results.
+    verified_results = [
+        r for r in results
+        if r.success and tasks_by_key.get(r.task_key, {}).get("status") == "verified"
+    ]
+    passthrough_results = [
+        r for r in results
+        if not (r.success and tasks_by_key.get(r.task_key, {}).get("status") == "verified")
+    ]
 
     # Sort verified tasks by key for deterministic merge order
     verified_results.sort(key=lambda r: r.task_key)
@@ -437,10 +444,19 @@ def merge_parallel_results(
     console.print()
     console.print(f"  [bold]Merging[/bold]  [dim]{len(verified_results)} verified tasks[/dim]")
 
-    merged_results: list[TaskResult] = list(failed_results)  # carry forward failed tasks
+    merged_results: list[TaskResult] = list(passthrough_results)
 
     for result in verified_results:
         task_key = result.task_key
+        task_meta = tasks_by_key.get(task_key, {})
+        task_id = task_meta.get("id", 0)
+        custom_test_cmd = task_meta.get("verify")
+
+        try:
+            update_task(tasks_file, task_key, status="merge_pending")
+        except Exception:
+            pass
+
         # Find the best candidate ref for this task
         candidate_ref = _find_best_candidate_ref(project_dir, task_key)
         if not candidate_ref:
@@ -457,7 +473,8 @@ def merge_parallel_results(
             ))
             continue
 
-        # Cherry-pick candidate onto main
+        # Cherry-pick candidate onto a temp branch rooted at the current main
+        # HEAD, but do not fast-forward main until verification passes.
         success, new_sha = cherry_pick_candidate(
             project_dir, candidate_ref, default_branch,
         )
@@ -470,7 +487,7 @@ def merge_parallel_results(
             except Exception:
                 pass
             telemetry.log(TaskFailed(
-                task_key=task_key, task_id=0,
+                task_key=task_key, task_id=task_id,
                 error=error, cost_usd=result.cost_usd,
             ))
             merged_results.append(TaskResult(
@@ -494,11 +511,6 @@ def merge_parallel_results(
                 timeout=test_timeout,
             )
             if not test_result.passed:
-                # Revert: reset main back to before the cherry-pick
-                subprocess.run(
-                    ["git", "reset", "--hard", "HEAD~1"],
-                    cwd=project_dir, capture_output=True,
-                )
                 failure_output = test_result.failure_output or "post-rebase tests failed"
                 console.print(
                     f"    [red]\u2717[/red] #{task_key[:8]}  post-rebase test failure"
@@ -510,7 +522,7 @@ def merge_parallel_results(
                 except Exception:
                     pass
                 telemetry.log(TaskFailed(
-                    task_key=task_key, task_id=0,
+                    task_key=task_key, task_id=task_id,
                     error=error, cost_usd=result.cost_usd,
                 ))
                 merged_results.append(TaskResult(
@@ -522,16 +534,37 @@ def merge_parallel_results(
                 ))
                 continue
 
+        ff = subprocess.run(
+            ["git", "merge", "--ff-only", new_sha],
+            cwd=project_dir, capture_output=True, text=True,
+        )
+        if ff.returncode != 0:
+            console.print(f"    [red]\u2717[/red] #{task_key[:8]}  fast-forward failed")
+            error = f"merge_failed: fast-forward failed\n{(ff.stderr or '')[:500]}"
+            try:
+                update_task(tasks_file, task_key, status="merge_failed",
+                            error=error, error_code="merge_ff_failed")
+            except Exception:
+                pass
+            telemetry.log(TaskFailed(
+                task_key=task_key, task_id=task_id,
+                error=error, cost_usd=result.cost_usd,
+            ))
+            merged_results.append(TaskResult(
+                task_key=task_key, success=False,
+                error=error, cost_usd=result.cost_usd,
+                duration_s=result.duration_s,
+                diff_summary=result.diff_summary,
+                qa_report=result.qa_report,
+            ))
+            continue
+
         # Merge succeeded
         console.print(f"    [green]\u2713[/green] #{task_key[:8]}  merged ({new_sha[:7]})")
         try:
-            # Load the task to get task_id for telemetry
-            tasks = load_tasks(tasks_file)
-            task_meta = next((t for t in tasks if t.get("key") == task_key), {})
-            task_id = task_meta.get("id", 0)
             update_task(tasks_file, task_key, status="passed")
         except Exception:
-            task_id = 0
+            pass
 
         telemetry.log(TaskMerged(
             task_key=task_key, task_id=task_id,
@@ -587,18 +620,18 @@ async def _run_batch_parallel(
         task_key = task_plan.task_key
         worktree_path: Path | None = None
         try:
-            # Create worktree (synchronous git operation)
-            worktree_path = await asyncio.to_thread(
-                create_task_worktree, project_dir, task_key, base_sha,
-            )
-            worktree_paths[task_key] = worktree_path
-
-            # Install dependencies in the worktree
-            await asyncio.to_thread(
-                _install_deps, worktree_path, install_timeout,
-            )
-
             async with semaphore:
+                # Bound setup concurrency too: worktree creation and dependency
+                # installation can be the most expensive parallel operations.
+                worktree_path = await asyncio.to_thread(
+                    create_task_worktree, project_dir, task_key, base_sha,
+                )
+                worktree_paths[task_key] = worktree_path
+
+                await asyncio.to_thread(
+                    _install_deps, worktree_path, install_timeout,
+                )
+
                 if context.interrupted:
                     return TaskResult(
                         task_key=task_key, success=False,
@@ -612,9 +645,20 @@ async def _run_batch_parallel(
                 return result
 
         except Exception as exc:
+            error = f"parallel execution error: {exc}"
+            try:
+                update_task(
+                    tasks_file,
+                    task_key,
+                    status="failed",
+                    error=error,
+                    error_code="parallel_setup_failed",
+                )
+            except Exception:
+                pass
             return TaskResult(
                 task_key=task_key, success=False,
-                error=f"parallel execution error: {exc}",
+                error=error,
             )
         finally:
             # Clean up worktree

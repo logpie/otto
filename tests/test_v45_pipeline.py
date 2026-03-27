@@ -21,6 +21,7 @@ from otto.runner import (
     _get_diff_info,
     run_task_v45,
 )
+from otto.git_ops import cleanup_task_worktree, create_task_worktree
 from otto.tasks import load_tasks
 from otto.testing import TierResult, TestSuiteResult
 
@@ -872,6 +873,62 @@ class TestRunTaskV45:
         assert persisted["error_code"] == "time_budget_exceeded"
         assert current_branch == default_branch
         assert branch_check.returncode != 0
+
+    @pytest.mark.asyncio
+    async def test_parallel_no_change_pass_skips_merge_phase(self, tmp_git_repo):
+        """Parallel no-change QA passes should be marked passed without a candidate ref."""
+        default_branch = _current_branch(tmp_git_repo)
+        task = {
+            "id": 1,
+            "key": "tasknochange1",
+            "prompt": "Feature already exists",
+            "status": "pending",
+            "spec": [{"text": "Feature works", "binding": "must"}],
+            "max_retries": 0,
+        }
+        tasks_path = _write_task(tmp_git_repo, task)
+        config = {
+            "default_branch": default_branch,
+            "max_retries": 0,
+            "verify_timeout": 30,
+            "max_task_time": 60,
+            "test_command": None,
+        }
+        base_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=tmp_git_repo, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        worktree = create_task_worktree(tmp_git_repo, task["key"], base_sha)
+
+        async def fake_query(*, prompt, options=None):
+            yield SimpleNamespace(
+                session_id="sess-no-change",
+                is_error=False,
+                total_cost_usd=0.0,
+                result="feature already exists",
+            )
+
+        qa_mock = AsyncMock(return_value={
+            "must_passed": True,
+            "verdict": {"must_passed": True, "must_items": []},
+            "raw_report": "QA PASS",
+            "cost_usd": 0.0,
+        })
+
+        try:
+            with patch("otto.runner.query", new=fake_query):
+                with patch("otto.runner.run_qa_agent_v45", new=qa_mock):
+                    result = await run_task_v45(
+                        task, config, tmp_git_repo, tasks_path, task_work_dir=worktree,
+                    )
+        finally:
+            cleanup_task_worktree(tmp_git_repo, task["key"])
+
+        persisted = load_tasks(tasks_path)[0]
+        assert result["success"] is True
+        assert result["status"] == "passed"
+        assert persisted["status"] == "passed"
+        assert _find_best_candidate_ref(tmp_git_repo, task["key"]) is None
 
 
 class TestSystemPromptPreset:

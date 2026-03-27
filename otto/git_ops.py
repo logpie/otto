@@ -454,10 +454,12 @@ def cherry_pick_candidate(
 ) -> tuple[bool, str]:
     """Cherry-pick a candidate ref onto the current HEAD of default_branch.
 
-    Creates a temporary branch, cherry-picks the candidate, and fast-forwards
-    default_branch. Used in the serial merge phase for parallel tasks.
+    Creates a temporary branch and cherry-picks the candidate there. Used in
+    the serial merge phase for parallel tasks.
 
     Returns (success, new_head_sha). On conflict, aborts and returns (False, "").
+    The caller is responsible for fast-forwarding default_branch to new_head_sha
+    after post-rebase verification passes.
     """
     temp_branch = f"otto/_merge_temp_{candidate_ref.replace('/', '_')}"
 
@@ -513,23 +515,16 @@ def cherry_pick_candidate(
         cwd=repo_root, capture_output=True, text=True, check=True,
     ).stdout.strip()
 
-    # Fast-forward default branch to temp branch
+    # Return to default branch and clean up the temp branch. The caller can
+    # fast-forward default_branch to new_sha after verification passes.
     subprocess.run(
         ["git", "checkout", default_branch],
         cwd=repo_root, capture_output=True, check=True,
     )
-    ff = subprocess.run(
-        ["git", "merge", "--ff-only", temp_branch],
-        cwd=repo_root, capture_output=True,
-    )
-    # Clean up temp branch
     subprocess.run(
         ["git", "branch", "-D", temp_branch],
         cwd=repo_root, capture_output=True,
     )
-
-    if ff.returncode != 0:
-        return False, ""
     return True, new_sha
 
 

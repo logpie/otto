@@ -1210,8 +1210,8 @@ async def _handle_no_changes(
         emit("phase", name="qa", status="done", time_s=qa_elapsed_nc,
              cost=qa_cost_nc)
         if parallel:
-            emit("phase", name="merge", status="pending",
-                 detail="no changes needed — deferred to merge phase")
+            emit("phase", name="merge", status="done", time_s=0,
+                 detail="skipped (no changes to merge)")
         else:
             emit("phase", name="merge", status="done", time_s=0,
                  detail="no changes needed")
@@ -1220,6 +1220,7 @@ async def _handle_no_changes(
             cleanup_branch(project_dir, key, default_branch)
         return {
             "action": "pass",
+            "status": "passed",
             "qa_report": qa_report_nc,
             "diff_summary": "No changes needed — QA verified existing code",
             "cost_usd": qa_cost_nc,
@@ -1689,7 +1690,7 @@ async def run_task_v45(
                 if not spec_task or (spec_task and spec_task.done()):
                     spec_task = None
                 if nc_result["action"] == "pass":
-                    status = "verified" if is_parallel else "passed"
+                    status = nc_result.get("status", "passed")
                     return _result(True, status,
                                    qa_report=nc_result["qa_report"],
                                    diff_summary=nc_result["diff_summary"])
