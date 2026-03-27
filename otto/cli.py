@@ -23,6 +23,8 @@ from otto.tasks import (
     add_tasks,
     delete_task,
     load_tasks,
+    mutate_and_recompute,
+    refresh_planner_state,
     spec_binding,
     spec_is_verifiable,
     spec_text,
@@ -416,7 +418,7 @@ def plan(specs):
         return
 
     tasks_path = project_dir / "tasks.yaml"
-    tasks = load_tasks(tasks_path)
+    tasks = refresh_planner_state(tasks_path)
     pending = [t for t in tasks if t.get("status") == "pending"]
 
     if not pending:
@@ -475,7 +477,7 @@ def status(watch):
     import fcntl
 
     tasks_path = Path.cwd() / "tasks.yaml"
-    tasks = load_tasks(tasks_path)
+    tasks = refresh_planner_state(tasks_path)
     if not tasks:
         console.print(f"[dim]No tasks found. Use 'otto add' to create one.[/dim]")
         return
@@ -516,12 +518,12 @@ def retry(task_id, feedback, force):
       otto retry --force 2 "Output format is ugly, use a table"
     """
     tasks_path = Path.cwd() / "tasks.yaml"
-    tasks = load_tasks(tasks_path)
+    tasks = refresh_planner_state(tasks_path)
     for t in tasks:
         if t.get("id") == task_id:
-            if not force and t.get("status") not in ("failed", "merge_failed"):
+            if not force and t.get("status") not in ("failed", "merge_failed", "conflict", "blocked"):
                 error_console.print(
-                    f"Task #{task_id} is '{t.get('status')}', not 'failed'/'merge_failed'. Use --force to override.", style="error"
+                    f"Task #{task_id} is '{t.get('status')}', not retryable by default. Use --force to override.", style="error"
                 )
                 sys.exit(1)
             # Warn if retrying a task whose code is already merged to main
@@ -540,13 +542,24 @@ def retry(task_id, feedback, force):
                         f"  [dim]Consider: otto add 'new task' instead of retrying a completed one.[/dim]"
                     )
 
-            updates: dict = {
-                "status": "pending", "attempts": 0,
-                "session_id": None, "error": None, "error_code": None,
-            }
-            if feedback:
-                updates["feedback"] = feedback
-            update_task(tasks_path, t["key"], **updates)
+            def _reset(tasks):
+                for task in tasks:
+                    if task.get("key") != t["key"]:
+                        continue
+                    task["status"] = "pending"
+                    task["attempts"] = 0
+                    task.pop("session_id", None)
+                    task.pop("error", None)
+                    task.pop("error_code", None)
+                    task.pop("completed_at", None)
+                    task.pop("planner_conflicts", None)
+                    task.pop("blocked_by", None)
+                    task.pop("blocked_reason", None)
+                    if feedback:
+                        task["feedback"] = feedback
+                    break
+
+            mutate_and_recompute(tasks_path, _reset)
             console.print(f"[success]✓[/success] Reset task [bold]#{task_id}[/bold] to pending")
             if feedback:
                 console.print(f"  [dim]Feedback: {rich_escape(feedback)}[/dim]")
@@ -579,7 +592,7 @@ def drop(task_id, drop_all, yes):
         sys.exit(2)
 
     tasks_path = Path.cwd() / "tasks.yaml"
-    tasks = load_tasks(tasks_path)
+    tasks = refresh_planner_state(tasks_path)
     target = None
     for t in tasks:
         if t.get("id") == task_id:

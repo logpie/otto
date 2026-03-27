@@ -9,8 +9,11 @@ import yaml
 from otto.tasks import (
     add_task,
     add_tasks,
+    delete_task,
     generate_key,
     load_tasks,
+    mutate_and_recompute,
+    planner_input_fingerprint,
     save_tasks,
     update_task,
 )
@@ -213,3 +216,55 @@ class TestConcurrentAccess:
         assert not errors
         tasks = load_tasks(path)
         assert len(tasks) == 10
+
+
+class TestPlannerMetadata:
+    def test_fingerprint_ignores_planner_derived_status(self):
+        task = {
+            "id": 1,
+            "key": "abc123def456",
+            "prompt": "Rewrite utils",
+            "status": "pending",
+            "depends_on": [2],
+            "feedback": "keep API stable",
+        }
+        base = planner_input_fingerprint(task)
+        task["status"] = "conflict"
+        task["blocked_by"] = ["zzz999yyy888"]
+        task["error"] = "planner conflict"
+        assert planner_input_fingerprint(task) == base
+
+    def test_delete_recomputes_and_clears_stale_conflicts(self, tmp_git_repo):
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        created = add_tasks(tasks_path, [
+            {"prompt": "Rewrite parser"},
+            {"prompt": "Rewrite parser another way"},
+            {"prompt": "Use parser output", "depends_on": [1]},
+        ])
+        by_key = {task["key"]: task for task in load_tasks(tasks_path)}
+        conflict_keys = [created[0]["key"], created[1]["key"]]
+        fingerprints = {
+            key: planner_input_fingerprint(by_key[key])
+            for key in conflict_keys
+        }
+
+        def _apply_conflict(tasks):
+            for task in tasks:
+                if task.get("key") in conflict_keys:
+                    task["planner_conflicts"] = [{
+                        "tasks": conflict_keys,
+                        "description": "same parser rewrite",
+                        "suggestion": "pick one",
+                        "fingerprints": fingerprints,
+                    }]
+
+        mutate_and_recompute(tasks_path, _apply_conflict)
+        persisted = {task["key"]: task for task in load_tasks(tasks_path)}
+        assert persisted[created[0]["key"]]["status"] == "conflict"
+        assert persisted[created[1]["key"]]["status"] == "conflict"
+        assert persisted[created[2]["key"]]["status"] == "blocked"
+
+        delete_task(tasks_path, created[1]["id"])
+        persisted = {task["key"]: task for task in load_tasks(tasks_path)}
+        assert persisted[created[0]["key"]]["status"] == "pending"
+        assert persisted[created[2]["key"]]["status"] == "pending"

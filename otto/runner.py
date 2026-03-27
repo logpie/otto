@@ -232,15 +232,28 @@ def preflight_checks(
     # Baseline check moved to run_task_v45() — runs after branch creation
     # with auto-detected test command for consistent results.
 
+    from otto.tasks import load_tasks, mutate_and_recompute
+
     # Recover stale "running", "verified", "merge_pending" tasks
     # These states are transient — if we're starting fresh, something crashed
-    tasks = load_tasks(tasks_file)
     _stale_states = {"running", "verified", "merged", "merge_pending"}
-    for t in tasks:
-        if t.get("status") in _stale_states:
-            update_task(tasks_file, t["key"], status="pending",
-                        error=None, session_id=None)
-            console.print(f"  [yellow]Warning: Task #{t['id']} was stuck in '{t['status']}' -- reset to pending[/yellow]")
+    stale_tasks = [
+        task for task in load_tasks(tasks_file)
+        if task.get("status") in _stale_states
+    ]
+    if stale_tasks:
+        stale_keys = {task["key"] for task in stale_tasks if task.get("key")}
+
+        def _recover(tasks):
+            for task in tasks:
+                if task.get("key") in stale_keys:
+                    task["status"] = "pending"
+                    task.pop("error", None)
+                    task.pop("session_id", None)
+
+        mutate_and_recompute(tasks_file, _recover)
+        for task in stale_tasks:
+            console.print(f"  [yellow]Warning: Task #{task['id']} was stuck in '{task['status']}' -- reset to pending[/yellow]")
 
     tasks = load_tasks(tasks_file)
     pending = [t for t in tasks if t.get("status") == "pending"]

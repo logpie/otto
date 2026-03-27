@@ -126,6 +126,44 @@ class TestRunPerIntegration:
         assert exit_code == 1
 
     @pytest.mark.asyncio
+    async def test_conflicting_tasks_are_skipped_and_downstream_blocked(self, tmp_git_repo):
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        tasks_path.write_text(yaml.dump({"tasks": [
+            {"id": 1, "key": "task-a", "prompt": "Rewrite parser with approach A", "status": "pending"},
+            {"id": 2, "key": "task-b", "prompt": "Rewrite parser with approach B", "status": "pending"},
+            {"id": 3, "key": "task-c", "prompt": "Use parser output", "status": "pending", "depends_on": [2]},
+        ]}))
+
+        config = self._make_config(tmp_git_repo)
+        config["skip_qa"] = True
+        execution_plan = ExecutionPlan(
+            batches=[],
+            conflicts=[{
+                "tasks": ["task-a", "task-b"],
+                "description": "Both rewrite the parser incompatibly",
+                "suggestion": "choose one parser approach",
+            }],
+            analysis=[{
+                "task_a": "task-a",
+                "task_b": "task-b",
+                "relationship": "CONTRADICTORY",
+                "reason": "same parser rewrite",
+            }],
+        )
+
+        with patch("otto.orchestrator.plan", AsyncMock(return_value=execution_plan)):
+            with patch("otto.orchestrator.coding_loop", side_effect=AssertionError("coding_loop should not run")):
+                with patch("otto.orchestrator._print_summary"):
+                    with patch("otto.orchestrator._record_run_history"):
+                        exit_code = await run_per(config, tasks_path, tmp_git_repo)
+
+        assert exit_code == 1
+        persisted = {task["key"]: task for task in load_tasks(tasks_path)}
+        assert persisted["task-a"]["status"] == "conflict"
+        assert persisted["task-b"]["status"] == "conflict"
+        assert persisted["task-c"]["status"] == "blocked"
+
+    @pytest.mark.asyncio
     async def test_parallel_merge_retry_uses_error_code_and_preserves_attempts(self, tmp_git_repo):
         """Merge retries should use structured TaskResult codes and keep prior attempts."""
         tasks_path = tmp_git_repo / "tasks.yaml"

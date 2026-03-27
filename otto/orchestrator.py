@@ -23,9 +23,9 @@ from otto.context import Learning, PipelineContext, QAMode, TaskResult
 from otto.display import console, rich_escape
 from otto.planner import (
     ExecutionPlan,
-    default_plan,
     plan,
     replan,
+    serial_plan,
 )
 from otto.runner import (
     _print_summary,
@@ -33,7 +33,12 @@ from otto.runner import (
     preflight_checks,
 )
 from otto.qa import run_batch_qa_agent, run_targeted_batch_qa_agent
-from otto.tasks import load_tasks, update_task
+from otto.tasks import (
+    load_tasks,
+    mutate_and_recompute,
+    planner_input_fingerprint,
+    update_task,
+)
 from otto.telemetry import (
     AllDone,
     BatchCompleted,
@@ -135,19 +140,186 @@ def cleanup_orphaned_worktrees(project_dir: Path) -> None:
             shutil.rmtree(child, ignore_errors=True)
 
 
+def _planner_conflict_and_blocked_keys(
+    execution_plan: ExecutionPlan,
+    pending: list[dict[str, Any]],
+) -> tuple[set[str], set[str]]:
+    """Compute direct conflicts plus downstream blocked closure."""
+    task_by_key = {
+        str(task.get("key", "")): task
+        for task in pending
+        if task.get("key")
+    }
+    id_to_key = {
+        int(task["id"]): str(task["key"])
+        for task in pending
+        if isinstance(task.get("id"), int) and task.get("key")
+    }
+    reverse_deps: dict[str, set[str]] = {}
+    for task in pending:
+        task_key = str(task.get("key", "") or "")
+        if not task_key:
+            continue
+        for dep_id in task.get("depends_on") or []:
+            dep_key = id_to_key.get(dep_id)
+            if dep_key:
+                reverse_deps.setdefault(dep_key, set()).add(task_key)
+
+    direct_conflicts: set[str] = set()
+    for conflict in execution_plan.conflicts:
+        keys = [
+            str(task_key)
+            for task_key in conflict.get("tasks") or []
+            if str(task_key) in task_by_key
+        ]
+        if len(keys) >= 2:
+            direct_conflicts.update(keys)
+
+    blocked: set[str] = set()
+    for root_key in direct_conflicts:
+        queue = [root_key]
+        visited = {root_key}
+        while queue:
+            parent_key = queue.pop(0)
+            for child_key in reverse_deps.get(parent_key, set()):
+                if child_key in direct_conflicts:
+                    continue
+                blocked.add(child_key)
+                if child_key not in visited:
+                    visited.add(child_key)
+                    queue.append(child_key)
+
+    return direct_conflicts, blocked
+
+
 def _plan_covers_pending(execution_plan: ExecutionPlan, pending: list[dict[str, Any]]) -> bool:
-    """Return True when the plan covers each pending task key exactly once."""
-    pending_keys = [str(task.get("key", "")) for task in pending if task.get("key")]
+    """Return True when planned + conflicted + blocked covers pending exactly once."""
+    pending_keys = {
+        str(task.get("key", ""))
+        for task in pending
+        if task.get("key")
+    }
     planned_keys = [
         task_plan.task_key
         for batch in execution_plan.batches
         for task_plan in batch.tasks
     ]
-    return (
-        len(planned_keys) == len(pending_keys)
-        and len(set(planned_keys)) == len(planned_keys)
-        and set(planned_keys) == set(pending_keys)
-    )
+    if len(planned_keys) != len(set(planned_keys)):
+        return False
+
+    planned_set = set(planned_keys)
+    direct_conflicts, blocked_keys = _planner_conflict_and_blocked_keys(execution_plan, pending)
+    if planned_set & direct_conflicts:
+        return False
+    if planned_set & blocked_keys:
+        return False
+    if direct_conflicts & blocked_keys:
+        return False
+
+    covered = planned_set | direct_conflicts | blocked_keys
+    return covered == pending_keys
+
+
+def _apply_planner_outcomes(
+    tasks_file: Path,
+    pending: list[dict[str, Any]],
+    execution_plan: ExecutionPlan,
+) -> None:
+    """Persist direct conflicts, then recompute blocked closure atomically."""
+    pending_by_key = {
+        str(task.get("key", "")): task
+        for task in pending
+        if task.get("key")
+    }
+    pending_keys = set(pending_by_key)
+    conflict_entries_by_key: dict[str, list[dict[str, Any]]] = {}
+
+    for conflict in execution_plan.conflicts:
+        keys = [
+            str(task_key)
+            for task_key in conflict.get("tasks") or []
+            if str(task_key) in pending_by_key
+        ]
+        if len(keys) < 2:
+            continue
+        fingerprints = {
+            key: planner_input_fingerprint(pending_by_key[key])
+            for key in keys
+        }
+        entry = {
+            "tasks": keys,
+            "description": str(conflict.get("description", "") or ""),
+            "suggestion": str(conflict.get("suggestion", "") or ""),
+            "fingerprints": fingerprints,
+        }
+        for key in keys:
+            conflict_entries_by_key.setdefault(key, []).append(entry)
+
+    def _mutate(tasks: list[dict[str, Any]]) -> None:
+        for task in tasks:
+            task_key = str(task.get("key", "") or "")
+            if task_key not in pending_keys:
+                continue
+            task["planner_fingerprint"] = planner_input_fingerprint(task)
+            if task_key in conflict_entries_by_key:
+                task["planner_conflicts"] = conflict_entries_by_key[task_key]
+            else:
+                task.pop("planner_conflicts", None)
+            task.pop("blocked_by", None)
+            task.pop("blocked_reason", None)
+            if task.get("status") in ("conflict", "blocked"):
+                task["status"] = "pending"
+                task.pop("error", None)
+                task.pop("error_code", None)
+                task.pop("completed_at", None)
+
+    mutate_and_recompute(tasks_file, _mutate)
+
+
+def _print_planner_findings(pending: list[dict[str, Any]], tasks_file: Path) -> None:
+    pending_by_key = {
+        str(task.get("key", "")): task
+        for task in pending
+        if task.get("key")
+    }
+    persisted = {
+        str(task.get("key", "")): task
+        for task in load_tasks(tasks_file)
+        if task.get("key") in pending_by_key
+    }
+
+    conflicts = [task for task in persisted.values() if task.get("status") == "conflict"]
+    blocked = [task for task in persisted.values() if task.get("status") == "blocked"]
+    if not conflicts and not blocked:
+        return
+
+    if conflicts:
+        console.print("\n  [yellow]Planner detected conflicting tasks:[/yellow]")
+        shown: set[str] = set()
+        for task in conflicts:
+            entries = task.get("planner_conflicts") or []
+            for entry in entries:
+                pair = "|".join(sorted(str(key) for key in entry.get("tasks") or []))
+                if pair in shown:
+                    continue
+                shown.add(pair)
+                labels = ", ".join(
+                    f"#{pending_by_key[key].get('id', '?')}"
+                    for key in entry.get("tasks") or []
+                    if key in pending_by_key
+                )
+                console.print(
+                    f"    [yellow]⚠[/yellow] {labels}  {rich_escape(str(entry.get('description', '') or 'incompatible tasks'))}"
+                )
+                if entry.get("suggestion"):
+                    console.print(f"      [dim]{rich_escape(str(entry['suggestion'])[:160])}[/dim]")
+
+    if blocked:
+        console.print("  [yellow]Blocked tasks:[/yellow]")
+        for task in blocked:
+            console.print(
+                f"    [yellow]⚠[/yellow] #{task.get('id', '?')}  {rich_escape(str(task.get('error', '') or 'blocked by conflict'))}"
+            )
 
 
 def _fallback_batch_spec(task: dict[str, Any], error: str) -> list[dict[str, Any]]:
@@ -169,6 +341,7 @@ async def _run_batch_qa(
     context: Any,
     *,
     focus_task_keys: set[str] | None = None,
+    planner_analysis: list[dict[str, Any]] | None = None,
 ) -> dict:
     """Run combined QA on integrated codebase. Returns verdict."""
     if not merged_tasks:
@@ -213,6 +386,32 @@ async def _run_batch_qa(
     log_dir = project_dir / "otto_logs" / "batch-qa"
     log_dir.mkdir(parents=True, exist_ok=True)
     diff = "Integrated codebase after batch merge. Inspect repository state directly."
+    if planner_analysis:
+        merged_keys = {str(task.get("key", "")) for task in merged_tasks if task.get("key")}
+        merged_ids = {
+            str(task.get("key", "")): task.get("id", "?")
+            for task in merged_tasks
+            if task.get("key")
+        }
+        lines = []
+        for item in planner_analysis:
+            task_a = str(item.get("task_a", "") or "")
+            task_b = str(item.get("task_b", "") or "")
+            if task_a not in merged_keys or task_b not in merged_keys:
+                continue
+            relation = str(item.get("relationship", "") or "")
+            if relation == "INDEPENDENT":
+                continue
+            reason = str(item.get("reason", "") or "")
+            lines.append(
+                f"- Tasks #{merged_ids.get(task_a, '?')} and #{merged_ids.get(task_b, '?')}: "
+                f"{relation} — {reason or 'planner relationship'}"
+            )
+        if lines:
+            diff = (
+                f"{diff}\n\nPlanner relationship analysis:\n"
+                + "\n".join(lines)
+            )
     if focus_task_keys:
         qa_result = await run_targeted_batch_qa_agent(
             tasks_with_specs,
@@ -455,8 +654,11 @@ async def run_per(
         console.print("  Planning...", style="dim")
         execution_plan = await plan(pending, config, project_dir)
         if not _plan_covers_pending(execution_plan, pending):
-            console.print("  [yellow]Planner returned invalid task coverage; falling back to default plan[/yellow]")
-            execution_plan = default_plan(pending)
+            console.print("  [yellow]Planner returned invalid task coverage; falling back to serial plan[/yellow]")
+            execution_plan = serial_plan(pending)
+
+        _apply_planner_outcomes(tasks_file, pending, execution_plan)
+        _print_planner_findings(pending, tasks_file)
 
         telemetry.log(PlanCreated(
             total_batches=len(execution_plan.batches),
@@ -644,6 +846,7 @@ async def run_per(
                         console.print(f"\n  [bold]Batch QA[/bold]  [dim]{len(merged_tasks)} merged task(s)[/dim]")
                         batch_qa = await _run_batch_qa(
                             merged_tasks, config, project_dir, tasks_file, telemetry, context,
+                            planner_analysis=execution_plan.analysis,
                         )
                         initial_share = float(batch_qa.get("cost_usd", 0.0) or 0.0) / max(len(merged_tasks), 1)
                         for key in merged_keys:
@@ -754,6 +957,7 @@ async def run_per(
                                     telemetry,
                                     context,
                                     focus_task_keys=retried_merged_keys,
+                                    planner_analysis=execution_plan.analysis,
                                 )
                                 retry_share = float(final_batch_qa.get("cost_usd", 0.0) or 0.0) / max(len(retried_merged_keys), 1)
                                 for key in retried_merged_keys:
@@ -916,25 +1120,36 @@ async def run_per(
 
         # Step 5: Summary
         run_duration = time.monotonic() - run_start
-        missing_keys = pending_keys - set(context.results)
+        final_tasks = load_tasks(tasks_file)
+        terminal_nonexecuted = {
+            str(task.get("key", ""))
+            for task in final_tasks
+            if task.get("key") in pending_keys
+            and task.get("status") in ("conflict", "blocked")
+        }
+        missing_keys = pending_keys - set(context.results) - terminal_nonexecuted
 
         # AllDone is intentionally task-scoped; run-level post-run suite failures
         # are surfaced via the summary, run history, and exit code instead.
         telemetry.log(AllDone(
             total_passed=context.passed_count,
-            total_failed=context.failed_count,
+            total_failed=context.failed_count + len(terminal_nonexecuted),
             total_missing_or_interrupted=len(missing_keys),
             total_cost=context.total_cost,
             total_duration_s=run_duration,
         ))
 
         # Build results list for _print_summary
-        final_tasks = load_tasks(tasks_file)
         pending_keys = {t["key"] for t in pending}
         results: list[tuple[dict, bool]] = []
         for t in final_tasks:
             if t.get("key") in pending_keys:
-                results.append((t, t.get("status") == "passed"))
+                result_obj = context.results.get(t.get("key"))
+                passed = t.get("status") == "passed" or (
+                    bool(result_obj and result_obj.success)
+                    and t.get("status") not in ("failed", "merge_failed", "conflict", "blocked")
+                )
+                results.append((t, passed))
 
         try:
             _print_summary(
@@ -966,6 +1181,7 @@ async def run_per(
 
         return 1 if (
             context.failed_count > 0
+            or terminal_nonexecuted
             or post_run_suite_failed
             or context.interrupted
             or missing_keys

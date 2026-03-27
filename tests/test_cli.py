@@ -119,6 +119,39 @@ class TestRetry:
         result = runner.invoke(main, ["retry", "1"])
         assert result.exit_code != 0
 
+    def test_retries_conflict_task_and_clears_planner_metadata(self, runner, tmp_git_repo, monkeypatch):
+        from otto.tasks import planner_input_fingerprint
+
+        monkeypatch.chdir(tmp_git_repo)
+        runner.invoke(main, ["add", "Conflicting task"])
+        runner.invoke(main, ["add", "Other conflicting task"])
+        tasks = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())
+        task = tasks["tasks"][0]
+        other = tasks["tasks"][1]
+        fingerprint = planner_input_fingerprint(task)
+        other_fingerprint = planner_input_fingerprint(other)
+        for item in tasks["tasks"]:
+            item["status"] = "conflict"
+            item["planner_fingerprint"] = planner_input_fingerprint(item)
+            item["planner_conflicts"] = [{
+                "tasks": [task["key"], other["key"]],
+                "description": "same function rewrite",
+                "suggestion": "combine tasks",
+                "fingerprints": {
+                    task["key"]: fingerprint,
+                    other["key"]: other_fingerprint,
+                },
+            }]
+        (tmp_git_repo / "tasks.yaml").write_text(yaml.dump(tasks))
+
+        result = runner.invoke(main, ["retry", "1"])
+
+        assert result.exit_code == 0
+        persisted = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())["tasks"]
+        assert persisted[0]["status"] == "pending"
+        assert "planner_conflicts" not in persisted[0]
+        assert persisted[1]["status"] == "conflict"
+
 
 class TestRun:
     def test_dry_run(self, runner, tmp_git_repo, monkeypatch):
@@ -533,6 +566,36 @@ class TestDiffAndShow:
         assert "Agent log" in result.output
         assert "line 0" in result.output  # first line shown
 
+    def test_show_displays_conflict_details(self, runner, tmp_git_repo, monkeypatch):
+        from otto.tasks import planner_input_fingerprint
+
+        monkeypatch.chdir(tmp_git_repo)
+        runner.invoke(main, ["add", "Rewrite parser A"])
+        runner.invoke(main, ["add", "Rewrite parser B"])
+        tasks = yaml.safe_load((tmp_git_repo / "tasks.yaml").read_text())
+        first = tasks["tasks"][0]
+        second = tasks["tasks"][1]
+        fingerprints = {
+            first["key"]: planner_input_fingerprint(first),
+            second["key"]: planner_input_fingerprint(second),
+        }
+        for item in tasks["tasks"]:
+            item["status"] = "conflict"
+            item["planner_fingerprint"] = planner_input_fingerprint(item)
+            item["planner_conflicts"] = [{
+                "tasks": [first["key"], second["key"]],
+                "description": "same parser rewrite",
+                "suggestion": "choose one approach",
+                "fingerprints": fingerprints,
+            }]
+        (tmp_git_repo / "tasks.yaml").write_text(yaml.dump(tasks))
+
+        result = runner.invoke(main, ["show", "1"])
+
+        assert result.exit_code == 0
+        assert "Conflict details" in result.output
+        assert "choose one approach" in result.output
+
 
 class TestHistory:
     def test_no_history(self, runner, tmp_git_repo, monkeypatch):
@@ -661,6 +724,37 @@ class TestStatusSpec:
         assert result.exit_code == 0
         # Card layout shows spec count in detail line
         assert "3 specs" in result.output
+
+    def test_status_shows_conflict_and_blocked(self, runner, tmp_git_repo, monkeypatch):
+        from otto.tasks import planner_input_fingerprint
+
+        monkeypatch.chdir(tmp_git_repo)
+        tasks = {"tasks": [
+            {"id": 1, "key": "task-a", "prompt": "Rewrite parser A", "status": "conflict"},
+            {"id": 2, "key": "task-b", "prompt": "Rewrite parser B", "status": "conflict"},
+            {"id": 3, "key": "task-c", "prompt": "Use parser output", "status": "blocked", "depends_on": [2]},
+        ]}
+        first = tasks["tasks"][0]
+        second = tasks["tasks"][1]
+        fingerprints = {
+            first["key"]: planner_input_fingerprint(first),
+            second["key"]: planner_input_fingerprint(second),
+        }
+        for item in tasks["tasks"][:2]:
+            item["planner_fingerprint"] = planner_input_fingerprint(item)
+            item["planner_conflicts"] = [{
+                "tasks": [first["key"], second["key"]],
+                "description": "same parser rewrite",
+                "suggestion": "choose one approach",
+                "fingerprints": fingerprints,
+            }]
+        (tmp_git_repo / "tasks.yaml").write_text(yaml.dump(tasks))
+
+        result = runner.invoke(main, ["status"])
+
+        assert result.exit_code == 0
+        assert "conflict" in result.output
+        assert "blocked" in result.output
 
 
 class TestStatusCost:

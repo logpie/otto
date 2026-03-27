@@ -14,6 +14,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "max_parallel": 1,              # 0 or 1 = serial (default); >1 = parallel tasks per batch
     "test_command": None,           # auto-detected if not set
     "model": None,                  # override Claude model (e.g. sonnet)
+    "planner_model": None,          # planner-only model override (None = CC default)
+    "planner_effort": "medium",     # planner reasoning effort
 
     # Timeouts
     "install_timeout": 120,         # seconds for dependency installation in worktrees
