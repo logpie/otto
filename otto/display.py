@@ -1044,6 +1044,7 @@ def build_status_table(tasks: list[dict], show_phase: bool = False):
         "running": "[cyan]\u25cf[/cyan]",
         "pending": "[dim]\u25cb[/dim]",
         "verified": "[blue]\u25c9[/blue]",
+        "merged": "[blue]\u25c9[/blue]",
         "merge_pending": "[blue]\u25c9[/blue]",
     }
 
@@ -1066,7 +1067,7 @@ def build_status_table(tasks: list[dict], show_phase: bool = False):
             lines.append(f"  {icon} [bold]#{task_id}[/bold]  {rich_escape(prompt_text)}")
         elif status_str in ("failed", "blocked", "merge_failed"):
             lines.append(f"  {icon} [bold]#{task_id}[/bold]  {rich_escape(prompt_text)}")
-        elif status_str in ("running", "verified", "merge_pending"):
+        elif status_str in ("running", "verified", "merged", "merge_pending"):
             lines.append(f"  {icon} [bold]#{task_id}[/bold]  {rich_escape(prompt_text)}")
         else:
             lines.append(f"  {icon} [dim]#{task_id}[/dim]  [dim]{rich_escape(prompt_text)}[/dim]")
@@ -1116,6 +1117,15 @@ def build_status_table(tasks: list[dict], show_phase: bool = False):
             if spec_count:
                 detail_parts.append(f"[dim]{spec_count} specs[/dim]")
             lines.append(f"    {_SEP.join(detail_parts)}")
+        elif status_str == "merged":
+            detail_parts.append("[blue]merged (QA pending)[/blue]")
+            if cost:
+                detail_parts.append(f"[dim]${cost:.2f}[/dim]")
+            if dur:
+                detail_parts.append(f"[dim]{format_duration(dur)}[/dim]")
+            if spec_count:
+                detail_parts.append(f"[dim]{spec_count} specs[/dim]")
+            lines.append(f"    {_SEP.join(detail_parts)}")
         elif status_str == "merge_pending":
             detail_parts.append("[blue]merging...[/blue]")
             if cost:
@@ -1148,6 +1158,8 @@ def build_status_table(tasks: list[dict], show_phase: bool = False):
         parts.append(f"[green]{counts['passed']} passed[/green]")
     if counts.get("verified"):
         parts.append(f"[blue]{counts['verified']} verified[/blue]")
+    if counts.get("merged"):
+        parts.append(f"[blue]{counts['merged']} merged[/blue]")
     if counts.get("merge_pending"):
         parts.append(f"[blue]{counts['merge_pending']} merging[/blue]")
     if counts.get("failed"):

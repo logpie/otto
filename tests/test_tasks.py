@@ -72,6 +72,18 @@ class TestUpdateTask:
         assert updated["status"] == "running"
         assert updated["attempts"] == 1
 
+    def test_accepts_merged_status(self, tmp_git_repo):
+        path = tmp_git_repo / "tasks.yaml"
+        task = add_task(path, "Do something")
+        updated = update_task(path, task["key"], status="merged")
+        assert updated["status"] == "merged"
+
+    def test_rejects_invalid_status(self, tmp_git_repo):
+        path = tmp_git_repo / "tasks.yaml"
+        task = add_task(path, "Do something")
+        with pytest.raises(ValueError):
+            update_task(path, task["key"], status="not-a-real-state")
+
     def test_raises_on_unknown_key(self, tmp_git_repo):
         path = tmp_git_repo / "tasks.yaml"
         add_task(path, "Do something")

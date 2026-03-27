@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from otto.config import git_meta_dir
-from otto.context import Learning, PipelineContext, TaskResult
+from otto.context import Learning, PipelineContext, QAMode, TaskResult
 from otto.display import console, rich_escape
 from otto.planner import (
     ExecutionPlan,
@@ -32,6 +32,7 @@ from otto.runner import (
     coding_loop,
     preflight_checks,
 )
+from otto.qa import run_batch_qa_agent
 from otto.tasks import load_tasks, update_task
 from otto.telemetry import (
     AllDone,
@@ -149,6 +150,112 @@ def _plan_covers_pending(execution_plan: ExecutionPlan, pending: list[dict[str, 
     )
 
 
+def _fallback_batch_spec(task: dict[str, Any], error: str) -> list[dict[str, Any]]:
+    return [{
+        "text": (
+            "Implementation fulfills the original task prompt and integrates cleanly "
+            f"with the merged codebase ({error or 'structured spec unavailable'})."
+        ),
+        "binding": "must",
+    }]
+
+
+async def _run_batch_qa(
+    merged_tasks: list[dict],
+    config: dict,
+    project_dir: Path,
+    tasks_file: Path,
+    telemetry: Any,
+    context: Any,
+) -> dict:
+    """Run combined QA on integrated codebase. Returns verdict."""
+    if not merged_tasks:
+        return {"must_passed": True, "verdict": {}, "raw_report": "", "failed_task_keys": [], "cost_usd": 0.0}
+
+    tasks_with_specs: list[dict[str, Any]] = []
+    spec_cost = 0.0
+    spec_errors: list[str] = []
+    spec_settings = config.get("spec_agent_settings", "project").split(",")
+
+    from otto.spec import async_generate_spec
+
+    async def _ensure_spec(task: dict[str, Any]) -> dict[str, Any]:
+        nonlocal spec_cost
+        if task.get("spec"):
+            return task
+        if config.get("skip_spec"):
+            spec_errors.append(f"{task.get('key')}: skip_spec enabled")
+            return {**task, "spec": _fallback_batch_spec(task, "skip_spec enabled")}
+
+        log_dir = project_dir / "otto_logs" / task["key"]
+        log_dir.mkdir(parents=True, exist_ok=True)
+        spec_items, cost, error = await async_generate_spec(
+            task.get("prompt", ""),
+            project_dir,
+            setting_sources=spec_settings,
+            log_dir=log_dir,
+        )
+        spec_cost += cost
+        if spec_items:
+            try:
+                update_task(tasks_file, task["key"], spec=spec_items)
+            except Exception:
+                pass
+            return {**task, "spec": spec_items}
+
+        spec_errors.append(f"{task.get('key')}: {error or 'structured spec unavailable'}")
+        return {**task, "spec": _fallback_batch_spec(task, error or "structured spec unavailable")}
+
+    tasks_with_specs = list(await asyncio.gather(*(_ensure_spec(task) for task in merged_tasks)))
+
+    log_dir = project_dir / "otto_logs" / "batch-qa"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    diff = "Integrated codebase after batch merge. Inspect repository state directly."
+    qa_result = await run_batch_qa_agent(
+        tasks_with_specs,
+        config,
+        project_dir,
+        diff=diff,
+        log_dir=log_dir,
+    )
+    total_cost = spec_cost + float(qa_result.get("cost_usd", 0.0) or 0.0)
+    raw_report = qa_result.get("raw_report", "")
+    if spec_errors:
+        raw_report = (
+            "[warning] Some task specs were regenerated with prompt-only fallback:\n"
+            + "\n".join(f"- {msg}" for msg in spec_errors)
+            + ("\n\n" + raw_report if raw_report else "")
+        )
+
+    return {
+        **qa_result,
+        "raw_report": raw_report,
+        "cost_usd": total_cost,
+    }
+
+
+def _summarize_batch_qa_failure(batch_qa: dict[str, Any]) -> str:
+    """Create a concise failure summary for merged tasks left pending QA."""
+    verdict = batch_qa.get("verdict", {}) or {}
+    for item in verdict.get("must_items", []) or []:
+        if item.get("status") == "fail":
+            task_key = item.get("task_key", "unknown")
+            criterion = item.get("criterion", "")[:120]
+            return f"batch QA failed for {task_key}: {criterion}" if criterion else f"batch QA failed for {task_key}"
+    for item in verdict.get("integration_findings", []) or []:
+        if item.get("status") == "fail":
+            desc = item.get("description", "")[:120]
+            return f"batch QA integration failure: {desc}" if desc else "batch QA integration failure"
+    if batch_qa.get("test_suite_passed") is False:
+        return "batch QA failed: full test suite regression check failed"
+    raw_report = batch_qa.get("raw_report", "")
+    for line in raw_report.splitlines():
+        stripped = line.strip()
+        if stripped and len(stripped) > 10 and not stripped.startswith("["):
+            return f"batch QA failed: {stripped[:120]}"
+    return "batch QA failed"
+
+
 async def run_per(
     config: dict[str, Any],
     tasks_file: Path,
@@ -230,6 +337,12 @@ async def run_per(
         pending_keys = {t["key"] for t in pending}
         pending_by_key = {t["key"]: t for t in pending}
         task_ids = {t["key"]: t.get("id", 0) for t in pending}
+        if config.get("skip_qa"):
+            qa_mode = QAMode.SKIP
+        elif len(pending) == 1:
+            qa_mode = QAMode.PER_TASK
+        else:
+            qa_mode = QAMode.BATCH
         console.print()
         spec_label = f", [dim]{total_specs} specs[/dim]" if total_specs > 0 else ""
         console.print(
@@ -282,148 +395,236 @@ async def run_per(
                 batch_results = await _run_batch_parallel(
                     batch, context, config, project_dir, telemetry, tasks_file,
                     max_parallel=max_parallel,
+                    qa_mode=qa_mode,
                 )
-                # Serial merge phase: merge verified candidates onto main
-                if not context.interrupted:
-                    batch_results = merge_parallel_results(
-                        batch_results, config, project_dir, tasks_file, telemetry,
-                    )
-
-                # Auto-retry merge failures on updated main.
-                # Both merge conflicts and post-merge test failures get re-run:
-                # the coding agent sees sibling tasks' code and applies the
-                # original task's changes, resolving conflicts naturally.
-                # This replaces the old text-only LLM conflict resolver.
-                if not context.interrupted:
-                    merge_failed = [
-                        r for r in batch_results
-                        if not r.success and r.error_code in (
-                            "merge_conflict", "post_merge_test_fail",
-                        )
-                    ]
-                    if merge_failed:
-                        console.print(
-                            f"\n  [yellow]Re-applying {len(merge_failed)} merge-failed "
-                            f"task(s) on updated main...[/yellow]"
-                        )
-                        for failed_result in merge_failed:
-                            if context.interrupted:
-                                break
-                            fkey = failed_result.task_key
-                            tp = next(
-                                (t for t in batch.tasks if t.task_key == fkey), None,
-                            )
-                            if not tp:
-                                continue
-                            from otto.git_ops import _find_best_candidate_ref
-                            from otto.merge_resolve import scoped_reapply
-
-                            candidate_ref = _find_best_candidate_ref(project_dir, fkey)
-                            base_sha = ""
-                            if candidate_ref:
-                                base_result = subprocess.run(
-                                    ["git", "rev-parse", f"{candidate_ref}^"],
-                                    cwd=project_dir,
-                                    capture_output=True,
-                                    text=True,
-                                )
-                                if base_result.returncode == 0:
-                                    base_sha = base_result.stdout.strip()
-
-                            if candidate_ref and base_sha:
-                                reapply_success, new_sha = await scoped_reapply(
-                                    task_key=fkey,
-                                    candidate_ref=candidate_ref,
-                                    base_sha=base_sha,
-                                    config=config,
-                                    project_dir=project_dir,
-                                    tasks_file=tasks_file,
-                                )
-                                if reapply_success:
-                                    ff = subprocess.run(
-                                        ["git", "merge", "--ff-only", new_sha],
-                                        cwd=project_dir,
-                                        capture_output=True,
-                                        text=True,
-                                    )
-                                    if ff.returncode == 0:
-                                        try:
-                                            update_task(
-                                                tasks_file,
-                                                fkey,
-                                                status="passed",
-                                                error=None,
-                                                error_code=None,
-                                                feedback=None,
-                                                session_id=None,
-                                            )
-                                        except Exception:
-                                            pass
-                                        telemetry.log(TaskMerged(
-                                            task_key=fkey,
-                                            task_id=task_ids.get(fkey, 0),
-                                            cost_usd=failed_result.cost_usd,
-                                            duration_s=failed_result.duration_s,
-                                            diff_summary=failed_result.diff_summary,
-                                        ))
-                                        batch_results = [
-                                            TaskResult(
-                                                task_key=fkey,
-                                                success=True,
-                                                commit_sha=new_sha,
-                                                cost_usd=failed_result.cost_usd,
-                                                duration_s=failed_result.duration_s,
-                                                diff_summary=failed_result.diff_summary,
-                                                qa_report=failed_result.qa_report,
-                                            ) if r.task_key == fkey else r
-                                            for r in batch_results
-                                        ]
-                                        continue
-                            # Inject the task's previous diff as feedback so the
-                            # coding agent knows what to re-apply on updated main.
-                            diff_hint = failed_result.diff_summary or ""
-                            if diff_hint:
-                                merge_feedback = (
-                                    "Your previous implementation was verified and passed all tests, "
-                                    "but caused a merge conflict with another task's changes that are "
-                                    "now on main. Re-apply your changes on the updated codebase. "
-                                    "Here is your previous diff for reference:\n\n"
-                                    f"{diff_hint[:8000]}"
-                                )
-                            else:
-                                merge_feedback = (
-                                    "Your previous implementation passed but caused a merge conflict. "
-                                    "Another task's changes are now on main. Re-implement your task "
-                                    "on the updated codebase."
-                                )
-                            try:
-                                update_task(
-                                    tasks_file, fkey,
-                                    status="pending",
-                                    error=None, error_code=None, session_id=None,
-                                    feedback=merge_feedback,
-                                )
-                            except Exception:
-                                continue
-                            # Re-run on updated main (sees other tasks' code)
-                            retry_result = await coding_loop(
-                                tp, context, config, project_dir,
-                                telemetry, tasks_file,
-                            )
-                            batch_results = [
-                                retry_result if r.task_key == fkey else r
-                                for r in batch_results
-                            ]
             else:
                 # Serial execution — tasks share the main checkout
                 batch_results: list[TaskResult] = []
                 for task_plan in batch.tasks:
                     result = await coding_loop(
                         task_plan, context, config, project_dir, telemetry, tasks_file,
+                        qa_mode=qa_mode,
                     )
                     batch_results.append(result)
                     if context.interrupted:
                         break
+
+            if (use_parallel or qa_mode == QAMode.BATCH) and not context.interrupted:
+                batch_results = merge_parallel_results(
+                    batch_results, config, project_dir, tasks_file, telemetry,
+                    qa_mode=qa_mode,
+                )
+
+                merge_failed = [
+                    r for r in batch_results
+                    if not r.success and r.error_code in ("merge_conflict", "post_merge_test_fail")
+                ]
+                if merge_failed:
+                    console.print(
+                        f"\n  [yellow]Re-applying {len(merge_failed)} merge-failed task(s) on updated main...[/yellow]"
+                    )
+                    for failed_result in merge_failed:
+                        if context.interrupted:
+                            break
+                        fkey = failed_result.task_key
+                        tp = next((t for t in batch.tasks if t.task_key == fkey), None)
+                        if not tp:
+                            continue
+                        from otto.git_ops import _find_best_candidate_ref
+                        from otto.merge_resolve import scoped_reapply
+
+                        candidate_ref = _find_best_candidate_ref(project_dir, fkey)
+                        base_sha = ""
+                        if candidate_ref:
+                            base_result = subprocess.run(
+                                ["git", "rev-parse", f"{candidate_ref}^"],
+                                cwd=project_dir,
+                                capture_output=True,
+                                text=True,
+                            )
+                            if base_result.returncode == 0:
+                                base_sha = base_result.stdout.strip()
+
+                        if candidate_ref and base_sha:
+                            reapply_success, new_sha = await scoped_reapply(
+                                task_key=fkey,
+                                candidate_ref=candidate_ref,
+                                base_sha=base_sha,
+                                config=config,
+                                project_dir=project_dir,
+                                tasks_file=tasks_file,
+                            )
+                            if reapply_success:
+                                ff = subprocess.run(
+                                    ["git", "merge", "--ff-only", new_sha],
+                                    cwd=project_dir,
+                                    capture_output=True,
+                                    text=True,
+                                )
+                                if ff.returncode == 0:
+                                    try:
+                                        update_task(
+                                            tasks_file,
+                                            fkey,
+                                            status="merged" if qa_mode == QAMode.BATCH else "passed",
+                                            error=None,
+                                            error_code=None,
+                                            feedback=None,
+                                            session_id=None,
+                                        )
+                                    except Exception:
+                                        pass
+                                    telemetry.log(TaskMerged(
+                                        task_key=fkey,
+                                        task_id=task_ids.get(fkey, 0),
+                                        cost_usd=failed_result.cost_usd,
+                                        duration_s=failed_result.duration_s,
+                                        diff_summary=failed_result.diff_summary,
+                                    ))
+                                    batch_results = [
+                                        TaskResult(
+                                            task_key=fkey,
+                                            success=True,
+                                            commit_sha=new_sha,
+                                            cost_usd=failed_result.cost_usd,
+                                            duration_s=failed_result.duration_s,
+                                            diff_summary=failed_result.diff_summary,
+                                            qa_report=failed_result.qa_report,
+                                        ) if r.task_key == fkey else r
+                                        for r in batch_results
+                                    ]
+                                    continue
+
+                        diff_hint = failed_result.diff_summary or ""
+                        if diff_hint:
+                            merge_feedback = (
+                                "Your previous implementation was verified and passed all tests, "
+                                "but caused a merge conflict with another task's changes that are "
+                                "now on main. Re-apply your changes on the updated codebase. "
+                                "Here is your previous diff for reference:\n\n"
+                                f"{diff_hint[:8000]}"
+                            )
+                        else:
+                            merge_feedback = (
+                                "Your previous implementation passed but caused a merge conflict. "
+                                "Another task's changes are now on main. Re-implement your task "
+                                "on the updated codebase."
+                            )
+                        try:
+                            update_task(
+                                tasks_file, fkey,
+                                status="pending",
+                                error=None, error_code=None, session_id=None,
+                                feedback=merge_feedback,
+                            )
+                        except Exception:
+                            continue
+
+                        retry_result = await coding_loop(
+                            tp, context, config, project_dir,
+                            telemetry, tasks_file,
+                            qa_mode=qa_mode,
+                        )
+                        if retry_result.success:
+                            rerun_merged = merge_parallel_results(
+                                [retry_result], config, project_dir, tasks_file, telemetry,
+                                qa_mode=qa_mode,
+                            )
+                            retry_result = rerun_merged[0]
+                        batch_results = [
+                            retry_result if r.task_key == fkey else r
+                            for r in batch_results
+                        ]
+
+                if qa_mode == QAMode.BATCH and not context.interrupted:
+                    batch_keys = {tp.task_key for tp in batch.tasks}
+                    persisted_tasks = {
+                        task["key"]: task
+                        for task in load_tasks(tasks_file)
+                        if task.get("key") in batch_keys
+                    }
+                    merged_tasks = [
+                        task for task in persisted_tasks.values()
+                        if task.get("status") == "merged"
+                    ]
+                    if merged_tasks:
+                        console.print(f"\n  [bold]Batch QA[/bold]  [dim]{len(merged_tasks)} merged task(s)[/dim]")
+                        batch_qa = await _run_batch_qa(
+                            merged_tasks, config, project_dir, tasks_file, telemetry, context,
+                        )
+                        failed_keys = set(batch_qa.get("failed_task_keys") or [])
+                        if not batch_qa.get("must_passed"):
+                            if not failed_keys:
+                                failed_keys = {task["key"] for task in merged_tasks}
+                            failure_summary = _summarize_batch_qa_failure(batch_qa)
+                            for task in merged_tasks:
+                                kwargs = {
+                                    "status": "merged",
+                                    "error": None,
+                                    "error_code": None,
+                                    "feedback": None,
+                                }
+                                if task["key"] in failed_keys:
+                                    kwargs["error"] = failure_summary
+                                    kwargs["error_code"] = "batch_qa_failed"
+                                try:
+                                    update_task(tasks_file, task["key"], **kwargs)
+                                except Exception:
+                                    pass
+                            batch_results = [
+                                TaskResult(
+                                    task_key=result.task_key,
+                                    success=result.success and result.task_key not in failed_keys,
+                                    commit_sha=result.commit_sha,
+                                    worktree=result.worktree,
+                                    cost_usd=result.cost_usd + (
+                                        float(batch_qa.get("cost_usd", 0.0) or 0.0) / max(len(merged_tasks), 1)
+                                        if result.task_key in {task["key"] for task in merged_tasks}
+                                        else 0.0
+                                    ),
+                                    error=failure_summary if result.task_key in failed_keys else result.error,
+                                    error_code="batch_qa_failed" if result.task_key in failed_keys else result.error_code,
+                                    qa_report=batch_qa.get("raw_report", "") if result.task_key in {task["key"] for task in merged_tasks} else result.qa_report,
+                                    diff_summary=result.diff_summary,
+                                    duration_s=result.duration_s,
+                                    review_ref=result.review_ref,
+                                )
+                                for result in batch_results
+                            ]
+                        else:
+                            merged_keys = {task["key"] for task in merged_tasks}
+                            for task in merged_tasks:
+                                try:
+                                    update_task(
+                                        tasks_file,
+                                        task["key"],
+                                        status="passed",
+                                        error=None,
+                                        error_code=None,
+                                        feedback=None,
+                                    )
+                                except Exception:
+                                    pass
+                            batch_results = [
+                                TaskResult(
+                                    task_key=result.task_key,
+                                    success=result.success,
+                                    commit_sha=result.commit_sha,
+                                    worktree=result.worktree,
+                                    cost_usd=result.cost_usd + (
+                                        float(batch_qa.get("cost_usd", 0.0) or 0.0) / max(len(merged_tasks), 1)
+                                        if result.task_key in merged_keys
+                                        else 0.0
+                                    ),
+                                    error=result.error,
+                                    error_code=result.error_code,
+                                    qa_report=batch_qa.get("raw_report", "") if result.task_key in merged_keys else result.qa_report,
+                                    diff_summary=result.diff_summary,
+                                    duration_s=result.duration_s,
+                                    review_ref=result.review_ref,
+                                )
+                                for result in batch_results
+                            ]
 
             # Process results (TaskMerged/TaskFailed already emitted by coding_loop)
             batch_passed = 0
@@ -585,6 +786,7 @@ def merge_parallel_results(
     project_dir: Path,
     tasks_file: Path,
     telemetry: Any,
+    qa_mode: str = QAMode.PER_TASK,
 ) -> list[TaskResult]:
     """Serial merge phase: merge verified candidates onto main sequentially.
 
@@ -594,7 +796,7 @@ def merge_parallel_results(
       3. Run test suite on the merged result (post-merge verification)
       4. If tests fail -> mark merge_failed
       5. Fast-forward main to the new commit
-      6. Mark task passed
+      6. Mark task merged/passed based on QA mode
 
     Returns a new list of TaskResults with updated success/error fields.
     """
@@ -652,6 +854,20 @@ def merge_parallel_results(
         # Find the best candidate ref for this task
         candidate_ref = _find_best_candidate_ref(project_dir, task_key)
         if not candidate_ref:
+            if qa_mode == QAMode.BATCH and (result.diff_summary or "").startswith("No changes needed"):
+                try:
+                    update_task(tasks_file, task_key, status="merged", error=None, error_code=None)
+                except Exception:
+                    pass
+                merged_results.append(TaskResult(
+                    task_key=task_key, success=True,
+                    commit_sha=None,
+                    cost_usd=result.cost_usd,
+                    duration_s=result.duration_s,
+                    diff_summary=result.diff_summary,
+                    qa_report=result.qa_report,
+                ))
+                continue
             console.print(f"    [red]\u2717[/red] #{task_key[:8]}  no candidate ref found")
             error = "merge_failed: no candidate ref"
             try:
@@ -754,7 +970,13 @@ def merge_parallel_results(
         # Merge succeeded
         console.print(f"    [green]\u2713[/green] #{task_key[:8]}  merged ({new_sha[:7]})")
         try:
-            update_task(tasks_file, task_key, status="passed")
+            update_task(
+                tasks_file,
+                task_key,
+                status="merged" if qa_mode == QAMode.BATCH else "passed",
+                error=None,
+                error_code=None,
+            )
         except Exception:
             pass
 
@@ -786,6 +1008,7 @@ async def _run_batch_parallel(
     tasks_file: Path,
     *,
     max_parallel: int,
+    qa_mode: str = QAMode.PER_TASK,
 ) -> list[TaskResult]:
     """Run a batch of tasks in parallel using per-task git worktrees.
 
@@ -833,6 +1056,7 @@ async def _run_batch_parallel(
                     task_plan, context, config, project_dir,
                     telemetry, tasks_file,
                     task_work_dir=worktree_path,
+                    qa_mode=qa_mode,
                 )
                 return result
 

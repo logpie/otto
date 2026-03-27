@@ -12,6 +12,24 @@ from typing import Any
 
 import yaml
 
+VALID_TASK_STATES = {
+    "pending",
+    "running",
+    "verified",
+    "merged",
+    "merge_pending",
+    "passed",
+    "failed",
+    "blocked",
+    "merge_failed",
+}
+
+
+def _validate_task_status(status: Any) -> None:
+    """Raise when Otto task status is not a recognized pipeline state."""
+    if status not in VALID_TASK_STATES:
+        raise ValueError(f"Invalid task status: {status!r}")
+
 
 def spec_text(item) -> str:
     """Extract text from a spec item (either plain string or dict with 'text' key)."""
@@ -180,6 +198,8 @@ def add_tasks(
 def update_task(tasks_path: Path, key: str, **updates) -> dict[str, Any]:
     """Update a task by key. Thread-safe via flock. Raises KeyError if not found."""
     result = {}
+    if "status" in updates and updates["status"] is not None:
+        _validate_task_status(updates["status"])
 
     def _update(tasks):
         for task in tasks:

@@ -11,8 +11,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import yaml
 
-from otto.context import PipelineContext, TaskResult
+from otto.context import PipelineContext, QAMode, TaskResult
 from otto.orchestrator import (
+    _run_batch_qa,
     _run_batch_parallel,
     cleanup_orphaned_worktrees,
     merge_parallel_results,
@@ -82,7 +83,7 @@ class TestRunPerIntegration:
         config = self._make_config(tmp_git_repo)
 
         # Mock coding_loop to succeed — create a branch with commit for merge
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, task_work_dir=None):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, task_work_dir=None, qa_mode="per_task"):
             branch = f"otto/{task_plan.task_key}"
             subprocess.run(["git", "checkout", "-b", branch], cwd=project_dir, capture_output=True)
             (project_dir / "hello.py").write_text("def hello(): return 'hello'\n")
@@ -113,7 +114,7 @@ class TestRunPerIntegration:
 
         config = self._make_config(tmp_git_repo)
 
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, task_work_dir=None):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, task_work_dir=None, qa_mode="per_task"):
             return TaskResult(
                 task_key=task_plan.task_key, success=False,
                 error="tests failed", cost_usd=0.20,
@@ -145,6 +146,7 @@ class TestRunPerIntegration:
         ]}))
 
         config = self._make_config(tmp_git_repo)
+        config["skip_qa"] = True
         execution_plan = ExecutionPlan(batches=[Batch(tasks=[
             TaskPlan(task_key="task-merge"),
             TaskPlan(task_key="task-pass"),
@@ -159,34 +161,42 @@ class TestRunPerIntegration:
                 TaskResult(task_key="task-pass", success=True),
             ]
 
-        def fake_merge_parallel_results(results, config, project_dir, task_file, telemetry):
-            update_task(
-                task_file,
-                "task-merge",
-                status="merge_failed",
-                error="post-merge tests failed",
-                error_code="post_merge_test_fail",
-            )
-            update_task(task_file, "task-pass", status="passed")
-            return [
-                TaskResult(
-                    task_key="task-merge",
-                    success=False,
+        merge_calls = 0
+
+        def fake_merge_parallel_results(results, config, project_dir, task_file, telemetry, qa_mode="per_task"):
+            nonlocal merge_calls
+            merge_calls += 1
+            if merge_calls == 1:
+                update_task(
+                    task_file,
+                    "task-merge",
+                    status="merge_failed",
                     error="post-merge tests failed",
                     error_code="post_merge_test_fail",
-                ),
-                TaskResult(task_key="task-pass", success=True),
-            ]
+                )
+                update_task(task_file, "task-pass", status="passed")
+                return [
+                    TaskResult(
+                        task_key="task-merge",
+                        success=False,
+                        error="post-merge tests failed",
+                        error_code="post_merge_test_fail",
+                    ),
+                    TaskResult(task_key="task-pass", success=True),
+                ]
+
+            update_task(task_file, "task-merge", status="merged" if qa_mode == QAMode.BATCH else "passed")
+            return [TaskResult(task_key="task-merge", success=True)]
 
         rerun_calls: list[str] = []
 
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None, qa_mode="per_task"):
             rerun_calls.append(task_plan.task_key)
             task = next(t for t in load_tasks(task_file) if t.get("key") == task_plan.task_key)
             assert task["status"] == "pending"
             assert task["attempts"] == 2
             assert task.get("error_code") is None
-            update_task(task_file, task_plan.task_key, status="passed")
+            update_task(task_file, task_plan.task_key, status="verified" if qa_mode == QAMode.BATCH else "passed")
             return TaskResult(task_key=task_plan.task_key, success=True)
 
         with patch("otto.orchestrator.preflight_checks", side_effect=fake_preflight_checks):
@@ -242,6 +252,7 @@ class TestRunPerIntegration:
         subprocess.run(["git", "checkout", "main"], cwd=tmp_git_repo, capture_output=True, check=True)
 
         config = self._make_config(tmp_git_repo)
+        config["skip_qa"] = True
         execution_plan = ExecutionPlan(batches=[Batch(tasks=[
             TaskPlan(task_key="task-merge"),
             TaskPlan(task_key="task-pass"),
@@ -256,24 +267,32 @@ class TestRunPerIntegration:
                 TaskResult(task_key="task-pass", success=True),
             ]
 
-        def fake_merge_parallel_results(results, config, project_dir, task_file, telemetry):
-            update_task(
-                task_file,
-                "task-merge",
-                status="merge_failed",
-                error="post-merge tests failed",
-                error_code="post_merge_test_fail",
-            )
-            update_task(task_file, "task-pass", status="passed")
-            return [
-                TaskResult(
-                    task_key="task-merge",
-                    success=False,
+        merge_calls = 0
+
+        def fake_merge_parallel_results(results, config, project_dir, task_file, telemetry, qa_mode="per_task"):
+            nonlocal merge_calls
+            merge_calls += 1
+            if merge_calls == 1:
+                update_task(
+                    task_file,
+                    "task-merge",
+                    status="merge_failed",
                     error="post-merge tests failed",
                     error_code="post_merge_test_fail",
-                ),
-                TaskResult(task_key="task-pass", success=True),
-            ]
+                )
+                update_task(task_file, "task-pass", status="passed")
+                return [
+                    TaskResult(
+                        task_key="task-merge",
+                        success=False,
+                        error="post-merge tests failed",
+                        error_code="post_merge_test_fail",
+                    ),
+                    TaskResult(task_key="task-pass", success=True),
+                ]
+
+            update_task(task_file, "task-merge", status="merged" if qa_mode == QAMode.BATCH else "passed")
+            return [TaskResult(task_key="task-merge", success=True)]
 
         call_order: list[str] = []
 
@@ -284,9 +303,9 @@ class TestRunPerIntegration:
             assert base_sha == expected_base_sha
             return False, ""
 
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None, qa_mode="per_task"):
             call_order.append("coding_loop")
-            update_task(task_file, task_plan.task_key, status="passed")
+            update_task(task_file, task_plan.task_key, status="verified" if qa_mode == QAMode.BATCH else "passed")
             return TaskResult(task_key=task_plan.task_key, success=True)
 
         with patch("otto.orchestrator.preflight_checks", side_effect=fake_preflight_checks):
@@ -328,7 +347,7 @@ class TestRunPerIntegration:
         events: list[str] = []
         in_flight = False
 
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, task_work_dir=None):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, task_work_dir=None, qa_mode="per_task"):
             nonlocal in_flight
             assert in_flight is False
             in_flight = True
@@ -374,7 +393,7 @@ class TestRunPerIntegration:
         executed_keys: list[str] = []
         received_work_dirs: dict[str, str] = {}
 
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, task_work_dir=None):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, task_work_dir=None, qa_mode="per_task"):
             executed_keys.append(task_plan.task_key)
             if task_work_dir:
                 received_work_dirs[task_plan.task_key] = str(task_work_dir)
@@ -433,7 +452,7 @@ class TestRunPerIntegration:
         ])
         executed: list[str] = []
 
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, task_work_dir=None):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, task_work_dir=None, qa_mode="per_task"):
             executed.append(task_plan.task_key)
             if task_plan.task_key == "task-one":
                 return TaskResult(task_key=task_plan.task_key, success=False, error="boom")
@@ -467,7 +486,7 @@ class TestRunPerIntegration:
         ])
         executed: list[str] = []
 
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, task_work_dir=None):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, task_work_dir=None, qa_mode="per_task"):
             executed.append(task_plan.task_key)
             context.interrupted = True
             return TaskResult(task_key=task_plan.task_key, success=True)
@@ -510,7 +529,7 @@ class TestRunPerIntegration:
             "task-three": False,
         }
 
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None, qa_mode="per_task"):
             success = outcomes[task_plan.task_key]
             if success:
                 update_task(task_file, task_plan.task_key, status="passed")
@@ -544,7 +563,7 @@ class TestRunPerIntegration:
             Batch(tasks=[TaskPlan(task_key="task-one"), TaskPlan(task_key="task-two")]),
         ])
 
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None, qa_mode="per_task"):
             update_task(task_file, task_plan.task_key, status="passed")
             return TaskResult(task_key=task_plan.task_key, success=True)
 
@@ -580,7 +599,7 @@ class TestRunPerIntegration:
             Batch(tasks=[TaskPlan(task_key="task-one"), TaskPlan(task_key="task-two")]),
         ])
 
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None, qa_mode="per_task"):
             update_task(task_file, task_plan.task_key, status="passed")
             return TaskResult(task_key=task_plan.task_key, success=True)
 
@@ -612,6 +631,83 @@ class TestRunPerIntegration:
         history_entry = json.loads(history_path.read_text().strip().splitlines()[-1])
         assert history_entry["tasks_failed"] == 0
         assert history_entry["failure_summary"] == "post-run integration failed: 1 failed"
+
+    @pytest.mark.asyncio
+    async def test_multi_task_run_uses_batch_qa_mode_and_batch_qa(self, tmp_git_repo):
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        tasks_path.write_text(yaml.dump({"tasks": [
+            {"id": 1, "key": "task-one", "prompt": "Task one", "status": "pending"},
+            {"id": 2, "key": "task-two", "prompt": "Task two", "status": "pending"},
+        ]}))
+
+        config = self._make_config(tmp_git_repo)
+        config["max_parallel"] = 1
+        execution_plan = ExecutionPlan(batches=[
+            Batch(tasks=[TaskPlan(task_key="task-one"), TaskPlan(task_key="task-two")]),
+        ])
+        seen_modes: list[str] = []
+
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None, qa_mode="per_task"):
+            seen_modes.append(qa_mode)
+            update_task(task_file, task_plan.task_key, status="verified")
+            return TaskResult(task_key=task_plan.task_key, success=True)
+
+        def fake_merge_parallel_results(results, config, project_dir, task_file, telemetry, qa_mode="per_task"):
+            assert qa_mode == QAMode.BATCH
+            for result in results:
+                update_task(task_file, result.task_key, status="merged")
+            return results
+
+        batch_qa_mock = AsyncMock(return_value={
+            "must_passed": True,
+            "verdict": {"must_passed": True, "must_items": []},
+            "raw_report": "batch qa pass",
+            "failed_task_keys": [],
+            "cost_usd": 0.0,
+        })
+
+        with patch("otto.orchestrator.plan", AsyncMock(return_value=execution_plan)):
+            with patch("otto.orchestrator.coding_loop", side_effect=fake_coding_loop):
+                with patch("otto.orchestrator.merge_parallel_results", side_effect=fake_merge_parallel_results):
+                    with patch("otto.orchestrator._run_batch_qa", batch_qa_mock):
+                        exit_code = await run_per(config, tasks_path, tmp_git_repo)
+
+        assert exit_code == 0
+        assert seen_modes == [QAMode.BATCH, QAMode.BATCH]
+        batch_qa_mock.assert_awaited_once()
+        persisted = {task["key"]: task for task in load_tasks(tasks_path)}
+        assert persisted["task-one"]["status"] == "passed"
+        assert persisted["task-two"]["status"] == "passed"
+
+    @pytest.mark.asyncio
+    async def test_skip_qa_mode_does_not_run_batch_qa(self, tmp_git_repo):
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        tasks_path.write_text(yaml.dump({"tasks": [
+            {"id": 1, "key": "task-one", "prompt": "Task one", "status": "pending"},
+            {"id": 2, "key": "task-two", "prompt": "Task two", "status": "pending"},
+        ]}))
+
+        config = self._make_config(tmp_git_repo)
+        config["skip_qa"] = True
+        config["max_parallel"] = 1
+        execution_plan = ExecutionPlan(batches=[
+            Batch(tasks=[TaskPlan(task_key="task-one"), TaskPlan(task_key="task-two")]),
+        ])
+        seen_modes: list[str] = []
+
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None, qa_mode="per_task"):
+            seen_modes.append(qa_mode)
+            update_task(task_file, task_plan.task_key, status="passed")
+            return TaskResult(task_key=task_plan.task_key, success=True)
+
+        with patch("otto.orchestrator.plan", AsyncMock(return_value=execution_plan)):
+            with patch("otto.orchestrator.coding_loop", side_effect=fake_coding_loop):
+                with patch("otto.orchestrator._run_batch_qa", AsyncMock()) as batch_qa_mock:
+                    exit_code = await run_per(config, tasks_path, tmp_git_repo)
+
+        assert exit_code == 0
+        assert seen_modes == [QAMode.SKIP, QAMode.SKIP]
+        batch_qa_mock.assert_not_awaited()
 
 
 class TestOrchestrationLogic:
@@ -898,6 +994,25 @@ class TestMergeParallelResults:
         assert "merge_pending" in status_updates
         assert status_updates.index("merge_pending") < status_updates.index("passed")
 
+    def test_batch_mode_merge_marks_task_merged(self, tmp_git_repo):
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        tasks_path.write_text(yaml.dump({"tasks": [
+            {"id": 1, "key": "task-merge", "prompt": "Task merge", "status": "verified"},
+        ]}))
+        log_dir = tmp_git_repo / "otto_logs"
+        log_dir.mkdir(exist_ok=True)
+        telemetry = Telemetry(log_dir)
+
+        self._create_candidate_commit(tmp_git_repo, "task-merge", "merge.txt", "ok\n")
+        results = [TaskResult(task_key="task-merge", success=True)]
+
+        merged = merge_parallel_results(
+            results, self._make_config(), tmp_git_repo, tasks_path, telemetry, qa_mode=QAMode.BATCH,
+        )
+
+        assert merged[0].success is True
+        assert load_tasks(tasks_path)[0]["status"] == "merged"
+
 
 class TestMergeCandidate:
     """Tests for merge_candidate git operation."""
@@ -1031,7 +1146,7 @@ class TestRunBatchParallel:
                 active_setup -= 1
             return None
 
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, task_work_dir=None):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, task_work_dir=None, qa_mode="per_task"):
             return TaskResult(task_key=task_plan.task_key, success=True)
 
         with patch("otto.git_ops.create_task_worktree", side_effect=fake_create_task_worktree):
@@ -1079,6 +1194,28 @@ class TestCrashRecovery:
         tasks_path = tmp_git_repo / "tasks.yaml"
         tasks_path.write_text(yaml.dump({"tasks": [
             {"id": 1, "key": "mp-task", "prompt": "Merge pending", "status": "merge_pending"},
+        ]}))
+
+        config = {
+            "default_branch": "main",
+            "max_retries": 1,
+            "verify_timeout": 60,
+            "max_parallel": 1,
+        }
+
+        from otto.runner import preflight_checks
+        error_code, pending = preflight_checks(config, tasks_path, tmp_git_repo)
+
+        assert error_code is None
+        assert len(pending) == 1
+        assert pending[0]["status"] == "pending"
+
+    @pytest.mark.asyncio
+    async def test_stale_merged_reset_to_pending(self, tmp_git_repo):
+        """Tasks stuck in 'merged' should be reset to 'pending' on startup."""
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        tasks_path.write_text(yaml.dump({"tasks": [
+            {"id": 1, "key": "merged-task", "prompt": "Merged", "status": "merged"},
         ]}))
 
         config = {
