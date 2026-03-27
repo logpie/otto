@@ -164,16 +164,16 @@ class TestRunPerIntegration:
                 task_file,
                 "task-merge",
                 status="merge_failed",
-                error="merge conflict",
-                error_code="merge_conflict",
+                error="post-merge tests failed",
+                error_code="post_merge_test_fail",
             )
             update_task(task_file, "task-pass", status="passed")
             return [
                 TaskResult(
                     task_key="task-merge",
                     success=False,
-                    error="merge conflict",
-                    error_code="merge_failed",
+                    error="post-merge tests failed",
+                    error_code="post_merge_test_fail",
                 ),
                 TaskResult(task_key="task-pass", success=True),
             ]
@@ -472,8 +472,8 @@ class TestMergeParallelResults:
         assert (tmp_git_repo / "a.txt").exists()
         assert (tmp_git_repo / "b.txt").exists()
 
-    def test_conflict_detected(self, tmp_git_repo):
-        """Two tasks modifying the same file should result in one merge_failed."""
+    def test_conflict_with_llm_resolution_disabled(self, tmp_git_repo):
+        """With LLM resolution disabled, merge conflict should result in merge_failed."""
         tasks_path = tmp_git_repo / "tasks.yaml"
         tasks_path.write_text(yaml.dump({"tasks": [
             {"id": 1, "key": "task-aaa", "prompt": "Task A", "status": "verified"},
@@ -493,9 +493,11 @@ class TestMergeParallelResults:
         ]
         config = self._make_config()
 
-        merged = merge_parallel_results(results, config, tmp_git_repo, tasks_path, telemetry)
+        # Disable LLM resolution so we can test the fallback path
+        with patch("otto.merge_resolve.resolve_conflicts_with_llm", return_value=False):
+            merged = merge_parallel_results(results, config, tmp_git_repo, tasks_path, telemetry)
 
-        # First task (task-aaa, sorted first) should merge, second should conflict
+        # First task should merge, second should fail
         passed = [r for r in merged if r.success]
         failed = [r for r in merged if not r.success]
         assert len(passed) == 1
@@ -600,7 +602,7 @@ class TestMergeParallelResults:
 
         assert len(merged) == 1
         assert not merged[0].success
-        assert merged[0].error_code == "merge_failed"
+        assert merged[0].error_code == "post_merge_test_fail"
         assert "post-merge" in (merged[0].error or "").lower()
 
         # Main should remain at the original HEAD after the failed verification
@@ -699,8 +701,8 @@ class TestMergeCandidate:
         ).stdout.strip()
         assert head != new_sha
 
-    def test_merge_conflict_returns_false(self, tmp_git_repo):
-        """Merge conflict should return (False, '') and leave main clean."""
+    def test_merge_conflict_without_llm_returns_false(self, tmp_git_repo):
+        """Merge conflict with LLM disabled should return (False, '') and leave main clean."""
         from otto.git_ops import merge_candidate, _anchor_candidate_ref
 
         # Create a file on main
@@ -724,9 +726,10 @@ class TestMergeCandidate:
         subprocess.run(["git", "checkout", "main"], cwd=tmp_git_repo, capture_output=True)
         _anchor_candidate_ref(tmp_git_repo, "conflict-task", 1, candidate_sha)
 
-        success, new_sha = merge_candidate(
-            tmp_git_repo, "refs/otto/candidates/conflict-task/attempt-1", "main",
-        )
+        with patch("otto.merge_resolve.resolve_conflicts_with_llm", return_value=False):
+            success, new_sha = merge_candidate(
+                tmp_git_repo, "refs/otto/candidates/conflict-task/attempt-1", "main",
+            )
         assert not success
         assert new_sha == ""
         # Should be back on main

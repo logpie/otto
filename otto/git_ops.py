@@ -8,6 +8,7 @@ from typing import Any
 
 from rich.markup import escape as rich_escape
 
+from otto import merge_resolve
 from otto.theme import console
 from otto.tasks import update_task
 
@@ -447,6 +448,42 @@ def rebase_and_merge(project_dir: Path, task_branch: str, default_branch: str) -
     return False
 
 
+def _abort_merge_and_cleanup(
+    repo_root: Path, default_branch: str, temp_branch: str,
+) -> None:
+    """Abort a failed merge and clean up the temp branch.
+
+    Verifies postconditions: on default_branch, no MERGE_HEAD, temp branch deleted.
+    Falls back to hard reset if abort fails.
+    """
+    subprocess.run(
+        ["git", "merge", "--abort"],
+        cwd=repo_root, capture_output=True,
+    )
+    # If abort didn't work (e.g., partial resolution staged), hard reset.
+    # Use git rev-parse --git-path to handle linked worktrees correctly.
+    git_path = subprocess.run(
+        ["git", "rev-parse", "--git-path", "MERGE_HEAD"],
+        cwd=repo_root, capture_output=True, text=True,
+    )
+    merge_head = Path(git_path.stdout.strip()) if git_path.returncode == 0 else repo_root / ".git" / "MERGE_HEAD"
+    if not merge_head.is_absolute():
+        merge_head = repo_root / merge_head
+    if merge_head.exists():
+        subprocess.run(
+            ["git", "reset", "--hard"],
+            cwd=repo_root, capture_output=True,
+        )
+    subprocess.run(
+        ["git", "checkout", default_branch],
+        cwd=repo_root, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "branch", "-D", temp_branch],
+        cwd=repo_root, capture_output=True,
+    )
+
+
 def merge_candidate(
     repo_root: Path,
     candidate_ref: str,
@@ -454,8 +491,8 @@ def merge_candidate(
 ) -> tuple[bool, str]:
     """Merge a candidate ref onto the current HEAD of default_branch.
 
-    Uses git merge which auto-resolves more conflicts
-    like both tasks adding to the same file in different locations.
+    Uses git merge which auto-resolves most conflicts. If git merge fails,
+    attempts tool-free Claude CLI conflict resolution before giving up.
 
     Returns (success, new_head_sha). On conflict, aborts and returns (False, "").
     The caller is responsible for fast-forwarding default_branch to new_head_sha
@@ -494,20 +531,22 @@ def merge_candidate(
         cwd=repo_root, capture_output=True, text=True,
     )
     if merge.returncode != 0:
-        # Abort merge and clean up
-        subprocess.run(
-            ["git", "merge", "--abort"],
-            cwd=repo_root, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "checkout", default_branch],
-            cwd=repo_root, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "branch", "-D", temp_branch],
-            cwd=repo_root, capture_output=True,
-        )
-        return False, ""
+        # Git merge failed — try tool-free LLM conflict resolution before giving up
+        conflicted = merge_resolve.get_conflicted_files(repo_root)
+        if conflicted:
+            try:
+                resolved = merge_resolve.resolve_conflicts_with_llm(repo_root, conflicted)
+            except Exception:
+                resolved = False
+
+            if not resolved:
+                _abort_merge_and_cleanup(repo_root, default_branch, temp_branch)
+                return False, ""
+            # LLM resolved the conflicts — merge commit is done, fall through
+        else:
+            # No conflicted files but merge failed (unusual) — abort
+            _abort_merge_and_cleanup(repo_root, default_branch, temp_branch)
+            return False, ""
 
     # Get the new HEAD sha
     new_sha = subprocess.run(

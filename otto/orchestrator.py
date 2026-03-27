@@ -287,14 +287,14 @@ async def run_per(
                         batch_results, config, project_dir, tasks_file, telemetry,
                     )
 
-                # Auto-retry merge_failed tasks on updated main.
-                # Most merge "conflicts" are just concurrent additions to the
-                # same file — git merge handles these. Only truly unresolvable
-                # conflicts need a full coding re-run.
+                # Auto-retry tasks that failed post-merge testing on updated main.
+                # Pure merge conflicts are already handled by LLM resolution in
+                # merge_candidate(). Only re-code when tests fail after merge
+                # (semantic conflict — code merged cleanly but doesn't work together).
                 if not context.interrupted:
                     merge_failed = [
                         r for r in batch_results
-                        if not r.success and r.error_code == "merge_failed"
+                        if not r.success and r.error_code == "post_merge_test_fail"
                     ]
                     if merge_failed:
                         console.print(
@@ -522,8 +522,8 @@ def merge_parallel_results(
             project_dir, candidate_ref, default_branch,
         )
         if not success:
-            console.print(f"    [red]\u2717[/red] #{task_key[:8]}  merge conflict")
-            error = "merge_failed: merge conflict"
+            console.print(f"    [red]\u2717[/red] #{task_key[:8]}  merge conflict (LLM resolution failed)")
+            error = "merge_failed: merge conflict (LLM resolution attempted)"
             try:
                 update_task(tasks_file, task_key, status="merge_failed",
                             error=error, error_code="merge_conflict")
@@ -571,7 +571,7 @@ def merge_parallel_results(
                 ))
                 merged_results.append(TaskResult(
                     task_key=task_key, success=False,
-                    error_code="merge_failed",
+                    error_code="post_merge_test_fail",
                     error=error, cost_usd=result.cost_usd,
                     duration_s=result.duration_s,
                     diff_summary=result.diff_summary,
