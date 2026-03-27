@@ -114,6 +114,8 @@ otto revert --all       Undo all otto commits + clear queue
 
 ## Architecture
 
+> **Full pipeline reference with debugging guide:** [`docs/architecture.md`](docs/architecture.md)
+
 ### v4.5 pipeline
 
 Otto is infrastructure, not intelligence. The intelligence is Claude's. Otto provides:
