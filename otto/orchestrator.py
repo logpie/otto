@@ -2,10 +2,12 @@
 
 Replaces the v3 LLM pilot with a Python-driven orchestrator. LLM is invoked
 only at decision points (initial plan + replan on failure). Agents coordinate
-through in-memory shared state. Tasks execute sequentially within each batch.
+through in-memory shared state. Tasks execute sequentially within each batch,
+or in parallel when max_parallel > 1 (each task gets its own git worktree).
 
 Entry point: run_per()
 """
+import asyncio
 import fcntl
 import json
 import shutil
@@ -119,6 +121,9 @@ def persist_learnings(project_dir: Path, context: PipelineContext) -> None:
 
 def cleanup_orphaned_worktrees(project_dir: Path) -> None:
     """Remove orphaned otto worktrees from previous crashed runs."""
+    from otto.git_ops import cleanup_all_worktrees
+    cleanup_all_worktrees(project_dir)
+    # Legacy path for backward compat
     wt_dir = project_dir / ".worktrees"
     if not wt_dir.exists():
         return
@@ -162,6 +167,9 @@ async def run_per(
     except BlockingIOError:
         console.print("Another otto process is running", style="red")
         return 2
+
+    # Clean up orphaned worktrees from previous crashed runs
+    cleanup_orphaned_worktrees(project_dir)
 
     # Clean up stale task lock files
     tasks_lock = project_dir / ".tasks.lock"
@@ -247,26 +255,35 @@ async def run_per(
         console.print(f"  [dim]Plan: {len(execution_plan.batches)} batch(es), {execution_plan.total_tasks} tasks[/dim]")
 
         # Step 3: PER loop
+        max_parallel = config.get("max_parallel", 1) or 1
         batch_idx = 0
         while not execution_plan.is_empty and not context.interrupted:
             batch = execution_plan.batches[0]
             batch_idx += 1
             batch_size = len(batch.tasks)
 
+            use_parallel = max_parallel > 1 and batch_size > 1
             if batch_size > 1:
-                console.print(f"\n  [bold]Batch {batch_idx}[/bold]  [dim]{batch_size} tasks (sequential)[/dim]")
+                mode_label = "parallel" if use_parallel else "sequential"
+                console.print(f"\n  [bold]Batch {batch_idx}[/bold]  [dim]{batch_size} tasks ({mode_label})[/dim]")
             else:
                 console.print(f"\n  [bold]Batch {batch_idx}[/bold]  [dim]1 task[/dim]")
 
-            # Execute batch — sequential within batch because tasks share a checkout.
-            batch_results: list[TaskResult] = []
-            for task_plan in batch.tasks:
-                result = await coding_loop(
-                    task_plan, context, config, project_dir, telemetry, tasks_file,
+            if use_parallel:
+                batch_results = await _run_batch_parallel(
+                    batch, context, config, project_dir, telemetry, tasks_file,
+                    max_parallel=max_parallel,
                 )
-                batch_results.append(result)
-                if context.interrupted:
-                    break
+            else:
+                # Serial execution — tasks share the main checkout
+                batch_results: list[TaskResult] = []
+                for task_plan in batch.tasks:
+                    result = await coding_loop(
+                        task_plan, context, config, project_dir, telemetry, tasks_file,
+                    )
+                    batch_results.append(result)
+                    if context.interrupted:
+                        break
 
             # Process results (TaskMerged/TaskFailed already emitted by coding_loop)
             batch_passed = 0
@@ -345,6 +362,8 @@ async def run_per(
         return 1 if context.failed_count > 0 or context.interrupted or missing_keys else 0
 
     finally:
+        # Clean up any leftover worktrees from parallel execution
+        cleanup_orphaned_worktrees(project_dir)
         # Ensure we're back on default branch
         subprocess.run(
             ["git", "checkout", default_branch],
@@ -354,6 +373,99 @@ async def run_per(
         signal.signal(signal.SIGTERM, old_sigterm)
         fcntl.flock(lock_fh, fcntl.LOCK_UN)
         lock_fh.close()
+
+
+async def _run_batch_parallel(
+    batch: Any,  # planner.Batch
+    context: Any,  # PipelineContext
+    config: dict[str, Any],
+    project_dir: Path,
+    telemetry: Any,  # Telemetry
+    tasks_file: Path,
+    *,
+    max_parallel: int,
+) -> list[TaskResult]:
+    """Run a batch of tasks in parallel using per-task git worktrees.
+
+    Each task gets its own worktree created from the current HEAD.
+    Tasks run concurrently up to max_parallel via asyncio.Semaphore.
+    Worktrees are cleaned up after all tasks complete.
+    """
+    from otto.git_ops import create_task_worktree, cleanup_task_worktree
+    from otto.testing import _install_deps
+
+    default_branch = config["default_branch"]
+    install_timeout = config.get("verify_timeout", 300)
+
+    # Get base SHA (current HEAD on default branch)
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=project_dir, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    semaphore = asyncio.Semaphore(max_parallel)
+    worktree_paths: dict[str, Path] = {}
+
+    async def _run_one(task_plan: Any) -> TaskResult:
+        task_key = task_plan.task_key
+        worktree_path: Path | None = None
+        try:
+            # Create worktree (synchronous git operation)
+            worktree_path = await asyncio.to_thread(
+                create_task_worktree, project_dir, task_key, base_sha,
+            )
+            worktree_paths[task_key] = worktree_path
+
+            # Install dependencies in the worktree
+            await asyncio.to_thread(
+                _install_deps, worktree_path, install_timeout,
+            )
+
+            async with semaphore:
+                if context.interrupted:
+                    return TaskResult(
+                        task_key=task_key, success=False,
+                        error="interrupted before start",
+                    )
+                result = await coding_loop(
+                    task_plan, context, config, project_dir,
+                    telemetry, tasks_file,
+                    task_work_dir=worktree_path,
+                )
+                return result
+
+        except Exception as exc:
+            return TaskResult(
+                task_key=task_key, success=False,
+                error=f"parallel execution error: {exc}",
+            )
+        finally:
+            # Clean up worktree
+            if worktree_path:
+                try:
+                    await asyncio.to_thread(
+                        cleanup_task_worktree, project_dir, task_key,
+                    )
+                except Exception:
+                    pass
+
+    # Launch all tasks concurrently
+    tasks = [_run_one(tp) for tp in batch.tasks]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Convert exceptions to failed TaskResults
+    batch_results: list[TaskResult] = []
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            task_key = batch.tasks[i].task_key
+            batch_results.append(TaskResult(
+                task_key=task_key, success=False,
+                error=f"unexpected exception: {result}",
+            ))
+        else:
+            batch_results.append(result)
+
+    return batch_results
 
 
 def _record_run_history(

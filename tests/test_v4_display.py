@@ -45,7 +45,7 @@ class TestCodingLoopDisplay:
         mock_display = MagicMock()
         mock_display.stop.return_value = "5s"
 
-        async def fake_run_task_v45(task, config, project_dir, tasks_file, context=None, on_progress=None):
+        async def fake_run_task_v45(task, config, project_dir, tasks_file, context=None, on_progress=None, task_work_dir=None):
             # Simulate a successful run
             from otto.tasks import update_task
             update_task(tasks_path, "abc123def456", status="passed", cost_usd=0.10)
@@ -77,7 +77,7 @@ class TestCodingLoopDisplay:
         mock_display.stop.return_value = "10s"
         phase_calls = []
 
-        async def fake_run_task_v45(task, config, project_dir, tasks_file, context=None, on_progress=None):
+        async def fake_run_task_v45(task, config, project_dir, tasks_file, context=None, on_progress=None, task_work_dir=None):
             # Simulate phase events
             if on_progress:
                 on_progress("phase", {"name": "prepare", "status": "running"})
@@ -114,7 +114,7 @@ class TestCodingLoopDisplay:
         mock_display = MagicMock()
         mock_display.stop.return_value = "5s"
 
-        async def fake_run_task_v45(task, config, project_dir, tasks_file, context=None, on_progress=None):
+        async def fake_run_task_v45(task, config, project_dir, tasks_file, context=None, on_progress=None, task_work_dir=None):
             if on_progress:
                 on_progress("agent_tool", {"name": "Write", "detail": "hello.py"})
                 on_progress("agent_tool", {"name": "Bash", "detail": "pytest"})
@@ -144,7 +144,7 @@ class TestCodingLoopDisplay:
         mock_display = MagicMock()
         mock_display.stop.return_value = "5s"
 
-        async def fake_run_task_v45(task, config, project_dir, tasks_file, context=None, on_progress=None):
+        async def fake_run_task_v45(task, config, project_dir, tasks_file, context=None, on_progress=None, task_work_dir=None):
             if on_progress:
                 on_progress("qa_finding", {"text": "### Spec 1: PASS"})
                 on_progress("qa_finding", {"text": "### Spec 2: FAIL"})
@@ -174,7 +174,7 @@ class TestCodingLoopDisplay:
         mock_display = MagicMock()
         mock_display.stop.return_value = "5s"
 
-        async def fake_run_task_v45(task, config, project_dir, tasks_file, context=None, on_progress=None):
+        async def fake_run_task_v45(task, config, project_dir, tasks_file, context=None, on_progress=None, task_work_dir=None):
             if on_progress:
                 on_progress("spec_item", {"text": "[must] Adds hello"})
                 on_progress("qa_item_result", {
@@ -211,7 +211,7 @@ class TestCodingLoopDisplay:
         mock_display = MagicMock()
         mock_display.stop.return_value = "3s"
 
-        async def fake_run_task_v45(task, config, project_dir, tasks_file, context=None, on_progress=None):
+        async def fake_run_task_v45(task, config, project_dir, tasks_file, context=None, on_progress=None, task_work_dir=None):
             from otto.tasks import update_task
             update_task(tasks_path, "abc123def456", status="failed", error="tests failed")
             return {"success": False, "cost_usd": 0.05, "status": "failed",
@@ -238,7 +238,7 @@ class TestCodingLoopDisplay:
         mock_display = MagicMock()
         mock_display.stop.return_value = "3s"
 
-        async def fake_run_task_v45(task, config, project_dir, tasks_file, context=None, on_progress=None):
+        async def fake_run_task_v45(task, config, project_dir, tasks_file, context=None, on_progress=None, task_work_dir=None):
             from otto.tasks import update_task
             update_task(tasks_path, "abc123def456", status="failed", error="tests failed")
             return {"success": False, "cost_usd": 0.05, "status": "failed",

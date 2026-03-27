@@ -134,6 +134,85 @@ def _run_cleanup_git_command(
     return result
 
 
+def _worktrees_dir(repo_root: Path) -> Path:
+    """Return the .otto-worktrees directory for task worktrees."""
+    return repo_root / ".otto-worktrees"
+
+
+def create_task_worktree(repo_root: Path, task_key: str, base_sha: str) -> Path:
+    """Create a per-task git worktree for parallel execution.
+
+    Uses detached HEAD at base_sha — no branch created.
+    Returns the worktree path.
+    """
+    wt_dir = _worktrees_dir(repo_root)
+    wt_dir.mkdir(parents=True, exist_ok=True)
+    worktree_path = wt_dir / f"otto-task-{task_key}"
+
+    # Remove stale worktree if it exists (crashed previous run)
+    if worktree_path.exists():
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", str(worktree_path)],
+            cwd=repo_root, capture_output=True,
+        )
+        if worktree_path.exists():
+            shutil.rmtree(worktree_path, ignore_errors=True)
+
+    result = subprocess.run(
+        ["git", "worktree", "add", "--detach", str(worktree_path), base_sha],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        stderr = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError(f"Failed to create worktree for {task_key}: {stderr}")
+
+    return worktree_path
+
+
+def cleanup_task_worktree(repo_root: Path, task_key: str) -> None:
+    """Remove a task's worktree and prune metadata."""
+    worktree_path = _worktrees_dir(repo_root) / f"otto-task-{task_key}"
+    if worktree_path.exists():
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", str(worktree_path)],
+            cwd=repo_root, capture_output=True,
+        )
+        # Belt and suspenders — remove leftover directory
+        if worktree_path.exists():
+            shutil.rmtree(worktree_path, ignore_errors=True)
+    # Prune any orphaned worktree metadata
+    subprocess.run(
+        ["git", "worktree", "prune"],
+        cwd=repo_root, capture_output=True,
+    )
+
+
+def cleanup_all_worktrees(repo_root: Path) -> None:
+    """Remove all otto task worktrees. Called on startup to clean up crashes."""
+    wt_dir = _worktrees_dir(repo_root)
+    if not wt_dir.exists():
+        return
+    for child in wt_dir.iterdir():
+        if child.name.startswith("otto-task-") and child.is_dir():
+            subprocess.run(
+                ["git", "worktree", "remove", "--force", str(child)],
+                cwd=repo_root, capture_output=True,
+            )
+            if child.exists():
+                shutil.rmtree(child, ignore_errors=True)
+    subprocess.run(
+        ["git", "worktree", "prune"],
+        cwd=repo_root, capture_output=True,
+    )
+    # Remove the directory itself if empty
+    try:
+        wt_dir.rmdir()
+    except OSError:
+        pass
+
+
 def _restore_workspace_state(
     project_dir: Path,
     reset_ref: str | None = None,

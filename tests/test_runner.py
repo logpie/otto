@@ -338,3 +338,136 @@ class TestShouldStageUntracked:
         assert _should_stage_untracked("__tests__/myFeature.test.tsx") is True
         assert _should_stage_untracked("tests/test_calculator.py") is True
         assert _should_stage_untracked("src/utils.test.ts") is True
+
+
+class TestTaskWorktrees:
+    """Tests for parallel execution worktree lifecycle (git_ops.py)."""
+
+    def test_create_and_cleanup_worktree(self, tmp_git_repo):
+        """Create a task worktree, verify it exists, then clean it up."""
+        from otto.git_ops import create_task_worktree, cleanup_task_worktree
+
+        base_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=tmp_git_repo, capture_output=True, text=True,
+        ).stdout.strip()
+
+        wt_path = create_task_worktree(tmp_git_repo, "test-key", base_sha)
+        assert wt_path.exists()
+        assert wt_path.is_dir()
+        # Worktree should have the README from the base commit
+        assert (wt_path / "README.md").exists()
+        # Worktree is in detached HEAD
+        head_ref = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=wt_path, capture_output=True, text=True,
+        ).stdout.strip()
+        assert head_ref == base_sha
+
+        cleanup_task_worktree(tmp_git_repo, "test-key")
+        assert not wt_path.exists()
+
+    def test_create_worktree_at_specific_sha(self, tmp_git_repo):
+        """Worktree should be at the specified base SHA, not necessarily HEAD."""
+        from otto.git_ops import create_task_worktree, cleanup_task_worktree
+
+        # Get the first commit SHA
+        first_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=tmp_git_repo, capture_output=True, text=True,
+        ).stdout.strip()
+
+        # Make another commit
+        (tmp_git_repo / "extra.txt").write_text("extra content")
+        subprocess.run(["git", "add", "extra.txt"], cwd=tmp_git_repo, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "add extra"], cwd=tmp_git_repo, capture_output=True)
+
+        # Create worktree at first SHA — should NOT have extra.txt
+        wt_path = create_task_worktree(tmp_git_repo, "old-sha-key", first_sha)
+        assert wt_path.exists()
+        assert not (wt_path / "extra.txt").exists()
+        assert (wt_path / "README.md").exists()
+
+        cleanup_task_worktree(tmp_git_repo, "old-sha-key")
+
+    def test_multiple_worktrees_isolated(self, tmp_git_repo):
+        """Multiple worktrees should be independent of each other."""
+        from otto.git_ops import create_task_worktree, cleanup_task_worktree
+
+        base_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=tmp_git_repo, capture_output=True, text=True,
+        ).stdout.strip()
+
+        wt1 = create_task_worktree(tmp_git_repo, "key-1", base_sha)
+        wt2 = create_task_worktree(tmp_git_repo, "key-2", base_sha)
+
+        assert wt1.exists() and wt2.exists()
+        assert wt1 != wt2
+
+        # Write a file in wt1, verify it doesn't appear in wt2
+        (wt1 / "only_in_wt1.txt").write_text("isolated")
+        assert not (wt2 / "only_in_wt1.txt").exists()
+
+        cleanup_task_worktree(tmp_git_repo, "key-1")
+        cleanup_task_worktree(tmp_git_repo, "key-2")
+        assert not wt1.exists()
+        assert not wt2.exists()
+
+    def test_cleanup_all_worktrees(self, tmp_git_repo):
+        """cleanup_all_worktrees should remove all otto task worktrees."""
+        from otto.git_ops import create_task_worktree, cleanup_all_worktrees
+
+        base_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=tmp_git_repo, capture_output=True, text=True,
+        ).stdout.strip()
+
+        wt1 = create_task_worktree(tmp_git_repo, "all-1", base_sha)
+        wt2 = create_task_worktree(tmp_git_repo, "all-2", base_sha)
+        assert wt1.exists() and wt2.exists()
+
+        cleanup_all_worktrees(tmp_git_repo)
+        assert not wt1.exists()
+        assert not wt2.exists()
+
+    def test_cleanup_all_no_worktrees_is_noop(self, tmp_git_repo):
+        """cleanup_all_worktrees when no worktrees exist should not raise."""
+        from otto.git_ops import cleanup_all_worktrees
+        cleanup_all_worktrees(tmp_git_repo)
+        # Should not raise
+
+    def test_create_worktree_replaces_stale(self, tmp_git_repo):
+        """Creating a worktree that already exists should replace it."""
+        from otto.git_ops import create_task_worktree, cleanup_task_worktree
+
+        base_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=tmp_git_repo, capture_output=True, text=True,
+        ).stdout.strip()
+
+        wt1 = create_task_worktree(tmp_git_repo, "stale-key", base_sha)
+        (wt1 / "stale_file.txt").write_text("stale")
+
+        # Create again — should replace
+        wt2 = create_task_worktree(tmp_git_repo, "stale-key", base_sha)
+        assert wt2.exists()
+        # Stale file should be gone (fresh worktree)
+        assert not (wt2 / "stale_file.txt").exists()
+
+        cleanup_task_worktree(tmp_git_repo, "stale-key")
+
+    def test_worktrees_in_otto_worktrees_dir(self, tmp_git_repo):
+        """Worktrees should be created under .otto-worktrees/."""
+        from otto.git_ops import create_task_worktree, cleanup_task_worktree
+
+        base_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=tmp_git_repo, capture_output=True, text=True,
+        ).stdout.strip()
+
+        wt_path = create_task_worktree(tmp_git_repo, "path-check", base_sha)
+        assert ".otto-worktrees" in str(wt_path)
+        assert "otto-task-path-check" in wt_path.name
+
+        cleanup_task_worktree(tmp_git_repo, "path-check")

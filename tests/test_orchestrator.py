@@ -72,7 +72,7 @@ class TestRunPerIntegration:
         config = self._make_config(tmp_git_repo)
 
         # Mock coding_loop to succeed — create a branch with commit for merge
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, task_work_dir=None):
             branch = f"otto/{task_plan.task_key}"
             subprocess.run(["git", "checkout", "-b", branch], cwd=project_dir, capture_output=True)
             (project_dir / "hello.py").write_text("def hello(): return 'hello'\n")
@@ -103,7 +103,7 @@ class TestRunPerIntegration:
 
         config = self._make_config(tmp_git_repo)
 
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, task_work_dir=None):
             return TaskResult(
                 task_key=task_plan.task_key, success=False,
                 error="tests failed", cost_usd=0.20,
@@ -123,8 +123,8 @@ class TestRunPerIntegration:
         assert context.interrupted is True
 
     @pytest.mark.asyncio
-    async def test_batch_tasks_run_sequentially(self, tmp_git_repo):
-        """Tasks in the same batch must not overlap on the shared checkout."""
+    async def test_batch_tasks_run_sequentially_when_max_parallel_1(self, tmp_git_repo):
+        """With max_parallel=1, tasks in the same batch run sequentially."""
         import yaml
         tasks_path = tmp_git_repo / "tasks.yaml"
         tasks_path.write_text(yaml.dump({"tasks": [
@@ -133,13 +133,14 @@ class TestRunPerIntegration:
         ]}))
 
         config = self._make_config(tmp_git_repo)
+        config["max_parallel"] = 1  # force serial execution
         execution_plan = ExecutionPlan(batches=[
             Batch(tasks=[TaskPlan(task_key="task-one"), TaskPlan(task_key="task-two")]),
         ])
         events: list[str] = []
         in_flight = False
 
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, task_work_dir=None):
             nonlocal in_flight
             assert in_flight is False
             in_flight = True
@@ -162,6 +163,48 @@ class TestRunPerIntegration:
         ]
 
     @pytest.mark.asyncio
+    async def test_batch_tasks_run_parallel_when_max_parallel_gt_1(self, tmp_git_repo):
+        """With max_parallel>1 and multiple tasks, tasks run in parallel with worktrees."""
+        import yaml
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        tasks_path.write_text(yaml.dump({"tasks": [
+            {"id": 1, "key": "task-one", "prompt": "Task one", "status": "pending", "spec": ["one"]},
+            {"id": 2, "key": "task-two", "prompt": "Task two", "status": "pending", "spec": ["two"]},
+        ]}))
+
+        config = self._make_config(tmp_git_repo)
+        config["max_parallel"] = 2
+        execution_plan = ExecutionPlan(batches=[
+            Batch(tasks=[TaskPlan(task_key="task-one"), TaskPlan(task_key="task-two")]),
+        ])
+        executed_keys: list[str] = []
+        received_work_dirs: dict[str, str] = {}
+
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, task_work_dir=None):
+            executed_keys.append(task_plan.task_key)
+            if task_work_dir:
+                received_work_dirs[task_plan.task_key] = str(task_work_dir)
+            return TaskResult(task_key=task_plan.task_key, success=True)
+
+        with patch("otto.orchestrator.plan", AsyncMock(return_value=execution_plan)):
+            with patch("otto.orchestrator.coding_loop", side_effect=fake_coding_loop):
+                exit_code = await run_per(config, tasks_path, tmp_git_repo)
+
+        assert exit_code == 0
+        assert set(executed_keys) == {"task-one", "task-two"}
+        # Each task should have received a separate worktree path
+        assert len(received_work_dirs) == 2
+        assert received_work_dirs["task-one"] != received_work_dirs["task-two"]
+        # Worktree paths should contain the task key
+        assert "task-one" in received_work_dirs["task-one"]
+        assert "task-two" in received_work_dirs["task-two"]
+        # Worktrees should be cleaned up after
+        wt_dir = tmp_git_repo / ".otto-worktrees"
+        if wt_dir.exists():
+            remaining = [c for c in wt_dir.iterdir() if c.name.startswith("otto-task-")]
+            assert remaining == [], f"Worktrees not cleaned up: {remaining}"
+
+    @pytest.mark.asyncio
     async def test_invalid_replan_falls_back_to_remaining_plan(self, tmp_git_repo):
         """Invalid replan coverage should preserve the pre-replan remaining plan."""
         import yaml
@@ -182,7 +225,7 @@ class TestRunPerIntegration:
         ])
         executed: list[str] = []
 
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, task_work_dir=None):
             executed.append(task_plan.task_key)
             if task_plan.task_key == "task-one":
                 return TaskResult(task_key=task_plan.task_key, success=False, error="boom")
@@ -194,7 +237,10 @@ class TestRunPerIntegration:
                     exit_code = await run_per(config, tasks_path, tmp_git_repo)
 
         assert exit_code == 1
-        assert executed == ["task-one", "task-two", "task-three"]
+        # Batch 1 runs task-one (serial, single task). Batch 2 runs task-two and task-three
+        # (parallel, order non-deterministic). All 3 must execute.
+        assert executed[0] == "task-one"
+        assert set(executed) == {"task-one", "task-two", "task-three"}
 
     @pytest.mark.asyncio
     async def test_all_done_reports_missing_or_interrupted_tasks(self, tmp_git_repo):
@@ -207,12 +253,13 @@ class TestRunPerIntegration:
         ]}))
 
         config = self._make_config(tmp_git_repo)
+        config["max_parallel"] = 1  # serial for interrupt testing
         execution_plan = ExecutionPlan(batches=[
             Batch(tasks=[TaskPlan(task_key="task-one"), TaskPlan(task_key="task-two")]),
         ])
         executed: list[str] = []
 
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, task_work_dir=None):
             executed.append(task_plan.task_key)
             context.interrupted = True
             return TaskResult(task_key=task_plan.task_key, success=True)
