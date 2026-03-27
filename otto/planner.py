@@ -581,7 +581,7 @@ Classify the shortlisted task pairs and build an execution plan.
 
 Relationship labels:
 - INDEPENDENT: different files/components, parallel OK
-- ADDITIVE: same file, different functions/sections, parallel OK
+- ADDITIVE: same file, different functions/sections, serialize (same-file parallel causes merge conflicts)
 - DEPENDENT: task B needs task A output, serialize
 - CONTRADICTORY: incompatible edits to the same thing, flag and exclude from execution
 - UNCERTAIN: not enough information, serialize conservatively
@@ -589,8 +589,8 @@ Relationship labels:
 Rules:
 - Respect explicit depends_on constraints.
 - Exclude contradictory tasks from batches and report them in conflicts.
-- UNCERTAIN pairs should not run in the same batch.
-- Independent and additive tasks should run in parallel when possible.
+- ADDITIVE and UNCERTAIN pairs should not run in the same batch.
+- Only truly INDEPENDENT tasks (different files) should run in parallel.
 
 Return JSON only:
 {{
