@@ -383,6 +383,135 @@ class TestRunPerIntegration:
         assert all_done["event"] == "all_done"
         assert all_done["total_missing_or_interrupted"] == 1
 
+    @pytest.mark.asyncio
+    async def test_post_run_integration_skipped_when_run_not_clean(self, tmp_git_repo):
+        """End-of-run integration should not run if any task already failed."""
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        tasks_path.write_text(yaml.dump({"tasks": [
+            {"id": 1, "key": "task-one", "prompt": "Task one", "status": "pending", "spec": ["one"]},
+            {"id": 2, "key": "task-two", "prompt": "Task two", "status": "pending", "spec": ["two"]},
+            {"id": 3, "key": "task-three", "prompt": "Task three", "status": "pending", "spec": ["three"]},
+        ]}))
+
+        config = self._make_config(tmp_git_repo)
+        config["test_command"] = "pytest"
+        config["max_parallel"] = 1
+        execution_plan = ExecutionPlan(batches=[
+            Batch(tasks=[
+                TaskPlan(task_key="task-one"),
+                TaskPlan(task_key="task-two"),
+                TaskPlan(task_key="task-three"),
+            ]),
+        ])
+        outcomes = {
+            "task-one": True,
+            "task-two": True,
+            "task-three": False,
+        }
+
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None):
+            success = outcomes[task_plan.task_key]
+            if success:
+                update_task(task_file, task_plan.task_key, status="passed")
+                return TaskResult(task_key=task_plan.task_key, success=True)
+            update_task(task_file, task_plan.task_key, status="failed", error="boom")
+            return TaskResult(task_key=task_plan.task_key, success=False, error="boom")
+
+        with patch("otto.orchestrator.plan", AsyncMock(return_value=execution_plan)):
+            with patch("otto.orchestrator.coding_loop", side_effect=fake_coding_loop):
+                with patch("otto.testing.run_test_suite") as run_suite_mock:
+                    exit_code = await run_per(config, tasks_path, tmp_git_repo)
+
+        assert exit_code == 1
+        run_suite_mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_post_run_integration_uses_main_suite_only(self, tmp_git_repo):
+        """End-of-run integration should run the main suite without task verify hooks."""
+        from otto.testing import TestSuiteResult, TierResult
+
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        tasks_path.write_text(yaml.dump({"tasks": [
+            {"id": 1, "key": "task-one", "prompt": "Task one", "status": "pending", "spec": ["one"]},
+            {"id": 2, "key": "task-two", "prompt": "Task two", "status": "pending", "spec": ["two"]},
+        ]}))
+
+        config = self._make_config(tmp_git_repo)
+        config["test_command"] = "pytest"
+        config["max_parallel"] = 1
+        execution_plan = ExecutionPlan(batches=[
+            Batch(tasks=[TaskPlan(task_key="task-one"), TaskPlan(task_key="task-two")]),
+        ])
+
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None):
+            update_task(task_file, task_plan.task_key, status="passed")
+            return TaskResult(task_key=task_plan.task_key, success=True)
+
+        passed_suite = TestSuiteResult(
+            passed=True,
+            tiers=[TierResult(tier="existing_tests", passed=True, output="ok")],
+        )
+        with patch("otto.orchestrator.plan", AsyncMock(return_value=execution_plan)):
+            with patch("otto.orchestrator.coding_loop", side_effect=fake_coding_loop):
+                with patch("otto.testing.run_test_suite", return_value=passed_suite) as run_suite_mock:
+                    exit_code = await run_per(config, tasks_path, tmp_git_repo)
+
+        assert exit_code == 0
+        run_suite_mock.assert_called_once()
+        assert run_suite_mock.call_args.kwargs["candidate_sha"] == "HEAD"
+        assert run_suite_mock.call_args.kwargs["custom_test_cmd"] is None
+
+    @pytest.mark.asyncio
+    async def test_post_run_integration_failure_is_run_level_only(self, tmp_git_repo):
+        """Integration failure should exit non-zero without blaming any one task."""
+        from otto.testing import TestSuiteResult, TierResult
+
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        tasks_path.write_text(yaml.dump({"tasks": [
+            {"id": 1, "key": "task-one", "prompt": "Task one", "status": "pending", "spec": ["one"]},
+            {"id": 2, "key": "task-two", "prompt": "Task two", "status": "pending", "spec": ["two"]},
+        ]}))
+
+        config = self._make_config(tmp_git_repo)
+        config["test_command"] = "pytest"
+        config["max_parallel"] = 1
+        execution_plan = ExecutionPlan(batches=[
+            Batch(tasks=[TaskPlan(task_key="task-one"), TaskPlan(task_key="task-two")]),
+        ])
+
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None):
+            update_task(task_file, task_plan.task_key, status="passed")
+            return TaskResult(task_key=task_plan.task_key, success=True)
+
+        failed_suite = TestSuiteResult(
+            passed=False,
+            tiers=[TierResult(tier="existing_tests", passed=False, output="1 failed")],
+        )
+        with patch("otto.orchestrator.plan", AsyncMock(return_value=execution_plan)):
+            with patch("otto.orchestrator.coding_loop", side_effect=fake_coding_loop):
+                with patch("otto.testing.run_test_suite", return_value=failed_suite):
+                    with patch("otto.orchestrator._print_summary") as print_summary_mock:
+                        exit_code = await run_per(config, tasks_path, tmp_git_repo)
+
+        assert exit_code == 1
+        persisted = {task["key"]: task for task in load_tasks(tasks_path)}
+        assert persisted["task-one"]["status"] == "passed"
+        assert persisted["task-two"]["status"] == "passed"
+        assert persisted["task-one"].get("error_code") is None
+        assert persisted["task-two"].get("error_code") is None
+        print_summary_mock.assert_called_once()
+        assert print_summary_mock.call_args.kwargs["integration_passed"] is False
+
+        events_path = tmp_git_repo / "otto_logs" / "v4_events.jsonl"
+        all_done = json.loads(events_path.read_text().strip().splitlines()[-1])
+        assert all_done["event"] == "all_done"
+        assert all_done["total_failed"] == 0
+
+        history_path = tmp_git_repo / "otto_logs" / "run-history.jsonl"
+        history_entry = json.loads(history_path.read_text().strip().splitlines()[-1])
+        assert history_entry["tasks_failed"] == 0
+        assert history_entry["failure_summary"] == "post-run integration failed: 1 failed"
+
 
 class TestOrchestrationLogic:
     """Unit tests for plan-execute-replan logic."""

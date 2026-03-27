@@ -264,6 +264,8 @@ async def run_per(
         # Step 3: PER loop
         max_parallel = config.get("max_parallel", 1) or 1
         batch_idx = 0
+        integration_failed = False
+        integration_failure_output = ""
         while not execution_plan.is_empty and not context.interrupted:
             batch = execution_plan.batches[0]
             batch_idx += 1
@@ -410,7 +412,12 @@ async def run_per(
         # each task in isolation — combined changes may break invariants neither
         # task's tests check (e.g., foreign key constraints, shared state).
         total_passed = context.passed_count
-        if total_passed >= 2 and not config.get("skip_test") and not context.interrupted:
+        if (
+            total_passed >= 2
+            and context.failed_count == 0
+            and not config.get("skip_test")
+            and not context.interrupted
+        ):
             from otto.testing import run_test_suite
             test_command = config.get("test_command")
             test_timeout = config.get("verify_timeout", 300)
@@ -420,51 +427,29 @@ async def run_per(
                     project_dir=project_dir,
                     candidate_sha="HEAD",
                     test_command=test_command,
+                    custom_test_cmd=None,
                     timeout=test_timeout,
                 )
                 if integration_result.passed:
                     console.print("    [green]\u2713[/green] integration tests passed")
                 else:
                     failure_output = integration_result.failure_output or "integration tests failed"
+                    integration_failed = True
+                    integration_failure_output = failure_output[:500]
                     console.print(
                         f"    [red]\u2717[/red] integration tests failed — cross-task conflict detected"
                     )
-                    # Find the last task that passed and mark it for re-apply.
-                    # It's the most likely culprit (introduced the breaking interaction).
-                    last_passed_key = None
-                    for key, result in reversed(list(context.results.items())):
-                        if result.success:
-                            last_passed_key = key
-                            break
-                    if last_passed_key:
-                        error = f"post-run integration tests failed\n{failure_output[:500]}"
-                        try:
-                            update_task(tasks_file, last_passed_key,
-                                        status="merge_failed",
-                                        error=error, error_code="post_merge_test_fail")
-                        except Exception:
-                            pass
-                        # Update context so summary reflects the failure
-                        old_result = context.results[last_passed_key]
-                        context.results[last_passed_key] = TaskResult(
-                            task_key=last_passed_key,
-                            success=False,
-                            error_code="post_merge_test_fail",
-                            error=error,
-                            cost_usd=old_result.cost_usd,
-                            duration_s=old_result.duration_s,
-                            diff_summary=old_result.diff_summary,
-                            qa_report=old_result.qa_report,
-                        )
-                        console.print(
-                            f"    [yellow]Task {last_passed_key[:8]} marked for re-apply "
-                            f"— run otto again to retry[/yellow]"
-                        )
+                    console.print(
+                        "    [yellow]Task statuses were left unchanged; choose which task(s) "
+                        "to re-apply based on the integration failure output[/yellow]"
+                    )
 
         # Step 5: Summary
         run_duration = time.monotonic() - run_start
         missing_keys = pending_keys - set(context.results)
 
+        # AllDone is intentionally task-scoped; run-level integration failures
+        # are surfaced via the summary, run history, and exit code instead.
         telemetry.log(AllDone(
             total_passed=context.passed_count,
             total_failed=context.failed_count,
@@ -482,15 +467,39 @@ async def run_per(
                 results.append((t, t.get("status") == "passed"))
 
         try:
-            _print_summary(results, run_duration, total_cost=context.total_cost,
-                           project_dir=project_dir)
+            _print_summary(
+                results,
+                run_duration,
+                integration_passed=not integration_failed,
+                total_cost=context.total_cost,
+                project_dir=project_dir,
+            )
         except Exception as exc:
             console.print(f"  [yellow]Warning: summary display error: {exc}[/yellow]")
 
-        # Record run history
-        _record_run_history(project_dir, results, run_duration, context.total_cost)
+        if integration_failed:
+            console.print(
+                "  [yellow]Run exited non-zero due to post-run integration failure[/yellow]"
+            )
+            if integration_failure_output:
+                console.print(f"  [dim]{rich_escape(integration_failure_output)}[/dim]")
 
-        return 1 if context.failed_count > 0 or context.interrupted or missing_keys else 0
+        # Record run history
+        _record_run_history(
+            project_dir,
+            results,
+            run_duration,
+            context.total_cost,
+            integration_failed=integration_failed,
+            integration_failure_output=integration_failure_output,
+        )
+
+        return 1 if (
+            context.failed_count > 0
+            or integration_failed
+            or context.interrupted
+            or missing_keys
+        ) else 0
 
     finally:
         # Clean up any leftover worktrees from parallel execution
@@ -813,6 +822,8 @@ def _record_run_history(
     results: list[tuple[dict, bool]],
     run_duration: float,
     total_cost: float,
+    integration_failed: bool = False,
+    integration_failure_output: str = "",
 ) -> None:
     """Record run to otto_logs/run-history.jsonl."""
     import json
@@ -831,6 +842,18 @@ def _record_run_history(
                 failure_summary = f"task #{ft.get('id', '?')} failed: {ft.get('error', 'unknown')[:40]}"
             else:
                 failure_summary = f"{tasks_failed} tasks failed"
+        elif integration_failed:
+            failure_summary = "post-run integration failed"
+            if integration_failure_output:
+                detail = next(
+                    (line.strip() for line in reversed(integration_failure_output.splitlines()) if line.strip()),
+                    "",
+                )
+                if detail:
+                    integration_failure_output = detail
+                failure_summary = (
+                    f"{failure_summary}: {integration_failure_output[:40]}"
+                )
         commit_sha = ""
         try:
             sha_result = subprocess.run(

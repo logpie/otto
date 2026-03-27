@@ -255,6 +255,16 @@ async def plan(
         # Single task — no need for LLM planning
         return default_plan(tasks)
 
+    # When max_parallel > 1 and no tasks have explicit depends_on,
+    # use deterministic default_plan() instead of the LLM planner.
+    # The LLM tends to infer file-overlap dependencies and serialize tasks,
+    # defeating parallelism. default_plan() groups all independent tasks
+    # into one batch. The pipeline handles merge conflicts via re-apply.
+    max_parallel = config.get("max_parallel", 1) or 1
+    has_explicit_deps = any(t.get("depends_on") for t in tasks)
+    if max_parallel > 1 and not has_explicit_deps:
+        return default_plan(tasks)
+
     from otto.agent import ClaudeAgentOptions, _subprocess_env, run_agent_query
 
     # Build task summary for the planner
@@ -268,21 +278,12 @@ async def plan(
             f"spec={spec_count} items{dep_str}: {t.get('prompt', '')}"
         )
 
-    max_parallel = config.get("max_parallel", 1) or 1
-    parallel_hint = ""
-    if max_parallel > 1:
-        parallel_hint = (
-            f"\n\nmax_parallel={max_parallel}. Group tasks into parallel batches aggressively. "
-            "Do NOT separate tasks just because they might modify the same files — "
-            "the pipeline handles merge conflicts automatically. Only respect explicit depends_on."
-        )
-
     prompt = f"""Plan the execution of these {len(tasks)} tasks:
 
 {chr(10).join(task_lines)}
 
 Produce the JSON execution plan. Group independent tasks into parallel batches.
-Respect depends_on constraints.{parallel_hint}"""
+Respect depends_on constraints."""
 
     try:
         agent_opts = ClaudeAgentOptions(
