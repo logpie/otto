@@ -472,8 +472,8 @@ class TestMergeParallelResults:
         assert (tmp_git_repo / "a.txt").exists()
         assert (tmp_git_repo / "b.txt").exists()
 
-    def test_conflict_with_llm_resolution_disabled(self, tmp_git_repo):
-        """With LLM resolution disabled, merge conflict should result in merge_failed."""
+    def test_conflict_detected_and_queued_for_reapply(self, tmp_git_repo):
+        """Merge conflict should mark task for re-apply (not abort permanently)."""
         tasks_path = tmp_git_repo / "tasks.yaml"
         tasks_path.write_text(yaml.dump({"tasks": [
             {"id": 1, "key": "task-aaa", "prompt": "Task A", "status": "verified"},
@@ -493,19 +493,17 @@ class TestMergeParallelResults:
         ]
         config = self._make_config()
 
-        # Disable LLM resolution so we can test the fallback path
-        with patch("otto.merge_resolve.resolve_conflicts_with_llm", return_value=False):
-            merged = merge_parallel_results(results, config, tmp_git_repo, tasks_path, telemetry)
+        merged = merge_parallel_results(results, config, tmp_git_repo, tasks_path, telemetry)
 
-        # First task should merge, second should fail
+        # First task should merge, second should be queued for re-apply
         passed = [r for r in merged if r.success]
         failed = [r for r in merged if not r.success]
         assert len(passed) == 1
         assert len(failed) == 1
         assert passed[0].task_key == "task-aaa"
         assert failed[0].task_key == "task-bbb"
-        assert failed[0].error_code == "merge_failed"
-        assert "conflict" in (failed[0].error or "").lower()
+        assert failed[0].error_code == "merge_conflict"
+        assert "re-apply" in (failed[0].error or "").lower()
 
     def test_failed_tasks_carried_through(self, tmp_git_repo):
         """Failed tasks from the parallel phase should be carried through unchanged."""
@@ -726,10 +724,9 @@ class TestMergeCandidate:
         subprocess.run(["git", "checkout", "main"], cwd=tmp_git_repo, capture_output=True)
         _anchor_candidate_ref(tmp_git_repo, "conflict-task", 1, candidate_sha)
 
-        with patch("otto.merge_resolve.resolve_conflicts_with_llm", return_value=False):
-            success, new_sha = merge_candidate(
-                tmp_git_repo, "refs/otto/candidates/conflict-task/attempt-1", "main",
-            )
+        success, new_sha = merge_candidate(
+            tmp_git_repo, "refs/otto/candidates/conflict-task/attempt-1", "main",
+        )
         assert not success
         assert new_sha == ""
         # Should be back on main

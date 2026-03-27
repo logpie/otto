@@ -8,7 +8,6 @@ from typing import Any
 
 from rich.markup import escape as rich_escape
 
-from otto import merge_resolve
 from otto.theme import console
 from otto.tasks import update_task
 
@@ -531,22 +530,8 @@ def merge_candidate(
         cwd=repo_root, capture_output=True, text=True,
     )
     if merge.returncode != 0:
-        # Git merge failed — try tool-free LLM conflict resolution before giving up
-        conflicted = merge_resolve.get_conflicted_files(repo_root)
-        if conflicted:
-            try:
-                resolved = merge_resolve.resolve_conflicts_with_llm(repo_root, conflicted)
-            except Exception:
-                resolved = False
-
-            if not resolved:
-                _abort_merge_and_cleanup(repo_root, default_branch, temp_branch)
-                return False, ""
-            # LLM resolved the conflicts — merge commit is done, fall through
-        else:
-            # No conflicted files but merge failed (unusual) — abort
-            _abort_merge_and_cleanup(repo_root, default_branch, temp_branch)
-            return False, ""
+        _abort_merge_and_cleanup(repo_root, default_branch, temp_branch)
+        return False, ""
 
     # Get the new HEAD sha
     new_sha = subprocess.run(

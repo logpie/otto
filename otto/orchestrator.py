@@ -287,18 +287,21 @@ async def run_per(
                         batch_results, config, project_dir, tasks_file, telemetry,
                     )
 
-                # Auto-retry tasks that failed post-merge testing on updated main.
-                # Pure merge conflicts are already handled by LLM resolution in
-                # merge_candidate(). Only re-code when tests fail after merge
-                # (semantic conflict — code merged cleanly but doesn't work together).
+                # Auto-retry merge failures on updated main.
+                # Both merge conflicts and post-merge test failures get re-run:
+                # the coding agent sees sibling tasks' code and applies the
+                # original task's changes, resolving conflicts naturally.
+                # This replaces the old text-only LLM conflict resolver.
                 if not context.interrupted:
                     merge_failed = [
                         r for r in batch_results
-                        if not r.success and r.error_code == "post_merge_test_fail"
+                        if not r.success and r.error_code in (
+                            "merge_conflict", "post_merge_test_fail",
+                        )
                     ]
                     if merge_failed:
                         console.print(
-                            f"\n  [yellow]Re-running {len(merge_failed)} merge-failed "
+                            f"\n  [yellow]Re-applying {len(merge_failed)} merge-failed "
                             f"task(s) on updated main...[/yellow]"
                         )
                         for failed_result in merge_failed:
@@ -310,12 +313,29 @@ async def run_per(
                             )
                             if not tp:
                                 continue
-                            # Reset task for re-run
+                            # Inject the task's previous diff as feedback so the
+                            # coding agent knows what to re-apply on updated main.
+                            diff_hint = failed_result.diff_summary or ""
+                            if diff_hint:
+                                merge_feedback = (
+                                    "Your previous implementation was verified and passed all tests, "
+                                    "but caused a merge conflict with another task's changes that are "
+                                    "now on main. Re-apply your changes on the updated codebase. "
+                                    "Here is your previous diff for reference:\n\n"
+                                    f"{diff_hint[:8000]}"
+                                )
+                            else:
+                                merge_feedback = (
+                                    "Your previous implementation passed but caused a merge conflict. "
+                                    "Another task's changes are now on main. Re-implement your task "
+                                    "on the updated codebase."
+                                )
                             try:
                                 update_task(
                                     tasks_file, fkey,
                                     status="pending",
                                     error=None, error_code=None, session_id=None,
+                                    feedback=merge_feedback,
                                 )
                             except Exception:
                                 continue
@@ -522,20 +542,16 @@ def merge_parallel_results(
             project_dir, candidate_ref, default_branch,
         )
         if not success:
-            console.print(f"    [red]\u2717[/red] #{task_key[:8]}  merge conflict (LLM resolution failed)")
-            error = "merge_failed: merge conflict (LLM resolution attempted)"
+            console.print(f"    [yellow]⚠[/yellow] #{task_key[:8]}  merge conflict — queued for re-apply")
+            error = "merge_conflict: will re-apply on updated main"
             try:
                 update_task(tasks_file, task_key, status="merge_failed",
                             error=error, error_code="merge_conflict")
             except Exception:
                 pass
-            telemetry.log(TaskFailed(
-                task_key=task_key, task_id=task_id,
-                error=error, cost_usd=result.cost_usd,
-            ))
             merged_results.append(TaskResult(
                 task_key=task_key, success=False,
-                error_code="merge_failed",
+                error_code="merge_conflict",
                 error=error, cost_usd=result.cost_usd,
                 duration_s=result.duration_s,
                 diff_summary=result.diff_summary,
