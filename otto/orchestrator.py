@@ -315,6 +315,70 @@ async def run_per(
                             )
                             if not tp:
                                 continue
+                            from otto.git_ops import _find_best_candidate_ref
+                            from otto.merge_resolve import scoped_reapply
+
+                            candidate_ref = _find_best_candidate_ref(project_dir, fkey)
+                            base_sha = ""
+                            if candidate_ref:
+                                base_result = subprocess.run(
+                                    ["git", "rev-parse", f"{candidate_ref}^"],
+                                    cwd=project_dir,
+                                    capture_output=True,
+                                    text=True,
+                                )
+                                if base_result.returncode == 0:
+                                    base_sha = base_result.stdout.strip()
+
+                            if candidate_ref and base_sha:
+                                reapply_success, new_sha = await scoped_reapply(
+                                    task_key=fkey,
+                                    candidate_ref=candidate_ref,
+                                    base_sha=base_sha,
+                                    config=config,
+                                    project_dir=project_dir,
+                                    tasks_file=tasks_file,
+                                )
+                                if reapply_success:
+                                    ff = subprocess.run(
+                                        ["git", "merge", "--ff-only", new_sha],
+                                        cwd=project_dir,
+                                        capture_output=True,
+                                        text=True,
+                                    )
+                                    if ff.returncode == 0:
+                                        try:
+                                            update_task(
+                                                tasks_file,
+                                                fkey,
+                                                status="passed",
+                                                error=None,
+                                                error_code=None,
+                                                feedback=None,
+                                                session_id=None,
+                                            )
+                                        except Exception:
+                                            pass
+                                        telemetry.log(TaskMerged(
+                                            task_key=fkey,
+                                            task_id=task_ids.get(fkey, 0),
+                                            cost_usd=failed_result.cost_usd,
+                                            duration_s=failed_result.duration_s,
+                                            diff_summary=failed_result.diff_summary,
+                                        ))
+                                        batch_results = [
+                                            TaskResult(
+                                                task_key=fkey,
+                                                success=True,
+                                                commit_sha=new_sha,
+                                                cost_usd=failed_result.cost_usd,
+                                                duration_s=failed_result.duration_s,
+                                                diff_summary=failed_result.diff_summary,
+                                                qa_report=failed_result.qa_report,
+                                            ) if r.task_key == fkey else r
+                                            for r in batch_results
+                                        ]
+                                        continue
                             # Inject the task's previous diff as feedback so the
                             # coding agent knows what to re-apply on updated main.
                             diff_hint = failed_result.diff_summary or ""

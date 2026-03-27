@@ -202,6 +202,107 @@ class TestRunPerIntegration:
         assert rerun_calls == ["task-merge"]
 
     @pytest.mark.asyncio
+    async def test_parallel_merge_retry_tries_scoped_reapply_before_coding_loop(self, tmp_git_repo):
+        """Merge retries should attempt scoped patch reapply before full coding fallback."""
+        from otto.git_ops import _anchor_candidate_ref
+
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        tasks_path.write_text(yaml.dump({"tasks": [
+            {
+                "id": 1,
+                "key": "task-merge",
+                "prompt": "Retry merge task",
+                "status": "pending",
+            },
+            {
+                "id": 2,
+                "key": "task-pass",
+                "prompt": "Pass task",
+                "status": "pending",
+            },
+        ]}))
+
+        (tmp_git_repo / "app.txt").write_text("base\n")
+        subprocess.run(["git", "add", "app.txt"], cwd=tmp_git_repo, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "add app"], cwd=tmp_git_repo, capture_output=True, check=True)
+        expected_base_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=tmp_git_repo, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        subprocess.run(["git", "checkout", "-b", "candidate-task-merge"], cwd=tmp_git_repo, capture_output=True, check=True)
+        (tmp_git_repo / "feature.txt").write_text("candidate\n")
+        subprocess.run(["git", "add", "feature.txt"], cwd=tmp_git_repo, capture_output=True, check=True)
+        subprocess.run(["git", "commit", "-m", "candidate"], cwd=tmp_git_repo, capture_output=True, check=True)
+        candidate_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=tmp_git_repo, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        _anchor_candidate_ref(tmp_git_repo, "task-merge", 1, candidate_sha)
+        subprocess.run(["git", "checkout", "main"], cwd=tmp_git_repo, capture_output=True, check=True)
+
+        config = self._make_config(tmp_git_repo)
+        execution_plan = ExecutionPlan(batches=[Batch(tasks=[
+            TaskPlan(task_key="task-merge"),
+            TaskPlan(task_key="task-pass"),
+        ])])
+
+        def fake_preflight_checks(*args, **kwargs):
+            return None, load_tasks(tasks_path)
+
+        async def fake_run_batch_parallel(*args, **kwargs):
+            return [
+                TaskResult(task_key="task-merge", success=True),
+                TaskResult(task_key="task-pass", success=True),
+            ]
+
+        def fake_merge_parallel_results(results, config, project_dir, task_file, telemetry):
+            update_task(
+                task_file,
+                "task-merge",
+                status="merge_failed",
+                error="post-merge tests failed",
+                error_code="post_merge_test_fail",
+            )
+            update_task(task_file, "task-pass", status="passed")
+            return [
+                TaskResult(
+                    task_key="task-merge",
+                    success=False,
+                    error="post-merge tests failed",
+                    error_code="post_merge_test_fail",
+                ),
+                TaskResult(task_key="task-pass", success=True),
+            ]
+
+        call_order: list[str] = []
+
+        async def fake_scoped_reapply(*, task_key, candidate_ref, base_sha, config, project_dir, tasks_file):
+            call_order.append("scoped_reapply")
+            assert task_key == "task-merge"
+            assert candidate_ref == "refs/otto/candidates/task-merge/attempt-1"
+            assert base_sha == expected_base_sha
+            return False, ""
+
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None):
+            call_order.append("coding_loop")
+            update_task(task_file, task_plan.task_key, status="passed")
+            return TaskResult(task_key=task_plan.task_key, success=True)
+
+        with patch("otto.orchestrator.preflight_checks", side_effect=fake_preflight_checks):
+            with patch("otto.orchestrator.plan", new=AsyncMock(return_value=execution_plan)):
+                with patch("otto.orchestrator._run_batch_parallel", side_effect=fake_run_batch_parallel):
+                    with patch("otto.orchestrator.merge_parallel_results", side_effect=fake_merge_parallel_results):
+                        with patch("otto.merge_resolve.scoped_reapply", side_effect=fake_scoped_reapply):
+                            with patch("otto.orchestrator.coding_loop", side_effect=fake_coding_loop):
+                                with patch("otto.orchestrator._print_summary"):
+                                    with patch("otto.orchestrator._record_run_history"):
+                                        exit_code = await run_per(config, tasks_path, tmp_git_repo)
+
+        assert exit_code == 0
+        assert call_order == ["scoped_reapply", "coding_loop"]
+
+    @pytest.mark.asyncio
     async def test_signal_sets_interrupted(self, tmp_git_repo):
         """Context.interrupted should be set by signal handler."""
         context = PipelineContext()
