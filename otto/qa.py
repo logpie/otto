@@ -410,7 +410,10 @@ def _write_proof_artifacts(
     clean_prompt = re.sub(r'\s+', ' ', original_prompt).strip()
     must_total = len(must_items)
     must_passed_count = sum(1 for item in must_items if item.get("status") == "pass")
-    result_icon = "\u2713 PASSED" if must_passed_count == must_total else "\u2717 FAILED"
+    overall_passed = verdict.get("must_passed")
+    if overall_passed is None:
+        overall_passed = must_passed_count == must_total
+    result_icon = "\u2713 PASSED" if overall_passed else "\u2717 FAILED"
 
     r: list[str] = []
     r.append(f"# {clean_prompt}")
@@ -436,6 +439,37 @@ def _write_proof_artifacts(
                 r.append(f"- {p}")
         else:
             r.append("\n*No proof recorded*")
+        r.append("")
+
+    integration_findings = verdict.get("integration_findings", []) or []
+    if integration_findings:
+        r.append("## Integration Findings")
+        r.append("")
+        for item in integration_findings:
+            status_str = item.get("status", "unknown")
+            icon = "\u2713" if status_str == "pass" else "\u2717"
+            description = item.get("description", "") or "Integration check"
+            tasks_involved = ", ".join(item.get("tasks_involved") or [])
+            test = item.get("test", "")
+            r.append(f"### {icon} {description}")
+            if tasks_involved:
+                r.append(f"Tasks: {tasks_involved}")
+            if test:
+                r.append(f"Test: {test}")
+            r.append("")
+
+    regressions = verdict.get("regressions", []) or []
+    if regressions:
+        r.append("## Regressions")
+        r.append("")
+        for item in regressions:
+            r.append(f"- {item}")
+        r.append("")
+
+    if "test_suite_passed" in verdict:
+        suite_icon = "\u2713" if verdict.get("test_suite_passed") else "\u2717"
+        suite_status = "passed" if verdict.get("test_suite_passed") else "failed"
+        r.append(f"## Full Test Suite: {suite_icon} {suite_status}")
         r.append("")
 
     # Screenshots (inline, not a separate section)
@@ -477,6 +511,71 @@ def _write_proof_artifacts(
         pass
 
     return file_count, coverage_str
+
+
+def _write_batch_proof_artifacts(
+    log_dir: Path,
+    verdict: dict,
+    qa_actions: list[dict],
+    tasks_with_specs: list[dict[str, Any]],
+    cost_usd: float,
+) -> tuple[int, str]:
+    """Write proof artifacts for a combined batch verdict and each task within it."""
+    batch_prompt = f"Batch QA for {len(tasks_with_specs)} task(s)"
+    batch_verdict = dict(verdict or {})
+    task_count = max(len(tasks_with_specs), 1)
+
+    batch_count, batch_coverage = _write_proof_artifacts(
+        log_dir,
+        batch_verdict,
+        qa_actions,
+        {"key": "batch-qa"},
+        batch_prompt,
+        cost_usd,
+    )
+
+    must_items = batch_verdict.get("must_items", []) or []
+    integration_findings = batch_verdict.get("integration_findings", []) or []
+    regressions = batch_verdict.get("regressions", []) or []
+    test_suite_passed = batch_verdict.get("test_suite_passed", True)
+    per_task_cost = cost_usd / task_count
+    logs_root = log_dir.parent
+
+    for task in tasks_with_specs:
+        task_key = task.get("key", "unknown")
+        task_log_dir = logs_root / task_key
+        task_log_dir.mkdir(parents=True, exist_ok=True)
+
+        task_must_items = [
+            item for item in must_items
+            if item.get("task_key") == task_key
+        ]
+        task_integration_findings = [
+            item for item in integration_findings
+            if task_key in (item.get("tasks_involved") or [])
+        ]
+        task_passed = (
+            all(item.get("status") == "pass" for item in task_must_items)
+            and not any(item.get("status") == "fail" for item in task_integration_findings)
+            and not regressions
+            and bool(test_suite_passed)
+        )
+        task_verdict = {
+            **batch_verdict,
+            "must_passed": task_passed,
+            "must_items": task_must_items,
+            "integration_findings": task_integration_findings,
+        }
+        _write_proof_artifacts(
+            task_log_dir,
+            task_verdict,
+            qa_actions,
+            task,
+            task.get("prompt", ""),
+            per_task_cost,
+        )
+
+    return batch_count, batch_coverage
 
 
 def _unwrap_tool_result_content(content: Any) -> str:
@@ -1041,4 +1140,26 @@ async def _run_batch_qa_agent(
         on_progress=on_progress,
         enable_browser=True,
     )
-    return _finalize_batch_qa_result(qa_result)
+    final_result = _finalize_batch_qa_result(qa_result)
+
+    proof_count = 0
+    proof_coverage = ""
+    if log_dir:
+        try:
+            batch_verdict = dict(final_result.get("verdict", {}) or {})
+            batch_verdict["must_passed"] = final_result.get("must_passed", False)
+            proof_count, proof_coverage = _write_batch_proof_artifacts(
+                log_dir,
+                batch_verdict,
+                qa_result.get("qa_actions", []) or [],
+                tasks_with_specs,
+                float(final_result.get("cost_usd", 0.0) or 0.0),
+            )
+        except Exception:
+            pass
+
+    return {
+        **final_result,
+        "proof_count": proof_count,
+        "proof_coverage": proof_coverage,
+    }

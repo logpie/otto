@@ -377,6 +377,52 @@ class TestRunTaskV45:
         qa_mock.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_skip_mode_without_spec_does_not_start_spec_generation(self, tmp_git_repo):
+        default_branch = _current_branch(tmp_git_repo)
+        task = {
+            "id": 1,
+            "key": "taskskip002",
+            "prompt": "Add feature.txt",
+            "status": "pending",
+        }
+        tasks_path = _write_task(tmp_git_repo, task)
+        config = {
+            "default_branch": default_branch,
+            "max_retries": 0,
+            "verify_timeout": 30,
+            "max_task_time": 60,
+            "test_command": None,
+        }
+
+        async def fake_query(*, prompt, options=None):
+            (tmp_git_repo / "feature.txt").write_text("hello\n")
+            yield SimpleNamespace(
+                session_id="sess-skip-mode-no-spec",
+                is_error=False,
+                total_cost_usd=0.0,
+                result="ok",
+            )
+
+        with patch("otto.runner.query", new=fake_query):
+            with patch("otto.spec.generate_spec_sync") as spec_mock:
+                with patch("otto.runner.run_test_suite", return_value=TestSuiteResult(
+                    passed=True,
+                    tiers=[TierResult("tier1", True, "1 passed")],
+                )):
+                    with patch("otto.runner.run_qa_agent_v45") as qa_mock:
+                        with patch("otto.runner.merge_to_default", return_value=True):
+                            result = await run_task_v45(
+                                task, config, tmp_git_repo, tasks_path, qa_mode="skip",
+                            )
+
+        persisted = load_tasks(tasks_path)[0]
+        assert result["success"] is True
+        assert result["status"] == "passed"
+        assert persisted["status"] == "passed"
+        spec_mock.assert_not_called()
+        qa_mock.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_merge_diverged_persists_error_code(self, tmp_git_repo):
         """Merge-diverged failures should persist structured error_code to tasks.yaml."""
         default_branch = _current_branch(tmp_git_repo)
