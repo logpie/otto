@@ -106,7 +106,7 @@ def detect_test_command(project_dir: Path) -> str | None:
         except (json.JSONDecodeError, KeyError):
             pass
 
-    # pytest
+    # pytest — prefer project venv if it exists
     tests_dir = project_dir / "tests"
     test_dir = project_dir / "test"
     has_py_tests = False
@@ -118,7 +118,12 @@ def detect_test_command(project_dir: Path) -> str | None:
     if not has_py_tests:
         has_py_tests = any(project_dir.glob("test_*.py"))
     if has_py_tests:
-        candidates.append("pytest")
+        # Check project venv first — Flask/Django projects install deps there
+        venv_pytest = project_dir / ".venv" / "bin" / "pytest"
+        if venv_pytest.exists():
+            candidates.append(f"{venv_pytest}")
+        else:
+            candidates.append("pytest")
 
     # go test
     if (project_dir / "go.mod").exists():

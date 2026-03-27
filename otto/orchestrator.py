@@ -644,6 +644,53 @@ def merge_parallel_results(
             qa_report=result.qa_report,
         ))
 
+    # Post-batch integration test: after ALL tasks merge, run the full test
+    # suite on main to catch cross-task interaction bugs.
+    # Each task was verified in isolation, but combined changes may break
+    # invariants neither task's tests check (e.g., foreign key constraints).
+    passed_count = sum(1 for r in merged_results if r.success)
+    if passed_count >= 2 and not config.get("skip_test"):
+        console.print("\n  [bold]Post-batch integration test[/bold]")
+        integration_result = run_test_suite(
+            project_dir=project_dir,
+            candidate_sha="HEAD",
+            test_command=test_command,
+            timeout=test_timeout,
+        )
+        if integration_result.passed:
+            console.print("    [green]\u2713[/green] integration tests passed")
+        else:
+            failure_output = integration_result.failure_output or "integration tests failed"
+            console.print(
+                f"    [red]\u2717[/red] integration tests failed — cross-task conflict detected"
+            )
+            # Mark the last-merged task as failed (most likely culprit)
+            # The auto-retry in the orchestrator will re-run it on updated main.
+            last_passed = next(
+                (r for r in reversed(merged_results) if r.success), None,
+            )
+            if last_passed:
+                error = f"merge_failed: post-batch integration tests failed\n{failure_output[:500]}"
+                try:
+                    update_task(tasks_file, last_passed.task_key,
+                                status="merge_failed",
+                                error=error, error_code="post_merge_test_fail")
+                except Exception:
+                    pass
+                merged_results = [
+                    TaskResult(
+                        task_key=r.task_key,
+                        success=False,
+                        error_code="post_merge_test_fail",
+                        error=error,
+                        cost_usd=r.cost_usd,
+                        duration_s=r.duration_s,
+                        diff_summary=r.diff_summary,
+                        qa_report=r.qa_report,
+                    ) if r.task_key == last_passed.task_key else r
+                    for r in merged_results
+                ]
+
     return merged_results
 
 
