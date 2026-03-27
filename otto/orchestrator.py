@@ -286,6 +286,48 @@ async def run_per(
                     batch_results = merge_parallel_results(
                         batch_results, config, project_dir, tasks_file, telemetry,
                     )
+
+                # Auto-retry merge_failed tasks serially on updated main.
+                # The coding agent sees the merged code and builds around it.
+                if not context.interrupted:
+                    merge_failed = [
+                        r for r in batch_results
+                        if not r.success and "merge" in (r.error or "").lower()
+                    ]
+                    if merge_failed:
+                        console.print(
+                            f"\n  [yellow]Re-running {len(merge_failed)} merge-failed "
+                            f"task(s) on updated main...[/yellow]"
+                        )
+                        for failed_result in merge_failed:
+                            if context.interrupted:
+                                break
+                            fkey = failed_result.task_key
+                            # Find the task plan
+                            tp = next(
+                                (t for t in batch.tasks if t.task_key == fkey), None,
+                            )
+                            if not tp:
+                                continue
+                            # Reset task to pending for re-run
+                            try:
+                                update_task(
+                                    tasks_file, fkey,
+                                    status="pending", attempts=0,
+                                    error=None, session_id=None,
+                                )
+                            except Exception:
+                                continue
+                            # Re-run serially on updated main (no worktree)
+                            retry_result = await coding_loop(
+                                tp, context, config, project_dir,
+                                telemetry, tasks_file,
+                            )
+                            # Replace the failed result with the retry result
+                            batch_results = [
+                                retry_result if r.task_key == fkey else r
+                                for r in batch_results
+                            ]
             else:
                 # Serial execution — tasks share the main checkout
                 batch_results: list[TaskResult] = []
