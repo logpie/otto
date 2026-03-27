@@ -281,7 +281,7 @@ async def run_per(
                     batch, context, config, project_dir, telemetry, tasks_file,
                     max_parallel=max_parallel,
                 )
-                # Serial merge phase: cherry-pick verified candidates onto main
+                # Serial merge phase: merge verified candidates onto main
                 if not context.interrupted:
                     batch_results = merge_parallel_results(
                         batch_results, config, project_dir, tasks_file, telemetry,
@@ -294,7 +294,7 @@ async def run_per(
                 if not context.interrupted:
                     merge_failed = [
                         r for r in batch_results
-                        if not r.success and "merge" in (r.error or "").lower()
+                        if not r.success and r.error_code == "merge_failed"
                     ]
                     if merge_failed:
                         console.print(
@@ -314,8 +314,8 @@ async def run_per(
                             try:
                                 update_task(
                                     tasks_file, fkey,
-                                    status="pending", attempts=0,
-                                    error=None, session_id=None,
+                                    status="pending",
+                                    error=None, error_code=None, session_id=None,
                                 )
                             except Exception:
                                 continue
@@ -436,12 +436,12 @@ def merge_parallel_results(
     tasks_file: Path,
     telemetry: Any,
 ) -> list[TaskResult]:
-    """Serial merge phase: cherry-pick verified candidates onto main sequentially.
+    """Serial merge phase: merge verified candidates onto main sequentially.
 
     For each verified task (sorted by task_key for determinism):
-      1. Cherry-pick the candidate ref onto current main HEAD
+      1. Merge the candidate ref onto current main HEAD
       2. If conflict -> mark merge_failed
-      3. Run test suite on the cherry-picked result (post-rebase verification)
+      3. Run test suite on the merged result (post-merge verification)
       4. If tests fail -> mark merge_failed
       5. Fast-forward main to the new commit
       6. Mark task passed
@@ -449,7 +449,7 @@ def merge_parallel_results(
     Returns a new list of TaskResults with updated success/error fields.
     """
     from otto.git_ops import (
-        cherry_pick_candidate,
+        merge_candidate,
         _find_best_candidate_ref,
     )
     from otto.testing import run_test_suite
@@ -510,19 +510,20 @@ def merge_parallel_results(
                 pass
             merged_results.append(TaskResult(
                 task_key=task_key, success=False,
+                error_code="merge_failed",
                 error=error, cost_usd=result.cost_usd,
                 duration_s=result.duration_s,
             ))
             continue
 
-        # Cherry-pick candidate onto a temp branch rooted at the current main
+        # Merge the candidate onto a temp branch rooted at the current main
         # HEAD, but do not fast-forward main until verification passes.
-        success, new_sha = cherry_pick_candidate(
+        success, new_sha = merge_candidate(
             project_dir, candidate_ref, default_branch,
         )
         if not success:
             console.print(f"    [red]\u2717[/red] #{task_key[:8]}  merge conflict")
-            error = "merge_failed: cherry-pick conflict"
+            error = "merge_failed: merge conflict"
             try:
                 update_task(tasks_file, task_key, status="merge_failed",
                             error=error, error_code="merge_conflict")
@@ -534,6 +535,7 @@ def merge_parallel_results(
             ))
             merged_results.append(TaskResult(
                 task_key=task_key, success=False,
+                error_code="merge_failed",
                 error=error, cost_usd=result.cost_usd,
                 duration_s=result.duration_s,
                 diff_summary=result.diff_summary,
@@ -541,7 +543,7 @@ def merge_parallel_results(
             ))
             continue
 
-        # Post-rebase verification: run test suite in a fresh disposable worktree.
+        # Post-merge verification: run test suite in a fresh disposable worktree.
         # This tests the exact commit that will become main HEAD.
         # Strict mode: no "local pass beats worktree fail" heuristic.
         if not config.get("skip_test"):
@@ -553,14 +555,14 @@ def merge_parallel_results(
                 timeout=test_timeout,
             )
             if not test_result.passed:
-                failure_output = test_result.failure_output or "post-rebase tests failed"
+                failure_output = test_result.failure_output or "post-merge tests failed"
                 console.print(
-                    f"    [red]\u2717[/red] #{task_key[:8]}  post-rebase test failure"
+                    f"    [red]\u2717[/red] #{task_key[:8]}  post-merge test failure"
                 )
-                error = f"merge_failed: post-rebase tests failed\n{failure_output[:500]}"
+                error = f"merge_failed: post-merge tests failed\n{failure_output[:500]}"
                 try:
                     update_task(tasks_file, task_key, status="merge_failed",
-                                error=error, error_code="post_rebase_test_fail")
+                                error=error, error_code="post_merge_test_fail")
                 except Exception:
                     pass
                 telemetry.log(TaskFailed(
@@ -569,6 +571,7 @@ def merge_parallel_results(
                 ))
                 merged_results.append(TaskResult(
                     task_key=task_key, success=False,
+                    error_code="merge_failed",
                     error=error, cost_usd=result.cost_usd,
                     duration_s=result.duration_s,
                     diff_summary=result.diff_summary,
@@ -594,6 +597,7 @@ def merge_parallel_results(
             ))
             merged_results.append(TaskResult(
                 task_key=task_key, success=False,
+                error_code="merge_failed",
                 error=error, cost_usd=result.cost_usd,
                 duration_s=result.duration_s,
                 diff_summary=result.diff_summary,

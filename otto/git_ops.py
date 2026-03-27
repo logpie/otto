@@ -447,19 +447,19 @@ def rebase_and_merge(project_dir: Path, task_branch: str, default_branch: str) -
     return False
 
 
-def cherry_pick_candidate(
+def merge_candidate(
     repo_root: Path,
     candidate_ref: str,
     default_branch: str,
 ) -> tuple[bool, str]:
     """Merge a candidate ref onto the current HEAD of default_branch.
 
-    Uses git merge (not cherry-pick) which auto-resolves more conflicts
+    Uses git merge which auto-resolves more conflicts
     like both tasks adding to the same file in different locations.
 
     Returns (success, new_head_sha). On conflict, aborts and returns (False, "").
     The caller is responsible for fast-forwarding default_branch to new_head_sha
-    after post-rebase verification passes.
+    after post-merge verification passes.
     """
     temp_branch = f"otto/_merge_temp_{candidate_ref.replace('/', '_')}"
 
@@ -488,7 +488,7 @@ def cherry_pick_candidate(
         cwd=repo_root, capture_output=True, check=True,
     )
 
-    # Merge the candidate (not cherry-pick — handles concurrent additions better)
+    # Merge the candidate and preserve concurrent additions when possible.
     merge = subprocess.run(
         ["git", "merge", "--no-edit", candidate_sha],
         cwd=repo_root, capture_output=True, text=True,

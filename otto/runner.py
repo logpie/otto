@@ -451,6 +451,7 @@ async def coding_loop(
         return TaskResult(
             task_key=task_key, success=False,
             cost_usd=cost, error=error,
+            error_code=result.get("error_code"),
             duration_s=duration,
             qa_report=result.get("qa_report", ""),
             diff_summary=result.get("diff_summary", ""),
@@ -1463,7 +1464,7 @@ async def run_task_v45(
         prep_start = time.monotonic()
 
         if tasks_file:
-            update_task(tasks_file, key, status="running", attempts=0, review_ref=None)
+            update_task(tasks_file, key, status="running", review_ref=None)
 
         if is_parallel:
             # Parallel mode: worktree is already at base_sha (detached HEAD).

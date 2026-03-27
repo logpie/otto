@@ -19,6 +19,7 @@ from otto.orchestrator import (
     run_per,
 )
 from otto.planner import Batch, ExecutionPlan, TaskPlan
+from otto.tasks import load_tasks, update_task
 from otto.telemetry import Telemetry
 
 
@@ -124,6 +125,83 @@ class TestRunPerIntegration:
         assert exit_code == 1
 
     @pytest.mark.asyncio
+    async def test_parallel_merge_retry_uses_error_code_and_preserves_attempts(self, tmp_git_repo):
+        """Merge retries should use structured TaskResult codes and keep prior attempts."""
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        tasks_path.write_text(yaml.dump({"tasks": [
+            {
+                "id": 1,
+                "key": "task-merge",
+                "prompt": "Retry merge task",
+                "status": "pending",
+                "attempts": 2,
+            },
+            {
+                "id": 2,
+                "key": "task-pass",
+                "prompt": "Pass task",
+                "status": "pending",
+            },
+        ]}))
+
+        config = self._make_config(tmp_git_repo)
+        execution_plan = ExecutionPlan(batches=[Batch(tasks=[
+            TaskPlan(task_key="task-merge"),
+            TaskPlan(task_key="task-pass"),
+        ])])
+
+        def fake_preflight_checks(*args, **kwargs):
+            return None, load_tasks(tasks_path)
+
+        async def fake_run_batch_parallel(*args, **kwargs):
+            return [
+                TaskResult(task_key="task-merge", success=True),
+                TaskResult(task_key="task-pass", success=True),
+            ]
+
+        def fake_merge_parallel_results(results, config, project_dir, task_file, telemetry):
+            update_task(
+                task_file,
+                "task-merge",
+                status="merge_failed",
+                error="merge conflict",
+                error_code="merge_conflict",
+            )
+            update_task(task_file, "task-pass", status="passed")
+            return [
+                TaskResult(
+                    task_key="task-merge",
+                    success=False,
+                    error="merge conflict",
+                    error_code="merge_failed",
+                ),
+                TaskResult(task_key="task-pass", success=True),
+            ]
+
+        rerun_calls: list[str] = []
+
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None):
+            rerun_calls.append(task_plan.task_key)
+            task = next(t for t in load_tasks(task_file) if t.get("key") == task_plan.task_key)
+            assert task["status"] == "pending"
+            assert task["attempts"] == 2
+            assert task.get("error_code") is None
+            update_task(task_file, task_plan.task_key, status="passed")
+            return TaskResult(task_key=task_plan.task_key, success=True)
+
+        with patch("otto.orchestrator.preflight_checks", side_effect=fake_preflight_checks):
+            with patch("otto.orchestrator.plan", new=AsyncMock(return_value=execution_plan)):
+                with patch("otto.orchestrator._run_batch_parallel", side_effect=fake_run_batch_parallel):
+                    with patch("otto.orchestrator.merge_parallel_results", side_effect=fake_merge_parallel_results):
+                        with patch("otto.orchestrator.coding_loop", side_effect=fake_coding_loop):
+                            with patch("otto.orchestrator._print_summary"):
+                                with patch("otto.orchestrator._record_run_history"):
+                                    exit_code = await run_per(config, tasks_path, tmp_git_repo)
+
+        assert exit_code == 0
+        assert rerun_calls == ["task-merge"]
+
+    @pytest.mark.asyncio
     async def test_signal_sets_interrupted(self, tmp_git_repo):
         """Context.interrupted should be set by signal handler."""
         context = PipelineContext()
@@ -176,7 +254,7 @@ class TestRunPerIntegration:
         """With max_parallel>1 and multiple tasks, tasks run in parallel with worktrees.
 
         The mock coding_loop creates a real commit in the worktree and anchors
-        it as a candidate ref, so the serial merge phase can cherry-pick it.
+        it as a candidate ref, so the serial merge phase can merge it.
         """
         import yaml
         from otto.git_ops import _anchor_candidate_ref
@@ -188,7 +266,7 @@ class TestRunPerIntegration:
 
         config = self._make_config(tmp_git_repo)
         config["max_parallel"] = 2
-        config["skip_test"] = True  # skip post-rebase verification for unit test speed
+        config["skip_test"] = True  # skip post-merge verification for unit test speed
         execution_plan = ExecutionPlan(batches=[
             Batch(tasks=[TaskPlan(task_key="task-one"), TaskPlan(task_key="task-two")]),
         ])
@@ -199,7 +277,7 @@ class TestRunPerIntegration:
             executed_keys.append(task_plan.task_key)
             if task_work_dir:
                 received_work_dirs[task_plan.task_key] = str(task_work_dir)
-                # Create a real commit in the worktree so the merge phase has something to cherry-pick
+                # Create a real commit in the worktree so the merge phase has something to merge
                 filename = f"{task_plan.task_key}.txt"
                 (task_work_dir / filename).write_text(f"content for {task_plan.task_key}\n")
                 subprocess.run(["git", "add", filename], cwd=task_work_dir, capture_output=True, check=True)
@@ -345,7 +423,7 @@ class TestMergeParallelResults:
             "default_branch": "main",
             "max_retries": 1,
             "verify_timeout": 60,
-            "skip_test": True,  # skip post-rebase verification for unit tests
+            "skip_test": True,  # skip post-merge verification for unit tests
         }
 
     def _create_candidate_commit(self, repo, task_key, filename, content):
@@ -424,6 +502,7 @@ class TestMergeParallelResults:
         assert len(failed) == 1
         assert passed[0].task_key == "task-aaa"
         assert failed[0].task_key == "task-bbb"
+        assert failed[0].error_code == "merge_failed"
         assert "conflict" in (failed[0].error or "").lower()
 
     def test_failed_tasks_carried_through(self, tmp_git_repo):
@@ -482,18 +561,18 @@ class TestMergeParallelResults:
         telemetry = Telemetry(log_dir)
         results = [TaskResult(task_key="task-pass", success=True)]
 
-        with patch("otto.git_ops.cherry_pick_candidate") as cherry_pick_mock:
+        with patch("otto.git_ops.merge_candidate") as merge_candidate_mock:
             merged = merge_parallel_results(results, self._make_config(), tmp_git_repo, tasks_path, telemetry)
 
         assert merged == results
-        cherry_pick_mock.assert_not_called()
+        merge_candidate_mock.assert_not_called()
 
-    def test_post_rebase_test_failure(self, tmp_git_repo):
-        """Post-rebase test failure should mark task as merge_failed and revert."""
+    def test_post_merge_test_failure(self, tmp_git_repo):
+        """Post-merge test failure should mark task as merge_failed and revert."""
         from otto.testing import TestSuiteResult, TierResult
         tasks_path = tmp_git_repo / "tasks.yaml"
         tasks_path.write_text(yaml.dump({"tasks": [
-            {"id": 1, "key": "task-fail", "prompt": "Fails post-rebase", "status": "verified"},
+            {"id": 1, "key": "task-fail", "prompt": "Fails post-merge verification", "status": "verified"},
         ]}))
         log_dir = tmp_git_repo / "otto_logs"
         log_dir.mkdir(exist_ok=True)
@@ -509,7 +588,7 @@ class TestMergeParallelResults:
 
         results = [TaskResult(task_key="task-fail", success=True)]
         config = self._make_config()
-        config["skip_test"] = False  # enable post-rebase verification
+        config["skip_test"] = False  # enable post-merge verification
 
         # Mock run_test_suite to return failure
         failed_suite = TestSuiteResult(
@@ -521,16 +600,17 @@ class TestMergeParallelResults:
 
         assert len(merged) == 1
         assert not merged[0].success
-        assert "post-rebase" in (merged[0].error or "").lower()
+        assert merged[0].error_code == "merge_failed"
+        assert "post-merge" in (merged[0].error or "").lower()
 
-        # Main should be reverted to where it was before
+        # Main should remain at the original HEAD after the failed verification
         head_after = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             cwd=tmp_git_repo, capture_output=True, text=True, check=True,
         ).stdout.strip()
         assert head_after == head_before
 
-    def test_post_rebase_verification_uses_task_verify_command(self, tmp_git_repo):
+    def test_post_merge_verification_uses_task_verify_command(self, tmp_git_repo):
         """Merge verification should forward each task's custom verify command."""
         from otto.testing import TestSuiteResult, TierResult
         tasks_path = tmp_git_repo / "tasks.yaml"
@@ -589,12 +669,12 @@ class TestMergeParallelResults:
         assert status_updates.index("merge_pending") < status_updates.index("passed")
 
 
-class TestCherryPickCandidate:
-    """Tests for cherry_pick_candidate git operation."""
+class TestMergeCandidate:
+    """Tests for merge_candidate git operation."""
 
-    def test_clean_cherry_pick(self, tmp_git_repo):
-        """Cherry-pick a candidate ref onto main with no conflicts."""
-        from otto.git_ops import cherry_pick_candidate, _anchor_candidate_ref
+    def test_clean_merge(self, tmp_git_repo):
+        """Merge a candidate ref onto a temp branch with no conflicts."""
+        from otto.git_ops import merge_candidate, _anchor_candidate_ref
 
         # Create a candidate commit
         (tmp_git_repo / "new_file.txt").write_text("hello\n")
@@ -607,7 +687,7 @@ class TestCherryPickCandidate:
         subprocess.run(["git", "reset", "--hard", "HEAD~1"], cwd=tmp_git_repo, capture_output=True)
         _anchor_candidate_ref(tmp_git_repo, "test-task", 1, sha)
 
-        success, new_sha = cherry_pick_candidate(
+        success, new_sha = merge_candidate(
             tmp_git_repo, f"refs/otto/candidates/test-task/attempt-1", "main",
         )
         assert success
@@ -619,9 +699,9 @@ class TestCherryPickCandidate:
         ).stdout.strip()
         assert head != new_sha
 
-    def test_conflict_returns_false(self, tmp_git_repo):
-        """Cherry-pick with conflict should return (False, '') and leave main clean."""
-        from otto.git_ops import cherry_pick_candidate, _anchor_candidate_ref
+    def test_merge_conflict_returns_false(self, tmp_git_repo):
+        """Merge conflict should return (False, '') and leave main clean."""
+        from otto.git_ops import merge_candidate, _anchor_candidate_ref
 
         # Create a file on main
         (tmp_git_repo / "shared.txt").write_text("main content\n")
@@ -644,7 +724,7 @@ class TestCherryPickCandidate:
         subprocess.run(["git", "checkout", "main"], cwd=tmp_git_repo, capture_output=True)
         _anchor_candidate_ref(tmp_git_repo, "conflict-task", 1, candidate_sha)
 
-        success, new_sha = cherry_pick_candidate(
+        success, new_sha = merge_candidate(
             tmp_git_repo, "refs/otto/candidates/conflict-task/attempt-1", "main",
         )
         assert not success

@@ -16,6 +16,7 @@ class TaskResult:
     worktree: Path | None = None
     cost_usd: float = 0.0
     error: str | None = None
+    error_code: str | None = None
     qa_report: str = ""
     diff_summary: str = ""
     duration_s: float = 0.0
