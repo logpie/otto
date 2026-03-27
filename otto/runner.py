@@ -222,7 +222,7 @@ def preflight_checks(
     exclude_path = git_meta_dir(project_dir) / "info" / "exclude"
     exclude_path.parent.mkdir(parents=True, exist_ok=True)
     existing_exclude = exclude_path.read_text() if exclude_path.exists() else ""
-    otto_excludes = ["otto_logs/", "otto_arch/", ".otto-scratch/", "tasks.yaml", ".tasks.lock"]
+    otto_excludes = ["otto_logs/", "otto_arch/", ".otto-scratch/", ".otto-worktrees/", "tasks.yaml", ".tasks.lock"]
     missing_excludes = [e for e in otto_excludes if e not in existing_exclude]
     if missing_excludes:
         with open(exclude_path, "a") as f:
@@ -233,13 +233,15 @@ def preflight_checks(
     # Baseline check moved to run_task_v45() — runs after branch creation
     # with auto-detected test command for consistent results.
 
-    # Recover stale "running" tasks
+    # Recover stale "running", "verified", "merge_pending" tasks
+    # These states are transient — if we're starting fresh, something crashed
     tasks = load_tasks(tasks_file)
+    _stale_states = {"running", "verified", "merge_pending"}
     for t in tasks:
-        if t.get("status") == "running":
+        if t.get("status") in _stale_states:
             update_task(tasks_file, t["key"], status="pending",
                         error=None, session_id=None)
-            console.print(f"  [yellow]Warning: Task #{t['id']} was stuck in 'running' -- reset to pending[/yellow]")
+            console.print(f"  [yellow]Warning: Task #{t['id']} was stuck in '{t['status']}' -- reset to pending[/yellow]")
 
     tasks = load_tasks(tasks_file)
     pending = [t for t in tasks if t.get("status") == "pending"]
@@ -261,13 +263,21 @@ async def coding_loop(
     project_dir: Path,
     telemetry: Any,  # otto.telemetry.Telemetry
     tasks_file: Path | None = None,
+    task_work_dir: Path | None = None,
 ) -> Any:  # otto.context.TaskResult
     """v4 coding loop — run a single task through the v4.5 execution path.
 
     Passes an on_progress callback to run_task_v45() so phase events flow
     through the telemetry dual-write (legacy pilot_results.jsonl).
     Emits TaskMerged/TaskFailed at the actual completion time (not deferred).
+
+    Args:
+        project_dir: repo root — for git ops, config, logs.
+        task_work_dir: where the coding agent works. Defaults to project_dir
+            (serial mode). In parallel mode, this is a git worktree.
     """
+    if task_work_dir is None:
+        task_work_dir = project_dir
     from otto.context import TaskResult
     from otto.telemetry import AgentToolCall, TaskFailed, TaskMerged, TaskStarted
 
@@ -365,6 +375,7 @@ async def coding_loop(
         result = await run_task_v45(
             task, config, project_dir, tasks_file,
             context=context, on_progress=_on_progress,
+            task_work_dir=task_work_dir,
         )
 
         duration = time.monotonic() - task_start
@@ -374,7 +385,7 @@ async def coding_loop(
         if result.get("success"):
             commit_sha = subprocess.run(
                 ["git", "rev-parse", "HEAD"],
-                cwd=project_dir, capture_output=True, text=True,
+                cwd=task_work_dir, capture_output=True, text=True,
             ).stdout.strip()
 
             # Print task result — same indentation level as phase completions
@@ -1229,6 +1240,7 @@ async def run_task_v45(
     tasks_file: Path | None,
     context: Any | None = None,  # PipelineContext
     on_progress: Any | None = None,
+    task_work_dir: Path | None = None,
 ) -> dict[str, Any]:
     """v4.5 per-task execution loop — bare CC + parallel spec gen + verify + QA.
 
@@ -1240,9 +1252,16 @@ async def run_task_v45(
     - Durable candidate refs (never discard verified code)
     - Session resume on retry
 
+    Args:
+        project_dir: repo root — for git ops, config, logs, tasks.yaml.
+        task_work_dir: where the coding agent works. Defaults to project_dir
+            (serial mode). In parallel mode, this is a per-task git worktree.
+
     Returns {success, status, cost_usd, error, diff_summary, qa_report,
              phase_timings, review_ref}.
     """
+    if task_work_dir is None:
+        task_work_dir = project_dir
     from otto.spec import async_generate_spec  # noqa: F401 — kept for backward compat
 
     key = task["key"]
@@ -1273,8 +1292,8 @@ async def run_task_v45(
     spec_generation_error = ""
     _result_error_code_unset = object()
 
-    # Live state for otto status -w
-    _live_state_file = project_dir / "otto_logs" / "live-state.json"
+    # Live state for otto status -w — per-task file under otto_logs/{key}/
+    _live_state_file = project_dir / "otto_logs" / key / "live-state.json"
     _live_phases: dict[str, dict] = {
         p: {"status": "pending", "time_s": 0.0}
         for p in ["prepare", "spec_gen", "coding", "test", "qa", "merge"]
@@ -1429,14 +1448,14 @@ async def run_task_v45(
         if tasks_file:
             update_task(tasks_file, key, status="running", attempts=0, review_ref=None)
 
-        base_sha = create_task_branch(project_dir, key, default_branch, task=task)
-        pre_existing_untracked = _snapshot_untracked(project_dir)
+        base_sha = create_task_branch(task_work_dir, key, default_branch, task=task)
+        pre_existing_untracked = _snapshot_untracked(task_work_dir)
 
         log_dir = project_dir / "otto_logs" / key
         log_dir.mkdir(parents=True, exist_ok=True)
 
         # Create scratch area for ephemeral test verification
-        scratch_dir = project_dir / ".otto-scratch"
+        scratch_dir = task_work_dir / ".otto-scratch"
         scratch_dir.mkdir(exist_ok=True)
 
         custom_test_cmd = task.get("verify")
@@ -1445,14 +1464,14 @@ async def run_task_v45(
         if "test_command" in config:
             test_command = config["test_command"]  # respect explicit null
         else:
-            test_command = detect_test_command(project_dir)
+            test_command = detect_test_command(task_work_dir)
 
         # Baseline test check
         baseline_detail = ""
         baseline_failures: set[str] = set()
         if test_command:
             from otto.testing import run_local_tests
-            baseline = run_local_tests(project_dir, test_command, test_timeout)
+            baseline = run_local_tests(task_work_dir, test_command, test_timeout)
             if baseline.output:
                 baseline_failures = extract_failing_tests(baseline.output)
             if not baseline.passed and not baseline.skipped:
@@ -1469,7 +1488,7 @@ async def run_task_v45(
                     emit("phase", name="prepare", status="fail", time_s=prep_elapsed,
                          error="baseline tests fail — infrastructure issue")
                     _cleanup_task_failure(
-                        project_dir, key, default_branch, tasks_file,
+                        task_work_dir, key, default_branch, tasks_file,
                         pre_existing_untracked=pre_existing_untracked,
                         error=f"BASELINE_FAIL: {output[-500:]}",
                         error_code="baseline_fail",
@@ -1495,7 +1514,7 @@ async def run_task_v45(
             await _cancel_spec_task()
             error = f"max retries already exhausted ({prior_attempts} prior)"
             _cleanup_task_failure(
-                project_dir, key, default_branch, tasks_file,
+                task_work_dir, key, default_branch, tasks_file,
                 pre_existing_untracked=pre_existing_untracked,
                 error=error,
                 error_code="max_retries",
@@ -1515,7 +1534,7 @@ async def run_task_v45(
             def _run_spec_gen_thread():
                 nonlocal _spec_finish_time
                 try:
-                    result = generate_spec_sync(prompt, project_dir, setting_sources=_spec_settings)
+                    result = generate_spec_sync(prompt, task_work_dir, setting_sources=_spec_settings, log_dir=log_dir)
                     _spec_finish_time = time.monotonic()
                     return result
                 except Exception as exc:
@@ -1543,7 +1562,7 @@ async def run_task_v45(
                 await _cancel_spec_task()
                 error = f"time budget exceeded ({int(elapsed)}s)"
                 _cleanup_task_failure(
-                    project_dir, key, default_branch, tasks_file,
+                    task_work_dir, key, default_branch, tasks_file,
                     pre_existing_untracked=pre_existing_untracked,
                     error=error,
                     error_code="time_budget_exceeded",
@@ -1562,7 +1581,7 @@ async def run_task_v45(
             # ── Coding ──────────────────────────────────────────────────
             feedback = task.get("feedback", "")
             coding_prompt = _build_coding_prompt(
-                prompt, project_dir,
+                prompt, task_work_dir,
                 attempt=attempt,
                 last_error=last_error,
                 last_error_source=last_error_source,
@@ -1581,7 +1600,7 @@ async def run_task_v45(
             coding_start = time.monotonic()
             try:
                 new_session_id, result_msg, agent_log_lines = await _run_coding_agent(
-                    coding_prompt, config, project_dir,
+                    coding_prompt, config, task_work_dir,
                     session_id=session_id,
                     emit=emit,
                     log_dir=log_dir,
@@ -1606,7 +1625,7 @@ async def run_task_v45(
                 emit("phase", name="coding", status="fail", time_s=coding_elapsed,
                      error=str(e)[:80], attempt=attempt_num)
                 _restore_workspace_state(
-                    project_dir,
+                    task_work_dir,
                     reset_ref=base_sha,
                     pre_existing_untracked=pre_existing_untracked,
                 )
@@ -1616,12 +1635,12 @@ async def run_task_v45(
 
             # ── Check for changes ───────────────────────────────────────
             no_changes, _ = _check_agent_changes(
-                project_dir, base_sha, pre_existing_untracked,
+                task_work_dir, base_sha, pre_existing_untracked,
             )
 
             if no_changes:
                 nc_result = await _handle_no_changes(
-                    task, config, project_dir,
+                    task, config, task_work_dir,
                     prompt=prompt,
                     spec=spec,
                     spec_task=spec_task,
@@ -1655,17 +1674,17 @@ async def run_task_v45(
 
             # ── Build candidate + verify ────────────────────────────────
             candidate_sha = build_candidate_commit(
-                project_dir, base_sha, pre_existing_untracked,
+                task_work_dir, base_sha, pre_existing_untracked,
             )
 
             # Re-detect test command
             if not config.get("test_command"):
-                detected = detect_test_command(project_dir)
+                detected = detect_test_command(task_work_dir)
                 if detected:
                     test_command = detected
 
             # PRE-TEST: quick sanity check in the working directory
-            pre_test = None if config.get("skip_test") else _run_pre_test(project_dir, test_command, test_timeout)
+            pre_test = None if config.get("skip_test") else _run_pre_test(task_work_dir, test_command, test_timeout)
             if pre_test and not pre_test.passed and not pre_test.skipped:
                 # Check if failures are only pre-existing (flaky) baseline failures
                 current_failures = extract_failing_tests(pre_test.output or "")
@@ -1679,7 +1698,7 @@ async def run_task_v45(
                     last_error_source = "test"
                     subprocess.run(
                         ["git", "reset", "--mixed", base_sha],
-                        cwd=project_dir, capture_output=True,
+                        cwd=task_work_dir, capture_output=True,
                     )
                     continue
 
@@ -1694,7 +1713,7 @@ async def run_task_v45(
             else:
                 emit("phase", name="test", status="running")
                 test_result, test_elapsed, test_detail = _run_full_test_suite(
-                    project_dir, candidate_sha, test_command, custom_test_cmd,
+                    task_work_dir, candidate_sha, test_command, custom_test_cmd,
                     test_timeout, log_dir, attempt_num,
                 )
             phase_timings["test"] = phase_timings.get("test", 0) + test_elapsed
@@ -1710,7 +1729,7 @@ async def run_task_v45(
                          error=(test_result.failure_output or "")[:80], detail=test_detail)
                     subprocess.run(
                         ["git", "reset", "--mixed", base_sha],
-                        cwd=project_dir, capture_output=True,
+                        cwd=task_work_dir, capture_output=True,
                     )
                     last_error = build_retry_excerpt(test_result.failure_output or "")
                     last_error_source = "test"
@@ -1721,18 +1740,18 @@ async def run_task_v45(
                      detail=test_detail)
 
             # ANCHOR verified candidate as durable git ref
-            ref_name = _anchor_candidate_ref(project_dir, key, attempt_num, candidate_sha)
+            ref_name = _anchor_candidate_ref(task_work_dir, key, attempt_num, candidate_sha)
             emit("phase", name="candidate", status="done", detail=ref_name)
 
             # ── Squash + diff ───────────────────────────────────────────
             try:
                 diff_summary = _squash_and_commit(
-                    project_dir, base_sha, prompt, task_id,
+                    task_work_dir, base_sha, prompt, task_id,
                 )
             except (subprocess.CalledProcessError, Exception) as e:
                 stderr = getattr(e, "stderr", str(e))
                 _cleanup_task_failure(
-                    project_dir, key, default_branch, tasks_file,
+                    task_work_dir, key, default_branch, tasks_file,
                     pre_existing_untracked=pre_existing_untracked,
                     error=f"squash commit failed: {stderr}",
                     error_code="internal_error",
@@ -1741,7 +1760,7 @@ async def run_task_v45(
                 )
                 return _result(False, "failed", error=f"squash commit failed: {stderr}")
 
-            diff_info = _get_diff_info(project_dir, base_sha)
+            diff_info = _get_diff_info(task_work_dir, base_sha)
 
             _write_log_safe(log_dir, "verify.log", "PASSED")
 
@@ -1771,7 +1790,7 @@ async def run_task_v45(
                     await _await_spec_task()
 
                 qa_out = await _run_qa(
-                    task, config, project_dir,
+                    task, config, task_work_dir,
                     prompt=prompt,
                     spec=spec,
                     spec_generation_error=spec_generation_error,
@@ -1790,7 +1809,7 @@ async def run_task_v45(
                     # Reset for retry — send structured failure info
                     subprocess.run(
                         ["git", "reset", "--mixed", base_sha],
-                        cwd=project_dir, capture_output=True,
+                        cwd=task_work_dir, capture_output=True,
                     )
                     failed_musts = qa_out["failed_musts"]
                     if failed_musts:
@@ -1803,7 +1822,7 @@ async def run_task_v45(
 
             # ── Restore workspace before merge ──────────────────────────
             _restore_workspace_state(
-                project_dir,
+                task_work_dir,
                 reset_ref=candidate_sha,
                 pre_existing_untracked=pre_existing_untracked,
             )
@@ -1812,7 +1831,7 @@ async def run_task_v45(
             # verified candidate before merge so the branch HEAD matches the
             # exact state that passed testing.
             _restore_workspace_state(
-                project_dir,
+                task_work_dir,
                 reset_ref=candidate_sha,
                 pre_existing_untracked=pre_existing_untracked,
             )
@@ -1823,18 +1842,18 @@ async def run_task_v45(
             # ── Merge ───────────────────────────────────────────────────
             emit("phase", name="merge", status="running")
             merge_start = time.monotonic()
-            if merge_to_default(project_dir, key, default_branch):
+            if merge_to_default(task_work_dir, key, default_branch):
                 merge_elapsed = round(time.monotonic() - merge_start, 1)
                 phase_timings["merge"] = merge_elapsed
                 emit("phase", name="merge", status="done", time_s=merge_elapsed)
-                testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / key
+                testgen_dir = git_meta_dir(task_work_dir) / "otto" / "testgen" / key
                 if testgen_dir.exists():
                     shutil.rmtree(testgen_dir, ignore_errors=True)
                 # Append commit SHA to proof report
                 try:
                     commit_sha = subprocess.run(
                         ["git", "rev-parse", "HEAD"],
-                        cwd=project_dir, capture_output=True, text=True,
+                        cwd=task_work_dir, capture_output=True, text=True,
                     ).stdout.strip()
                     proof_report_path = log_dir / "qa-proofs" / "proof-report.md"
                     if proof_report_path.exists() and commit_sha:
@@ -1856,10 +1875,10 @@ async def run_task_v45(
 
         # All retries exhausted — find best verified candidate
         await _cancel_spec_task()
-        best_ref = _find_best_candidate_ref(project_dir, key)
+        best_ref = _find_best_candidate_ref(task_work_dir, key)
         last_err_detail = f"\nLast error:\n{last_error}" if last_error else ""
         _cleanup_task_failure(
-            project_dir, key, default_branch, tasks_file,
+            task_work_dir, key, default_branch, tasks_file,
             pre_existing_untracked=pre_existing_untracked,
             error=f"max retries exhausted{last_err_detail}", error_code="max_retries",
             cost_usd=total_cost,
@@ -1876,7 +1895,7 @@ async def run_task_v45(
         await _cancel_spec_task()
         try:
             _cleanup_task_failure(
-                project_dir, key, default_branch, tasks_file,
+                task_work_dir, key, default_branch, tasks_file,
                 pre_existing_untracked=pre_existing_untracked,
                 error=f"unexpected error: {e}", error_code="internal_error",
                 cost_usd=total_cost,

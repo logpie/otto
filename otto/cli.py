@@ -519,9 +519,9 @@ def retry(task_id, feedback, force):
     tasks = load_tasks(tasks_path)
     for t in tasks:
         if t.get("id") == task_id:
-            if not force and t.get("status") != "failed":
+            if not force and t.get("status") not in ("failed", "merge_failed"):
                 error_console.print(
-                    f"Task #{task_id} is '{t.get('status')}', not 'failed'. Use --force to override.", style="error"
+                    f"Task #{task_id} is '{t.get('status')}', not 'failed'/'merge_failed'. Use --force to override.", style="error"
                 )
                 sys.exit(1)
             # Warn if retrying a task whose code is already merged to main
@@ -590,8 +590,8 @@ def drop(task_id, drop_all, yes):
         sys.exit(1)
 
     task_status = target.get("status", "pending")
-    if task_status == "running":
-        error_console.print(f"[error]\u2717[/error] Cannot drop a running task. Wait for it to finish or retry.")
+    if task_status in ("running", "merge_pending"):
+        error_console.print(f"[error]\u2717[/error] Cannot drop a {task_status} task. Wait for it to finish or retry.")
         sys.exit(1)
     if task_status == "passed":
         console.print(f"[warning]\u26a0[/warning] This only removes task [bold]#{task_id}[/bold] from the queue. "
@@ -734,8 +734,8 @@ def _revert_one(task_id: int, yes: bool) -> None:
         error_console.print(f"Task #{task_id} not found", style="error")
         sys.exit(1)
 
-    if target.get("status") == "running":
-        error_console.print(f"[error]\u2717[/error] Cannot revert a running task.", style="error")
+    if target.get("status") in ("running", "merge_pending"):
+        error_console.print(f"[error]\u2717[/error] Cannot revert a {target.get('status')} task.", style="error")
         sys.exit(1)
 
     # Find the commit for this task

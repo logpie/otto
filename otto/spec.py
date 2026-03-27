@@ -102,34 +102,37 @@ def _parse_spec_output(text: str) -> list:
     return items
 
 
-def generate_spec(prompt: str, project_dir: Path, setting_sources: list[str] | None = None) -> list:
+def generate_spec(prompt: str, project_dir: Path, setting_sources: list[str] | None = None, log_dir: Path | None = None) -> list:
     """Generate a spec for a single task using an agentic QA engineer.
 
     Returns a list of spec items (dicts with text/verifiable),
     or empty list on failure.
     """
-    spec, _cost, _error = asyncio.run(_run_spec_agent(prompt, project_dir, setting_sources=setting_sources))
+    spec, _cost, _error = asyncio.run(_run_spec_agent(prompt, project_dir, setting_sources=setting_sources, log_dir=log_dir))
     return spec
 
 
-def generate_spec_sync(prompt: str, project_dir: Path, setting_sources: list[str] | None = None) -> tuple[list, float, str | None]:
+def generate_spec_sync(prompt: str, project_dir: Path, setting_sources: list[str] | None = None, log_dir: Path | None = None) -> tuple[list, float, str | None]:
     """Sync version returning full (spec_items, cost, error) tuple.
 
     Safe to call from asyncio.to_thread() — creates its own event loop.
     """
-    return asyncio.run(_run_spec_agent(prompt, project_dir, setting_sources=setting_sources))
+    return asyncio.run(_run_spec_agent(prompt, project_dir, setting_sources=setting_sources, log_dir=log_dir))
 
 
-async def async_generate_spec(prompt: str, project_dir: Path, setting_sources: list[str] | None = None) -> tuple[list, float, str | None]:
+async def async_generate_spec(prompt: str, project_dir: Path, setting_sources: list[str] | None = None, log_dir: Path | None = None) -> tuple[list, float, str | None]:
     """Async version of generate_spec. Returns (spec_items, cost, error)."""
-    return await _run_spec_agent(prompt, project_dir, setting_sources=setting_sources)
+    return await _run_spec_agent(prompt, project_dir, setting_sources=setting_sources, log_dir=log_dir)
 
 
-async def _run_spec_agent(prompt: str, project_dir: Path, setting_sources: list[str] | None = None) -> tuple[list, float, str | None]:
+async def _run_spec_agent(prompt: str, project_dir: Path, setting_sources: list[str] | None = None, log_dir: Path | None = None) -> tuple[list, float, str | None]:
     """Run the spec generation agent.
 
     Uses a structured system prompt for constraint faithfulness,
     with a compliance self-check step before output.
+
+    If log_dir is provided, spec-agent.log is written there (per-task).
+    Otherwise falls back to otto_logs/spec-agent.log (legacy).
     """
     with tempfile.NamedTemporaryFile(suffix=".txt", prefix="otto_spec_", delete=False) as temp_file:
         spec_file = Path(temp_file.name)
@@ -191,9 +194,9 @@ Instructions:
 Write acceptance criteria to: {spec_file}
 Write only [must]/[should] criteria lines to the file — no headings, notes, or prose."""
 
-    # Persistent log for debugging
-    log_dir = project_dir / "otto_logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
+    # Persistent log for debugging — per-task log_dir when available
+    spec_log_dir = log_dir if log_dir else (project_dir / "otto_logs")
+    spec_log_dir.mkdir(parents=True, exist_ok=True)
     log_lines: list[str] = []
 
     spec_cost = 0.0
@@ -247,13 +250,13 @@ Write only [must]/[should] criteria lines to the file — no headings, notes, or
         error_msg = str(e)
         print(f"  spec agent error: {error_msg}", flush=True)
         log_lines.append(f"ERROR: {error_msg}")
-        _write_log(log_dir / "spec-agent.log", log_lines)
+        _write_log(spec_log_dir / "spec-agent.log", log_lines)
         # Clean up temp file on error path
         if spec_file.exists():
             spec_file.unlink(missing_ok=True)
         return [], spec_cost, error_msg
 
-    _write_log(log_dir / "spec-agent.log", log_lines)
+    _write_log(spec_log_dir / "spec-agent.log", log_lines)
 
     # Read the spec file
     if spec_file.exists():
@@ -266,7 +269,7 @@ Write only [must]/[should] criteria lines to the file — no headings, notes, or
     error_msg = "Spec agent did not write the output file"
     print(f"  spec agent error: {error_msg}", flush=True)
     log_lines.append(f"ERROR: {error_msg}")
-    _write_log(log_dir / "spec-agent.log", log_lines)
+    _write_log(spec_log_dir / "spec-agent.log", log_lines)
     return [], spec_cost, error_msg
 
 

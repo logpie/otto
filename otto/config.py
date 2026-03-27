@@ -11,6 +11,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Core
     "default_branch": "main",
     "max_retries": 3,
+    "max_parallel": 1,              # 0 or 1 = serial (default); >1 = parallel tasks per batch
     "test_command": None,           # auto-detected if not set
     "model": None,                  # override Claude model (e.g. sonnet)
 
@@ -276,6 +277,8 @@ def create_config(project_dir: Path) -> Path:
     config_path = project_dir / "otto.yaml"
     lines = yaml.dump(config, default_flow_style=False, sort_keys=False).rstrip()
     lines += "\n"
+    lines += "\n# Parallelism:\n"
+    lines += f"# max_parallel: 1                # 0 or 1 = serial (default); >1 = parallel tasks per batch\n"
     lines += "\n# Timeouts:\n"
     lines += f"# verify_timeout: 300            # seconds for test suite in verify\n"
     lines += f"# max_task_time: 3600            # 1hr circuit breaker per task\n"
@@ -298,7 +301,7 @@ def create_config(project_dir: Path) -> Path:
     exclude_path = git_meta_dir(project_dir) / "info" / "exclude"
     exclude_path.parent.mkdir(parents=True, exist_ok=True)
     existing = exclude_path.read_text() if exclude_path.exists() else ""
-    entries = ["tasks.yaml", ".tasks.lock", "otto_logs/", "otto.lock", "otto_arch/", ".otto-scratch/"]
+    entries = ["tasks.yaml", ".tasks.lock", "otto_logs/", "otto.lock", "otto_arch/", ".otto-scratch/", ".otto-worktrees/"]
     to_add = [e for e in entries if e not in existing]
     if to_add:
         with open(exclude_path, "a") as f:

@@ -1040,8 +1040,11 @@ def build_status_table(tasks: list[dict], show_phase: bool = False):
         "passed": "[green]\u2713[/green]",
         "failed": "[red]\u2717[/red]",
         "blocked": "[red]\u2717[/red]",
+        "merge_failed": "[red]\u2717[/red]",
         "running": "[cyan]\u25cf[/cyan]",
         "pending": "[dim]\u25cb[/dim]",
+        "verified": "[blue]\u25c9[/blue]",
+        "merge_pending": "[blue]\u25c9[/blue]",
     }
 
     _SEP = " \u00b7 "  # middle dot separator for detail lines
@@ -1061,16 +1064,16 @@ def build_status_table(tasks: list[dict], show_phase: bool = False):
         # Line 1: icon + id + prompt
         if status_str in ("passed",):
             lines.append(f"  {icon} [bold]#{task_id}[/bold]  {rich_escape(prompt_text)}")
-        elif status_str in ("failed", "blocked"):
+        elif status_str in ("failed", "blocked", "merge_failed"):
             lines.append(f"  {icon} [bold]#{task_id}[/bold]  {rich_escape(prompt_text)}")
-        elif status_str == "running":
+        elif status_str in ("running", "verified", "merge_pending"):
             lines.append(f"  {icon} [bold]#{task_id}[/bold]  {rich_escape(prompt_text)}")
         else:
             lines.append(f"  {icon} [dim]#{task_id}[/dim]  [dim]{rich_escape(prompt_text)}[/dim]")
 
         # Line 2: detail line (status-dependent, colorized key info)
         detail_parts: list[str] = []
-        if status_str in ("passed", "failed", "blocked"):
+        if status_str in ("passed", "failed", "blocked", "merge_failed"):
             # Relative time from completed_at
             completed_at = t.get("completed_at", "")
             rel = _relative_time(completed_at) if completed_at else ""
@@ -1078,6 +1081,8 @@ def build_status_table(tasks: list[dict], show_phase: bool = False):
                 status_label = f"[green]passed[/green]"
             elif status_str == "failed":
                 status_label = f"[red]failed[/red]"
+            elif status_str == "merge_failed":
+                status_label = f"[red]merge failed[/red]"
             else:
                 status_label = f"[red]{status_str}[/red]"
             detail_parts.append(f"{status_label} {rel}" if rel else status_label)
@@ -1102,6 +1107,20 @@ def build_status_table(tasks: list[dict], show_phase: bool = False):
             if cost:
                 detail_parts.append(f"${cost:.2f}")
             lines.append(f"    [dim]{_SEP.join(detail_parts)}[/dim]")
+        elif status_str == "verified":
+            detail_parts.append("[blue]verified[/blue]")
+            if cost:
+                detail_parts.append(f"[dim]${cost:.2f}[/dim]")
+            if dur:
+                detail_parts.append(f"[dim]{format_duration(dur)}[/dim]")
+            if spec_count:
+                detail_parts.append(f"[dim]{spec_count} specs[/dim]")
+            lines.append(f"    {_SEP.join(detail_parts)}")
+        elif status_str == "merge_pending":
+            detail_parts.append("[blue]merging...[/blue]")
+            if cost:
+                detail_parts.append(f"[dim]${cost:.2f}[/dim]")
+            lines.append(f"    {_SEP.join(detail_parts)}")
         else:
             # pending
             detail_parts.append("pending")
@@ -1109,8 +1128,8 @@ def build_status_table(tasks: list[dict], show_phase: bool = False):
                 detail_parts.append(f"{spec_count} specs")
             lines.append(f"    [dim]{_SEP.join(detail_parts)}[/dim]")
 
-        # Line 3: error line for failed/blocked
-        if status_str in ("failed", "blocked") and t.get("error"):
+        # Line 3: error line for failed/blocked/merge_failed
+        if status_str in ("failed", "blocked", "merge_failed") and t.get("error"):
             error_text = t["error"].splitlines()[0][:70] if t.get("error") else ""
             lines.append(f"    [red]\u21b3 {rich_escape(error_text)}[/red]")
 
@@ -1127,8 +1146,14 @@ def build_status_table(tasks: list[dict], show_phase: bool = False):
     parts = []
     if counts.get("passed"):
         parts.append(f"[green]{counts['passed']} passed[/green]")
+    if counts.get("verified"):
+        parts.append(f"[blue]{counts['verified']} verified[/blue]")
+    if counts.get("merge_pending"):
+        parts.append(f"[blue]{counts['merge_pending']} merging[/blue]")
     if counts.get("failed"):
         parts.append(f"[red]{counts['failed']} failed[/red]")
+    if counts.get("merge_failed"):
+        parts.append(f"[red]{counts['merge_failed']} merge failed[/red]")
     if counts.get("blocked"):
         parts.append(f"[red]{counts['blocked']} blocked[/red]")
     if counts.get("pending"):
@@ -1160,52 +1185,65 @@ def build_status_table(tasks: list[dict], show_phase: bool = False):
 
 
 def _build_live_phase_lines() -> list:
-    """Build Rich Text lines showing live progress from live-state.json."""
+    """Build Rich Text lines showing live progress from per-task live-state.json files.
+
+    Scans otto_logs/*/live-state.json to support multiple concurrent tasks.
+    """
     import json
     from pathlib import Path
 
     lines = []
-    live_file = Path.cwd() / "otto_logs" / "live-state.json"
-    if not live_file.exists():
+    otto_logs = Path.cwd() / "otto_logs"
+    if not otto_logs.exists():
         return lines
-    try:
-        live = json.loads(live_file.read_text())
-        tid = live.get("task_id", "?")
-        prompt = live.get("prompt", "")[:50]
-        elapsed = live.get("elapsed_s", 0)
-        cost = live.get("cost_usd", 0)
-        elapsed_str = format_duration(elapsed)
-        lines.append(Text.from_markup(f"  [info]▸ Task #{tid}:[/info] {rich_escape(prompt)}"))
-        phases = live.get("phases", {})
-        _icons = {
-            "done": "[success]✓[/success]",
-            "fail": "[error]✗[/error]",
-            "running": "[info]●[/info]",
-            "pending": "[dim]◦[/dim]",
-        }
-        for pname in ["prepare", "coding", "test", "qa", "merge"]:
-            pdata = phases.get(pname, {})
-            pstatus = pdata.get("status", "pending")
-            icon = _icons.get(pstatus, "◦")
-            ptime = pdata.get("time_s", 0)
-            extra = ""
-            if pstatus == "running":
-                extra = f"  [dim]{elapsed_str}[/dim]"
-            elif pstatus == "done" and ptime:
-                extra = f"  [dim]{ptime:.0f}s[/dim]"
-            elif pstatus == "fail":
-                err = rich_escape(pdata.get("error", "")[:40])
-                extra = f"  [error]{err}[/error]"
-            lines.append(Text.from_markup(f"    {icon} {pname:<10}{extra}"))
-        tools = live.get("recent_tools", [])
-        for tool_line in tools[-3:]:
-            lines.append(Text.from_markup(f"        [dim]{rich_escape(tool_line[:60])}[/dim]"))
-        if cost > 0:
-            lines.append(Text.from_markup(f"    [dim]${cost:.2f} so far[/dim]"))
-    except (json.JSONDecodeError, OSError):
-        pass
+
+    # Collect all live-state files: per-task otto_logs/{key}/live-state.json
+    live_files = sorted(otto_logs.glob("*/live-state.json"))
+
+    for live_file in live_files:
+        try:
+            live = json.loads(live_file.read_text())
+            _render_live_state(live, lines)
+        except (json.JSONDecodeError, OSError):
+            pass
 
     return lines
+
+
+def _render_live_state(live: dict, lines: list) -> None:
+    """Render a single task's live-state into Rich Text lines."""
+    tid = live.get("task_id", "?")
+    prompt = live.get("prompt", "")[:50]
+    elapsed = live.get("elapsed_s", 0)
+    cost = live.get("cost_usd", 0)
+    elapsed_str = format_duration(elapsed)
+    lines.append(Text.from_markup(f"  [info]\u25b8 Task #{tid}:[/info] {rich_escape(prompt)}"))
+    phases = live.get("phases", {})
+    _icons = {
+        "done": "[success]\u2713[/success]",
+        "fail": "[error]\u2717[/error]",
+        "running": "[info]\u25cf[/info]",
+        "pending": "[dim]\u25e6[/dim]",
+    }
+    for pname in ["prepare", "coding", "test", "qa", "merge"]:
+        pdata = phases.get(pname, {})
+        pstatus = pdata.get("status", "pending")
+        icon = _icons.get(pstatus, "\u25e6")
+        ptime = pdata.get("time_s", 0)
+        extra = ""
+        if pstatus == "running":
+            extra = f"  [dim]{elapsed_str}[/dim]"
+        elif pstatus == "done" and ptime:
+            extra = f"  [dim]{ptime:.0f}s[/dim]"
+        elif pstatus == "fail":
+            err = rich_escape(pdata.get("error", "")[:40])
+            extra = f"  [error]{err}[/error]"
+        lines.append(Text.from_markup(f"    {icon} {pname:<10}{extra}"))
+    tools = live.get("recent_tools", [])
+    for tool_line in tools[-3:]:
+        lines.append(Text.from_markup(f"        [dim]{rich_escape(tool_line[:60])}[/dim]"))
+    if cost > 0:
+        lines.append(Text.from_markup(f"    [dim]${cost:.2f} so far[/dim]"))
 
 
 def watch_status(tasks_loader, console_obj=None) -> None:
