@@ -275,47 +275,41 @@ merge_parallel_results()
     │    ├─ Create temp branch from current HEAD
     │    ├─ git merge --no-edit candidate_sha
     │    │
-    │    ├─ Merge succeeds? → proceed
-    │    │
-    │    └─ Merge conflicts?
-    │         │
-    │         ├─ Get conflicted files (git diff --diff-filter=U)
-    │         ├─ For each file:
-    │         │    ├─ Check: is text file? (skip binary)
-    │         │    ├─ Read: base (:1:), ours (:2:), theirs (:3:)
-    │         │    ├─ Build prompt with 3-way view
-    │         │    ├─ Call: claude --print -m haiku --tools "" (stdin)
-    │         │    │        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    │         │    │        Tool-free, no permissions, real timeout
-    │         │    └─ Validate: no conflict markers in output
-    │         │
-    │         ├─ All resolved? → write files, git add, git commit
-    │         └─ Any failed? → abort merge, mark merge_failed
-    │              Cost: ~$0.02 vs $2-3 for full re-code
+    │    ├─ Merge succeeds? → proceed to post-merge tests
+    │    └─ Merge conflicts? → abort, mark merge_conflict
+    │         └─ Queued for re-apply (see 3d below)
     │
     ├─ Post-merge test verification (unless skip_test)
     │    ├─ run_test_suite() in fresh worktree at new_sha
     │    │
     │    ├─ Tests pass? → fast-forward main
     │    └─ Tests fail? → revert, mark post_merge_test_fail
-    │         └─ Triggers auto-retry in orchestrator
+    │         └─ Queued for re-apply (see 3d below)
     │
     ├─ Fast-forward: git merge --ff-only new_sha
     │
     └─ Update task: status=passed, commit_sha, cost
 ```
 
-### 3d. Auto-Retry & Replan
+### 3d. Auto-Retry (Coding Agent Re-Apply) & Replan
+
+When merge fails (conflict or post-merge test failure), the coding agent re-runs
+on updated main. No separate conflict resolver — the coding agent IS the resolver.
 
 ```
 After merge phase:
   │
-  ├─ Any post_merge_test_fail tasks?
+  ├─ Any merge_conflict or post_merge_test_fail tasks?
   │    │
   │    └─ For each:
-  │         ├─ Reset task to pending
+  │         ├─ Inject previous diff as feedback:
+  │         │    "Your previous implementation passed all tests but caused
+  │         │     a merge conflict with another task. Re-apply your changes
+  │         │     on the updated codebase. Here is your previous diff: ..."
+  │         ├─ Reset task to pending (preserve attempt count)
   │         ├─ Re-run full coding_loop() on updated main
-  │         │    (agent now sees sibling tasks' code)
+  │         │    Agent sees sibling tasks' code, applies changes naturally
+  │         │    Runs tests + QA on the integrated result
   │         └─ Replace result in batch_results
   │
   ├─ Remove completed batch from plan
@@ -375,7 +369,7 @@ After merge phase:
 | **Spec gen** | Sonnet | ~$0.15-0.30 | Once per task (background thread) |
 | **Coding agent** | CC default | ~$0.50-1.50 | Per attempt (resumes session) |
 | **QA agent** | CC default | ~$0.30-1.00 | Per attempt (tier-dependent) |
-| **Merge resolver** | Haiku CLI | ~$0.02 | Per conflicted file (rare) |
+| **Merge re-apply** | CC default | ~$0.50-1.50 | Coding agent re-applies on updated main (rare) |
 | **Typical task** | | **~$1.00-2.50** | Single attempt, no retries |
 | **With retry** | | **~$2.50-4.00** | Coding + QA + retry coding + retry QA |
 
