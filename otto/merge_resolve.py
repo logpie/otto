@@ -13,17 +13,6 @@ from otto.tasks import load_tasks
 from otto.testing import run_test_suite
 
 
-_MERGE_RESOLVER_SYSTEM_PROMPT = """\
-You are a merge conflict resolver.
-Apply the provided patch to the current checked-out codebase.
-Do not re-explore the repository.
-Do not re-implement the feature from scratch.
-Do not run QA.
-Make only the minimal edits needed to apply the patch correctly on top of the updated codebase.
-Leave the resolved changes in the working tree without creating commits.
-"""
-
-
 def _git(
     project_dir: Path,
     *args: str,
@@ -105,6 +94,8 @@ def _build_agent_prompt(
     conflict_diff: str,
 ) -> str:
     return f"""\
+You are a merge conflict resolver. Your ONLY job is to apply a known patch to the current codebase.
+
 Apply the known patch for task `{task_key}` to the current checked-out codebase.
 
 Constraints:
@@ -190,11 +181,11 @@ async def scoped_reapply(
         env=_subprocess_env(),
         max_turns=30,
         effort="low",
-        system_prompt={
-            "type": "preset",
-            "preset": "claude_code",
-            "append": _MERGE_RESOLVER_SYSTEM_PROMPT,
-        },
+        # Use CC's preset to keep built-in tool guidance (Glob over find, etc.)
+        # The merge resolver instructions are in the prompt itself, not system_prompt.
+        # CRITICAL: system_prompt=None would blank CC's defaults.
+        # "append" is NOT a real SDK field — don't use it.
+        system_prompt={"type": "preset", "preset": "claude_code"},
     )
 
     prompt = _build_agent_prompt(

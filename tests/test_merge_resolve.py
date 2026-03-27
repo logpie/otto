@@ -127,7 +127,10 @@ async def test_scoped_reapply_uses_agent_after_cherry_pick_conflict(tmp_git_repo
         assert options.model is None
         assert options.system_prompt["type"] == "preset"
         assert options.system_prompt["preset"] == "claude_code"
-        assert "merge conflict resolver" in options.system_prompt["append"].lower()
+        assert "append" not in options.system_prompt  # SDK doesn't support append
+        # Merge resolver instructions are in the prompt itself
+        assert "Do not re-explore" in prompt
+        assert "Do not re-implement" in prompt
         assert "Full patch to apply:" in prompt
         assert "diff --git" in prompt
         assert "@@" in prompt
