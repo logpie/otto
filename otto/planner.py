@@ -229,6 +229,8 @@ Output ONLY a JSON object in this exact format:
 Rules:
 - Tasks with depends_on MUST be in a LATER batch than their dependencies
 - Independent tasks SHOULD be in the same batch (parallel execution)
+- Do NOT serialize tasks just because they might touch the same file — the pipeline
+  handles merge conflicts automatically via re-apply. Only respect explicit depends_on.
 - Keep it simple — most tasks are "direct" strategy
 - Only use "research_first" when the task involves unfamiliar APIs/libraries
 """
@@ -266,12 +268,21 @@ async def plan(
             f"spec={spec_count} items{dep_str}: {t.get('prompt', '')}"
         )
 
+    max_parallel = config.get("max_parallel", 1) or 1
+    parallel_hint = ""
+    if max_parallel > 1:
+        parallel_hint = (
+            f"\n\nmax_parallel={max_parallel}. Group tasks into parallel batches aggressively. "
+            "Do NOT separate tasks just because they might modify the same files — "
+            "the pipeline handles merge conflicts automatically. Only respect explicit depends_on."
+        )
+
     prompt = f"""Plan the execution of these {len(tasks)} tasks:
 
 {chr(10).join(task_lines)}
 
 Produce the JSON execution plan. Group independent tasks into parallel batches.
-Respect depends_on constraints."""
+Respect depends_on constraints.{parallel_hint}"""
 
     try:
         agent_opts = ClaudeAgentOptions(
