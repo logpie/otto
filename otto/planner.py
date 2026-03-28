@@ -8,11 +8,13 @@ import json
 import logging
 import re
 import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from otto.agent import ClaudeAgentOptions, _subprocess_env, run_agent_query
+from otto.observability import append_text_log
 
 logger = logging.getLogger("otto.planner")
 
@@ -23,6 +25,52 @@ RELATIONSHIP_VALUES = {
     "CONTRADICTORY",
     "UNCERTAIN",
 }
+
+
+def _planner_log(project_dir: Path, *lines: str) -> None:
+    append_text_log(project_dir / "otto_logs" / "planner.log", lines)
+
+
+def _format_batches(plan: ExecutionPlan) -> list[str]:
+    if not plan.batches:
+        return ["- (none)"]
+    lines: list[str] = []
+    for idx, batch in enumerate(plan.batches, start=1):
+        entries = [
+            f"{task.task_key}[strategy={task.strategy}, effort={task.effort}]"
+            for task in batch.tasks
+        ]
+        lines.append(f"- batch {idx}: {', '.join(entries)}")
+    return lines
+
+
+def _format_shortlist(shortlist: list[dict[str, str]]) -> list[str]:
+    if not shortlist:
+        return ["- (none)"]
+    return [
+        f"- {item['task_a']} <-> {item['task_b']}: {item['reason']}"
+        for item in shortlist
+    ]
+
+
+def _format_analysis(analysis: list[dict[str, Any]]) -> list[str]:
+    if not analysis:
+        return ["- (none)"]
+    return [
+        f"- {item.get('task_a')} <-> {item.get('task_b')}: "
+        f"{item.get('relationship')} ({str(item.get('reason', '') or '')[:160]})"
+        for item in analysis
+    ]
+
+
+def _format_conflicts(conflicts: list[dict[str, Any]]) -> list[str]:
+    if not conflicts:
+        return ["- (none)"]
+    return [
+        f"- {', '.join(str(key) for key in conflict.get('tasks') or [])}: "
+        f"{str(conflict.get('description', '') or '')[:160]}"
+        for conflict in conflicts
+    ]
 
 
 @dataclass
@@ -611,7 +659,7 @@ async def _run_planner_prompt(
     *,
     model: str | None,
     effort: str,
-) -> str:
+) -> tuple[str, float, float]:
     options = ClaudeAgentOptions(
         permission_mode="bypassPermissions",
         cwd=str(project_dir),
@@ -622,8 +670,9 @@ async def _run_planner_prompt(
     )
     if model:
         options.model = model
-    raw_output, _cost, _result = await run_agent_query(prompt, options)
-    return raw_output
+    started_at = time.monotonic()
+    raw_output, cost, _result = await run_agent_query(prompt, options)
+    return raw_output, float(cost or 0.0), round(time.monotonic() - started_at, 1)
 
 
 async def _shortlist_pairs(
@@ -631,6 +680,13 @@ async def _shortlist_pairs(
     config: dict[str, Any],
     project_dir: Path,
 ) -> list[dict[str, str]]:
+    task_summary = _task_summary(tasks)
+    _planner_log(
+        project_dir,
+        f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] shortlist request",
+        "task summary sent to LLM:",
+        task_summary or "- (none)",
+    )
     prompt = f"""You are triaging coding task relationships.
 
 Review ALL tasks below and return ONLY suspicious task pairs that need deeper review.
@@ -647,7 +703,7 @@ Return JSON only:
 Tasks:
 {_task_summary(tasks)}
 """
-    raw_output = await _run_planner_prompt(
+    raw_output, cost_usd, duration_s = await _run_planner_prompt(
         prompt,
         config,
         project_dir,
@@ -669,6 +725,13 @@ Tasks:
             continue
         seen.add(signature)
         normalized.append(item)
+    _planner_log(
+        project_dir,
+        f"shortlist LLM call: model=haiku effort=low time_s={duration_s:.1f} cost_usd={cost_usd:.4f}",
+        "shortlist results:",
+        *_format_shortlist(normalized),
+        "",
+    )
     return normalized
 
 
@@ -682,19 +745,46 @@ async def plan(
         return ExecutionPlan()
 
     if len(tasks) == 1:
-        return ExecutionPlan(batches=[Batch(tasks=[TaskPlan(task_key=str(tasks[0]["key"]))])])
+        result = ExecutionPlan(batches=[Batch(tasks=[TaskPlan(task_key=str(tasks[0]["key"]))])])
+        _planner_log(
+            project_dir,
+            f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] planner shortcut",
+            "task summary sent to LLM:",
+            _task_summary(tasks),
+            "fallback trigger: single task; skipped planner LLM",
+            "final batch structure:",
+            *_format_batches(result),
+            "",
+        )
+        return result
 
     try:
         shortlist = await _shortlist_pairs(tasks, config, project_dir)
         has_explicit_deps = any(task.get("depends_on") for task in tasks)
         if not shortlist:
-            if has_explicit_deps:
-                return _normalize_plan(default_plan(tasks), tasks)
-            return _normalize_plan(default_plan(tasks), tasks)
+            fallback = _normalize_plan(default_plan(tasks), tasks)
+            trigger = "empty shortlist with explicit depends_on" if has_explicit_deps else "empty shortlist"
+            _planner_log(
+                project_dir,
+                f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] planner fallback",
+                f"fallback trigger: {trigger}",
+                "final batch structure:",
+                *_format_batches(fallback),
+                "",
+            )
+            return fallback
 
         candidate_lines = "\n".join(
             f"- {item['task_a']} <-> {item['task_b']}: {item['reason']}"
             for item in shortlist
+        )
+        _planner_log(
+            project_dir,
+            f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] relationship analysis request",
+            "task summary sent to LLM:",
+            _task_summary(tasks),
+            "shortlist results:",
+            *_format_shortlist(shortlist),
         )
         prompt = f"""You are planning execution for an autonomous coding pipeline.
 
@@ -736,7 +826,7 @@ Shortlisted pairs for detailed review:
 Project context (git ls-files, capped at 200):
 {_project_context(project_dir)}
 """
-        raw_output = await _run_planner_prompt(
+        raw_output, cost_usd, duration_s = await _run_planner_prompt(
             prompt,
             config,
             project_dir,
@@ -746,10 +836,36 @@ Project context (git ls-files, capped at 200):
         result = parse_plan_json(raw_output)
         if result is None:
             raise ValueError("planner parse failed")
-        return _normalize_plan(result, tasks)
+        normalized = _normalize_plan(result, tasks)
+        _planner_log(
+            project_dir,
+            (
+                "relationship LLM call: "
+                f"model={_planner_model(config) or 'default'} "
+                f"effort={_planner_effort(config)} "
+                f"time_s={duration_s:.1f} cost_usd={cost_usd:.4f}"
+            ),
+            "relationship analysis:",
+            *_format_analysis(normalized.analysis),
+            "conflicts found:",
+            *_format_conflicts(normalized.conflicts),
+            "final batch structure:",
+            *_format_batches(normalized),
+            "",
+        )
+        return normalized
     except Exception as exc:
         logger.warning("Planner failed; falling back to serial plan: %s", exc)
-        return serial_plan(tasks)
+        fallback = serial_plan(tasks)
+        _planner_log(
+            project_dir,
+            f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] planner fallback",
+            f"fallback trigger: planner failed ({exc})",
+            "final batch structure:",
+            *_format_batches(fallback),
+            "",
+        )
+        return fallback
 
 
 async def replan(
@@ -796,7 +912,16 @@ Remaining tasks:
 {chr(10).join(remaining_tasks)}
 """
     try:
-        raw_output = await _run_planner_prompt(
+        _planner_log(
+            project_dir,
+            f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] replan request",
+            "completed results summary:",
+            *(results_summary or ["- None"]),
+            "remaining tasks:",
+            *(remaining_tasks or ["- None"]),
+            f"existing batch structure: {'; '.join(_format_batches(remaining_plan))}",
+        )
+        raw_output, cost_usd, duration_s = await _run_planner_prompt(
             prompt,
             config,
             project_dir,
@@ -811,7 +936,7 @@ Remaining tasks:
             for batch in remaining_plan.batches
             for task_plan in batch.tasks
         ]
-        return _normalize_plan(
+        normalized = _normalize_plan(
             ExecutionPlan(
                 batches=replanned.batches,
                 learnings=replanned.learnings,
@@ -820,6 +945,35 @@ Remaining tasks:
             ),
             remaining_tasks,
         )
+        _planner_log(
+            project_dir,
+            (
+                "replan LLM call: "
+                f"model={_planner_model(config) or 'default'} "
+                f"effort={_planner_effort(config)} "
+                f"time_s={duration_s:.1f} cost_usd={cost_usd:.4f}"
+            ),
+            "final batch structure:",
+            *_format_batches(normalized),
+            "",
+        )
+        return normalized
     except Exception as exc:
         logger.warning("Replan failed; falling back to serial remaining plan: %s", exc)
-        return _serial_plan_from_remaining(remaining_plan)
+        fallback = _serial_plan_from_remaining(remaining_plan)
+        _planner_log(
+            project_dir,
+            f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] replan fallback",
+            f"replan LLM call: model={_planner_model(config) or 'default'} effort={_planner_effort(config)}"
+            if 'cost_usd' in locals() else "replan LLM call: not completed",
+            (
+                f"replan timing: {duration_s:.1f}s cost_usd={cost_usd:.4f}"
+                if 'duration_s' in locals() and 'cost_usd' in locals()
+                else ""
+            ),
+            f"fallback trigger: replan failed ({exc})",
+            "final batch structure:",
+            *_format_batches(fallback),
+            "",
+        )
+        return fallback

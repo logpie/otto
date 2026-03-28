@@ -334,11 +334,13 @@ class TestRunPerIntegration:
 
         call_order: list[str] = []
 
-        async def fake_scoped_reapply(*, task_key, candidate_ref, base_sha, config, project_dir, tasks_file):
+        async def fake_scoped_reapply(*, task_key, candidate_ref, base_sha, config, project_dir, tasks_file, return_metadata=False):
             call_order.append("scoped_reapply")
             assert task_key == "task-merge"
             assert candidate_ref == "refs/otto/candidates/task-merge/attempt-1"
             assert base_sha == expected_base_sha
+            if return_metadata:
+                return False, "", {"cherry_pick": "fail", "agent_fallback_triggered": False}
             return False, ""
 
         async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None, qa_mode="per_task", sibling_context=None):
@@ -413,7 +415,7 @@ class TestRunPerIntegration:
                 ]
             raise AssertionError("merge_parallel_results should not run a second time when scoped reapply succeeds")
 
-        async def fake_scoped_reapply(*, task_key, candidate_ref, base_sha, config, project_dir, tasks_file):
+        async def fake_scoped_reapply(*, task_key, candidate_ref, base_sha, config, project_dir, tasks_file, return_metadata=False):
             assert task_key == "task-merge"
             assert candidate_ref == "refs/otto/candidates/task-merge/attempt-1"
             subprocess.run(["git", "checkout", "-b", "scoped-reapply"], cwd=project_dir, capture_output=True, check=True)
@@ -425,6 +427,8 @@ class TestRunPerIntegration:
                 cwd=project_dir, capture_output=True, text=True, check=True,
             ).stdout.strip()
             subprocess.run(["git", "checkout", "main"], cwd=project_dir, capture_output=True, check=True)
+            if return_metadata:
+                return True, new_sha, {"cherry_pick": "fail", "agent_fallback_triggered": True}
             return True, new_sha
 
         batch_qa_mock = AsyncMock(return_value={
@@ -1162,6 +1166,10 @@ class TestMergeParallelResults:
         # Both files should exist on main
         assert (tmp_git_repo / "a.txt").exists()
         assert (tmp_git_repo / "b.txt").exists()
+        orchestrator_log = (tmp_git_repo / "otto_logs" / "orchestrator.log").read_text()
+        assert "merge attempt" in orchestrator_log
+        assert "task=task-aaa merge result=success" in orchestrator_log
+        assert "task=task-bbb merge result=success" in orchestrator_log
 
     def test_conflict_detected_and_queued_for_reapply(self, tmp_git_repo):
         """Merge conflict should mark task for re-apply (not abort permanently)."""

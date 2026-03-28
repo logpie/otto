@@ -116,6 +116,19 @@ class TestDetermineQaTier:
         }
         assert determine_qa_tier({}, spec, 0, diff_info, mapping) == 2
 
+    def test_logs_qa_tier_decision(self, tmp_path):
+        spec = [{"text": "works", "binding": "must"}]
+        diff_info = {"files": ["src/app.py"]}
+        mapping = {"works": "test.py::test_works"}
+
+        tier = determine_qa_tier({"key": "task-qa-log"}, spec, 0, diff_info, mapping, log_dir=tmp_path)
+
+        assert tier == 0
+        qa_tier_log = (tmp_path / "qa-tier.log").read_text()
+        assert "risk patterns: none matched" in qa_tier_log
+        assert "spa detection: no" in qa_tier_log
+        assert "final tier: 0" in qa_tier_log
+
 
 class TestFormatSpecV45:
     def test_formats_must_should(self):
@@ -284,6 +297,126 @@ class TestGetDiffInfo:
 
 
 class TestRunTaskV45:
+    @pytest.mark.asyncio
+    async def test_writes_task_summary_and_preserves_live_state(self, tmp_git_repo):
+        default_branch = _current_branch(tmp_git_repo)
+        task = {
+            "id": 1,
+            "key": "tasksummary001",
+            "prompt": "Add feature.txt",
+            "status": "pending",
+            "spec": [{"text": "Creates feature.txt", "binding": "must"}],
+        }
+        tasks_path = _write_task(tmp_git_repo, task)
+        config = {
+            "default_branch": default_branch,
+            "max_retries": 0,
+            "verify_timeout": 30,
+            "max_task_time": 60,
+            "test_command": None,
+        }
+
+        async def fake_query(*, prompt, options=None):
+            (tmp_git_repo / "feature.txt").write_text("hello\n")
+            yield SimpleNamespace(
+                session_id="sess-summary",
+                is_error=False,
+                total_cost_usd=0.42,
+                result="ok",
+            )
+
+        qa_mock = AsyncMock(return_value={
+            "must_passed": True,
+            "verdict": {"must_passed": True, "must_items": []},
+            "raw_report": "QA PASS",
+            "cost_usd": 0.11,
+            "qa_elapsed": 3.0,
+            "failed_musts": [],
+            "prev_failed_criteria": [],
+        })
+
+        with patch("otto.runner.query", new=fake_query):
+            with patch("otto.runner.run_test_suite", return_value=TestSuiteResult(
+                passed=True,
+                tiers=[TierResult("tier1", True, "1 passed")],
+            )):
+                with patch("otto.runner.run_qa_agent_v45", new=qa_mock):
+                    with patch("otto.runner.merge_to_default", return_value=True):
+                        result = await run_task_v45(task, config, tmp_git_repo, tasks_path)
+
+        assert result["success"] is True
+        log_dir = tmp_git_repo / "otto_logs" / task["key"]
+        summary = json.loads((log_dir / "task-summary.json").read_text())
+        live_state = json.loads((log_dir / "live-state.json").read_text())
+        assert summary["status"] == "passed"
+        assert summary["attempts"] == 1
+        assert summary["phase_costs"]["coding"] == pytest.approx(0.42)
+        assert summary["phase_costs"]["qa"] == pytest.approx(0.11)
+        assert "prepare" in summary["phase_timings"]
+        assert live_state["completed"] is True
+        assert live_state["status"] == "passed"
+
+    @pytest.mark.asyncio
+    async def test_phase_events_are_emitted_to_telemetry(self, tmp_git_repo):
+        from otto.telemetry import Telemetry
+
+        default_branch = _current_branch(tmp_git_repo)
+        task = {
+            "id": 1,
+            "key": "tasktelemetry001",
+            "prompt": "Add feature.txt",
+            "status": "pending",
+        }
+        tasks_path = _write_task(tmp_git_repo, task)
+        config = {
+            "default_branch": default_branch,
+            "max_retries": 0,
+            "verify_timeout": 30,
+            "max_task_time": 60,
+            "test_command": None,
+            "skip_qa": True,
+        }
+        telemetry = Telemetry(tmp_git_repo / "otto_logs")
+
+        async def fake_query(*, prompt, options=None):
+            (tmp_git_repo / "feature.txt").write_text("hello\n")
+            yield SimpleNamespace(
+                session_id="sess-telemetry",
+                is_error=False,
+                total_cost_usd=0.0,
+                result="ok",
+            )
+
+        def on_progress(event_type, data):
+            pass
+
+        setattr(on_progress, "_telemetry", telemetry)
+
+        with patch("otto.runner.query", new=fake_query):
+            with patch("otto.runner.run_test_suite", return_value=TestSuiteResult(
+                passed=True,
+                tiers=[TierResult("tier1", True, "1 passed")],
+            )):
+                with patch("otto.runner.merge_to_default", return_value=True):
+                    result = await run_task_v45(
+                        task,
+                        config,
+                        tmp_git_repo,
+                        tasks_path,
+                        on_progress=on_progress,
+                        qa_mode="skip",
+                    )
+
+        assert result["success"] is True
+        events = [
+            json.loads(line)
+            for line in telemetry.events_path.read_text().splitlines()
+            if line.strip()
+        ]
+        phase_events = [event for event in events if event["event"] == "phase_completed"]
+        assert any(event["phase"] == "prepare" and event["status"] == "running" for event in phase_events)
+        assert any(event["phase"] == "merge" and event["status"] == "done" for event in phase_events)
+
     @pytest.mark.asyncio
     async def test_batch_mode_skips_spec_gen_and_qa_and_returns_verified(self, tmp_git_repo):
         default_branch = _current_branch(tmp_git_repo)

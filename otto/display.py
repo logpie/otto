@@ -1230,6 +1230,8 @@ def _build_live_phase_lines() -> list:
 
 def _render_live_state(live: dict, lines: list) -> None:
     """Render a single task's live-state into Rich Text lines."""
+    if live.get("completed"):
+        return
     tid = live.get("task_id", "?")
     prompt = live.get("prompt", "")[:50]
     elapsed = live.get("elapsed_s", 0)

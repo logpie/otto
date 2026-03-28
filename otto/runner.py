@@ -41,6 +41,7 @@ from otto.git_ops import (
     _restore_workspace_state,
     _snapshot_untracked,
 )
+from otto.observability import write_json_file
 from otto.qa import (
     format_spec_v45,
     determine_qa_tier,
@@ -384,6 +385,9 @@ async def coding_loop(
         except Exception:
             pass
 
+    setattr(_on_progress, "_telemetry", telemetry)
+    setattr(_on_progress, "_task_key", task_key)
+
     try:
         # v4.5: use run_task_v45 which passes context directly
         result = await run_task_v45(
@@ -513,6 +517,33 @@ def _write_log_safe(log_dir: Path, filename: str, content: str) -> None:
         (log_dir / filename).write_text(content)
     except OSError:
         pass
+
+
+def _write_task_summary_safe(
+    log_dir: Path,
+    *,
+    task_key: str,
+    status: str,
+    total_cost_usd: float,
+    total_duration_s: float,
+    attempts: int,
+    phase_timings: dict[str, float],
+    phase_costs: dict[str, float],
+    retry_reasons: list[str],
+) -> None:
+    write_json_file(
+        log_dir / "task-summary.json",
+        {
+            "task_key": task_key,
+            "status": status,
+            "total_cost_usd": round(total_cost_usd, 4),
+            "total_duration_s": round(total_duration_s, 1),
+            "attempts": attempts,
+            "phase_timings": {name: round(value, 1) for name, value in phase_timings.items() if value or name in ("prepare", "coding", "test", "qa", "merge")},
+            "phase_costs": {name: round(value, 4) for name, value in phase_costs.items() if value},
+            "retry_reasons": retry_reasons,
+        },
+    )
 
 
 def _persist_qa_results(
@@ -1012,7 +1043,7 @@ async def _run_qa(
             "binding": "must",
         }]
 
-    qa_tier = determine_qa_tier(task, qa_spec, attempt, diff_info)
+    qa_tier = determine_qa_tier(task, qa_spec, attempt, diff_info, log_dir=log_dir)
     if qa_warning:
         qa_tier = max(qa_tier, 2)
 
@@ -1191,7 +1222,7 @@ async def _handle_no_changes(
 
     # Run QA against existing (unchanged) code
     diff_info_nc = {"files": [], "full_diff": "(no changes)"}
-    qa_tier_nc = max(determine_qa_tier(task, qa_spec, attempt, diff_info_nc), 1)
+    qa_tier_nc = max(determine_qa_tier(task, qa_spec, attempt, diff_info_nc, log_dir=log_dir), 1)
     emit("phase", name="qa", status="running",
          detail=f"tier {qa_tier_nc} — verifying existing code")
     qa_start_nc = time.monotonic()
@@ -1321,6 +1352,15 @@ async def run_task_v45(
     total_attempts = prior_attempts
     # empty_retries removed — prompt now includes working dir, should not happen
     phase_timings: dict[str, float] = {}
+    summary_phase_timings: dict[str, float] = {
+        "prepare": 0.0,
+        "coding": 0.0,
+        "test": 0.0,
+        "qa": 0.0,
+        "merge": 0.0,
+    }
+    phase_costs: dict[str, float] = {}
+    retry_reasons: list[str] = []
     spec = task.get("spec")
     batch_qa_mode = qa_mode == QAMode.BATCH
     skip_qa_mode = qa_mode == QAMode.SKIP
@@ -1330,9 +1370,11 @@ async def run_task_v45(
     _spec_finish_time: float | None = None  # set by spec gen thread on completion
     spec_generation_error = ""
     _result_error_code_unset = object()
+    log_dir = project_dir / "otto_logs" / key
+    log_dir.mkdir(parents=True, exist_ok=True)
 
     # Live state for otto status -w — per-task file under otto_logs/{key}/
-    _live_state_file = project_dir / "otto_logs" / key / "live-state.json"
+    _live_state_file = log_dir / "live-state.json"
     _live_phases: dict[str, dict] = {
         p: {"status": "pending", "time_s": 0.0}
         for p in ["prepare", "spec_gen", "coding", "test", "qa", "merge"]
@@ -1348,12 +1390,46 @@ async def run_task_v45(
         try:
             if event == "phase":
                 name = data.get("name", "")
+                status = str(data.get("status", "") or "")
+                phase_time = float(data.get("time_s", 0.0) or 0.0)
+                phase_cost = float(data.get("cost", 0.0) or 0.0)
                 if name in _live_phases:
-                    _live_phases[name]["status"] = data.get("status", "")
-                    if data.get("time_s"):
-                        _live_phases[name]["time_s"] = data["time_s"]
+                    _live_phases[name]["status"] = status
+                    if phase_time:
+                        _live_phases[name]["time_s"] = phase_time
                     if data.get("error"):
                         _live_phases[name]["error"] = data["error"][:100]
+                    elif "error" in _live_phases[name]:
+                        _live_phases[name].pop("error", None)
+                if phase_time and status in ("done", "fail", "skip"):
+                    summary_key = str(name)
+                    if summary_key != "candidate":
+                        summary_phase_timings[summary_key] = round(
+                            summary_phase_timings.get(summary_key, 0.0) + phase_time,
+                            1,
+                        )
+                if phase_cost:
+                    cost_key = "spec" if name == "spec_gen" else str(name)
+                    phase_costs[cost_key] = round(phase_costs.get(cost_key, 0.0) + phase_cost, 4)
+                phase_telemetry = getattr(on_progress, "_telemetry", None) if on_progress else None
+                if phase_telemetry and name:
+                    try:
+                        from otto.telemetry import PhaseCompleted
+
+                        phase_telemetry.log(PhaseCompleted(
+                            task_key=key,
+                            phase=str(name),
+                            status=status,
+                            time_s=phase_time,
+                            cost_usd=phase_cost,
+                            detail=str(data.get("detail") or data.get("error") or "")[:200],
+                        ))
+                    except Exception:
+                        pass
+            elif event == "attempt_boundary":
+                reason = str(data.get("reason", "") or "").strip()
+                if reason:
+                    retry_reasons.append(reason)
             elif event == "agent_tool":
                 detail = data.get("detail", "")
                 tool_name = data.get("name", "")
@@ -1365,6 +1441,7 @@ async def run_task_v45(
                 "prompt": prompt[:80],
                 "elapsed_s": round(time.monotonic() - task_start, 1),
                 "cost_usd": total_cost,
+                "completed": False,
                 "phases": _live_phases,
                 "recent_tools": list(_live_tools),
             }))
@@ -1441,12 +1518,33 @@ async def run_task_v45(
                 diff_summary: str = "", qa_report: str = "",
                 review_ref: str | None = None,
                 error_code: Any = _result_error_code_unset) -> dict[str, Any]:
-        try:
-            if _live_state_file.exists():
-                _live_state_file.unlink()
-        except OSError:
-            pass
         duration = time.monotonic() - task_start
+        try:
+            _live_state_file.write_text(json.dumps({
+                "task_key": key,
+                "task_id": task_id,
+                "prompt": prompt[:80],
+                "elapsed_s": round(duration, 1),
+                "cost_usd": total_cost,
+                "status": status,
+                "completed": True,
+                "error": error[:200] if error else "",
+                "phases": _live_phases,
+                "recent_tools": list(_live_tools),
+            }))
+        except Exception:
+            pass
+        _write_task_summary_safe(
+            log_dir,
+            task_key=key,
+            status=status,
+            total_cost_usd=total_cost,
+            total_duration_s=duration,
+            attempts=total_attempts,
+            phase_timings=summary_phase_timings,
+            phase_costs=phase_costs,
+            retry_reasons=retry_reasons,
+        )
         if tasks_file:
             try:
                 from datetime import datetime, timezone
@@ -1500,9 +1598,6 @@ async def run_task_v45(
         else:
             base_sha = create_task_branch(task_work_dir, key, default_branch, task=task)
         pre_existing_untracked = _snapshot_untracked(task_work_dir)
-
-        log_dir = project_dir / "otto_logs" / key
-        log_dir.mkdir(parents=True, exist_ok=True)
 
         # Create scratch area for ephemeral test verification
         scratch_dir = task_work_dir / ".otto-scratch"

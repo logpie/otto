@@ -27,6 +27,7 @@ from otto.planner import (
     replan,
     serial_plan,
 )
+from otto.observability import append_text_log
 from otto.runner import (
     _print_summary,
     coding_loop,
@@ -47,6 +48,30 @@ from otto.telemetry import (
     TaskFailed,
     Telemetry,
 )
+
+
+def _orchestrator_log(project_dir: Path, *lines: str) -> None:
+    append_text_log(project_dir / "otto_logs" / "orchestrator.log", lines)
+
+
+def _format_batch_structure(batch: Any, pending_by_key: dict[str, dict[str, Any]], *, mode: str) -> list[str]:
+    lines = [f"batch structure: mode={mode} size={len(batch.tasks)}"]
+    for task_plan in batch.tasks:
+        task = pending_by_key.get(task_plan.task_key, {})
+        lines.append(
+            f"- #{task.get('id', '?')} {task_plan.task_key}: "
+            f"{str(task.get('prompt', '') or '')[:120]}"
+        )
+    return lines
+
+
+def _summarize_batch_structure(plan: ExecutionPlan) -> str:
+    if not plan.batches:
+        return "(none)"
+    return "; ".join(
+        f"batch {idx}: {', '.join(task.task_key for task in batch.tasks)}"
+        for idx, batch in enumerate(plan.batches, start=1)
+    )
 
 
 def load_learnings(project_dir: Path, context: PipelineContext) -> None:
@@ -754,6 +779,13 @@ async def run_per(
         if not _plan_covers_pending(execution_plan, pending):
             console.print("  [yellow]Planner returned invalid task coverage; falling back to serial plan[/yellow]")
             execution_plan = serial_plan(pending)
+            _orchestrator_log(
+                project_dir,
+                f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] replan",
+                "replan triggered: planner coverage invalid; fell back to serial plan",
+                f"new structure: {_summarize_batch_structure(execution_plan)}",
+                "",
+            )
 
         _apply_planner_outcomes(tasks_file, pending, execution_plan)
         _print_planner_findings(pending, tasks_file)
@@ -781,6 +813,11 @@ async def run_per(
                 console.print(f"\n  [bold]Batch {batch_idx}[/bold]  [dim]{batch_size} tasks ({mode_label})[/dim]")
             else:
                 console.print(f"\n  [bold]Batch {batch_idx}[/bold]  [dim]1 task[/dim]")
+            _orchestrator_log(
+                project_dir,
+                f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] batch {batch_idx}",
+                *_format_batch_structure(batch, pending_by_key, mode="parallel" if use_parallel else "serial"),
+            )
 
             if use_parallel:
                 # Build sibling context for each task in the batch
@@ -853,13 +890,23 @@ async def run_per(
                                 base_sha = base_result.stdout.strip()
 
                         if candidate_ref and base_sha:
-                            reapply_success, new_sha = await scoped_reapply(
+                            reapply_success, new_sha, reapply_meta = await scoped_reapply(
                                 task_key=fkey,
                                 candidate_ref=candidate_ref,
                                 base_sha=base_sha,
                                 config=config,
                                 project_dir=project_dir,
                                 tasks_file=tasks_file,
+                                return_metadata=True,
+                            )
+                            _orchestrator_log(
+                                project_dir,
+                                (
+                                    f"scoped reapply: task={fkey} "
+                                    f"cherry-pick={reapply_meta.get('cherry_pick', 'unknown') if reapply_meta else 'unknown'} "
+                                    f"agent_fallback={reapply_meta.get('agent_fallback_triggered', False) if reapply_meta else False} "
+                                    f"result={'success' if reapply_success else 'fail'}"
+                                ),
                             )
                             if reapply_success:
                                 ff = subprocess.run(
@@ -901,6 +948,15 @@ async def run_per(
                                         for r in batch_results
                                     ]
                                     continue
+                            _orchestrator_log(
+                                project_dir,
+                                f"scoped reapply: task={fkey} failed; falling back to coding agent retry",
+                            )
+                        else:
+                            _orchestrator_log(
+                                project_dir,
+                                f"scoped reapply: task={fkey} skipped (missing candidate ref or base sha); falling back to coding agent retry",
+                            )
 
                         diff_hint = failed_result.diff_summary or ""
                         if diff_hint:
@@ -970,6 +1026,10 @@ async def run_per(
                         merged_keys = {task["key"] for task in merged_tasks}
                         context_label = f" + {len(prior_tasks)} prior" if prior_tasks else ""
                         console.print(f"\n  [bold]Batch QA[/bold]  [dim]{len(merged_tasks)} merged task(s){context_label}[/dim]")
+                        _orchestrator_log(
+                            project_dir,
+                            f"batch QA: triggered for {len(merged_tasks)} merged task(s)",
+                        )
                         batch_qa = await _run_batch_qa(
                             merged_tasks, config, project_dir, tasks_file, telemetry, context,
                             pre_batch_sha=pre_batch_sha,
@@ -1077,6 +1137,10 @@ async def run_per(
                                 console.print(
                                     f"\n  [bold]Batch QA Retry[/bold]  [dim]{len(retried_merged_keys)} retried task(s)[/dim]"
                                 )
+                                _orchestrator_log(
+                                    project_dir,
+                                    f"batch QA: retry triggered for {len(retried_merged_keys)} task(s)",
+                                )
                                 final_batch_qa = await _run_batch_qa(
                                     merged_tasks,
                                     config,
@@ -1110,6 +1174,10 @@ async def run_per(
                                 if task.get("status") == "merged"
                             }
                             _rollback_main_to_sha(project_dir, pre_batch_sha)
+                            _orchestrator_log(
+                                project_dir,
+                                "rollback: main reset to pre-batch SHA due to batch QA infrastructure error",
+                            )
                             for task_key in rollback_pending_keys:
                                 try:
                                     update_task(
@@ -1138,6 +1206,10 @@ async def run_per(
                                 and key not in final_failed_keys
                             }
                             _rollback_main_to_sha(project_dir, pre_batch_sha)
+                            _orchestrator_log(
+                                project_dir,
+                                f"rollback: main reset to pre-batch SHA because {final_failure_summary or 'batch QA failed'}",
+                            )
                             for task_key in rollback_pending_keys:
                                 try:
                                     update_task(
@@ -1155,7 +1227,16 @@ async def run_per(
                             console.print(
                                 "  [yellow]Batch QA rejected the merged batch; rolled main back to the pre-batch commit[/yellow]"
                             )
-
+                        _orchestrator_log(
+                            project_dir,
+                            "batch QA result: "
+                            + (
+                                "infrastructure error"
+                                if final_batch_qa.get("infrastructure_error")
+                                else ("pass" if final_batch_qa.get("must_passed") else (final_failure_summary or "fail"))
+                            ),
+                            "",
+                        )
                         for task_key in merged_keys:
                             if task_key in final_failed_keys:
                                 final_result = next((r for r in batch_results if r.task_key == task_key), None)
@@ -1255,6 +1336,19 @@ async def run_per(
                             )
                             for result in batch_results
                         ]
+                    else:
+                        _orchestrator_log(
+                            project_dir,
+                            "batch QA: skipped (no merged tasks in batch)",
+                            "",
+                        )
+                else:
+                    reason = "interrupted" if context.interrupted else f"mode={qa_mode}"
+                    _orchestrator_log(
+                        project_dir,
+                        f"batch QA: skipped ({reason})",
+                        "",
+                    )
 
             # Process results (TaskMerged/TaskFailed already emitted by coding_loop)
             batch_passed = 0
@@ -1300,9 +1394,24 @@ async def run_per(
                 replanned = await replan(context, remaining_plan, config, project_dir)
                 if _plan_covers_pending(replanned, remaining_pending):
                     execution_plan = replanned
+                    _orchestrator_log(
+                        project_dir,
+                        f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] replan",
+                        "replan triggered after batch failures",
+                        f"old structure: {_summarize_batch_structure(remaining_plan)}",
+                        f"new structure: {_summarize_batch_structure(replanned)}",
+                        "",
+                    )
                 else:
                     console.print("  [yellow]Replan returned invalid task coverage; keeping existing remaining plan[/yellow]")
                     execution_plan = remaining_plan
+                    _orchestrator_log(
+                        project_dir,
+                        f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] replan",
+                        "replan triggered after batch failures but was rejected due to invalid coverage",
+                        f"kept structure: {_summarize_batch_structure(remaining_plan)}",
+                        "",
+                    )
 
         # Step 4: Post-run test suite
         # Batch QA already covers integration/regression testing for normal runs.
@@ -1485,6 +1594,11 @@ def merge_parallel_results(
         task_meta = tasks_by_key.get(task_key, {})
         task_id = task_meta.get("id", 0)
         custom_test_cmd = task_meta.get("verify")
+        _orchestrator_log(
+            project_dir,
+            f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] merge attempt",
+            f"task={task_key} status=started qa_mode={qa_mode}",
+        )
 
         try:
             update_task(tasks_file, task_key, status="merge_pending")
@@ -1507,6 +1621,7 @@ def merge_parallel_results(
                     diff_summary=result.diff_summary,
                     qa_report=result.qa_report,
                 ))
+                _orchestrator_log(project_dir, f"task={task_key} merge result=skip no-changes-batch")
                 continue
             console.print(f"    [red]\u2717[/red] #{task_key[:8]}  no candidate ref found")
             error = "merge_failed: no candidate ref"
@@ -1520,6 +1635,7 @@ def merge_parallel_results(
                 error=error, cost_usd=result.cost_usd,
                 duration_s=result.duration_s,
             ))
+            _orchestrator_log(project_dir, f"task={task_key} merge result=fail reason=no candidate ref")
             continue
 
         # Merge the candidate onto a temp branch rooted at the current main
@@ -1543,6 +1659,7 @@ def merge_parallel_results(
                 diff_summary=result.diff_summary,
                 qa_report=result.qa_report,
             ))
+            _orchestrator_log(project_dir, f"task={task_key} merge result=conflict")
             continue
 
         # Post-merge verification: run test suite in a fresh disposable worktree.
@@ -1579,6 +1696,7 @@ def merge_parallel_results(
                     diff_summary=result.diff_summary,
                     qa_report=result.qa_report,
                 ))
+                _orchestrator_log(project_dir, f"task={task_key} merge result=fail reason=post-merge test failure")
                 continue
 
         ff = subprocess.run(
@@ -1605,6 +1723,7 @@ def merge_parallel_results(
                 diff_summary=result.diff_summary,
                 qa_report=result.qa_report,
             ))
+            _orchestrator_log(project_dir, f"task={task_key} merge result=fail reason=fast-forward failed")
             continue
 
         # Merge succeeded
@@ -1635,6 +1754,7 @@ def merge_parallel_results(
             diff_summary=result.diff_summary,
             qa_report=result.qa_report,
         ))
+        _orchestrator_log(project_dir, f"task={task_key} merge result=success commit={new_sha[:12]}")
 
     return merged_results
 

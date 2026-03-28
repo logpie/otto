@@ -94,6 +94,10 @@ async def test_scoped_reapply_cherry_pick_succeeds(tmp_git_repo):
     assert _git(tmp_git_repo, "branch", "--show-current").stdout.strip() == "main"
     assert _git(tmp_git_repo, "rev-parse", "HEAD").stdout.strip() == main_before
     assert _show_file(tmp_git_repo, new_sha, "feature.txt") == "from candidate\n"
+    merge_log = (tmp_git_repo / "otto_logs" / task_key / "merge-resolve.log").read_text()
+    assert "patch size:" in merge_log
+    assert "cherry-pick attempted: success" in merge_log
+    assert "test verification: pass" in merge_log
 
 
 @pytest.mark.asyncio
@@ -153,6 +157,10 @@ async def test_scoped_reapply_uses_agent_after_cherry_pick_conflict(tmp_git_repo
     assert _git(tmp_git_repo, "branch", "--show-current").stdout.strip() == "main"
     assert _git(tmp_git_repo, "rev-parse", "HEAD").stdout.strip() == main_before
     assert _show_file(tmp_git_repo, new_sha, "app.txt") == "value=resolved\n"
+    merge_log = (tmp_git_repo / "otto_logs" / task_key / "merge-resolve.log").read_text()
+    assert "cherry-pick attempted: fail" in merge_log
+    assert "agent fallback: triggered" in merge_log
+    assert "agent fallback result: success" in merge_log
 
 
 @pytest.mark.asyncio

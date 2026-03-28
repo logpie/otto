@@ -46,6 +46,18 @@ class TaskFailed:
 
 
 @dataclass
+class PhaseCompleted:
+    event: str = "phase_completed"
+    task_key: str = ""
+    phase: str = ""
+    status: str = ""
+    time_s: float = 0.0
+    cost_usd: float = 0.0
+    detail: str = ""
+    timestamp: float = 0.0
+
+
+@dataclass
 class VerifyCompleted:
     event: str = "verify_completed"
     task_key: str = ""
@@ -103,7 +115,7 @@ class AllDone:
 
 # Union of all event types
 TelemetryEvent = (
-    TaskStarted | TaskMerged | TaskFailed | VerifyCompleted |
+    TaskStarted | TaskMerged | TaskFailed | PhaseCompleted | VerifyCompleted |
     AgentToolCall | ResearchComplete | BatchCompleted | PlanCreated | AllDone
 )
 

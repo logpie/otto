@@ -6,6 +6,7 @@ from otto.telemetry import (
     AgentToolCall,
     AllDone,
     BatchCompleted,
+    PhaseCompleted,
     PlanCreated,
     ResearchComplete,
     TaskFailed,
@@ -36,6 +37,12 @@ class TestEventDataclasses:
         e = VerifyCompleted(task_key="abc", passed=True, duration_s=5.0)
         assert e.event == "verify_completed"
         assert e.passed is True
+
+    def test_phase_completed(self):
+        e = PhaseCompleted(task_key="abc", phase="qa", status="done", time_s=5.0, cost_usd=0.25)
+        assert e.event == "phase_completed"
+        assert e.phase == "qa"
+        assert e.cost_usd == 0.25
 
     def test_agent_tool_call(self):
         e = AgentToolCall(task_key="abc", name="Read", detail="src/main.py")
@@ -79,12 +86,14 @@ class TestTelemetry:
     def test_log_appends(self, tmp_path):
         t = Telemetry(tmp_path / "logs")
         t.log(TaskStarted(task_key="t1", task_id=1))
+        t.log(PhaseCompleted(task_key="t1", phase="coding", status="done", time_s=12.0))
         t.log(AllDone(total_passed=1, total_failed=0, total_missing_or_interrupted=0, total_cost=0.50))
         lines = t.events_path.read_text().strip().splitlines()
-        assert len(lines) == 2
+        assert len(lines) == 3
         assert json.loads(lines[0])["event"] == "task_started"
-        assert json.loads(lines[1])["event"] == "all_done"
-        assert json.loads(lines[1])["total_missing_or_interrupted"] == 0
+        assert json.loads(lines[1])["event"] == "phase_completed"
+        assert json.loads(lines[2])["event"] == "all_done"
+        assert json.loads(lines[2])["total_missing_or_interrupted"] == 0
 
     def test_legacy_disabled_by_default(self, tmp_path):
         t = Telemetry(tmp_path / "logs")

@@ -609,6 +609,40 @@ class TestPlan:
         result = parse_plan_json("This is not valid JSON at all")
         assert result is None
 
+    @pytest.mark.asyncio
+    async def test_writes_planner_log(self, tmp_path):
+        tasks = [
+            {"key": "t1", "id": 1, "prompt": "Add search page"},
+            {"key": "t2", "id": 2, "prompt": "Add auth flow"},
+        ]
+        responses = iter([
+            json.dumps({"candidates": [{"task_a": "t1", "task_b": "t2", "reason": "possible dependency"}]}),
+            json.dumps({
+                "analysis": [
+                    {"task_a": "t1", "task_b": "t2", "relationship": "DEPENDENT", "reason": "auth gates the page"},
+                ],
+                "conflicts": [],
+                "batches": [
+                    {"tasks": [{"task_key": "t1"}]},
+                    {"tasks": [{"task_key": "t2"}]},
+                ],
+            }),
+        ])
+
+        async def fake_query(prompt, options, *args, **kwargs):
+            return next(responses), 0.12, None
+
+        result = None
+        with patch("otto.planner.run_agent_query", side_effect=fake_query):
+            result = await plan(tasks, {}, tmp_path)
+
+        assert result is not None
+        planner_log = (tmp_path / "otto_logs" / "planner.log").read_text()
+        assert "task summary sent to LLM" in planner_log
+        assert "shortlist results" in planner_log
+        assert "relationship analysis" in planner_log
+        assert "final batch structure" in planner_log
+
 
 class TestReplan:
     @pytest.mark.asyncio

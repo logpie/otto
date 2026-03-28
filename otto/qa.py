@@ -18,6 +18,7 @@ from otto.agent import (
     _subprocess_env,
     query,
 )
+from otto.observability import append_text_log
 from otto.theme import console
 
 # UserMessage may not exist in all SDK versions — used for tool-result capture
@@ -102,6 +103,7 @@ def determine_qa_tier(
     attempt: int,
     diff_info: dict[str, Any],
     spec_test_mapping: dict[str, str | None] | None = None,
+    log_dir: Path | None = None,
 ) -> int:
     """Determine QA tier based on residual risk after verification.
 
@@ -111,17 +113,49 @@ def determine_qa_tier(
     """
     from otto.tasks import spec_binding, spec_is_verifiable
 
-    diff_files = diff_info.get("files", [])
+    diff_files = [str(path) for path in (diff_info.get("files") or [])]
     spec_test_mapping = spec_test_mapping or {}
+    log_lines = [
+        f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] QA tier decision for {task.get('key', 'unknown')}",
+        f"attempt: {attempt}",
+        f"changed files: {len(diff_files)}",
+    ]
 
     # Tier 2: high-risk domains
     HIGH_RISK_PATTERNS = ["auth", "crypto", "permission", "migration",
                           "payment", "security", "token", "session"]
-    if any(pattern in f.lower() for f in diff_files for pattern in HIGH_RISK_PATTERNS):
+    matched_risk_patterns = sorted({
+        pattern
+        for f in diff_files
+        for pattern in HIGH_RISK_PATTERNS
+        if pattern in f.lower()
+    })
+    log_lines.append(
+        "risk patterns: "
+        + (", ".join(matched_risk_patterns) if matched_risk_patterns else "none matched")
+    )
+    if matched_risk_patterns:
+        log_lines.append("visual specs: not evaluated (tier 2 already required)")
+        log_lines.append("spa detection: not evaluated (tier 2 already required)")
+        log_lines.append("test mapping: not evaluated (tier 2 already required)")
+        log_lines.append("final tier: 2")
+        if log_dir:
+            append_text_log(log_dir / "qa-tier.log", log_lines + [""])
         return 2
 
     # Tier 2: non-verifiable [must] items require browser/subjective QA.
-    if any(spec_binding(item) == "must" and not spec_is_verifiable(item) for item in spec):
+    non_verifiable_must = any(
+        spec_binding(item) == "must" and not spec_is_verifiable(item)
+        for item in spec
+    )
+    log_lines.append(f"non-verifiable [must]: {'yes' if non_verifiable_must else 'no'}")
+    if non_verifiable_must:
+        log_lines.append("visual specs: required by non-verifiable [must]")
+        log_lines.append("spa detection: not evaluated (tier 2 already required)")
+        log_lines.append("test mapping: not evaluated (tier 2 already required)")
+        log_lines.append("final tier: 2")
+        if log_dir:
+            append_text_log(log_dir / "qa-tier.log", log_lines + [""])
         return 2
 
     # Tier 2: visual/UI specs (need browser), SPA apps, or retries
@@ -138,17 +172,39 @@ def determine_qa_tier(
         and not any(seg in f.lower() for seg in ("test", "__tests__", "spec", ".test.", ".spec."))
         for f in diff_files
     )
+    log_lines.append(f"visual specs detected: {'yes' if has_visual else 'no'}")
+    log_lines.append(f"spa detection: {'yes' if is_spa else 'no'}")
+    log_lines.append(f"retry escalation: {'yes' if attempt > 0 else 'no'}")
     if has_visual or is_spa or attempt > 0:
+        log_lines.append("test mapping: not evaluated (tier 2 already required)")
+        log_lines.append("final tier: 2")
+        if log_dir:
+            append_text_log(log_dir / "qa-tier.log", log_lines + [""])
         return 2
 
     # Tier 1: unmapped [must] items or cross-cutting changes
     unmapped = [item for item in spec
                 if spec_binding(item) == "must"
                 and not spec_test_mapping.get(spec_text(item))]
+    log_lines.append(
+        "unmapped [must] items: "
+        + (
+            ", ".join(spec_text(item)[:80] for item in unmapped[:3])
+            if unmapped else
+            "none"
+        )
+    )
+    log_lines.append(f"cross-cutting diff: {'yes' if len(diff_files) > 5 else 'no'}")
     if unmapped or len(diff_files) > 5:
+        log_lines.append("final tier: 1")
+        if log_dir:
+            append_text_log(log_dir / "qa-tier.log", log_lines + [""])
         return 1
 
     # Tier 0: every [must] item has a test, local change, first attempt
+    log_lines.append("final tier: 0")
+    if log_dir:
+        append_text_log(log_dir / "qa-tier.log", log_lines + [""])
     return 0
 
 

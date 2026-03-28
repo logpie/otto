@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
 from otto.agent import ClaudeAgentOptions, run_agent_query, _subprocess_env
 from otto.config import detect_test_command
 from otto.git_ops import build_candidate_commit
+from otto.observability import append_text_log
 from otto.tasks import load_tasks
 from otto.testing import run_test_suite
 
@@ -140,11 +142,41 @@ async def scoped_reapply(
     config: dict,
     project_dir: Path,
     tasks_file: Path,
-) -> tuple[bool, str]:
+    *,
+    return_metadata: bool = False,
+) -> tuple[bool, str] | tuple[bool, str, dict[str, Any]]:
     """Apply a task's verified diff onto updated main via a scoped agent."""
     default_branch = config["default_branch"]
+    log_path = project_dir / "otto_logs" / task_key / "merge-resolve.log"
+    started_at = time.monotonic()
+    metadata: dict[str, Any] = {
+        "patch_lines": 0,
+        "cherry_pick": "not_attempted",
+        "agent_fallback_triggered": False,
+        "agent_max_turns": 0,
+        "agent_result": "not_needed",
+        "verification_passed": False,
+        "time_s": 0.0,
+    }
+
+    def _log(*lines: str) -> None:
+        append_text_log(log_path, lines)
+
+    def _finish(success: bool, sha: str) -> tuple[bool, str] | tuple[bool, str, dict[str, Any]]:
+        metadata["time_s"] = round(time.monotonic() - started_at, 1)
+        _log(f"total time: {metadata['time_s']:.1f}s", "")
+        if return_metadata:
+            return success, sha, metadata
+        return success, sha
+
     candidate_sha = _resolve_candidate_sha(project_dir, candidate_ref)
     patch_text = _git(project_dir, "diff", f"{base_sha}..{candidate_sha}", check=True).stdout
+    metadata["patch_lines"] = len(patch_text.splitlines())
+    _log(
+        f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] scoped reapply for {task_key}",
+        f"patch size: {metadata['patch_lines']} lines",
+        f"candidate ref: {candidate_ref}",
+    )
     temp_branch = f"otto/_scoped_reapply_{task_key}"
 
     _git(project_dir, "checkout", default_branch, check=True)
@@ -154,6 +186,8 @@ async def scoped_reapply(
 
     cherry_pick = _git(project_dir, "cherry-pick", "--no-commit", candidate_sha)
     if cherry_pick.returncode == 0:
+        metadata["cherry_pick"] = "success"
+        _log("cherry-pick attempted: success")
         try:
             new_sha = _commit_current_tree(
                 project_dir,
@@ -161,20 +195,29 @@ async def scoped_reapply(
             )
         except Exception:
             _cleanup_failure(project_dir, default_branch, temp_branch)
-            return False, ""
-        if _verify_result(task_key, new_sha, config, project_dir, tasks_file):
+            _log("result: failed to create scoped commit")
+            return _finish(False, "")
+        verified = _verify_result(task_key, new_sha, config, project_dir, tasks_file)
+        metadata["verification_passed"] = verified
+        _log(f"test verification: {'pass' if verified else 'fail'}")
+        if verified:
             _git(project_dir, "checkout", default_branch, check=True)
             _git(project_dir, "branch", "-D", temp_branch)
-            return True, new_sha
+            return _finish(True, new_sha)
         _cleanup_failure(project_dir, default_branch, temp_branch)
-        return False, ""
+        return _finish(False, "")
 
+    metadata["cherry_pick"] = "fail"
     conflict_files = _git(project_dir, "diff", "--name-only", "--diff-filter=U").stdout.strip()
     conflict_status = _git(project_dir, "status", "--short").stdout.strip()
     conflict_diff = _git(project_dir, "diff").stdout.strip()
+    _log("cherry-pick attempted: fail")
     _abort_cherry_pick(project_dir)
 
     coding_settings = config.get("coding_agent_settings", "project").split(",")
+    metadata["agent_fallback_triggered"] = True
+    metadata["agent_max_turns"] = 30
+    _log(f"agent fallback: triggered (max_turns={metadata['agent_max_turns']})")
     agent_opts = ClaudeAgentOptions(
         permission_mode="bypassPermissions",
         cwd=str(project_dir),
@@ -203,11 +246,15 @@ async def scoped_reapply(
     try:
         _, _, result_msg = await run_agent_query(prompt, agent_opts)
     except Exception:
+        metadata["agent_result"] = "exception"
+        _log("agent fallback result: exception")
         _cleanup_failure(project_dir, default_branch, temp_branch)
-        return False, ""
+        return _finish(False, "")
     if getattr(result_msg, "is_error", False):
+        metadata["agent_result"] = "error"
+        _log("agent fallback result: error")
         _cleanup_failure(project_dir, default_branch, temp_branch)
-        return False, ""
+        return _finish(False, "")
 
     try:
         new_sha = _commit_current_tree(
@@ -215,13 +262,22 @@ async def scoped_reapply(
             temp_base_sha,
         )
     except Exception:
+        metadata["agent_result"] = "no_changes"
+        _log("agent fallback result: no scoped commit created")
         _cleanup_failure(project_dir, default_branch, temp_branch)
-        return False, ""
+        return _finish(False, "")
 
-    if _verify_result(task_key, new_sha, config, project_dir, tasks_file):
+    verified = _verify_result(task_key, new_sha, config, project_dir, tasks_file)
+    metadata["verification_passed"] = verified
+    metadata["agent_result"] = "success" if verified else "verification_failed"
+    _log(
+        f"agent fallback result: {metadata['agent_result']}",
+        f"test verification: {'pass' if verified else 'fail'}",
+    )
+    if verified:
         _git(project_dir, "checkout", default_branch, check=True)
         _git(project_dir, "branch", "-D", temp_branch)
-        return True, new_sha
+        return _finish(True, new_sha)
 
     _cleanup_failure(project_dir, default_branch, temp_branch)
-    return False, ""
+    return _finish(False, "")
