@@ -192,6 +192,50 @@ def _planner_conflict_and_blocked_keys(
     return direct_conflicts, blocked
 
 
+def _build_sibling_context(
+    task_key: str,
+    batch: Any,
+    pending_by_key: dict[str, dict[str, Any]],
+    analysis: list[dict[str, Any]],
+) -> str | None:
+    """Build context about sibling tasks for the coding agent.
+
+    Tells the agent what other tasks exist, what they modify, and what
+    integration risks to watch for. This prevents bugs like "items API
+    doesn't filter by authenticated user" when a sibling task adds auth.
+    """
+    siblings = [
+        tp for tp in batch.tasks
+        if tp.task_key != task_key and tp.task_key in pending_by_key
+    ]
+    if not siblings:
+        return None
+
+    lines = ["OTHER TASKS IN THIS BATCH (consider interactions):"]
+    for sib in siblings:
+        sib_task = pending_by_key.get(sib.task_key, {})
+        sib_prompt = sib_task.get("prompt", "")
+        lines.append(f"- {sib_prompt}")
+
+    # Add planner relationship analysis for this task
+    relevant = [
+        item for item in analysis
+        if task_key in (item.get("task_a"), item.get("task_b"))
+        and item.get("relationship") not in ("INDEPENDENT", None)
+    ]
+    if relevant:
+        lines.append("\nPlanner analysis (integration risks):")
+        for item in relevant:
+            other = item["task_b"] if item["task_a"] == task_key else item["task_a"]
+            other_prompt = pending_by_key.get(other, {}).get("prompt", other)
+            lines.append(
+                f"- {item.get('relationship', '?')} with \"{other_prompt[:100]}\": "
+                f"{item.get('reason', '')}"
+            )
+
+    return "\n".join(lines)
+
+
 def _plan_covers_pending(execution_plan: ExecutionPlan, pending: list[dict[str, Any]]) -> bool:
     """Return True when planned + conflicted + blocked covers pending exactly once."""
     pending_keys = {
@@ -731,18 +775,30 @@ async def run_per(
                 console.print(f"\n  [bold]Batch {batch_idx}[/bold]  [dim]1 task[/dim]")
 
             if use_parallel:
+                # Build sibling context for each task in the batch
+                sib_ctxs = {
+                    tp.task_key: _build_sibling_context(
+                        tp.task_key, batch, pending_by_key, execution_plan.analysis,
+                    )
+                    for tp in batch.tasks
+                }
                 batch_results = await _run_batch_parallel(
                     batch, context, config, project_dir, telemetry, tasks_file,
                     max_parallel=max_parallel,
                     qa_mode=qa_mode,
+                    sibling_contexts=sib_ctxs,
                 )
             else:
                 # Serial execution — tasks share the main checkout
                 batch_results: list[TaskResult] = []
                 for task_plan in batch.tasks:
+                    sibling_ctx = _build_sibling_context(
+                        task_plan.task_key, batch, pending_by_key, execution_plan.analysis,
+                    )
                     result = await coding_loop(
                         task_plan, context, config, project_dir, telemetry, tasks_file,
                         qa_mode=qa_mode,
+                        sibling_context=sibling_ctx,
                     )
                     batch_results.append(result)
                     if context.interrupted:
@@ -1585,6 +1641,7 @@ async def _run_batch_parallel(
     *,
     max_parallel: int,
     qa_mode: str = QAMode.PER_TASK,
+    sibling_contexts: dict[str, str | None] | None = None,
 ) -> list[TaskResult]:
     """Run a batch of tasks in parallel using per-task git worktrees.
 
@@ -1628,11 +1685,13 @@ async def _run_batch_parallel(
                         task_key=task_key, success=False,
                         error="interrupted before start",
                     )
+                sib_ctx = (sibling_contexts or {}).get(task_key)
                 result = await coding_loop(
                     task_plan, context, config, project_dir,
                     telemetry, tasks_file,
                     task_work_dir=worktree_path,
                     qa_mode=qa_mode,
+                    sibling_context=sib_ctx,
                 )
                 return result
 

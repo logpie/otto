@@ -83,7 +83,7 @@ class TestRunPerIntegration:
         config = self._make_config(tmp_git_repo)
 
         # Mock coding_loop to succeed — create a branch with commit for merge
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, task_work_dir=None, qa_mode="per_task"):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, task_work_dir=None, qa_mode="per_task", sibling_context=None):
             branch = f"otto/{task_plan.task_key}"
             subprocess.run(["git", "checkout", "-b", branch], cwd=project_dir, capture_output=True)
             (project_dir / "hello.py").write_text("def hello(): return 'hello'\n")
@@ -114,7 +114,7 @@ class TestRunPerIntegration:
 
         config = self._make_config(tmp_git_repo)
 
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, task_work_dir=None, qa_mode="per_task"):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, task_work_dir=None, qa_mode="per_task", sibling_context=None):
             return TaskResult(
                 task_key=task_plan.task_key, success=False,
                 error="tests failed", cost_usd=0.20,
@@ -228,7 +228,7 @@ class TestRunPerIntegration:
 
         rerun_calls: list[str] = []
 
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None, qa_mode="per_task"):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None, qa_mode="per_task", sibling_context=None):
             rerun_calls.append(task_plan.task_key)
             task = next(t for t in load_tasks(task_file) if t.get("key") == task_plan.task_key)
             assert task["status"] == "pending"
@@ -341,7 +341,7 @@ class TestRunPerIntegration:
             assert base_sha == expected_base_sha
             return False, ""
 
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None, qa_mode="per_task"):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None, qa_mode="per_task", sibling_context=None):
             call_order.append("coding_loop")
             update_task(task_file, task_plan.task_key, status="verified" if qa_mode == QAMode.BATCH else "passed")
             return TaskResult(task_key=task_plan.task_key, success=True)
@@ -476,7 +476,7 @@ class TestRunPerIntegration:
         events: list[str] = []
         in_flight = False
 
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, task_work_dir=None, qa_mode="per_task"):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, task_work_dir=None, qa_mode="per_task", sibling_context=None):
             nonlocal in_flight
             assert in_flight is False
             in_flight = True
@@ -522,7 +522,7 @@ class TestRunPerIntegration:
         executed_keys: list[str] = []
         received_work_dirs: dict[str, str] = {}
 
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, task_work_dir=None, qa_mode="per_task"):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, task_work_dir=None, qa_mode="per_task", sibling_context=None):
             executed_keys.append(task_plan.task_key)
             if task_work_dir:
                 received_work_dirs[task_plan.task_key] = str(task_work_dir)
@@ -581,7 +581,7 @@ class TestRunPerIntegration:
         ])
         executed: list[str] = []
 
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, task_work_dir=None, qa_mode="per_task"):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, task_work_dir=None, qa_mode="per_task", sibling_context=None):
             executed.append(task_plan.task_key)
             if task_plan.task_key == "task-one":
                 return TaskResult(task_key=task_plan.task_key, success=False, error="boom")
@@ -615,7 +615,7 @@ class TestRunPerIntegration:
         ])
         executed: list[str] = []
 
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, task_work_dir=None, qa_mode="per_task"):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, task_work_dir=None, qa_mode="per_task", sibling_context=None):
             executed.append(task_plan.task_key)
             context.interrupted = True
             return TaskResult(task_key=task_plan.task_key, success=True)
@@ -659,7 +659,7 @@ class TestRunPerIntegration:
             "task-three": False,
         }
 
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None, qa_mode="per_task"):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None, qa_mode="per_task", sibling_context=None):
             success = outcomes[task_plan.task_key]
             if success:
                 update_task(task_file, task_plan.task_key, status="passed")
@@ -694,7 +694,7 @@ class TestRunPerIntegration:
             Batch(tasks=[TaskPlan(task_key="task-one"), TaskPlan(task_key="task-two")]),
         ])
 
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None, qa_mode="per_task"):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None, qa_mode="per_task", sibling_context=None):
             update_task(task_file, task_plan.task_key, status="passed")
             return TaskResult(task_key=task_plan.task_key, success=True)
 
@@ -731,7 +731,7 @@ class TestRunPerIntegration:
             Batch(tasks=[TaskPlan(task_key="task-one"), TaskPlan(task_key="task-two")]),
         ])
 
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None, qa_mode="per_task"):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None, qa_mode="per_task", sibling_context=None):
             update_task(task_file, task_plan.task_key, status="passed")
             return TaskResult(task_key=task_plan.task_key, success=True)
 
@@ -779,7 +779,7 @@ class TestRunPerIntegration:
         ])
         seen_modes: list[str] = []
 
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None, qa_mode="per_task"):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None, qa_mode="per_task", sibling_context=None):
             seen_modes.append(qa_mode)
             update_task(task_file, task_plan.task_key, status="verified")
             return TaskResult(task_key=task_plan.task_key, success=True)
@@ -828,7 +828,7 @@ class TestRunPerIntegration:
         ])
         call_counts = {"task-one": 0, "task-two": 0}
 
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None, qa_mode="per_task"):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None, qa_mode="per_task", sibling_context=None):
             call_counts[task_plan.task_key] += 1
             if task_plan.task_key == "task-one" and call_counts["task-one"] == 2:
                 task = next(t for t in load_tasks(task_file) if t["key"] == "task-one")
@@ -910,7 +910,7 @@ class TestRunPerIntegration:
         ])
         call_counts = {"task-one": 0, "task-two": 0}
 
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None, qa_mode="per_task"):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None, qa_mode="per_task", sibling_context=None):
             call_counts[task_plan.task_key] += 1
             update_task(task_file, task_plan.task_key, status="verified")
             return TaskResult(task_key=task_plan.task_key, success=True)
@@ -996,7 +996,7 @@ class TestRunPerIntegration:
             Batch(tasks=[TaskPlan(task_key="task-one"), TaskPlan(task_key="task-two")]),
         ])
 
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None, qa_mode="per_task"):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None, qa_mode="per_task", sibling_context=None):
             update_task(task_file, task_plan.task_key, status="verified")
             return TaskResult(task_key=task_plan.task_key, success=True)
 
@@ -1053,7 +1053,7 @@ class TestRunPerIntegration:
         ])
         seen_modes: list[str] = []
 
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None, qa_mode="per_task"):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None, qa_mode="per_task", sibling_context=None):
             seen_modes.append(qa_mode)
             update_task(task_file, task_plan.task_key, status="passed")
             return TaskResult(task_key=task_plan.task_key, success=True)
@@ -1511,7 +1511,7 @@ class TestRunBatchParallel:
                 active_setup -= 1
             return None
 
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, task_work_dir=None, qa_mode="per_task"):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, task_work_dir=None, qa_mode="per_task", sibling_context=None):
             return TaskResult(task_key=task_plan.task_key, success=True)
 
         with patch("otto.git_ops.create_task_worktree", side_effect=fake_create_task_worktree):

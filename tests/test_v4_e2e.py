@@ -253,7 +253,7 @@ class TestRunPerE2E:
              "spec": ["hello() returns 'hello'"]},
         ]}))
 
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, qa_mode="per_task"):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, qa_mode="per_task", sibling_context=None, task_work_dir=None):
             # Simulate: create branch, commit, merge (as run_task_with_qa would)
             key = task_plan.task_key
             branch = f"otto/{key}"
@@ -291,7 +291,7 @@ class TestRunPerE2E:
              "spec": ["Something impossible"]},
         ]}))
 
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, qa_mode="per_task"):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, qa_mode="per_task", sibling_context=None, task_work_dir=None):
             from otto.tasks import update_task
             update_task(tasks_path, task_plan.task_key, status="failed", error="max retries")
             return TaskResult(task_key=task_plan.task_key, success=False, error="max retries")
@@ -314,7 +314,7 @@ class TestRunPerE2E:
 
         call_order = []
 
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, qa_mode="per_task"):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, qa_mode="per_task", sibling_context=None, task_work_dir=None):
             call_order.append(task_plan.task_key)
             from otto.tasks import update_task
             update_task(tasks_path, task_plan.task_key, status="passed", cost_usd=0.05)
@@ -351,7 +351,7 @@ class TestRunPerE2E:
 
         call_count = 0
 
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, qa_mode="per_task"):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, qa_mode="per_task", sibling_context=None, task_work_dir=None):
             nonlocal call_count
             call_count += 1
             from otto.tasks import update_task
@@ -376,7 +376,7 @@ class TestRunPerE2E:
             {"id": 1, "key": "abc123def456", "prompt": "Test", "status": "pending"},
         ]}))
 
-        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, qa_mode="per_task"):
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, qa_mode="per_task", sibling_context=None, task_work_dir=None):
             from otto.tasks import update_task
             update_task(tasks_path, task_plan.task_key, status="passed", cost_usd=0.25)
             return TaskResult(task_key=task_plan.task_key, success=True, cost_usd=0.25)

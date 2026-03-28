@@ -277,6 +277,7 @@ async def coding_loop(
     tasks_file: Path | None = None,
     task_work_dir: Path | None = None,
     qa_mode: str = QAMode.PER_TASK,
+    sibling_context: str | None = None,
 ) -> Any:  # otto.context.TaskResult
     """v4 coding loop — run a single task through the v4.5 execution path.
 
@@ -390,6 +391,7 @@ async def coding_loop(
             context=context, on_progress=_on_progress,
             task_work_dir=task_work_dir,
             qa_mode=qa_mode,
+            sibling_context=sibling_context,
         )
 
         duration = time.monotonic() - task_start
@@ -616,6 +618,7 @@ def _build_coding_prompt(
     feedback: str,
     spec: list | None,
     context: Any | None,
+    sibling_context: str | None = None,
 ) -> str:
     """Build the coding agent prompt for a given attempt.
 
@@ -626,6 +629,8 @@ def _build_coding_prompt(
 
     if attempt == 0 and not last_error:
         # ROUND 1: Bare CC — raw prompt + cross-task learnings + user feedback
+        if sibling_context:
+            coding_prompt += f"\n\n{sibling_context}"
         if feedback:
             coding_prompt += f"\n\nIMPORTANT feedback from the user:\n{feedback}"
         if context and hasattr(context, 'observed_learnings') and context.observed_learnings:
@@ -1272,6 +1277,7 @@ async def run_task_v45(
     on_progress: Any | None = None,
     task_work_dir: Path | None = None,
     qa_mode: str = QAMode.PER_TASK,
+    sibling_context: str | None = None,
 ) -> dict[str, Any]:
     """v4.5 per-task execution loop — bare CC + parallel spec gen + verify + QA.
 
@@ -1635,6 +1641,7 @@ async def run_task_v45(
                 feedback=feedback,
                 spec=spec,
                 context=context,
+                sibling_context=sibling_context,
             )
 
             if attempt == 0 and not last_error:
