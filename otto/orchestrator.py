@@ -454,7 +454,10 @@ async def _run_batch_qa(
 
     tasks_with_specs = list(await asyncio.gather(*(_ensure_spec(task) for task in merged_tasks)))
 
-    log_dir = project_dir / "otto_logs" / "batch-qa"
+    # Run-scoped batch QA directory (prevents overwriting between runs)
+    import time as _time_mod
+    batch_qa_ts = _time_mod.strftime("%Y%m%d-%H%M%S")
+    log_dir = project_dir / "otto_logs" / f"batch-qa-{batch_qa_ts}"
     log_dir.mkdir(parents=True, exist_ok=True)
 
     # Compute real diff so QA can see what changed (QA1 fix)

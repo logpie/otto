@@ -1519,6 +1519,12 @@ async def run_task_v45(
                 review_ref: str | None = None,
                 error_code: Any = _result_error_code_unset) -> dict[str, Any]:
         duration = time.monotonic() - task_start
+        # In batch mode, mark deferred phases so live-state isn't misleading
+        final_phases = dict(_live_phases)
+        if batch_qa_mode:
+            for phase_name in ("spec_gen", "qa", "merge"):
+                if final_phases.get(phase_name, {}).get("status") == "pending":
+                    final_phases[phase_name] = {"status": "deferred_to_batch", "time_s": 0}
         try:
             _live_state_file.write_text(json.dumps({
                 "task_key": key,
@@ -1529,7 +1535,7 @@ async def run_task_v45(
                 "status": status,
                 "completed": True,
                 "error": error[:200] if error else "",
-                "phases": _live_phases,
+                "phases": final_phases,
                 "recent_tools": list(_live_tools),
             }))
         except Exception:
@@ -1768,6 +1774,21 @@ async def run_task_v45(
 
                 coding_elapsed = round(time.monotonic() - coding_start, 1)
                 phase_timings["coding"] = phase_timings.get("coding", 0) + coding_elapsed
+
+                # Warn if SDK returned $0 for a non-trivial coding run
+                # (known issue: concurrent parallel sessions may lose cost)
+                if attempt_cost == 0 and coding_elapsed > 10:
+                    from otto.observability import append_text_log
+                    append_text_log(
+                        log_dir / "cost-warning.log",
+                        [
+                            f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] WARNING: $0 cost for {coding_elapsed:.0f}s coding",
+                            f"session_id: {session_id}",
+                            f"result_msg.total_cost_usd: {getattr(result_msg, 'total_cost_usd', 'missing')}",
+                            f"This may be an SDK bug with concurrent parallel sessions.",
+                            "",
+                        ],
+                    )
 
             except Exception as e:
                 coding_elapsed = round(time.monotonic() - coding_start, 1)
