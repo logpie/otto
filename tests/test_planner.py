@@ -312,6 +312,33 @@ class TestNormalizePlan:
             }
         ]
 
+    def test_dependent_relationship_is_directional_across_batches(self):
+        tasks = [
+            {"key": "t1", "id": 1, "prompt": "Add auth backend"},
+            {"key": "t2", "id": 2, "prompt": "Build profile page"},
+        ]
+        plan = ExecutionPlan(
+            batches=[
+                Batch(tasks=[TaskPlan(task_key="t2")]),
+                Batch(tasks=[TaskPlan(task_key="t1")]),
+            ],
+            analysis=[
+                {
+                    "task_a": "t1",
+                    "task_b": "t2",
+                    "relationship": "DEPENDENT",
+                    "reason": "Profile page needs auth outputs.",
+                }
+            ],
+        )
+
+        result = _normalize_plan(plan, tasks)
+
+        assert [[tp.task_key for tp in batch.tasks] for batch in result.batches] == [
+            ["t1"],
+            ["t2"],
+        ]
+
     def test_multi_task_with_deps(self):
         """Tasks with depends_on should be in later batches."""
         tasks = [
@@ -615,3 +642,39 @@ class TestReplan:
 
         assert result.total_tasks == 1
         assert result.batches[0].tasks[0].task_key == "t2"
+
+    @pytest.mark.asyncio
+    async def test_replan_normalizes_preserved_analysis(self, tmp_path):
+        from otto.context import PipelineContext
+
+        ctx = PipelineContext()
+        remaining = ExecutionPlan(
+            batches=[Batch(tasks=[TaskPlan(task_key="t1"), TaskPlan(task_key="t2")])],
+            analysis=[
+                {
+                    "task_a": "t1",
+                    "task_b": "t2",
+                    "relationship": "DEPENDENT",
+                    "reason": "Profile page needs auth outputs.",
+                }
+            ],
+        )
+
+        async def fake_query(prompt, options, *args, **kwargs):
+            return json.dumps({
+                "batches": [
+                    {"tasks": [{"task_key": "t2"}]},
+                    {"tasks": [{"task_key": "t1"}]},
+                ],
+                "learnings": ["reordered based on recent results"],
+            }), 0.0, None
+
+        with patch("otto.planner.run_agent_query", side_effect=fake_query):
+            result = await replan(ctx, remaining, {}, tmp_path)
+
+        assert [[tp.task_key for tp in batch.tasks] for batch in result.batches] == [
+            ["t1"],
+            ["t2"],
+        ]
+        assert result.analysis == remaining.analysis
+        assert result.learnings == ["reordered based on recent results"]

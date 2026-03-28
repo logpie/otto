@@ -353,21 +353,61 @@ def _serialize_analysis_batches(
     batches: list[Batch],
     analysis: list[dict[str, Any]],
 ) -> list[Batch]:
+    task_plans_by_key: dict[str, TaskPlan] = {}
+    original_batch_by_key: dict[str, int] = {}
+    original_order_by_key: dict[str, tuple[int, int]] = {}
+    for batch_index, batch in enumerate(batches):
+        for task_index, task_plan in enumerate(batch.tasks):
+            task_plans_by_key[task_plan.task_key] = task_plan
+            original_batch_by_key[task_plan.task_key] = batch_index
+            original_order_by_key[task_plan.task_key] = (batch_index, task_index)
+
     serialized_pairs = {
         frozenset((item["task_a"], item["task_b"]))
         for item in analysis
-        if item.get("relationship") in {"DEPENDENT", "ADDITIVE", "UNCERTAIN"}
+        if item.get("relationship") in {"ADDITIVE", "UNCERTAIN"}
+        and item.get("task_a") in task_plans_by_key
+        and item.get("task_b") in task_plans_by_key
         and item.get("task_a") != item.get("task_b")
     }
-    if not serialized_pairs:
+    dependency_predecessors: dict[str, set[str]] = {
+        task_key: set() for task_key in task_plans_by_key
+    }
+    for item in analysis:
+        if item.get("relationship") != "DEPENDENT":
+            continue
+        task_a = str(item.get("task_a", "") or "")
+        task_b = str(item.get("task_b", "") or "")
+        if (
+            task_a not in task_plans_by_key
+            or task_b not in task_plans_by_key
+            or task_a == task_b
+        ):
+            continue
+        dependency_predecessors[task_b].add(task_a)
+
+    if not serialized_pairs and not any(dependency_predecessors.values()):
         return batches
 
     serialized_batches: list[Batch] = []
-    for batch_index, batch in enumerate(batches):
-        while len(serialized_batches) <= batch_index:
-            serialized_batches.append(Batch(tasks=[]))
-        for task_plan in batch.tasks:
-            target_batch = batch_index
+    task_batch_by_key: dict[str, int] = {}
+    pending_keys = sorted(task_plans_by_key, key=original_order_by_key.__getitem__)
+    while pending_keys:
+        next_pending: list[str] = []
+        progressed = False
+        for task_key in pending_keys:
+            predecessors = dependency_predecessors.get(task_key, set())
+            if any(pred not in task_batch_by_key for pred in predecessors):
+                next_pending.append(task_key)
+                continue
+
+            task_plan = task_plans_by_key[task_key]
+            target_batch = original_batch_by_key[task_key]
+            if predecessors:
+                target_batch = max(
+                    target_batch,
+                    max(task_batch_by_key[pred] + 1 for pred in predecessors),
+                )
             while True:
                 while len(serialized_batches) <= target_batch:
                     serialized_batches.append(Batch(tasks=[]))
@@ -376,13 +416,26 @@ def _serialize_analysis_batches(
                     for existing in serialized_batches[target_batch].tasks
                 }
                 if any(
-                    frozenset((task_plan.task_key, other_key)) in serialized_pairs
+                    frozenset((task_key, other_key)) in serialized_pairs
                     for other_key in existing_keys
                 ):
                     target_batch += 1
                     continue
                 serialized_batches[target_batch].tasks.append(task_plan)
+                task_batch_by_key[task_key] = target_batch
+                progressed = True
                 break
+
+        if progressed:
+            pending_keys = next_pending
+            continue
+
+        # Dependency cycles are invalid, but keep execution deterministic and conservative.
+        for task_key in next_pending:
+            task_plan = task_plans_by_key[task_key]
+            serialized_batches.append(Batch(tasks=[task_plan]))
+            task_batch_by_key[task_key] = len(serialized_batches) - 1
+        break
 
     return [batch for batch in serialized_batches if batch.tasks]
 
@@ -753,11 +806,19 @@ Remaining tasks:
         replanned = parse_plan_json(raw_output)
         if replanned is None or replanned.is_empty:
             raise ValueError("replan parse failed")
-        return ExecutionPlan(
-            batches=replanned.batches,
-            learnings=replanned.learnings,
-            conflicts=list(remaining_plan.conflicts),
-            analysis=list(remaining_plan.analysis),
+        remaining_tasks = [
+            {"key": task_plan.task_key}
+            for batch in remaining_plan.batches
+            for task_plan in batch.tasks
+        ]
+        return _normalize_plan(
+            ExecutionPlan(
+                batches=replanned.batches,
+                learnings=replanned.learnings,
+                conflicts=list(remaining_plan.conflicts),
+                analysis=list(remaining_plan.analysis),
+            ),
+            remaining_tasks,
         )
     except Exception as exc:
         logger.warning("Replan failed; falling back to serial remaining plan: %s", exc)
