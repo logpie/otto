@@ -340,6 +340,8 @@ async def _run_batch_qa(
     telemetry: Any,
     context: Any,
     *,
+    pre_batch_sha: str | None = None,
+    prior_tasks: list[dict] | None = None,
     focus_task_keys: set[str] | None = None,
     planner_analysis: list[dict[str, Any]] | None = None,
 ) -> dict:
@@ -385,7 +387,14 @@ async def _run_batch_qa(
 
     log_dir = project_dir / "otto_logs" / "batch-qa"
     log_dir.mkdir(parents=True, exist_ok=True)
-    diff = "Integrated codebase after batch merge. Inspect repository state directly."
+
+    # Compute real diff so QA can see what changed (QA1 fix)
+    if pre_batch_sha:
+        from otto.git_ops import _get_diff_info
+        diff_info = _get_diff_info(project_dir, pre_batch_sha)
+        diff = diff_info.get("full_diff", "") or "(no diff available)"
+    else:
+        diff = "(pre-batch SHA not available — inspect repository state directly)"
     if planner_analysis:
         merged_keys = {str(task.get("key", "")) for task in merged_tasks if task.get("key")}
         merged_ids = {
@@ -412,6 +421,16 @@ async def _run_batch_qa(
                 f"{diff}\n\nPlanner relationship analysis:\n"
                 + "\n".join(lines)
             )
+
+    # QA2 fix: include prior batch tasks as context for cross-task awareness
+    if prior_tasks:
+        from otto.qa import format_batch_spec
+        prior_context = format_batch_spec(prior_tasks)
+        diff = (
+            f"{diff}\n\n"
+            f"PRIOR TASKS (already passed — do NOT re-verify, but consider interactions):\n"
+            f"{prior_context}"
+        )
     if focus_task_keys:
         qa_result = await run_targeted_batch_qa_agent(
             tasks_with_specs,
@@ -864,20 +883,33 @@ async def run_per(
                     batch_keys = {tp.task_key for tp in batch.tasks}
                     batch_qa_costs: dict[str, float] = {}
                     qa_reports_by_task: dict[str, str] = {}
+                    # Load current batch's merged tasks for QA verification
+                    all_persisted = load_tasks(tasks_file)
                     persisted_tasks = {
                         task["key"]: task
-                        for task in load_tasks(tasks_file)
+                        for task in all_persisted
                         if task.get("key") in batch_keys
                     }
                     merged_tasks = [
                         task for task in persisted_tasks.values()
                         if task.get("status") == "merged"
                     ]
+                    # QA2 fix: include prior batches' tasks as context
+                    # (not for re-verification, but for cross-task awareness)
+                    prior_tasks = [
+                        task for task in all_persisted
+                        if task.get("key") in pending_keys
+                        and task.get("key") not in batch_keys
+                        and task.get("status") in ("passed", "merged")
+                    ]
                     if merged_tasks:
                         merged_keys = {task["key"] for task in merged_tasks}
-                        console.print(f"\n  [bold]Batch QA[/bold]  [dim]{len(merged_tasks)} merged task(s)[/dim]")
+                        context_label = f" + {len(prior_tasks)} prior" if prior_tasks else ""
+                        console.print(f"\n  [bold]Batch QA[/bold]  [dim]{len(merged_tasks)} merged task(s){context_label}[/dim]")
                         batch_qa = await _run_batch_qa(
                             merged_tasks, config, project_dir, tasks_file, telemetry, context,
+                            pre_batch_sha=pre_batch_sha,
+                            prior_tasks=prior_tasks if prior_tasks else None,
                             planner_analysis=execution_plan.analysis,
                         )
                         initial_share = float(batch_qa.get("cost_usd", 0.0) or 0.0) / max(len(merged_tasks), 1)
@@ -988,6 +1020,8 @@ async def run_per(
                                     tasks_file,
                                     telemetry,
                                     context,
+                                    pre_batch_sha=pre_batch_sha,
+                                    prior_tasks=prior_tasks if prior_tasks else None,
                                     focus_task_keys=retried_merged_keys,
                                     planner_analysis=execution_plan.analysis,
                                 )
