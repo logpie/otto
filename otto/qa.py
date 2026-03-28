@@ -132,7 +132,12 @@ def determine_qa_tier(
                 for kw in ("ui", "layout", "style", "visual", "responsive"))
         for item in spec
     )
-    is_spa = any(f.endswith((".jsx", ".tsx", ".vue", ".svelte")) for f in diff_files)
+    # Only count SOURCE files as SPA indicators, not test files
+    is_spa = any(
+        f.endswith((".jsx", ".tsx", ".vue", ".svelte"))
+        and not any(seg in f.lower() for seg in ("test", "__tests__", "spec", ".test.", ".spec."))
+        for f in diff_files
+    )
     if has_visual or is_spa or attempt > 0:
         return 2
 
