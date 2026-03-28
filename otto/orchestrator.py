@@ -1569,7 +1569,7 @@ def merge_parallel_results(
         if not candidate_ref:
             if qa_mode == QAMode.BATCH and (result.diff_summary or "").startswith("No changes needed"):
                 try:
-                    update_task(tasks_file, task_key, status="merged", error=None, error_code=None)
+                    update_task(tasks_file, task_key, status="merged", error=None, error_code=None, feedback=None)
                 except Exception:
                     pass
                 merged_results.append(TaskResult(
@@ -1694,6 +1694,7 @@ def merge_parallel_results(
                 status="merged" if qa_mode == QAMode.BATCH else "passed",
                 error=None,
                 error_code=None,
+                feedback=None,
             )
         except Exception:
             pass
