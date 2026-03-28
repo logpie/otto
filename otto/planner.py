@@ -462,7 +462,9 @@ def _project_context(project_dir: Path) -> str:
     except Exception:
         return "(git ls-files unavailable)"
 
-    files = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    from otto.git_ops import _is_otto_owned
+    files = [line.strip() for line in result.stdout.splitlines()
+             if line.strip() and not _is_otto_owned(line.strip())]
     if not files:
         return "(no tracked files)"
     limited = files[:200]
