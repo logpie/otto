@@ -8,22 +8,34 @@ This document is the source of truth for otto's execution pipeline. Use it for d
 otto run
   │
   ├─ 1. Preflight (baseline tests, git check, stale task recovery)
-  ├─ 2. Plan (Sonnet groups tasks into batches, respects depends_on)
+  ├─ 2. Smart Planner (classify task relationships, detect conflicts)
+  │     ├─ INDEPENDENT → parallel batch
+  │     ├─ ADDITIVE (same file) → serialize
+  │     ├─ DEPENDENT → serialize (later batch)
+  │     ├─ CONTRADICTORY → flag to user, skip coding
+  │     └─ UNCERTAIN → serialize (conservative)
+  │
   ├─ 3. PER Loop (Plan-Execute-Replan)
   │     │
   │     ├─ For each batch:
   │     │     │
   │     │     ├─ PARALLEL (max_parallel > 1, batch_size > 1)
-  │     │     │    Each task → own git worktree → coding_loop()
-  │     │     │    Then → serial merge phase (git merge one-by-one)
+  │     │     │    Each task → own git worktree → code + test (no QA)
+  │     │     │    Then → serial merge phase
   │     │     │
   │     │     └─ SERIAL (max_parallel = 1 or single task)
-  │     │          Each task → otto/{key} branch → coding_loop()
+  │     │          Each task → otto/{key} branch → code + test (no QA)
   │     │
-  │     ├─ Auto-retry merge failures:
-  │     │    Merge conflict or post-merge test failure?
-  │     │    → Re-run coding agent on updated main with previous diff
-  │     │      (same coding_loop: full retry budget, no max_turns, runs tests + QA)
+  │     ├─ Merge conflicts:
+  │     │    1. git merge (handles most cases)
+  │     │    2. Scoped reapply (cherry-pick → agent with patch)
+  │     │    3. Full coding_loop fallback (last resort)
+  │     │
+  │     ├─ Batch QA (one session, combined specs from all tasks)
+  │     │    Verify ALL [must] items on integrated codebase
+  │     │    Generate cross-task integration tests
+  │     │    If [must] fails → retry task → targeted re-QA
+  │     │    If batch QA rejects → rollback main to pre-batch state
   │     │
   │     └─ Replan remaining batches if failures occurred
   │

@@ -116,66 +116,67 @@ otto revert --all       Undo all otto commits + clear queue
 
 > **Full pipeline reference with debugging guide:** [`docs/architecture.md`](docs/architecture.md)
 
-### v4.5 pipeline
+### v5 pipeline
 
 Otto is infrastructure, not intelligence. The intelligence is Claude's. Otto provides:
 
 ```
     ┌─────────────────────────────────────────────────────────┐
-    │  Per-task pipeline (runs in parallel worktrees):        │
+    │  1. Smart Planner                                       │
+    │     Analyzes task relationships:                        │
+    │     INDEPENDENT → parallel  DEPENDENT → serialize       │
+    │     ADDITIVE (same file) → serialize                    │
+    │     CONTRADICTORY → flag to user, skip coding           │
     │                                                         │
-    │  1. Preflight                                           │
-    │     Baseline tests (jest + pytest), .gitignore,         │
-    │     record flaky test names for later comparison        │
+    │  2. Per-task pipeline (parallel worktrees):             │
+    │     Coding Agent → Tests → Verify (no QA yet)           │
+    │     Spec generation deferred to batch QA                │
     │                                                         │
-    │  2. Coding Agent  ──────────  Spec Gen (parallel)       │
-    │     Bare CC, no custom          [must]/[should]/◈       │
-    │     system prompt               classification          │
+    │  3. Merge phase                                         │
+    │     git merge → conflict? → scoped reapply              │
+    │     (cherry-pick first, agent fallback, full re-code    │
+    │      last resort — with previous diff as context)       │
     │                                                         │
-    │  3. Pre-verify                                          │
-    │     Run tests in working dir. If failures match         │
-    │     baseline flaky set → proceed. New failures → retry. │
+    │  4. Batch QA (one session, combined specs)              │
+    │     Verify ALL [must] items on integrated codebase      │
+    │     Generate cross-task integration tests               │
+    │     Run full test suite as regression check             │
+    │     If [must] fails → retry task → targeted re-QA       │
     │                                                         │
-    │  4. External verify (clean disposable worktree)         │
-    │     + Claim verification: audit agent log vs evidence   │
-    │                                                         │
-    │  5. QA Agent (adversarial, risk-tiered)                 │
-    │     Tier 0: skip │ Tier 1: targeted │ Tier 2: browser   │
-    │     Writes per-item proof + screenshots to qa-proofs/   │
-    │                                                         │
-    │  6. Post-QA restore (reset to verified candidate SHA)   │
-    │     Task state: verified                                │
-    ├─────────────────────────────────────────────────────────┤
-    │  Serial merge phase (after all parallel tasks finish):  │
-    │                                                         │
-    │  7. Merge each verified task onto main (in order)       │
-    │     Post-merge test verification per task               │
-    │     Conflict or test fail → re-run coding agent on      │
-    │     updated main with previous diff as context          │
-    │     (same agent, same intelligence, full retry budget)   │
-    │                                                         │
-    │  8. Pass → merge + proof report with commit SHA         │
-    │     Fail → retry with failure excerpt (not raw output)  │
+    │  5. Pass → proof report with commit SHA                 │
+    │     Fail → retry with failure excerpt                   │
     └─────────────────────────────────────────────────────────┘
+```
+
+### Smart planner
+
+Before coding starts, the planner classifies task relationships:
+
+```
+Tasks: [A: add search] [B: add dark mode] [C: add search filters] [D: rewrite search]
+  │
+  Planner analysis:
+  ├─ A ↔ B: INDEPENDENT → parallel batch
+  ├─ A ↔ C: DEPENDENT (C needs A) → C in later batch
+  ├─ A ↔ D: CONTRADICTORY → flag to user, skip both
+  └─ B ↔ C: INDEPENDENT → parallel batch
+  │
+  Plan: Batch 1 [A, B] → Batch 2 [C]
+  Conflicts: [A, D] — "Both rewrite search with incompatible goals"
 ```
 
 ### Parallel batch execution
 
 Independent tasks within a batch run concurrently in git worktrees:
 
-```
-Batch 1: [task A, task B, task C]  ← independent → run in PARALLEL
-          ↓ all verified, then merge serially
-Batch 2: [task D]                  ← depends on A+B → runs AFTER batch 1
-```
-
 - **Within-batch** = parallel (tasks are independent, each in its own worktree)
 - **Cross-batch** = serial (later batches depend on earlier results)
-- **Merge phase** = serial (verified tasks merge one-by-one onto main)
-- **Merge conflict** = re-run coding agent on updated main with previous diff as guidance (no separate resolver — the coding agent IS the resolver, with full tool access, tests, and QA)
+- **Same-file tasks** = serialized (additive overlap causes reliable merge conflicts)
+- **Merge conflict** = scoped reapply (cherry-pick → agent with patch → full re-code fallback)
+- **Batch QA** = one session on integrated codebase with combined specs
 
-Task states: `pending → running → verified → merge_pending → passed`
-(or `→ failed` / `→ merge_failed → auto-retry → pending`)
+Task states: `pending → running → verified → merged → passed`
+(or `→ failed` / `→ merge_failed → auto-retry` / `→ conflict`)
 
 ### Spec binding model
 

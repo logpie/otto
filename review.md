@@ -1,3 +1,21 @@
+## Implementation Gate — 2026-03-27 — Batch QA pipeline + Smart planner
+
+### Round 1 — Codex
+- [CRITICAL] Batch QA after code on main, no rollback — fixed by Codex: pre-batch HEAD snapshot, git reset --hard on failure
+- [CRITICAL] Planner analysis not enforced by code — fixed by Codex: _normalize_plan synthesizes conflicts, serializes dependent pairs
+- [IMPORTANT] Infrastructure error lost in batch QA — fixed by Codex: preserved through finalizer
+- [IMPORTANT] Batch QA passes with incomplete coverage — fixed by Codex: expected (task_key, spec_id) matrix, rejects incomplete
+- [IMPORTANT] Candidate commits absorb unrelated untracked files — noted, pre-existing
+- [NOTE] Spec ID renumbering after sort — noted, pre-existing
+
+### Round 2 — Codex
+- [IMPORTANT] Dependency order not directional + replan bypasses normalization — fixed by Codex
+
+### Round 3 — Codex
+- APPROVED. No new issues.
+
+---
+
 ## Implementation Gate — 2026-03-26 — LLM-based merge conflict resolution
 
 ### Round 1 — Codex
