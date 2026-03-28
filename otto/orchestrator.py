@@ -958,14 +958,24 @@ async def run_per(
                                 f"scoped reapply: task={fkey} skipped (missing candidate ref or base sha); falling back to coding agent retry",
                             )
 
-                        diff_hint = failed_result.diff_summary or ""
+                        # Get the FULL diff (not just --stat) so the coding agent
+                        # knows exactly what to re-implement
+                        full_diff = ""
+                        if candidate_ref and base_sha:
+                            full_diff_result = subprocess.run(
+                                ["git", "diff", f"{base_sha}..{candidate_ref}"],
+                                cwd=project_dir, capture_output=True, text=True,
+                            )
+                            if full_diff_result.returncode == 0:
+                                full_diff = full_diff_result.stdout.strip()
+                        diff_hint = full_diff or failed_result.diff_summary or ""
                         if diff_hint:
                             merge_feedback = (
                                 "Your previous implementation was verified and passed all tests, "
                                 "but caused a merge conflict with another task's changes that are "
                                 "now on main. Re-apply your changes on the updated codebase. "
                                 "Here is your previous diff for reference:\n\n"
-                                f"{diff_hint[:8000]}"
+                                f"{diff_hint}"
                             )
                         else:
                             merge_feedback = (
