@@ -1796,24 +1796,32 @@ async def _run_batch_parallel(
         task_key = task_plan.task_key
         worktree_path: Path | None = None
         try:
+            _orchestrator_log(project_dir, f"  parallel: {task_key[:8]} waiting for semaphore (max_parallel={max_parallel})")
             async with semaphore:
-                # Bound setup concurrency too: worktree creation and dependency
-                # installation can be the most expensive parallel operations.
+                _orchestrator_log(project_dir, f"  parallel: {task_key[:8]} acquired semaphore")
+                wt_start = time.monotonic()
                 worktree_path = await asyncio.to_thread(
                     create_task_worktree, project_dir, task_key, base_sha,
                 )
                 worktree_paths[task_key] = worktree_path
+                wt_elapsed = time.monotonic() - wt_start
+                _orchestrator_log(project_dir, f"  parallel: {task_key[:8]} worktree created at {worktree_path} ({wt_elapsed:.1f}s)")
 
+                install_start = time.monotonic()
                 await asyncio.to_thread(
                     _install_deps, worktree_path, install_timeout,
                 )
+                install_elapsed = time.monotonic() - install_start
+                _orchestrator_log(project_dir, f"  parallel: {task_key[:8]} deps installed ({install_elapsed:.1f}s)")
 
                 if context.interrupted:
+                    _orchestrator_log(project_dir, f"  parallel: {task_key[:8]} interrupted before coding")
                     return TaskResult(
                         task_key=task_key, success=False,
                         error="interrupted before start",
                     )
                 sib_ctx = (sibling_contexts or {}).get(task_key)
+                _orchestrator_log(project_dir, f"  parallel: {task_key[:8]} starting coding_loop")
                 result = await coding_loop(
                     task_plan, context, config, project_dir,
                     telemetry, tasks_file,
@@ -1821,10 +1829,12 @@ async def _run_batch_parallel(
                     qa_mode=qa_mode,
                     sibling_context=sib_ctx,
                 )
+                _orchestrator_log(project_dir, f"  parallel: {task_key[:8]} coding_loop done (success={result.success})")
                 return result
 
         except Exception as exc:
             error = f"parallel execution error: {exc}"
+            _orchestrator_log(project_dir, f"  parallel: {task_key[:8]} EXCEPTION: {exc}")
             try:
                 update_task(
                     tasks_file,
@@ -1840,13 +1850,14 @@ async def _run_batch_parallel(
                 error=error,
             )
         finally:
-            # Clean up worktree
             if worktree_path:
                 try:
                     await asyncio.to_thread(
                         cleanup_task_worktree, project_dir, task_key,
                     )
+                    _orchestrator_log(project_dir, f"  parallel: {task_key[:8]} worktree cleaned up")
                 except Exception as e:
+                    _orchestrator_log(project_dir, f"  parallel: {task_key[:8]} worktree cleanup FAILED: {e}")
                     console.print(f"[yellow]⚠ Worktree cleanup failed for {task_key}: {e}[/yellow]")
 
     # Launch all tasks concurrently
