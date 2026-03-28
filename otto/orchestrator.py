@@ -485,11 +485,19 @@ async def _run_batch_qa(
             log_dir=log_dir,
         )
     else:
+        def _batch_qa_progress(event_type: str, data: dict) -> None:
+            """Display batch QA progress in terminal."""
+            if event_type == "agent_tool":
+                tool_name = data.get("name", "")
+                detail = data.get("detail", "")[:60]
+                console.print(f"        {tool_name}  {rich_escape(detail)}", style="dim")
+
         qa_result = await run_batch_qa_agent(
             tasks_with_specs,
             config,
             project_dir,
             diff=diff,
+            on_progress=_batch_qa_progress,
             log_dir=log_dir,
         )
     total_cost = spec_cost + float(qa_result.get("cost_usd", 0.0) or 0.0)

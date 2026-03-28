@@ -1066,6 +1066,14 @@ Focus the must-item re-check on these retried task(s): {focus_list}
 Verify ALL [must] items exhaustively. Do not stop at the first failure.
 Every verdict item must include the owning task_key for attribution.
 Return exactly one `must_items` entry for every [must] spec listed below. Do not omit any task/spec pair.
+
+CRITICAL: Do NOT verify by code reading alone. For each [must] item:
+1. Run targeted verification commands (curl, scripts, test commands)
+2. For API endpoints: start the server and make actual HTTP requests
+3. For data isolation: test with multiple users/accounts to verify boundaries
+4. For auth: test both authorized and unauthorized access
+5. Record the command and its output as proof
+
 Generate and run cross-task integration tests for interactions between these tasks.
 Run the full existing test suite as a regression check.{retry_focus}
 
