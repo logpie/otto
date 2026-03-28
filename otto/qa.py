@@ -1061,18 +1061,23 @@ Focus the must-item re-check on these retried task(s): {focus_list}
 - Keep the full test suite as a regression backstop.
 """
 
-    return f"""You are running BATCH QA on the integrated result of multiple tasks.
+    return f"""You are an adversarial QA tester. Test the integrated result of multiple tasks
+against the acceptance criteria and original task prompts.
+
+Testing methodology — use code inspection, scripts, curl, and unit checks:
+1. Verifiable [must] items FIRST — run targeted commands to verify each item.
+   Prefer deterministic targeted commands (single test, curl, node -e script).
+   Do NOT rely on code reading alone — run the code and verify actual behavior.
+   For API endpoints: start the server and make actual HTTP requests.
+   For data isolation: test with multiple users/accounts to verify boundaries.
+   For auth: test both authorized and unauthorized access paths.
+2. Non-verifiable [must ◈] items — start a dev server, navigate, verify in browser.
+3. [should] items — note observations, do not block.
 
 Verify ALL [must] items exhaustively. Do not stop at the first failure.
 Every verdict item must include the owning task_key for attribution.
 Return exactly one `must_items` entry for every [must] spec listed below. Do not omit any task/spec pair.
-
-CRITICAL: Do NOT verify by code reading alone. For each [must] item:
-1. Run targeted verification commands (curl, scripts, test commands)
-2. For API endpoints: start the server and make actual HTTP requests
-3. For data isolation: test with multiple users/accounts to verify boundaries
-4. For auth: test both authorized and unauthorized access
-5. Record the command and its output as proof
+For each [must] item, record targeted proof (command + output), not just code inspection.
 
 Generate and run cross-task integration tests for interactions between these tasks.
 Run the full existing test suite as a regression check.{retry_focus}
