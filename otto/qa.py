@@ -687,6 +687,7 @@ async def _run_qa_prompt(
     verdict_file: Path,
     on_progress: Any = None,
     enable_browser: bool = False,
+    log_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Execute a QA prompt and return parsed verdict plus captured actions."""
     qa_mcp_servers = _build_qa_mcp_servers(enable_browser)
@@ -852,6 +853,31 @@ async def _run_qa_prompt(
     if not verdict or "must_passed" not in verdict:
         verdict = _parse_qa_verdict_json(raw_report)
 
+    # Write QA agent log for debugging (what tools were called, what the agent said)
+    if log_dir:
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_lines = []
+            for action in qa_actions:
+                atype = action.get("type", "unknown")
+                if atype == "bash":
+                    cmd = action.get("command", "")[:120]
+                    output = action.get("output", "")[:200]
+                    log_lines.append(f"● Bash  {cmd}")
+                    if output:
+                        log_lines.append(f"  → {output}")
+                elif atype == "browser":
+                    log_lines.append(f"● Browser:{action.get('action', '')}  {action.get('detail', '')[:80]}")
+                else:
+                    log_lines.append(f"● {atype}  {action.get('detail', '')[:80]}")
+            if report_lines:
+                log_lines.append("")
+                log_lines.extend(report_lines[-10:])  # last 10 lines of agent text
+            log_lines.append(f"\nCost: ${qa_cost:.2f}")
+            (log_dir / "qa-agent.log").write_text("\n".join(log_lines))
+        except Exception:
+            pass
+
     return {
         "must_passed": verdict.get("must_passed", False),
         "verdict": verdict,
@@ -948,6 +974,7 @@ Save any browser screenshots to: {log_dir / "qa-proofs" if log_dir else "/tmp"}/
         verdict_file=verdict_file,
         on_progress=on_progress,
         enable_browser=tier >= 2,
+        log_dir=log_dir,
     )
     must_passed = qa_result.get("must_passed", False)
     verdict = qa_result.get("verdict", {})
@@ -1207,6 +1234,7 @@ async def _run_batch_qa_agent(
         verdict_file=verdict_file,
         on_progress=on_progress,
         enable_browser=True,
+        log_dir=log_dir,
     )
     final_result = _finalize_batch_qa_result(qa_result, tasks_with_specs)
 
