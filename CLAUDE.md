@@ -24,7 +24,7 @@ cat otto_logs/run-history.jsonl       # Cost, time, pass/fail per run
 | `qa-verdict.json` | Structured verdict with per-item pass/fail + evidence. |
 | `qa-proofs/proof-report.md` | Human-readable proof per [must] item. |
 | `qa-proofs/regression-check.sh` | Re-runnable verification commands. |
-| `merge-resolve.log` | Scoped reapply: cherry-pick attempted, agent fallback, patch size. |
+| `cost-warning.log` | Warnings when parallel task reports $0 cost (SDK concurrency bug). |
 
 ### Run-level logs (otto_logs/)
 | File | What it tells you |
@@ -46,9 +46,10 @@ cat otto_logs/run-history.jsonl       # Cost, time, pass/fail per run
 **"Why was this task serialized instead of parallelized?"**
 → Read `planner.log` — check relationship analysis and conflict detection.
 
-**"Why did the merge conflict reapply take so long?"**
-→ Read `merge-resolve.log` — did cherry-pick succeed or did agent fallback run?
-→ Read `orchestrator.log` — parallel section shows semaphore/worktree timing.
+**"Why did the merge conflict retry take so long?"**
+→ Read `orchestrator.log` — look for "merge retry" entries with error type and feedback path.
+→ Read the retry attempt's `attempt-N-agent.log` — did the agent use the diff feedback or re-explore from scratch?
+→ Compare attempt-1 (original) vs attempt-2 (retry) — retry should be faster if feedback worked.
 
 **"What happened during a parallel run?"**
 → Read `orchestrator.log` — shows semaphore acquire/release, worktree creation, dep install timing, coding_loop results per task.

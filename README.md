@@ -133,9 +133,9 @@ Otto is infrastructure, not intelligence. The intelligence is Claude's. Otto pro
     │     Spec generation deferred to batch QA                │
     │                                                         │
     │  3. Merge phase                                         │
-    │     git merge → conflict? → scoped reapply              │
-    │     (cherry-pick first, agent fallback, full re-code    │
-    │      last resort — with previous diff as context)       │
+    │     git merge → conflict? → coding agent re-apply       │
+    │     (full diff as context, agent adapts intelligently,  │
+    │      one agent — trust it to self-regulate)             │
     │                                                         │
     │  4. Batch QA (one session, combined specs)              │
     │     Verify ALL [must] items on integrated codebase      │
@@ -172,8 +172,8 @@ Independent tasks within a batch run concurrently in git worktrees:
 - **Within-batch** = parallel (tasks are independent, each in its own worktree)
 - **Cross-batch** = serial (later batches depend on earlier results)
 - **Same-file tasks** = serialized (additive overlap causes reliable merge conflicts)
-- **Merge conflict** = scoped reapply (cherry-pick → agent with patch → full re-code fallback)
-- **Batch QA** = one session on integrated codebase with combined specs
+- **Merge conflict** = coding agent re-applies with full diff as context (one agent, adapts intelligently — simple conflicts resolve fast, complex ones get more exploration)
+- **Batch QA** = one session on integrated codebase with combined specs, behavioral testing required
 
 Task states: `pending → running → verified → merged → passed`
 (or `→ failed` / `→ merge_failed → auto-retry` / `→ conflict`)

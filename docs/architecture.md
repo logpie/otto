@@ -28,8 +28,8 @@ otto run
   │     │
   │     ├─ Merge conflicts:
   │     │    1. git merge (handles most cases)
-  │     │    2. Scoped reapply (cherry-pick → agent with patch)
-  │     │    3. Full coding_loop fallback (last resort)
+  │     │    2. If conflict → coding agent re-applies with full diff
+  │     │       (one agent, adapts intelligently, no cherry-pick)
   │     │
   │     ├─ Batch QA (one session, combined specs from all tasks)
   │     │    Verify ALL [must] items on integrated codebase
@@ -306,36 +306,30 @@ merge_parallel_results()
     └─ Update task: status=passed, commit_sha, cost
 ```
 
-### 3d. Auto-Retry (Coding Agent Re-Apply) & Replan
+### 3d. Auto-Retry (Merge Conflict Resolution) & Replan
 
-When merge fails (conflict or post-merge test failure), the coding agent re-runs
-on updated main. No separate conflict resolver — the coding agent IS the resolver.
-It gets the same full pipeline: unlimited coding turns, up to max_retries attempts,
-testing, and QA.
+When merge fails, the coding agent re-runs on updated main with intelligent
+feedback. One agent, one path — trust it to self-regulate.
+
+E2e verified: merge conflict retry takes ~56s (vs ~154s original), costs ~$0.15
+(vs ~$0.60 original). Agent reads 3 files, makes targeted edits, adapts to
+sibling task's code. 75% cheaper, 64% faster than original coding.
 
 ```
 After merge phase:
   │
-  ├─ Any merge_conflict or post_merge_test_fail tasks?
-  │    │
-  │    └─ For each:
-  │         │
-  │         ├─ Inject previous diff as feedback:
-  │         │    "Your previous implementation passed all tests but caused
-  │         │     a merge conflict with another task. Re-apply your changes
-  │         │     on the updated codebase. Here is your previous diff: ..."
-  │         │
-  │         ├─ Reset task to pending (preserve attempt count)
-  │         │
-  │         ├─ Re-run full coding_loop() on updated main
-  │         │    ├─ Fresh agent session (new session_id)
-  │         │    ├─ Reads current main (sibling tasks' code is there)
-  │         │    ├─ Previous diff in feedback → knows what to implement
-  │         │    ├─ No max_turns — agent finishes naturally
-  │         │    ├─ Up to max_retries attempts if tests/QA fail
-  │         │    ├─ Full testing (pre-test + clean worktree)
-  │         │    └─ Full QA (same tier logic, proof generation)
-  │         │
+  ├─ merge_conflict?
+  │    └─ coding_loop with "MERGE CONFLICT CONTEXT" feedback:
+  │         ├─ Full diff from previous implementation
+  │         ├─ Files previously changed (diff --stat)
+  │         ├─ Strategy: "Read diff → read main → apply with Edit → test"
+  │         ├─ Agent self-regulates: simple → fast, complex → explores more
+  │         └─ Replace result in batch_results
+  │
+  ├─ post_merge_test_fail?
+  │    └─ coding_loop with test failure feedback:
+  │         ├─ Full diff + "tests FAILED on integrated codebase"
+  │         ├─ Strategy: "Adapt implementation to work with other task"
   │         └─ Replace result in batch_results
   │
   ├─ Remove completed batch from plan
@@ -400,7 +394,7 @@ After merge phase:
 | **Spec gen** | Sonnet | ~$0.15-0.30 | Once per task (background thread) |
 | **Coding agent** | CC default | ~$0.50-1.50 | Per attempt (resumes session) |
 | **QA agent** | CC default | ~$0.30-1.00 | Per attempt (tier-dependent) |
-| **Merge re-apply** | CC default | ~$0.50-1.50 | Full coding_loop on updated main with diff feedback (rare) |
+| **Merge re-apply** | CC default | ~$0.15-0.50 | Coding agent with full diff — adapts intelligently (e2e verified: ~$0.15) |
 | **Typical task** | | **~$1.00-2.50** | Single attempt, no retries |
 | **With retry** | | **~$2.50-4.00** | Coding + QA + retry coding + retry QA |
 
