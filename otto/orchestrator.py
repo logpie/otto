@@ -859,10 +859,18 @@ async def run_per(
                     qa_mode=qa_mode,
                 )
 
-                merge_failed = [
+                # Split merge failures by type:
+                # - merge_conflict → scoped reapply (apply patch differently)
+                # - post_merge_test_fail → full coding_loop (semantic conflict, needs re-coding)
+                merge_conflicts = [
                     r for r in batch_results
-                    if not r.success and r.error_code in ("merge_conflict", "post_merge_test_fail")
+                    if not r.success and r.error_code == "merge_conflict"
                 ]
+                test_failures = [
+                    r for r in batch_results
+                    if not r.success and r.error_code == "post_merge_test_fail"
+                ]
+                merge_failed = merge_conflicts + test_failures
                 if merge_failed:
                     console.print(
                         f"\n  [yellow]Re-applying {len(merge_failed)} merge-failed task(s) on updated main...[/yellow]"
@@ -950,64 +958,57 @@ async def run_per(
                                     continue
                             _orchestrator_log(
                                 project_dir,
-                                f"scoped reapply: task={fkey} failed; falling back to coding agent retry",
+                                f"scoped reapply: task={fkey} failed — task marked merge_failed",
                             )
                         else:
                             _orchestrator_log(
                                 project_dir,
-                                f"scoped reapply: task={fkey} skipped (missing candidate ref or base sha); falling back to coding agent retry",
+                                f"scoped reapply: task={fkey} skipped (missing candidate ref or base sha) — task marked merge_failed",
                             )
-
-                        # Get the FULL diff (not just --stat) so the coding agent
-                        # knows exactly what to re-implement
-                        full_diff = ""
-                        if candidate_ref and base_sha:
-                            full_diff_result = subprocess.run(
-                                ["git", "diff", f"{base_sha}..{candidate_ref}"],
-                                cwd=project_dir, capture_output=True, text=True,
-                            )
-                            if full_diff_result.returncode == 0:
-                                full_diff = full_diff_result.stdout.strip()
-                        diff_hint = full_diff or failed_result.diff_summary or ""
-                        if diff_hint:
+                        # For post_merge_test_fail: the patch applied fine but tests
+                        # fail — semantic conflict needs re-coding, not just re-applying.
+                        if failed_result.error_code == "post_merge_test_fail":
+                            _orchestrator_log(project_dir, f"post-merge test fail: {fkey[:8]} falling back to coding_loop")
+                            full_diff = ""
+                            if candidate_ref and base_sha:
+                                full_diff_result = subprocess.run(
+                                    ["git", "diff", f"{base_sha}..{candidate_ref}"],
+                                    cwd=project_dir, capture_output=True, text=True,
+                                )
+                                if full_diff_result.returncode == 0:
+                                    full_diff = full_diff_result.stdout.strip()
                             merge_feedback = (
-                                "Your previous implementation was verified and passed all tests, "
-                                "but caused a merge conflict with another task's changes that are "
-                                "now on main. Re-apply your changes on the updated codebase. "
-                                "Here is your previous diff for reference:\n\n"
-                                f"{diff_hint}"
+                                "Your previous implementation merged cleanly but tests failed on the "
+                                "integrated codebase. Another task's changes may conflict semantically. "
+                                "Re-implement with awareness of the test failures.\n\n"
+                                f"Previous diff:\n{full_diff or '(not available)'}"
                             )
-                        else:
-                            merge_feedback = (
-                                "Your previous implementation passed but caused a merge conflict. "
-                                "Another task's changes are now on main. Re-implement your task "
-                                "on the updated codebase."
-                            )
-                        try:
-                            update_task(
-                                tasks_file, fkey,
-                                status="pending",
-                                error=None, error_code=None, session_id=None,
-                                feedback=merge_feedback,
-                            )
-                        except Exception:
-                            continue
-
-                        retry_result = await coding_loop(
-                            tp, context, config, project_dir,
-                            telemetry, tasks_file,
-                            qa_mode=qa_mode,
-                        )
-                        if retry_result.success:
-                            rerun_merged = merge_parallel_results(
-                                [retry_result], config, project_dir, tasks_file, telemetry,
+                            try:
+                                update_task(
+                                    tasks_file, fkey,
+                                    status="pending",
+                                    error=None, error_code=None, session_id=None,
+                                    feedback=merge_feedback,
+                                )
+                            except Exception:
+                                continue
+                            retry_result = await coding_loop(
+                                tp, context, config, project_dir,
+                                telemetry, tasks_file,
                                 qa_mode=qa_mode,
                             )
-                            retry_result = rerun_merged[0]
-                        batch_results = [
-                            retry_result if r.task_key == fkey else r
-                            for r in batch_results
-                        ]
+                            if retry_result.success:
+                                rerun_merged = merge_parallel_results(
+                                    [retry_result], config, project_dir, tasks_file, telemetry,
+                                    qa_mode=qa_mode,
+                                )
+                                retry_result = rerun_merged[0]
+                            batch_results = [
+                                retry_result if r.task_key == fkey else r
+                                for r in batch_results
+                            ]
+                        # For merge_conflict: scoped reapply is the only handler.
+                        # If it can't apply the patch, the task stays merge_failed.
 
                 if qa_mode == QAMode.BATCH and not context.interrupted:
                     batch_keys = {tp.task_key for tp in batch.tasks}

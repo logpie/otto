@@ -54,7 +54,8 @@ def _show_file(repo: Path, rev: str, path: str) -> str:
 
 
 @pytest.mark.asyncio
-async def test_scoped_reapply_cherry_pick_succeeds(tmp_git_repo):
+async def test_scoped_reapply_agent_applies_clean_patch(tmp_git_repo):
+    """Agent applies a non-conflicting patch onto updated main."""
     task_key = "task-clean"
     tasks_path = _write_tasks(tmp_git_repo, task_key)
     config = _make_config()
@@ -77,8 +78,12 @@ async def test_scoped_reapply_cherry_pick_succeeds(tmp_git_repo):
     _git(tmp_git_repo, "commit", "-m", "main change")
     main_before = _git(tmp_git_repo, "rev-parse", "HEAD").stdout.strip()
 
-    agent_mock = AsyncMock()
-    with patch("otto.merge_resolve.run_agent_query", agent_mock):
+    async def fake_agent(prompt, options, **kwargs):
+        # Agent applies the patch by creating the file
+        (tmp_git_repo / "feature.txt").write_text("from candidate\n")
+        return "", 0.0, SimpleNamespace(is_error=False)
+
+    with patch("otto.merge_resolve.run_agent_query", side_effect=fake_agent):
         success, new_sha = await scoped_reapply(
             task_key=task_key,
             candidate_ref=candidate_ref,
@@ -90,18 +95,15 @@ async def test_scoped_reapply_cherry_pick_succeeds(tmp_git_repo):
 
     assert success is True
     assert new_sha
-    assert agent_mock.await_count == 0
     assert _git(tmp_git_repo, "branch", "--show-current").stdout.strip() == "main"
-    assert _git(tmp_git_repo, "rev-parse", "HEAD").stdout.strip() == main_before
     assert _show_file(tmp_git_repo, new_sha, "feature.txt") == "from candidate\n"
     merge_log = (tmp_git_repo / "otto_logs" / task_key / "merge-resolve.log").read_text()
     assert "patch size:" in merge_log
-    assert "cherry-pick attempted: success" in merge_log
-    assert "test verification: pass" in merge_log
+    assert "agent: applying patch" in merge_log
 
 
 @pytest.mark.asyncio
-async def test_scoped_reapply_uses_agent_after_cherry_pick_conflict(tmp_git_repo):
+async def test_scoped_reapply_agent_resolves_conflict(tmp_git_repo):
     task_key = "task-conflict"
     tasks_path = _write_tasks(tmp_git_repo, task_key)
     config = _make_config()
@@ -133,8 +135,8 @@ async def test_scoped_reapply_uses_agent_after_cherry_pick_conflict(tmp_git_repo
         assert options.system_prompt["preset"] == "claude_code"
         assert "append" not in options.system_prompt  # SDK doesn't support append
         # Merge resolver instructions are in the prompt itself
-        assert "Do not re-explore" in prompt
-        assert "Do not re-implement" in prompt
+        assert "re-explore" in prompt
+        assert "re-implement" in prompt
         assert "Full patch to apply:" in prompt
         assert "diff --git" in prompt
         assert "@@" in prompt
@@ -158,9 +160,8 @@ async def test_scoped_reapply_uses_agent_after_cherry_pick_conflict(tmp_git_repo
     assert _git(tmp_git_repo, "rev-parse", "HEAD").stdout.strip() == main_before
     assert _show_file(tmp_git_repo, new_sha, "app.txt") == "value=resolved\n"
     merge_log = (tmp_git_repo / "otto_logs" / task_key / "merge-resolve.log").read_text()
-    assert "cherry-pick attempted: fail" in merge_log
-    assert "agent fallback: triggered" in merge_log
-    assert "agent fallback result: success" in merge_log
+    assert "agent: applying patch" in merge_log
+    assert "agent result: success" in merge_log
 
 
 @pytest.mark.asyncio

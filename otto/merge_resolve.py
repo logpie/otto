@@ -38,12 +38,6 @@ def _cleanup_failure(project_dir: Path, default_branch: str, temp_branch: str) -
     _git(project_dir, "branch", "-D", temp_branch)
 
 
-def _abort_cherry_pick(project_dir: Path) -> None:
-    abort = _git(project_dir, "cherry-pick", "--abort")
-    if abort.returncode != 0:
-        _git(project_dir, "reset", "--hard")
-
-
 def _resolve_candidate_sha(project_dir: Path, candidate_ref: str) -> str:
     return _git(project_dir, "rev-parse", candidate_ref, check=True).stdout.strip()
 
@@ -91,47 +85,24 @@ def _build_agent_prompt(
     base_sha: str,
     candidate_sha: str,
     patch_text: str,
-    conflict_files: str,
-    conflict_status: str,
-    conflict_diff: str,
 ) -> str:
     return f"""\
-You are a merge conflict resolver. Your ONLY job is to apply a known patch to the current codebase.
+You are re-applying a verified implementation that caused a merge conflict.
+Another task's changes are now on main. Your job:
 
-Apply the known patch for task `{task_key}` to the current checked-out codebase.
-
-Constraints:
-- Do not re-explore the repository.
-- Do not re-implement the feature from scratch.
-- Do not broaden the change.
-- Do not create commits.
-- Stop after the patch is correctly applied to the working tree.
+1. Read the patch below — this is YOUR previous working implementation
+2. Apply these changes to the updated codebase
+3. Resolve any conflicts with the existing code intelligently
+4. Do NOT re-explore the repository or re-implement from scratch
+5. Do NOT create commits — leave changes in the working tree
 
 Context:
 - Candidate ref: `{candidate_ref}`
 - Candidate SHA: `{candidate_sha}`
 - Original base SHA: `{base_sha}`
-- Mechanical cherry-pick failed on updated main.
-
-Conflicted files from the failed cherry-pick:
-```text
-{conflict_files or "(none reported)"}
-```
-
-Git status from the failed cherry-pick:
-```text
-{conflict_status or "(empty)"}
-```
-
-Conflicted working-tree diff from the failed cherry-pick:
-```diff
-{conflict_diff or ""}
-```
 
 Full patch to apply:
-```diff
 {patch_text}
-```
 """
 
 
@@ -145,16 +116,21 @@ async def scoped_reapply(
     *,
     return_metadata: bool = False,
 ) -> tuple[bool, str] | tuple[bool, str, dict[str, Any]]:
-    """Apply a task's verified diff onto updated main via a scoped agent."""
+    """Apply a task's verified diff onto updated main via a scoped agent.
+
+    Two-tier approach:
+    1. git merge (already tried by caller — that's why we're here)
+    2. Scoped agent applies the full patch intelligently
+
+    No cherry-pick (same conflict set as merge). No full re-code fallback
+    (if scoped agent can't apply the patch, the task fails).
+    """
     default_branch = config["default_branch"]
     log_path = project_dir / "otto_logs" / task_key / "merge-resolve.log"
     started_at = time.monotonic()
     metadata: dict[str, Any] = {
         "patch_lines": 0,
-        "cherry_pick": "not_attempted",
-        "agent_fallback_triggered": False,
-        "agent_max_turns": 0,
-        "agent_result": "not_needed",
+        "agent_result": "not_started",
         "verification_passed": False,
         "time_s": 0.0,
     }
@@ -184,40 +160,9 @@ async def scoped_reapply(
     _git(project_dir, "checkout", "-b", temp_branch, check=True)
     temp_base_sha = _git(project_dir, "rev-parse", "HEAD", check=True).stdout.strip()
 
-    cherry_pick = _git(project_dir, "cherry-pick", "--no-commit", candidate_sha)
-    if cherry_pick.returncode == 0:
-        metadata["cherry_pick"] = "success"
-        _log("cherry-pick attempted: success")
-        try:
-            new_sha = _commit_current_tree(
-                project_dir,
-                temp_base_sha,
-            )
-        except Exception:
-            _cleanup_failure(project_dir, default_branch, temp_branch)
-            _log("result: failed to create scoped commit")
-            return _finish(False, "")
-        verified = _verify_result(task_key, new_sha, config, project_dir, tasks_file)
-        metadata["verification_passed"] = verified
-        _log(f"test verification: {'pass' if verified else 'fail'}")
-        if verified:
-            _git(project_dir, "checkout", default_branch, check=True)
-            _git(project_dir, "branch", "-D", temp_branch)
-            return _finish(True, new_sha)
-        _cleanup_failure(project_dir, default_branch, temp_branch)
-        return _finish(False, "")
-
-    metadata["cherry_pick"] = "fail"
-    conflict_files = _git(project_dir, "diff", "--name-only", "--diff-filter=U").stdout.strip()
-    conflict_status = _git(project_dir, "status", "--short").stdout.strip()
-    conflict_diff = _git(project_dir, "diff").stdout.strip()
-    _log("cherry-pick attempted: fail")
-    _abort_cherry_pick(project_dir)
-
+    # Scoped agent applies the patch
     coding_settings = config.get("coding_agent_settings", "project").split(",")
-    metadata["agent_fallback_triggered"] = True
-    metadata["agent_max_turns"] = 30
-    _log(f"agent fallback: triggered (max_turns={metadata['agent_max_turns']})")
+    _log("agent: applying patch on updated main")
     agent_opts = ClaudeAgentOptions(
         permission_mode="bypassPermissions",
         cwd=str(project_dir),
@@ -225,10 +170,6 @@ async def scoped_reapply(
         env=_subprocess_env(),
         max_turns=30,
         effort="low",
-        # Use CC's preset to keep built-in tool guidance (Glob over find, etc.)
-        # The merge resolver instructions are in the prompt itself, not system_prompt.
-        # CRITICAL: system_prompt=None would blank CC's defaults.
-        # "append" is NOT a real SDK field — don't use it.
         system_prompt={"type": "preset", "preset": "claude_code"},
     )
 
@@ -238,32 +179,26 @@ async def scoped_reapply(
         base_sha=base_sha,
         candidate_sha=candidate_sha,
         patch_text=patch_text,
-        conflict_files=conflict_files,
-        conflict_status=conflict_status,
-        conflict_diff=conflict_diff,
     )
 
     try:
         _, _, result_msg = await run_agent_query(prompt, agent_opts)
-    except Exception:
+    except Exception as exc:
         metadata["agent_result"] = "exception"
-        _log("agent fallback result: exception")
+        _log(f"agent result: exception ({exc})")
         _cleanup_failure(project_dir, default_branch, temp_branch)
         return _finish(False, "")
     if getattr(result_msg, "is_error", False):
         metadata["agent_result"] = "error"
-        _log("agent fallback result: error")
+        _log("agent result: error")
         _cleanup_failure(project_dir, default_branch, temp_branch)
         return _finish(False, "")
 
     try:
-        new_sha = _commit_current_tree(
-            project_dir,
-            temp_base_sha,
-        )
+        new_sha = _commit_current_tree(project_dir, temp_base_sha)
     except Exception:
         metadata["agent_result"] = "no_changes"
-        _log("agent fallback result: no scoped commit created")
+        _log("agent result: no changes produced")
         _cleanup_failure(project_dir, default_branch, temp_branch)
         return _finish(False, "")
 
@@ -271,7 +206,7 @@ async def scoped_reapply(
     metadata["verification_passed"] = verified
     metadata["agent_result"] = "success" if verified else "verification_failed"
     _log(
-        f"agent fallback result: {metadata['agent_result']}",
+        f"agent result: {metadata['agent_result']}",
         f"test verification: {'pass' if verified else 'fail'}",
     )
     if verified:
