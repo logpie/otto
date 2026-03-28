@@ -10,7 +10,7 @@ from pathlib import Path
 import click
 
 from otto.display import console, format_cost, format_duration, rich_escape
-from otto.tasks import load_tasks, spec_binding, spec_is_verifiable, spec_text
+from otto.tasks import load_tasks, refresh_planner_state, spec_binding, spec_is_verifiable, spec_text
 from otto.theme import error_console
 
 
@@ -267,7 +267,7 @@ def register_log_commands(main: click.Group) -> None:
     def logs(task_id, raw, follow):
         """Show structured logs for a task."""
         tasks_path = Path.cwd() / "tasks.yaml"
-        tasks = load_tasks(tasks_path)
+        tasks = refresh_planner_state(tasks_path)
         target = None
         for t in tasks:
             if t.get("id") == task_id:
@@ -421,7 +421,7 @@ def register_log_commands(main: click.Group) -> None:
 
         tasks_path = Path.cwd() / "tasks.yaml"
         project_dir = Path.cwd()
-        tasks = load_tasks(tasks_path)
+        tasks = refresh_planner_state(tasks_path)
         for t in tasks:
             if t.get("id") == task_id:
                 key = t.get("key", "?")
@@ -429,7 +429,7 @@ def register_log_commands(main: click.Group) -> None:
                 log_dir = project_dir / "otto_logs" / key
 
                 status_styles = {
-                    "passed": "success", "failed": "error", "blocked": "error",
+                    "passed": "success", "failed": "error", "blocked": "warning", "conflict": "warning",
                     "running": "info", "pending": "dim",
                 }
                 status_style = status_styles.get(task_status, "")
@@ -526,6 +526,32 @@ def register_log_commands(main: click.Group) -> None:
 
                 if t.get("error"):
                     console.print(f"\n  [error]Error:[/error] {rich_escape(t['error'])}")
+
+                if task_status == "conflict":
+                    conflicts = t.get("planner_conflicts") or []
+                    if conflicts:
+                        console.print("\n  [dim]Conflict details:[/dim]")
+                        for entry in conflicts:
+                            other_ids = []
+                            for other_key in entry.get("tasks") or []:
+                                if other_key == key:
+                                    continue
+                                other_task = next((task for task in tasks if task.get("key") == other_key), None)
+                                if other_task:
+                                    other_ids.append(f"#{other_task.get('id', '?')}")
+                            if other_ids:
+                                console.print(f"    [warning]With:[/warning] {', '.join(other_ids)}")
+                            if entry.get("suggestion"):
+                                console.print(f"    [dim]{rich_escape(str(entry['suggestion'])[:200])}[/dim]")
+
+                if task_status == "blocked" and t.get("blocked_by"):
+                    blockers = []
+                    for other_key in t.get("blocked_by") or []:
+                        other_task = next((task for task in tasks if task.get("key") == other_key), None)
+                        if other_task:
+                            blockers.append(f"#{other_task.get('id', '?')}")
+                    if blockers:
+                        console.print(f"\n  [dim]Blocked by:[/dim] {', '.join(blockers)}")
 
                 if task_status == "failed" and log_dir.exists():
                     verify_logs = sorted(log_dir.glob("attempt-*-verify.log"), reverse=True)

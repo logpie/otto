@@ -1,242 +1,675 @@
-"""Otto v4 planner — execution plan dataclasses and LLM plan/replan.
-
-This module contains:
-1. Pure dataclasses (TaskPlan, Batch, ExecutionPlan) — no I/O
-2. parse_plan_json() / default_plan() — deterministic plan construction
-3. plan() / replan() — LLM-driven planning (Step 3, added later)
-"""
+"""Otto planner — execution plan dataclasses and smart relationship analysis."""
 
 from __future__ import annotations
 
+import graphlib
+import hashlib
 import json
 import logging
 import re
+import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
+from otto.agent import ClaudeAgentOptions, _subprocess_env, run_agent_query
+
 logger = logging.getLogger("otto.planner")
+
+RELATIONSHIP_VALUES = {
+    "INDEPENDENT",
+    "ADDITIVE",
+    "DEPENDENT",
+    "CONTRADICTORY",
+    "UNCERTAIN",
+}
 
 
 @dataclass
 class TaskPlan:
     """Plan for a single task within a batch."""
+
     task_key: str
-    strategy: str = "direct"      # "direct" | "research_first"
-    research_query: str = ""      # query for research agent (if strategy=research_first)
-    skip_qa: bool = False         # skip QA for trivial tasks
-    effort: str = "high"          # agent effort level
+    strategy: str = "direct"
+    research_query: str = ""
+    skip_qa: bool = False
+    effort: str = "high"
 
 
 @dataclass
 class Batch:
     """A group of tasks that can run in parallel."""
+
     tasks: list[TaskPlan] = field(default_factory=list)
 
 
 @dataclass
 class ExecutionPlan:
-    """Ordered list of batches with cross-task learnings."""
+    """Ordered list of batches with planner metadata."""
+
     batches: list[Batch] = field(default_factory=list)
     learnings: list[str] = field(default_factory=list)
+    conflicts: list[dict[str, Any]] = field(default_factory=list)
+    analysis: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def total_tasks(self) -> int:
-        return sum(len(b.tasks) for b in self.batches)
+        return sum(len(batch.tasks) for batch in self.batches)
 
     @property
     def is_empty(self) -> bool:
         return self.total_tasks == 0
 
     def remaining_after(self, completed_keys: set[str]) -> "ExecutionPlan":
-        """Return a new plan with completed tasks removed."""
-        remaining_batches = []
+        """Return a new plan with completed tasks removed and metadata preserved."""
+        remaining_batches: list[Batch] = []
+        unresolved_keys: set[str] = set()
         for batch in self.batches:
             remaining = [tp for tp in batch.tasks if tp.task_key not in completed_keys]
             if remaining:
                 remaining_batches.append(Batch(tasks=remaining))
-        return ExecutionPlan(batches=remaining_batches, learnings=list(self.learnings))
+                unresolved_keys.update(tp.task_key for tp in remaining)
+
+        remaining_conflicts = [
+            conflict
+            for conflict in self.conflicts
+            if set(_conflict_task_keys(conflict)).issubset(unresolved_keys)
+        ]
+        remaining_analysis = [
+            item
+            for item in self.analysis
+            if item.get("task_a") in unresolved_keys
+            and item.get("task_b") in unresolved_keys
+        ]
+        return ExecutionPlan(
+            batches=remaining_batches,
+            learnings=list(self.learnings),
+            conflicts=remaining_conflicts,
+            analysis=remaining_analysis,
+        )
 
 
-def parse_plan_json(raw: str) -> ExecutionPlan | None:
-    """Parse a JSON execution plan from LLM output.
-
-    Handles JSON wrapped in markdown fences. Returns None on malformed input.
-
-    Expected JSON format:
-    {
-        "batches": [
-            {
-                "tasks": [
-                    {"task_key": "abc123", "strategy": "direct"},
-                    ...
-                ]
-            },
-            ...
-        ],
-        "learnings": ["..."]
-    }
-    """
-    # Strip markdown fences
+def _strip_json_wrapper(raw: str) -> str:
     text = raw.strip()
     match = re.search(r"```(?:json)?\s*\n?(.*?)\n?\s*```", text, re.DOTALL)
     if match:
         text = match.group(1).strip()
 
-    # Try to find JSON object if there's surrounding text
-    if not text.startswith("{"):
-        start = text.find("{")
-        if start >= 0:
-            # Find matching closing brace
-            depth = 0
-            for i, ch in enumerate(text[start:], start):
-                if ch == "{":
-                    depth += 1
-                elif ch == "}":
-                    depth -= 1
-                    if depth == 0:
-                        text = text[start:i + 1]
-                        break
+    if text.startswith("{"):
+        return text
 
+    start = text.find("{")
+    if start < 0:
+        return text
+
+    depth = 0
+    for idx, ch in enumerate(text[start:], start):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:idx + 1]
+    return text
+
+
+def _normalize_relationship(value: Any) -> str | None:
+    relation = str(value or "").strip().upper()
+    if relation in RELATIONSHIP_VALUES:
+        return relation
+    return None
+
+
+def _conflict_task_keys(conflict: dict[str, Any]) -> list[str]:
+    tasks = conflict.get("tasks")
+    if not isinstance(tasks, list):
+        return []
+    return [str(task_key) for task_key in tasks if str(task_key)]
+
+
+def parse_plan_json(raw: str) -> ExecutionPlan | None:
+    """Parse planner JSON from model output."""
     try:
-        data = json.loads(text)
+        data = json.loads(_strip_json_wrapper(raw))
     except (json.JSONDecodeError, ValueError):
         return None
 
     if not isinstance(data, dict):
         return None
 
-    batches_raw = data.get("batches")
+    batches_raw = data.get("batches", [])
+    conflicts_raw = data.get("conflicts", [])
+    analysis_raw = data.get("analysis", [])
+
     if not isinstance(batches_raw, list):
         return None
+    if conflicts_raw is not None and not isinstance(conflicts_raw, list):
+        return None
+    if analysis_raw is not None and not isinstance(analysis_raw, list):
+        return None
 
-    batches = []
+    batches: list[Batch] = []
     for batch_data in batches_raw:
         if not isinstance(batch_data, dict):
             continue
+        task_plans: list[TaskPlan] = []
         tasks_raw = batch_data.get("tasks", [])
         if not isinstance(tasks_raw, list):
             continue
-        task_plans = []
         for tp_data in tasks_raw:
             if not isinstance(tp_data, dict):
                 continue
-            task_key = tp_data.get("task_key", "")
+            task_key = str(tp_data.get("task_key", "") or "").strip()
             if not task_key:
                 continue
-            task_plans.append(TaskPlan(
-                task_key=task_key,
-                strategy=tp_data.get("strategy", "direct"),
-                research_query=tp_data.get("research_query", ""),
-                skip_qa=bool(tp_data.get("skip_qa", False)),
-                effort=tp_data.get("effort", "high"),
-            ))
+            task_plans.append(
+                TaskPlan(
+                    task_key=task_key,
+                    strategy=str(tp_data.get("strategy", "direct") or "direct"),
+                    research_query=str(tp_data.get("research_query", "") or ""),
+                    skip_qa=bool(tp_data.get("skip_qa", False)),
+                    effort=str(tp_data.get("effort", "high") or "high"),
+                )
+            )
         if task_plans:
             batches.append(Batch(tasks=task_plans))
 
-    if not batches:
+    conflicts: list[dict[str, Any]] = []
+    for conflict in conflicts_raw or []:
+        if not isinstance(conflict, dict):
+            continue
+        keys = _conflict_task_keys(conflict)
+        if len(keys) < 2:
+            continue
+        conflicts.append(
+            {
+                "tasks": keys,
+                "description": str(conflict.get("description", "") or ""),
+                "suggestion": str(conflict.get("suggestion", "") or ""),
+            }
+        )
+
+    analysis: list[dict[str, Any]] = []
+    for item in analysis_raw or []:
+        if not isinstance(item, dict):
+            continue
+        task_a = str(item.get("task_a", "") or "").strip()
+        task_b = str(item.get("task_b", "") or "").strip()
+        relationship = _normalize_relationship(item.get("relationship"))
+        if not task_a or not task_b or not relationship:
+            continue
+        analysis.append(
+            {
+                "task_a": task_a,
+                "task_b": task_b,
+                "relationship": relationship,
+                "reason": str(item.get("reason", "") or ""),
+            }
+        )
+
+    if not batches and not conflicts:
         return None
 
     learnings = data.get("learnings", [])
     if not isinstance(learnings, list):
         learnings = []
 
-    return ExecutionPlan(batches=batches, learnings=[str(l) for l in learnings])
+    return ExecutionPlan(
+        batches=batches,
+        learnings=[str(item) for item in learnings],
+        conflicts=conflicts,
+        analysis=analysis,
+    )
 
 
-def default_plan(tasks: list[dict[str, Any]]) -> ExecutionPlan:
-    """Create a dependency-respecting fallback plan.
-
-    Uses topological sort to respect depends_on constraints. Independent
-    tasks are grouped into parallel batches. Used when the planner LLM
-    fails or returns malformed JSON.
-    """
-    import graphlib
-
-    # Build lookup structures
+def _task_graph(tasks: list[dict[str, Any]]) -> tuple[dict[str, dict[str, Any]], dict[int, str], dict[str, list[str]]]:
     task_by_key: dict[str, dict[str, Any]] = {}
     id_to_key: dict[int, str] = {}
+    dep_keys_by_key: dict[str, list[str]] = {}
+
     for task in tasks:
-        key = task.get("key", "")
+        key = str(task.get("key", "") or "").strip()
         if not key:
             continue
         task_by_key[key] = task
-        id_to_key[task.get("id", 0)] = key
+        if isinstance(task.get("id"), int):
+            id_to_key[int(task["id"])] = key
 
-    if not task_by_key:
-        return ExecutionPlan()
-
-    # Build dependency graph: key -> set of dependency keys
-    ts = graphlib.TopologicalSorter()
     for key, task in task_by_key.items():
-        dep_ids = task.get("depends_on") or []
-        dep_keys = [id_to_key[d] for d in dep_ids if d in id_to_key]
-        ts.add(key, *dep_keys)
+        deps = []
+        for dep_id in task.get("depends_on") or []:
+            dep_key = id_to_key.get(dep_id)
+            if dep_key:
+                deps.append(dep_key)
+        dep_keys_by_key[key] = deps
 
-    # Topological sort into batches (each "ready" group is a parallel batch)
+    return task_by_key, id_to_key, dep_keys_by_key
+
+
+def _topological_layers(tasks: list[dict[str, Any]]) -> list[list[str]]:
+    task_by_key, _id_to_key, dep_keys_by_key = _task_graph(tasks)
+    if not task_by_key:
+        return []
+
+    sorter = graphlib.TopologicalSorter()
+    for key, dep_keys in dep_keys_by_key.items():
+        sorter.add(key, *dep_keys)
+
     try:
-        ts.prepare()
+        sorter.prepare()
     except graphlib.CycleError:
-        # Cycle detected — fall back to sequential order
-        batches = [Batch(tasks=[TaskPlan(task_key=k)]) for k in task_by_key]
-        return ExecutionPlan(batches=batches)
+        return [[key] for key in task_by_key]
 
-    batches = []
-    while ts.is_active():
-        ready = list(ts.get_ready())
+    layers: list[list[str]] = []
+    while sorter.is_active():
+        ready = list(sorter.get_ready())
         if not ready:
             break
-        batch_tasks = [TaskPlan(task_key=k) for k in ready]
-        batches.append(Batch(tasks=batch_tasks))
-        for k in ready:
-            ts.done(k)
+        layers.append(ready)
+        for key in ready:
+            sorter.done(key)
+    return layers
 
+
+def default_plan(tasks: list[dict[str, Any]]) -> ExecutionPlan:
+    """Create a dependency-respecting parallel plan."""
+    return ExecutionPlan(
+        batches=[Batch(tasks=[TaskPlan(task_key=key) for key in layer]) for layer in _topological_layers(tasks)],
+    )
+
+
+def serial_plan(tasks: list[dict[str, Any]]) -> ExecutionPlan:
+    """Create a dependency-respecting serial plan."""
+    batches: list[Batch] = []
+    for layer in _topological_layers(tasks):
+        for key in layer:
+            batches.append(Batch(tasks=[TaskPlan(task_key=key)]))
     return ExecutionPlan(batches=batches)
 
 
-# ---------------------------------------------------------------------------
-# LLM-driven planning (plan + replan)
-# ---------------------------------------------------------------------------
+def _serial_plan_from_remaining(remaining_plan: ExecutionPlan) -> ExecutionPlan:
+    batches = [
+        Batch(tasks=[TaskPlan(
+            task_key=task_plan.task_key,
+            strategy=task_plan.strategy,
+            research_query=task_plan.research_query,
+            skip_qa=task_plan.skip_qa,
+            effort=task_plan.effort,
+        )])
+        for batch in remaining_plan.batches
+        for task_plan in batch.tasks
+    ]
+    return ExecutionPlan(
+        batches=batches,
+        learnings=list(remaining_plan.learnings),
+        conflicts=list(remaining_plan.conflicts),
+        analysis=list(remaining_plan.analysis),
+    )
 
-_PLANNER_SYSTEM_PROMPT = """\
-You are a planning agent for an autonomous coding pipeline. You analyze tasks
-and produce an execution plan as JSON.
 
-Given a list of tasks with their specs, dependencies, and project context,
-produce an optimal execution plan that:
-1. Groups independent tasks into parallel batches
-2. Respects depends_on constraints (dependent tasks go in later batches)
-3. Assigns strategies: "direct" for straightforward tasks, "research_first"
-   for tasks that need web research or doc reading before coding
+def _task_summary(tasks: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    for task in tasks:
+        key = str(task.get("key", "") or "")
+        deps = task.get("depends_on") or []
+        dep_str = f" depends_on=#{', #'.join(str(dep) for dep in deps)}" if deps else ""
+        feedback = str(task.get("feedback", "") or "").strip()
+        feedback_str = f"\n  feedback: {feedback[:400]}" if feedback else ""
+        lines.append(
+            f"- task_key={key} id=#{task.get('id', '?')}{dep_str}\n"
+            f"  prompt: {str(task.get('prompt', '') or '')[:1200]}{feedback_str}"
+        )
+    return "\n".join(lines)
 
-Output ONLY a JSON object in this exact format:
-```json
-{
-    "batches": [
-        {
-            "tasks": [
+
+def _explicit_dependency_analysis(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    _task_by_key, id_to_key, _dep_keys_by_key = _task_graph(tasks)
+    analysis: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for task in tasks:
+        task_key = str(task.get("key", "") or "")
+        if not task_key:
+            continue
+        for dep_id in task.get("depends_on") or []:
+            dep_key = id_to_key.get(dep_id)
+            if not dep_key:
+                continue
+            pair = (dep_key, task_key)
+            if pair in seen:
+                continue
+            seen.add(pair)
+            analysis.append(
                 {
-                    "task_key": "<12-char hex key>",
-                    "strategy": "direct",
-                    "effort": "high"
+                    "task_a": dep_key,
+                    "task_b": task_key,
+                    "relationship": "DEPENDENT",
+                    "reason": "Explicit depends_on constraint.",
                 }
-            ]
-        }
-    ],
-    "learnings": []
-}
-```
+            )
+    return analysis
 
-Rules:
-- Tasks with depends_on MUST be in a LATER batch than their dependencies
-- Independent tasks SHOULD be in the same batch (parallel execution)
-- Do NOT serialize tasks just because they might touch the same file — the pipeline
-  handles merge conflicts automatically via re-apply. Only respect explicit depends_on.
-- Keep it simple — most tasks are "direct" strategy
-- Only use "research_first" when the task involves unfamiliar APIs/libraries
+
+def _serialize_analysis_batches(
+    batches: list[Batch],
+    analysis: list[dict[str, Any]],
+) -> list[Batch]:
+    task_plans_by_key: dict[str, TaskPlan] = {}
+    original_batch_by_key: dict[str, int] = {}
+    original_order_by_key: dict[str, tuple[int, int]] = {}
+    for batch_index, batch in enumerate(batches):
+        for task_index, task_plan in enumerate(batch.tasks):
+            task_plans_by_key[task_plan.task_key] = task_plan
+            original_batch_by_key[task_plan.task_key] = batch_index
+            original_order_by_key[task_plan.task_key] = (batch_index, task_index)
+
+    serialized_pairs = {
+        frozenset((item["task_a"], item["task_b"]))
+        for item in analysis
+        if item.get("relationship") in {"ADDITIVE", "UNCERTAIN"}
+        and item.get("task_a") in task_plans_by_key
+        and item.get("task_b") in task_plans_by_key
+        and item.get("task_a") != item.get("task_b")
+    }
+    dependency_predecessors: dict[str, set[str]] = {
+        task_key: set() for task_key in task_plans_by_key
+    }
+    for item in analysis:
+        if item.get("relationship") != "DEPENDENT":
+            continue
+        task_a = str(item.get("task_a", "") or "")
+        task_b = str(item.get("task_b", "") or "")
+        if (
+            task_a not in task_plans_by_key
+            or task_b not in task_plans_by_key
+            or task_a == task_b
+        ):
+            continue
+        dependency_predecessors[task_b].add(task_a)
+
+    if not serialized_pairs and not any(dependency_predecessors.values()):
+        return batches
+
+    serialized_batches: list[Batch] = []
+    task_batch_by_key: dict[str, int] = {}
+    pending_keys = sorted(task_plans_by_key, key=original_order_by_key.__getitem__)
+    while pending_keys:
+        next_pending: list[str] = []
+        progressed = False
+        for task_key in pending_keys:
+            predecessors = dependency_predecessors.get(task_key, set())
+            if any(pred not in task_batch_by_key for pred in predecessors):
+                next_pending.append(task_key)
+                continue
+
+            task_plan = task_plans_by_key[task_key]
+            target_batch = original_batch_by_key[task_key]
+            if predecessors:
+                target_batch = max(
+                    target_batch,
+                    max(task_batch_by_key[pred] + 1 for pred in predecessors),
+                )
+            while True:
+                while len(serialized_batches) <= target_batch:
+                    serialized_batches.append(Batch(tasks=[]))
+                existing_keys = {
+                    existing.task_key
+                    for existing in serialized_batches[target_batch].tasks
+                }
+                if any(
+                    frozenset((task_key, other_key)) in serialized_pairs
+                    for other_key in existing_keys
+                ):
+                    target_batch += 1
+                    continue
+                serialized_batches[target_batch].tasks.append(task_plan)
+                task_batch_by_key[task_key] = target_batch
+                progressed = True
+                break
+
+        if progressed:
+            pending_keys = next_pending
+            continue
+
+        # Dependency cycles are invalid, but keep execution deterministic and conservative.
+        for task_key in next_pending:
+            task_plan = task_plans_by_key[task_key]
+            serialized_batches.append(Batch(tasks=[task_plan]))
+            task_batch_by_key[task_key] = len(serialized_batches) - 1
+        break
+
+    return [batch for batch in serialized_batches if batch.tasks]
+
+
+def _normalize_plan(plan: ExecutionPlan, tasks: list[dict[str, Any]]) -> ExecutionPlan:
+    valid_keys = {str(task.get("key", "") or "") for task in tasks if task.get("key")}
+    explicit_analysis = _explicit_dependency_analysis(tasks)
+
+    analysis: list[dict[str, Any]] = []
+    seen_analysis: set[tuple[str, str, str]] = set()
+    for item in list(plan.analysis) + explicit_analysis:
+        task_a = str(item.get("task_a", "") or "")
+        task_b = str(item.get("task_b", "") or "")
+        relationship = _normalize_relationship(item.get("relationship"))
+        if task_a not in valid_keys or task_b not in valid_keys or not relationship:
+            continue
+        signature = (task_a, task_b, relationship)
+        if signature in seen_analysis:
+            continue
+        seen_analysis.add(signature)
+        analysis.append(
+            {
+                "task_a": task_a,
+                "task_b": task_b,
+                "relationship": relationship,
+                "reason": str(item.get("reason", "") or ""),
+            }
+        )
+
+    conflicts: list[dict[str, Any]] = []
+    seen_conflicts: set[str] = set()
+    conflict_sets: list[set[str]] = []
+    for conflict in plan.conflicts:
+        keys = [key for key in _conflict_task_keys(conflict) if key in valid_keys]
+        if len(keys) < 2:
+            continue
+        signature = "|".join(sorted(keys))
+        if signature in seen_conflicts:
+            continue
+        seen_conflicts.add(signature)
+        conflict_sets.append(set(keys))
+        conflicts.append(
+            {
+                "tasks": keys,
+                "description": str(conflict.get("description", "") or ""),
+                "suggestion": str(conflict.get("suggestion", "") or ""),
+            }
+        )
+
+    for item in analysis:
+        if item.get("relationship") != "CONTRADICTORY":
+            continue
+        pair = {item["task_a"], item["task_b"]}
+        if len(pair) < 2 or any(pair.issubset(existing) for existing in conflict_sets):
+            continue
+        ordered_pair = sorted(pair)
+        signature = "|".join(ordered_pair)
+        if signature in seen_conflicts:
+            continue
+        seen_conflicts.add(signature)
+        conflict_sets.append(pair)
+        conflicts.append(
+            {
+                "tasks": ordered_pair,
+                "description": str(item.get("reason", "") or "Planner marked these tasks as contradictory."),
+                "suggestion": "Do not run these tasks in the same batch.",
+            }
+        )
+
+    conflict_keys = {
+        key
+        for conflict in conflicts
+        for key in conflict.get("tasks", [])
+    }
+
+    seed_batches: list[Batch] = []
+    seen_planned: set[str] = set()
+    for batch in plan.batches:
+        normalized_tasks: list[TaskPlan] = []
+        for task_plan in batch.tasks:
+            if task_plan.task_key not in valid_keys:
+                continue
+            if task_plan.task_key in conflict_keys or task_plan.task_key in seen_planned:
+                continue
+            seen_planned.add(task_plan.task_key)
+            normalized_tasks.append(task_plan)
+        if normalized_tasks:
+            seed_batches.append(Batch(tasks=normalized_tasks))
+
+    batches = _serialize_analysis_batches(seed_batches, analysis)
+
+    return ExecutionPlan(
+        batches=batches,
+        learnings=list(plan.learnings),
+        conflicts=conflicts,
+        analysis=analysis,
+    )
+
+
+def _parse_shortlist_json(raw: str) -> list[dict[str, str]] | None:
+    try:
+        data = json.loads(_strip_json_wrapper(raw))
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    candidates = data.get("candidates")
+    if not isinstance(candidates, list):
+        return None
+    parsed: list[dict[str, str]] = []
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        task_a = str(item.get("task_a", "") or "").strip()
+        task_b = str(item.get("task_b", "") or "").strip()
+        if not task_a or not task_b or task_a == task_b:
+            continue
+        parsed.append(
+            {
+                "task_a": task_a,
+                "task_b": task_b,
+                "reason": str(item.get("reason", "") or ""),
+            }
+        )
+    return parsed
+
+
+def _shortlist_signature(item: dict[str, str]) -> tuple[str, str]:
+    task_a = item["task_a"]
+    task_b = item["task_b"]
+    return tuple(sorted((task_a, task_b)))
+
+
+def _project_context(project_dir: Path) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "ls-files"],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except Exception:
+        return "(git ls-files unavailable)"
+
+    from otto.git_ops import _is_otto_owned
+    files = [line.strip() for line in result.stdout.splitlines()
+             if line.strip() and not _is_otto_owned(line.strip())]
+    if not files:
+        return "(no tracked files)"
+    limited = files[:200]
+    suffix = "\n... (truncated)" if len(files) > len(limited) else ""
+    return "\n".join(f"- {path}" for path in limited) + suffix
+
+
+def _planner_settings(config: dict[str, Any]) -> list[str]:
+    return str(config.get("planner_agent_settings", "project") or "project").split(",")
+
+
+def _planner_effort(config: dict[str, Any], default: str = "medium") -> str:
+    return str(config.get("planner_effort", default) or default)
+
+
+def _planner_model(config: dict[str, Any]) -> str | None:
+    model = config.get("planner_model")
+    return str(model) if model else None
+
+
+async def _run_planner_prompt(
+    prompt: str,
+    config: dict[str, Any],
+    project_dir: Path,
+    *,
+    model: str | None,
+    effort: str,
+) -> str:
+    options = ClaudeAgentOptions(
+        permission_mode="bypassPermissions",
+        cwd=str(project_dir),
+        setting_sources=_planner_settings(config),
+        env=_subprocess_env(),
+        effort=effort,
+        system_prompt={"type": "preset", "preset": "claude_code"},
+    )
+    if model:
+        options.model = model
+    raw_output, _cost, _result = await run_agent_query(prompt, options)
+    return raw_output
+
+
+async def _shortlist_pairs(
+    tasks: list[dict[str, Any]],
+    config: dict[str, Any],
+    project_dir: Path,
+) -> list[dict[str, str]]:
+    prompt = f"""You are triaging coding task relationships.
+
+Review ALL tasks below and return ONLY suspicious task pairs that need deeper review.
+Suspicious means any likely overlap, dependency, contradiction, or uncertainty.
+Do not include obviously independent pairs.
+
+Return JSON only:
+{{
+  "candidates": [
+    {{"task_a": "task_key_a", "task_b": "task_key_b", "reason": "brief reason"}}
+  ]
+}}
+
+Tasks:
+{_task_summary(tasks)}
 """
+    raw_output = await _run_planner_prompt(
+        prompt,
+        config,
+        project_dir,
+        model="haiku",
+        effort="low",
+    )
+    candidates = _parse_shortlist_json(raw_output)
+    if candidates is None:
+        raise ValueError("shortlist parse failed")
 
-
-from pathlib import Path
+    valid_keys = {str(task.get("key", "") or "") for task in tasks if task.get("key")}
+    normalized: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in candidates:
+        if item["task_a"] not in valid_keys or item["task_b"] not in valid_keys:
+            continue
+        signature = _shortlist_signature(item)
+        if signature in seen:
+            continue
+        seen.add(signature)
+        normalized.append(item)
+    return normalized
 
 
 async def plan(
@@ -244,151 +677,149 @@ async def plan(
     config: dict[str, Any],
     project_dir: Path,
 ) -> ExecutionPlan:
-    """Create an execution plan using a single Sonnet query.
-
-    Falls back to default_plan() on any failure.
-    """
+    """Create an execution plan using smart relationship analysis."""
     if not tasks:
         return ExecutionPlan()
 
     if len(tasks) == 1:
-        # Single task — no need for LLM planning
-        return default_plan(tasks)
-
-    # When max_parallel > 1 and no tasks have explicit depends_on,
-    # use deterministic default_plan() instead of the LLM planner.
-    # The LLM tends to infer file-overlap dependencies and serialize tasks,
-    # defeating parallelism. default_plan() groups all independent tasks
-    # into one batch. The pipeline handles merge conflicts via re-apply.
-    max_parallel = config.get("max_parallel", 1) or 1
-    has_explicit_deps = any(t.get("depends_on") for t in tasks)
-    if max_parallel > 1 and not has_explicit_deps:
-        return default_plan(tasks)
-
-    from otto.agent import ClaudeAgentOptions, _subprocess_env, run_agent_query
-
-    # Build task summary for the planner
-    task_lines = []
-    for t in tasks:
-        deps = t.get("depends_on", [])
-        dep_str = f" (depends_on: #{', #'.join(str(d) for d in deps)})" if deps else ""
-        spec_count = len(t.get("spec", []))
-        task_lines.append(
-            f"- key={t['key']} id=#{t.get('id', '?')} "
-            f"spec={spec_count} items{dep_str}: {t.get('prompt', '')}"
-        )
-
-    prompt = f"""Plan the execution of these {len(tasks)} tasks:
-
-{chr(10).join(task_lines)}
-
-Produce the JSON execution plan. Group independent tasks into parallel batches.
-Respect depends_on constraints."""
+        return ExecutionPlan(batches=[Batch(tasks=[TaskPlan(task_key=str(tasks[0]["key"]))])])
 
     try:
-        agent_opts = ClaudeAgentOptions(
-            permission_mode="bypassPermissions",
-            cwd=str(project_dir),
-            setting_sources=config.get("planner_agent_settings", "project").split(","),
-            env=_subprocess_env(),
-            effort="low",
-            system_prompt=_PLANNER_SYSTEM_PROMPT,
-            model="sonnet",
+        shortlist = await _shortlist_pairs(tasks, config, project_dir)
+        has_explicit_deps = any(task.get("depends_on") for task in tasks)
+        if not shortlist:
+            if has_explicit_deps:
+                return _normalize_plan(default_plan(tasks), tasks)
+            return _normalize_plan(default_plan(tasks), tasks)
+
+        candidate_lines = "\n".join(
+            f"- {item['task_a']} <-> {item['task_b']}: {item['reason']}"
+            for item in shortlist
         )
+        prompt = f"""You are planning execution for an autonomous coding pipeline.
 
-        raw_output, _cost, _result = await run_agent_query(prompt, agent_opts)
+Classify the shortlisted task pairs and build an execution plan.
+
+Relationship labels:
+- INDEPENDENT: different files/components, parallel OK
+- ADDITIVE: same file, different functions/sections, serialize (same-file parallel causes merge conflicts)
+- DEPENDENT: task B needs task A output, serialize
+- CONTRADICTORY: incompatible edits to the same thing, flag and exclude from execution
+- UNCERTAIN: not enough information, serialize conservatively
+
+Rules:
+- Respect explicit depends_on constraints.
+- Exclude contradictory tasks from batches and report them in conflicts.
+- ADDITIVE and UNCERTAIN pairs should not run in the same batch.
+- Only truly INDEPENDENT tasks (different files) should run in parallel.
+
+Return JSON only:
+{{
+  "analysis": [
+    {{"task_a": "a", "task_b": "b", "relationship": "INDEPENDENT|ADDITIVE|DEPENDENT|CONTRADICTORY|UNCERTAIN", "reason": "brief reason"}}
+  ],
+  "conflicts": [
+    {{"tasks": ["a", "b"], "description": "what conflicts", "suggestion": "how to resolve"}}
+  ],
+  "batches": [
+    {{"tasks": [{{"task_key": "a", "strategy": "direct", "effort": "high"}}]}}
+  ],
+  "learnings": []
+}}
+
+Tasks:
+{_task_summary(tasks)}
+
+Shortlisted pairs for detailed review:
+{candidate_lines}
+
+Project context (git ls-files, capped at 200):
+{_project_context(project_dir)}
+"""
+        raw_output = await _run_planner_prompt(
+            prompt,
+            config,
+            project_dir,
+            model=_planner_model(config),
+            effort=_planner_effort(config),
+        )
         result = parse_plan_json(raw_output)
-        if result and not result.is_empty:
-            return result
-
-        logger.warning("Planner output unparseable, falling back to default_plan. Raw: %s", raw_output[:300])
+        if result is None:
+            raise ValueError("planner parse failed")
+        return _normalize_plan(result, tasks)
     except Exception as exc:
-        logger.warning("Planner query failed: %s, falling back to default_plan", exc)
-
-    return default_plan(tasks)
+        logger.warning("Planner failed; falling back to serial plan: %s", exc)
+        return serial_plan(tasks)
 
 
 async def replan(
-    context: Any,  # PipelineContext
+    context: Any,
     remaining_plan: ExecutionPlan,
     config: dict[str, Any],
     project_dir: Path,
 ) -> ExecutionPlan:
-    """Replan at batch boundary with accumulated results/learnings.
-
-    Called when a batch completes with failures. Uses context to inform
-    retry strategies. Falls back to remaining_plan on failure.
-    """
+    """Replan remaining batches while preserving conflict metadata."""
     if remaining_plan.is_empty:
         return remaining_plan
 
-    from otto.agent import ClaudeAgentOptions, _subprocess_env, run_agent_query
-
-    # Build rich context — pass raw environmental feedback, not summaries
-    results_summary = []
+    results_summary: list[str] = []
     for key, result in context.results.items():
         if result.success:
-            results_summary.append(
-                f"- {key}: PASSED — {result.diff_summary or 'no diff'}"
-            )
+            results_summary.append(f"- {key}: PASSED — {result.diff_summary or 'no diff summary'}")
         else:
             parts = [f"- {key}: FAILED"]
             if result.error:
-                parts.append(f"  Error: {result.error}")
+                parts.append(f"  error: {result.error}")
             if result.qa_report:
-                parts.append(f"  QA report: {result.qa_report}")
+                parts.append(f"  qa: {result.qa_report[:400]}")
             results_summary.append("\n".join(parts))
 
-    learnings_str = "\n".join(f"- [{l.source}] {l.text}" for l in context.learnings) if context.learnings else "None"
+    learnings_str = "\n".join(f"- [{item.source}] {item.text}" for item in context.learnings) if context.learnings else "None"
+    remaining_tasks = [
+        f"- key={task_plan.task_key} strategy={task_plan.strategy}"
+        for batch in remaining_plan.batches
+        for task_plan in batch.tasks
+    ]
 
-    # Include research findings
-    research_parts = []
-    for key in context.results:
-        findings = context.get_research(key)
-        if findings:
-            research_parts.append(f"- Research for {key}: {findings}")
-    research_str = "\n".join(research_parts) if research_parts else "None"
+    prompt = f"""You are replanning remaining autonomous coding tasks.
 
-    remaining_tasks = []
-    for batch in remaining_plan.batches:
-        for tp in batch.tasks:
-            remaining_tasks.append(f"- key={tp.task_key} strategy={tp.strategy}")
+Keep the task set exactly the same. Adjust batch order or strategies only if the completed results require it.
+Return JSON only with batches/learnings. Preserve any existing conflict handling outside this response.
 
-    prompt = f"""Replan the remaining tasks based on what happened so far.
+Completed results:
+{chr(10).join(results_summary) or "None"}
 
-COMPLETED RESULTS:
-{chr(10).join(results_summary) or "None yet"}
-
-LEARNINGS:
+Learnings:
 {learnings_str}
 
-RESEARCH FINDINGS:
-{research_str}
-
-REMAINING TASKS:
+Remaining tasks:
 {chr(10).join(remaining_tasks)}
-
-Update strategies based on what we learned.
-Output the JSON execution plan for REMAINING tasks only."""
-
+"""
     try:
-        agent_opts = ClaudeAgentOptions(
-            permission_mode="bypassPermissions",
-            cwd=str(project_dir),
-            setting_sources=config.get("planner_agent_settings", "project").split(","),
-            env=_subprocess_env(),
-            effort="low",
-            system_prompt=_PLANNER_SYSTEM_PROMPT,
-            model="sonnet",
+        raw_output = await _run_planner_prompt(
+            prompt,
+            config,
+            project_dir,
+            model=_planner_model(config),
+            effort=_planner_effort(config),
         )
-
-        raw_output, _cost, _result = await run_agent_query(prompt, agent_opts)
-        result = parse_plan_json(raw_output)
-        if result and not result.is_empty:
-            return result
-
-        logger.warning("Replanner output unparseable, keeping remaining plan. Raw: %s", raw_output[:300])
+        replanned = parse_plan_json(raw_output)
+        if replanned is None or replanned.is_empty:
+            raise ValueError("replan parse failed")
+        remaining_tasks = [
+            {"key": task_plan.task_key}
+            for batch in remaining_plan.batches
+            for task_plan in batch.tasks
+        ]
+        return _normalize_plan(
+            ExecutionPlan(
+                batches=replanned.batches,
+                learnings=replanned.learnings,
+                conflicts=list(remaining_plan.conflicts),
+                analysis=list(remaining_plan.analysis),
+            ),
+            remaining_tasks,
+        )
     except Exception as exc:
-        logger.warning("Replan query failed: %s, keeping remaining plan", exc)
-
-    return remaining_plan
+        logger.warning("Replan failed; falling back to serial remaining plan: %s", exc)
+        return _serial_plan_from_remaining(remaining_plan)

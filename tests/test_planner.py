@@ -6,6 +6,7 @@ from unittest.mock import patch, AsyncMock, MagicMock
 import pytest
 
 from otto.planner import (
+    _normalize_plan,
     Batch,
     ExecutionPlan,
     TaskPlan,
@@ -56,11 +57,37 @@ class TestExecutionPlan:
                 Batch(tasks=[TaskPlan(task_key="t3")]),
             ],
             learnings=["lesson1"],
+            conflicts=[{"tasks": ["t4", "t5"], "description": "conflict"}],
+            analysis=[
+                {"task_a": "t1", "task_b": "t2", "relationship": "ADDITIVE", "reason": "same file"},
+                {"task_a": "t4", "task_b": "t5", "relationship": "CONTRADICTORY", "reason": "same function"},
+            ],
         )
         remaining = plan.remaining_after({"t1", "t3"})
         assert remaining.total_tasks == 1
         assert remaining.batches[0].tasks[0].task_key == "t2"
         assert remaining.learnings == ["lesson1"]
+        assert remaining.conflicts == []
+        assert remaining.analysis == []
+
+    def test_remaining_after_preserves_unresolved_metadata(self):
+        plan = ExecutionPlan(
+            batches=[
+                Batch(tasks=[TaskPlan(task_key="t1"), TaskPlan(task_key="t2")]),
+                Batch(tasks=[TaskPlan(task_key="t3")]),
+            ],
+            conflicts=[{"tasks": ["t2", "t3"], "description": "conflict"}],
+            analysis=[
+                {"task_a": "t1", "task_b": "t2", "relationship": "DEPENDENT", "reason": "chain"},
+                {"task_a": "t2", "task_b": "t3", "relationship": "CONTRADICTORY", "reason": "overlap"},
+            ],
+        )
+        remaining = plan.remaining_after({"t1"})
+        assert remaining.total_tasks == 2
+        assert remaining.conflicts == [{"tasks": ["t2", "t3"], "description": "conflict"}]
+        assert remaining.analysis == [
+            {"task_a": "t2", "task_b": "t3", "relationship": "CONTRADICTORY", "reason": "overlap"},
+        ]
 
     def test_remaining_after_all_complete(self):
         plan = ExecutionPlan(batches=[
@@ -146,6 +173,30 @@ class TestParsePlanJson:
         assert plan is not None
         assert plan.learnings == []
 
+    def test_conflicts_without_batches_parse(self):
+        raw = json.dumps({
+            "conflicts": [
+                {
+                    "tasks": ["t1", "t2"],
+                    "description": "same function, different rewrite",
+                    "suggestion": "combine prompts",
+                }
+            ],
+            "analysis": [
+                {
+                    "task_a": "t1",
+                    "task_b": "t2",
+                    "relationship": "contradictory",
+                    "reason": "same function",
+                }
+            ],
+        })
+        plan = parse_plan_json(raw)
+        assert plan is not None
+        assert plan.total_tasks == 0
+        assert plan.conflicts[0]["tasks"] == ["t1", "t2"]
+        assert plan.analysis[0]["relationship"] == "CONTRADICTORY"
+
 
 class TestDefaultPlan:
     def test_single_task(self):
@@ -168,6 +219,125 @@ class TestDefaultPlan:
         assert len(result.batches) == 1
         keys = {tp.task_key for tp in result.batches[0].tasks}
         assert keys == {"t1", "t2", "t3"}
+
+
+class TestNormalizePlan:
+    def test_synthesizes_conflicts_from_contradictory_analysis(self):
+        tasks = [
+            {"key": "t1", "id": 1, "prompt": "Rewrite parser one way"},
+            {"key": "t2", "id": 2, "prompt": "Rewrite parser another way"},
+        ]
+        plan = ExecutionPlan(
+            batches=[Batch(tasks=[TaskPlan(task_key="t1"), TaskPlan(task_key="t2")])],
+            analysis=[
+                {
+                    "task_a": "t1",
+                    "task_b": "t2",
+                    "relationship": "CONTRADICTORY",
+                    "reason": "Both tasks rewrite the same function incompatibly.",
+                }
+            ],
+        )
+
+        result = _normalize_plan(plan, tasks)
+
+        assert result.total_tasks == 0
+        assert result.conflicts == [
+            {
+                "tasks": ["t1", "t2"],
+                "description": "Both tasks rewrite the same function incompatibly.",
+                "suggestion": "Do not run these tasks in the same batch.",
+            }
+        ]
+
+    def test_serializes_model_batch_when_analysis_requires_it(self):
+        tasks = [
+            {"key": "t1", "id": 1, "prompt": "Add auth backend"},
+            {"key": "t2", "id": 2, "prompt": "Build profile page"},
+            {"key": "t3", "id": 3, "prompt": "Refine copy"},
+        ]
+        plan = ExecutionPlan(
+            batches=[Batch(tasks=[TaskPlan(task_key="t1"), TaskPlan(task_key="t2"), TaskPlan(task_key="t3")])],
+            analysis=[
+                {
+                    "task_a": "t1",
+                    "task_b": "t2",
+                    "relationship": "DEPENDENT",
+                    "reason": "Profile page needs auth outputs.",
+                },
+                {
+                    "task_a": "t1",
+                    "task_b": "t3",
+                    "relationship": "UNCERTAIN",
+                    "reason": "Both may touch the same rendered view.",
+                },
+                {
+                    "task_a": "t2",
+                    "task_b": "t3",
+                    "relationship": "ADDITIVE",
+                    "reason": "Both edit the profile page in adjacent code.",
+                },
+            ],
+        )
+
+        result = _normalize_plan(plan, tasks)
+
+        assert [[tp.task_key for tp in batch.tasks] for batch in result.batches] == [
+            ["t1"],
+            ["t2"],
+            ["t3"],
+        ]
+
+    def test_explicit_dependencies_are_serialized_even_if_model_groups_them(self):
+        tasks = [
+            {"key": "t1", "id": 1, "prompt": "Add auth backend"},
+            {"key": "t2", "id": 2, "prompt": "Build profile page", "depends_on": [1]},
+        ]
+        plan = ExecutionPlan(
+            batches=[Batch(tasks=[TaskPlan(task_key="t1"), TaskPlan(task_key="t2")])],
+        )
+
+        result = _normalize_plan(plan, tasks)
+
+        assert [[tp.task_key for tp in batch.tasks] for batch in result.batches] == [
+            ["t1"],
+            ["t2"],
+        ]
+        assert result.analysis == [
+            {
+                "task_a": "t1",
+                "task_b": "t2",
+                "relationship": "DEPENDENT",
+                "reason": "Explicit depends_on constraint.",
+            }
+        ]
+
+    def test_dependent_relationship_is_directional_across_batches(self):
+        tasks = [
+            {"key": "t1", "id": 1, "prompt": "Add auth backend"},
+            {"key": "t2", "id": 2, "prompt": "Build profile page"},
+        ]
+        plan = ExecutionPlan(
+            batches=[
+                Batch(tasks=[TaskPlan(task_key="t2")]),
+                Batch(tasks=[TaskPlan(task_key="t1")]),
+            ],
+            analysis=[
+                {
+                    "task_a": "t1",
+                    "task_b": "t2",
+                    "relationship": "DEPENDENT",
+                    "reason": "Profile page needs auth outputs.",
+                }
+            ],
+        )
+
+        result = _normalize_plan(plan, tasks)
+
+        assert [[tp.task_key for tp in batch.tasks] for batch in result.batches] == [
+            ["t1"],
+            ["t2"],
+        ]
 
     def test_multi_task_with_deps(self):
         """Tasks with depends_on should be in later batches."""
@@ -218,6 +388,165 @@ async def _fake_query_returning(text):
 
 class TestPlan:
     @pytest.mark.asyncio
+    async def test_two_independent_tasks_parallel_after_shortlist(self, tmp_path):
+        tasks = [
+            {"key": "t1", "id": 1, "prompt": "Add search page"},
+            {"key": "t2", "id": 2, "prompt": "Add dark mode toggle"},
+        ]
+        seen_options = []
+
+        async def fake_query(prompt, options, *args, **kwargs):
+            seen_options.append(options)
+            assert options.system_prompt == {"type": "preset", "preset": "claude_code"}
+            return json.dumps({"candidates": []}), 0.0, None
+
+        with patch("otto.planner.run_agent_query", side_effect=fake_query):
+            result = await plan(tasks, {}, tmp_path)
+
+        assert len(seen_options) == 1
+        assert seen_options[0].model == "haiku"
+        assert len(result.batches) == 1
+        assert {tp.task_key for tp in result.batches[0].tasks} == {"t1", "t2"}
+        assert result.analysis == []
+
+    @pytest.mark.asyncio
+    async def test_two_additive_tasks_serialized(self, tmp_path):
+        tasks = [
+            {"key": "t1", "id": 1, "prompt": "Add slugify() to utils.py"},
+            {"key": "t2", "id": 2, "prompt": "Add title_case() to utils.py"},
+        ]
+        responses = iter([
+            json.dumps({"candidates": [{"task_a": "t1", "task_b": "t2", "reason": "same file"}]}),
+            json.dumps({
+                "analysis": [
+                    {"task_a": "t1", "task_b": "t2", "relationship": "ADDITIVE", "reason": "same file, different functions"},
+                ],
+                "conflicts": [],
+                "batches": [
+                    {"tasks": [{"task_key": "t1"}, {"task_key": "t2"}]},
+                ],
+            }),
+        ])
+
+        async def fake_query(prompt, options, *args, **kwargs):
+            return next(responses), 0.0, None
+
+        with patch("otto.planner.run_agent_query", side_effect=fake_query):
+            result = await plan(tasks, {}, tmp_path)
+
+        assert [[tp.task_key for tp in batch.tasks] for batch in result.batches] == [
+            ["t1"],
+            ["t2"],
+        ]
+        assert result.analysis[0]["relationship"] == "ADDITIVE"
+
+    @pytest.mark.asyncio
+    async def test_two_dependent_tasks_serialized(self, tmp_path):
+        tasks = [
+            {"key": "t1", "id": 1, "prompt": "Add auth backend"},
+            {"key": "t2", "id": 2, "prompt": "Build profile page on top of auth"},
+        ]
+        responses = iter([
+            json.dumps({"candidates": [{"task_a": "t1", "task_b": "t2", "reason": "profile depends on auth"}]}),
+            json.dumps({
+                "analysis": [
+                    {"task_a": "t1", "task_b": "t2", "relationship": "DEPENDENT", "reason": "profile requires auth output"},
+                ],
+                "conflicts": [],
+                "batches": [
+                    {"tasks": [{"task_key": "t1"}]},
+                    {"tasks": [{"task_key": "t2"}]},
+                ],
+            }),
+        ])
+
+        async def fake_query(prompt, options, *args, **kwargs):
+            return next(responses), 0.0, None
+
+        with patch("otto.planner.run_agent_query", side_effect=fake_query):
+            result = await plan(tasks, {}, tmp_path)
+
+        assert [batch.tasks[0].task_key for batch in result.batches] == ["t1", "t2"]
+        assert result.analysis[0]["relationship"] == "DEPENDENT"
+
+    @pytest.mark.asyncio
+    async def test_two_contradictory_tasks_flagged(self, tmp_path):
+        tasks = [
+            {"key": "t1", "id": 1, "prompt": "Rewrite calculateWindChill with formula A"},
+            {"key": "t2", "id": 2, "prompt": "Rewrite calculateWindChill with formula B"},
+        ]
+        responses = iter([
+            json.dumps({"candidates": [{"task_a": "t1", "task_b": "t2", "reason": "same function"}]}),
+            json.dumps({
+                "analysis": [
+                    {"task_a": "t1", "task_b": "t2", "relationship": "CONTRADICTORY", "reason": "same function, incompatible goals"},
+                ],
+                "conflicts": [
+                    {
+                        "tasks": ["t1", "t2"],
+                        "description": "Both rewrite calculateWindChill incompatibly",
+                        "suggestion": "Combine into one task",
+                    }
+                ],
+                "batches": [],
+            }),
+        ])
+
+        async def fake_query(prompt, options, *args, **kwargs):
+            return next(responses), 0.0, None
+
+        with patch("otto.planner.run_agent_query", side_effect=fake_query):
+            result = await plan(tasks, {}, tmp_path)
+
+        assert result.total_tasks == 0
+        assert result.conflicts == [
+            {
+                "tasks": ["t1", "t2"],
+                "description": "Both rewrite calculateWindChill incompatibly",
+                "suggestion": "Combine into one task",
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_mixed_relationships_plan(self, tmp_path):
+        tasks = [
+            {"key": "t1", "id": 1, "prompt": "Add slugify() to utils.py"},
+            {"key": "t2", "id": 2, "prompt": "Add title_case() to utils.py"},
+            {"key": "t3", "id": 3, "prompt": "Use slugify() in user routes"},
+            {"key": "t4", "id": 4, "prompt": "Add onboarding page"},
+        ]
+        responses = iter([
+            json.dumps({
+                "candidates": [
+                    {"task_a": "t1", "task_b": "t2", "reason": "same file"},
+                    {"task_a": "t1", "task_b": "t3", "reason": "route depends on helper"},
+                ]
+            }),
+            json.dumps({
+                "analysis": [
+                    {"task_a": "t1", "task_b": "t2", "relationship": "ADDITIVE", "reason": "same file, different functions"},
+                    {"task_a": "t1", "task_b": "t3", "relationship": "DEPENDENT", "reason": "routes need helper"},
+                    {"task_a": "t2", "task_b": "t4", "relationship": "INDEPENDENT", "reason": "unrelated"},
+                ],
+                "conflicts": [],
+                "batches": [
+                    {"tasks": [{"task_key": "t1"}, {"task_key": "t2"}, {"task_key": "t4"}]},
+                    {"tasks": [{"task_key": "t3"}]},
+                ],
+            }),
+        ])
+
+        async def fake_query(prompt, options, *args, **kwargs):
+            return next(responses), 0.0, None
+
+        with patch("otto.planner.run_agent_query", side_effect=fake_query):
+            result = await plan(tasks, {}, tmp_path)
+
+        assert len(result.batches) == 2
+        assert {tp.task_key for tp in result.batches[0].tasks} == {"t1", "t4"}
+        assert {tp.task_key for tp in result.batches[1].tasks} == {"t2", "t3"}
+
+    @pytest.mark.asyncio
     async def test_single_task_skips_llm(self, tmp_path):
         """Single task should use default_plan without calling LLM."""
         tasks = [{"key": "abc123", "prompt": "Add hello"}]
@@ -232,23 +561,15 @@ class TestPlan:
 
     @pytest.mark.asyncio
     async def test_fallback_on_import_error(self, tmp_path):
-        """Should fall back to default_plan when SDK not available."""
+        """Planner failure should fall back to a serial plan."""
         tasks = [
             {"key": "t1", "prompt": "Task 1"},
             {"key": "t2", "prompt": "Task 2"},
         ]
-        with patch("otto.planner.plan.__module__", "otto.planner"):
-            # Patch the import inside plan() to fail
-            import builtins
-            original_import = builtins.__import__
-            def mock_import(name, *args, **kwargs):
-                if name == "claude_agent_sdk":
-                    raise ImportError("no SDK")
-                return original_import(name, *args, **kwargs)
-            with patch("builtins.__import__", side_effect=mock_import):
-                result = await plan(tasks, {}, tmp_path)
+        with patch("otto.planner.run_agent_query", side_effect=RuntimeError("boom")):
+            result = await plan(tasks, {}, tmp_path)
         assert result.total_tasks == 2
-        assert len(result.batches) == 1  # independent tasks → 1 parallel batch
+        assert len(result.batches) == 2
 
     @pytest.mark.asyncio
     async def test_successful_plan_from_llm(self, tmp_path):
@@ -321,3 +642,39 @@ class TestReplan:
 
         assert result.total_tasks == 1
         assert result.batches[0].tasks[0].task_key == "t2"
+
+    @pytest.mark.asyncio
+    async def test_replan_normalizes_preserved_analysis(self, tmp_path):
+        from otto.context import PipelineContext
+
+        ctx = PipelineContext()
+        remaining = ExecutionPlan(
+            batches=[Batch(tasks=[TaskPlan(task_key="t1"), TaskPlan(task_key="t2")])],
+            analysis=[
+                {
+                    "task_a": "t1",
+                    "task_b": "t2",
+                    "relationship": "DEPENDENT",
+                    "reason": "Profile page needs auth outputs.",
+                }
+            ],
+        )
+
+        async def fake_query(prompt, options, *args, **kwargs):
+            return json.dumps({
+                "batches": [
+                    {"tasks": [{"task_key": "t2"}]},
+                    {"tasks": [{"task_key": "t1"}]},
+                ],
+                "learnings": ["reordered based on recent results"],
+            }), 0.0, None
+
+        with patch("otto.planner.run_agent_query", side_effect=fake_query):
+            result = await replan(ctx, remaining, {}, tmp_path)
+
+        assert [[tp.task_key for tp in batch.tasks] for batch in result.batches] == [
+            ["t1"],
+            ["t2"],
+        ]
+        assert result.analysis == remaining.analysis
+        assert result.learnings == ["reordered based on recent results"]

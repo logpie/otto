@@ -6,9 +6,11 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
-from otto.qa import _write_proof_artifacts, run_qa_agent_v45
+import pytest
+
+from otto.qa import _finalize_batch_qa_result, _write_proof_artifacts, run_batch_qa_agent, run_qa_agent_v45
 
 
 class TestWriteProofArtifacts:
@@ -421,3 +423,150 @@ class TestRunQaAgentStreamCapture:
         assert "regression-check.sh" in report
         # Raw SDK list format NOT in report
         assert "[{'type': 'text'" not in report
+
+
+class TestRunBatchQaAgentProofArtifacts:
+    @pytest.mark.asyncio
+    async def test_writes_batch_and_per_task_proof_artifacts(self, tmp_path):
+        log_dir = tmp_path / "otto_logs" / "batch-qa"
+        tasks_with_specs = [
+            {
+                "id": 1,
+                "key": "task-one",
+                "prompt": "Implement task one",
+                "spec": [{"text": "task one works", "binding": "must"}],
+            },
+            {
+                "id": 2,
+                "key": "task-two",
+                "prompt": "Implement task two",
+                "spec": [{"text": "task two works", "binding": "must"}],
+            },
+        ]
+        qa_result = {
+            "must_passed": True,
+            "verdict": {
+                "must_passed": True,
+                "must_items": [
+                    {
+                        "task_key": "task-one",
+                        "spec_id": 1,
+                        "criterion": "task one works",
+                        "status": "pass",
+                        "evidence": "pytest task one passed",
+                        "proof": ["pytest tests/test_task_one.py -q"],
+                    },
+                    {
+                        "task_key": "task-two",
+                        "spec_id": 1,
+                        "criterion": "task two works",
+                        "status": "pass",
+                        "evidence": "pytest task two passed",
+                        "proof": ["pytest tests/test_task_two.py -q"],
+                    },
+                ],
+                "integration_findings": [
+                    {
+                        "description": "tasks integrate cleanly",
+                        "status": "pass",
+                        "test": "pytest tests/test_integration.py -q",
+                        "tasks_involved": ["task-one", "task-two"],
+                    },
+                ],
+                "regressions": [],
+                "test_suite_passed": True,
+            },
+            "raw_report": "batch qa passed",
+            "cost_usd": 1.2,
+            "qa_actions": [
+                {"type": "bash", "command": "pytest tests/test_task_one.py -q", "output": "1 passed", "is_error": False},
+                {"type": "bash", "command": "pytest tests/test_task_two.py -q", "output": "1 passed", "is_error": False},
+                {"type": "bash", "command": "pytest tests/test_integration.py -q", "output": "1 passed", "is_error": False},
+            ],
+        }
+
+        with patch("otto.qa._run_qa_prompt", new=AsyncMock(return_value=qa_result)):
+            result = await run_batch_qa_agent(
+                tasks_with_specs,
+                {},
+                tmp_path,
+                diff="diff --git a/app.py b/app.py",
+                log_dir=log_dir,
+            )
+
+        batch_report = log_dir / "qa-proofs" / "proof-report.md"
+        task_one_report = tmp_path / "otto_logs" / "task-one" / "qa-proofs" / "proof-report.md"
+        task_two_report = tmp_path / "otto_logs" / "task-two" / "qa-proofs" / "proof-report.md"
+
+        assert result["must_passed"] is True
+        assert result["proof_count"] >= 2
+        assert batch_report.exists()
+        assert (log_dir / "qa-proofs" / "regression-check.sh").exists()
+        assert task_one_report.exists()
+        assert task_two_report.exists()
+        assert (tmp_path / "otto_logs" / "task-one" / "qa-proofs" / "must-1.md").read_text().find("task one works") >= 0
+        assert (tmp_path / "otto_logs" / "task-two" / "qa-proofs" / "must-1.md").read_text().find("task two works") >= 0
+        assert "Integration Findings" in batch_report.read_text()
+        assert "tasks integrate cleanly" in task_one_report.read_text()
+
+
+class TestFinalizeBatchQaResult:
+    def test_preserves_infrastructure_error_flag(self):
+        final = _finalize_batch_qa_result(
+            {
+                "must_passed": False,
+                "verdict": {
+                    "must_items": [],
+                    "integration_findings": [],
+                    "regressions": [],
+                    "test_suite_passed": True,
+                },
+                "raw_report": "stream closed",
+                "cost_usd": 0.0,
+                "infrastructure_error": True,
+            },
+            [],
+        )
+
+        assert final["must_passed"] is False
+        assert final["infrastructure_error"] is True
+
+    def test_rejects_incomplete_spec_coverage(self):
+        tasks_with_specs = [
+            {
+                "key": "task-one",
+                "spec": [
+                    {"text": "first must item", "binding": "must"},
+                    {"text": "second must item", "binding": "must"},
+                ],
+            }
+        ]
+
+        final = _finalize_batch_qa_result(
+            {
+                "must_passed": True,
+                "verdict": {
+                    "must_items": [
+                        {
+                            "task_key": "task-one",
+                            "spec_id": 1,
+                            "criterion": "first must item",
+                            "status": "pass",
+                            "evidence": "ok",
+                        }
+                    ],
+                    "integration_findings": [],
+                    "regressions": [],
+                    "test_suite_passed": True,
+                },
+                "raw_report": "passed but incomplete",
+                "cost_usd": 0.0,
+            },
+            tasks_with_specs,
+        )
+
+        assert final["must_passed"] is False
+        assert final["failed_task_keys"] == ["task-one"]
+        assert final["verdict"]["coverage_error"]["missing"] == [
+            {"task_key": "task-one", "spec_id": 2}
+        ]

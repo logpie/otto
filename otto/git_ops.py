@@ -337,11 +337,18 @@ def build_candidate_commit(
         )
 
     # Stage all agent changes explicitly (never git add -A per spec)
-    # Stage modified/deleted tracked files
-    subprocess.run(
-        ["git", "add", "-u"],
-        cwd=project_dir, capture_output=True, check=True,
+    # Stage modified/deleted tracked files, excluding otto-owned paths
+    # (otto_logs/, tasks.yaml, etc. may be tracked from prior runs)
+    modified = subprocess.run(
+        ["git", "diff", "--name-only", "--diff-filter=ACDMRTUX"],
+        cwd=project_dir, capture_output=True, text=True,
     )
+    for f in modified.stdout.strip().split("\n"):
+        if f and not _is_otto_owned(f):
+            subprocess.run(
+                ["git", "add", "--", f],
+                cwd=project_dir, capture_output=True,
+            )
     # Stage untracked project source files — includes both agent-created
     # AND pre-existing untracked files (they may be imported by agent code).
     # Excludes otto runtime files and build artifacts via _should_stage_untracked.
@@ -634,15 +641,24 @@ def _find_best_candidate_ref(project_dir: Path, task_key: str) -> str | None:
 
 
 def _get_diff_info(project_dir: Path, base_sha: str) -> dict[str, Any]:
-    """Get diff info for QA tiering."""
+    """Get diff info for QA tiering. Excludes otto-owned paths."""
     result = subprocess.run(
         ["git", "diff", "--name-only", base_sha, "HEAD"],
         cwd=project_dir, capture_output=True, text=True,
     )
-    files = [f.strip() for f in result.stdout.strip().splitlines() if f.strip()]
+    files = [f.strip() for f in result.stdout.strip().splitlines()
+             if f.strip() and not _is_otto_owned(f.strip())]
+
+    # Build diff excluding otto-owned paths to avoid inflating QA prompt
+    # with massive log file deletions
+    exclude_args = []
+    for prefix in _OTTO_OWNED_PREFIXES:
+        exclude_args.extend([":(exclude)" + prefix])
+    for fname in _OTTO_OWNED_FILES:
+        exclude_args.extend([":(exclude)" + fname])
 
     full_diff = subprocess.run(
-        ["git", "diff", base_sha, "HEAD"],
+        ["git", "diff", base_sha, "HEAD", "--"] + exclude_args,
         cwd=project_dir, capture_output=True, text=True,
     )
 

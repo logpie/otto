@@ -14,6 +14,7 @@ otto/display.py
 otto/display_preview.py
 otto/flaky.py
 otto/git_ops.py
+otto/merge_resolve.py
 otto/orchestrator.py
 otto/planner.py
 otto/qa.py
@@ -37,6 +38,7 @@ tests/test_context.py
 tests/test_flaky.py
 tests/test_integration.py
 tests/test_manager.py
+tests/test_merge_resolve.py
 tests/test_orchestrator.py
 tests/test_pilot_display.py
 tests/test_planner.py

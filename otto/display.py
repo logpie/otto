@@ -1039,11 +1039,13 @@ def build_status_table(tasks: list[dict], show_phase: bool = False):
     _STATUS_ICONS = {
         "passed": "[green]\u2713[/green]",
         "failed": "[red]\u2717[/red]",
-        "blocked": "[red]\u2717[/red]",
+        "blocked": "[yellow]\u26a0[/yellow]",
+        "conflict": "[yellow]\u26a0[/yellow]",
         "merge_failed": "[red]\u2717[/red]",
         "running": "[cyan]\u25cf[/cyan]",
         "pending": "[dim]\u25cb[/dim]",
         "verified": "[blue]\u25c9[/blue]",
+        "merged": "[blue]\u25c9[/blue]",
         "merge_pending": "[blue]\u25c9[/blue]",
     }
 
@@ -1064,16 +1066,16 @@ def build_status_table(tasks: list[dict], show_phase: bool = False):
         # Line 1: icon + id + prompt
         if status_str in ("passed",):
             lines.append(f"  {icon} [bold]#{task_id}[/bold]  {rich_escape(prompt_text)}")
-        elif status_str in ("failed", "blocked", "merge_failed"):
+        elif status_str in ("failed", "blocked", "conflict", "merge_failed"):
             lines.append(f"  {icon} [bold]#{task_id}[/bold]  {rich_escape(prompt_text)}")
-        elif status_str in ("running", "verified", "merge_pending"):
+        elif status_str in ("running", "verified", "merged", "merge_pending"):
             lines.append(f"  {icon} [bold]#{task_id}[/bold]  {rich_escape(prompt_text)}")
         else:
             lines.append(f"  {icon} [dim]#{task_id}[/dim]  [dim]{rich_escape(prompt_text)}[/dim]")
 
         # Line 2: detail line (status-dependent, colorized key info)
         detail_parts: list[str] = []
-        if status_str in ("passed", "failed", "blocked", "merge_failed"):
+        if status_str in ("passed", "failed", "blocked", "conflict", "merge_failed"):
             # Relative time from completed_at
             completed_at = t.get("completed_at", "")
             rel = _relative_time(completed_at) if completed_at else ""
@@ -1081,10 +1083,12 @@ def build_status_table(tasks: list[dict], show_phase: bool = False):
                 status_label = f"[green]passed[/green]"
             elif status_str == "failed":
                 status_label = f"[red]failed[/red]"
+            elif status_str == "conflict":
+                status_label = f"[yellow]conflict[/yellow]"
             elif status_str == "merge_failed":
                 status_label = f"[red]merge failed[/red]"
             else:
-                status_label = f"[red]{status_str}[/red]"
+                status_label = f"[yellow]{status_str}[/yellow]"
             detail_parts.append(f"{status_label} {rel}" if rel else status_label)
             if attempts and attempts > 1:
                 detail_parts.append(f"[yellow]{attempts} attempts[/yellow]")
@@ -1116,6 +1120,15 @@ def build_status_table(tasks: list[dict], show_phase: bool = False):
             if spec_count:
                 detail_parts.append(f"[dim]{spec_count} specs[/dim]")
             lines.append(f"    {_SEP.join(detail_parts)}")
+        elif status_str == "merged":
+            detail_parts.append("[blue]merged (QA pending)[/blue]")
+            if cost:
+                detail_parts.append(f"[dim]${cost:.2f}[/dim]")
+            if dur:
+                detail_parts.append(f"[dim]{format_duration(dur)}[/dim]")
+            if spec_count:
+                detail_parts.append(f"[dim]{spec_count} specs[/dim]")
+            lines.append(f"    {_SEP.join(detail_parts)}")
         elif status_str == "merge_pending":
             detail_parts.append("[blue]merging...[/blue]")
             if cost:
@@ -1129,9 +1142,10 @@ def build_status_table(tasks: list[dict], show_phase: bool = False):
             lines.append(f"    [dim]{_SEP.join(detail_parts)}[/dim]")
 
         # Line 3: error line for failed/blocked/merge_failed
-        if status_str in ("failed", "blocked", "merge_failed") and t.get("error"):
+        if status_str in ("failed", "blocked", "conflict", "merge_failed") and t.get("error"):
             error_text = t["error"].splitlines()[0][:70] if t.get("error") else ""
-            lines.append(f"    [red]\u21b3 {rich_escape(error_text)}[/red]")
+            color = "yellow" if status_str in ("blocked", "conflict") else "red"
+            lines.append(f"    [{color}]\u21b3 {rich_escape(error_text)}[/{color}]")
 
     # Summary line
     counts: dict[str, int] = {}
@@ -1148,6 +1162,8 @@ def build_status_table(tasks: list[dict], show_phase: bool = False):
         parts.append(f"[green]{counts['passed']} passed[/green]")
     if counts.get("verified"):
         parts.append(f"[blue]{counts['verified']} verified[/blue]")
+    if counts.get("merged"):
+        parts.append(f"[blue]{counts['merged']} merged[/blue]")
     if counts.get("merge_pending"):
         parts.append(f"[blue]{counts['merge_pending']} merging[/blue]")
     if counts.get("failed"):
@@ -1155,7 +1171,9 @@ def build_status_table(tasks: list[dict], show_phase: bool = False):
     if counts.get("merge_failed"):
         parts.append(f"[red]{counts['merge_failed']} merge failed[/red]")
     if counts.get("blocked"):
-        parts.append(f"[red]{counts['blocked']} blocked[/red]")
+        parts.append(f"[yellow]{counts['blocked']} blocked[/yellow]")
+    if counts.get("conflict"):
+        parts.append(f"[yellow]{counts['conflict']} conflict[/yellow]")
     if counts.get("pending"):
         parts.append(f"[dim]{counts['pending']} pending[/dim]")
     if counts.get("running"):

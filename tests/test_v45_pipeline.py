@@ -13,6 +13,7 @@ import yaml
 from otto.qa import (
     determine_qa_tier,
     _parse_qa_verdict_json,
+    format_batch_spec,
     format_spec_v45,
 )
 from otto.runner import (
@@ -125,6 +126,33 @@ class TestFormatSpecV45:
         result = format_spec_v45(spec)
         assert "[must] returns 429" in result
         assert "[should] nice header" in result
+
+
+class TestFormatBatchSpec:
+    def test_groups_specs_by_task_and_adds_integration_section(self):
+        result = format_batch_spec([
+            {
+                "id": 1,
+                "key": "task-aaa",
+                "prompt": "Add API",
+                "spec": [
+                    {"text": "returns JSON", "binding": "must"},
+                    {"text": "layout matches mock", "binding": "should", "verifiable": False},
+                ],
+            },
+            {
+                "id": 2,
+                "key": "task-bbb",
+                "prompt": "Add UI",
+                "spec": [{"text": "renders dashboard", "binding": "must"}],
+            },
+        ])
+
+        assert "## Task #1: Add API (task_key: task-aaa)" in result
+        assert "[must] {task_key: task-aaa, spec_id: 1} returns JSON" in result
+        assert "[should ◈] {task_key: task-aaa, spec_id: 2} layout matches mock" in result
+        assert "## Task #2: Add UI (task_key: task-bbb)" in result
+        assert "## Cross-Task Integration" in result
 
 
 class TestParseQaVerdictJson:
@@ -256,6 +284,144 @@ class TestGetDiffInfo:
 
 
 class TestRunTaskV45:
+    @pytest.mark.asyncio
+    async def test_batch_mode_skips_spec_gen_and_qa_and_returns_verified(self, tmp_git_repo):
+        default_branch = _current_branch(tmp_git_repo)
+        task = {
+            "id": 1,
+            "key": "taskbatch001",
+            "prompt": "Add feature.txt",
+            "status": "pending",
+        }
+        tasks_path = _write_task(tmp_git_repo, task)
+        config = {
+            "default_branch": default_branch,
+            "max_retries": 0,
+            "verify_timeout": 30,
+            "max_task_time": 60,
+            "test_command": None,
+        }
+
+        async def fake_query(*, prompt, options=None):
+            (tmp_git_repo / "feature.txt").write_text("hello\n")
+            yield SimpleNamespace(
+                session_id="sess-batch-mode",
+                is_error=False,
+                total_cost_usd=0.0,
+                result="ok",
+            )
+
+        with patch("otto.runner.query", new=fake_query):
+            with patch("otto.spec.generate_spec_sync") as spec_mock:
+                with patch("otto.runner.run_qa_agent_v45") as qa_mock:
+                    with patch("otto.runner.run_test_suite", return_value=TestSuiteResult(
+                        passed=True,
+                        tiers=[TierResult("tier1", True, "1 passed")],
+                    )):
+                        with patch("otto.runner.merge_to_default") as merge_mock:
+                            result = await run_task_v45(
+                                task, config, tmp_git_repo, tasks_path, qa_mode="batch",
+                            )
+
+        persisted = load_tasks(tasks_path)[0]
+        assert result["success"] is True
+        assert result["status"] == "verified"
+        assert persisted["status"] == "verified"
+        spec_mock.assert_not_called()
+        qa_mock.assert_not_called()
+        merge_mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_skip_mode_skips_qa_and_keeps_serial_merge_behavior(self, tmp_git_repo):
+        default_branch = _current_branch(tmp_git_repo)
+        task = {
+            "id": 1,
+            "key": "taskskip001",
+            "prompt": "Add feature.txt",
+            "status": "pending",
+            "spec": [{"text": "Creates feature.txt", "binding": "must"}],
+        }
+        tasks_path = _write_task(tmp_git_repo, task)
+        config = {
+            "default_branch": default_branch,
+            "max_retries": 0,
+            "verify_timeout": 30,
+            "max_task_time": 60,
+            "test_command": None,
+        }
+
+        async def fake_query(*, prompt, options=None):
+            (tmp_git_repo / "feature.txt").write_text("hello\n")
+            yield SimpleNamespace(
+                session_id="sess-skip-mode",
+                is_error=False,
+                total_cost_usd=0.0,
+                result="ok",
+            )
+
+        with patch("otto.runner.query", new=fake_query):
+            with patch("otto.runner.run_test_suite", return_value=TestSuiteResult(
+                passed=True,
+                tiers=[TierResult("tier1", True, "1 passed")],
+            )):
+                with patch("otto.runner.run_qa_agent_v45") as qa_mock:
+                    with patch("otto.runner.merge_to_default", return_value=True):
+                        result = await run_task_v45(
+                            task, config, tmp_git_repo, tasks_path, qa_mode="skip",
+                        )
+
+        persisted = load_tasks(tasks_path)[0]
+        assert result["success"] is True
+        assert result["status"] == "passed"
+        assert persisted["status"] == "passed"
+        qa_mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_skip_mode_without_spec_does_not_start_spec_generation(self, tmp_git_repo):
+        default_branch = _current_branch(tmp_git_repo)
+        task = {
+            "id": 1,
+            "key": "taskskip002",
+            "prompt": "Add feature.txt",
+            "status": "pending",
+        }
+        tasks_path = _write_task(tmp_git_repo, task)
+        config = {
+            "default_branch": default_branch,
+            "max_retries": 0,
+            "verify_timeout": 30,
+            "max_task_time": 60,
+            "test_command": None,
+        }
+
+        async def fake_query(*, prompt, options=None):
+            (tmp_git_repo / "feature.txt").write_text("hello\n")
+            yield SimpleNamespace(
+                session_id="sess-skip-mode-no-spec",
+                is_error=False,
+                total_cost_usd=0.0,
+                result="ok",
+            )
+
+        with patch("otto.runner.query", new=fake_query):
+            with patch("otto.spec.generate_spec_sync") as spec_mock:
+                with patch("otto.runner.run_test_suite", return_value=TestSuiteResult(
+                    passed=True,
+                    tiers=[TierResult("tier1", True, "1 passed")],
+                )):
+                    with patch("otto.runner.run_qa_agent_v45") as qa_mock:
+                        with patch("otto.runner.merge_to_default", return_value=True):
+                            result = await run_task_v45(
+                                task, config, tmp_git_repo, tasks_path, qa_mode="skip",
+                            )
+
+        persisted = load_tasks(tasks_path)[0]
+        assert result["success"] is True
+        assert result["status"] == "passed"
+        assert persisted["status"] == "passed"
+        spec_mock.assert_not_called()
+        qa_mock.assert_not_called()
+
     @pytest.mark.asyncio
     async def test_merge_diverged_persists_error_code(self, tmp_git_repo):
         """Merge-diverged failures should persist structured error_code to tasks.yaml."""

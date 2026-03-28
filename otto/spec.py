@@ -175,7 +175,9 @@ Output format — one item per line:
   [should] prefer inline explanation of each contributing factor
   [should] credit source model if attribution is available"""
 
-    agent_prompt = f"""TASK: {prompt}
+    agent_prompt = f"""{system_prompt}
+
+TASK: {prompt}
 
 Instructions:
 - Read only what you need: the data types/models file and 1-2 existing components
@@ -204,8 +206,7 @@ Write only [must]/[should] criteria lines to the file — no headings, notes, or
         agent_opts = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
             cwd=str(project_dir),
-            system_prompt={"type": "preset", "preset": "claude_code",
-                           "append": system_prompt},
+            system_prompt={"type": "preset", "preset": "claude_code"},
             setting_sources=setting_sources or ["project"],
             env=dict(os.environ),
         )

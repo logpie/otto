@@ -24,6 +24,7 @@ from otto.agent import (
 )
 
 from otto.config import git_meta_dir, detect_test_command
+from otto.context import QAMode
 from otto.display import _truncate_at_word, console, format_cost, format_duration, rich_escape
 from otto.git_ops import (
     check_clean_tree,
@@ -41,10 +42,8 @@ from otto.git_ops import (
     _snapshot_untracked,
 )
 from otto.qa import (
-    QA_SYSTEM_PROMPT_V45,
     format_spec_v45,
     determine_qa_tier,
-    _parse_qa_verdict_json,
     run_qa_agent_v45,
 )
 from otto.tasks import load_tasks, update_task
@@ -233,15 +232,28 @@ def preflight_checks(
     # Baseline check moved to run_task_v45() — runs after branch creation
     # with auto-detected test command for consistent results.
 
+    from otto.tasks import load_tasks, mutate_and_recompute
+
     # Recover stale "running", "verified", "merge_pending" tasks
     # These states are transient — if we're starting fresh, something crashed
-    tasks = load_tasks(tasks_file)
-    _stale_states = {"running", "verified", "merge_pending"}
-    for t in tasks:
-        if t.get("status") in _stale_states:
-            update_task(tasks_file, t["key"], status="pending",
-                        error=None, session_id=None)
-            console.print(f"  [yellow]Warning: Task #{t['id']} was stuck in '{t['status']}' -- reset to pending[/yellow]")
+    _stale_states = {"running", "verified", "merged", "merge_pending"}
+    stale_tasks = [
+        task for task in load_tasks(tasks_file)
+        if task.get("status") in _stale_states
+    ]
+    if stale_tasks:
+        stale_keys = {task["key"] for task in stale_tasks if task.get("key")}
+
+        def _recover(tasks):
+            for task in tasks:
+                if task.get("key") in stale_keys:
+                    task["status"] = "pending"
+                    task.pop("error", None)
+                    task.pop("session_id", None)
+
+        mutate_and_recompute(tasks_file, _recover)
+        for task in stale_tasks:
+            console.print(f"  [yellow]Warning: Task #{task['id']} was stuck in '{task['status']}' -- reset to pending[/yellow]")
 
     tasks = load_tasks(tasks_file)
     pending = [t for t in tasks if t.get("status") == "pending"]
@@ -264,6 +276,7 @@ async def coding_loop(
     telemetry: Any,  # otto.telemetry.Telemetry
     tasks_file: Path | None = None,
     task_work_dir: Path | None = None,
+    qa_mode: str = QAMode.PER_TASK,
 ) -> Any:  # otto.context.TaskResult
     """v4 coding loop — run a single task through the v4.5 execution path.
 
@@ -376,6 +389,7 @@ async def coding_loop(
             task, config, project_dir, tasks_file,
             context=context, on_progress=_on_progress,
             task_work_dir=task_work_dir,
+            qa_mode=qa_mode,
         )
 
         duration = time.monotonic() - task_start
@@ -1257,6 +1271,7 @@ async def run_task_v45(
     context: Any | None = None,  # PipelineContext
     on_progress: Any | None = None,
     task_work_dir: Path | None = None,
+    qa_mode: str = QAMode.PER_TASK,
 ) -> dict[str, Any]:
     """v4.5 per-task execution loop — bare CC + parallel spec gen + verify + QA.
 
@@ -1301,6 +1316,8 @@ async def run_task_v45(
     # empty_retries removed — prompt now includes working dir, should not happen
     phase_timings: dict[str, float] = {}
     spec = task.get("spec")
+    batch_qa_mode = qa_mode == QAMode.BATCH
+    skip_qa_mode = qa_mode == QAMode.SKIP
     pre_existing_untracked: set[str] | None = None
     spec_task: asyncio.Task | None = None
     spec_started_at: float | None = None
@@ -1555,7 +1572,7 @@ async def run_task_v45(
         # Fire spec gen in a separate thread for true parallelism.
         # asyncio.create_task shares the event loop and gets starved by coding.
         # to_thread runs generate_spec_sync() with its own event loop.
-        if not spec and not config.get("skip_spec"):
+        if not spec and not config.get("skip_spec") and not batch_qa_mode and not skip_qa_mode:
             from otto.spec import generate_spec_sync
 
             _spec_settings = config.get("spec_agent_settings", "project").split(",")
@@ -1669,6 +1686,31 @@ async def run_task_v45(
             )
 
             if no_changes:
+                if batch_qa_mode:
+                    reason = ""
+                    for line in reversed(agent_log_lines):
+                        if not line.startswith("\u25cf") and line.strip():
+                            reason = line.strip()[:120]
+                            break
+                    emit("phase", name="coding", status="done", time_s=coding_elapsed,
+                         cost=attempt_cost, detail=f"no changes — {reason or 'existing code'}")
+                    _restore_workspace_state(
+                        task_work_dir,
+                        reset_ref=base_sha,
+                        pre_existing_untracked=pre_existing_untracked,
+                    )
+                    if not is_parallel:
+                        subprocess.run(
+                            ["git", "checkout", default_branch],
+                            cwd=task_work_dir,
+                            capture_output=True,
+                        )
+                        cleanup_branch(task_work_dir, key, default_branch)
+                    return _result(
+                        True,
+                        "verified",
+                        diff_summary="No changes needed — batch QA will verify existing code",
+                    )
                 nc_result = await _handle_no_changes(
                     task, config, task_work_dir,
                     prompt=prompt,
@@ -1810,10 +1852,12 @@ async def run_task_v45(
 
             # ── QA ──────────────────────────────────────────────────────
             qa_report = ""
-            if config.get("skip_qa"):
+            if skip_qa_mode or config.get("skip_qa"):
                 await _cancel_spec_task()
                 emit("phase", name="qa", status="done", time_s=0,
                      detail="skipped (skip_qa)")
+            elif batch_qa_mode:
+                await _cancel_spec_task()
             else:
                 # Await specs before QA (if still generating)
                 if spec_task and not spec:
@@ -1869,16 +1913,23 @@ async def run_task_v45(
                 pre_existing_untracked=pre_existing_untracked,
             )
 
-            if not config.get("skip_qa"):
+            if not skip_qa_mode and not config.get("skip_qa") and not batch_qa_mode:
                 _audit_proof_sufficiency(qa_out["verdict"], spec, log_dir / "qa-proofs", emit)
 
-            # ── Parallel mode: stop at verified, merge happens later ───
+            # ── Batch / parallel mode: stop at verified, merge happens later ──
             is_parallel = task_work_dir != project_dir
-            if is_parallel:
+            if batch_qa_mode or is_parallel:
                 # In parallel mode, the orchestrator handles merge after all
                 # tasks complete. Return as "verified" with the candidate ref.
-                emit("phase", name="merge", status="pending",
-                     detail="deferred to merge phase")
+                detail = "deferred to batch merge" if batch_qa_mode else "deferred to merge phase"
+                emit("phase", name="merge", status="pending", detail=detail)
+                if batch_qa_mode and not is_parallel:
+                    subprocess.run(
+                        ["git", "checkout", default_branch],
+                        cwd=task_work_dir,
+                        capture_output=True,
+                    )
+                    cleanup_branch(task_work_dir, key, default_branch)
                 return _result(True, "verified",
                                diff_summary=diff_summary, qa_report=qa_report)
 

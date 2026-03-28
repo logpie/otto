@@ -54,6 +54,8 @@ class TestLoadConfig:
         cfg = load_config(config_path)
         assert cfg["max_retries"] == DEFAULT_CONFIG["max_retries"]
         assert cfg["model"] == DEFAULT_CONFIG["model"]
+        assert cfg["planner_model"] == DEFAULT_CONFIG["planner_model"]
+        assert cfg["planner_effort"] == DEFAULT_CONFIG["planner_effort"]
         assert cfg["verify_timeout"] == DEFAULT_CONFIG["verify_timeout"]
 
     def test_returns_defaults_when_file_missing(self, tmp_git_repo):

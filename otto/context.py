@@ -7,6 +7,12 @@ from pathlib import Path
 from typing import Any
 
 
+class QAMode:
+    PER_TASK = "per_task"
+    BATCH = "batch"
+    SKIP = "skip"
+
+
 @dataclass
 class TaskResult:
     """Result of a single task execution in the v4 pipeline."""
