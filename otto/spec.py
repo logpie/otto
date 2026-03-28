@@ -184,6 +184,12 @@ Instructions:
   for context. Do not read every file in the project.
 - If the task references an external site/app/example, inspect it before writing the spec
   and emit concrete behavioral criteria derived from what you observed.
+- IMPORTANT: Check what already exists in the codebase that this task must integrate with.
+  If the project has authentication/authorization, new data APIs MUST include ownership
+  scoping (e.g., "items filtered by authenticated user"). If the project has foreign keys
+  or relationships, deletion MUST handle cascading. If the project has validation on
+  existing models, new endpoints MUST respect those constraints. These are [must] items —
+  not obvious from the task prompt alone, but critical for correctness.
 - Cover the core behavior. Add error/edge cases only when non-obvious or task-specific.
   Standard UI behaviors (click-outside, escape key, toggle) don't need specs unless the task calls them out.
 - Reference user-visible placement when useful, but do not mention internal implementation names or file structure.
