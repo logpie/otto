@@ -349,43 +349,47 @@ def _explicit_dependency_analysis(tasks: list[dict[str, Any]]) -> list[dict[str,
     return analysis
 
 
+def _serialize_analysis_batches(
+    batches: list[Batch],
+    analysis: list[dict[str, Any]],
+) -> list[Batch]:
+    serialized_pairs = {
+        frozenset((item["task_a"], item["task_b"]))
+        for item in analysis
+        if item.get("relationship") in {"DEPENDENT", "ADDITIVE", "UNCERTAIN"}
+        and item.get("task_a") != item.get("task_b")
+    }
+    if not serialized_pairs:
+        return batches
+
+    serialized_batches: list[Batch] = []
+    for batch_index, batch in enumerate(batches):
+        while len(serialized_batches) <= batch_index:
+            serialized_batches.append(Batch(tasks=[]))
+        for task_plan in batch.tasks:
+            target_batch = batch_index
+            while True:
+                while len(serialized_batches) <= target_batch:
+                    serialized_batches.append(Batch(tasks=[]))
+                existing_keys = {
+                    existing.task_key
+                    for existing in serialized_batches[target_batch].tasks
+                }
+                if any(
+                    frozenset((task_plan.task_key, other_key)) in serialized_pairs
+                    for other_key in existing_keys
+                ):
+                    target_batch += 1
+                    continue
+                serialized_batches[target_batch].tasks.append(task_plan)
+                break
+
+    return [batch for batch in serialized_batches if batch.tasks]
+
+
 def _normalize_plan(plan: ExecutionPlan, tasks: list[dict[str, Any]]) -> ExecutionPlan:
     valid_keys = {str(task.get("key", "") or "") for task in tasks if task.get("key")}
     explicit_analysis = _explicit_dependency_analysis(tasks)
-
-    conflicts: list[dict[str, Any]] = []
-    conflict_keys: set[str] = set()
-    seen_conflicts: set[str] = set()
-    for conflict in plan.conflicts:
-        keys = [key for key in _conflict_task_keys(conflict) if key in valid_keys]
-        if len(keys) < 2:
-            continue
-        signature = "|".join(sorted(keys))
-        if signature in seen_conflicts:
-            continue
-        seen_conflicts.add(signature)
-        conflict_keys.update(keys)
-        conflicts.append(
-            {
-                "tasks": keys,
-                "description": str(conflict.get("description", "") or ""),
-                "suggestion": str(conflict.get("suggestion", "") or ""),
-            }
-        )
-
-    batches: list[Batch] = []
-    seen_planned: set[str] = set()
-    for batch in plan.batches:
-        normalized_tasks: list[TaskPlan] = []
-        for task_plan in batch.tasks:
-            if task_plan.task_key not in valid_keys:
-                continue
-            if task_plan.task_key in conflict_keys or task_plan.task_key in seen_planned:
-                continue
-            seen_planned.add(task_plan.task_key)
-            normalized_tasks.append(task_plan)
-        if normalized_tasks:
-            batches.append(Batch(tasks=normalized_tasks))
 
     analysis: list[dict[str, Any]] = []
     seen_analysis: set[tuple[str, str, str]] = set()
@@ -407,6 +411,68 @@ def _normalize_plan(plan: ExecutionPlan, tasks: list[dict[str, Any]]) -> Executi
                 "reason": str(item.get("reason", "") or ""),
             }
         )
+
+    conflicts: list[dict[str, Any]] = []
+    seen_conflicts: set[str] = set()
+    conflict_sets: list[set[str]] = []
+    for conflict in plan.conflicts:
+        keys = [key for key in _conflict_task_keys(conflict) if key in valid_keys]
+        if len(keys) < 2:
+            continue
+        signature = "|".join(sorted(keys))
+        if signature in seen_conflicts:
+            continue
+        seen_conflicts.add(signature)
+        conflict_sets.append(set(keys))
+        conflicts.append(
+            {
+                "tasks": keys,
+                "description": str(conflict.get("description", "") or ""),
+                "suggestion": str(conflict.get("suggestion", "") or ""),
+            }
+        )
+
+    for item in analysis:
+        if item.get("relationship") != "CONTRADICTORY":
+            continue
+        pair = {item["task_a"], item["task_b"]}
+        if len(pair) < 2 or any(pair.issubset(existing) for existing in conflict_sets):
+            continue
+        ordered_pair = sorted(pair)
+        signature = "|".join(ordered_pair)
+        if signature in seen_conflicts:
+            continue
+        seen_conflicts.add(signature)
+        conflict_sets.append(pair)
+        conflicts.append(
+            {
+                "tasks": ordered_pair,
+                "description": str(item.get("reason", "") or "Planner marked these tasks as contradictory."),
+                "suggestion": "Do not run these tasks in the same batch.",
+            }
+        )
+
+    conflict_keys = {
+        key
+        for conflict in conflicts
+        for key in conflict.get("tasks", [])
+    }
+
+    seed_batches: list[Batch] = []
+    seen_planned: set[str] = set()
+    for batch in plan.batches:
+        normalized_tasks: list[TaskPlan] = []
+        for task_plan in batch.tasks:
+            if task_plan.task_key not in valid_keys:
+                continue
+            if task_plan.task_key in conflict_keys or task_plan.task_key in seen_planned:
+                continue
+            seen_planned.add(task_plan.task_key)
+            normalized_tasks.append(task_plan)
+        if normalized_tasks:
+            seed_batches.append(Batch(tasks=normalized_tasks))
+
+    batches = _serialize_analysis_batches(seed_batches, analysis)
 
     return ExecutionPlan(
         batches=batches,

@@ -6,6 +6,7 @@ from unittest.mock import patch, AsyncMock, MagicMock
 import pytest
 
 from otto.planner import (
+    _normalize_plan,
     Batch,
     ExecutionPlan,
     TaskPlan,
@@ -219,6 +220,98 @@ class TestDefaultPlan:
         keys = {tp.task_key for tp in result.batches[0].tasks}
         assert keys == {"t1", "t2", "t3"}
 
+
+class TestNormalizePlan:
+    def test_synthesizes_conflicts_from_contradictory_analysis(self):
+        tasks = [
+            {"key": "t1", "id": 1, "prompt": "Rewrite parser one way"},
+            {"key": "t2", "id": 2, "prompt": "Rewrite parser another way"},
+        ]
+        plan = ExecutionPlan(
+            batches=[Batch(tasks=[TaskPlan(task_key="t1"), TaskPlan(task_key="t2")])],
+            analysis=[
+                {
+                    "task_a": "t1",
+                    "task_b": "t2",
+                    "relationship": "CONTRADICTORY",
+                    "reason": "Both tasks rewrite the same function incompatibly.",
+                }
+            ],
+        )
+
+        result = _normalize_plan(plan, tasks)
+
+        assert result.total_tasks == 0
+        assert result.conflicts == [
+            {
+                "tasks": ["t1", "t2"],
+                "description": "Both tasks rewrite the same function incompatibly.",
+                "suggestion": "Do not run these tasks in the same batch.",
+            }
+        ]
+
+    def test_serializes_model_batch_when_analysis_requires_it(self):
+        tasks = [
+            {"key": "t1", "id": 1, "prompt": "Add auth backend"},
+            {"key": "t2", "id": 2, "prompt": "Build profile page"},
+            {"key": "t3", "id": 3, "prompt": "Refine copy"},
+        ]
+        plan = ExecutionPlan(
+            batches=[Batch(tasks=[TaskPlan(task_key="t1"), TaskPlan(task_key="t2"), TaskPlan(task_key="t3")])],
+            analysis=[
+                {
+                    "task_a": "t1",
+                    "task_b": "t2",
+                    "relationship": "DEPENDENT",
+                    "reason": "Profile page needs auth outputs.",
+                },
+                {
+                    "task_a": "t1",
+                    "task_b": "t3",
+                    "relationship": "UNCERTAIN",
+                    "reason": "Both may touch the same rendered view.",
+                },
+                {
+                    "task_a": "t2",
+                    "task_b": "t3",
+                    "relationship": "ADDITIVE",
+                    "reason": "Both edit the profile page in adjacent code.",
+                },
+            ],
+        )
+
+        result = _normalize_plan(plan, tasks)
+
+        assert [[tp.task_key for tp in batch.tasks] for batch in result.batches] == [
+            ["t1"],
+            ["t2"],
+            ["t3"],
+        ]
+
+    def test_explicit_dependencies_are_serialized_even_if_model_groups_them(self):
+        tasks = [
+            {"key": "t1", "id": 1, "prompt": "Add auth backend"},
+            {"key": "t2", "id": 2, "prompt": "Build profile page", "depends_on": [1]},
+        ]
+        plan = ExecutionPlan(
+            batches=[Batch(tasks=[TaskPlan(task_key="t1"), TaskPlan(task_key="t2")])],
+        )
+
+        result = _normalize_plan(plan, tasks)
+
+        assert [[tp.task_key for tp in batch.tasks] for batch in result.batches] == [
+            ["t1"],
+            ["t2"],
+        ]
+        assert result.analysis == [
+            {
+                "task_a": "t1",
+                "task_b": "t2",
+                "relationship": "DEPENDENT",
+                "reason": "Explicit depends_on constraint.",
+            }
+        ]
+
     def test_multi_task_with_deps(self):
         """Tasks with depends_on should be in later batches."""
         tasks = [
@@ -290,7 +383,7 @@ class TestPlan:
         assert result.analysis == []
 
     @pytest.mark.asyncio
-    async def test_two_additive_tasks_parallel(self, tmp_path):
+    async def test_two_additive_tasks_serialized(self, tmp_path):
         tasks = [
             {"key": "t1", "id": 1, "prompt": "Add slugify() to utils.py"},
             {"key": "t2", "id": 2, "prompt": "Add title_case() to utils.py"},
@@ -314,8 +407,10 @@ class TestPlan:
         with patch("otto.planner.run_agent_query", side_effect=fake_query):
             result = await plan(tasks, {}, tmp_path)
 
-        assert len(result.batches) == 1
-        assert {tp.task_key for tp in result.batches[0].tasks} == {"t1", "t2"}
+        assert [[tp.task_key for tp in batch.tasks] for batch in result.batches] == [
+            ["t1"],
+            ["t2"],
+        ]
         assert result.analysis[0]["relationship"] == "ADDITIVE"
 
     @pytest.mark.asyncio
@@ -421,8 +516,8 @@ class TestPlan:
             result = await plan(tasks, {}, tmp_path)
 
         assert len(result.batches) == 2
-        assert {tp.task_key for tp in result.batches[0].tasks} == {"t1", "t2", "t4"}
-        assert [tp.task_key for tp in result.batches[1].tasks] == ["t3"]
+        assert {tp.task_key for tp in result.batches[0].tasks} == {"t1", "t4"}
+        assert {tp.task_key for tp in result.batches[1].tasks} == {"t2", "t3"}
 
     @pytest.mark.asyncio
     async def test_single_task_skips_llm(self, tmp_path):

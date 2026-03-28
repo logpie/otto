@@ -969,15 +969,70 @@ class TestRunPerIntegration:
             with patch("otto.orchestrator.coding_loop", side_effect=fake_coding_loop):
                 with patch("otto.orchestrator.merge_parallel_results", side_effect=fake_merge_parallel_results):
                     with patch("otto.orchestrator._run_batch_qa", batch_qa_mock):
-                        exit_code = await run_per(config, tasks_path, tmp_git_repo)
+                        with patch("otto.orchestrator._rollback_main_to_sha", return_value=True) as rollback_mock:
+                            exit_code = await run_per(config, tasks_path, tmp_git_repo)
 
         assert exit_code == 1
         assert call_counts == {"task-one": 2, "task-two": 1}
         assert batch_qa_mock.await_count == 2
+        rollback_mock.assert_called_once()
         persisted = {task["key"]: task for task in load_tasks(tasks_path)}
         assert persisted["task-one"]["status"] == "failed"
         assert persisted["task-one"]["error_code"] == "batch_qa_failed"
-        assert persisted["task-two"]["status"] == "passed"
+        assert persisted["task-two"]["status"] == "pending"
+        assert persisted["task-two"].get("error_code") is None
+
+    @pytest.mark.asyncio
+    async def test_batch_qa_infrastructure_error_rolls_back_without_failing_tasks(self, tmp_git_repo):
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        tasks_path.write_text(yaml.dump({"tasks": [
+            {"id": 1, "key": "task-one", "prompt": "Task one", "status": "pending"},
+            {"id": 2, "key": "task-two", "prompt": "Task two", "status": "pending"},
+        ]}))
+
+        config = self._make_config(tmp_git_repo)
+        config["max_parallel"] = 1
+        execution_plan = ExecutionPlan(batches=[
+            Batch(tasks=[TaskPlan(task_key="task-one"), TaskPlan(task_key="task-two")]),
+        ])
+
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, task_file, task_work_dir=None, qa_mode="per_task"):
+            update_task(task_file, task_plan.task_key, status="verified")
+            return TaskResult(task_key=task_plan.task_key, success=True)
+
+        def fake_merge_parallel_results(results, config, project_dir, task_file, telemetry, qa_mode="per_task"):
+            for result in results:
+                update_task(task_file, result.task_key, status="merged")
+            return results
+
+        batch_qa_mock = AsyncMock(return_value={
+            "must_passed": False,
+            "verdict": {
+                "must_items": [],
+                "integration_findings": [],
+                "regressions": [],
+                "test_suite_passed": True,
+            },
+            "raw_report": "stream closed",
+            "failed_task_keys": [],
+            "cost_usd": 0.0,
+            "infrastructure_error": True,
+        })
+
+        with patch("otto.orchestrator.plan", AsyncMock(return_value=execution_plan)):
+            with patch("otto.orchestrator.coding_loop", side_effect=fake_coding_loop):
+                with patch("otto.orchestrator.merge_parallel_results", side_effect=fake_merge_parallel_results):
+                    with patch("otto.orchestrator._run_batch_qa", batch_qa_mock):
+                        with patch("otto.orchestrator._rollback_main_to_sha", return_value=True) as rollback_mock:
+                            exit_code = await run_per(config, tasks_path, tmp_git_repo)
+
+        assert exit_code == 1
+        rollback_mock.assert_called_once()
+        persisted = {task["key"]: task for task in load_tasks(tasks_path)}
+        assert persisted["task-one"]["status"] == "pending"
+        assert persisted["task-two"]["status"] == "pending"
+        assert persisted["task-one"].get("error_code") is None
+        assert persisted["task-two"].get("error_code") is None
 
     @pytest.mark.asyncio
     async def test_skip_qa_mode_does_not_run_batch_qa(self, tmp_git_repo):

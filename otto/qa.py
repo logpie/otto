@@ -633,6 +633,20 @@ def format_batch_spec(tasks_with_specs: list[dict]) -> str:
     return "\n".join(sections).strip()
 
 
+def _expected_batch_must_matrix(tasks_with_specs: list[dict[str, Any]]) -> set[tuple[str, int]]:
+    from otto.tasks import spec_binding
+
+    expected: set[tuple[str, int]] = set()
+    for task in tasks_with_specs:
+        task_key = str(task.get("key", "") or "").strip()
+        if not task_key:
+            continue
+        for spec_id, item in enumerate(task.get("spec") or [], start=1):
+            if spec_binding(item) == "must":
+                expected.add((task_key, spec_id))
+    return expected
+
+
 def _build_qa_mcp_servers(enable_browser: bool) -> dict[str, dict]:
     """Load browser MCP configuration when QA may need browser verification."""
     if not enable_browser:
@@ -1051,6 +1065,7 @@ Focus the must-item re-check on these retried task(s): {focus_list}
 
 Verify ALL [must] items exhaustively. Do not stop at the first failure.
 Every verdict item must include the owning task_key for attribution.
+Return exactly one `must_items` entry for every [must] spec listed below. Do not omit any task/spec pair.
 Generate and run cross-task integration tests for interactions between these tasks.
 Run the full existing test suite as a regression check.{retry_focus}
 
@@ -1082,13 +1097,46 @@ Use this JSON structure:
 }}"""
 
 
-def _finalize_batch_qa_result(qa_result: dict[str, Any]) -> dict[str, Any]:
+def _finalize_batch_qa_result(
+    qa_result: dict[str, Any],
+    tasks_with_specs: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     verdict = qa_result.get("verdict", {}) or {}
+    if not isinstance(verdict, dict):
+        verdict = {}
     integration_findings = verdict.get("integration_findings", []) or []
     integration_failed = any(item.get("status") == "fail" for item in integration_findings)
     regressions = verdict.get("regressions", []) or []
     test_suite_passed = verdict.get("test_suite_passed", True)
-    overall_passed = bool(qa_result.get("must_passed")) and not integration_failed and not regressions and bool(test_suite_passed)
+    infrastructure_error = bool(qa_result.get("infrastructure_error", False))
+    expected_pairs = _expected_batch_must_matrix(tasks_with_specs or [])
+    actual_pairs: set[tuple[str, int]] = set()
+    for item in verdict.get("must_items", []) or []:
+        task_key = str(item.get("task_key", "") or "").strip()
+        try:
+            spec_id = int(item.get("spec_id"))
+        except (TypeError, ValueError):
+            continue
+        if task_key:
+            actual_pairs.add((task_key, spec_id))
+    missing_pairs = sorted(expected_pairs - actual_pairs)
+    if missing_pairs:
+        verdict["coverage_error"] = {
+            "expected_count": len(expected_pairs),
+            "actual_count": len(actual_pairs),
+            "missing": [
+                {"task_key": task_key, "spec_id": spec_id}
+                for task_key, spec_id in missing_pairs
+            ],
+        }
+    overall_passed = (
+        bool(qa_result.get("must_passed"))
+        and not infrastructure_error
+        and not missing_pairs
+        and not integration_failed
+        and not regressions
+        and bool(test_suite_passed)
+    )
 
     failed_task_keys = {
         item.get("task_key")
@@ -1100,6 +1148,7 @@ def _finalize_batch_qa_result(qa_result: dict[str, Any]) -> dict[str, Any]:
             failed_task_keys.update(
                 key for key in (item.get("tasks_involved") or []) if key
             )
+    failed_task_keys.update(task_key for task_key, _spec_id in missing_pairs)
 
     return {
         "must_passed": overall_passed,
@@ -1108,6 +1157,7 @@ def _finalize_batch_qa_result(qa_result: dict[str, Any]) -> dict[str, Any]:
         "cost_usd": qa_result.get("cost_usd", 0.0),
         "failed_task_keys": sorted(failed_task_keys),
         "test_suite_passed": bool(test_suite_passed),
+        "infrastructure_error": infrastructure_error,
     }
 
 
@@ -1145,7 +1195,7 @@ async def _run_batch_qa_agent(
         on_progress=on_progress,
         enable_browser=True,
     )
-    final_result = _finalize_batch_qa_result(qa_result)
+    final_result = _finalize_batch_qa_result(qa_result, tasks_with_specs)
 
     proof_count = 0
     proof_coverage = ""

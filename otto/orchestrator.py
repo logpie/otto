@@ -545,6 +545,33 @@ def _combine_task_results(previous: TaskResult, current: TaskResult) -> TaskResu
     )
 
 
+def _current_head_sha(project_dir: Path) -> str | None:
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=project_dir,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        return result.stdout.strip()
+    return None
+
+
+def _rollback_main_to_sha(project_dir: Path, sha: str | None) -> bool:
+    if not sha:
+        return False
+    result = subprocess.run(
+        ["git", "reset", "--hard", sha],
+        cwd=project_dir,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        console.print("  [red]Failed to roll back main after batch QA failure[/red]")
+        return False
+    return True
+
+
 async def run_per(
     config: dict[str, Any],
     tasks_file: Path,
@@ -675,6 +702,7 @@ async def run_per(
             batch = execution_plan.batches[0]
             batch_idx += 1
             batch_size = len(batch.tasks)
+            abort_after_batch = False
 
             use_parallel = max_parallel > 1 and batch_size > 1
             if batch_size > 1:
@@ -700,6 +728,10 @@ async def run_per(
                     batch_results.append(result)
                     if context.interrupted:
                         break
+
+            pre_batch_sha = None
+            if qa_mode == QAMode.BATCH and not context.interrupted:
+                pre_batch_sha = _current_head_sha(project_dir)
 
             if (use_parallel or qa_mode == QAMode.BATCH) and not context.interrupted:
                 batch_results = merge_parallel_results(
@@ -855,7 +887,7 @@ async def run_per(
 
                         final_batch_qa = batch_qa
                         qa_failed_keys = set(batch_qa.get("failed_task_keys") or [])
-                        if not batch_qa.get("must_passed"):
+                        if not batch_qa.get("must_passed") and not batch_qa.get("infrastructure_error"):
                             if not qa_failed_keys:
                                 qa_failed_keys = set(merged_keys)
                             failure_summary = _summarize_batch_qa_failure(batch_qa)
@@ -964,15 +996,67 @@ async def run_per(
                                     batch_qa_costs[key] = batch_qa_costs.get(key, 0.0) + retry_share
                                     qa_reports_by_task[key] = final_batch_qa.get("raw_report", "")
 
+                        persisted_tasks = {
+                            task["key"]: task
+                            for task in load_tasks(tasks_file)
+                            if task.get("key") in batch_keys
+                        }
+                        rollback_pending_keys: set[str] = set()
                         final_failed_keys: set[str] = {
                             result.task_key for result in batch_results if not result.success
                         }
                         final_failure_summary = None
-                        if not final_batch_qa.get("must_passed"):
+                        if final_batch_qa.get("infrastructure_error"):
+                            rollback_pending_keys = {
+                                key for key, task in persisted_tasks.items()
+                                if task.get("status") == "merged"
+                            }
+                            _rollback_main_to_sha(project_dir, pre_batch_sha)
+                            for task_key in rollback_pending_keys:
+                                try:
+                                    update_task(
+                                        tasks_file,
+                                        task_key,
+                                        status="pending",
+                                        error=None,
+                                        error_code=None,
+                                        feedback=None,
+                                        session_id=None,
+                                    )
+                                except Exception:
+                                    pass
+                            abort_after_batch = True
+                            console.print(
+                                "  [yellow]Batch QA infrastructure error; rolled back merged batch and stopped the run[/yellow]"
+                            )
+                        elif not final_batch_qa.get("must_passed"):
                             final_failed_keys.update(final_batch_qa.get("failed_task_keys") or [])
                             if not final_failed_keys:
                                 final_failed_keys = set(merged_keys)
                             final_failure_summary = _summarize_batch_qa_failure(final_batch_qa)
+                            rollback_pending_keys = {
+                                key for key, task in persisted_tasks.items()
+                                if task.get("status") == "merged"
+                                and key not in final_failed_keys
+                            }
+                            _rollback_main_to_sha(project_dir, pre_batch_sha)
+                            for task_key in rollback_pending_keys:
+                                try:
+                                    update_task(
+                                        tasks_file,
+                                        task_key,
+                                        status="pending",
+                                        error=None,
+                                        error_code=None,
+                                        feedback=None,
+                                        session_id=None,
+                                    )
+                                except Exception:
+                                    pass
+                            abort_after_batch = True
+                            console.print(
+                                "  [yellow]Batch QA rejected the merged batch; rolled main back to the pre-batch commit[/yellow]"
+                            )
 
                         for task_key in merged_keys:
                             if task_key in final_failed_keys:
@@ -1001,6 +1085,18 @@ async def run_per(
                                     )
                                 except Exception:
                                     pass
+                            elif task_key in rollback_pending_keys:
+                                try:
+                                    update_task(
+                                        tasks_file,
+                                        task_key,
+                                        status="pending",
+                                        error=None,
+                                        error_code=None,
+                                        feedback=None,
+                                    )
+                                except Exception:
+                                    pass
                             else:
                                 try:
                                     update_task(
@@ -1017,20 +1113,42 @@ async def run_per(
                         batch_results = [
                             TaskResult(
                                 task_key=result.task_key,
-                                success=result.success and result.task_key not in final_failed_keys,
+                                success=(
+                                    result.success
+                                    and result.task_key not in final_failed_keys
+                                    and result.task_key not in rollback_pending_keys
+                                ),
                                 commit_sha=result.commit_sha,
                                 worktree=result.worktree,
                                 cost_usd=result.cost_usd + batch_qa_costs.get(result.task_key, 0.0),
                                 error=(
-                                    final_failure_summary
-                                    if result.task_key in final_failed_keys and result.success
-                                    else result.error
+                                    "batch QA infrastructure error"
+                                    if final_batch_qa.get("infrastructure_error")
+                                    and result.task_key in rollback_pending_keys
+                                    else (
+                                        "batch rolled back after batch QA failure"
+                                        if result.task_key in rollback_pending_keys
+                                        else (
+                                            final_failure_summary
+                                            if result.task_key in final_failed_keys and result.success
+                                            else result.error
+                                        )
+                                    )
                                 ),
                                 error_code=(
-                                    "batch_qa_failed"
-                                    if result.task_key in final_failed_keys
-                                    and (result.success or result.error_code == "batch_qa_failed")
-                                    else result.error_code
+                                    "batch_qa_infrastructure_error"
+                                    if final_batch_qa.get("infrastructure_error")
+                                    and result.task_key in rollback_pending_keys
+                                    else (
+                                        "batch_qa_rolled_back"
+                                        if result.task_key in rollback_pending_keys
+                                        else (
+                                            "batch_qa_failed"
+                                            if result.task_key in final_failed_keys
+                                            and (result.success or result.error_code == "batch_qa_failed")
+                                            else result.error_code
+                                        )
+                                    )
                                 ),
                                 qa_report=qa_reports_by_task.get(result.task_key, result.qa_report),
                                 diff_summary=result.diff_summary,
@@ -1063,6 +1181,9 @@ async def run_per(
             pass_str = f"[green]{batch_passed} passed[/green]"
             fail_str = f"[red]{batch_failed} failed[/red]" if batch_failed else f"{batch_failed} failed"
             console.print(f"  Batch {batch_idx}: {pass_str}, {fail_str}")
+
+            if abort_after_batch:
+                break
 
             # Remove completed batch and check for replan
             completed_keys = {r.task_key for r in batch_results}

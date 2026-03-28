@@ -345,8 +345,8 @@ class TestProofOfWorkE2E:
             ],
         )
         qa_actions = [
-            {"type": "bash", "command": "node -e 'console.log(1+1)'", "output": "2"},
-            {"type": "bash", "command": "python -c 'print(3)'", "output": "3"},
+            {"type": "bash", "command": "python3 -c 'print(1+1)'", "output": "2"},
+            {"type": "bash", "command": "python3 -c 'print(3)'", "output": "3"},
         ]
         task = {"key": "RUN-1"}
         _write_proof_artifacts(log_dir, verdict, qa_actions, task, "Test runnable", 0.01)
@@ -360,7 +360,7 @@ class TestProofOfWorkE2E:
             capture_output=True, text=True, timeout=10,
         )
         assert result.returncode == 0
-        assert "2" in result.stdout  # node -e 'console.log(1+1)' outputs 2
+        assert "2" in result.stdout
         assert "3" in result.stdout
 
     # ------------------------------------------------------------------
@@ -598,7 +598,7 @@ class TestProofOfWorkE2E:
         log_dir = _make_log_dir(tmp_path)
         verdict = _make_verdict(must_passed=True)
         qa_actions = [
-            {"type": "bash", "command": 'node -e "console.log((3.7).toFixed(0))"', "output": "4"},
+            {"type": "bash", "command": 'python3 -c "print(round(3.7))"', "output": "4"},
         ]
         task = {"key": "QUOTE-1"}
         _write_proof_artifacts(log_dir, verdict, qa_actions, task, "Test quotes", 0.0)
