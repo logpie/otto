@@ -1268,6 +1268,21 @@ async def _run_batch_qa_agent(
     log_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Run exhaustive QA over a merged batch."""
+    # Log tier decision for batch QA (always full/tier 2 — combined specs + integration)
+    if log_dir:
+        task_count = len(tasks_with_specs)
+        spec_count = sum(len(t.get("spec", [])) for t in tasks_with_specs)
+        is_retry = bool(retried_task_keys)
+        append_text_log(log_dir / "qa-tier.log", [
+            f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Batch QA tier decision",
+            f"mode: batch (always full/tier 2)",
+            f"tasks: {task_count}",
+            f"total specs: {spec_count}",
+            f"retry round: {'yes — focused on ' + ', '.join(sorted(retried_task_keys)) if is_retry else 'no (initial)'}",
+            f"browser: enabled",
+            f"reason: batch QA verifies integrated codebase with combined specs + cross-task integration tests",
+            "",
+        ])
     with tempfile.NamedTemporaryFile(suffix=".json", prefix="otto_batch_qa_", delete=False) as tf:
         verdict_file = Path(tf.name)
 
@@ -1293,6 +1308,23 @@ async def _run_batch_qa_agent(
         log_dir=log_dir,
     )
     final_result = _finalize_batch_qa_result(qa_result, tasks_with_specs)
+
+    # Write per-task qa-agent.log references so each task's logs are self-contained
+    if log_dir:
+        batch_qa_log = log_dir / "qa-agent.log"
+        for task in tasks_with_specs:
+            task_key = task.get("key", "")
+            if not task_key:
+                continue
+            task_log_dir = project_dir / "otto_logs" / task_key
+            task_log_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                append_text_log(task_log_dir / "qa-agent.log", [
+                    f"[batch QA — see {log_dir.name}/qa-agent.log for full details]",
+                    "",
+                ])
+            except Exception:
+                pass
 
     proof_count = 0
     proof_coverage = ""

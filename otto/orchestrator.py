@@ -741,6 +741,16 @@ async def run_per(
     old_sigterm = signal.signal(signal.SIGTERM, _signal_handler)
 
     run_start = time.monotonic()
+
+    # Run delimiter in logs for easier single-run review
+    run_ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    _orchestrator_log(project_dir, f"\n{'='*60}", f"RUN START: {run_ts}", f"{'='*60}")
+    from otto.observability import append_text_log as _append_log
+    _append_log(
+        project_dir / "otto_logs" / "planner.log",
+        [f"\n{'='*60}", f"RUN START: {run_ts}", f"{'='*60}"],
+    )
+
     try:
         # Step 1: Preflight checks
         error_code, pending = preflight_checks(config, tasks_file, project_dir)
