@@ -776,11 +776,6 @@ async def run_per(
             abort_after_batch = False
 
             use_parallel = max_parallel > 1 and batch_size > 1
-            # Single-task batches use per-task QA (faster, same quality).
-            # Batch QA only adds value for 2+ tasks (cross-task integration).
-            effective_qa = qa_mode
-            if effective_qa == QAMode.BATCH and batch_size == 1:
-                effective_qa = QAMode.PER_TASK
             if batch_size > 1:
                 mode_label = "parallel" if use_parallel else "sequential"
                 console.print(f"\n  [bold]Batch {batch_idx}[/bold]  [dim]{batch_size} tasks ({mode_label})[/dim]")
@@ -798,7 +793,7 @@ async def run_per(
                 batch_results = await _run_batch_parallel(
                     batch, context, config, project_dir, telemetry, tasks_file,
                     max_parallel=max_parallel,
-                    qa_mode=effective_qa,
+                    qa_mode=qa_mode,
                     sibling_contexts=sib_ctxs,
                 )
             else:
@@ -810,7 +805,7 @@ async def run_per(
                     )
                     result = await coding_loop(
                         task_plan, context, config, project_dir, telemetry, tasks_file,
-                        qa_mode=effective_qa,
+                        qa_mode=qa_mode,
                         sibling_context=sibling_ctx,
                     )
                     batch_results.append(result)
@@ -818,13 +813,13 @@ async def run_per(
                         break
 
             pre_batch_sha = None
-            if effective_qa == QAMode.BATCH and not context.interrupted:
+            if qa_mode == QAMode.BATCH and not context.interrupted:
                 pre_batch_sha = _current_head_sha(project_dir)
 
-            if (use_parallel or effective_qa == QAMode.BATCH) and not context.interrupted:
+            if (use_parallel or qa_mode == QAMode.BATCH) and not context.interrupted:
                 batch_results = merge_parallel_results(
                     batch_results, config, project_dir, tasks_file, telemetry,
-                    qa_mode=effective_qa,
+                    qa_mode=qa_mode,
                 )
 
                 merge_failed = [
@@ -878,7 +873,7 @@ async def run_per(
                                         update_task(
                                             tasks_file,
                                             fkey,
-                                            status="merged" if effective_qa == QAMode.BATCH else "passed",
+                                            status="merged" if qa_mode == QAMode.BATCH else "passed",
                                             error=None,
                                             error_code=None,
                                             feedback=None,
@@ -935,12 +930,12 @@ async def run_per(
                         retry_result = await coding_loop(
                             tp, context, config, project_dir,
                             telemetry, tasks_file,
-                            qa_mode=effective_qa,
+                            qa_mode=qa_mode,
                         )
                         if retry_result.success:
                             rerun_merged = merge_parallel_results(
                                 [retry_result], config, project_dir, tasks_file, telemetry,
-                                qa_mode=effective_qa,
+                                qa_mode=qa_mode,
                             )
                             retry_result = rerun_merged[0]
                         batch_results = [
@@ -948,7 +943,7 @@ async def run_per(
                             for r in batch_results
                         ]
 
-                if effective_qa == QAMode.BATCH and not context.interrupted:
+                if qa_mode == QAMode.BATCH and not context.interrupted:
                     batch_keys = {tp.task_key for tp in batch.tasks}
                     batch_qa_costs: dict[str, float] = {}
                     qa_reports_by_task: dict[str, str] = {}
@@ -1038,13 +1033,13 @@ async def run_per(
                                     project_dir,
                                     telemetry,
                                     tasks_file,
-                                    qa_mode=effective_qa,
+                                    qa_mode=qa_mode,
                                 )
                                 retry_result = _combine_task_results(previous_result, raw_retry_result)
                                 if raw_retry_result.success:
                                     rerun_merged = merge_parallel_results(
                                         [raw_retry_result], config, project_dir, tasks_file, telemetry,
-                                        qa_mode=effective_qa,
+                                        qa_mode=qa_mode,
                                     )
                                     retry_result = _combine_task_results(previous_result, rerun_merged[0])
                                     retried_keys.add(fkey)
