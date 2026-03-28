@@ -896,21 +896,37 @@ async def run_per(
                         # intelligent feedback. The agent applies the diff first
                         # (cheap/fast), explores more if needed (expensive but smart).
                         error_type = failed_result.error_code or "merge_failed"
+                        diff_stat = failed_result.diff_summary or ""
+
                         if error_type == "post_merge_test_fail":
                             merge_feedback = (
-                                "Your previous implementation merged cleanly but tests failed on the "
-                                "integrated codebase. Another task's changes may conflict semantically. "
-                                "Try applying your previous diff first. If tests still fail, adapt "
-                                "your implementation to work with the other task's changes.\n\n"
-                                f"Previous diff:\n{full_diff or '(not available)'}"
+                                "MERGE CONFLICT CONTEXT (read this before coding):\n\n"
+                                "Your previous implementation for this task was verified and passed "
+                                "all tests. It merged cleanly onto main, but tests FAILED on the "
+                                "integrated codebase — another task's code is now on main and "
+                                "conflicts semantically with yours.\n\n"
+                                "Strategy:\n"
+                                "1. Read the diff below to understand what YOU previously implemented\n"
+                                "2. Read the current codebase to see the OTHER task's changes\n"
+                                "3. Re-apply your changes, adapting where needed to work with both\n"
+                                "4. Run tests to verify the integration works\n\n"
+                                f"Files you previously changed:\n{diff_stat}\n\n"
+                                f"Your previous implementation (full diff):\n{full_diff or '(not available)'}"
                             )
                         else:
                             merge_feedback = (
-                                "Your previous implementation caused a merge conflict with another "
-                                "task's changes that are now on main. Try applying your previous diff "
-                                "first. If conflicts arise, resolve them intelligently by reading both "
-                                "versions. Only re-explore if the diff alone isn't enough.\n\n"
-                                f"Previous diff:\n{full_diff or '(not available)'}"
+                                "MERGE CONFLICT CONTEXT (read this before coding):\n\n"
+                                "Your previous implementation for this task was verified and passed "
+                                "all tests, but caused a git merge conflict with another task's "
+                                "changes that are now on main.\n\n"
+                                "Strategy:\n"
+                                "1. Read the diff below to understand what YOU previously implemented\n"
+                                "2. Read the current files on main to see the OTHER task's changes\n"
+                                "3. Apply your changes using Edit, adapting to avoid conflicts\n"
+                                "4. Do NOT start from scratch — use the diff as your guide\n"
+                                "5. Run tests to verify everything works together\n\n"
+                                f"Files you previously changed:\n{diff_stat}\n\n"
+                                f"Your previous implementation (full diff):\n{full_diff or '(not available)'}"
                             )
 
                         _orchestrator_log(
