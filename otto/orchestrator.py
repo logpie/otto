@@ -859,18 +859,10 @@ async def run_per(
                     qa_mode=qa_mode,
                 )
 
-                # Split merge failures by type:
-                # - merge_conflict → scoped reapply (apply patch differently)
-                # - post_merge_test_fail → full coding_loop (semantic conflict, needs re-coding)
-                merge_conflicts = [
+                merge_failed = [
                     r for r in batch_results
-                    if not r.success and r.error_code == "merge_conflict"
+                    if not r.success and r.error_code in ("merge_conflict", "post_merge_test_fail")
                 ]
-                test_failures = [
-                    r for r in batch_results
-                    if not r.success and r.error_code == "post_merge_test_fail"
-                ]
-                merge_failed = merge_conflicts + test_failures
                 if merge_failed:
                     console.print(
                         f"\n  [yellow]Re-applying {len(merge_failed)} merge-failed task(s) on updated main...[/yellow]"
@@ -882,133 +874,73 @@ async def run_per(
                         tp = next((t for t in batch.tasks if t.task_key == fkey), None)
                         if not tp:
                             continue
-                        from otto.git_ops import _find_best_candidate_ref
-                        from otto.merge_resolve import scoped_reapply
 
+                        # Get full diff from the candidate ref
+                        from otto.git_ops import _find_best_candidate_ref
                         candidate_ref = _find_best_candidate_ref(project_dir, fkey)
-                        base_sha = ""
+                        full_diff = ""
                         if candidate_ref:
                             base_result = subprocess.run(
                                 ["git", "rev-parse", f"{candidate_ref}^"],
-                                cwd=project_dir,
-                                capture_output=True,
-                                text=True,
+                                cwd=project_dir, capture_output=True, text=True,
                             )
                             if base_result.returncode == 0:
-                                base_sha = base_result.stdout.strip()
-
-                        if candidate_ref and base_sha:
-                            reapply_success, new_sha, reapply_meta = await scoped_reapply(
-                                task_key=fkey,
-                                candidate_ref=candidate_ref,
-                                base_sha=base_sha,
-                                config=config,
-                                project_dir=project_dir,
-                                tasks_file=tasks_file,
-                                return_metadata=True,
-                            )
-                            _orchestrator_log(
-                                project_dir,
-                                (
-                                    f"scoped reapply: task={fkey} "
-                                    f"cherry-pick={reapply_meta.get('cherry_pick', 'unknown') if reapply_meta else 'unknown'} "
-                                    f"agent_fallback={reapply_meta.get('agent_fallback_triggered', False) if reapply_meta else False} "
-                                    f"result={'success' if reapply_success else 'fail'}"
-                                ),
-                            )
-                            if reapply_success:
-                                ff = subprocess.run(
-                                    ["git", "merge", "--ff-only", new_sha],
-                                    cwd=project_dir,
-                                    capture_output=True,
-                                    text=True,
-                                )
-                                if ff.returncode == 0:
-                                    try:
-                                        update_task(
-                                            tasks_file,
-                                            fkey,
-                                            status="merged" if qa_mode == QAMode.BATCH else "passed",
-                                            error=None,
-                                            error_code=None,
-                                            feedback=None,
-                                            session_id=None,
-                                        )
-                                    except Exception:
-                                        pass
-                                    telemetry.log(TaskMerged(
-                                        task_key=fkey,
-                                        task_id=task_ids.get(fkey, 0),
-                                        cost_usd=failed_result.cost_usd,
-                                        duration_s=failed_result.duration_s,
-                                        diff_summary=failed_result.diff_summary,
-                                    ))
-                                    batch_results = [
-                                        TaskResult(
-                                            task_key=fkey,
-                                            success=True,
-                                            commit_sha=new_sha,
-                                            cost_usd=failed_result.cost_usd,
-                                            duration_s=failed_result.duration_s,
-                                            diff_summary=failed_result.diff_summary,
-                                            qa_report=failed_result.qa_report,
-                                        ) if r.task_key == fkey else r
-                                        for r in batch_results
-                                    ]
-                                    continue
-                            _orchestrator_log(
-                                project_dir,
-                                f"scoped reapply: task={fkey} failed — task marked merge_failed",
-                            )
-                        else:
-                            _orchestrator_log(
-                                project_dir,
-                                f"scoped reapply: task={fkey} skipped (missing candidate ref or base sha) — task marked merge_failed",
-                            )
-                        # For post_merge_test_fail: the patch applied fine but tests
-                        # fail — semantic conflict needs re-coding, not just re-applying.
-                        if failed_result.error_code == "post_merge_test_fail":
-                            _orchestrator_log(project_dir, f"post-merge test fail: {fkey[:8]} falling back to coding_loop")
-                            full_diff = ""
-                            if candidate_ref and base_sha:
-                                full_diff_result = subprocess.run(
-                                    ["git", "diff", f"{base_sha}..{candidate_ref}"],
+                                diff_result = subprocess.run(
+                                    ["git", "diff", f"{base_result.stdout.strip()}..{candidate_ref}"],
                                     cwd=project_dir, capture_output=True, text=True,
                                 )
-                                if full_diff_result.returncode == 0:
-                                    full_diff = full_diff_result.stdout.strip()
+                                if diff_result.returncode == 0:
+                                    full_diff = diff_result.stdout.strip()
+
+                        # One path for all merge failures: coding_loop with
+                        # intelligent feedback. The agent applies the diff first
+                        # (cheap/fast), explores more if needed (expensive but smart).
+                        error_type = failed_result.error_code or "merge_failed"
+                        if error_type == "post_merge_test_fail":
                             merge_feedback = (
                                 "Your previous implementation merged cleanly but tests failed on the "
                                 "integrated codebase. Another task's changes may conflict semantically. "
-                                "Re-implement with awareness of the test failures.\n\n"
+                                "Try applying your previous diff first. If tests still fail, adapt "
+                                "your implementation to work with the other task's changes.\n\n"
                                 f"Previous diff:\n{full_diff or '(not available)'}"
                             )
-                            try:
-                                update_task(
-                                    tasks_file, fkey,
-                                    status="pending",
-                                    error=None, error_code=None, session_id=None,
-                                    feedback=merge_feedback,
-                                )
-                            except Exception:
-                                continue
-                            retry_result = await coding_loop(
-                                tp, context, config, project_dir,
-                                telemetry, tasks_file,
+                        else:
+                            merge_feedback = (
+                                "Your previous implementation caused a merge conflict with another "
+                                "task's changes that are now on main. Try applying your previous diff "
+                                "first. If conflicts arise, resolve them intelligently by reading both "
+                                "versions. Only re-explore if the diff alone isn't enough.\n\n"
+                                f"Previous diff:\n{full_diff or '(not available)'}"
+                            )
+
+                        _orchestrator_log(
+                            project_dir,
+                            f"merge retry: {fkey[:8]} error={error_type} → coding_loop with full diff feedback",
+                        )
+                        try:
+                            update_task(
+                                tasks_file, fkey,
+                                status="pending",
+                                error=None, error_code=None, session_id=None,
+                                feedback=merge_feedback,
+                            )
+                        except Exception:
+                            continue
+                        retry_result = await coding_loop(
+                            tp, context, config, project_dir,
+                            telemetry, tasks_file,
+                            qa_mode=qa_mode,
+                        )
+                        if retry_result.success:
+                            rerun_merged = merge_parallel_results(
+                                [retry_result], config, project_dir, tasks_file, telemetry,
                                 qa_mode=qa_mode,
                             )
-                            if retry_result.success:
-                                rerun_merged = merge_parallel_results(
-                                    [retry_result], config, project_dir, tasks_file, telemetry,
-                                    qa_mode=qa_mode,
-                                )
-                                retry_result = rerun_merged[0]
-                            batch_results = [
-                                retry_result if r.task_key == fkey else r
-                                for r in batch_results
-                            ]
-                        # For merge_conflict: scoped reapply is the only handler.
-                        # If it can't apply the patch, the task stays merge_failed.
+                            retry_result = rerun_merged[0]
+                        batch_results = [
+                            retry_result if r.task_key == fkey else r
+                            for r in batch_results
+                        ]
 
                 if qa_mode == QAMode.BATCH and not context.interrupted:
                     batch_keys = {tp.task_key for tp in batch.tasks}
