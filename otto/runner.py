@@ -140,48 +140,36 @@ def preflight_checks(
     should abort with that exit code. Otherwise pending_tasks is the list of
     tasks to run.
 
-    Side effects: checks out default branch, runs baseline, resets stale tasks,
-    injects deps from file-plan.
+    Preflight is read-only until validation passes: it never stashes user work,
+    switches branches, or creates commits. If the repo is not ready, it fails
+    with a clear message.
     """
     default_branch = config["default_branch"]
 
-    # Ensure we're on the default branch
-    checkout = subprocess.run(
-        ["git", "checkout", default_branch],
-        cwd=project_dir, capture_output=True, text=True,
-    )
-    if checkout.returncode != 0:
-        subprocess.run(
-            ["git", "stash", "--include-untracked"],
-            cwd=project_dir, capture_output=True,
-        )
-        retry = subprocess.run(
-            ["git", "checkout", default_branch],
-            cwd=project_dir, capture_output=True, text=True,
-        )
-        if retry.returncode != 0:
-            console.print(f"[red]Cannot checkout {default_branch}: {retry.stderr.strip()}[/red]")
-            return (2, [])
-
+    # ── Step 1: Validate repo state (read-only — no mutations) ────────
     actual = subprocess.run(
         ["git", "branch", "--show-current"],
         cwd=project_dir, capture_output=True, text=True,
     ).stdout.strip()
     if actual != default_branch:
-        console.print(f"[red]Expected branch {default_branch}, on {actual}[/red]")
+        console.print(
+            f"[red]Otto requires branch '{default_branch}' but repo is on '{actual}'.\n"
+            f"  Run: git checkout {default_branch}[/red]"
+        )
         return (2, [])
 
     if not check_clean_tree(project_dir):
-        console.print("[red]Working tree is dirty -- fix before running otto[/red]")
+        console.print("[red]Working tree has uncommitted changes — commit or stash before running otto[/red]")
         return (2, [])
 
+    # ── Step 2: Non-destructive setup (no commits, no branch changes) ─
     # Suggest CLAUDE.md if missing — coding agents read it for project conventions
     if not (project_dir / "CLAUDE.md").exists():
         _suggest_claude_md(project_dir)
 
-    # Ensure .gitignore covers known build/dependency dirs.
-    # Uses framework detection (not size heuristics) — only auto-adds
-    # from a curated allowlist keyed off project manifest files.
+    # Ensure .git/info/exclude covers framework build dirs + otto runtime files.
+    # Uses .git/info/exclude (local-only, never committed) instead of .gitignore
+    # to avoid creating unrelated commits on the default branch.
     _FRAMEWORK_IGNORES: dict[str, list[str]] = {
         "package.json": ["node_modules/", ".next/", "dist/", "build/", "coverage/", ".turbo/"],
         "pyproject.toml": ["__pycache__/", ".venv/", "dist/", ".pytest_cache/", "*.egg-info"],
@@ -191,53 +179,41 @@ def preflight_checks(
         "go.mod": ["vendor/"],
         "Gemfile": ["vendor/bundle/"],
     }
-    gitignore = project_dir / ".gitignore"
-    existing_text = gitignore.read_text() if gitignore.exists() else ""
-    existing_ignores = {
-        line.strip() for line in existing_text.splitlines()
-        if line.strip() and not line.strip().startswith("#")
-    }
-    missing_ignores = []
-    for manifest, dirs in _FRAMEWORK_IGNORES.items():
-        if (project_dir / manifest).exists():
-            for d in dirs:
-                if d not in existing_ignores and d.rstrip("/") not in existing_ignores:
-                    missing_ignores.append(d)
-    if missing_ignores:
-        with open(gitignore, "a") as f:
-            if existing_text and not existing_text.endswith("\n"):
-                f.write("\n")
-            f.write("\n".join(sorted(set(missing_ignores))) + "\n")
-        subprocess.run(["git", "add", ".gitignore"], cwd=project_dir, capture_output=True)
-        subprocess.run(
-            ["git", "commit", "-m", "otto: update .gitignore for build artifacts"],
-            cwd=project_dir, capture_output=True,
-        )
-        label = ", ".join(d.rstrip("/") for d in missing_ignores[:3])
-        console.print(f"  [dim]Updated .gitignore (+{label})[/dim]")
-
-    # Ensure .git/info/exclude has otto runtime entries.
-    # Written every preflight because git reset --hard can wipe it.
     from otto.config import git_meta_dir
     exclude_path = git_meta_dir(project_dir) / "info" / "exclude"
     exclude_path.parent.mkdir(parents=True, exist_ok=True)
     existing_exclude = exclude_path.read_text() if exclude_path.exists() else ""
+
+    # Collect framework-specific ignores
+    framework_excludes: list[str] = []
+    for manifest, dirs in _FRAMEWORK_IGNORES.items():
+        if (project_dir / manifest).exists():
+            for d in dirs:
+                if d not in existing_exclude and d.rstrip("/") not in existing_exclude:
+                    framework_excludes.append(d)
+
+    # Otto runtime entries
     otto_excludes = ["otto_logs/", "otto_arch/", ".otto-scratch/", ".otto-worktrees/", "tasks.yaml", ".tasks.lock"]
     missing_excludes = [e for e in otto_excludes if e not in existing_exclude]
-    if missing_excludes:
+
+    all_new_excludes = sorted(set(framework_excludes + missing_excludes))
+    if all_new_excludes:
         with open(exclude_path, "a") as f:
-            f.write("\n# otto runtime files\n")
-            for entry in missing_excludes:
+            f.write("\n# otto auto-excludes\n")
+            for entry in all_new_excludes:
                 f.write(entry + "\n")
+        if framework_excludes:
+            label = ", ".join(d.rstrip("/") for d in framework_excludes[:3])
+            console.print(f"  [dim]Updated .git/info/exclude (+{label})[/dim]")
 
     # Baseline check moved to run_task_v45() — runs after branch creation
     # with auto-detected test command for consistent results.
 
     from otto.tasks import load_tasks, mutate_and_recompute
 
-    # Recover stale "running", "verified", "merge_pending" tasks
-    # These states are transient — if we're starting fresh, something crashed
-    _stale_states = {"running", "verified", "merged", "merge_pending"}
+    # Recover stale transient tasks — if we're starting fresh, something crashed.
+    # "merged" is NOT stale: it means code already landed on main.
+    _stale_states = {"running", "verified", "merge_pending"}
     stale_tasks = [
         task for task in load_tasks(tasks_file)
         if task.get("status") in _stale_states

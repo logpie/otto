@@ -208,6 +208,28 @@ def determine_qa_tier(
     return 0
 
 
+def _is_verdict_complete(verdict: dict[str, Any], *, expected_must_count: int = 0) -> bool:
+    """Check if a QA verdict has a valid, complete schema.
+
+    A verdict is complete when:
+    - must_passed is a boolean
+    - must_items is a list
+    - If must_passed is True and expected_must_count > 0, must_items covers all of them
+    - Not a legacy fallback parse (those lack real evidence)
+    """
+    if verdict.get("_legacy_parse"):
+        return False
+    if not isinstance(verdict.get("must_passed"), bool):
+        return False
+    must_items = verdict.get("must_items")
+    if not isinstance(must_items, list):
+        return False
+    # If claiming pass with expected must items, require full coverage
+    if verdict["must_passed"] and expected_must_count > 0 and len(must_items) < expected_must_count:
+        return False
+    return True
+
+
 def _parse_qa_verdict_json(report: str) -> dict[str, Any]:
     """Parse structured JSON QA verdict from agent output.
 
@@ -744,6 +766,7 @@ async def _run_qa_prompt(
     on_progress: Any = None,
     enable_browser: bool = False,
     log_dir: Path | None = None,
+    expected_must_count: int = 0,
 ) -> dict[str, Any]:
     """Execute a QA prompt and return parsed verdict plus captured actions."""
     qa_mcp_servers = _build_qa_mcp_servers(enable_browser)
@@ -872,7 +895,7 @@ async def _run_qa_prompt(
         if verdict_file.exists():
             try:
                 partial = json.loads(verdict_file.read_text().strip())
-                if "must_passed" in partial:
+                if _is_verdict_complete(partial, expected_must_count=expected_must_count):
                     return {
                         "must_passed": partial["must_passed"],
                         "verdict": partial,
@@ -910,8 +933,11 @@ async def _run_qa_prompt(
     else:
         verdict_file.unlink(missing_ok=True)
 
-    if not verdict or "must_passed" not in verdict:
+    if not verdict or not _is_verdict_complete(verdict, expected_must_count=expected_must_count):
         verdict = _parse_qa_verdict_json(raw_report)
+        # Legacy/fallback verdicts claiming pass without evidence are not trustworthy
+        if not _is_verdict_complete(verdict, expected_must_count=expected_must_count):
+            verdict["must_passed"] = False
 
     # Write QA agent log for debugging (what tools were called, what the agent said)
     if log_dir:
@@ -978,6 +1004,7 @@ async def run_qa_agent_v45(
         else:
             return 2  # should — test last
     sorted_spec = sorted(spec, key=_spec_sort_key)
+    expected_must_count = sum(1 for item in sorted_spec if spec_binding(item) == "must")
 
     # Build spec section with binding levels and verifiability
     spec_lines = []
@@ -1035,6 +1062,7 @@ Save any browser screenshots to: {log_dir / "qa-proofs" if log_dir else "/tmp"}/
         on_progress=on_progress,
         enable_browser=tier >= 2,
         log_dir=log_dir,
+        expected_must_count=expected_must_count,
     )
     must_passed = qa_result.get("must_passed", False)
     verdict = qa_result.get("verdict", {})

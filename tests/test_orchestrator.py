@@ -1381,8 +1381,8 @@ class TestCrashRecovery:
         assert pending[0]["status"] == "pending"
 
     @pytest.mark.asyncio
-    async def test_stale_merged_reset_to_pending(self, tmp_git_repo):
-        """Tasks stuck in 'merged' should be reset to 'pending' on startup."""
+    async def test_merged_tasks_not_reset_on_startup(self, tmp_git_repo):
+        """Tasks in 'merged' state should NOT be reset — code already landed on main."""
         tasks_path = tmp_git_repo / "tasks.yaml"
         tasks_path.write_text(yaml.dump({"tasks": [
             {"id": 1, "key": "merged-task", "prompt": "Merged", "status": "merged"},
@@ -1398,9 +1398,13 @@ class TestCrashRecovery:
         from otto.runner import preflight_checks
         error_code, pending = preflight_checks(config, tasks_path, tmp_git_repo)
 
-        assert error_code is None
-        assert len(pending) == 1
-        assert pending[0]["status"] == "pending"
+        assert error_code == 0  # no pending tasks → clean exit
+        # merged task should NOT appear in pending list
+        assert len(pending) == 0
+        # verify it stayed merged in the file
+        from otto.tasks import load_tasks
+        persisted = {t["key"]: t for t in load_tasks(tasks_path)}
+        assert persisted["merged-task"]["status"] == "merged"
 
 
 class TestInstallTimeout:

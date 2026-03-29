@@ -987,8 +987,10 @@ Return JSON only:
         replanned = parse_plan_json(raw_output)
         if replanned is None or replanned.is_empty:
             raise ValueError("replan parse failed")
+        # Use full task dicts (with id, depends_on) so _normalize_plan can
+        # enforce explicit dependency constraints deterministically.
         normalize_input = [
-            {"key": task_plan.task_key}
+            pending_by_key.get(task_plan.task_key, {"key": task_plan.task_key})
             for batch in remaining_plan.batches
             for task_plan in batch.tasks
         ]

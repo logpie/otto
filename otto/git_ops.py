@@ -218,11 +218,39 @@ def _restore_workspace_state(
     reset_ref: str | None = None,
     pre_existing_untracked: set[str] | None = None,
 ) -> None:
-    """Restore tracked files and remove only Otto-created untracked files."""
+    """Restore tracked files and remove only Otto-created untracked files.
+
+    Preserves Otto-owned tracked files (e.g. tasks.yaml) across git reset --hard
+    to prevent queue state corruption when these files happen to be tracked.
+    """
+    # Save Otto-owned tracked files before reset
+    saved: dict[str, bytes] = {}
+    for otto_file in _OTTO_OWNED_FILES:
+        fpath = project_dir / otto_file
+        if fpath.exists():
+            # Check if tracked by git
+            result = subprocess.run(
+                ["git", "ls-files", otto_file],
+                cwd=project_dir, capture_output=True, text=True,
+            )
+            if result.stdout.strip():
+                try:
+                    saved[otto_file] = fpath.read_bytes()
+                except OSError:
+                    pass
+
     cmd = ["git", "reset", "--hard"]
     if reset_ref:
         cmd.append(reset_ref)
     _run_cleanup_git_command(project_dir, cmd, "git reset --hard")
+
+    # Restore Otto-owned tracked files that were saved
+    for otto_file, content in saved.items():
+        try:
+            (project_dir / otto_file).write_bytes(content)
+        except OSError:
+            pass
+
     _remove_otto_created_untracked(project_dir, pre_existing_untracked)
 
 
@@ -237,15 +265,16 @@ def create_task_branch(
     """
     branch_name = f"otto/{key}"
 
-    # Ensure we're on the default branch before branching
+    # Verify we're on the default branch (preflight guarantees this).
+    # Fail loudly rather than silently switching branches.
     current = subprocess.run(
         ["git", "branch", "--show-current"],
         cwd=project_dir, capture_output=True, text=True,
     ).stdout.strip()
     if current != default_branch:
-        subprocess.run(
-            ["git", "checkout", default_branch],
-            cwd=project_dir, capture_output=True, check=True,
+        raise RuntimeError(
+            f"create_task_branch requires '{default_branch}' but on '{current}' — "
+            f"run preflight_checks first"
         )
 
     # Check if branch exists
