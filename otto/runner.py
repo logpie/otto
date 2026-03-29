@@ -41,7 +41,7 @@ from otto.observability import write_json_file
 from otto.qa import (
     format_spec_v45,
     determine_qa_tier,
-    run_qa_agent_v45,
+    run_qa,
 )
 from otto.tasks import load_tasks, update_task
 from otto.testing import run_test_suite, _subprocess_env
@@ -1040,11 +1040,10 @@ async def _run_qa(
     from otto.tasks import spec_binding as _sb
     focus_items = [item for item in qa_spec if _sb(item) == "must"]
 
-    qa_result = await run_qa_agent_v45(
-        task, qa_spec, config, project_dir,
-        original_prompt=prompt,
+    qa_task = {"key": task.get("key", "unknown"), "prompt": prompt, "spec": qa_spec}
+    qa_result = await run_qa(
+        [qa_task], config, project_dir,
         diff=diff_info["full_diff"],
-        tier=qa_tier,
         focus_items=focus_items,
         prev_failed=prev_failed_criteria if prev_failed_criteria else None,
         on_progress=on_progress,
@@ -1063,11 +1062,9 @@ async def _run_qa(
         emit("phase", name="qa", status="fail", time_s=qa_elapsed,
              error="QA infrastructure error — retrying")
         await asyncio.sleep(5)  # brief backoff
-        qa_result = await run_qa_agent_v45(
-            task, qa_spec, config, project_dir,
-            original_prompt=prompt,
+        qa_result = await run_qa(
+            [qa_task], config, project_dir,
             diff=diff_info["full_diff"],
-            tier=qa_tier,
             focus_items=focus_items,
             prev_failed=prev_failed_criteria,
             on_progress=on_progress,
@@ -1196,11 +1193,10 @@ async def _handle_no_changes(
     from otto.tasks import spec_binding as _sb_nc
     focus_nc = [item for item in qa_spec if _sb_nc(item) == "must"]
 
-    qa_result_nc = await run_qa_agent_v45(
-        task, qa_spec, config, project_dir,
-        original_prompt=prompt,
+    qa_task_nc = {"key": task.get("key", "unknown"), "prompt": prompt, "spec": qa_spec}
+    qa_result_nc = await run_qa(
+        [qa_task_nc], config, project_dir,
         diff="(no code changes — agent believes feature already exists)",
-        tier=qa_tier_nc,
         focus_items=focus_nc,
         on_progress=on_progress,
         log_dir=log_dir,

@@ -56,7 +56,7 @@ class TestEndToEnd:
         tasks = load_tasks(tasks_path)
         task = tasks[0]
 
-        with patch("otto.runner.run_qa_agent_v45", new=AsyncMock(return_value={
+        with patch("otto.runner.run_qa", new=AsyncMock(return_value={
             "must_passed": True,
             "verdict": {"must_passed": True, "must_items": []},
             "raw_report": "QA PASS",

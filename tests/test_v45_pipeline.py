@@ -306,7 +306,7 @@ class TestRunTaskV45:
                 passed=True,
                 tiers=[TierResult("tier1", True, "1 passed")],
             )):
-                with patch("otto.runner.run_qa_agent_v45", new=qa_mock):
+                with patch("otto.runner.run_qa", new=qa_mock):
                     result = await run_task_v45(task, config, tmp_git_repo, tasks_path)
 
         assert result["success"] is True
@@ -410,7 +410,7 @@ class TestRunTaskV45:
 
         with patch("otto.runner.query", new=fake_query):
             with patch("otto.spec.generate_spec_sync") as spec_mock:
-                with patch("otto.runner.run_qa_agent_v45") as qa_mock:
+                with patch("otto.runner.run_qa") as qa_mock:
                     with patch("otto.runner.run_test_suite", return_value=TestSuiteResult(
                         passed=True,
                         tiers=[TierResult("tier1", True, "1 passed")],
@@ -459,7 +459,7 @@ class TestRunTaskV45:
                 passed=True,
                 tiers=[TierResult("tier1", True, "1 passed")],
             )):
-                with patch("otto.runner.run_qa_agent_v45") as qa_mock:
+                with patch("otto.runner.run_qa") as qa_mock:
                     result = await run_task_v45(
                         task, config, tmp_git_repo, tasks_path, qa_mode="skip",
                     )
@@ -503,7 +503,7 @@ class TestRunTaskV45:
                     passed=True,
                     tiers=[TierResult("tier1", True, "1 passed")],
                 )):
-                    with patch("otto.runner.run_qa_agent_v45") as qa_mock:
+                    with patch("otto.runner.run_qa") as qa_mock:
                         result = await run_task_v45(
                             task, config, tmp_git_repo, tasks_path, qa_mode="skip",
                         )
@@ -559,18 +559,18 @@ class TestRunTaskV45:
                     passed=True,
                     tiers=[TierResult("tier1", True, "1 passed")],
                 )):
-                    with patch("otto.runner.run_qa_agent_v45", new=qa_mock):
+                    with patch("otto.runner.run_qa", new=qa_mock):
                         result = await run_task_v45(
                             task, config, tmp_git_repo, tasks_path,
                         )
 
-        qa_spec = qa_mock.await_args.args[1]
+        qa_tasks = qa_mock.await_args.args[0]
+        qa_spec = qa_tasks[0]["spec"]
         assert result["success"] is True
         assert len(qa_spec) == 1
         assert qa_spec[0]["binding"] == "must"
         assert "original task prompt" in qa_spec[0]["text"].lower()
         assert "Structured spec generation failed" in result["qa_report"]
-        assert qa_mock.await_args.kwargs["tier"] == 1  # unified tier, browser always available
 
     @pytest.mark.asyncio
     async def test_retry_prompt_wraps_last_error_in_code_fence(self, tmp_git_repo):
@@ -717,7 +717,7 @@ class TestRunTaskV45:
                     passed=True,
                     tiers=[TierResult("tier1", True, "1 passed")],
                 )):
-                    with patch("otto.runner.run_qa_agent_v45", new=qa_mock):
+                    with patch("otto.runner.run_qa", new=qa_mock):
                         result = await run_task_v45(
                             task, config, tmp_git_repo, tasks_path,
                         )
@@ -793,7 +793,7 @@ class TestRunTaskV45:
                     passed=True,
                     tiers=[TierResult("tier1", True, "1 passed")],
                 )):
-                    with patch("otto.runner.run_qa_agent_v45", new=qa_mock):
+                    with patch("otto.runner.run_qa", new=qa_mock):
                         result = await run_task_v45(
                             task, config, tmp_git_repo, tasks_path, on_progress=on_progress,
                         )
@@ -884,7 +884,7 @@ class TestRunTaskV45:
                 passed=True,
                 tiers=[TierResult("tier1", True, "1 passed")],
             )):
-                with patch("otto.runner.run_qa_agent_v45", new=qa_mock):
+                with patch("otto.runner.run_qa", new=qa_mock):
                     result = await run_task_v45(
                         task, config, tmp_git_repo, tasks_path,
                     )
@@ -937,7 +937,7 @@ class TestRunTaskV45:
                 passed=True,
                 tiers=[TierResult("tier1", True, "1 passed")],
             )):
-                with patch("otto.runner.run_qa_agent_v45", new=qa_mock):
+                with patch("otto.runner.run_qa", new=qa_mock):
                     result = await run_task_v45(
                         task, config, tmp_git_repo, tasks_path,
                     )
@@ -1044,7 +1044,7 @@ class TestRunTaskV45:
 
         try:
             with patch("otto.runner.query", new=fake_query):
-                with patch("otto.runner.run_qa_agent_v45", new=qa_mock):
+                with patch("otto.runner.run_qa", new=qa_mock):
                     result = await run_task_v45(
                         task, config, tmp_git_repo, tasks_path, task_work_dir=worktree,
                     )
@@ -1076,8 +1076,8 @@ class TestSystemPromptPreset:
     def test_qa_agent_uses_preset(self):
         """QA agent must use preset to keep CC defaults."""
         import inspect
-        from otto.qa import run_qa_agent_v45
-        source = inspect.getsource(run_qa_agent_v45)
+        from otto.qa import _run_qa_prompt
+        source = inspect.getsource(_run_qa_prompt)
         assert '"type": "preset"' in source or "preset" in source, \
             "QA agent must use system_prompt preset to preserve CC defaults"
 

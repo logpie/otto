@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from otto.qa import _finalize_batch_qa_result, _write_proof_artifacts, run_batch_qa_agent, run_qa_agent_v45
+from otto.qa import _finalize_qa_result, _write_proof_artifacts, run_qa
 
 
 class TestWriteProofArtifacts:
@@ -407,12 +407,10 @@ class TestRunQaAgentStreamCapture:
             AssistantMessage=FakeAssistantMessage,
             UserMessage=FakeUserMessage,
         ):
-            result = asyncio.run(run_qa_agent_v45(
-                task={"key": "QA-1"},
-                spec=[],
+            result = asyncio.run(run_qa(
+                tasks=[{"key": "QA-1", "prompt": "Check the CLI output", "spec": []}],
                 config={},
                 project_dir=tmp_path,
-                original_prompt="Check the CLI output",
                 diff="diff --git a/app.py b/app.py",
                 log_dir=tmp_path / "logs",
             ))
@@ -486,7 +484,7 @@ class TestRunBatchQaAgentProofArtifacts:
         }
 
         with patch("otto.qa._run_qa_prompt", new=AsyncMock(return_value=qa_result)):
-            result = await run_batch_qa_agent(
+            result = await run_qa(
                 tasks_with_specs,
                 {},
                 tmp_path,
@@ -510,9 +508,10 @@ class TestRunBatchQaAgentProofArtifacts:
         assert "tasks integrate cleanly" in task_one_report.read_text()
 
 
-class TestFinalizeBatchQaResult:
+class TestFinalizeQaResult:
     def test_preserves_infrastructure_error_flag(self):
-        final = _finalize_batch_qa_result(
+        """Batch path: infrastructure_error flag is preserved."""
+        final = _finalize_qa_result(
             {
                 "must_passed": False,
                 "verdict": {
@@ -525,13 +524,15 @@ class TestFinalizeBatchQaResult:
                 "cost_usd": 0.0,
                 "infrastructure_error": True,
             },
-            [],
+            # Need 2+ tasks to trigger batch path
+            [{"key": "a", "spec": []}, {"key": "b", "spec": []}],
         )
 
         assert final["must_passed"] is False
         assert final["infrastructure_error"] is True
 
     def test_rejects_incomplete_spec_coverage(self):
+        """Batch path: missing spec coverage fails the result."""
         tasks_with_specs = [
             {
                 "key": "task-one",
@@ -539,10 +540,14 @@ class TestFinalizeBatchQaResult:
                     {"text": "first must item", "binding": "must"},
                     {"text": "second must item", "binding": "must"},
                 ],
-            }
+            },
+            {
+                "key": "task-two",
+                "spec": [],
+            },
         ]
 
-        final = _finalize_batch_qa_result(
+        final = _finalize_qa_result(
             {
                 "must_passed": True,
                 "verdict": {

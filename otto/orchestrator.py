@@ -33,7 +33,7 @@ from otto.runner import (
     coding_loop,
     preflight_checks,
 )
-from otto.qa import run_batch_qa_agent, run_targeted_batch_qa_agent
+from otto.qa import run_qa
 from otto.tasks import (
     load_tasks,
     mutate_and_recompute,
@@ -515,7 +515,7 @@ async def _run_batch_qa(
             f"{prior_context}"
         )
     if focus_task_keys:
-        qa_result = await run_targeted_batch_qa_agent(
+        qa_result = await run_qa(
             tasks_with_specs,
             config,
             project_dir,
@@ -531,7 +531,7 @@ async def _run_batch_qa(
                 detail = data.get("detail", "")[:60]
                 console.print(f"        {tool_name}  {rich_escape(detail)}", style="dim")
 
-        qa_result = await run_batch_qa_agent(
+        qa_result = await run_qa(
             tasks_with_specs,
             config,
             project_dir,

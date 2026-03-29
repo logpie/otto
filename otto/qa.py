@@ -28,19 +28,19 @@ except (ImportError, AttributeError):
     UserMessage = None  # type: ignore[assignment,misc]
 
 
-QA_SYSTEM_PROMPT_V45 = """\
+_QA_BASE_INSTRUCTIONS = """\
 You are a QA tester. Your job has two parts: VERIFY and BREAK.
 
 PART 1 — VERIFY (required)
-Test every [must] criterion with evidence. This is the gate.
-
-Testing order:
-1. Verifiable [must] items FIRST — use code inspection, scripts, curl, unit checks.
-   If ANY [must] item fails, write the verdict immediately. Do not proceed to
-   browser testing or [should] items.
-2. Non-verifiable [must ◈] items — these are subjective (visual, UX, wording).
-   For visual/layout/styling items: start a dev server, navigate to the page,
-   and verify in the browser. Code inspection alone cannot confirm appearance.
+Testing methodology — use code inspection, scripts, curl, and unit checks:
+1. Verifiable [must] items FIRST — run targeted commands to verify each item.
+   Prefer deterministic targeted commands (single test, curl, node -e script).
+   Do NOT rely on code reading alone — run the code and verify actual behavior.
+   For API endpoints: start the server and make actual HTTP requests.
+   For data isolation: test with multiple users/accounts to verify boundaries.
+   For auth: test both authorized and unauthorized access paths.
+2. Non-verifiable [must ◈] items — start a dev server, navigate, verify in browser.
+   Code inspection alone cannot confirm appearance.
    For non-visual subjective items: use your best judgment with evidence.
 3. [should] items — note observations, do not block merge.
 
@@ -49,7 +49,8 @@ Run the full existing test suite once for broad regression coverage.
 
 For each [must] item, record at least one targeted proof tied to that spec_id.
 Prefer a deterministic targeted command (single test, curl, script).
-If a blocking [must] fails, you may stop after recording proof for checked items.
+If a blocking [must] fails, record proof for that item. For single-task QA you
+may stop early. For multi-task batch QA, continue checking ALL items for attribution.
 
 PART 2 — BREAK (after all specs pass)
 Spend 2-3 tool calls trying to break the implementation beyond what the
@@ -70,20 +71,6 @@ Also check:
 When taking browser screenshots, ALWAYS save to a file path:
   take_screenshot(filePath="<proof_dir>/screenshot-<name>.png")
 Do NOT take screenshots without filePath — inline screenshots break the message pipe.
-
-Write your verdict to the output file as JSON:
-{
-  "must_passed": true/false,
-  "must_items": [
-    {"spec_id": 1, "criterion": "...", "status": "pass/fail", "evidence": "...", "proof": ["ran jest: 5 passed", "curl /api returns 200"]}
-  ],
-  "should_notes": [
-    {"criterion": "...", "observation": "...", "screenshot": "path or null"}
-  ],
-  "regressions": [],
-  "prompt_intent": "Implementation matches/diverges from original prompt because...",
-  "extras": ["boundary: rate=0 causes ValueError — may want to handle as burst-only mode"]
-}
 
 Kill any servers you started (by PID, not pkill)."""
 
@@ -917,201 +904,36 @@ async def _run_qa_prompt(
     }
 
 
-async def run_qa_agent_v45(
-    task: dict[str, Any],
-    spec: list,
-    config: dict[str, Any],
-    project_dir: Path,
-    original_prompt: str,
-    diff: str,
-    tier: int = 1,
-    focus_items: list | None = None,
-    prev_failed: list[str] | None = None,
-    on_progress: Any = None,
-    log_dir: Path | None = None,
-) -> dict[str, Any]:
-    """v4.5 QA agent — structured JSON verdict, risk-based tiering.
-
-    Returns {must_passed, verdict, raw_report, cost_usd, proof_count, proof_coverage}.
-    """
-    from otto.tasks import spec_text, spec_binding, spec_is_verifiable
-
-    # Sort specs: verifiable [must] first, then non-verifiable [must], then [should].
-    # QA tests in this order and fails fast on [must] failures.
-    def _spec_sort_key(item):
-        b = spec_binding(item)
-        v = spec_is_verifiable(item)
-        if b == "must" and v:
-            return 0  # verifiable must — test first
-        elif b == "must":
-            return 1  # non-verifiable must — test second
-        else:
-            return 2  # should — test last
-    sorted_spec = sorted(spec, key=_spec_sort_key)
-    expected_must_count = sum(1 for item in sorted_spec if spec_binding(item) == "must")
-
-    # Build spec section with binding levels and verifiability
-    spec_lines = []
-    for i, item in enumerate(sorted_spec):
-        text = spec_text(item)
-        binding = spec_binding(item)
-        marker = "" if spec_is_verifiable(item) else " \u25c8"
-        spec_lines.append(f"  {i+1}. [{binding}{marker}] {text}")
-    spec_section = "\n".join(spec_lines)
-
-    # Build focus section for targeted QA
-    focus_section = ""
-    if prev_failed:
-        focus_section += "\n\nPRIORITY — These items failed in the previous QA round. Verify they are fixed FIRST:\n"
-        focus_section += "\n".join(f"  - {c}" for c in prev_failed)
-        focus_section += "\nThen verify remaining items haven't regressed."
-    elif focus_items:
-        focus_texts = [spec_text(item) for item in focus_items]
-        focus_section = "\n\nFocus your testing on these items that lack test coverage:\n"
-        focus_section += "\n".join(f"  - {t}" for t in focus_texts)
-
-    # Create a temp file for the verdict
-    with tempfile.NamedTemporaryFile(suffix=".json", prefix="otto_qa_", delete=False) as tf:
-        verdict_file = Path(tf.name)
-
-    qa_prompt = f"""{QA_SYSTEM_PROMPT_V45}
-
-Test this implementation against the acceptance criteria and the original task prompt.
-
-You are working in {project_dir}. All project files are in this directory. Do not search outside it.
-
-ORIGINAL TASK PROMPT:
-{original_prompt}
-
-ACCEPTANCE CRITERIA:
-{spec_section}
-{focus_section}
-
-DIFF:
-{diff}
-
-Write your JSON verdict to: {verdict_file}
-Save any browser screenshots to: {log_dir / "qa-proofs" if log_dir else "/tmp"}/screenshot-<name>.png
-"""
-
-    # Ensure qa-proofs dir exists before QA so agent can save screenshots there
-    if log_dir:
-        (log_dir / "qa-proofs").mkdir(parents=True, exist_ok=True)
-    # _run_qa_prompt keeps CC defaults via system_prompt={"type": "preset", "preset": "claude_code"}.
-    qa_result = await _run_qa_prompt(
-        qa_prompt=qa_prompt,
-        config=config,
-        project_dir=project_dir,
-        verdict_file=verdict_file,
-        on_progress=on_progress,
-        enable_browser=True,
-        log_dir=log_dir,
-        expected_must_count=expected_must_count,
-    )
-    must_passed = qa_result.get("must_passed", False)
-    verdict = qa_result.get("verdict", {})
-    raw_report = qa_result.get("raw_report", "")
-    qa_cost = qa_result.get("cost_usd", 0.0)
-    qa_actions = qa_result.get("qa_actions", [])
-
-    # Write proof artifacts if log_dir is provided
-    proof_count = 0
-    proof_coverage = ""
-    if log_dir:
-        try:
-            proof_count, proof_coverage = _write_proof_artifacts(
-                log_dir, verdict, qa_actions, task,
-                original_prompt, qa_cost,
-            )
-        except Exception:
-            pass
-
-    # Emit summary for display
-    if on_progress:
-        try:
-            must_items = verdict.get("must_items", [])
-            total = len(must_items)
-            passed = sum(1 for item in must_items if item.get("status") == "pass")
-            on_progress("qa_summary", {
-                "total": total,
-                "passed": passed,
-                "failed": total - passed,
-                "proof_count": proof_count,
-                "proof_coverage": proof_coverage,
-            })
-        except Exception:
-            pass
-
-    return {
-        "must_passed": must_passed,
-        "verdict": verdict,
-        "raw_report": raw_report,
-        "cost_usd": qa_cost,
-        "proof_count": proof_count,
-        "proof_coverage": proof_coverage,
-        "infrastructure_error": qa_result.get("infrastructure_error", False),
-    }
-
-
-async def run_batch_qa_agent(
-    tasks_with_specs: list[dict[str, Any]],
-    config: dict[str, Any],
-    project_dir: Path,
-    *,
-    diff: str,
-    on_progress: Any = None,
-    log_dir: Path | None = None,
-) -> dict[str, Any]:
-    """Run exhaustive QA over a merged batch."""
-    return await _run_batch_qa_agent(
-        tasks_with_specs,
-        config,
-        project_dir,
-        diff=diff,
-        on_progress=on_progress,
-        log_dir=log_dir,
-    )
-
-
-async def run_targeted_batch_qa_agent(
-    tasks_with_specs: list[dict[str, Any]],
-    config: dict[str, Any],
-    project_dir: Path,
-    *,
-    diff: str,
-    retried_task_keys: set[str],
-    on_progress: Any = None,
-    log_dir: Path | None = None,
-) -> dict[str, Any]:
-    """Run a second-round batch QA focused on retried tasks."""
-    return await _run_batch_qa_agent(
-        tasks_with_specs,
-        config,
-        project_dir,
-        diff=diff,
-        retried_task_keys=retried_task_keys,
-        on_progress=on_progress,
-        log_dir=log_dir,
-    )
-
-
-def _build_batch_qa_prompt(
-    tasks_with_specs: list[dict[str, Any]],
+def _build_qa_prompt(
+    tasks: list[dict[str, Any]],
     project_dir: Path,
     verdict_file: Path,
     screenshot_dir: Path,
     diff: str,
     *,
+    prev_failed: list[str] | None = None,
+    focus_items: list | None = None,
     retried_task_keys: set[str] | None = None,
 ) -> str:
-    task_list = "\n".join(
-        f"- #{task.get('id', '?')} {task.get('prompt', '')} (task_key: {task.get('key', 'unknown')})"
-        for task in tasks_with_specs
-    )
-    retry_focus = ""
-    if retried_task_keys:
-        focus_list = ", ".join(sorted(retried_task_keys))
-        retry_focus = f"""
+    """Build QA prompt for single-task or multi-task (batch) QA.
+
+    Single task (len(tasks)==1): simpler framing, no task_key attribution required.
+    Multi task (len(tasks)>1): task_key attribution, cross-task integration, coverage matrix.
+    """
+    from otto.tasks import spec_binding, spec_is_verifiable, spec_text
+
+    is_batch = len(tasks) > 1
+
+    if is_batch:
+        # --- Batch prompt ---
+        task_list = "\n".join(
+            f"- #{task.get('id', '?')} {task.get('prompt', '')} (task_key: {task.get('key', 'unknown')})"
+            for task in tasks
+        )
+        retry_focus = ""
+        if retried_task_keys:
+            focus_list = ", ".join(sorted(retried_task_keys))
+            retry_focus = f"""
 
 RETRY ROUND:
 Focus the must-item re-check on these retried task(s): {focus_list}
@@ -1120,34 +942,17 @@ Focus the must-item re-check on these retried task(s): {focus_list}
 - Keep the full test suite as a regression backstop.
 """
 
-    return f"""You are a QA tester for the integrated result of multiple tasks.
-Your job has two parts: VERIFY and BREAK.
-
-PART 1 — VERIFY (required)
-Testing methodology — use code inspection, scripts, curl, and unit checks:
-1. Verifiable [must] items FIRST — run targeted commands to verify each item.
-   Prefer deterministic targeted commands (single test, curl, node -e script).
-   Do NOT rely on code reading alone — run the code and verify actual behavior.
-   For API endpoints: start the server and make actual HTTP requests.
-   For data isolation: test with multiple users/accounts to verify boundaries.
-   For auth: test both authorized and unauthorized access paths.
-2. Non-verifiable [must ◈] items — start a dev server, navigate, verify in browser.
-3. [should] items — note observations, do not block.
-
+        batch_additions = """
 Verify ALL [must] items exhaustively. Do not stop at the first failure.
 Every verdict item must include the owning task_key for attribution.
 Return exactly one `must_items` entry for every [must] spec listed below. Do not omit any task/spec pair.
 For each [must] item, record targeted proof (command + output), not just code inspection.
 
 Generate and run cross-task integration tests for interactions between these tasks.
-Run the full existing test suite as a regression check.
+Run the full existing test suite as a regression check."""
 
-PART 2 — BREAK (after all specs pass)
-Spend 2-3 tool calls trying to break the implementation beyond what the
-spec covers. Try boundary inputs (0, empty, null, negative), wrong types,
-missing fields. Test the programmatic API directly, not just through CLI.
-Report findings in the "extras" field — do NOT fail [must] items for
-behavior not in the spec.{retry_focus}
+        return f"""{_QA_BASE_INSTRUCTIONS}
+{batch_additions}{retry_focus}
 
 You are working in {project_dir}. All project files are in this directory. Do not search outside it.
 
@@ -1155,7 +960,7 @@ BATCH TASKS:
 {task_list}
 
 ACCEPTANCE CRITERIA:
-{format_batch_spec(tasks_with_specs)}
+{format_batch_spec(tasks)}
 
 MERGED DIFF:
 {diff}
@@ -1176,109 +981,261 @@ Use this JSON structure:
   "test_suite_passed": true
 }}"""
 
+    else:
+        # --- Single-task prompt ---
+        task = tasks[0]
+        spec = task.get("spec") or []
+        original_prompt = task.get("prompt", "")
 
-def _finalize_batch_qa_result(
+        # Sort specs: verifiable [must] first, then non-verifiable [must], then [should].
+        def _spec_sort_key(item):
+            b = spec_binding(item)
+            v = spec_is_verifiable(item)
+            if b == "must" and v:
+                return 0
+            elif b == "must":
+                return 1
+            else:
+                return 2
+        sorted_spec = sorted(spec, key=_spec_sort_key)
+
+        spec_lines = []
+        for i, item in enumerate(sorted_spec):
+            text = spec_text(item)
+            binding = spec_binding(item)
+            marker = "" if spec_is_verifiable(item) else " \u25c8"
+            spec_lines.append(f"  {i+1}. [{binding}{marker}] {text}")
+        spec_section = "\n".join(spec_lines)
+
+        focus_section = ""
+        if prev_failed:
+            focus_section += "\n\nPRIORITY \u2014 These items failed in the previous QA round. Verify they are fixed FIRST:\n"
+            focus_section += "\n".join(f"  - {c}" for c in prev_failed)
+            focus_section += "\nThen verify remaining items haven't regressed."
+        elif focus_items:
+            focus_texts = [spec_text(item) for item in focus_items]
+            focus_section = "\n\nFocus your testing on these items that lack test coverage:\n"
+            focus_section += "\n".join(f"  - {t}" for t in focus_texts)
+
+        return f"""{_QA_BASE_INSTRUCTIONS}
+
+Test this implementation against the acceptance criteria and the original task prompt.
+
+You are working in {project_dir}. All project files are in this directory. Do not search outside it.
+
+ORIGINAL TASK PROMPT:
+{original_prompt}
+
+ACCEPTANCE CRITERIA:
+{spec_section}
+{focus_section}
+
+DIFF:
+{diff}
+
+Write your JSON verdict to: {verdict_file}
+Save any browser screenshots to: {screenshot_dir}/screenshot-<name>.png
+
+Write your verdict as JSON:
+{{
+  "must_passed": true/false,
+  "must_items": [
+    {{"spec_id": 1, "criterion": "...", "status": "pass/fail", "evidence": "...", "proof": ["ran jest: 5 passed", "curl /api returns 200"]}}
+  ],
+  "should_notes": [
+    {{"criterion": "...", "observation": "...", "screenshot": "path or null"}}
+  ],
+  "regressions": [],
+  "prompt_intent": "Implementation matches/diverges from original prompt because...",
+  "extras": ["boundary: rate=0 causes ValueError \u2014 may want to handle as burst-only mode"]
+}}"""
+
+
+def _finalize_qa_result(
     qa_result: dict[str, Any],
-    tasks_with_specs: list[dict[str, Any]] | None = None,
+    tasks: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    """Unified post-processor for both single-task and batch QA results.
+
+    Single task: injects task_key, validates expected_must_count.
+    Multi task: coverage matrix, task_key attribution, integration findings, failed_task_keys.
+
+    Returns a stable dict shape with all fields both caller types need.
+    """
+    from otto.tasks import spec_binding
+
     verdict = qa_result.get("verdict", {}) or {}
     if not isinstance(verdict, dict):
         verdict = {}
-    integration_findings = verdict.get("integration_findings", []) or []
-    integration_failed = any(item.get("status") == "fail" for item in integration_findings)
-    regressions = verdict.get("regressions", []) or []
-    test_suite_passed = verdict.get("test_suite_passed", True)
     infrastructure_error = bool(qa_result.get("infrastructure_error", False))
-    expected_pairs = _expected_batch_must_matrix(tasks_with_specs or [])
-    actual_pairs: set[tuple[str, int]] = set()
-    for item in verdict.get("must_items", []) or []:
-        task_key = str(item.get("task_key", "") or "").strip()
-        try:
-            spec_id = int(item.get("spec_id"))
-        except (TypeError, ValueError):
-            continue
-        if task_key:
-            actual_pairs.add((task_key, spec_id))
-    missing_pairs = sorted(expected_pairs - actual_pairs)
-    if missing_pairs:
-        verdict["coverage_error"] = {
-            "expected_count": len(expected_pairs),
-            "actual_count": len(actual_pairs),
-            "missing": [
-                {"task_key": task_key, "spec_id": spec_id}
-                for task_key, spec_id in missing_pairs
-            ],
+    is_batch = len(tasks) > 1
+
+    if is_batch:
+        # --- Batch finalization ---
+        integration_findings = verdict.get("integration_findings", []) or []
+        integration_failed = any(item.get("status") == "fail" for item in integration_findings)
+        regressions = verdict.get("regressions", []) or []
+        test_suite_passed = verdict.get("test_suite_passed", True)
+
+        expected_pairs = _expected_batch_must_matrix(tasks)
+        actual_pairs: set[tuple[str, int]] = set()
+        for item in verdict.get("must_items", []) or []:
+            task_key = str(item.get("task_key", "") or "").strip()
+            try:
+                sid = int(item.get("spec_id"))
+            except (TypeError, ValueError):
+                continue
+            if task_key:
+                actual_pairs.add((task_key, sid))
+        missing_pairs = sorted(expected_pairs - actual_pairs)
+        if missing_pairs:
+            verdict["coverage_error"] = {
+                "expected_count": len(expected_pairs),
+                "actual_count": len(actual_pairs),
+                "missing": [
+                    {"task_key": tk, "spec_id": sid}
+                    for tk, sid in missing_pairs
+                ],
+            }
+        overall_passed = (
+            bool(qa_result.get("must_passed"))
+            and not infrastructure_error
+            and not missing_pairs
+            and not integration_failed
+            and not regressions
+            and bool(test_suite_passed)
+        )
+
+        failed_task_keys: set[str] = {
+            item.get("task_key")
+            for item in verdict.get("must_items", []) or []
+            if item.get("status") == "fail" and item.get("task_key")
         }
-    overall_passed = (
-        bool(qa_result.get("must_passed"))
-        and not infrastructure_error
-        and not missing_pairs
-        and not integration_failed
-        and not regressions
-        and bool(test_suite_passed)
-    )
+        for item in integration_findings:
+            if item.get("status") == "fail":
+                failed_task_keys.update(
+                    key for key in (item.get("tasks_involved") or []) if key
+                )
+        failed_task_keys.update(tk for tk, _sid in missing_pairs)
 
-    failed_task_keys = {
-        item.get("task_key")
-        for item in verdict.get("must_items", []) or []
-        if item.get("status") == "fail" and item.get("task_key")
-    }
-    for item in integration_findings:
-        if item.get("status") == "fail":
-            failed_task_keys.update(
-                key for key in (item.get("tasks_involved") or []) if key
-            )
-    failed_task_keys.update(task_key for task_key, _spec_id in missing_pairs)
+        return {
+            "must_passed": overall_passed,
+            "verdict": verdict,
+            "raw_report": qa_result.get("raw_report", ""),
+            "cost_usd": qa_result.get("cost_usd", 0.0),
+            "failed_task_keys": sorted(failed_task_keys),
+            "test_suite_passed": bool(test_suite_passed),
+            "infrastructure_error": infrastructure_error,
+        }
 
-    return {
-        "must_passed": overall_passed,
-        "verdict": verdict,
-        "raw_report": qa_result.get("raw_report", ""),
-        "cost_usd": qa_result.get("cost_usd", 0.0),
-        "failed_task_keys": sorted(failed_task_keys),
-        "test_suite_passed": bool(test_suite_passed),
-        "infrastructure_error": infrastructure_error,
-    }
+    else:
+        # --- Single-task finalization ---
+        task = tasks[0]
+        task_key = task.get("key", "unknown")
+        spec = task.get("spec") or []
+        expected_must_count = sum(1 for item in spec if spec_binding(item) == "must")
+
+        must_passed = qa_result.get("must_passed", False)
+
+        # Inject task_key into must_items for consistency
+        for item in verdict.get("must_items", []) or []:
+            if not item.get("task_key"):
+                item["task_key"] = task_key
+
+        # Validate expected_must_count for pass verdicts
+        if must_passed and expected_must_count > 0:
+            actual_must = len(verdict.get("must_items", []) or [])
+            if actual_must < expected_must_count:
+                must_passed = False
+
+        return {
+            "must_passed": must_passed,
+            "verdict": verdict,
+            "raw_report": qa_result.get("raw_report", ""),
+            "cost_usd": qa_result.get("cost_usd", 0.0),
+            "failed_task_keys": sorted(
+                {item.get("task_key") or task_key
+                 for item in verdict.get("must_items", []) or []
+                 if item.get("status") == "fail"}
+            ),
+            "test_suite_passed": bool(verdict.get("test_suite_passed", True)),
+            "infrastructure_error": infrastructure_error,
+        }
 
 
-async def _run_batch_qa_agent(
-    tasks_with_specs: list[dict[str, Any]],
+async def run_qa(
+    tasks: list[dict[str, Any]],
     config: dict[str, Any],
     project_dir: Path,
-    *,
     diff: str,
-    retried_task_keys: set[str] | None = None,
+    *,
     on_progress: Any = None,
     log_dir: Path | None = None,
+    prev_failed: list[str] | None = None,
+    focus_items: list | None = None,
+    retried_task_keys: set[str] | None = None,
 ) -> dict[str, Any]:
-    """Run exhaustive QA over a merged batch."""
-    # Log tier decision for batch QA (combined specs + integration, browser available)
+    """Unified QA entry point -- single-task or batch.
+
+    Args:
+        tasks: list of dicts, each with keys: key, prompt, spec.
+               Single-task QA: pass a 1-element list.
+               Batch QA: pass N-element list.
+        config: otto config dict.
+        project_dir: project root.
+        diff: git diff string.
+        on_progress: optional progress callback.
+        log_dir: directory for QA logs/proofs.
+        prev_failed: per-task retry focus -- previously failed criteria text.
+        focus_items: per-task focus -- spec items lacking test coverage.
+        retried_task_keys: batch retry focus -- task keys to re-verify.
+
+    Returns dict with keys:
+        must_passed, verdict, raw_report, cost_usd, failed_task_keys,
+        test_suite_passed, infrastructure_error, proof_count, proof_coverage.
+    """
+    from otto.tasks import spec_binding
+
+    is_batch = len(tasks) > 1
+
+    # Log tier decision
     if log_dir:
-        task_count = len(tasks_with_specs)
-        spec_count = sum(len(t.get("spec", [])) for t in tasks_with_specs)
-        is_retry = bool(retried_task_keys)
-        append_text_log(log_dir / "qa-tier.log", [
-            f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Batch QA tier decision",
-            f"mode: batch (combined specs, browser available)",
-            f"tasks: {task_count}",
-            f"total specs: {spec_count}",
-            f"retry round: {'yes — focused on ' + ', '.join(sorted(retried_task_keys)) if is_retry else 'no (initial)'}",
-            f"browser: enabled",
-            f"reason: batch QA verifies integrated codebase with combined specs + cross-task integration tests",
-            "",
-        ])
-    with tempfile.NamedTemporaryFile(suffix=".json", prefix="otto_batch_qa_", delete=False) as tf:
+        if is_batch:
+            task_count = len(tasks)
+            spec_count = sum(len(t.get("spec", [])) for t in tasks)
+            is_retry = bool(retried_task_keys)
+            append_text_log(log_dir / "qa-tier.log", [
+                f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Batch QA tier decision",
+                f"mode: batch (combined specs, browser available)",
+                f"tasks: {task_count}",
+                f"total specs: {spec_count}",
+                f"retry round: {'yes — focused on ' + ', '.join(sorted(retried_task_keys)) if is_retry else 'no (initial)'}",
+                f"browser: enabled",
+                f"reason: batch QA verifies integrated codebase with combined specs + cross-task integration tests",
+                "",
+            ])
+
+    # Create verdict temp file
+    with tempfile.NamedTemporaryFile(suffix=".json", prefix="otto_qa_", delete=False) as tf:
         verdict_file = Path(tf.name)
 
     screenshot_dir = log_dir / "qa-proofs" if log_dir else Path("/tmp")
     screenshot_dir.mkdir(parents=True, exist_ok=True)
 
-    qa_prompt = _build_batch_qa_prompt(
-        tasks_with_specs,
+    # Compute expected_must_count for single-task (used by _run_qa_prompt)
+    expected_must_count = 0
+    if not is_batch:
+        spec = tasks[0].get("spec") or []
+        expected_must_count = sum(1 for item in spec if spec_binding(item) == "must")
+
+    qa_prompt = _build_qa_prompt(
+        tasks,
         project_dir,
         verdict_file,
         screenshot_dir,
         diff,
+        prev_failed=prev_failed,
+        focus_items=focus_items,
         retried_task_keys=retried_task_keys,
     )
 
@@ -1290,13 +1247,14 @@ async def _run_batch_qa_agent(
         on_progress=on_progress,
         enable_browser=True,
         log_dir=log_dir,
+        expected_must_count=expected_must_count,
     )
-    final_result = _finalize_batch_qa_result(qa_result, tasks_with_specs)
 
-    # Write per-task qa-agent.log references so each task's logs are self-contained
-    if log_dir:
-        batch_qa_log = log_dir / "qa-agent.log"
-        for task in tasks_with_specs:
+    final_result = _finalize_qa_result(qa_result, tasks)
+
+    # Write per-task qa-agent.log references for batch
+    if is_batch and log_dir:
+        for task in tasks:
             task_key = task.get("key", "")
             if not task_key:
                 continue
@@ -1304,25 +1262,54 @@ async def _run_batch_qa_agent(
             task_log_dir.mkdir(parents=True, exist_ok=True)
             try:
                 append_text_log(task_log_dir / "qa-agent.log", [
-                    f"[batch QA — see {log_dir.name}/qa-agent.log for full details]",
+                    f"[batch QA \u2014 see {log_dir.name}/qa-agent.log for full details]",
                     "",
                 ])
             except Exception:
                 pass
 
+    # Write proof artifacts
     proof_count = 0
     proof_coverage = ""
     if log_dir:
         try:
-            batch_verdict = dict(final_result.get("verdict", {}) or {})
-            batch_verdict["must_passed"] = final_result.get("must_passed", False)
-            proof_count, proof_coverage = _write_batch_proof_artifacts(
-                log_dir,
-                batch_verdict,
-                qa_result.get("qa_actions", []) or [],
-                tasks_with_specs,
-                float(final_result.get("cost_usd", 0.0) or 0.0),
-            )
+            if is_batch:
+                batch_verdict = dict(final_result.get("verdict", {}) or {})
+                batch_verdict["must_passed"] = final_result.get("must_passed", False)
+                proof_count, proof_coverage = _write_batch_proof_artifacts(
+                    log_dir,
+                    batch_verdict,
+                    qa_result.get("qa_actions", []) or [],
+                    tasks,
+                    float(final_result.get("cost_usd", 0.0) or 0.0),
+                )
+            else:
+                task = tasks[0]
+                proof_count, proof_coverage = _write_proof_artifacts(
+                    log_dir,
+                    final_result.get("verdict", {}),
+                    qa_result.get("qa_actions", []),
+                    task,
+                    task.get("prompt", ""),
+                    float(final_result.get("cost_usd", 0.0) or 0.0),
+                )
+        except Exception:
+            pass
+
+    # Emit summary for display (single-task progress reporting)
+    if on_progress and not is_batch:
+        try:
+            verdict = final_result.get("verdict", {})
+            must_items = verdict.get("must_items", [])
+            total = len(must_items)
+            passed = sum(1 for item in must_items if item.get("status") == "pass")
+            on_progress("qa_summary", {
+                "total": total,
+                "passed": passed,
+                "failed": total - passed,
+                "proof_count": proof_count,
+                "proof_coverage": proof_coverage,
+            })
         except Exception:
             pass
 
