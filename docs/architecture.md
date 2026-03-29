@@ -7,7 +7,7 @@ This document is the source of truth for otto's execution pipeline. Use it for d
 ```
 otto run
   │
-  ├─ 1. Preflight (baseline tests, git check, stale task recovery)
+  ├─ 1. Preflight (validate branch/tree, stale recovery, no mutations)
   ├─ 2. Smart Planner (single LLM call, high effort)
   │     ├─ INDEPENDENT → parallel batch
   │     ├─ ADDITIVE (same file) → serialize
@@ -53,17 +53,19 @@ otto run
 ## 1. Preflight
 
 ```
-preflight_checks()
+preflight_checks()  — read-only validation first, no mutations
   │
   ├─ Acquire otto.lock (prevent concurrent runs)
   ├─ Clean orphaned worktrees from previous crashes
-  ├─ Check git: correct branch? clean working tree?
-  │    └─ Dirty tree with non-otto files → EXIT 2
+  ├─ Validate git state (fail-fast, never auto-checkout or stash):
+  │    ├─ Wrong branch → EXIT 2 ("run: git checkout {branch}")
+  │    └─ Dirty tree → EXIT 2 ("commit or stash before running")
   │
   ├─ Recover stale tasks:
   │    running/verified/merge_pending → reset to pending
+  │    (merged tasks are NOT reset — code already on main)
   │
-  ├─ Auto-update .gitignore + .git/info/exclude
+  ├─ Update .git/info/exclude (framework + otto ignores, no commits)
   ├─ Load tasks.yaml → filter pending tasks
   │    └─ No pending tasks → EXIT 0
   │
