@@ -83,16 +83,23 @@ plan(pending_tasks)
   │
   ├─ Single task? → default_plan() (no LLM, instant)
   │
-  └─ Multiple tasks? → Sonnet query (effort=low, ~$0.01)
+  └─ Multiple tasks? → single LLM call (effort=high)
        │
-       ├─ Groups independent tasks into parallel batches
+       ├─ Pairwise relationship analysis:
+       │    INDEPENDENT → parallel batch
+       │    ADDITIVE (same file) → serialize
+       │    DEPENDENT → serialize (later batch)
+       │    CONTRADICTORY → separate batches (never dropped)
+       │    UNCERTAIN → serialize (conservative)
+       │
        ├─ Respects depends_on constraints (topological sort)
-       ├─ Returns ExecutionPlan { batches: [Batch { tasks: [TaskPlan] }] }
+       ├─ Missing tasks auto-added as serial batches (safety net)
+       ├─ Returns ExecutionPlan { batches, analysis, conflicts }
        │
        └─ Parse fails? → fallback to default_plan()
 
-Validation: plan must cover all pending tasks exactly once
-  └─ Invalid? → fallback to default_plan()
+Validation: _normalize_plan enforces dependency constraints
+  └─ Invalid coverage? → fallback to default_plan()
 ```
 
 **Key files:** `planner.py:plan()`, `planner.py:default_plan()`
@@ -408,8 +415,8 @@ After merge phase:
 
 | Component | Model | Typical Cost | When |
 |-----------|-------|-------------|------|
-| **Planner** | Sonnet | ~$0.01 | Once per run (multi-task only) |
-| **Replanner** | Sonnet | ~$0.01 | After batch failure (if remaining batches) |
+| **Planner** | CC default | ~$0.02-0.05 | Once per run (effort=high, multi-task only) |
+| **Replanner** | CC default | ~$0.02-0.05 | After batch failure (with dependency context) |
 | **Spec gen** | Sonnet | ~$0.15-0.30 | Once per task (background thread) |
 | **Coding agent** | CC default | ~$0.50-1.50 | Per attempt (resumes session) |
 | **QA agent** | CC default | ~$0.30-1.00 | Per attempt (tier-dependent) |
