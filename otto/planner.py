@@ -559,6 +559,9 @@ def _normalize_plan(plan: ExecutionPlan, tasks: list[dict[str, Any]]) -> Executi
         for key in conflict.get("tasks", [])
     }
 
+    # Build batches — do NOT exclude conflict tasks. They should still
+    # be scheduled (in separate batches). Conflicts are for reporting,
+    # not for dropping tasks.
     seed_batches: list[Batch] = []
     seen_planned: set[str] = set()
     for batch in plan.batches:
@@ -566,12 +569,19 @@ def _normalize_plan(plan: ExecutionPlan, tasks: list[dict[str, Any]]) -> Executi
         for task_plan in batch.tasks:
             if task_plan.task_key not in valid_keys:
                 continue
-            if task_plan.task_key in conflict_keys or task_plan.task_key in seen_planned:
+            if task_plan.task_key in seen_planned:
                 continue
             seen_planned.add(task_plan.task_key)
             normalized_tasks.append(task_plan)
         if normalized_tasks:
             seed_batches.append(Batch(tasks=normalized_tasks))
+
+    # Add any tasks missing from the plan (planner dropped them)
+    missing_keys = valid_keys - seen_planned
+    if missing_keys:
+        for key in sorted(missing_keys):
+            seed_batches.append(Batch(tasks=[TaskPlan(task_key=key)]))
+        logger.warning("Planner dropped %d task(s): %s — added as serial batches", len(missing_keys), ", ".join(sorted(missing_keys)))
 
     batches = _serialize_analysis_batches(seed_batches, analysis)
 
@@ -759,49 +769,34 @@ async def plan(
         return result
 
     try:
-        shortlist = await _shortlist_pairs(tasks, config, project_dir)
-        has_explicit_deps = any(task.get("depends_on") for task in tasks)
-        if not shortlist:
-            fallback = _normalize_plan(default_plan(tasks), tasks)
-            trigger = "empty shortlist with explicit depends_on" if has_explicit_deps else "empty shortlist"
-            _planner_log(
-                project_dir,
-                f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] planner fallback",
-                f"fallback trigger: {trigger}",
-                "final batch structure:",
-                *_format_batches(fallback),
-                "",
-            )
-            return fallback
-
-        candidate_lines = "\n".join(
-            f"- {item['task_a']} <-> {item['task_b']}: {item['reason']}"
-            for item in shortlist
-        )
         _planner_log(
             project_dir,
-            f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] relationship analysis request",
+            f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] planner request",
             "task summary sent to LLM:",
             _task_summary(tasks),
-            "shortlist results:",
-            *_format_shortlist(shortlist),
         )
+        # Single LLM call for both analysis + batching.
+        # The old two-phase approach (Haiku shortlist → Sonnet classify) was fragile:
+        # Haiku missed pairs → tasks silently dropped from batches.
+        # One strong call is more reliable. Cost difference: ~$0.01-0.02.
         prompt = f"""You are planning execution for an autonomous coding pipeline.
 
-Classify the shortlisted task pairs and build an execution plan.
+Analyze ALL task pairs for relationships and build an execution plan.
+CRITICAL: Every input task MUST appear in exactly one batch. Do NOT drop any tasks.
 
 Relationship labels:
 - INDEPENDENT: different files/components, parallel OK
 - ADDITIVE: same file, different functions/sections, serialize (same-file parallel causes merge conflicts)
 - DEPENDENT: task B needs task A output, serialize
-- CONTRADICTORY: incompatible edits to the same thing, flag and exclude from execution
+- CONTRADICTORY: incompatible goals for the same code — flag in conflicts BUT STILL schedule both in separate batches (the pipeline handles conflicts)
 - UNCERTAIN: not enough information, serialize conservatively
 
 Rules:
 - Respect explicit depends_on constraints.
-- Exclude contradictory tasks from batches and report them in conflicts.
+- CONTRADICTORY tasks go in conflicts AND in separate batches (do NOT exclude them).
 - ADDITIVE and UNCERTAIN pairs should not run in the same batch.
 - Only truly INDEPENDENT tasks (different files) should run in parallel.
+- EVERY input task key MUST appear in exactly one batch.
 
 Return JSON only:
 {{
@@ -820,9 +815,6 @@ Return JSON only:
 Tasks:
 {_task_summary(tasks)}
 
-Shortlisted pairs for detailed review:
-{candidate_lines}
-
 Project context (git ls-files, capped at 200):
 {_project_context(project_dir)}
 """
@@ -831,7 +823,7 @@ Project context (git ls-files, capped at 200):
             config,
             project_dir,
             model=_planner_model(config),
-            effort=_planner_effort(config),
+            effort=_planner_effort(config, default="high"),
         )
         result = parse_plan_json(raw_output)
         if result is None:
@@ -840,9 +832,9 @@ Project context (git ls-files, capped at 200):
         _planner_log(
             project_dir,
             (
-                "relationship LLM call: "
+                "planner LLM call: "
                 f"model={_planner_model(config) or 'default'} "
-                f"effort={_planner_effort(config)} "
+                f"effort={_planner_effort(config, default='high')} "
                 f"time_s={duration_s:.1f} cost_usd={cost_usd:.4f}"
             ),
             "relationship analysis:",

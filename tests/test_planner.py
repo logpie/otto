@@ -241,7 +241,8 @@ class TestNormalizePlan:
 
         result = _normalize_plan(plan, tasks)
 
-        assert result.total_tasks == 0
+        # Contradictory tasks still scheduled (in separate batches), not dropped
+        assert result.total_tasks == 2
         assert result.conflicts == [
             {
                 "tasks": ["t1", "t2"],
@@ -398,16 +399,23 @@ class TestPlan:
         async def fake_query(prompt, options, *args, **kwargs):
             seen_options.append(options)
             assert options.system_prompt == {"type": "preset", "preset": "claude_code"}
-            return json.dumps({"candidates": []}), 0.0, None
+            return json.dumps({
+                "analysis": [
+                    {"task_a": "t1", "task_b": "t2", "relationship": "INDEPENDENT", "reason": "different features"}
+                ],
+                "conflicts": [],
+                "batches": [
+                    {"tasks": [{"task_key": "t1"}, {"task_key": "t2"}]}
+                ],
+            }), 0.0, None
 
         with patch("otto.planner.run_agent_query", side_effect=fake_query):
             result = await plan(tasks, {}, tmp_path)
 
         assert len(seen_options) == 1
-        assert seen_options[0].model == "haiku"
+        # Single planner call (no more two-phase shortlist)
         assert len(result.batches) == 1
         assert {tp.task_key for tp in result.batches[0].tasks} == {"t1", "t2"}
-        assert result.analysis == []
 
     @pytest.mark.asyncio
     async def test_two_additive_tasks_serialized(self, tmp_path):
@@ -415,9 +423,8 @@ class TestPlan:
             {"key": "t1", "id": 1, "prompt": "Add slugify() to utils.py"},
             {"key": "t2", "id": 2, "prompt": "Add title_case() to utils.py"},
         ]
-        responses = iter([
-            json.dumps({"candidates": [{"task_a": "t1", "task_b": "t2", "reason": "same file"}]}),
-            json.dumps({
+        async def fake_query(prompt, options, *args, **kwargs):
+            return json.dumps({
                 "analysis": [
                     {"task_a": "t1", "task_b": "t2", "relationship": "ADDITIVE", "reason": "same file, different functions"},
                 ],
@@ -425,11 +432,7 @@ class TestPlan:
                 "batches": [
                     {"tasks": [{"task_key": "t1"}, {"task_key": "t2"}]},
                 ],
-            }),
-        ])
-
-        async def fake_query(prompt, options, *args, **kwargs):
-            return next(responses), 0.0, None
+            }), 0.0, None
 
         with patch("otto.planner.run_agent_query", side_effect=fake_query):
             result = await plan(tasks, {}, tmp_path)
@@ -446,9 +449,7 @@ class TestPlan:
             {"key": "t1", "id": 1, "prompt": "Add auth backend"},
             {"key": "t2", "id": 2, "prompt": "Build profile page on top of auth"},
         ]
-        responses = iter([
-            json.dumps({"candidates": [{"task_a": "t1", "task_b": "t2", "reason": "profile depends on auth"}]}),
-            json.dumps({
+        single_response = json.dumps({
                 "analysis": [
                     {"task_a": "t1", "task_b": "t2", "relationship": "DEPENDENT", "reason": "profile requires auth output"},
                 ],
@@ -457,11 +458,10 @@ class TestPlan:
                     {"tasks": [{"task_key": "t1"}]},
                     {"tasks": [{"task_key": "t2"}]},
                 ],
-            }),
-        ])
+            })
 
         async def fake_query(prompt, options, *args, **kwargs):
-            return next(responses), 0.0, None
+            return single_response, 0.0, None
 
         with patch("otto.planner.run_agent_query", side_effect=fake_query):
             result = await plan(tasks, {}, tmp_path)
@@ -475,9 +475,7 @@ class TestPlan:
             {"key": "t1", "id": 1, "prompt": "Rewrite calculateWindChill with formula A"},
             {"key": "t2", "id": 2, "prompt": "Rewrite calculateWindChill with formula B"},
         ]
-        responses = iter([
-            json.dumps({"candidates": [{"task_a": "t1", "task_b": "t2", "reason": "same function"}]}),
-            json.dumps({
+        single_response = json.dumps({
                 "analysis": [
                     {"task_a": "t1", "task_b": "t2", "relationship": "CONTRADICTORY", "reason": "same function, incompatible goals"},
                 ],
@@ -489,16 +487,16 @@ class TestPlan:
                     }
                 ],
                 "batches": [],
-            }),
-        ])
+            })
 
         async def fake_query(prompt, options, *args, **kwargs):
-            return next(responses), 0.0, None
+            return single_response, 0.0, None
 
         with patch("otto.planner.run_agent_query", side_effect=fake_query):
             result = await plan(tasks, {}, tmp_path)
 
-        assert result.total_tasks == 0
+        # Contradictory tasks still scheduled (in separate batches), not dropped
+        assert result.total_tasks == 2
         assert result.conflicts == [
             {
                 "tasks": ["t1", "t2"],
@@ -515,14 +513,8 @@ class TestPlan:
             {"key": "t3", "id": 3, "prompt": "Use slugify() in user routes"},
             {"key": "t4", "id": 4, "prompt": "Add onboarding page"},
         ]
-        responses = iter([
-            json.dumps({
-                "candidates": [
-                    {"task_a": "t1", "task_b": "t2", "reason": "same file"},
-                    {"task_a": "t1", "task_b": "t3", "reason": "route depends on helper"},
-                ]
-            }),
-            json.dumps({
+        async def fake_query(prompt, options, *args, **kwargs):
+            return json.dumps({
                 "analysis": [
                     {"task_a": "t1", "task_b": "t2", "relationship": "ADDITIVE", "reason": "same file, different functions"},
                     {"task_a": "t1", "task_b": "t3", "relationship": "DEPENDENT", "reason": "routes need helper"},
@@ -533,11 +525,7 @@ class TestPlan:
                     {"tasks": [{"task_key": "t1"}, {"task_key": "t2"}, {"task_key": "t4"}]},
                     {"tasks": [{"task_key": "t3"}]},
                 ],
-            }),
-        ])
-
-        async def fake_query(prompt, options, *args, **kwargs):
-            return next(responses), 0.0, None
+            }), 0.0, None
 
         with patch("otto.planner.run_agent_query", side_effect=fake_query):
             result = await plan(tasks, {}, tmp_path)
@@ -615,9 +603,7 @@ class TestPlan:
             {"key": "t1", "id": 1, "prompt": "Add search page"},
             {"key": "t2", "id": 2, "prompt": "Add auth flow"},
         ]
-        responses = iter([
-            json.dumps({"candidates": [{"task_a": "t1", "task_b": "t2", "reason": "possible dependency"}]}),
-            json.dumps({
+        single_response = json.dumps({
                 "analysis": [
                     {"task_a": "t1", "task_b": "t2", "relationship": "DEPENDENT", "reason": "auth gates the page"},
                 ],
@@ -626,11 +612,10 @@ class TestPlan:
                     {"tasks": [{"task_key": "t1"}]},
                     {"tasks": [{"task_key": "t2"}]},
                 ],
-            }),
-        ])
+            })
 
         async def fake_query(prompt, options, *args, **kwargs):
-            return next(responses), 0.12, None
+            return single_response, 0.12, None
 
         result = None
         with patch("otto.planner.run_agent_query", side_effect=fake_query):
@@ -639,7 +624,7 @@ class TestPlan:
         assert result is not None
         planner_log = (tmp_path / "otto_logs" / "planner.log").read_text()
         assert "task summary sent to LLM" in planner_log
-        assert "shortlist results" in planner_log
+        assert "planner LLM call" in planner_log
         assert "relationship analysis" in planner_log
         assert "final batch structure" in planner_log
 
