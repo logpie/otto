@@ -292,45 +292,43 @@ merge_batch_results()
     │    ├─ Create temp branch from current HEAD
     │    ├─ git merge --no-edit candidate_sha
     │    │
-    │    ├─ Merge succeeds? → proceed to post-merge tests
+    │    ├─ Merge succeeds? → proceed
     │    └─ Merge conflicts? → abort, mark merge_conflict
     │         └─ Queued for re-apply (see 3d below)
     │
-    ├─ Per-task post-merge test (--no-qa mode only)
+    ├─ Per-task post-merge test (--no-qa mode ONLY — sole integration gate)
     │    ├─ run_test_suite() in fresh worktree at new_sha
-    │    ├─ Tests pass? → fast-forward main
     │    └─ Tests fail? → mark post_merge_test_fail, queue for re-apply
     │
     ├─ Fast-forward: git merge --ff-only new_sha
     │
-    └─ Update task: status=merged (batch QA) or passed (per-task), commit_sha, cost
+    └─ Update task: status=merged (batch QA) or passed (per-task)
+
+Post-merge test strategy by mode:
+  PER_TASK (single):  skip — task's test phase already verified this code
+  BATCH (multi-task): skip per-task, one post-batch suite on HEAD (see 3d)
+  SKIP (--no-qa):     keep per-task — it's the only integration gate
 ```
 
-### 3d. Auto-Retry (Merge Conflict Resolution) & Replan
-
-When merge fails, the coding agent re-runs on updated main with intelligent
-feedback. One agent, one path — trust it to self-regulate.
-
-E2e verified: merge conflict retry takes ~56s (vs ~154s original), costs ~$0.15
-(vs ~$0.60 original). Agent reads 3 files, makes targeted edits, adapts to
-sibling task's code. 75% cheaper, 64% faster than original coding.
+### 3d. Post-batch Integration, Auto-Retry & Replan
 
 ```
 After merge phase:
   │
   ├─ merge_conflict?
-  │    └─ coding_loop with "MERGE CONFLICT CONTEXT" feedback:
+  │    └─ _run_task_in_worktree with "MERGE CONFLICT CONTEXT" feedback:
   │         ├─ Full diff from previous implementation
   │         ├─ Files previously changed (diff --stat)
   │         ├─ Strategy: "Read diff → read main → apply with Edit → test"
-  │         ├─ Agent self-regulates: simple → fast, complex → explores more
   │         └─ Replace result in batch_results
   │
-  ├─ post_merge_test_fail?
-  │    └─ coding_loop with test failure feedback:
-  │         ├─ Full diff + "tests FAILED on integrated codebase"
-  │         ├─ Strategy: "Adapt implementation to work with other task"
-  │         └─ Replace result in batch_results
+  ├─ post_merge_test_fail? (--no-qa mode only)
+  │    └─ _run_task_in_worktree with test failure feedback
+  │
+  ├─ Post-batch integration test (BATCH mode, 2+ merged tasks)
+  │    ├─ One deterministic run_test_suite() on integrated HEAD
+  │    ├─ Pass? → proceed to batch QA
+  │    └─ Fail? → HARD GATE: rollback batch, reset all tasks to pending
   │
   ├─ Batch QA (up to max_retries rounds)
   │    ├─ Initial QA on integrated codebase
