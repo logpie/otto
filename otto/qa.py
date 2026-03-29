@@ -195,14 +195,15 @@ def _is_verdict_complete(verdict: dict[str, Any], *, expected_must_count: int = 
     - must_passed is a boolean
     - must_items is a list
     - If must_passed is True and expected_must_count > 0, must_items covers all of them
-    - Not a legacy fallback parse (those lack real evidence)
+    - Legacy fallback: only trusted for fail verdicts (pass requires evidence)
     """
-    if verdict.get("_legacy_parse"):
-        return False
     if not isinstance(verdict.get("must_passed"), bool):
         return False
     must_items = verdict.get("must_items")
     if not isinstance(must_items, list):
+        return False
+    # Legacy parses lack structured evidence — trust fail but not pass
+    if verdict.get("_legacy_parse") and verdict["must_passed"]:
         return False
     # If claiming pass with expected must items, require full coverage
     if verdict["must_passed"] and expected_must_count > 0 and len(must_items) < expected_must_count:
@@ -906,16 +907,19 @@ async def _run_qa_prompt(
             verdict_text = verdict_file.read_text().strip()
             if verdict_text:
                 verdict = json.loads(verdict_text)
-        except (json.JSONDecodeError, OSError):
-            pass
+        except (json.JSONDecodeError, OSError) as parse_err:
+            report_lines.append(f"\n[Verdict file parse error: {parse_err}]")
         finally:
             verdict_file.unlink(missing_ok=True)
     else:
         verdict_file.unlink(missing_ok=True)
 
     if not verdict or not _is_verdict_complete(verdict, expected_must_count=expected_must_count):
+        # Try parsing verdict from agent's text output (agent often repeats it)
         verdict = _parse_qa_verdict_json(raw_report)
-        # Legacy/fallback verdicts claiming pass without evidence are not trustworthy
+        # Legacy/fallback verdicts claiming pass without must_items evidence
+        # are not trustworthy — force fail. But if the raw report contains
+        # valid structured JSON with must_items, trust it.
         if not _is_verdict_complete(verdict, expected_must_count=expected_must_count):
             verdict["must_passed"] = False
 
