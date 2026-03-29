@@ -203,29 +203,18 @@ run_task_v45(task, config, project_dir, task_work_dir=worktree)
 #### Testing Phase Detail
 
 ```
-TESTING
+TESTING (clean disposable worktree — deterministic)
   │
   ├─ skip_test? → skip, proceed to QA
   │
-  ├─ PRE-TEST (working dir sanity check)
-  │    ├─ Run tests locally
-  │    ├─ Extract failing test names
-  │    ├─ Compare against baseline flaky set
-  │    │    ├─ Only baseline failures? → proceed (flaky)
-  │    │    └─ New failures? → reset workspace, retry
-  │    │
-  │    └─ Emit: phase=test, status=running
+  ├─ Create temp worktree at candidate_sha
+  ├─ Install deps
+  ├─ Run test_command (jest/pytest/etc.)
+  ├─ Run custom verify command (if task.verify set)
+  ├─ Write attempt-N-verify.log
   │
-  ├─ FULL TEST (clean disposable worktree)
-  │    ├─ Create temp worktree at candidate_sha
-  │    ├─ Install deps
-  │    ├─ Run test_command (jest/pytest/etc.)
-  │    ├─ Run custom verify command (if task.verify set)
-  │    ├─ Write attempt-N-verify.log
-  │    │
-  │    ├─ Tests pass? → proceed to QA
-  │    ├─ Tests fail locally but pass in worktree? → proceed (env issue)
-  │    └─ Tests fail? → build retry excerpt, retry
+  ├─ Tests pass? → proceed to QA
+  └─ Tests fail? → build retry excerpt, retry
   │
   ├─ CLAIM VERIFICATION (audit-only, non-blocking)
   │    └─ Regex audit: agent log vs test evidence
@@ -520,17 +509,19 @@ Saves ~$2/retry by avoiding prompt cache invalidation.
 
 ---
 
-## 10. Flaky Test Detection
+## 10. Baseline Test Check
 
 ```
-Baseline (run_task_v45 prepare phase, not preflight):
-  Auto-detect test command → run tests → record failing test names as "known flaky set"
-
-Pre-verify (after coding):
-  Run tests → extract failing test names
+Baseline (run_task_v45 prepare phase):
+  Auto-detect test command → run tests in worktree
   │
-  ├─ All failures in flaky set? → proceed (pre-existing)
-  └─ New failures? → retry (agent introduced them)
+  ├─ Tests pass? → record count ("baseline: N tests passing")
+  └─ Tests fail with infra keywords? → EXIT (baseline_fail)
+       (ModuleNotFoundError, command not found, SyntaxError, etc.)
+
+After coding:
+  Full test suite in clean disposable worktree (deterministic)
+  Tests fail? → build retry excerpt, retry
 ```
 
 ---

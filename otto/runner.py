@@ -47,7 +47,6 @@ from otto.tasks import load_tasks, update_task
 from otto.testing import run_test_suite, _subprocess_env
 from otto.claim_verify import verify_claims, format_claim_findings
 from otto.retry_excerpt import build_retry_excerpt
-from otto.flaky import extract_failing_tests, failures_are_baseline_only
 
 
 def _suggest_claude_md(project_dir: Path) -> None:
@@ -804,20 +803,6 @@ def _check_agent_changes(
     no_changes = diff_check.returncode == 0 and not new_untracked
     return no_changes, new_untracked
 
-
-def _run_pre_test(
-    project_dir: Path,
-    test_command: str | None,
-    timeout: int,
-) -> Any | None:
-    """Run pre-test (quick local test) if test_command is set.
-
-    Returns the check result, or None if skipped.
-    """
-    if not test_command:
-        return None
-    from otto.testing import run_local_tests
-    return run_local_tests(project_dir, test_command, timeout)
 
 
 def _run_full_test_suite(
@@ -1576,12 +1561,9 @@ async def run_task_v45(
 
         # Baseline test check
         baseline_detail = ""
-        baseline_failures: set[str] = set()
         if test_command:
             from otto.testing import run_local_tests
             baseline = run_local_tests(task_work_dir, test_command, test_timeout)
-            if baseline.output:
-                baseline_failures = extract_failing_tests(baseline.output)
             if not baseline.passed and not baseline.skipped:
                 output = baseline.output or ""
                 infra_keywords = [
@@ -1824,28 +1806,9 @@ async def run_task_v45(
                 if detected:
                     test_command = detected
 
-            # PRE-TEST: quick sanity check in the working directory
-            pre_test = None if config.get("skip_test") else _run_pre_test(task_work_dir, test_command, test_timeout)
-            if pre_test and not pre_test.passed and not pre_test.skipped:
-                # Check if failures are only pre-existing (flaky) baseline failures
-                current_failures = extract_failing_tests(pre_test.output or "")
-                if baseline_failures and failures_are_baseline_only(baseline_failures, current_failures):
-                    # Only flaky/baseline failures — proceed instead of retrying
-                    pass
-                else:
-                    emit("phase", name="coding", status="fail", time_s=coding_elapsed,
-                         error="tests fail in working dir", cost=attempt_cost)
-                    last_error = build_retry_excerpt(pre_test.output or "tests failed locally")
-                    last_error_source = "test"
-                    subprocess.run(
-                        ["git", "reset", "--mixed", base_sha],
-                        cwd=task_work_dir, capture_output=True,
-                    )
-                    continue
-
-            # TEST — clean worktree, deterministic
+            # TEST — clean disposable worktree, deterministic
             if config.get("skip_test"):
-                from otto.testing import TierResult, TestSuiteResult
+                from otto.testing import TestSuiteResult
                 emit("phase", name="test", status="done", time_s=0,
                      detail="skipped (skip_test)")
                 test_result = TestSuiteResult(passed=True, tiers=[], failure_output=None)
@@ -1860,25 +1823,18 @@ async def run_task_v45(
             phase_timings["test"] = phase_timings.get("test", 0) + test_elapsed
 
             if not test_result.passed:
-                if test_command and pre_test and pre_test.passed:
-                    # Tests pass locally but fail in cold worktree — trust local
-                    emit("phase", name="test", status="done", time_s=test_elapsed,
-                         detail=test_detail)
-                    # Fall through to the test-passed path below
-                else:
-                    emit("phase", name="test", status="fail", time_s=test_elapsed,
-                         error=(test_result.failure_output or "")[:80], detail=test_detail)
-                    subprocess.run(
-                        ["git", "reset", "--mixed", base_sha],
-                        cwd=task_work_dir, capture_output=True,
-                    )
-                    last_error = build_retry_excerpt(test_result.failure_output or "")
-                    last_error_source = "test"
-                    continue
+                emit("phase", name="test", status="fail", time_s=test_elapsed,
+                     error=(test_result.failure_output or "")[:80], detail=test_detail)
+                subprocess.run(
+                    ["git", "reset", "--mixed", base_sha],
+                    cwd=task_work_dir, capture_output=True,
+                )
+                last_error = build_retry_excerpt(test_result.failure_output or "")
+                last_error_source = "test"
+                continue
 
-            if test_result.passed:
-                emit("phase", name="test", status="done", time_s=test_elapsed,
-                     detail=test_detail)
+            emit("phase", name="test", status="done", time_s=test_elapsed,
+                 detail=test_detail)
 
             # ANCHOR verified candidate as durable git ref
             ref_name = _anchor_candidate_ref(task_work_dir, key, attempt_num, candidate_sha)
