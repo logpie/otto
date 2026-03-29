@@ -163,6 +163,9 @@ run_task_v45(task, config, project_dir, task_work_dir=worktree)
   ║    │  attempt 1+: + spec   ║    ║                                ║
   ║    │    + failure excerpt   ║    ║  Runs in background thread     ║
   ║    │    + learnings         ║    ║  Available by attempt 2        ║
+  ║    │                       ║    ║                                ║
+  ║    │  ◄ spec feeds into ◄──╫────║  → coding prompt (attempt 1+)  ║
+  ║    │                       ║    ║  → QA tier + acceptance criteria║
   ║    │                       ║    ╚════════════════════════════════╝
   ║    ├─ Run coding agent     ║
   ║    │  (CC, bypassPerms,    ║
@@ -184,7 +187,7 @@ run_task_v45(task, config, project_dir, task_work_dir=worktree)
   ║    │     attempt-{N}       ║
   ║    │                       ║
   ║    ├─────────────────────► TESTING
-  ║    ├─────────────────────► QA
+  ║    ├─────────────────────► QA (awaits spec from background thread)
   ║    │                       ║
   ║    ├─ All passed?          ║
   ║    │  └─ Break (success)   ║
