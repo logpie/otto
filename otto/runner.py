@@ -538,11 +538,22 @@ def _persist_qa_results(
     log_dir: Path,
     qa_report: str,
     verdict: dict,
+    attempt_num: int = 0,
 ) -> None:
-    """Persist QA report and verdict JSON to the task log directory."""
+    """Persist QA report and verdict JSON to the task log directory.
+
+    When attempt_num > 0, writes per-attempt files AND overwrites the latest
+    versions so both historical and current views are available.
+    """
+    # Always write the "latest" file (for tools that read qa-report.md)
     _write_log_safe(log_dir, "qa-report.md", qa_report or "No QA output")
     if verdict:
         _write_log_safe(log_dir, "qa-verdict.json", json.dumps(verdict, indent=2))
+    # Also write per-attempt copies if attempt > 1 (preserve retry history)
+    if attempt_num > 1:
+        _write_log_safe(log_dir, f"attempt-{attempt_num}-qa-report.md", qa_report or "No QA output")
+        if verdict:
+            _write_log_safe(log_dir, f"attempt-{attempt_num}-qa-verdict.json", json.dumps(verdict, indent=2))
 
 
 def _normalize_criterion_text(text: str) -> str:
@@ -1077,7 +1088,7 @@ async def _run_qa(
     _emit_qa_item_results(emit, verdict, qa_spec)
 
     # Persist the final QA report, including retried runs.
-    _persist_qa_results(log_dir, qa_report, verdict)
+    _persist_qa_results(log_dir, qa_report, verdict, attempt_num=attempt)
 
     failed_musts = [
         item for item in verdict.get("must_items", [])

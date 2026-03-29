@@ -769,14 +769,20 @@ async def _run_qa_prompt(
     qa_cost = 0.0
     qa_actions: list[dict] = []
     pending_tool_uses: dict[str, dict] = {}
+    _qa_start_time = time.monotonic()
+    _first_message_time: float | None = None
+    _turn_count = 0
 
     from otto.display import build_agent_tool_event as _build_agent_tool_event
 
     try:
         async def _run_query():
-            nonlocal qa_cost
+            nonlocal qa_cost, _first_message_time, _turn_count
             result_msg = None
             async for message in query(prompt=qa_prompt, options=qa_opts):
+                _turn_count += 1
+                if _first_message_time is None:
+                    _first_message_time = time.monotonic()
                 if isinstance(message, ResultMessage):
                     result_msg = message
                 elif hasattr(message, "session_id") and hasattr(message, "is_error"):
@@ -804,12 +810,14 @@ async def _run_qa_prompt(
                         elif ToolUseBlock and isinstance(block, ToolUseBlock):
                             tool_id = getattr(block, "id", None)
                             inp = block.input or {}
+                            _tool_ts = round(time.monotonic() - _qa_start_time, 1)
                             if block.name == "Bash":
                                 action = {
                                     "type": "bash",
                                     "command": inp.get("command", ""),
                                     "output": "",
                                     "is_error": False,
+                                    "elapsed_s": _tool_ts,
                                 }
                                 qa_actions.append(action)
                                 if tool_id:
@@ -822,6 +830,7 @@ async def _run_qa_prompt(
                                     "detail": inp.get("url", "") or inp.get("selector", "") or inp.get("function", ""),
                                     "input": json.dumps(inp) if inp else "",
                                     "output": "",
+                                    "elapsed_s": _tool_ts,
                                 }
                                 if mcp_action == "take_screenshot":
                                     action["path"] = inp.get("path", "")
@@ -922,28 +931,39 @@ async def _run_qa_prompt(
         if not _is_verdict_complete(verdict, expected_must_count=expected_must_count):
             verdict["must_passed"] = False
 
-    # Write QA agent log for debugging (what tools were called, what the agent said)
+    # Write QA agent log with timestamps for debugging
+    _qa_total_time = round(time.monotonic() - _qa_start_time, 1)
+    _qa_init_time = round((_first_message_time or time.monotonic()) - _qa_start_time, 1)
     if log_dir:
         try:
             log_dir.mkdir(parents=True, exist_ok=True)
-            log_lines = []
+            log_lines = [
+                f"{'=' * 60}",
+                f"QA RUN  tier={expected_must_count}  {time.strftime('%Y-%m-%d %H:%M:%S')}",
+                f"SDK init: {_qa_init_time}s  total: {_qa_total_time}s  turns: {_turn_count}  cost: ${qa_cost:.2f}",
+                f"{'=' * 60}",
+            ]
             for action in qa_actions:
                 atype = action.get("type", "unknown")
+                ts = action.get("elapsed_s", 0)
+                ts_str = f"[{ts:6.1f}s]"
                 if atype == "bash":
                     cmd = action.get("command", "")[:120]
                     output = action.get("output", "")[:200]
-                    log_lines.append(f"● Bash  {cmd}")
+                    log_lines.append(f"{ts_str} ● Bash  {cmd}")
                     if output:
-                        log_lines.append(f"  → {output}")
+                        log_lines.append(f"         → {output}")
                 elif atype == "browser":
-                    log_lines.append(f"● Browser:{action.get('action', '')}  {action.get('detail', '')[:80]}")
+                    log_lines.append(f"{ts_str} ● Browser:{action.get('action', '')}  {action.get('detail', '')[:80]}")
                 else:
-                    log_lines.append(f"● {atype}  {action.get('detail', '')[:80]}")
+                    log_lines.append(f"{ts_str} ● {atype}  {action.get('detail', '')[:80]}")
             if report_lines:
                 log_lines.append("")
-                log_lines.extend(report_lines[-10:])  # last 10 lines of agent text
-            log_lines.append(f"\nCost: ${qa_cost:.2f}")
-            (log_dir / "qa-agent.log").write_text("\n".join(log_lines))
+                log_lines.extend(report_lines[-10:])
+            log_lines.append(f"\nCost: ${qa_cost:.2f}  Time: {_qa_total_time}s (init: {_qa_init_time}s)")
+            # Append (not overwrite) so retries are preserved
+            from otto.observability import append_text_log
+            append_text_log(log_dir / "qa-agent.log", log_lines + [""])
         except Exception:
             pass
 
