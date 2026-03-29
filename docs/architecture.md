@@ -81,7 +81,7 @@ preflight_checks()  — read-only validation first, no mutations
 ```
 plan(pending_tasks)
   │
-  ├─ Single task? → default_plan() (no LLM, instant)
+  ├─ Single task? → instant (no LLM needed)
   │
   └─ Multiple tasks? → single LLM call (effort=high)
        │
@@ -96,13 +96,13 @@ plan(pending_tasks)
        ├─ Missing tasks auto-added as serial batches (safety net)
        ├─ Returns ExecutionPlan { batches, analysis, conflicts }
        │
-       └─ Parse fails? → fallback to default_plan()
+       └─ Parse fails? → fallback to serial_plan()
 
 Validation: _normalize_plan enforces dependency constraints
-  └─ Invalid coverage? → fallback to default_plan()
+  └─ Invalid coverage? → fallback to serial_plan()
 ```
 
-**Key files:** `planner.py:plan()`, `planner.py:default_plan()`
+**Key files:** `planner.py:plan()`, `planner.py:serial_plan()`
 
 ---
 
