@@ -21,11 +21,13 @@ otto run
   │     ├─ For each batch:
   │     │     │
   │     │     ├─ PARALLEL (max_parallel > 1, batch_size > 1)
-  │     │     │    Each task → own git worktree → code + test (no QA)
+  │     │     │    Each task → own git worktree → code + test
+  │     │     │    Per-task QA deferred to batch QA phase
   │     │     │    Then → serial merge phase
   │     │     │
   │     │     └─ SERIAL (max_parallel = 1 or single task)
-  │     │          Each task → otto/{key} branch → code + test (no QA)
+  │     │          Each task → otto/{key} branch → code + test
+  │     │          Per-task QA runs inline (unless batch QA mode)
   │     │
   │     ├─ Merge conflicts:
   │     │    1. git merge (handles most cases)
@@ -128,7 +130,7 @@ For each batch in plan:
   │    │    │
   │    │    └─ Return list[TaskResult]
   │    │
-  │    └─ Then → merge_parallel_results() (see section 3c)
+  │    └─ Then → merge_parallel_results() (see 3c, also used in batch QA serial)
   │
   └─ NO → Serial execution
        └─ For each task sequentially:
@@ -161,7 +163,7 @@ run_task_v45(task, config, project_dir, task_work_dir)
   ╔══════╧═════════════════════╗    ╔═══════════════╧═══════════════╗
   ║  CODING (attempt loop)     ║    ║  SPEC GENERATION (if enabled)  ║
   ╠════════════════════════════╣    ╠════════════════════════════════╣
-  ║                            ║    ║  Sonnet agent generates:       ║
+  ║                            ║    ║  CC agent generates:           ║
   ║  for attempt in max_retries║    ║  ├─ [must] gating criteria     ║
   ║    │                       ║    ║  ├─ [must ◈] visual/subjective ║
   ║    ├─ Build prompt:        ║    ║  ├─ [should] advisory          ║
@@ -273,8 +275,9 @@ QA
   │    └─ Write verdict JSON to output file
   │
   ├─ Parse verdict:
-  │    ├─ Structured JSON? → use directly
-  │    └─ Fallback: regex for "VERDICT: PASS/FAIL"
+  │    ├─ Structured JSON? → validate schema (must_passed + must_items)
+  │    │    └─ Incomplete? → force must_passed=False
+  │    └─ Fallback: regex for "VERDICT: PASS/FAIL" (forced fail if no evidence)
   │
   ├─ Infrastructure error? → sleep 5s, retry once
   │
