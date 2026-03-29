@@ -140,8 +140,10 @@ Otto is infrastructure, not intelligence. The intelligence is Claude's. Otto pro
     │  4. Batch QA (one session, combined specs)              │
     │     Verify ALL [must] items on integrated codebase      │
     │     Generate cross-task integration tests               │
-    │     Run full test suite as regression check             │
-    │     If [must] fails → retry task → targeted re-QA       │
+    │     If [must] fails → retry (up to max_retries rounds)  │
+    │     Each round: re-code → re-merge → re-QA             │
+    │     Still failing? → rollback batch, continue run       │
+    │     Smart replan re-schedules rolled-back tasks         │
     │                                                         │
     │  5. Pass → proof report with commit SHA                 │
     │     Fail → retry with failure excerpt                   │

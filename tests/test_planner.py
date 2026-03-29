@@ -640,8 +640,8 @@ class TestReplan:
         assert result.is_empty
 
     @pytest.mark.asyncio
-    async def test_fallback_on_import_error(self, tmp_path):
-        """Should return remaining_plan when SDK not available."""
+    async def test_fallback_on_llm_error(self, tmp_path):
+        """Should fall back to serial remaining plan when LLM call fails."""
         from otto.context import PipelineContext, TaskResult
         ctx = PipelineContext()
         ctx.add_failure(TaskResult(task_key="t1", success=False, error="tests failed"))
@@ -650,13 +650,7 @@ class TestReplan:
             Batch(tasks=[TaskPlan(task_key="t2")]),
         ])
 
-        import builtins
-        original_import = builtins.__import__
-        def mock_import(name, *args, **kwargs):
-            if name == "claude_agent_sdk":
-                raise ImportError("no SDK")
-            return original_import(name, *args, **kwargs)
-        with patch("builtins.__import__", side_effect=mock_import):
+        with patch("otto.planner._run_planner_prompt", side_effect=RuntimeError("SDK unavailable")):
             result = await replan(ctx, remaining, {}, tmp_path)
 
         assert result.total_tasks == 1

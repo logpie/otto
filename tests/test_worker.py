@@ -436,7 +436,8 @@ async def test_run_task_uses_agent_written_verify_sh(tmp_path):
         yield mock_result
 
     with patch("worker.query", side_effect=mock_query), \
-         patch("worker.run_verify", return_value=(True, "ok")):
+         patch("worker.run_verify", return_value=(True, "ok")), \
+         patch("worker.generate_verify_script", return_value="echo ok"):
         result = await run_task(task, tmp_path, max_retries=3)
 
     assert result["status"] == "completed"

@@ -704,6 +704,7 @@ class TestRunPerIntegration:
 
         config = self._make_config(tmp_git_repo)
         config["max_parallel"] = 1
+        config["max_retries"] = 0  # no retries within a batch — just fail and continue
         execution_plan = ExecutionPlan(batches=[
             Batch(tasks=[TaskPlan(task_key="task-one"), TaskPlan(task_key="task-two")]),
         ])
@@ -719,67 +720,68 @@ class TestRunPerIntegration:
                 update_task(task_file, result.task_key, status="merged")
             return results
 
+        qa_fail_task_one = {
+            "must_passed": False,
+            "verdict": {
+                "must_items": [
+                    {
+                        "task_key": "task-one",
+                        "spec_id": 1,
+                        "criterion": "returns widget",
+                        "status": "fail",
+                        "evidence": "broken response shape",
+                        "proof": ["pytest tests/test_widget.py::test_widget"],
+                    },
+                ],
+                "integration_findings": [],
+                "regressions": [],
+                "test_suite_passed": True,
+            },
+            "raw_report": "batch QA failed",
+            "failed_task_keys": ["task-one"],
+            "cost_usd": 0.0,
+        }
+        qa_pass = {
+            "must_passed": True,
+            "verdict": {"must_items": [], "integration_findings": [], "regressions": [], "test_suite_passed": True},
+            "raw_report": "batch QA passed",
+            "cost_usd": 0.0,
+        }
+        # max_retries=0: no retry rounds. Batch 1 QA fails → rollback → continue.
+        # Batch 2 (task-two only, task-one failed permanently) → QA passes.
         batch_qa_mock = AsyncMock(side_effect=[
-            {
-                "must_passed": False,
-                "verdict": {
-                    "must_items": [
-                        {
-                            "task_key": "task-one",
-                            "spec_id": 1,
-                            "criterion": "returns widget",
-                            "status": "fail",
-                            "evidence": "broken response shape",
-                            "proof": ["pytest tests/test_widget.py::test_widget"],
-                        },
-                    ],
-                    "integration_findings": [],
-                    "regressions": [],
-                    "test_suite_passed": True,
-                },
-                "raw_report": "initial batch QA failed",
-                "failed_task_keys": ["task-one"],
-                "cost_usd": 0.0,
-            },
-            {
-                "must_passed": False,
-                "verdict": {
-                    "must_items": [
-                        {
-                            "task_key": "task-one",
-                            "spec_id": 1,
-                            "criterion": "returns widget",
-                            "status": "fail",
-                            "evidence": "still broken",
-                            "proof": ["pytest tests/test_widget.py::test_widget"],
-                        },
-                    ],
-                    "integration_findings": [],
-                    "regressions": [],
-                    "test_suite_passed": True,
-                },
-                "raw_report": "retry batch QA still failed",
-                "failed_task_keys": ["task-one"],
-                "cost_usd": 0.0,
-            },
+            qa_fail_task_one,  # batch 1 initial QA (fails, no retries)
+            qa_pass,           # batch 2 (task-two only) QA passes
+        ])
+
+        # Replan returns task-two (the rolled-back task) in a new batch
+        replan_result = ExecutionPlan(batches=[
+            Batch(tasks=[TaskPlan(task_key="task-two")]),
         ])
 
         with patch("otto.orchestrator.plan", AsyncMock(return_value=execution_plan)):
-            with patch("otto.orchestrator.coding_loop", side_effect=fake_coding_loop):
-                with patch("otto.orchestrator.merge_parallel_results", side_effect=fake_merge_parallel_results):
-                    with patch("otto.orchestrator._run_batch_qa", batch_qa_mock):
-                        with patch("otto.orchestrator._rollback_main_to_sha", return_value=True) as rollback_mock:
-                            exit_code = await run_per(config, tasks_path, tmp_git_repo)
+            with patch("otto.orchestrator.replan", AsyncMock(return_value=replan_result)):
+                with patch("otto.orchestrator.coding_loop", side_effect=fake_coding_loop):
+                    with patch("otto.orchestrator.merge_parallel_results", side_effect=fake_merge_parallel_results):
+                        with patch("otto.orchestrator._run_batch_qa", batch_qa_mock):
+                            with patch("otto.orchestrator._rollback_main_to_sha", return_value=True) as rollback_mock:
+                                exit_code = await run_per(config, tasks_path, tmp_git_repo)
 
         assert exit_code == 1
-        assert call_counts == {"task-one": 2, "task-two": 1}
+        # task-one: initial coding only (max_retries=0, no batch retry)
+        # task-two: initial coding in batch 1, then re-coding in replanned batch 2
+        assert call_counts["task-one"] == 1
+        assert call_counts["task-two"] == 2
+        # 2 batch QA calls: batch 1 (fail) + replanned batch 2 (pass)
         assert batch_qa_mock.await_count == 2
+        # Rollback called once for batch 1 failure
         rollback_mock.assert_called_once()
         persisted = {task["key"]: task for task in load_tasks(tasks_path)}
+        # task-one permanently failed after batch QA rejection
         assert persisted["task-one"]["status"] == "failed"
         assert persisted["task-one"]["error_code"] == "batch_qa_failed"
-        assert persisted["task-two"]["status"] == "pending"
-        assert persisted["task-two"].get("error_code") is None
+        # task-two was rolled back from batch 1, then passed in replanned batch 2
+        assert persisted["task-two"]["status"] == "passed"
 
     @pytest.mark.asyncio
     async def test_batch_qa_infrastructure_error_rolls_back_without_failing_tasks(self, tmp_git_repo):

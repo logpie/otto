@@ -865,11 +865,20 @@ async def replan(
     remaining_plan: ExecutionPlan,
     config: dict[str, Any],
     project_dir: Path,
+    *,
+    failed_keys: set[str] | None = None,
+    rolled_back_keys: set[str] | None = None,
+    pending_by_key: dict[str, Any] | None = None,
 ) -> ExecutionPlan:
-    """Replan remaining batches while preserving conflict metadata."""
+    """Replan remaining batches using dependency analysis and failure context."""
     if remaining_plan.is_empty:
         return remaining_plan
 
+    failed_keys = failed_keys or set()
+    rolled_back_keys = rolled_back_keys or set()
+    pending_by_key = pending_by_key or {}
+
+    # Completed task summaries
     results_summary: list[str] = []
     for key, result in context.results.items():
         if result.success:
@@ -882,26 +891,81 @@ async def replan(
                 parts.append(f"  qa: {result.qa_report[:400]}")
             results_summary.append("\n".join(parts))
 
+    # Remaining tasks with prompts for context
+    remaining_tasks: list[str] = []
+    for batch in remaining_plan.batches:
+        for task_plan in batch.tasks:
+            key = task_plan.task_key
+            task = pending_by_key.get(key, {})
+            prompt_text = task.get("prompt", "(unknown)")
+            status = "ROLLED_BACK" if key in rolled_back_keys else "PENDING"
+            remaining_tasks.append(f"- key={key} status={status} prompt={prompt_text!r}")
+
+    # Original dependency analysis (from smart planner)
+    analysis_lines: list[str] = []
+    for item in remaining_plan.analysis:
+        analysis_lines.append(
+            f"- {item.get('task_a')} ↔ {item.get('task_b')}: "
+            f"{item.get('relationship', 'UNKNOWN')} — {item.get('reason', '')}"
+        )
+
+    # Dependencies on failed tasks
+    failed_deps: list[str] = []
+    if failed_keys:
+        for item in context.results.get("_all_analysis", []) if hasattr(context, "_all_analysis") else []:
+            pass  # handled below
+        # Check original plan analysis for deps on failed tasks
+        for item in (remaining_plan.analysis or []):
+            a, b = item.get("task_a", ""), item.get("task_b", "")
+            rel = item.get("relationship", "")
+            if rel == "DEPENDENT":
+                if a in failed_keys:
+                    failed_deps.append(f"- {b} depends on {a} (FAILED)")
+                elif b in failed_keys:
+                    failed_deps.append(f"- {a} depends on {b} (FAILED)")
+
     learnings_str = "\n".join(f"- [{item.source}] {item.text}" for item in context.learnings) if context.learnings else "None"
-    remaining_tasks = [
-        f"- key={task_plan.task_key} strategy={task_plan.strategy}"
-        for batch in remaining_plan.batches
-        for task_plan in batch.tasks
-    ]
 
-    prompt = f"""You are replanning remaining autonomous coding tasks.
+    prompt = f"""You are replanning remaining autonomous coding tasks after batch failures.
 
-Keep the task set exactly the same. Adjust batch order or strategies only if the completed results require it.
-Return JSON only with batches/learnings. Preserve any existing conflict handling outside this response.
+CONTEXT:
+- Some tasks FAILED permanently (QA rejected after retries). Their changes are NOT on main.
+- Some tasks were ROLLED_BACK (innocent bystanders — they passed coding+tests but were in the same batch as a failed task). They need to be re-run.
+- Remaining tasks from later batches are PENDING (not yet started).
 
-Completed results:
+FAILED TASKS (changes NOT on main):
+{chr(10).join(f"- {k}" for k in sorted(failed_keys)) or "None"}
+
+DEPENDENCY ANALYSIS (from original plan):
+{chr(10).join(analysis_lines) or "No pairwise analysis available"}
+
+DEPENDENCIES ON FAILED TASKS:
+{chr(10).join(failed_deps) or "None — no remaining tasks depend on failed tasks"}
+
+RULES:
+1. EVERY remaining task key MUST appear in exactly one batch (never drop tasks).
+2. Tasks that DEPEND on a failed task should be placed in a late batch with a note — they may fail but should still attempt.
+3. ROLLED_BACK tasks are safe to run — they passed before and just need re-execution.
+4. INDEPENDENT tasks can run in parallel within a batch.
+5. ADDITIVE tasks (same files) should be serialized.
+6. Keep batch count minimal — don't over-fragment.
+
+COMPLETED RESULTS:
 {chr(10).join(results_summary) or "None"}
 
-Learnings:
+LEARNINGS:
 {learnings_str}
 
-Remaining tasks:
+REMAINING TASKS:
 {chr(10).join(remaining_tasks)}
+
+Return JSON only:
+{{
+  "batches": [
+    {{"tasks": [{{"task_key": "key", "strategy": "direct"}}]}}
+  ],
+  "learnings": ["any new learnings from the failure pattern"]
+}}
 """
     try:
         _planner_log(
@@ -923,7 +987,7 @@ Remaining tasks:
         replanned = parse_plan_json(raw_output)
         if replanned is None or replanned.is_empty:
             raise ValueError("replan parse failed")
-        remaining_tasks = [
+        normalize_input = [
             {"key": task_plan.task_key}
             for batch in remaining_plan.batches
             for task_plan in batch.tasks
@@ -935,7 +999,7 @@ Remaining tasks:
                 conflicts=list(remaining_plan.conflicts),
                 analysis=list(remaining_plan.analysis),
             ),
-            remaining_tasks,
+            normalize_input,
         )
         _planner_log(
             project_dir,

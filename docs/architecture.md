@@ -35,10 +35,15 @@ otto run
   │     ├─ Batch QA (one session, combined specs from all tasks)
   │     │    Verify ALL [must] items on integrated codebase
   │     │    Generate cross-task integration tests
-  │     │    If [must] fails → retry task → targeted re-QA
-  │     │    If batch QA rejects → rollback main to pre-batch state
+  │     │    If [must] fails → retry failed tasks (up to max_retries rounds)
+  │     │    Each round: re-code → re-merge → re-QA
+  │     │    If still failing after max_retries → rollback batch, continue run
+  │     │    (only infrastructure errors abort the entire run)
   │     │
-  │     └─ Replan remaining batches if failures occurred
+  │     └─ Smart replan if failures occurred
+  │          Uses dependency analysis + failure context
+  │          Rolled-back tasks re-scheduled in later batches
+  │          Tasks depending on permanently failed tasks flagged
   │
   └─ 4. Summary + exit
 ```
@@ -333,15 +338,26 @@ After merge phase:
   │         ├─ Strategy: "Adapt implementation to work with other task"
   │         └─ Replace result in batch_results
   │
-  ├─ Remove completed batch from plan
+  ├─ Batch QA (up to max_retries rounds)
+  │    ├─ Initial QA on integrated codebase
+  │    ├─ If [must] fails → re-code failed tasks → re-merge → re-QA
+  │    ├─ Repeat up to max_retries rounds
+  │    └─ After max_retries: rollback batch, mark failed tasks,
+  │         reset rolled-back (innocent) tasks to pending
+  │         Continue run (don't abort remaining batches)
+  │
+  ├─ Remove completed/failed tasks from plan
+  │    (rolled-back tasks stay in plan for replan)
   │
   └─ Any failures AND remaining batches?
        │
-       └─ replan(context, remaining_plan)
-            ├─ Send to Sonnet: results, learnings, failures
-            ├─ Sonnet may: reorder tasks, change strategy
-            │    (e.g., "research_first" for failed domain)
-            └─ Falls back to remaining plan if replan fails
+       └─ Smart replan(context, remaining_plan)
+            ├─ Receives: dependency analysis, failed vs rolled-back keys,
+            │    task prompts, completed results
+            ├─ Tasks depending on failed tasks → late batch with warning
+            ├─ Rolled-back tasks → re-scheduled (they passed before)
+            ├─ Independent tasks → can parallelize
+            └─ Falls back to serial remaining plan if replan fails
 ```
 
 ---

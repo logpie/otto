@@ -1014,14 +1014,30 @@ async def run_per(
                             qa_reports_by_task[key] = batch_qa.get("raw_report", "")
 
                         final_batch_qa = batch_qa
-                        qa_failed_keys = set(batch_qa.get("failed_task_keys") or [])
-                        if not batch_qa.get("must_passed") and not batch_qa.get("infrastructure_error"):
+                        max_qa_retries = config.get("max_retries", 3)
+                        for qa_retry_round in range(max_qa_retries):
+                            if context.interrupted:
+                                break
+                            if final_batch_qa.get("must_passed") or final_batch_qa.get("infrastructure_error"):
+                                break
+
+                            qa_failed_keys = set(final_batch_qa.get("failed_task_keys") or [])
                             if not qa_failed_keys:
                                 qa_failed_keys = set(merged_keys)
-                            failure_summary = _summarize_batch_qa_failure(batch_qa)
+                            failure_summary = _summarize_batch_qa_failure(final_batch_qa)
+
+                            console.print(
+                                f"\n  [bold]Batch QA Retry[/bold]  [dim]round {qa_retry_round + 1}/{max_qa_retries}, "
+                                f"{len(qa_failed_keys)} failed task(s)[/dim]"
+                            )
+                            _orchestrator_log(
+                                project_dir,
+                                f"batch QA retry round {qa_retry_round + 1}/{max_qa_retries}: "
+                                f"{len(qa_failed_keys)} failed task(s): {sorted(qa_failed_keys)}",
+                            )
 
                             for fkey in qa_failed_keys:
-                                feedback = _build_batch_qa_feedback(fkey, batch_qa)
+                                feedback = _build_batch_qa_feedback(fkey, final_batch_qa)
                                 try:
                                     update_task(
                                         tasks_file,
@@ -1044,7 +1060,7 @@ async def run_per(
                                 if not task_plan or previous_result is None:
                                     continue
 
-                                feedback = _build_batch_qa_feedback(fkey, batch_qa)
+                                feedback = _build_batch_qa_feedback(fkey, final_batch_qa)
                                 try:
                                     update_task(
                                         tasks_file,
@@ -1106,12 +1122,9 @@ async def run_per(
                                     task for task in persisted_tasks.values()
                                     if task.get("status") == "merged"
                                 ]
-                                console.print(
-                                    f"\n  [bold]Batch QA Retry[/bold]  [dim]{len(retried_merged_keys)} retried task(s)[/dim]"
-                                )
                                 _orchestrator_log(
                                     project_dir,
-                                    f"batch QA: retry triggered for {len(retried_merged_keys)} task(s)",
+                                    f"batch QA re-verify: {len(retried_merged_keys)} retried task(s)",
                                 )
                                 final_batch_qa = await _run_batch_qa(
                                     merged_tasks,
@@ -1195,9 +1208,11 @@ async def run_per(
                                     )
                                 except Exception:
                                     pass
-                            abort_after_batch = True
+                            # Don't abort — continue with remaining batches (best effort).
+                            # Replan will account for failed tasks when scheduling later batches.
                             console.print(
-                                "  [yellow]Batch QA rejected the merged batch; rolled main back to the pre-batch commit[/yellow]"
+                                f"  [yellow]Batch QA rejected after {max_qa_retries} retries; "
+                                f"rolled back batch, continuing with remaining batches[/yellow]"
                             )
                         _orchestrator_log(
                             project_dir,
@@ -1349,9 +1364,27 @@ async def run_per(
             if abort_after_batch:
                 break
 
-            # Remove completed batch and check for replan
-            completed_keys = {r.task_key for r in batch_results}
+            # Remove completed batch — only remove tasks that are truly done
+            # (passed or permanently failed). Rolled-back tasks stay in the plan
+            # so replan can re-schedule them in later batches.
+            completed_keys = {
+                r.task_key for r in batch_results
+                if r.success or r.error_code not in ("batch_qa_rolled_back", "batch_qa_infrastructure_error")
+            }
             execution_plan = execution_plan.remaining_after(completed_keys)
+
+            # Track which tasks failed permanently vs were rolled back
+            batch_failed_keys = {
+                r.task_key for r in batch_results
+                if not r.success and r.error_code not in ("batch_qa_rolled_back", "batch_qa_infrastructure_error")
+            }
+            batch_rolled_back_keys = {
+                r.task_key for r in batch_results
+                if r.error_code in ("batch_qa_rolled_back", "batch_qa_infrastructure_error")
+            }
+            all_failed_keys = {
+                key for key, result in context.results.items() if not result.success
+            }
 
             if not execution_plan.is_empty and batch_failed > 0 and not context.interrupted:
                 # Replan with accumulated context
@@ -1363,7 +1396,12 @@ async def run_per(
                     for task_plan in remaining_batch.tasks
                     if task_plan.task_key in pending_by_key
                 ]
-                replanned = await replan(context, remaining_plan, config, project_dir)
+                replanned = await replan(
+                    context, remaining_plan, config, project_dir,
+                    failed_keys=all_failed_keys,
+                    rolled_back_keys=batch_rolled_back_keys,
+                    pending_by_key=pending_by_key,
+                )
                 if _plan_covers_pending(replanned, remaining_pending):
                     execution_plan = replanned
                     _orchestrator_log(

@@ -930,7 +930,7 @@ class TestRunTaskV45:
         }
 
         with patch("otto.runner._snapshot_untracked", return_value={"keep.me"}):
-            with patch("otto.runner.detect_test_command", side_effect=RuntimeError("boom")):
+            with patch("otto.runner._run_coding_agent", side_effect=RuntimeError("boom")):
                 with patch("otto.runner._cleanup_task_failure") as cleanup_mock:
                     result = await run_task_v45(task, config, tmp_git_repo, tasks_path)
 
