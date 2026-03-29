@@ -169,6 +169,20 @@ Rules:
   Don't promote ambiguous preferences to hard constraints.
   Don't invent product decisions.
 
+Think about who uses this code:
+- For CLI/UI tasks, the user is a human — spec the commands and visible output.
+- For library/module/data-layer tasks, the user is calling code — spec the
+  programmatic API: what parameters are accepted, what shape is returned,
+  what errors are raised on bad input.
+- For multi-layer tasks (data + API + CLI), spec each layer's contract.
+
+Think about what inputs will be tried:
+- Consider boundary values: zero, empty, negative, maximum.
+- If the task involves numeric parameters, what happens at zero?
+- If it involves collections, what happens when empty?
+- These only need [must] items when the behavior is non-obvious or
+  the task specifically mentions constraints.
+
 Output format — one item per line:
   [must] rate-limited requests return HTTP 429
   [must] response completes within 200ms p95
