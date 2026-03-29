@@ -77,7 +77,7 @@ run_per() entry point:
        └─ Return (exit_code, pending_tasks)
 ```
 
-**Key files:** `runner.py:preflight_checks()`, `git_ops.py:check_clean_tree()`
+**Key files:** `orchestrator.py:run_per()` (lock, worktree cleanup), `runner.py:preflight_checks()`, `git_ops.py:check_clean_tree()`
 
 ---
 
@@ -152,7 +152,7 @@ run_task_v45(task, config, project_dir, task_work_dir)
   ║  ├─ Create log dir: otto_logs/{key}/                 ║
   ║  ├─ Snapshot pre-existing untracked files             ║
   ║  ├─ Run baseline tests                                ║
-  ║  │    └─ Baseline fails? → EXIT (error_code=BASELINE) ║
+  ║  │    └─ Baseline fails? → EXIT (error_code=baseline_fail) ║
   ║  ├─ Record baseline test count + flaky test names     ║
   ║  └─ Emit: phase=prepare, status=done                  ║
   ╚══════════════════════════════════════════════════════╝
@@ -324,7 +324,7 @@ merge_parallel_results()
     │
     ├─ Fast-forward: git merge --ff-only new_sha
     │
-    └─ Update task: status=passed, commit_sha, cost
+    └─ Update task: status=merged (batch QA) or passed (per-task), commit_sha, cost
 ```
 
 ### 3d. Auto-Retry (Merge Conflict Resolution) & Replan
@@ -390,7 +390,7 @@ After merge phase:
                              │                                      │
               ┌──────────────┼──────────────┐                       │
               │              │               │                       │
-       (parallel)      (serial)        (all modes)                  │
+  (parallel/batch QA)  (serial per-task)  (all modes)                │
               │              │               │                       │
        ┌──────▼──────┐      │         ┌─────▼──────┐               │
        │  verified    │      │         │  failed     │               │
