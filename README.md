@@ -126,7 +126,7 @@ Otto is infrastructure, not intelligence. The intelligence is Claude's. Otto pro
     │     Analyzes task relationships:                        │
     │     INDEPENDENT → parallel  DEPENDENT → serialize       │
     │     ADDITIVE (same file) → serialize                    │
-    │     CONTRADICTORY → flag to user, skip coding           │
+    │     CONTRADICTORY → flag + separate batches (never drop) │
     │                                                         │
     │  2. Per-task pipeline (parallel worktrees):             │
     │     Coding Agent → Tests → Verify (no QA yet)           │
@@ -158,7 +158,7 @@ Tasks: [A: add search] [B: add dark mode] [C: add search filters] [D: rewrite se
   Planner analysis:
   ├─ A ↔ B: INDEPENDENT → parallel batch
   ├─ A ↔ C: DEPENDENT (C needs A) → C in later batch
-  ├─ A ↔ D: CONTRADICTORY → flag to user, skip both
+  ├─ A ↔ D: CONTRADICTORY → flag + schedule in separate batches
   └─ B ↔ C: INDEPENDENT → parallel batch
   │
   Plan: Batch 1 [A, B] → Batch 2 [C]

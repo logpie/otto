@@ -8,12 +8,13 @@ This document is the source of truth for otto's execution pipeline. Use it for d
 otto run
   │
   ├─ 1. Preflight (baseline tests, git check, stale task recovery)
-  ├─ 2. Smart Planner (classify task relationships, detect conflicts)
+  ├─ 2. Smart Planner (single LLM call, high effort)
   │     ├─ INDEPENDENT → parallel batch
   │     ├─ ADDITIVE (same file) → serialize
   │     ├─ DEPENDENT → serialize (later batch)
-  │     ├─ CONTRADICTORY → flag to user, skip coding
+  │     ├─ CONTRADICTORY → flag + schedule in separate batches (never drop)
   │     └─ UNCERTAIN → serialize (conservative)
+  │     Missing tasks auto-added as serial batches (safety net)
   │
   ├─ 3. PER Loop (Plan-Execute-Replan)
   │     │
