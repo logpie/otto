@@ -164,8 +164,9 @@ Rules:
   Focus on WHAT the code must do, not every way it could fail.
   The QA agent runs adversarial tests beyond your specs — you don't
   need to anticipate every edge case, just the core requirements.
-  Most tasks need 3-6 items. More than 8 usually means you are
-  splitting or specifying behaviors the QA agent will catch on its own.
+  Scale with task complexity: a bugfix may need 1-2, a full feature
+  may need 8-12. If you're specifying standard behaviors that any
+  competent implementation would include, you're over-specifying.
 - Explore the codebase and research external APIs/libraries/services
   as needed to write accurate, grounded criteria.
 - When the prompt is ambiguous, prefer [should] over [must].
