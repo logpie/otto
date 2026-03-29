@@ -79,12 +79,12 @@ class TestDetermineQaTier:
         diff_info = {"files": ["src/auth_middleware.py"]}
         assert determine_qa_tier({}, spec, 0, diff_info) == 2
 
-    def test_tier2_retry(self):
-        """Retry attempts always get tier 2."""
+    def test_retry_stays_at_tier1(self):
+        """Retry attempts stay at tier 1 — no blanket escalation to tier 2."""
         spec = [{"text": "works", "binding": "must"}]
         diff_info = {"files": ["src/simple.py"]}
         mapping = {"works": "test.py::test"}
-        assert determine_qa_tier({}, spec, 1, diff_info, mapping) == 2
+        assert determine_qa_tier({}, spec, 1, diff_info, mapping) == 1
 
     def test_tier2_spa(self):
         """SPA files (.jsx/.tsx) → tier 2."""

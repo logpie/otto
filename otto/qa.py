@@ -173,8 +173,7 @@ def determine_qa_tier(
     )
     log_lines.append(f"visual specs detected: {'yes' if has_visual else 'no'}")
     log_lines.append(f"spa detection: {'yes' if is_spa else 'no'}")
-    log_lines.append(f"retry escalation: {'yes' if attempt > 0 else 'no'}")
-    if has_visual or is_spa or attempt > 0:
+    if has_visual or is_spa:
         log_lines.append("test mapping: not evaluated (tier 2 already required)")
         log_lines.append("final tier: 2")
         if log_dir:
