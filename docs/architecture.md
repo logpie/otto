@@ -316,7 +316,7 @@ merge_parallel_results()
     │    ├─ run_test_suite() in fresh worktree at new_sha
     │    │
     │    ├─ Tests pass? → fast-forward main
-    │    └─ Tests fail? → revert, mark post_merge_test_fail
+    │    └─ Tests fail? → skip FF (merge stays on temp branch), mark post_merge_test_fail
     │         └─ Queued for re-apply (see 3d below)
     │
     ├─ Fast-forward: git merge --ff-only new_sha
@@ -377,39 +377,44 @@ After merge phase:
 ## 4. Task State Machine
 
 ```
-                           ┌─────────┐
-                           │ pending  │◄─────────────────────────┐
-                           └────┬─────┘                          │
-                                │ run starts                     │
-                           ┌────▼─────┐                          │
-                           │ running   │                          │
-                           └────┬─────┘                          │
-                                │                                │
-                 ┌──────────────┼──────────────┐                 │
-                 │              │               │                 │
-          (parallel)      (serial)        (all modes)            │
-                 │              │               │                 │
-          ┌──────▼──────┐      │         ┌─────▼─────┐          │
-          │  verified    │      │         │  failed    │          │
-          └──────┬──────┘      │         └───────────┘          │
-                 │              │         max_retries             │
-          ┌──────▼──────┐      │         exhausted,              │
-          │merge_pending │      │         timeout,                │
-          └──────┬──────┘      │         baseline fail           │
-                 │              │                                 │
-          ┌──────┼──────┐      │                                 │
-          │             │      │                                 │
-   ┌──────▼──────┐  ┌───▼─────▼───┐                             │
-   │merge_failed  │  │   passed     │                             │
-   └──────┬──────┘  └──────────────┘                             │
-          │          merge succeeded,                             │
-          │          all tests pass                               │
-          │                                                      │
-          └──► auto-retry: re-run coding_loop() ─────────────────┘
-               on updated main with previous
-               diff as feedback (full pipeline:
-               coding + tests + QA, no max_turns,
-               up to max_retries attempts)
+                        ┌──────────┐
+                        │ pending   │◄──────────────────────────────┐
+                        └────┬──────┘                               │
+                             │ run starts                           │
+                        ┌────▼──────┐                               │
+                        │ running    │                               │
+                        └────┬──────┘                               │
+                             │                                      │
+              ┌──────────────┼──────────────┐                       │
+              │              │               │                       │
+       (parallel)      (serial)        (all modes)                  │
+              │              │               │                       │
+       ┌──────▼──────┐      │         ┌─────▼──────┐               │
+       │  verified    │      │         │  failed     │               │
+       └──────┬──────┘      │         └────────────┘               │
+              │              │         max_retries                   │
+       ┌──────▼──────┐      │         exhausted,                    │
+       │merge_pending │      │         timeout,                      │
+       └──────┬──────┘      │         baseline fail                 │
+              │              │                                      │
+       ┌──────┼──────┐      │                                      │
+       │             │      │                                      │
+┌──────▼──────┐  ┌───▼─────▼───┐   ┌────────┐                     │
+│merge_failed  │  │  merged      │   │ passed  │                     │
+└──────┬──────┘  └──────┬───────┘   └────────┘                     │
+       │                │                                           │
+       │         (batch QA mode)                                    │
+       │                ├─ batch QA passes → passed                 │
+       │                ├─ batch QA fails → retry (up to max)       │
+       │                └─ rollback → pending (innocent tasks)      │
+       │                                                            │
+       └──► auto-retry: re-run coding_loop() ───────────────────────┘
+            on updated main with previous
+            diff as feedback (full pipeline)
+
+Planner-derived states (set by _recompute_planner_state):
+  conflict  — planner flagged CONTRADICTORY pair
+  blocked   — depends on a conflicting task
 ```
 
 ---
@@ -420,7 +425,7 @@ After merge phase:
 |-----------|-------|-------------|------|
 | **Planner** | CC default | ~$0.02-0.05 | Once per run (effort=high, multi-task only) |
 | **Replanner** | CC default | ~$0.02-0.05 | After batch failure (with dependency context) |
-| **Spec gen** | Sonnet | ~$0.15-0.30 | Once per task (background thread) |
+| **Spec gen** | CC default | ~$0.15-0.30 | Once per task (background thread) |
 | **Coding agent** | CC default | ~$0.50-1.50 | Per attempt (resumes session) |
 | **QA agent** | CC default | ~$0.30-1.00 | Per attempt (tier-dependent) |
 | **Merge re-apply** | CC default | ~$0.15-0.50 | Coding agent with full diff — adapts intelligently (e2e verified: ~$0.15) |
@@ -488,10 +493,11 @@ qa_timeout: 3600             # QA agent timeout (seconds)
 max_parallel: 1              # 1=serial (default), 2+=parallel worktrees
 install_timeout: 120         # npm ci / pip install timeout in worktrees
 
-# Per-agent setting scopes
-coding_agent_settings: "user,project"  # Reads user + project CLAUDE.md
-spec_agent_settings: "project"         # Project CLAUDE.md only
-qa_agent_settings: "project"           # Project CLAUDE.md only
+# Per-agent setting scopes (which CLAUDE.md files each agent reads)
+coding_agent_settings: "project"           # Project CLAUDE.md only (default)
+spec_agent_settings: "project"             # Project CLAUDE.md only
+qa_agent_settings: "project"               # Project CLAUDE.md only
+planner_agent_settings: "project"          # Project CLAUDE.md only
 
 # Auto-detected (override in otto.yaml if wrong)
 test_command: "npx jest"     # or "pytest", "cargo test", etc.
