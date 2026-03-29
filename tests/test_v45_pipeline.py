@@ -73,61 +73,27 @@ class TestDetermineQaTier:
         mapping = {"works": "test.py::test_works"}
         assert determine_qa_tier({}, spec, 0, diff_info, mapping) == 1
 
-    def test_tier2_high_risk(self):
-        """Files touching auth/crypto/security → tier 2."""
-        spec = [{"text": "login works", "binding": "must"}]
-        diff_info = {"files": ["src/auth_middleware.py"]}
-        assert determine_qa_tier({}, spec, 0, diff_info) == 2
+    def test_unified_tier_always_1(self):
+        """All scenarios return tier 1 — browser available, agent decides per-item."""
+        # High-risk
+        assert determine_qa_tier({}, [{"text": "login", "binding": "must"}], 0,
+                                 {"files": ["src/auth.py"]}) == 1
+        # SPA
+        assert determine_qa_tier({}, [{"text": "renders", "binding": "must"}], 0,
+                                 {"files": ["src/App.tsx"]}) == 1
+        # Visual
+        assert determine_qa_tier({}, [{"text": "UI responsive", "binding": "should"}], 0,
+                                 {"files": ["src/app.py"]}) == 1
+        # Retry
+        assert determine_qa_tier({}, [{"text": "works", "binding": "must"}], 3,
+                                 {"files": ["src/x.py"]}) == 1
 
-    def test_retry_stays_at_tier1(self):
-        """Retry attempts stay at tier 1 — no blanket escalation to tier 2."""
-        spec = [{"text": "works", "binding": "must"}]
-        diff_info = {"files": ["src/simple.py"]}
-        mapping = {"works": "test.py::test"}
-        assert determine_qa_tier({}, spec, 1, diff_info, mapping) == 1
-
-    def test_tier2_spa(self):
-        """SPA files (.jsx/.tsx) → tier 2."""
-        spec = [{"text": "renders", "binding": "must"}]
-        diff_info = {"files": ["src/App.tsx"]}
-        mapping = {"renders": "test.tsx::test"}
-        assert determine_qa_tier({}, spec, 0, diff_info, mapping) == 2
-
-    def test_tier2_visual_should(self):
-        """[should] items with visual keywords → tier 2."""
-        spec = [
-            {"text": "works", "binding": "must"},
-            {"text": "UI layout is responsive", "binding": "should"},
-        ]
-        diff_info = {"files": ["src/app.py"]}
-        mapping = {"works": "test.py::test"}
-        assert determine_qa_tier({}, spec, 0, diff_info, mapping) == 2
-
-    def test_tier2_non_verifiable_must(self):
-        """Non-verifiable [must ◈] items always require tier 2 QA."""
-        spec = [
-            {"text": "button works", "binding": "must", "verifiable": True},
-            {"text": "layout matches mock", "binding": "must", "verifiable": False},
-        ]
-        diff_info = {"files": ["src/app.py"]}
-        mapping = {
-            "button works": "test_app.py::test_button",
-            "layout matches mock": "test_app.py::test_layout",
-        }
-        assert determine_qa_tier({}, spec, 0, diff_info, mapping) == 2
-
-    def test_logs_qa_tier_decision(self, tmp_path):
-        spec = [{"text": "works", "binding": "must"}]
-        diff_info = {"files": ["src/app.py"]}
-        mapping = {"works": "test.py::test_works"}
-
-        tier = determine_qa_tier({"key": "task-qa-log"}, spec, 0, diff_info, mapping, log_dir=tmp_path)
-
+    def test_logs_qa_decision(self, tmp_path):
+        tier = determine_qa_tier({"key": "task-qa-log"}, [{"text": "works", "binding": "must"}],
+                                 0, {"files": ["src/app.py"]}, log_dir=tmp_path)
         assert tier == 1
         qa_tier_log = (tmp_path / "qa-tier.log").read_text()
-        assert "risk patterns: none matched" in qa_tier_log
-        assert "spa detection: no" in qa_tier_log
-        assert "final tier: 1" in qa_tier_log
+        assert "unified" in qa_tier_log
 
 
 class TestFormatSpecV45:

@@ -105,83 +105,18 @@ def determine_qa_tier(
     spec_test_mapping: dict[str, str | None] | None = None,
     log_dir: Path | None = None,
 ) -> int:
-    """Determine QA tier based on residual risk after verification.
+    """Determine QA tier. Currently always returns 1 — single tier with browser
+    always available. The QA agent decides per-spec-item whether to use
+    browser tools based on [must ◈] markers.
 
-    Tier 1: targeted QA (default — every task gets at least this)
-    Tier 2: full QA with browser (visual/SPA, auth/crypto, retries)
+    Returns 1 always. The tier parameter is kept for logging/observability.
     """
-    from otto.tasks import spec_binding, spec_is_verifiable
-
-    diff_files = [str(path) for path in (diff_info.get("files") or [])]
-    spec_test_mapping = spec_test_mapping or {}
     log_lines = [
-        f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] QA tier decision for {task.get('key', 'unknown')}",
+        f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] QA for {task.get('key', 'unknown')}",
         f"attempt: {attempt}",
-        f"changed files: {len(diff_files)}",
+        f"changed files: {len([str(p) for p in (diff_info.get('files') or [])])}",
+        "tier: 1 (unified — browser available, agent decides per-item)",
     ]
-
-    # Tier 2: high-risk domains
-    HIGH_RISK_PATTERNS = ["auth", "crypto", "permission", "migration",
-                          "payment", "security", "token", "session"]
-    matched_risk_patterns = sorted({
-        pattern
-        for f in diff_files
-        for pattern in HIGH_RISK_PATTERNS
-        if pattern in f.lower()
-    })
-    log_lines.append(
-        "risk patterns: "
-        + (", ".join(matched_risk_patterns) if matched_risk_patterns else "none matched")
-    )
-    if matched_risk_patterns:
-        log_lines.append("visual specs: not evaluated (tier 2 already required)")
-        log_lines.append("spa detection: not evaluated (tier 2 already required)")
-        log_lines.append("test mapping: not evaluated (tier 2 already required)")
-        log_lines.append("final tier: 2")
-        if log_dir:
-            append_text_log(log_dir / "qa-tier.log", log_lines + [""])
-        return 2
-
-    # Tier 2: non-verifiable [must] items require browser/subjective QA.
-    non_verifiable_must = any(
-        spec_binding(item) == "must" and not spec_is_verifiable(item)
-        for item in spec
-    )
-    log_lines.append(f"non-verifiable [must]: {'yes' if non_verifiable_must else 'no'}")
-    if non_verifiable_must:
-        log_lines.append("visual specs: required by non-verifiable [must]")
-        log_lines.append("spa detection: not evaluated (tier 2 already required)")
-        log_lines.append("test mapping: not evaluated (tier 2 already required)")
-        log_lines.append("final tier: 2")
-        if log_dir:
-            append_text_log(log_dir / "qa-tier.log", log_lines + [""])
-        return 2
-
-    # Tier 2: visual/UI specs (need browser), SPA apps, or retries
-    from otto.tasks import spec_text
-    has_visual = any(
-        spec_binding(item) == "should"
-        and any(kw in spec_text(item).lower()
-                for kw in ("ui", "layout", "style", "visual", "responsive"))
-        for item in spec
-    )
-    # Only count SOURCE files as SPA indicators, not test files
-    is_spa = any(
-        f.endswith((".jsx", ".tsx", ".vue", ".svelte"))
-        and not any(seg in f.lower() for seg in ("test", "__tests__", "spec", ".test.", ".spec."))
-        for f in diff_files
-    )
-    log_lines.append(f"visual specs detected: {'yes' if has_visual else 'no'}")
-    log_lines.append(f"spa detection: {'yes' if is_spa else 'no'}")
-    if has_visual or is_spa:
-        log_lines.append("test mapping: not evaluated (tier 2 already required)")
-        log_lines.append("final tier: 2")
-        if log_dir:
-            append_text_log(log_dir / "qa-tier.log", log_lines + [""])
-        return 2
-
-    # Tier 1: default — every task gets at least targeted QA
-    log_lines.append("final tier: 1")
     if log_dir:
         append_text_log(log_dir / "qa-tier.log", log_lines + [""])
     return 1
@@ -1063,7 +998,7 @@ Save any browser screenshots to: {log_dir / "qa-proofs" if log_dir else "/tmp"}/
         project_dir=project_dir,
         verdict_file=verdict_file,
         on_progress=on_progress,
-        enable_browser=tier >= 2,
+        enable_browser=True,
         log_dir=log_dir,
         expected_must_count=expected_must_count,
     )
