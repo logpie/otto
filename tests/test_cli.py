@@ -154,14 +154,15 @@ class TestRetry:
 
 
 class TestRun:
-    def test_dry_run(self, runner, tmp_git_repo, monkeypatch):
+    def test_dry_run_shows_plan(self, runner, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
         from otto.config import create_config
         create_config(tmp_git_repo)
         runner.invoke(main, ["add", "Task 1"])
         result = runner.invoke(main, ["run", "--dry-run"])
         assert result.exit_code == 0
-        assert "Pending tasks: 1" in result.output
+        assert "Execution Plan" in result.output
+        assert "otto run" in result.output
 
     def test_one_off_mode_routes_through_run_per(
         self,

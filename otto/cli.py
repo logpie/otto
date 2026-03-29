@@ -358,11 +358,27 @@ def run(prompt, dry_run, no_spec, no_qa, no_test):
         tasks_path = project_dir / "tasks.yaml"
         tasks = load_tasks(tasks_path)
         pending = [t for t in tasks if t.get("status") == "pending"]
-        console.print(f"Config: {rich_escape(str(project_dir / 'otto.yaml'))}")
-        console.print(f"  max_retries: {config['max_retries']}")
-        console.print(f"\nPending tasks: {len(pending)}")
-        for t in pending:
-            console.print(f"  #{t['id']} ({rich_escape(t['key'])}): {rich_escape(t['prompt'][:60])}")
+        if not pending:
+            console.print("No pending tasks.")
+            return
+
+        # Run the planner to show actual execution plan
+        from otto.planner import plan as smart_plan, serial_plan
+        try:
+            execution_plan = asyncio.run(smart_plan(pending, config, project_dir))
+        except Exception:
+            execution_plan = serial_plan(pending)
+
+        console.print(f"\n  [bold]Execution Plan[/bold]  ({len(pending)} tasks)\n")
+        for batch_idx, batch in enumerate(execution_plan.batches):
+            task_keys = [tp.task_key for tp in batch.tasks]
+            mode = "parallel" if len(task_keys) > 1 else "serial"
+            console.print(f"  Batch {batch_idx + 1}  {len(task_keys)} task(s) ({mode})")
+            for tp in batch.tasks:
+                task = next((t for t in pending if t.get("key") == tp.task_key), None)
+                prompt_text = (task.get("prompt", "") if task else tp.task_key)[:60]
+                console.print(f"    {rich_escape(tp.task_key[:8])}  {rich_escape(prompt_text)}")
+        console.print(f"\n  Run [bold]otto run[/bold] to execute.\n")
         return
 
     if prompt:
@@ -393,74 +409,6 @@ def run(prompt, dry_run, no_spec, no_qa, no_test):
         sys.exit(exit_code)
 
 
-@main.command(context_settings=CONTEXT_SETTINGS)
-@click.option("--specs", is_flag=True, help="Also generate specs for preview")
-def plan(specs):
-    """Show execution plan without running tasks."""
-    require_git()
-    project_dir = Path.cwd()
-    config_path = project_dir / "otto.yaml"
-    if not config_path.exists():
-        console.print("[dim]No otto.yaml found. Run 'otto init' first.[/dim]")
-        return
-
-    tasks_path = project_dir / "tasks.yaml"
-    tasks = refresh_planner_state(tasks_path)
-    pending = [t for t in tasks if t.get("status") == "pending"]
-
-    if not pending:
-        console.print("[dim]No pending tasks.[/dim]")
-        return
-
-    console.print(f"\n  [bold]Execution Plan[/bold]  [dim]({len(pending)} tasks)[/dim]\n")
-
-    # Use the smart planner (same as otto run) for accurate preview
-    import asyncio
-    from otto.config import load_config
-    from otto.planner import plan as smart_plan, serial_plan
-    config = load_config(config_path)
-    try:
-        execution_plan = asyncio.run(smart_plan(pending, config, project_dir))
-    except Exception:
-        execution_plan = serial_plan(pending)
-
-    for batch_idx, batch in enumerate(execution_plan.batches):
-        batch_label = "parallel" if len(batch.tasks) > 1 else "single"
-        console.print(f"  [bold]Batch {batch_idx + 1}[/bold]  [dim]{len(batch.tasks)} tasks ({batch_label})[/dim]")
-        for tp in batch.tasks:
-            # Find the task
-            task = next((t for t in pending if t.get("key") == tp.task_key), None)
-            if task:
-                spec_count = len(task.get("spec") or [])
-                spec_str = f"  [dim]({spec_count} spec)[/dim]" if spec_count else "  [dim](no spec)[/dim]"
-                deps = task.get("depends_on", [])
-                dep_str = f" \u2192 #{', #'.join(str(d) for d in deps)}" if deps else ""
-                console.print(f"    [dim]\u25cb[/dim] [bold]#{task['id']}[/bold]  {rich_escape(task.get('prompt', '')[:55])}{spec_str}[dim]{dep_str}[/dim]")
-        console.print()
-
-    # Summary
-    console.print(f"  [dim]Run 'otto run' to execute.[/dim]")
-
-    # Optional spec preview
-    if specs:
-        console.print(f"\n  [dim]Generating specs for preview...[/dim]")
-        for task in pending:
-            if not task.get("spec"):
-                console.print(f"\n  [dim]#{task['id']}[/dim]  {rich_escape(task.get('prompt', '')[:60])}")
-                try:
-                    spec_items = generate_spec(task["prompt"], project_dir)
-                    filtered = filter_generated_spec_items(spec_items)
-                    if filtered:
-                        for item in filtered:
-                            binding = spec_binding(item)
-                            text = spec_text(item)
-                            marker = "" if spec_is_verifiable(item) else " \u25c8"
-                            tag = f"[{binding}{marker}]"
-                            console.print(f"    [dim]{tag}[/dim] {rich_escape(text[:75])}")
-                    else:
-                        console.print(f"    [dim](no spec generated)[/dim]")
-                except Exception as e:
-                    console.print(f"    [error]spec gen failed: {rich_escape(str(e)[:60])}[/error]")
 
 
 @main.command(context_settings=CONTEXT_SETTINGS)
