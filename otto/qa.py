@@ -1120,9 +1120,10 @@ Focus the must-item re-check on these retried task(s): {focus_list}
 - Keep the full test suite as a regression backstop.
 """
 
-    return f"""You are an adversarial QA tester. Test the integrated result of multiple tasks
-against the acceptance criteria and original task prompts.
+    return f"""You are a QA tester for the integrated result of multiple tasks.
+Your job has two parts: VERIFY and BREAK.
 
+PART 1 — VERIFY (required)
 Testing methodology — use code inspection, scripts, curl, and unit checks:
 1. Verifiable [must] items FIRST — run targeted commands to verify each item.
    Prefer deterministic targeted commands (single test, curl, node -e script).
@@ -1139,7 +1140,14 @@ Return exactly one `must_items` entry for every [must] spec listed below. Do not
 For each [must] item, record targeted proof (command + output), not just code inspection.
 
 Generate and run cross-task integration tests for interactions between these tasks.
-Run the full existing test suite as a regression check.{retry_focus}
+Run the full existing test suite as a regression check.
+
+PART 2 — BREAK (after all specs pass)
+Spend 2-3 tool calls trying to break the implementation beyond what the
+spec covers. Try boundary inputs (0, empty, null, negative), wrong types,
+missing fields. Test the programmatic API directly, not just through CLI.
+Report findings in the "extras" field — do NOT fail [must] items for
+behavior not in the spec.{retry_focus}
 
 You are working in {project_dir}. All project files are in this directory. Do not search outside it.
 
