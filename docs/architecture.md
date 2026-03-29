@@ -53,23 +53,26 @@ otto run
 ## 1. Preflight
 
 ```
-preflight_checks()  — read-only validation first, no mutations
+run_per() entry point:
   │
   ├─ Acquire otto.lock (prevent concurrent runs)
   ├─ Clean orphaned worktrees from previous crashes
-  ├─ Validate git state (fail-fast, never auto-checkout or stash):
-  │    ├─ Wrong branch → EXIT 2 ("run: git checkout {branch}")
-  │    └─ Dirty tree → EXIT 2 ("commit or stash before running")
   │
-  ├─ Recover stale tasks:
-  │    running/verified/merge_pending → reset to pending
-  │    (merged tasks are NOT reset — code already on main)
-  │
-  ├─ Update .git/info/exclude (framework + otto ignores, no commits)
-  ├─ Load tasks.yaml → filter pending tasks
-  │    └─ No pending tasks → EXIT 0
-  │
-  └─ Return (exit_code, pending_tasks)
+  └─ preflight_checks() — read-only validation first, no mutations
+       │
+       ├─ Validate git state (fail-fast, never auto-checkout or stash):
+       │    ├─ Wrong branch → EXIT 2 ("run: git checkout {branch}")
+       │    └─ Dirty tree → EXIT 2 ("commit or stash before running")
+       │
+       ├─ Recover stale tasks:
+       │    running/verified/merge_pending → reset to pending
+       │    (merged tasks are NOT reset — code already on main)
+       │
+       ├─ Update .git/info/exclude (framework + otto ignores, no commits)
+       ├─ Load tasks.yaml → filter pending tasks
+       │    └─ No pending tasks → EXIT 0
+       │
+       └─ Return (exit_code, pending_tasks)
 ```
 
 **Key files:** `runner.py:preflight_checks()`, `git_ops.py:check_clean_tree()`
@@ -451,13 +454,19 @@ your-project/
     ├── run-history.jsonl              # One line per run: tasks, cost, time
     ├── v4_events.jsonl                # Telemetry events
     ├── learnings.jsonl                # Cross-run learnings
+    ├── planner.log                    # Task analysis, relationships, batch structure
+    ├── orchestrator.log               # Batch decisions, merge, parallel lifecycle
     ├── spec-agent.log                 # Spec generation logs
     └── {task_key}/
         ├── live-state.json            # Real-time progress (for otto status)
+        ├── task-summary.json          # Per-phase cost + timing breakdown
         ├── attempt-N-agent.log        # Coding agent full log
         ├── attempt-N-verify.log       # Test suite output
         ├── qa-report.md               # QA agent report
         ├── qa-verdict.json            # Structured verdict
+        ├── qa-agent.log               # QA agent tool calls + output
+        ├── qa-tier.log                # Why QA chose tier 0/1/2
+        ├── cost-warning.log           # Parallel $0 cost warnings
         └── qa-proofs/
             ├── proof-report.md        # Human-readable proof per must item
             ├── regression-check.sh    # Re-runnable verification commands
@@ -510,8 +519,8 @@ Saves ~$2/retry by avoiding prompt cache invalidation.
 ## 10. Flaky Test Detection
 
 ```
-Baseline (preflight):
-  Run tests → record failing test names as "known flaky set"
+Baseline (run_task_v45 prepare phase, not preflight):
+  Auto-detect test command → run tests → record failing test names as "known flaky set"
 
 Pre-verify (after coding):
   Run tests → extract failing test names
@@ -528,11 +537,15 @@ When something goes wrong, check in this order:
 
 1. **`otto status`** — current task states, phase timings
 2. **`otto_logs/{key}/live-state.json`** — real-time progress
-3. **`otto_logs/{key}/attempt-N-agent.log`** — what the coding agent did
-4. **`otto_logs/{key}/attempt-N-verify.log`** — test output
-5. **`otto_logs/{key}/qa-report.md`** — QA findings
-6. **`otto_logs/{key}/qa-proofs/proof-report.md`** — evidence per spec item
-7. **`otto_logs/run-history.jsonl`** — cost/time trends across runs
-8. **`otto_logs/v4_events.jsonl`** — detailed telemetry events
-9. **`git log --oneline -20`** — what got merged
-10. **`git worktree list`** — any orphaned worktrees?
+3. **`otto_logs/{key}/task-summary.json`** — per-phase cost + timing breakdown
+4. **`otto_logs/{key}/attempt-N-agent.log`** — what the coding agent did
+5. **`otto_logs/{key}/attempt-N-verify.log`** — test output
+6. **`otto_logs/{key}/qa-agent.log`** — what QA ran (Bash commands + output)
+7. **`otto_logs/{key}/qa-report.md`** — QA findings
+8. **`otto_logs/{key}/qa-proofs/proof-report.md`** — evidence per spec item
+9. **`otto_logs/planner.log`** — task analysis, relationships, batch structure
+10. **`otto_logs/orchestrator.log`** — batch decisions, merge, parallel lifecycle
+11. **`otto_logs/run-history.jsonl`** — cost/time trends across runs
+12. **`otto_logs/v4_events.jsonl`** — detailed telemetry events
+13. **`git log --oneline -20`** — what got merged
+14. **`git worktree list`** — any orphaned worktrees?
