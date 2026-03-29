@@ -48,10 +48,13 @@ if [[ ! -f "$BUGS_FILE" ]]; then
 EOF
 fi
 
-# Git metadata
+# Git + prompt metadata
 OTTO_REPO="$(cd "$SCRIPT_DIR/../.." && pwd)"
 OTTO_BRANCH="$(cd "$OTTO_REPO" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")"
 OTTO_COMMIT="$(cd "$OTTO_REPO" && git rev-parse --short HEAD 2>/dev/null || echo "unknown")"
+# Prompt version hashes — for A/B tracking across runs
+SPEC_PROMPT_HASH="$(cd "$OTTO_REPO" && git hash-object otto/spec.py 2>/dev/null | cut -c1-8 || echo "unknown")"
+QA_PROMPT_HASH="$(cd "$OTTO_REPO" && git hash-object otto/qa.py 2>/dev/null | cut -c1-8 || echo "unknown")"
 
 # Collect project list
 FILTER="${1:-}"
@@ -74,9 +77,22 @@ TOTAL=${#PROJECT_NAMES[@]}
 echo "============================================"
 echo "  Otto Pressure Test — $TIMESTAMP"
 echo "  Branch: $OTTO_BRANCH ($OTTO_COMMIT)"
+echo "  Prompts: spec=$SPEC_PROMPT_HASH qa=$QA_PROMPT_HASH"
 echo "  Projects: $TOTAL"
 echo "  Results: $RUN_DIR"
 echo "============================================"
+
+# Save run metadata for A/B comparison
+cat > "$RUN_DIR/run-meta.json" << EOF
+{
+  "timestamp": "$TIMESTAMP",
+  "branch": "$OTTO_BRANCH",
+  "commit": "$OTTO_COMMIT",
+  "spec_prompt_hash": "$SPEC_PROMPT_HASH",
+  "qa_prompt_hash": "$QA_PROMPT_HASH",
+  "projects": $TOTAL
+}
+EOF
 echo ""
 
 # Per-project results

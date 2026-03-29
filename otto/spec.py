@@ -160,9 +160,12 @@ Rules:
   and negative forms (e.g., "accepts valid input" and "rejects invalid input"
   are one item, not two).
 - Preserve every user constraint exactly. Do not weaken thresholds.
-- Produce as few criteria as needed to cover the task.
-  Most tasks need 3-8 items. More than 10 usually means you are
-  splitting or specifying standard behaviors unnecessarily.
+- Produce as few criteria as needed to define the contract.
+  Focus on WHAT the code must do, not every way it could fail.
+  The QA agent runs adversarial tests beyond your specs — you don't
+  need to anticipate every edge case, just the core requirements.
+  Most tasks need 3-6 items. More than 8 usually means you are
+  splitting or specifying behaviors the QA agent will catch on its own.
 - Explore the codebase and research external APIs/libraries/services
   as needed to write accurate, grounded criteria.
 - When the prompt is ambiguous, prefer [should] over [must].
