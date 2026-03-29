@@ -233,16 +233,13 @@ QA
   ├─ Await spec (if still generating in background)
   │
   ├─ Determine QA tier:
-  │    ├─ Tier 0: SKIP QA
-  │    │    All [must] items have tests + first attempt + local change
-  │    │
-  │    ├─ Tier 1: TARGETED
-  │    │    Unmapped [must] items OR 5+ files changed
+  │    ├─ Tier 1: TARGETED (default — every task gets at least this)
   │    │
   │    └─ Tier 2: FULL + BROWSER
   │         High-risk domains (auth, crypto, payment)
   │         OR visual specs (◈ items)
-  │         OR SPA + retry attempts
+  │         OR SPA files changed
+  │         OR retry attempt (attempt > 0)
   │
   ├─ Run QA agent (CC, bypassPerms, chrome-devtools MCP)
   │    ├─ Test [must] items first (in order)

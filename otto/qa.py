@@ -107,8 +107,7 @@ def determine_qa_tier(
 ) -> int:
     """Determine QA tier based on residual risk after verification.
 
-    Tier 0: skip QA (all [must] items have tests, local change, first attempt)
-    Tier 1: targeted QA (unmapped [must] items, cross-cutting changes)
+    Tier 1: targeted QA (default — every task gets at least this)
     Tier 2: full QA with browser (visual/SPA, auth/crypto, retries)
     """
     from otto.tasks import spec_binding, spec_is_verifiable
@@ -182,30 +181,11 @@ def determine_qa_tier(
             append_text_log(log_dir / "qa-tier.log", log_lines + [""])
         return 2
 
-    # Tier 1: unmapped [must] items or cross-cutting changes
-    unmapped = [item for item in spec
-                if spec_binding(item) == "must"
-                and not spec_test_mapping.get(spec_text(item))]
-    log_lines.append(
-        "unmapped [must] items: "
-        + (
-            ", ".join(spec_text(item)[:80] for item in unmapped[:3])
-            if unmapped else
-            "none"
-        )
-    )
-    log_lines.append(f"cross-cutting diff: {'yes' if len(diff_files) > 5 else 'no'}")
-    if unmapped or len(diff_files) > 5:
-        log_lines.append("final tier: 1")
-        if log_dir:
-            append_text_log(log_dir / "qa-tier.log", log_lines + [""])
-        return 1
-
-    # Tier 0: every [must] item has a test, local change, first attempt
-    log_lines.append("final tier: 0")
+    # Tier 1: default — every task gets at least targeted QA
+    log_lines.append("final tier: 1")
     if log_dir:
         append_text_log(log_dir / "qa-tier.log", log_lines + [""])
-    return 0
+    return 1
 
 
 def _is_verdict_complete(verdict: dict[str, Any], *, expected_must_count: int = 0) -> bool:

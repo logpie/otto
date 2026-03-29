@@ -1004,21 +1004,6 @@ async def _run_qa(
     if qa_warning:
         qa_tier = max(qa_tier, 2)
 
-    if qa_tier < 1:
-        # Tier 0 — skip QA
-        emit("phase", name="qa", status="done", time_s=0,
-             detail="tier 0 — skipped")
-        return {
-            "qa_report": "",
-            "qa_tier": qa_tier,
-            "verdict": {},
-            "must_passed": True,
-            "cost_usd": 0.0,
-            "qa_elapsed": 0.0,
-            "failed_musts": [],
-            "prev_failed_criteria": prev_failed_criteria,
-        }
-
     qa_detail = f"tier {qa_tier}"
     if qa_warning:
         qa_detail += " — prompt-only fallback"

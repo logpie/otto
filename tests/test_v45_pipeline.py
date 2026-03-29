@@ -43,8 +43,8 @@ def _write_task(repo: Path, task: dict) -> Path:
 class TestDetermineQaTier:
     """QA tiering based on residual risk after verification."""
 
-    def test_tier0_all_must_covered(self):
-        """All [must] items have tests, local change, first attempt → tier 0."""
+    def test_minimum_tier_is_1(self):
+        """Every task gets at least tier 1 — no tier 0 skip."""
         spec = [
             {"text": "returns 200", "binding": "must"},
             {"text": "handles errors", "binding": "must"},
@@ -54,7 +54,7 @@ class TestDetermineQaTier:
             "returns 200": "test_api.py::test_200",
             "handles errors": "test_api.py::test_errors",
         }
-        assert determine_qa_tier({}, spec, 0, diff_info, mapping) == 0
+        assert determine_qa_tier({}, spec, 0, diff_info, mapping) == 1
 
     def test_tier1_unmapped_must(self):
         """[must] items without test coverage → tier 1."""
@@ -123,11 +123,11 @@ class TestDetermineQaTier:
 
         tier = determine_qa_tier({"key": "task-qa-log"}, spec, 0, diff_info, mapping, log_dir=tmp_path)
 
-        assert tier == 0
+        assert tier == 1
         qa_tier_log = (tmp_path / "qa-tier.log").read_text()
         assert "risk patterns: none matched" in qa_tier_log
         assert "spa detection: no" in qa_tier_log
-        assert "final tier: 0" in qa_tier_log
+        assert "final tier: 1" in qa_tier_log
 
 
 class TestFormatSpecV45:
