@@ -8,7 +8,6 @@ or in parallel when max_parallel > 1 (each task gets its own git worktree).
 Entry point: run_per()
 """
 import asyncio
-import os
 import fcntl
 import json
 import shutil
@@ -764,27 +763,6 @@ async def run_per(
     )
 
     try:
-        # Step 0: Quick agent health check — fail fast if Claude CLI isn't authenticated
-        # Skip in test environments (OTTO_SKIP_AUTH_PROBE=1) to avoid hitting real CLI
-        if not os.environ.get("OTTO_SKIP_AUTH_PROBE"):
-            try:
-                _probe = subprocess.run(
-                    ["claude", "-p", "Reply with exactly OK", "--max-turns", "1"],
-                    capture_output=True, text=True, timeout=30,
-                    cwd=str(project_dir),
-                )
-                if _probe.returncode != 0:
-                    _stderr = (_probe.stderr or _probe.stdout or "").strip()
-                    if any(kw in _stderr.lower() for kw in ("not logged in", "please run /login", "unauthorized")):
-                        console.print("[red]Claude CLI is not authenticated. Run: claude /login[/red]")
-                        return 2
-                    console.print(f"  [yellow]Warning: agent probe returned exit {_probe.returncode}[/yellow]")
-            except FileNotFoundError:
-                console.print("[red]Claude CLI not found. Install: https://docs.anthropic.com/claude-code[/red]")
-                return 2
-            except subprocess.TimeoutExpired:
-                console.print("  [yellow]Warning: agent probe timed out (30s) — continuing[/yellow]")
-
         # Step 1: Preflight checks
         error_code, pending = preflight_checks(config, tasks_file, project_dir)
         if error_code is not None:

@@ -8,8 +8,6 @@ from pathlib import Path
 import pytest
 import yaml
 
-# Skip the auth probe in all tests — it hits the real Claude CLI and adds ~10s per test
-os.environ["OTTO_SKIP_AUTH_PROBE"] = "1"
 
 
 def pytest_collection_modifyitems(items):
