@@ -16,7 +16,7 @@ For each task, Otto:
 1. **Runs a bare CC coding agent** — raw prompt, no spec bottleneck. The coding agent explores the codebase, implements the feature, and runs tests on its own.
 2. **Generates acceptance spec in parallel** — `[must]` (gating) and `[should]` (advisory) criteria with `◈` markers for visual/subjective items. Runs in a separate thread alongside coding.
 3. **Verifies externally** — runs all tests in a clean disposable worktree.
-4. **QA agent reviews** — adversarial testing against spec + original prompt. Risk-based tiering: skip QA when all specs have tests (tier 0), targeted checks (tier 1), or full adversarial testing with browser (tier 2).
+4. **QA agent reviews** — two-part testing: VERIFY (check every [must] spec with evidence) then BREAK (adversarial boundary testing beyond specs). Browser available for visual items.
 5. **Merges** — squash merge to main, clean git history.
 
 Independent tasks run **in parallel** using git worktrees (`max_parallel: 2+`). Merge conflicts are resolved by re-running the coding agent on updated main with the previous diff as context — same intelligence, full retry budget.
