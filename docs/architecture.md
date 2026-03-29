@@ -26,7 +26,7 @@ otto run
   │     │     │    Then → serial merge phase
   │     │     │
   │     │     └─ SERIAL (max_parallel = 1 or single task)
-  │     │          Each task → otto/{key} branch → code + test
+  │     │          Each task → own git worktree → code + test
   │     │          Per-task QA runs inline (unless batch QA mode)
   │     │
   │     ├─ Merge conflicts:
@@ -118,25 +118,17 @@ Validation: _normalize_plan enforces dependency constraints
 ```
 For each batch in plan:
   │
-  ├─ max_parallel > 1 AND batch has 2+ tasks?
-  │    │
-  │    ├─ YES → _run_batch_parallel()
-  │    │    ├─ Snapshot HEAD as base_sha
-  │    │    ├─ For each task (bounded by semaphore):
-  │    │    │    ├─ git worktree add .otto-worktrees/otto-task-{key} base_sha --detach
-  │    │    │    ├─ Install deps in worktree
-  │    │    │    ├─ coding_loop(task_work_dir=worktree)
-  │    │    │    └─ Cleanup worktree (finally block)
-  │    │    │
-  │    │    └─ Return list[TaskResult]
-  │    │
-  │    └─ Then → merge_parallel_results() (see 3c, also used in batch QA serial)
+  ├─ All tasks → _run_task_in_worktree() (unified path)
+  │    ├─ git worktree add .otto-worktrees/otto-task-{key} base_sha --detach
+  │    ├─ Install deps in worktree
+  │    ├─ coding_loop(task_work_dir=worktree)
+  │    └─ Cleanup worktree (finally block)
   │
-  └─ NO → Serial execution
-       └─ For each task sequentially:
-            ├─ Create branch otto/{key}
-            ├─ coding_loop(task_work_dir=project_dir)
-            └─ Merge to default branch via ff-only
+  ├─ max_parallel > 1 AND batch has 2+ tasks?
+  │    ├─ YES → run tasks concurrently (bounded by semaphore)
+  │    └─ NO → run tasks sequentially
+  │
+  └─ Then → merge_batch_results() for ALL batches (see section 3c)
 ```
 
 ### 3b. Per-Task Pipeline (`coding_loop` → `run_task_v45`)
@@ -144,7 +136,7 @@ For each batch in plan:
 This is the core of otto — what happens for each individual task:
 
 ```
-run_task_v45(task, config, project_dir, task_work_dir)
+run_task_v45(task, config, project_dir, task_work_dir=worktree)
   │
   ╔══════════════════════════════════════════════════════╗
   ║  PREPARE                                             ║
@@ -294,19 +286,19 @@ QA
           (not generic "QA failed")
 ```
 
-### 3c. Serial Merge Phase (parallel mode)
+### 3c. Merge Phase (all modes)
 
-After all parallel tasks finish, merge verified candidates onto main one-by-one:
+After all tasks in a batch finish, merge verified candidates onto main one-by-one:
 
 ```
-merge_parallel_results()
+merge_batch_results()
   │
   For each verified task (sorted by key):
     │
     ├─ Find best candidate ref
     │    └─ refs/otto/candidates/{key}/attempt-{highest}
     │
-    ├─ merge_candidate(project_dir, candidate_ref, default_branch)
+    ├─ merge_candidate(project_dir, candidate_sha, default_branch)
     │    │
     │    ├─ Create temp branch from current HEAD
     │    ├─ git merge --no-edit candidate_sha
@@ -383,37 +375,37 @@ After merge phase:
                         ┌──────────┐
                         │ pending   │◄──────────────────────────────┐
                         └────┬──────┘                               │
-                             │ run starts                           │
+                             │ run starts (in worktree)             │
                         ┌────▼──────┐                               │
                         │ running    │                               │
                         └────┬──────┘                               │
                              │                                      │
-              ┌──────────────┼──────────────┐                       │
-              │              │               │                       │
-  (parallel/batch QA)  (serial per-task)  (all modes)                │
-              │              │               │                       │
-       ┌──────▼──────┐      │         ┌─────▼──────┐               │
-       │  verified    │      │         │  failed     │               │
-       └──────┬──────┘      │         └────────────┘               │
-              │              │         max_retries                   │
-       ┌──────▼──────┐      │         exhausted,                    │
-       │merge_pending │      │         timeout,                      │
-       └──────┬──────┘      │         baseline fail                 │
-              │              │                                      │
-       ┌──────┼──────┐      │                                      │
-       │             │      │                                      │
-┌──────▼──────┐  ┌───▼─────▼───┐   ┌────────┐                     │
-│merge_failed  │  │  merged      │   │ passed  │                     │
-└──────┬──────┘  └──────┬───────┘   └────────┘                     │
-       │                │                                           │
-       │         (batch QA mode)                                    │
-       │                ├─ batch QA passes → passed                 │
-       │                ├─ batch QA fails → retry (up to max)       │
-       │                └─ rollback → pending (innocent tasks)      │
-       │                                                            │
-       └──► auto-retry: re-run coding_loop() ───────────────────────┘
-            on updated main with previous
-            diff as feedback (full pipeline)
+                    ┌────────┼────────┐                             │
+                    │                 │                              │
+             (coding ok)        (all failures)                      │
+                    │                 │                              │
+             ┌──────▼──────┐   ┌─────▼──────┐                      │
+             │  verified    │   │  failed     │                      │
+             └──────┬──────┘   └────────────┘                      │
+                    │          max_retries                           │
+             ┌──────▼──────┐   exhausted,                           │
+             │merge_pending │   timeout,                             │
+             └──────┬──────┘   baseline fail                        │
+                    │                                               │
+             ┌──────┼──────┐                                        │
+             │             │                                        │
+      ┌──────▼──────┐  ┌──▼────────┐   ┌────────┐                  │
+      │merge_failed  │  │  merged    │   │ passed  │                  │
+      └──────┬──────┘  └─────┬─────┘   └────────┘                  │
+             │               │                                      │
+             │        (batch QA mode)                               │
+             │               ├─ batch QA passes → passed            │
+             │               ├─ batch QA fails → retry (up to max)  │
+             │               └─ rollback → pending (innocent tasks) │
+             │                                                      │
+             └──► auto-retry: _run_task_in_worktree() ──────────────┘
+                  on updated main with previous
+                  diff as feedback (full pipeline)
 
 Planner-derived states (set by _recompute_planner_state):
   conflict  — planner flagged CONTRADICTORY pair
