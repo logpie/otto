@@ -1063,9 +1063,10 @@ class TestMergeParallelResults:
         assert merged == results
         merge_candidate_mock.assert_not_called()
 
-    def test_post_merge_test_failure(self, tmp_git_repo):
-        """Post-merge test failure should mark task as merge_failed and revert."""
+    def test_post_merge_test_failure_in_skip_qa_mode(self, tmp_git_repo):
+        """Post-merge test failure in --no-qa mode should mark task as merge_failed."""
         from otto.testing import TestSuiteResult, TierResult
+        from otto.context import QAMode
         tasks_path = tmp_git_repo / "tasks.yaml"
         tasks_path.write_text(yaml.dump({"tasks": [
             {"id": 1, "key": "task-fail", "prompt": "Fails post-merge verification", "status": "verified"},
@@ -1084,7 +1085,7 @@ class TestMergeParallelResults:
 
         results = [TaskResult(task_key="task-fail", success=True)]
         config = self._make_config()
-        config["skip_test"] = False  # enable post-merge verification
+        config["skip_test"] = False
 
         # Mock run_test_suite to return failure
         failed_suite = TestSuiteResult(
@@ -1092,7 +1093,10 @@ class TestMergeParallelResults:
             tiers=[TierResult(tier="existing_tests", passed=False, output="1 failed")],
         )
         with patch("otto.testing.run_test_suite", return_value=failed_suite):
-            merged = merge_batch_results(results, config, tmp_git_repo, tasks_path, telemetry)
+            merged = merge_batch_results(
+                results, config, tmp_git_repo, tasks_path, telemetry,
+                qa_mode=QAMode.SKIP,
+            )
 
         assert len(merged) == 1
         assert not merged[0].success
@@ -1107,8 +1111,9 @@ class TestMergeParallelResults:
         assert head_after == head_before
 
     def test_post_merge_verification_uses_task_verify_command(self, tmp_git_repo):
-        """Merge verification should forward each task's custom verify command."""
+        """Merge verification in --no-qa mode should forward custom verify command."""
         from otto.testing import TestSuiteResult, TierResult
+        from otto.context import QAMode
         tasks_path = tmp_git_repo / "tasks.yaml"
         tasks_path.write_text(yaml.dump({"tasks": [
             {
@@ -1133,7 +1138,10 @@ class TestMergeParallelResults:
             tiers=[TierResult(tier="existing_tests", passed=True, output="ok")],
         )
         with patch("otto.testing.run_test_suite", return_value=passed_suite) as run_suite_mock:
-            merge_batch_results(results, config, tmp_git_repo, tasks_path, telemetry)
+            merge_batch_results(
+                results, config, tmp_git_repo, tasks_path, telemetry,
+                qa_mode=QAMode.SKIP,
+            )
 
         assert run_suite_mock.call_args.kwargs["custom_test_cmd"] == "bin/task-verify"
 

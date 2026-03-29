@@ -989,6 +989,57 @@ async def run_per(
                             for r in batch_results
                         ]
 
+                # Post-batch deterministic test suite: run once on integrated HEAD
+                # instead of N per-task post-merge tests. Catches integration failures
+                # (e.g., task A renames module, task B uses old name — merge succeeds
+                # but tests fail). Only for BATCH mode with 2+ merged tasks.
+                # Hard gate: if tests fail, rollback the batch.
+                if qa_mode == QAMode.BATCH and not context.interrupted and not config.get("skip_test"):
+                    merged_count = sum(1 for r in batch_results if r.success)
+                    if merged_count >= 2:
+                        test_command = config.get("test_command")
+                        if test_command:
+                            from otto.testing import run_test_suite as _run_suite
+                            _test_timeout = config.get("verify_timeout", 300)
+                            console.print("\n  [bold]Post-batch integration test[/bold]")
+                            _orchestrator_log(project_dir, f"post-batch integration test: {merged_count} merged tasks")
+                            _pb_result = _run_suite(
+                                project_dir=project_dir,
+                                candidate_sha="HEAD",
+                                test_command=test_command,
+                                custom_test_cmd=None,
+                                timeout=_test_timeout,
+                            )
+                            if _pb_result.passed:
+                                console.print("    [green]\u2713[/green] integration tests passed")
+                                _orchestrator_log(project_dir, "post-batch integration test: PASSED")
+                            else:
+                                console.print("    [red]\u2717[/red] integration tests failed — rolling back batch")
+                                _orchestrator_log(
+                                    project_dir,
+                                    f"post-batch integration test: FAILED — rollback\n{(_pb_result.failure_output or '')[:500]}",
+                                )
+                                # Hard gate: rollback all merged tasks and abort batch
+                                _rollback_main_to_sha(project_dir, pre_batch_sha)
+                                for r in batch_results:
+                                    if r.success:
+                                        try:
+                                            update_task(tasks_file, r.task_key, status="pending",
+                                                        error=None, error_code=None, feedback=None)
+                                        except Exception:
+                                            pass
+                                batch_results = [
+                                    TaskResult(
+                                        task_key=r.task_key,
+                                        success=False,
+                                        error="post-batch integration test failed",
+                                        error_code="post_batch_test_fail",
+                                        cost_usd=r.cost_usd,
+                                        duration_s=r.duration_s,
+                                    ) if r.success else r
+                                    for r in batch_results
+                                ]
+
                 if qa_mode == QAMode.BATCH and not context.interrupted:
                     batch_keys = {tp.task_key for tp in batch.tasks}
                     batch_qa_costs: dict[str, float] = {}
@@ -1454,8 +1505,9 @@ async def run_per(
                     )
 
         # Step 4: Post-run test suite
-        # Batch QA already covers integration/regression testing for normal runs.
-        # Keep the deterministic final test suite only for --no-qa mode.
+        # Final deterministic check on integrated HEAD. Runs for --no-qa mode
+        # (only integration gate) and is redundant but harmless for other modes
+        # since per-batch integration tests already ran above.
         total_passed = context.passed_count
         if (
             qa_mode == QAMode.SKIP and
@@ -1702,10 +1754,11 @@ def merge_batch_results(
             _orchestrator_log(project_dir, f"task={task_key} merge result=conflict")
             continue
 
-        # Post-merge verification: run test suite in a fresh disposable worktree.
-        # This tests the exact commit that will become main HEAD.
-        # Strict mode: no "local pass beats worktree fail" heuristic.
-        if not config.get("skip_test"):
+        # Per-task post-merge test: only in --no-qa mode where it's the sole
+        # integration gate. In BATCH mode, one post-batch suite replaces N per-task
+        # runs. In PER_TASK single-task mode, the task's own test phase already
+        # verified this exact code.
+        if qa_mode == QAMode.SKIP and not config.get("skip_test"):
             test_result = run_test_suite(
                 project_dir=project_dir,
                 candidate_sha=new_sha,

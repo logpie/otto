@@ -296,12 +296,10 @@ merge_batch_results()
     │    └─ Merge conflicts? → abort, mark merge_conflict
     │         └─ Queued for re-apply (see 3d below)
     │
-    ├─ Post-merge test verification (unless skip_test)
+    ├─ Per-task post-merge test (--no-qa mode only)
     │    ├─ run_test_suite() in fresh worktree at new_sha
-    │    │
     │    ├─ Tests pass? → fast-forward main
-    │    └─ Tests fail? → skip FF (merge stays on temp branch), mark post_merge_test_fail
-    │         └─ Queued for re-apply (see 3d below)
+    │    └─ Tests fail? → mark post_merge_test_fail, queue for re-apply
     │
     ├─ Fast-forward: git merge --ff-only new_sha
     │
