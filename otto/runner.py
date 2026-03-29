@@ -188,7 +188,7 @@ def preflight_checks(
                     framework_excludes.append(d)
 
     # Otto runtime entries
-    otto_excludes = ["otto_logs/", "otto_arch/", ".otto-scratch/", ".otto-worktrees/", "tasks.yaml", ".tasks.lock"]
+    otto_excludes = ["otto_logs/", "otto_arch/", ".otto-scratch/", ".otto-worktrees/", "tasks.yaml", ".tasks.lock", "otto.yaml"]
     missing_excludes = [e for e in otto_excludes if e not in existing_exclude]
 
     all_new_excludes = sorted(set(framework_excludes + missing_excludes))
@@ -201,8 +201,25 @@ def preflight_checks(
             label = ", ".join(d.rstrip("/") for d in framework_excludes[:3])
             console.print(f"  [dim]Updated .git/info/exclude (+{label})[/dim]")
 
-    # Baseline check moved to run_task_v45() — runs after branch creation
-    # with auto-detected test command for consistent results.
+    # Quick agent health check — fail fast if Claude CLI isn't authenticated
+    try:
+        probe = subprocess.run(
+            ["claude", "-p", "Reply with exactly OK", "--max-turns", "1"],
+            capture_output=True, text=True, timeout=30,
+            cwd=str(project_dir),
+        )
+        if probe.returncode != 0:
+            stderr = (probe.stderr or probe.stdout or "").strip()
+            if any(kw in stderr.lower() for kw in ("not logged in", "please run /login", "unauthorized")):
+                console.print("[red]Claude CLI is not authenticated. Run: claude /login[/red]")
+                return (2, [])
+            # Non-auth failure — warn but don't block (could be transient)
+            console.print(f"  [yellow]Warning: agent probe returned exit {probe.returncode}[/yellow]")
+    except FileNotFoundError:
+        console.print("[red]Claude CLI not found. Install it first: https://docs.anthropic.com/claude-code[/red]")
+        return (2, [])
+    except subprocess.TimeoutExpired:
+        console.print("  [yellow]Warning: agent probe timed out (30s) — continuing anyway[/yellow]")
 
     from otto.tasks import load_tasks, mutate_and_recompute
 
@@ -677,7 +694,7 @@ def _build_coding_prompt(
 async def _run_coding_agent(
     coding_prompt: str,
     config: dict[str, Any],
-    project_dir: Path,
+    work_dir: Path,
     *,
     session_id: str | None,
     emit: Any,
@@ -686,12 +703,13 @@ async def _run_coding_agent(
 ) -> tuple[str | None, float, list[str], Any]:
     """Run the coding agent and return (session_id, attempt_cost, log_lines, result_msg).
 
+    work_dir is the task's working directory (worktree path).
     Raises on agent error (result_msg.is_error).
     """
     _coding_settings = config.get("coding_agent_settings", "project").split(",")
     agent_opts = ClaudeAgentOptions(
         permission_mode="bypassPermissions",
-        cwd=str(project_dir),
+        cwd=str(work_dir),
         setting_sources=_coding_settings,
         env=_subprocess_env(),
         # Use CC's default system prompt (Glob over find, etc.)

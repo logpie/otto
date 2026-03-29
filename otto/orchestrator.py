@@ -1900,9 +1900,14 @@ async def _run_task_in_worktree(
         _orchestrator_log(project_dir, f"  worktree: {task_key[:8]} created ({wt_elapsed:.1f}s)")
 
         install_start = time.monotonic()
-        await asyncio.to_thread(_install_deps, worktree_path, install_timeout)
-        install_elapsed = time.monotonic() - install_start
-        _orchestrator_log(project_dir, f"  worktree: {task_key[:8]} deps installed ({install_elapsed:.1f}s)")
+        try:
+            await asyncio.to_thread(_install_deps, worktree_path, install_timeout)
+            install_elapsed = time.monotonic() - install_start
+            _orchestrator_log(project_dir, f"  worktree: {task_key[:8]} deps installed ({install_elapsed:.1f}s)")
+        except Exception as install_exc:
+            install_elapsed = time.monotonic() - install_start
+            _orchestrator_log(project_dir, f"  worktree: {task_key[:8]} deps install FAILED ({install_elapsed:.1f}s): {install_exc}")
+            # Continue — dep install is best-effort, coding agent may still succeed
 
         if context.interrupted:
             return TaskResult(task_key=task_key, success=False, error="interrupted before start")

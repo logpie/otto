@@ -9,6 +9,14 @@ dependencies = [
     "rich>=13.0",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.0",
+    "pytest-asyncio>=1.0",
+    "fastapi>=0.100",
+    "httpx>=0.24",
+]
+
 [project.scripts]
 otto = "otto.cli:main"
 
@@ -17,3 +25,4 @@ include = ["otto*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "strict"
