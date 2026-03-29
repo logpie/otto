@@ -427,9 +427,15 @@ def plan(specs):
 
     console.print(f"\n  [bold]Execution Plan[/bold]  [dim]({len(pending)} tasks)[/dim]\n")
 
-    # Show dependency graph
-    from otto.planner import default_plan
-    execution_plan = default_plan(pending)
+    # Use the smart planner (same as otto run) for accurate preview
+    import asyncio
+    from otto.config import load_config
+    from otto.planner import plan as smart_plan, serial_plan
+    config = load_config(config_path)
+    try:
+        execution_plan = asyncio.run(smart_plan(pending, config, project_dir))
+    except Exception:
+        execution_plan = serial_plan(pending)
 
     for batch_idx, batch in enumerate(execution_plan.batches):
         batch_label = "parallel" if len(batch.tasks) > 1 else "single"
