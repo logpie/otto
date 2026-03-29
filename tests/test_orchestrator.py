@@ -16,7 +16,7 @@ from otto.orchestrator import (
     _run_batch_qa,
     _run_batch_parallel,
     cleanup_orphaned_worktrees,
-    merge_parallel_results,
+    merge_batch_results,
     run_per,
 )
 from otto.planner import Batch, ExecutionPlan, TaskPlan
@@ -201,7 +201,7 @@ class TestRunPerIntegration:
 
         merge_calls = 0
 
-        def fake_merge_parallel_results(results, config, project_dir, task_file, telemetry, qa_mode="per_task"):
+        def fake_merge_batch_results(results, config, project_dir, task_file, telemetry, qa_mode="per_task"):
             nonlocal merge_calls
             merge_calls += 1
             if merge_calls == 1:
@@ -240,7 +240,7 @@ class TestRunPerIntegration:
         with patch("otto.orchestrator.preflight_checks", side_effect=fake_preflight_checks):
             with patch("otto.orchestrator.plan", new=AsyncMock(return_value=execution_plan)):
                 with patch("otto.orchestrator._run_batch_parallel", side_effect=fake_run_batch_parallel):
-                    with patch("otto.orchestrator.merge_parallel_results", side_effect=fake_merge_parallel_results):
+                    with patch("otto.orchestrator.merge_batch_results", side_effect=fake_merge_batch_results):
                         with patch("otto.orchestrator.coding_loop", side_effect=fake_coding_loop):
                             with patch("otto.orchestrator._print_summary"):
                                 with patch("otto.orchestrator._record_run_history"):
@@ -583,7 +583,7 @@ class TestRunPerIntegration:
             update_task(task_file, task_plan.task_key, status="verified")
             return TaskResult(task_key=task_plan.task_key, success=True)
 
-        def fake_merge_parallel_results(results, config, project_dir, task_file, telemetry, qa_mode="per_task"):
+        def fake_merge_batch_results(results, config, project_dir, task_file, telemetry, qa_mode="per_task"):
             assert qa_mode == QAMode.BATCH
             for result in results:
                 update_task(task_file, result.task_key, status="merged")
@@ -599,7 +599,7 @@ class TestRunPerIntegration:
 
         with patch("otto.orchestrator.plan", AsyncMock(return_value=execution_plan)):
             with patch("otto.orchestrator.coding_loop", side_effect=fake_coding_loop):
-                with patch("otto.orchestrator.merge_parallel_results", side_effect=fake_merge_parallel_results):
+                with patch("otto.orchestrator.merge_batch_results", side_effect=fake_merge_batch_results):
                     with patch("otto.orchestrator._run_batch_qa", batch_qa_mock):
                         with patch("otto.testing.run_test_suite") as run_suite_mock:
                             exit_code = await run_per(config, tasks_path, tmp_git_repo)
@@ -636,7 +636,7 @@ class TestRunPerIntegration:
             update_task(task_file, task_plan.task_key, status="verified")
             return TaskResult(task_key=task_plan.task_key, success=True, cost_usd=0.1)
 
-        def fake_merge_parallel_results(results, config, project_dir, task_file, telemetry, qa_mode="per_task"):
+        def fake_merge_batch_results(results, config, project_dir, task_file, telemetry, qa_mode="per_task"):
             assert qa_mode == QAMode.BATCH
             for result in results:
                 update_task(task_file, result.task_key, status="merged")
@@ -682,7 +682,7 @@ class TestRunPerIntegration:
 
         with patch("otto.orchestrator.plan", AsyncMock(return_value=execution_plan)):
             with patch("otto.orchestrator.coding_loop", side_effect=fake_coding_loop):
-                with patch("otto.orchestrator.merge_parallel_results", side_effect=fake_merge_parallel_results):
+                with patch("otto.orchestrator.merge_batch_results", side_effect=fake_merge_batch_results):
                     with patch("otto.orchestrator._run_batch_qa", batch_qa_mock):
                         exit_code = await run_per(config, tasks_path, tmp_git_repo)
 
@@ -715,7 +715,7 @@ class TestRunPerIntegration:
             update_task(task_file, task_plan.task_key, status="verified")
             return TaskResult(task_key=task_plan.task_key, success=True)
 
-        def fake_merge_parallel_results(results, config, project_dir, task_file, telemetry, qa_mode="per_task"):
+        def fake_merge_batch_results(results, config, project_dir, task_file, telemetry, qa_mode="per_task"):
             for result in results:
                 update_task(task_file, result.task_key, status="merged")
             return results
@@ -762,7 +762,7 @@ class TestRunPerIntegration:
         with patch("otto.orchestrator.plan", AsyncMock(return_value=execution_plan)):
             with patch("otto.orchestrator.replan", AsyncMock(return_value=replan_result)):
                 with patch("otto.orchestrator.coding_loop", side_effect=fake_coding_loop):
-                    with patch("otto.orchestrator.merge_parallel_results", side_effect=fake_merge_parallel_results):
+                    with patch("otto.orchestrator.merge_batch_results", side_effect=fake_merge_batch_results):
                         with patch("otto.orchestrator._run_batch_qa", batch_qa_mock):
                             with patch("otto.orchestrator._rollback_main_to_sha", return_value=True) as rollback_mock:
                                 exit_code = await run_per(config, tasks_path, tmp_git_repo)
@@ -801,7 +801,7 @@ class TestRunPerIntegration:
             update_task(task_file, task_plan.task_key, status="verified")
             return TaskResult(task_key=task_plan.task_key, success=True)
 
-        def fake_merge_parallel_results(results, config, project_dir, task_file, telemetry, qa_mode="per_task"):
+        def fake_merge_batch_results(results, config, project_dir, task_file, telemetry, qa_mode="per_task"):
             for result in results:
                 update_task(task_file, result.task_key, status="merged")
             return results
@@ -822,7 +822,7 @@ class TestRunPerIntegration:
 
         with patch("otto.orchestrator.plan", AsyncMock(return_value=execution_plan)):
             with patch("otto.orchestrator.coding_loop", side_effect=fake_coding_loop):
-                with patch("otto.orchestrator.merge_parallel_results", side_effect=fake_merge_parallel_results):
+                with patch("otto.orchestrator.merge_batch_results", side_effect=fake_merge_batch_results):
                     with patch("otto.orchestrator._run_batch_qa", batch_qa_mock):
                         with patch("otto.orchestrator._rollback_main_to_sha", return_value=True) as rollback_mock:
                             exit_code = await run_per(config, tasks_path, tmp_git_repo)
@@ -956,7 +956,7 @@ class TestMergeParallelResults:
         ]
         config = self._make_config()
 
-        merged = merge_parallel_results(results, config, tmp_git_repo, tasks_path, telemetry)
+        merged = merge_batch_results(results, config, tmp_git_repo, tasks_path, telemetry)
 
         assert len(merged) == 2
         assert all(r.success for r in merged)
@@ -989,7 +989,7 @@ class TestMergeParallelResults:
         ]
         config = self._make_config()
 
-        merged = merge_parallel_results(results, config, tmp_git_repo, tasks_path, telemetry)
+        merged = merge_batch_results(results, config, tmp_git_repo, tasks_path, telemetry)
 
         # First task should merge, second should be queued for re-apply
         passed = [r for r in merged if r.success]
@@ -1020,7 +1020,7 @@ class TestMergeParallelResults:
         ]
         config = self._make_config()
 
-        merged = merge_parallel_results(results, config, tmp_git_repo, tasks_path, telemetry)
+        merged = merge_batch_results(results, config, tmp_git_repo, tasks_path, telemetry)
 
         passed = [r for r in merged if r.success]
         failed = [r for r in merged if not r.success]
@@ -1043,7 +1043,7 @@ class TestMergeParallelResults:
         ]
         config = self._make_config()
 
-        merged = merge_parallel_results(results, config, tmp_git_repo, tasks_path, telemetry)
+        merged = merge_batch_results(results, config, tmp_git_repo, tasks_path, telemetry)
         assert merged == results
 
     def test_already_passed_parallel_result_skips_merge_phase(self, tmp_git_repo):
@@ -1058,7 +1058,7 @@ class TestMergeParallelResults:
         results = [TaskResult(task_key="task-pass", success=True)]
 
         with patch("otto.git_ops.merge_candidate") as merge_candidate_mock:
-            merged = merge_parallel_results(results, self._make_config(), tmp_git_repo, tasks_path, telemetry)
+            merged = merge_batch_results(results, self._make_config(), tmp_git_repo, tasks_path, telemetry)
 
         assert merged == results
         merge_candidate_mock.assert_not_called()
@@ -1092,7 +1092,7 @@ class TestMergeParallelResults:
             tiers=[TierResult(tier="existing_tests", passed=False, output="1 failed")],
         )
         with patch("otto.testing.run_test_suite", return_value=failed_suite):
-            merged = merge_parallel_results(results, config, tmp_git_repo, tasks_path, telemetry)
+            merged = merge_batch_results(results, config, tmp_git_repo, tasks_path, telemetry)
 
         assert len(merged) == 1
         assert not merged[0].success
@@ -1133,7 +1133,7 @@ class TestMergeParallelResults:
             tiers=[TierResult(tier="existing_tests", passed=True, output="ok")],
         )
         with patch("otto.testing.run_test_suite", return_value=passed_suite) as run_suite_mock:
-            merge_parallel_results(results, config, tmp_git_repo, tasks_path, telemetry)
+            merge_batch_results(results, config, tmp_git_repo, tasks_path, telemetry)
 
         assert run_suite_mock.call_args.kwargs["custom_test_cmd"] == "bin/task-verify"
 
@@ -1159,7 +1159,7 @@ class TestMergeParallelResults:
             return real_update_task(*args, **kwargs)
 
         with patch("otto.orchestrator.update_task", side_effect=tracking_update_task):
-            merge_parallel_results(results, self._make_config(), tmp_git_repo, tasks_path, telemetry)
+            merge_batch_results(results, self._make_config(), tmp_git_repo, tasks_path, telemetry)
 
         assert "merge_pending" in status_updates
         assert status_updates.index("merge_pending") < status_updates.index("passed")
@@ -1176,7 +1176,7 @@ class TestMergeParallelResults:
         self._create_candidate_commit(tmp_git_repo, "task-merge", "merge.txt", "ok\n")
         results = [TaskResult(task_key="task-merge", success=True)]
 
-        merged = merge_parallel_results(
+        merged = merge_batch_results(
             results, self._make_config(), tmp_git_repo, tasks_path, telemetry, qa_mode=QAMode.BATCH,
         )
 
@@ -1274,7 +1274,7 @@ class TestRunBatchParallel:
         assert not results[0].success
         persisted = yaml.safe_load(tasks_path.read_text())["tasks"][0]
         assert persisted["status"] == "failed"
-        assert persisted["error_code"] == "parallel_setup_failed"
+        assert persisted["error_code"] == "worktree_setup_failed"
         assert "setup boom" in persisted["error"]
 
     @pytest.mark.asyncio

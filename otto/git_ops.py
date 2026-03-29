@@ -220,101 +220,16 @@ def _restore_workspace_state(
 ) -> None:
     """Restore tracked files and remove only Otto-created untracked files.
 
-    Preserves Otto-owned tracked files (e.g. tasks.yaml) across git reset --hard
-    to prevent queue state corruption when these files happen to be tracked.
+    Used for within-task retry resets in worktrees. Otto-owned files like
+    tasks.yaml are not tracked in worktrees, so no save/restore needed.
     """
-    # Save Otto-owned tracked files before reset
-    saved: dict[str, bytes] = {}
-    for otto_file in _OTTO_OWNED_FILES:
-        fpath = project_dir / otto_file
-        if fpath.exists():
-            # Check if tracked by git
-            result = subprocess.run(
-                ["git", "ls-files", otto_file],
-                cwd=project_dir, capture_output=True, text=True,
-            )
-            if result.stdout.strip():
-                try:
-                    saved[otto_file] = fpath.read_bytes()
-                except OSError:
-                    pass
-
     cmd = ["git", "reset", "--hard"]
     if reset_ref:
         cmd.append(reset_ref)
     _run_cleanup_git_command(project_dir, cmd, "git reset --hard")
 
-    # Restore Otto-owned tracked files that were saved
-    for otto_file, content in saved.items():
-        try:
-            (project_dir / otto_file).write_bytes(content)
-        except OSError:
-            pass
-
     _remove_otto_created_untracked(project_dir, pre_existing_untracked)
 
-
-def create_task_branch(
-    project_dir: Path, key: str, default_branch: str,
-    task: dict[str, Any] | None = None,
-) -> str:
-    """Create otto/<key> branch. Returns base SHA.
-
-    If branch exists and was preserved from a diverge failure, raises RuntimeError.
-    Otherwise deletes stale branch and recreates.
-    """
-    branch_name = f"otto/{key}"
-
-    # Verify we're on the default branch (preflight guarantees this).
-    # Fail loudly rather than silently switching branches.
-    current = subprocess.run(
-        ["git", "branch", "--show-current"],
-        cwd=project_dir, capture_output=True, text=True,
-    ).stdout.strip()
-    if current != default_branch:
-        raise RuntimeError(
-            f"create_task_branch requires '{default_branch}' but on '{current}' — "
-            f"run preflight_checks first"
-        )
-
-    # Check if branch exists
-    check = subprocess.run(
-        ["git", "rev-parse", "--verify", branch_name],
-        cwd=project_dir,
-        capture_output=True,
-    )
-    if check.returncode == 0:
-        # Check if this was preserved from a diverge failure (structured error_code)
-        if task and task.get("status") == "failed" and task.get("error_code") == "merge_diverged":
-            raise RuntimeError(
-                f"Branch otto/{key} preserved from diverge failure — "
-                f"manually resolve or run 'otto drop --all' first"
-            )
-        # Delete stale branch
-        subprocess.run(
-            ["git", "branch", "-D", branch_name],
-            cwd=project_dir,
-            capture_output=True,
-        )
-
-    # Record base SHA
-    base_sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=project_dir,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
-
-    # Create and checkout new branch
-    subprocess.run(
-        ["git", "checkout", "-b", branch_name],
-        cwd=project_dir,
-        capture_output=True,
-        check=True,
-    )
-
-    return base_sha
 
 
 def _should_stage_untracked(rel_path: str) -> bool:
@@ -404,83 +319,7 @@ def build_candidate_commit(
     ).stdout.strip()
 
 
-def merge_to_default(project_dir: Path, key: str, default_branch: str) -> bool:
-    """Fast-forward merge task branch to default branch. Returns True on success."""
-    branch_name = f"otto/{key}"
-    subprocess.run(
-        ["git", "checkout", default_branch],
-        cwd=project_dir, capture_output=True, check=True,
-    )
-    result = subprocess.run(
-        ["git", "merge", "--ff-only", branch_name],
-        cwd=project_dir, capture_output=True,
-    )
-    if result.returncode == 0:
-        # Delete merged branch
-        subprocess.run(
-            ["git", "branch", "-d", branch_name],
-            cwd=project_dir, capture_output=True,
-        )
-        return True
-    # Merge failed (branch diverged) — stay on default branch, preserve task branch
-    return False
 
-
-def cleanup_branch(project_dir: Path, key: str, default_branch: str = "main") -> None:
-    """Delete a task branch. Checks out default_branch if on the task branch."""
-    branch_name = f"otto/{key}"
-    current = subprocess.run(
-        ["git", "branch", "--show-current"],
-        cwd=project_dir, capture_output=True, text=True,
-    ).stdout.strip()
-    if current == branch_name:
-        _run_cleanup_git_command(
-            project_dir,
-            ["git", "checkout", default_branch],
-            f"git checkout {default_branch}",
-        )
-    _run_cleanup_git_command(
-        project_dir,
-        ["git", "branch", "-D", branch_name],
-        f"git branch -D {branch_name}",
-    )
-
-
-def rebase_and_merge(project_dir: Path, task_branch: str, default_branch: str) -> bool:
-    """Rebase task_branch onto default_branch then ff-only merge.
-
-    Used for serial merge of parallel tasks.
-    Returns False on rebase conflict.
-    """
-    # Rebase task branch onto default
-    rebase = subprocess.run(
-        ["git", "rebase", default_branch, task_branch],
-        cwd=project_dir, capture_output=True, text=True,
-    )
-    if rebase.returncode != 0:
-        # Abort the failed rebase
-        subprocess.run(
-            ["git", "rebase", "--abort"],
-            cwd=project_dir, capture_output=True,
-        )
-        return False
-
-    # Fast-forward merge
-    subprocess.run(
-        ["git", "checkout", default_branch],
-        cwd=project_dir, capture_output=True, check=True,
-    )
-    result = subprocess.run(
-        ["git", "merge", "--ff-only", task_branch],
-        cwd=project_dir, capture_output=True,
-    )
-    if result.returncode == 0:
-        subprocess.run(
-            ["git", "branch", "-d", task_branch],
-            cwd=project_dir, capture_output=True,
-        )
-        return True
-    return False
 
 
 def _abort_merge_and_cleanup(
@@ -598,24 +437,17 @@ def _cleanup_task_failure(
     error_code: str = "unknown",
     cost_usd: float = 0.0,
     duration_s: float = 0.0,
-    parallel: bool = False,
 ) -> None:
-    """Unified cleanup for all task failure paths: retries exhausted, interruption, exceptions.
+    """Cleanup for task failure: restore workspace state and update tasks.yaml.
 
-    In parallel mode (parallel=True), skips branch checkout/deletion since the
-    task runs in a detached-HEAD worktree that the orchestrator cleans up.
+    Worktree cleanup is handled by the finally block in _run_task_in_worktree().
+    This function only restores the workspace within the worktree and updates
+    the task status.
     """
     _restore_workspace_state(
         project_dir,
         pre_existing_untracked=pre_existing_untracked,
     )
-    if not parallel:
-        _run_cleanup_git_command(
-            project_dir,
-            ["git", "checkout", default_branch],
-            f"git checkout {default_branch}",
-        )
-        cleanup_branch(project_dir, key, default_branch)
     if tasks_file:
         try:
             updates: dict[str, Any] = {

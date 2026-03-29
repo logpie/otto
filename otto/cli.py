@@ -366,39 +366,26 @@ def run(prompt, dry_run, no_spec, no_qa, no_test):
         return
 
     if prompt:
-        # One-off mode — adhoc-<timestamp>-<pid> per spec
-        import fcntl
+        # One-off mode — create temp tasks file and route through run_per
         import os
+        import tempfile
         import time
+        import yaml
 
-        lock_path = git_meta_dir(project_dir) / "otto.lock"
-        lock_path.touch()
-        lock_fh = open(lock_path, "r")
+        key = f"adhoc-{int(time.time())}-{os.getpid()}"
+        # Use a temp file to avoid overwriting real tasks.yaml
+        tmp_fd, tmp_path = tempfile.mkstemp(suffix=".yaml", prefix="otto-adhoc-", dir=str(project_dir))
+        tasks_path = Path(tmp_path)
         try:
-            fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            error_console.print("Another otto process is running", style="error")
-            sys.exit(2)
-
-        try:
-            from otto.runner import check_clean_tree
-            if not check_clean_tree(project_dir):
-                error_console.print(f"[error]✗[/error] Working tree is dirty \u2014 fix before running otto")
-                sys.exit(2)
-
-            key = f"adhoc-{int(time.time())}-{os.getpid()}"
-            task = {
-                "id": 0,
-                "key": key,
-                "prompt": prompt,
-                "status": "pending",
-            }
-            result = asyncio.run(_run_one_off_with_display(task, config, project_dir))
-            success = result.get("success", False)
-            sys.exit(0 if success else 1)
+            os.close(tmp_fd)
+            tasks_path.write_text(yaml.dump({"tasks": [
+                {"id": 0, "key": key, "prompt": prompt, "status": "pending"},
+            ]}))
+            from otto.orchestrator import run_per
+            exit_code = asyncio.run(run_per(config, tasks_path, project_dir))
+            sys.exit(exit_code)
         finally:
-            fcntl.flock(lock_fh, fcntl.LOCK_UN)
-            lock_fh.close()
+            tasks_path.unlink(missing_ok=True)
     else:
         tasks_path = project_dir / "tasks.yaml"
         from otto.orchestrator import run_per

@@ -16,7 +16,7 @@ import yaml
 from otto.context import PipelineContext, TaskResult
 from otto.orchestrator import run_per, cleanup_orphaned_worktrees, _plan_covers_pending
 from otto.planner import Batch, ExecutionPlan, TaskPlan, default_plan, parse_plan_json
-from otto.runner import coding_loop, preflight_checks, rebase_and_merge
+from otto.runner import coding_loop, preflight_checks
 from otto.telemetry import Telemetry, TaskStarted, TaskMerged, TaskFailed, AllDone
 
 
@@ -417,40 +417,6 @@ class TestContextE2E:
         assert abs(ctx.total_cost - 1.0) < 0.001
         assert ctx.passed_count == 2
         assert ctx.failed_count == 1
-
-
-# ---------------------------------------------------------------------------
-# E2E: Rebase and merge integration
-# ---------------------------------------------------------------------------
-
-class TestRebaseAndMergeE2E:
-    def test_two_sequential_merges(self, tmp_git_repo):
-        """Two task branches merged sequentially via rebase."""
-        # Task 1
-        subprocess.run(["git", "checkout", "-b", "otto/t1"], cwd=tmp_git_repo, capture_output=True)
-        _commit_file(tmp_git_repo, "t1.py", "# task 1", "otto: task 1")
-        subprocess.run(["git", "checkout", "main"], cwd=tmp_git_repo, capture_output=True)
-
-        result1 = rebase_and_merge(tmp_git_repo, "otto/t1", "main")
-        assert result1 is True
-        assert (tmp_git_repo / "t1.py").exists()
-
-        # Task 2 — branched from old main (before t1 merge)
-        # Simulate by creating from current main
-        subprocess.run(["git", "checkout", "-b", "otto/t2"], cwd=tmp_git_repo, capture_output=True)
-        _commit_file(tmp_git_repo, "t2.py", "# task 2", "otto: task 2")
-        subprocess.run(["git", "checkout", "main"], cwd=tmp_git_repo, capture_output=True)
-
-        result2 = rebase_and_merge(tmp_git_repo, "otto/t2", "main")
-        assert result2 is True
-        assert (tmp_git_repo / "t2.py").exists()
-
-        # Both files should be on main
-        files = subprocess.run(
-            ["git", "ls-files"], cwd=tmp_git_repo, capture_output=True, text=True,
-        ).stdout
-        assert "t1.py" in files
-        assert "t2.py" in files
 
 
 # ---------------------------------------------------------------------------

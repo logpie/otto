@@ -341,20 +341,19 @@ class TestRunTaskV45:
                 tiers=[TierResult("tier1", True, "1 passed")],
             )):
                 with patch("otto.runner.run_qa_agent_v45", new=qa_mock):
-                    with patch("otto.runner.merge_to_default", return_value=True):
-                        result = await run_task_v45(task, config, tmp_git_repo, tasks_path)
+                    result = await run_task_v45(task, config, tmp_git_repo, tasks_path)
 
         assert result["success"] is True
         log_dir = tmp_git_repo / "otto_logs" / task["key"]
         summary = json.loads((log_dir / "task-summary.json").read_text())
         live_state = json.loads((log_dir / "live-state.json").read_text())
-        assert summary["status"] == "passed"
+        assert summary["status"] == "verified"
         assert summary["attempts"] == 1
         assert summary["phase_costs"]["coding"] == pytest.approx(0.42)
         assert summary["phase_costs"]["qa"] == pytest.approx(0.11)
         assert "prepare" in summary["phase_timings"]
         assert live_state["completed"] is True
-        assert live_state["status"] == "passed"
+        assert live_state["status"] == "verified"
 
     @pytest.mark.asyncio
     async def test_phase_events_are_emitted_to_telemetry(self, tmp_git_repo):
@@ -397,15 +396,14 @@ class TestRunTaskV45:
                 passed=True,
                 tiers=[TierResult("tier1", True, "1 passed")],
             )):
-                with patch("otto.runner.merge_to_default", return_value=True):
-                    result = await run_task_v45(
-                        task,
-                        config,
-                        tmp_git_repo,
-                        tasks_path,
-                        on_progress=on_progress,
-                        qa_mode="skip",
-                    )
+                result = await run_task_v45(
+                    task,
+                    config,
+                    tmp_git_repo,
+                    tasks_path,
+                    on_progress=on_progress,
+                    qa_mode="skip",
+                )
 
         assert result["success"] is True
         events = [
@@ -415,7 +413,7 @@ class TestRunTaskV45:
         ]
         phase_events = [event for event in events if event["event"] == "phase_completed"]
         assert any(event["phase"] == "prepare" and event["status"] == "running" for event in phase_events)
-        assert any(event["phase"] == "merge" and event["status"] == "done" for event in phase_events)
+        assert any(event["phase"] == "merge" and event["status"] == "pending" for event in phase_events)
 
     @pytest.mark.asyncio
     async def test_batch_mode_skips_spec_gen_and_qa_and_returns_verified(self, tmp_git_repo):
@@ -451,10 +449,9 @@ class TestRunTaskV45:
                         passed=True,
                         tiers=[TierResult("tier1", True, "1 passed")],
                     )):
-                        with patch("otto.runner.merge_to_default") as merge_mock:
-                            result = await run_task_v45(
-                                task, config, tmp_git_repo, tasks_path, qa_mode="batch",
-                            )
+                        result = await run_task_v45(
+                            task, config, tmp_git_repo, tasks_path, qa_mode="batch",
+                        )
 
         persisted = load_tasks(tasks_path)[0]
         assert result["success"] is True
@@ -462,10 +459,9 @@ class TestRunTaskV45:
         assert persisted["status"] == "verified"
         spec_mock.assert_not_called()
         qa_mock.assert_not_called()
-        merge_mock.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_skip_mode_skips_qa_and_keeps_serial_merge_behavior(self, tmp_git_repo):
+    async def test_skip_mode_skips_qa_and_returns_verified(self, tmp_git_repo):
         default_branch = _current_branch(tmp_git_repo)
         task = {
             "id": 1,
@@ -498,15 +494,14 @@ class TestRunTaskV45:
                 tiers=[TierResult("tier1", True, "1 passed")],
             )):
                 with patch("otto.runner.run_qa_agent_v45") as qa_mock:
-                    with patch("otto.runner.merge_to_default", return_value=True):
-                        result = await run_task_v45(
-                            task, config, tmp_git_repo, tasks_path, qa_mode="skip",
-                        )
+                    result = await run_task_v45(
+                        task, config, tmp_git_repo, tasks_path, qa_mode="skip",
+                    )
 
         persisted = load_tasks(tasks_path)[0]
         assert result["success"] is True
-        assert result["status"] == "passed"
-        assert persisted["status"] == "passed"
+        assert result["status"] == "verified"
+        assert persisted["status"] == "verified"
         qa_mock.assert_not_called()
 
     @pytest.mark.asyncio
@@ -543,69 +538,16 @@ class TestRunTaskV45:
                     tiers=[TierResult("tier1", True, "1 passed")],
                 )):
                     with patch("otto.runner.run_qa_agent_v45") as qa_mock:
-                        with patch("otto.runner.merge_to_default", return_value=True):
-                            result = await run_task_v45(
-                                task, config, tmp_git_repo, tasks_path, qa_mode="skip",
-                            )
-
-        persisted = load_tasks(tasks_path)[0]
-        assert result["success"] is True
-        assert result["status"] == "passed"
-        assert persisted["status"] == "passed"
-        spec_mock.assert_not_called()
-        qa_mock.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_merge_diverged_persists_error_code(self, tmp_git_repo):
-        """Merge-diverged failures should persist structured error_code to tasks.yaml."""
-        default_branch = _current_branch(tmp_git_repo)
-        task = {
-            "id": 1,
-            "key": "taskmerge001",
-            "prompt": "Add feature.txt",
-            "status": "pending",
-            "spec": [{"text": "Creates feature.txt", "binding": "must"}],
-        }
-        tasks_path = _write_task(tmp_git_repo, task)
-        config = {
-            "default_branch": default_branch,
-            "max_retries": 0,
-            "verify_timeout": 30,
-            "max_task_time": 60,
-            "test_command": None,
-        }
-
-        async def fake_query(*, prompt, options=None):
-            (tmp_git_repo / "feature.txt").write_text("hello\n")
-            yield SimpleNamespace(
-                session_id="sess-1",
-                is_error=False,
-                total_cost_usd=0.0,
-                result="ok",
-            )
-
-        qa_mock = AsyncMock(return_value={
-            "must_passed": True,
-            "verdict": {"must_passed": True, "must_items": []},
-            "raw_report": "QA PASS",
-            "cost_usd": 0.0,
-        })
-
-        with patch("otto.runner.query", new=fake_query):
-            with patch("otto.runner.run_test_suite", return_value=TestSuiteResult(
-                passed=True,
-                tiers=[TierResult("tier1", True, "1 passed")],
-            )):
-                with patch("otto.runner.run_qa_agent_v45", new=qa_mock):
-                    with patch("otto.runner.merge_to_default", return_value=False):
                         result = await run_task_v45(
-                            task, config, tmp_git_repo, tasks_path,
+                            task, config, tmp_git_repo, tasks_path, qa_mode="skip",
                         )
 
         persisted = load_tasks(tasks_path)[0]
-        assert result["success"] is False
-        assert persisted["status"] == "failed"
-        assert persisted["error_code"] == "merge_diverged"
+        assert result["success"] is True
+        assert result["status"] == "verified"
+        assert persisted["status"] == "verified"
+        spec_mock.assert_not_called()
+        qa_mock.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_spec_generation_failure_falls_back_to_prompt_only_qa(self, tmp_git_repo):
@@ -652,10 +594,9 @@ class TestRunTaskV45:
                     tiers=[TierResult("tier1", True, "1 passed")],
                 )):
                     with patch("otto.runner.run_qa_agent_v45", new=qa_mock):
-                        with patch("otto.runner.merge_to_default", return_value=True):
-                            result = await run_task_v45(
-                                task, config, tmp_git_repo, tasks_path,
-                            )
+                        result = await run_task_v45(
+                            task, config, tmp_git_repo, tasks_path,
+                        )
 
         qa_spec = qa_mock.await_args.args[1]
         assert result["success"] is True
@@ -811,10 +752,9 @@ class TestRunTaskV45:
                     tiers=[TierResult("tier1", True, "1 passed")],
                 )):
                     with patch("otto.runner.run_qa_agent_v45", new=qa_mock):
-                        with patch("otto.runner.merge_to_default", return_value=True):
-                            result = await run_task_v45(
-                                task, config, tmp_git_repo, tasks_path,
-                            )
+                        result = await run_task_v45(
+                            task, config, tmp_git_repo, tasks_path,
+                        )
 
         persisted = load_tasks(tasks_path)[0]
         assert result["success"] is True
@@ -888,10 +828,9 @@ class TestRunTaskV45:
                     tiers=[TierResult("tier1", True, "1 passed")],
                 )):
                     with patch("otto.runner.run_qa_agent_v45", new=qa_mock):
-                        with patch("otto.runner.merge_to_default", return_value=True):
-                            result = await run_task_v45(
-                                task, config, tmp_git_repo, tasks_path, on_progress=on_progress,
-                            )
+                        result = await run_task_v45(
+                            task, config, tmp_git_repo, tasks_path, on_progress=on_progress,
+                        )
 
         spec_items = [data["text"] for event, data in progress_events if event == "spec_item"]
         qa_items = [data for event, data in progress_events if event == "qa_item_result"]
@@ -1033,91 +972,14 @@ class TestRunTaskV45:
                 tiers=[TierResult("tier1", True, "1 passed")],
             )):
                 with patch("otto.runner.run_qa_agent_v45", new=qa_mock):
-                    with patch("otto.runner.merge_to_default", return_value=True):
-                        result = await run_task_v45(
-                            task, config, tmp_git_repo, tasks_path,
-                        )
+                    result = await run_task_v45(
+                        task, config, tmp_git_repo, tasks_path,
+                    )
 
         persisted = load_tasks(tasks_path)[0]
         assert result["success"] is True
         assert result["review_ref"] is None
         assert "review_ref" not in persisted
-
-    @pytest.mark.asyncio
-    async def test_merge_restores_verified_candidate_after_qa_drift(self, tmp_git_repo):
-        """Merge should run from the verified candidate, not QA's leftover branch state."""
-        default_branch = _current_branch(tmp_git_repo)
-        task = {
-            "id": 1,
-            "key": "taskmerge01",
-            "prompt": "Add feature.txt",
-            "status": "pending",
-            "spec": [{"text": "Creates feature.txt", "binding": "must"}],
-            "max_retries": 0,
-        }
-        tasks_path = _write_task(tmp_git_repo, task)
-        config = {
-            "default_branch": default_branch,
-            "max_retries": 0,
-            "verify_timeout": 30,
-            "max_task_time": 60,
-            "test_command": None,
-        }
-
-        async def fake_query(*, prompt, options=None):
-            (tmp_git_repo / "feature.txt").write_text("candidate\n")
-            yield SimpleNamespace(
-                session_id="sess-merge-restore",
-                is_error=False,
-                total_cost_usd=0.0,
-                result="ok",
-            )
-
-        async def fake_qa(*args, **kwargs):
-            (tmp_git_repo / "feature.txt").write_text("qa drift\n")
-            subprocess.run(
-                ["git", "add", "feature.txt"],
-                cwd=tmp_git_repo, capture_output=True, check=True,
-            )
-            subprocess.run(
-                ["git", "commit", "-m", "qa drift"],
-                cwd=tmp_git_repo, capture_output=True, check=True,
-            )
-            (tmp_git_repo / "qa.tmp").write_text("left behind\n")
-            return {
-                "must_passed": True,
-                "verdict": {"must_passed": True, "must_items": []},
-                "raw_report": "QA PASS",
-                "cost_usd": 0.0,
-            }
-
-        def fake_merge(project_dir, key, default_branch):
-            candidate_sha = subprocess.run(
-                ["git", "rev-parse", f"refs/otto/candidates/{key}/attempt-1"],
-                cwd=project_dir, capture_output=True, text=True, check=True,
-            ).stdout.strip()
-            head_sha = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=project_dir, capture_output=True, text=True, check=True,
-            ).stdout.strip()
-
-            assert head_sha == candidate_sha
-            assert (project_dir / "feature.txt").read_text() == "candidate\n"
-            assert not (project_dir / "qa.tmp").exists()
-            return True
-
-        with patch("otto.runner.query", new=fake_query):
-            with patch("otto.runner.run_test_suite", return_value=TestSuiteResult(
-                passed=True,
-                tiers=[TierResult("tier1", True, "1 passed")],
-            )):
-                with patch("otto.runner.run_qa_agent_v45", new=fake_qa):
-                    with patch("otto.runner.merge_to_default", side_effect=fake_merge):
-                        result = await run_task_v45(
-                            task, config, tmp_git_repo, tasks_path,
-                        )
-
-        assert result["success"] is True
 
     @pytest.mark.asyncio
     async def test_time_budget_early_return_cleans_up_and_cancels_spec(self, tmp_git_repo):

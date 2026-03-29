@@ -28,11 +28,7 @@ from otto.context import QAMode
 from otto.display import _truncate_at_word, console, format_cost, format_duration, rich_escape
 from otto.git_ops import (
     check_clean_tree,
-    create_task_branch,
     build_candidate_commit,
-    merge_to_default,
-    cleanup_branch,
-    rebase_and_merge,
     _should_stage_untracked,
     _anchor_candidate_ref,
     _find_best_candidate_ref,
@@ -1151,12 +1147,9 @@ async def _handle_no_changes(
     emit: Any,
     on_progress: Any | None,
     log_dir: Path,
-    default_branch: str,
-    key: str,
     attempt: int,
     add_cost: Any,
     await_spec: Any,  # async callable
-    parallel: bool = False,
 ) -> dict[str, Any] | None:
     """Handle the case where coding agent made no changes.
 
@@ -1236,15 +1229,8 @@ async def _handle_no_changes(
         _audit_proof_sufficiency(verdict_nc, qa_spec, log_dir / "qa-proofs", emit)
         emit("phase", name="qa", status="done", time_s=qa_elapsed_nc,
              cost=qa_cost_nc)
-        if parallel:
-            emit("phase", name="merge", status="done", time_s=0,
-                 detail="skipped (no changes to merge)")
-        else:
-            emit("phase", name="merge", status="done", time_s=0,
-                 detail="no changes needed")
-            subprocess.run(["git", "checkout", default_branch],
-                           cwd=project_dir, capture_output=True)
-            cleanup_branch(project_dir, key, default_branch)
+        emit("phase", name="merge", status="done", time_s=0,
+             detail="no changes to merge")
         return {
             "action": "pass",
             "status": "passed",
@@ -1559,8 +1545,6 @@ async def run_task_v45(
         nonlocal total_cost
         total_cost += amount
 
-    is_parallel = task_work_dir != project_dir
-
     try:
         # ── Step 1: Prepare ─────────────────────────────────────────────
         emit("phase", name="prepare", status="running")
@@ -1569,16 +1553,13 @@ async def run_task_v45(
         if tasks_file:
             update_task(tasks_file, key, status="running", review_ref=None)
 
-        if is_parallel:
-            # Parallel mode: worktree is already at base_sha (detached HEAD).
-            # No branch needed — agent works on detached HEAD, candidate is
-            # anchored as a ref. Merge happens in the orchestrator.
-            base_sha = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=task_work_dir, capture_output=True, text=True, check=True,
-            ).stdout.strip()
-        else:
-            base_sha = create_task_branch(task_work_dir, key, default_branch, task=task)
+        # Worktree is already at base_sha (detached HEAD).
+        # No branch needed — agent works on detached HEAD, candidate is
+        # anchored as a ref. Merge happens in the orchestrator.
+        base_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=task_work_dir, capture_output=True, text=True, check=True,
+        ).stdout.strip()
         pre_existing_untracked = _snapshot_untracked(task_work_dir)
 
         # Create scratch area for ephemeral test verification
@@ -1621,7 +1602,6 @@ async def run_task_v45(
                         error_code="baseline_fail",
                         cost_usd=total_cost,
                         duration_s=time.monotonic() - task_start,
-                        parallel=is_parallel,
                     )
                     return _result(False, "failed",
                                    error=f"BASELINE_FAIL: test infrastructure broken\n{output[-500:]}")
@@ -1648,7 +1628,6 @@ async def run_task_v45(
                 error_code="max_retries",
                 cost_usd=total_cost,
                 duration_s=time.monotonic() - task_start,
-                parallel=is_parallel,
             )
             return _result(False, "failed", error=error, error_code="max_retries")
 
@@ -1697,7 +1676,6 @@ async def run_task_v45(
                     error_code="time_budget_exceeded",
                     cost_usd=total_cost,
                     duration_s=time.monotonic() - task_start,
-                    parallel=is_parallel,
                 )
                 return _result(False, "failed", error=error, error_code="time_budget_exceeded")
 
@@ -1798,13 +1776,6 @@ async def run_task_v45(
                         reset_ref=base_sha,
                         pre_existing_untracked=pre_existing_untracked,
                     )
-                    if not is_parallel:
-                        subprocess.run(
-                            ["git", "checkout", default_branch],
-                            cwd=task_work_dir,
-                            capture_output=True,
-                        )
-                        cleanup_branch(task_work_dir, key, default_branch)
                     return _result(
                         True,
                         "verified",
@@ -1821,12 +1792,9 @@ async def run_task_v45(
                     emit=emit,
                     on_progress=on_progress,
                     log_dir=log_dir,
-                    default_branch=default_branch,
-                    key=key,
                     attempt=attempt,
                     add_cost=_add_cost,
                     await_spec=_await_spec_task,
-                    parallel=is_parallel,
                 )
                 # _handle_no_changes may have awaited spec, update local ref
                 if not spec_task or (spec_task and spec_task.done()):
@@ -1930,7 +1898,6 @@ async def run_task_v45(
                     error_code="internal_error",
                     cost_usd=total_cost,
                     duration_s=time.monotonic() - task_start,
-                    parallel=is_parallel,
                 )
                 return _result(False, "failed", error=f"squash commit failed: {stderr}")
 
@@ -2015,56 +1982,11 @@ async def run_task_v45(
             if not skip_qa_mode and not config.get("skip_qa") and not batch_qa_mode:
                 _audit_proof_sufficiency(qa_out["verdict"], spec, log_dir / "qa-proofs", emit)
 
-            # ── Batch / parallel mode: stop at verified, merge happens later ──
-            is_parallel = task_work_dir != project_dir
-            if batch_qa_mode or is_parallel:
-                # In parallel mode, the orchestrator handles merge after all
-                # tasks complete. Return as "verified" with the candidate ref.
-                detail = "deferred to batch merge" if batch_qa_mode else "deferred to merge phase"
-                emit("phase", name="merge", status="pending", detail=detail)
-                if batch_qa_mode and not is_parallel:
-                    subprocess.run(
-                        ["git", "checkout", default_branch],
-                        cwd=task_work_dir,
-                        capture_output=True,
-                    )
-                    cleanup_branch(task_work_dir, key, default_branch)
-                return _result(True, "verified",
-                               diff_summary=diff_summary, qa_report=qa_report)
-
-            # ── Merge (serial mode only) ───────────────────────────────
-            emit("phase", name="merge", status="running")
-            merge_start = time.monotonic()
-            if merge_to_default(task_work_dir, key, default_branch):
-                merge_elapsed = round(time.monotonic() - merge_start, 1)
-                phase_timings["merge"] = merge_elapsed
-                emit("phase", name="merge", status="done", time_s=merge_elapsed)
-                testgen_dir = git_meta_dir(task_work_dir) / "otto" / "testgen" / key
-                if testgen_dir.exists():
-                    shutil.rmtree(testgen_dir, ignore_errors=True)
-                # Append commit SHA to proof report
-                try:
-                    commit_sha = subprocess.run(
-                        ["git", "rev-parse", "HEAD"],
-                        cwd=task_work_dir, capture_output=True, text=True,
-                    ).stdout.strip()
-                    proof_report_path = log_dir / "qa-proofs" / "proof-report.md"
-                    if proof_report_path.exists() and commit_sha:
-                        with open(proof_report_path, "a") as f:
-                            f.write(f"\n**Commit:** {commit_sha}\n")
-                except Exception:
-                    pass
-                return _result(True, "passed", diff_summary=diff_summary, qa_report=qa_report)
-            else:
-                merge_elapsed = round(time.monotonic() - merge_start, 1)
-                emit("phase", name="merge", status="fail", time_s=merge_elapsed,
-                     error="branch diverged")
-                return _result(
-                    False, "failed",
-                    error=f"branch diverged — otto/{key} preserved",
-                    diff_summary=diff_summary, qa_report=qa_report,
-                    error_code="merge_diverged",
-                )
+            # ── Verified — merge is handled by orchestrator ──
+            emit("phase", name="merge", status="pending",
+                 detail="deferred to merge phase")
+            return _result(True, "verified",
+                           diff_summary=diff_summary, qa_report=qa_report)
 
         # All retries exhausted — find best verified candidate
         await _cancel_spec_task()
@@ -2076,7 +1998,6 @@ async def run_task_v45(
             error=f"max retries exhausted{last_err_detail}", error_code="max_retries",
             cost_usd=total_cost,
             duration_s=time.monotonic() - task_start,
-            parallel=is_parallel,
         )
         return _result(
             False, "failed",
@@ -2094,7 +2015,6 @@ async def run_task_v45(
                 error=f"unexpected error: {e}", error_code="internal_error",
                 cost_usd=total_cost,
                 duration_s=duration,
-                parallel=is_parallel,
             )
         except Exception:
             pass

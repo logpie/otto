@@ -50,6 +50,17 @@ from otto.telemetry import (
 )
 
 
+def _stamp_proof_commit_sha(project_dir: Path, task_key: str, commit_sha: str) -> None:
+    """Append commit SHA to a task's proof report after successful merge."""
+    try:
+        proof_path = project_dir / "otto_logs" / task_key / "qa-proofs" / "proof-report.md"
+        if proof_path.exists() and commit_sha:
+            with open(proof_path, "a") as f:
+                f.write(f"\n**Commit:** {commit_sha}\n")
+    except Exception:
+        pass
+
+
 def _orchestrator_log(project_dir: Path, *lines: str) -> None:
     append_text_log(project_dir / "otto_logs" / "orchestrator.log", lines)
 
@@ -847,16 +858,19 @@ async def run_per(
                     sibling_contexts=sib_ctxs,
                 )
             else:
-                # Serial execution — tasks share the main checkout
+                # Serial execution — each task gets its own worktree
+                base_sha = subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=project_dir, capture_output=True, text=True, check=True,
+                ).stdout.strip()
                 batch_results: list[TaskResult] = []
                 for task_plan in batch.tasks:
                     sibling_ctx = _build_sibling_context(
                         task_plan.task_key, batch, pending_by_key, execution_plan.analysis,
                     )
-                    result = await coding_loop(
+                    result = await _run_task_in_worktree(
                         task_plan, context, config, project_dir, telemetry, tasks_file,
-                        qa_mode=qa_mode,
-                        sibling_context=sibling_ctx,
+                        base_sha, qa_mode=qa_mode, sibling_context=sibling_ctx,
                     )
                     batch_results.append(result)
                     if context.interrupted:
@@ -866,8 +880,8 @@ async def run_per(
             if qa_mode == QAMode.BATCH and not context.interrupted:
                 pre_batch_sha = _current_head_sha(project_dir)
 
-            if (use_parallel or qa_mode == QAMode.BATCH) and not context.interrupted:
-                batch_results = merge_parallel_results(
+            if not context.interrupted:
+                batch_results = merge_batch_results(
                     batch_results, config, project_dir, tasks_file, telemetry,
                     qa_mode=qa_mode,
                 )
@@ -955,13 +969,17 @@ async def run_per(
                             )
                         except Exception:
                             continue
-                        retry_result = await coding_loop(
+                        retry_base_sha = subprocess.run(
+                            ["git", "rev-parse", "HEAD"],
+                            cwd=project_dir, capture_output=True, text=True, check=True,
+                        ).stdout.strip()
+                        retry_result = await _run_task_in_worktree(
                             tp, context, config, project_dir,
-                            telemetry, tasks_file,
+                            telemetry, tasks_file, retry_base_sha,
                             qa_mode=qa_mode,
                         )
                         if retry_result.success:
-                            rerun_merged = merge_parallel_results(
+                            rerun_merged = merge_batch_results(
                                 [retry_result], config, project_dir, tasks_file, telemetry,
                                 qa_mode=qa_mode,
                             )
@@ -1074,18 +1092,23 @@ async def run_per(
                                 except Exception:
                                     pass
 
-                                raw_retry_result = await coding_loop(
+                                qa_retry_base_sha = subprocess.run(
+                                    ["git", "rev-parse", "HEAD"],
+                                    cwd=project_dir, capture_output=True, text=True, check=True,
+                                ).stdout.strip()
+                                raw_retry_result = await _run_task_in_worktree(
                                     task_plan,
                                     context,
                                     config,
                                     project_dir,
                                     telemetry,
                                     tasks_file,
+                                    qa_retry_base_sha,
                                     qa_mode=qa_mode,
                                 )
                                 retry_result = _combine_task_results(previous_result, raw_retry_result)
                                 if raw_retry_result.success:
-                                    rerun_merged = merge_parallel_results(
+                                    rerun_merged = merge_batch_results(
                                         [raw_retry_result], config, project_dir, tasks_file, telemetry,
                                         qa_mode=qa_mode,
                                     )
@@ -1275,6 +1298,13 @@ async def run_per(
                                     )
                                 except Exception:
                                     pass
+                                # Stamp commit SHA now that batch QA confirmed this task passed
+                                commit_sha = next(
+                                    (r.commit_sha for r in batch_results if r.task_key == task_key and r.commit_sha),
+                                    None,
+                                )
+                                if commit_sha:
+                                    _stamp_proof_commit_sha(project_dir, task_key, commit_sha)
 
                         batch_results = [
                             TaskResult(
@@ -1539,7 +1569,7 @@ async def run_per(
         lock_fh.close()
 
 
-def merge_parallel_results(
+def merge_batch_results(
     results: list[TaskResult],
     config: dict[str, Any],
     project_dir: Path,
@@ -1767,7 +1797,88 @@ def merge_parallel_results(
         ))
         _orchestrator_log(project_dir, f"task={task_key} merge result=success commit={new_sha[:12]}")
 
+        # Post-merge bookkeeping: cleanup testgen dir
+        try:
+            from otto.config import git_meta_dir
+            testgen_dir = git_meta_dir(project_dir) / "otto" / "testgen" / task_key
+            if testgen_dir.exists():
+                import shutil
+                shutil.rmtree(testgen_dir, ignore_errors=True)
+        except Exception:
+            pass
+        # Stamp commit SHA on proof report only for non-batch QA (per-task/skip).
+        # For batch QA, SHA is stamped after batch QA passes (rollback could
+        # invalidate the commit).
+        if qa_mode != QAMode.BATCH:
+            _stamp_proof_commit_sha(project_dir, task_key, new_sha)
+
     return merged_results
+
+
+async def _run_task_in_worktree(
+    task_plan: Any,
+    context: Any,
+    config: dict[str, Any],
+    project_dir: Path,
+    telemetry: Any,
+    tasks_file: Path,
+    base_sha: str,
+    *,
+    qa_mode: str = QAMode.PER_TASK,
+    sibling_context: str | None = None,
+) -> TaskResult:
+    """Run a single task in an isolated git worktree.
+
+    Creates worktree → installs deps → runs coding_loop → cleans up worktree.
+    Used by both serial and parallel execution paths.
+    """
+    from otto.git_ops import create_task_worktree, cleanup_task_worktree
+    from otto.testing import _install_deps
+
+    task_key = task_plan.task_key
+    install_timeout = config.get("install_timeout", config.get("verify_timeout", 300))
+    worktree_path: Path | None = None
+    try:
+        wt_start = time.monotonic()
+        worktree_path = await asyncio.to_thread(
+            create_task_worktree, project_dir, task_key, base_sha,
+        )
+        wt_elapsed = time.monotonic() - wt_start
+        _orchestrator_log(project_dir, f"  worktree: {task_key[:8]} created ({wt_elapsed:.1f}s)")
+
+        install_start = time.monotonic()
+        await asyncio.to_thread(_install_deps, worktree_path, install_timeout)
+        install_elapsed = time.monotonic() - install_start
+        _orchestrator_log(project_dir, f"  worktree: {task_key[:8]} deps installed ({install_elapsed:.1f}s)")
+
+        if context.interrupted:
+            return TaskResult(task_key=task_key, success=False, error="interrupted before start")
+
+        result = await coding_loop(
+            task_plan, context, config, project_dir,
+            telemetry, tasks_file,
+            task_work_dir=worktree_path,
+            qa_mode=qa_mode,
+            sibling_context=sibling_context,
+        )
+        return result
+
+    except Exception as exc:
+        error = f"worktree execution error: {exc}"
+        _orchestrator_log(project_dir, f"  worktree: {task_key[:8]} EXCEPTION: {exc}")
+        try:
+            update_task(tasks_file, task_key, status="failed", error=error, error_code="worktree_setup_failed")
+        except Exception:
+            pass
+        return TaskResult(task_key=task_key, success=False, error=error)
+    finally:
+        if worktree_path:
+            try:
+                await asyncio.to_thread(cleanup_task_worktree, project_dir, task_key)
+                _orchestrator_log(project_dir, f"  worktree: {task_key[:8]} cleaned up")
+            except Exception as e:
+                _orchestrator_log(project_dir, f"  worktree: {task_key[:8]} cleanup FAILED: {e}")
+                console.print(f"[yellow]Warning: worktree cleanup failed for {task_key}: {e}[/yellow]")
 
 
 async def _run_batch_parallel(
@@ -1788,12 +1899,6 @@ async def _run_batch_parallel(
     Tasks run concurrently up to max_parallel via asyncio.Semaphore.
     Worktrees are cleaned up after all tasks complete.
     """
-    from otto.git_ops import create_task_worktree, cleanup_task_worktree
-    from otto.testing import _install_deps
-
-    default_branch = config["default_branch"]
-    install_timeout = config.get("install_timeout", config.get("verify_timeout", 300))
-
     # Get base SHA (current HEAD on default branch)
     base_sha = subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -1801,75 +1906,18 @@ async def _run_batch_parallel(
     ).stdout.strip()
 
     semaphore = asyncio.Semaphore(max_parallel)
-    worktree_paths: dict[str, Path] = {}
 
     async def _run_one(task_plan: Any) -> TaskResult:
         task_key = task_plan.task_key
-        worktree_path: Path | None = None
-        try:
-            _orchestrator_log(project_dir, f"  parallel: {task_key[:8]} waiting for semaphore (max_parallel={max_parallel})")
-            async with semaphore:
-                _orchestrator_log(project_dir, f"  parallel: {task_key[:8]} acquired semaphore")
-                wt_start = time.monotonic()
-                worktree_path = await asyncio.to_thread(
-                    create_task_worktree, project_dir, task_key, base_sha,
-                )
-                worktree_paths[task_key] = worktree_path
-                wt_elapsed = time.monotonic() - wt_start
-                _orchestrator_log(project_dir, f"  parallel: {task_key[:8]} worktree created at {worktree_path} ({wt_elapsed:.1f}s)")
-
-                install_start = time.monotonic()
-                await asyncio.to_thread(
-                    _install_deps, worktree_path, install_timeout,
-                )
-                install_elapsed = time.monotonic() - install_start
-                _orchestrator_log(project_dir, f"  parallel: {task_key[:8]} deps installed ({install_elapsed:.1f}s)")
-
-                if context.interrupted:
-                    _orchestrator_log(project_dir, f"  parallel: {task_key[:8]} interrupted before coding")
-                    return TaskResult(
-                        task_key=task_key, success=False,
-                        error="interrupted before start",
-                    )
-                sib_ctx = (sibling_contexts or {}).get(task_key)
-                _orchestrator_log(project_dir, f"  parallel: {task_key[:8]} starting coding_loop")
-                result = await coding_loop(
-                    task_plan, context, config, project_dir,
-                    telemetry, tasks_file,
-                    task_work_dir=worktree_path,
-                    qa_mode=qa_mode,
-                    sibling_context=sib_ctx,
-                )
-                _orchestrator_log(project_dir, f"  parallel: {task_key[:8]} coding_loop done (success={result.success})")
-                return result
-
-        except Exception as exc:
-            error = f"parallel execution error: {exc}"
-            _orchestrator_log(project_dir, f"  parallel: {task_key[:8]} EXCEPTION: {exc}")
-            try:
-                update_task(
-                    tasks_file,
-                    task_key,
-                    status="failed",
-                    error=error,
-                    error_code="parallel_setup_failed",
-                )
-            except Exception:
-                pass
-            return TaskResult(
-                task_key=task_key, success=False,
-                error=error,
+        _orchestrator_log(project_dir, f"  parallel: {task_key[:8]} waiting for semaphore (max_parallel={max_parallel})")
+        async with semaphore:
+            _orchestrator_log(project_dir, f"  parallel: {task_key[:8]} acquired semaphore")
+            sib_ctx = (sibling_contexts or {}).get(task_key)
+            return await _run_task_in_worktree(
+                task_plan, context, config, project_dir,
+                telemetry, tasks_file, base_sha,
+                qa_mode=qa_mode, sibling_context=sib_ctx,
             )
-        finally:
-            if worktree_path:
-                try:
-                    await asyncio.to_thread(
-                        cleanup_task_worktree, project_dir, task_key,
-                    )
-                    _orchestrator_log(project_dir, f"  parallel: {task_key[:8]} worktree cleaned up")
-                except Exception as e:
-                    _orchestrator_log(project_dir, f"  parallel: {task_key[:8]} worktree cleanup FAILED: {e}")
-                    console.print(f"[yellow]⚠ Worktree cleanup failed for {task_key}: {e}[/yellow]")
 
     # Launch all tasks concurrently
     tasks = [_run_one(tp) for tp in batch.tasks]

@@ -68,21 +68,14 @@ class TestEndToEnd:
         # Verify
         assert success is True
         tasks = load_tasks(tasks_path)
-        assert tasks[0]["status"] == "passed"
-        # hello.py should be on main
-        assert (tmp_git_repo / "hello.py").exists()
-        branch = subprocess.run(
-            ["git", "branch", "--show-current"],
-            cwd=tmp_git_repo, capture_output=True, text=True,
-        ).stdout.strip()
-        assert branch == "main"
+        assert tasks[0]["status"] == "verified"
 
     @patch("otto.runner.ClaudeAgentOptions")
     @patch("otto.runner.query")
     def test_task_fails_and_reverts(
         self, mock_query, mock_options_cls, tmp_git_repo
     ):
-        """Task fails verify_cmd → branch deleted, main untouched."""
+        """Task fails verify_cmd → workspace reverted, main untouched."""
         create_config(tmp_git_repo)
         _commit_otto_config(tmp_git_repo)
 
@@ -117,9 +110,9 @@ class TestEndToEnd:
         ).stdout
         assert "otto/" not in branches
 
-    @patch("otto.runner.create_task_branch", side_effect=RuntimeError("branch boom"))
+    @patch("otto.runner._snapshot_untracked", side_effect=RuntimeError("setup boom"))
     def test_setup_exception_marks_task_failed(
-        self, mock_create_branch, tmp_git_repo
+        self, mock_snapshot, tmp_git_repo
     ):
         """Setup failures should not leave the task stuck in running."""
         create_config(tmp_git_repo)
@@ -138,4 +131,4 @@ class TestEndToEnd:
         failed_task = load_tasks(tasks_path)[0]
         assert failed_task["status"] == "failed"
         assert failed_task["error_code"] == "internal_error"
-        assert "branch boom" in failed_task["error"]
+        assert "setup boom" in failed_task["error"]

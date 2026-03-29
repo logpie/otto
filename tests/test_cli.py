@@ -163,58 +163,31 @@ class TestRun:
         assert result.exit_code == 0
         assert "Pending tasks: 1" in result.output
 
-    @patch("otto.runner.check_clean_tree", return_value=True)
-    @patch("otto.runner.run_task_v45")
-    @patch("otto.cli.TaskDisplay")
-    def test_one_off_mode_shows_display_output(
+    def test_one_off_mode_routes_through_run_per(
         self,
-        mock_display_cls,
-        mock_run_task_v45,
-        mock_check_clean_tree,
         runner,
         tmp_git_repo,
         monkeypatch,
     ):
+        """One-off mode writes temp tasks.yaml and calls run_per."""
         monkeypatch.chdir(tmp_git_repo)
         from otto.config import create_config
 
         create_config(tmp_git_repo)
 
-        mock_display = MagicMock()
-        mock_display.stop.return_value = "2s"
-        mock_display_cls.return_value = mock_display
+        async def fake_run_per(config, tasks_path, project_dir):
+            from otto.tasks import load_tasks
+            tasks = load_tasks(tasks_path)
+            pending = [t for t in tasks if t.get("status") == "pending"]
+            assert len(pending) == 1
+            assert "Fix the broken command" in pending[0]["prompt"]
+            assert pending[0]["key"].startswith("adhoc-")
+            return 0
 
-        async def fake_run_task_v45(task, config, project_dir, tasks_file=None, context=None, on_progress=None):
-            assert task["prompt"] == "Fix the broken command"
-            assert tasks_file is None
-            assert project_dir == tmp_git_repo
-            assert callable(on_progress)
-
-            on_progress("phase", {"name": "coding", "status": "running", "detail": "attempt 1"})
-            on_progress("agent_tool", {"name": "Read", "detail": "README.md"})
-            on_progress("phase", {"name": "coding", "status": "done", "time_s": 1.2, "cost": 0.03})
-
-            return {"success": True, "cost_usd": 0.03}
-
-        mock_run_task_v45.side_effect = fake_run_task_v45
-
-        result = runner.invoke(main, ["run", "Fix the broken command"])
+        with patch("otto.orchestrator.run_per", side_effect=fake_run_per):
+            result = runner.invoke(main, ["run", "Fix the broken command"])
 
         assert result.exit_code == 0
-        assert "Running" in result.output
-        assert "passed" in result.output
-        mock_check_clean_tree.assert_called_once_with(tmp_git_repo)
-        mock_display.start.assert_called_once()
-        mock_display.stop.assert_called_once()
-        mock_display.update_phase.assert_any_call(
-            name="coding",
-            status="running",
-            time_s=0.0,
-            error="",
-            detail="attempt 1",
-            cost=0,
-        )
-        mock_display.add_tool.assert_called_once_with(data={"name": "Read", "detail": "README.md"})
 
 
 class TestStatus:
