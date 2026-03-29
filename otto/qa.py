@@ -882,7 +882,11 @@ async def _run_qa_prompt(
                     }
             except (json.JSONDecodeError, OSError):
                 pass
-        if any(kw in error_str.lower() for kw in ("api_error", "internal server", "stream closed")):
+        if any(kw in error_str.lower() for kw in (
+            "api_error", "internal server", "stream closed",
+            "not logged in", "control request timeout", "please run /login",
+            "command failed with exit code",
+        )):
             return {
                 "must_passed": None,
                 "verdict": None,
