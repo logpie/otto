@@ -570,7 +570,7 @@ class TestRunTaskV45:
         assert qa_spec[0]["binding"] == "must"
         assert "original task prompt" in qa_spec[0]["text"].lower()
         assert "Structured spec generation failed" in result["qa_report"]
-        assert qa_mock.await_args.kwargs["tier"] == 2
+        assert qa_mock.await_args.kwargs["tier"] == 1  # unified tier, browser always available
 
     @pytest.mark.asyncio
     async def test_retry_prompt_wraps_last_error_in_code_fence(self, tmp_git_repo):

@@ -874,7 +874,7 @@ async def _run_qa_prompt(
             log_dir.mkdir(parents=True, exist_ok=True)
             log_lines = [
                 f"{'=' * 60}",
-                f"QA RUN  tier={expected_must_count}  {time.strftime('%Y-%m-%d %H:%M:%S')}",
+                f"QA RUN  must_count={expected_must_count}  {time.strftime('%Y-%m-%d %H:%M:%S')}",
                 f"SDK init: {_qa_init_time}s  total: {_qa_total_time}s  turns: {_turn_count}  cost: ${qa_cost:.2f}",
                 f"{'=' * 60}",
             ]
@@ -1238,14 +1238,14 @@ async def _run_batch_qa_agent(
     log_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Run exhaustive QA over a merged batch."""
-    # Log tier decision for batch QA (always full/tier 2 — combined specs + integration)
+    # Log tier decision for batch QA (combined specs + integration, browser available)
     if log_dir:
         task_count = len(tasks_with_specs)
         spec_count = sum(len(t.get("spec", [])) for t in tasks_with_specs)
         is_retry = bool(retried_task_keys)
         append_text_log(log_dir / "qa-tier.log", [
             f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Batch QA tier decision",
-            f"mode: batch (always full/tier 2)",
+            f"mode: batch (combined specs, browser available)",
             f"tasks: {task_count}",
             f"total specs: {spec_count}",
             f"retry round: {'yes — focused on ' + ', '.join(sorted(retried_task_keys)) if is_retry else 'no (initial)'}",

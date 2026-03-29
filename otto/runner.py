@@ -549,11 +549,11 @@ def _persist_qa_results(
     _write_log_safe(log_dir, "qa-report.md", qa_report or "No QA output")
     if verdict:
         _write_log_safe(log_dir, "qa-verdict.json", json.dumps(verdict, indent=2))
-    # Also write per-attempt copies if attempt > 1 (preserve retry history)
-    if attempt_num > 1:
-        _write_log_safe(log_dir, f"attempt-{attempt_num}-qa-report.md", qa_report or "No QA output")
+    # Also write per-attempt copies (preserve retry history)
+    if attempt_num >= 0:
+        _write_log_safe(log_dir, f"attempt-{attempt_num + 1}-qa-report.md", qa_report or "No QA output")
         if verdict:
-            _write_log_safe(log_dir, f"attempt-{attempt_num}-qa-verdict.json", json.dumps(verdict, indent=2))
+            _write_log_safe(log_dir, f"attempt-{attempt_num + 1}-qa-verdict.json", json.dumps(verdict, indent=2))
 
 
 def _normalize_criterion_text(text: str) -> str:
@@ -1030,8 +1030,6 @@ async def _run_qa(
         }]
 
     qa_tier = determine_qa_tier(task, qa_spec, attempt, diff_info, log_dir=log_dir)
-    if qa_warning:
-        qa_tier = max(qa_tier, 2)
 
     qa_detail = f"tier {qa_tier}"
     if qa_warning:
@@ -1277,7 +1275,7 @@ async def run_task_v45(
     - Attempt 1 = bare CC (raw prompt, no custom system prompt, no spec)
     - Spec gen runs in parallel with coding, awaited before QA
     - Structured JSON QA verdict with [must]/[should] binding
-    - Risk-based QA tiering (Tier 0/1/2)
+    - QA with browser available (agent decides per-item)
     - Durable candidate refs (never discard verified code)
     - Session resume on retry
 
