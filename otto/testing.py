@@ -98,9 +98,19 @@ def _install_deps(worktree_path: Path, timeout: int) -> str | None:
                     cwd=worktree_path, capture_output=True, timeout=timeout,
                     env=env,
                 )
+                subprocess.run(
+                    [venv_python, "-m", "pip", "install", "-q", "-e", ".[dev,test]"],
+                    cwd=worktree_path, capture_output=True, timeout=timeout,
+                    env=env,
+                )
             elif (worktree_path / "setup.py").exists():
                 subprocess.run(
                     [venv_python, "-m", "pip", "install", "-q", "-e", "."],
+                    cwd=worktree_path, capture_output=True, timeout=timeout,
+                    env=env,
+                )
+                subprocess.run(
+                    [venv_python, "-m", "pip", "install", "-q", "-e", ".[dev,test]"],
                     cwd=worktree_path, capture_output=True, timeout=timeout,
                     env=env,
                 )

@@ -516,6 +516,106 @@ class TestRunTaskV45:
         qa_mock.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_infra_baseline_failure_warns_and_allows_coding(self, tmp_git_repo):
+        default_branch = _current_branch(tmp_git_repo)
+        task = {
+            "id": 1,
+            "key": "taskbaselineinfra1",
+            "prompt": "Add feature.txt",
+            "status": "pending",
+        }
+        tasks_path = _write_task(tmp_git_repo, task)
+        config = {
+            "default_branch": default_branch,
+            "max_retries": 0,
+            "verify_timeout": 30,
+            "max_task_time": 60,
+            "test_command": "pytest",
+        }
+        warnings = []
+
+        async def fake_query(*, prompt, options=None):
+            (tmp_git_repo / "feature.txt").write_text("hello\n")
+            yield SimpleNamespace(
+                session_id="sess-baseline-infra",
+                is_error=False,
+                total_cost_usd=0.0,
+                result="ok",
+            )
+
+        with patch(
+            "otto.testing.run_local_tests",
+            return_value=TierResult(
+                "existing_tests",
+                False,
+                "ModuleNotFoundError: No module named 'humanize'",
+            ),
+        ):
+            with patch("otto.runner.query", new=fake_query):
+                with patch("otto.runner._log_warn", side_effect=warnings.append):
+                    with patch("otto.runner._cleanup_task_failure") as cleanup_mock:
+                        with patch("otto.runner.run_test_suite", return_value=TestSuiteResult(
+                            passed=True,
+                            tiers=[TierResult("tier1", True, "1 passed")],
+                        )) as verify_mock:
+                            result = await run_task_v45(
+                                task, config, tmp_git_repo, tasks_path, qa_mode="skip",
+                            )
+
+        persisted = load_tasks(tasks_path)[0]
+        assert result["success"] is True
+        assert result["status"] == "verified"
+        assert persisted["status"] == "verified"
+        assert warnings == [
+            "baseline tests hit infrastructure/setup issues; continuing so the coding agent can fix dependencies"
+        ]
+        cleanup_mock.assert_not_called()
+        assert verify_mock.called
+
+    @pytest.mark.asyncio
+    async def test_noninfra_baseline_failure_stays_fatal(self, tmp_git_repo):
+        default_branch = _current_branch(tmp_git_repo)
+        task = {
+            "id": 1,
+            "key": "taskbaselinefail1",
+            "prompt": "Add feature.txt",
+            "status": "pending",
+        }
+        tasks_path = _write_task(tmp_git_repo, task)
+        config = {
+            "default_branch": default_branch,
+            "max_retries": 0,
+            "verify_timeout": 30,
+            "max_task_time": 60,
+            "test_command": "pytest",
+        }
+
+        with patch(
+            "otto.testing.run_local_tests",
+            return_value=TierResult(
+                "existing_tests",
+                False,
+                "FAILED tests/test_basic.py::test_bad - AssertionError",
+            ),
+        ):
+            with patch("otto.runner.query") as query_mock:
+                with patch("otto.runner._cleanup_task_failure") as cleanup_mock:
+                    with patch("otto.runner.run_test_suite") as verify_mock:
+                        result = await run_task_v45(
+                            task, config, tmp_git_repo, tasks_path, qa_mode="skip",
+                        )
+
+        persisted = load_tasks(tasks_path)[0]
+        assert result["success"] is False
+        assert result["status"] == "failed"
+        assert result["error"].startswith("BASELINE_FAIL: baseline tests already failing")
+        assert persisted["status"] == "failed"
+        assert persisted["error_code"] == "baseline_fail"
+        cleanup_mock.assert_called_once()
+        query_mock.assert_not_called()
+        verify_mock.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_spec_generation_failure_falls_back_to_prompt_only_qa(self, tmp_git_repo):
         """QA should still run when spec generation fails after coding+verify pass."""
         default_branch = _current_branch(tmp_git_repo)

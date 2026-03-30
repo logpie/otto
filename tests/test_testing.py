@@ -210,6 +210,29 @@ class TestInstallDeps:
         # No pip install calls — better to skip than contaminate otto's venv
         assert not pip_calls
 
+    @patch("otto.testing.subprocess.run")
+    def test_python_project_also_tries_dev_test_extras(self, mock_run, tmp_path):
+        """Editable installs should also try common test/dev extras."""
+        worktree = tmp_path / "worktree"
+        venv_python = worktree / ".venv" / "bin" / "python"
+        venv_python.parent.mkdir(parents=True)
+        venv_python.write_text("")
+        (worktree / "pyproject.toml").write_text("[build-system]\nrequires=[]\n")
+
+        venv_bin = _install_deps(worktree, timeout=60)
+
+        assert venv_bin == str(venv_python.parent)
+        pip_calls = [
+            args[0]
+            for args, kwargs in mock_run.call_args_list
+            if args and isinstance(args[0], list) and len(args[0]) >= 3 and args[0][1:3] == ["-m", "pip"]
+        ]
+        assert pip_calls == [
+            [str(venv_python), "-m", "pip", "install", "-q", "-e", "."],
+            [str(venv_python), "-m", "pip", "install", "-q", "-e", ".[dev,test]"],
+            [str(venv_python), "-m", "pip", "install", "-q", "pytest"],
+        ]
+
 
 class TestIntegrationGate:
     @patch("otto.testing.run_local_tests")

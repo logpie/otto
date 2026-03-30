@@ -1589,10 +1589,15 @@ async def run_task_v45(
                     "errors during collection",
                 ]
                 if any(kw in output for kw in infra_keywords):
+                    _log_warn(
+                        "baseline tests hit infrastructure/setup issues; "
+                        "continuing so the coding agent can fix dependencies"
+                    )
+                else:
                     prep_elapsed = round(time.monotonic() - prep_start, 1)
                     phase_timings["prepare"] = prep_elapsed
                     emit("phase", name="prepare", status="fail", time_s=prep_elapsed,
-                         error="baseline tests fail — infrastructure issue")
+                         error="baseline tests already failing")
                     _cleanup_task_failure(
                         task_work_dir, key, default_branch, tasks_file,
                         pre_existing_untracked=pre_existing_untracked,
@@ -1601,10 +1606,14 @@ async def run_task_v45(
                         cost_usd=total_cost,
                         duration_s=time.monotonic() - task_start,
                     )
-                    return _result(False, "failed",
-                                   error=f"BASELINE_FAIL: test infrastructure broken\n{output[-500:]}")
+                    return _result(
+                        False,
+                        "failed",
+                        error=f"BASELINE_FAIL: baseline tests already failing\n{output[-500:]}",
+                        error_code="baseline_fail",
+                    )
             # Extract test count for display
-            if baseline.output:
+            if baseline.passed and baseline.output:
                 m = re.search(r"(\d+) passed", baseline.output)
                 if m:
                     baseline_detail = f"baseline: {m.group(1)} tests passing"
