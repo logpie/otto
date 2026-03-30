@@ -380,7 +380,7 @@ def run(prompt, dry_run, no_spec, no_qa, no_test):
         tasks = load_tasks(tasks_path)
         pending = [t for t in tasks if t.get("status") == "pending"]
         if not pending:
-            console.print("No pending tasks.")
+            console.print("Pending tasks: 0")
             return
 
         # Run the planner to show actual execution plan

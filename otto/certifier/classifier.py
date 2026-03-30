@@ -62,7 +62,13 @@ def classify(project_dir: Path) -> ProductProfile:
             elif "react" in deps and "next" not in deps:
                 profile.framework = "react"
                 profile.product_type = "web"
-                profile.start_command = "npm start"
+                # Prefer dev script (Vite), fall back to start (CRA)
+                if "dev" in scripts:
+                    profile.start_command = "npm run dev"
+                elif "start" in scripts:
+                    profile.start_command = "npm start"
+                else:
+                    profile.start_command = "npm start"
                 profile.port = 3000
                 profile.interaction = "browser"
             elif "electron" in deps:

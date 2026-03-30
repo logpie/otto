@@ -102,7 +102,8 @@ def _analyze_auth(project_dir: Path, config: TestConfig) -> None:
         config.login_candidates = ["/api/auth/callback/credentials"]
         config.login_endpoint = "/api/auth/callback/credentials"
 
-    # Check for register endpoint
+    # Check for register endpoint — App Router, Pages Router, Express, Flask
+    # App Router: src/app/api/auth/register/route.ts
     for pattern in [
         "**/api/auth/register/route.ts",
         "**/api/auth/register/route.js",
@@ -113,10 +114,8 @@ def _analyze_auth(project_dir: Path, config: TestConfig) -> None:
     ]:
         matches = list(project_dir.glob(pattern))
         if matches:
-            # Derive endpoint from file path
             rel = matches[0].relative_to(project_dir)
             parts = list(rel.parts)
-            # Remove src/app prefix and route.ts suffix
             if "src" in parts:
                 parts = parts[parts.index("src") + 1:]
             if "app" in parts:
@@ -127,6 +126,38 @@ def _analyze_auth(project_dir: Path, config: TestConfig) -> None:
             config.register_endpoint = endpoint
             config.register_candidates = [endpoint]
             break
+
+    # Pages Router: pages/api/auth/register.ts
+    if not config.register_endpoint:
+        for pattern in [
+            "**/pages/api/auth/register.ts",
+            "**/pages/api/auth/register.js",
+            "**/pages/api/register.ts",
+            "**/pages/api/signup.ts",
+        ]:
+            matches = list(project_dir.glob(pattern))
+            if matches:
+                rel = matches[0].relative_to(project_dir)
+                parts = list(rel.parts)
+                if "pages" in parts:
+                    parts = parts[parts.index("pages") + 1:]
+                if parts and parts[-1].endswith((".ts", ".js")):
+                    parts[-1] = parts[-1].rsplit(".", 1)[0]
+                endpoint = "/" + "/".join(parts)
+                config.register_endpoint = endpoint
+                config.register_candidates = [endpoint]
+                break
+
+    # Express/Flask: search source files for register route definitions
+    if not config.register_endpoint:
+        for route_info in config.routes:
+            path_lower = route_info.path.lower()
+            if "POST" in route_info.methods and any(
+                kw in path_lower for kw in ["register", "signup", "sign-up"]
+            ):
+                config.register_endpoint = route_info.path
+                config.register_candidates = [route_info.path]
+                break
 
     # If no register endpoint found but NextAuth exists, check auth.ts for providers
     if not config.register_endpoint and config.auth_type == "nextauth":

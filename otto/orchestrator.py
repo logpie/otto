@@ -1477,6 +1477,18 @@ async def run_per(
                                 f"product context update failed for {result.task_key}: {exc}",
                             )
 
+                # Commit context.md so worktree-based tasks can see it
+                if context_path.exists():
+                    try:
+                        import subprocess as sp
+                        sp.run(["git", "add", "context.md"], cwd=str(project_dir),
+                               capture_output=True, timeout=5)
+                        sp.run(["git", "commit", "-m", "otto: update product context",
+                                "--allow-empty"], cwd=str(project_dir),
+                               capture_output=True, timeout=5)
+                    except Exception:
+                        pass
+
             telemetry.log(BatchCompleted(
                 batch_index=batch_idx - 1,
                 tasks_passed=batch_passed,
