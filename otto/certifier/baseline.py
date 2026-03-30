@@ -635,6 +635,58 @@ def _execute_check_exists_step(step: dict[str, Any], context: ExecutionContext, 
             timestamp=timestamp,
         )
 
+    # Source code content checks — search for patterns in project files
+    search_target = step.get("target", "")
+    if any(keyword in search_target.lower() for keyword in ["password hash", "bcrypt", "argon2", "hashing library"]):
+        # Check if password hashing is used — search source files
+        for pattern in ["bcrypt", "argon2", "scrypt", "pbkdf2", "hashSync", "hash("]:
+            for f in context.project_dir.glob("**/*.ts"):
+                if "node_modules" in str(f):
+                    continue
+                try:
+                    if pattern in f.read_text():
+                        return Evidence(
+                            step=json.dumps(step, sort_keys=True),
+                            command=f"grep '{pattern}' {f.name}",
+                            expected="password hashing library used",
+                            actual=f"found '{pattern}' in {f.relative_to(context.project_dir)}",
+                            passed=True, outcome="pass", timestamp=timestamp,
+                        )
+                except OSError:
+                    pass
+        return Evidence(
+            step=json.dumps(step, sort_keys=True),
+            command="grep password-hashing patterns in source",
+            expected="bcrypt/argon2/scrypt found",
+            actual="no password hashing library found in source",
+            passed=False, outcome="fail", timestamp=timestamp,
+        )
+
+    if any(keyword in search_target.lower() for keyword in ["stripe", "payment key", "api key"]):
+        # Check if Stripe is configured — look in source and env files
+        for pattern in ["STRIPE_SECRET_KEY", "stripe", "Stripe("]:
+            for f in list(context.project_dir.glob("**/*.ts")) + list(context.project_dir.glob("**/.env*")):
+                if "node_modules" in str(f):
+                    continue
+                try:
+                    if pattern in f.read_text():
+                        return Evidence(
+                            step=json.dumps(step, sort_keys=True),
+                            command=f"grep '{pattern}' {f.name}",
+                            expected="Stripe integration present",
+                            actual=f"found '{pattern}' in {f.relative_to(context.project_dir)}",
+                            passed=True, outcome="pass", timestamp=timestamp,
+                        )
+                except OSError:
+                    pass
+        return Evidence(
+            step=json.dumps(step, sort_keys=True),
+            command="grep stripe patterns in source",
+            expected="Stripe SDK/keys found",
+            actual="no Stripe integration found in source",
+            passed=False, outcome="fail", timestamp=timestamp,
+        )
+
     if target == "note":
         return Evidence(
             step=json.dumps(step, sort_keys=True),
@@ -1201,7 +1253,22 @@ def _check_http_expectations(
             payload = response.json()
         except ValueError:
             return False, f"expected JSON body with keys {json_keys}, got {response.text[:200]}"
+        # Check top-level keys AND common wrapper patterns (data, results, items)
         missing_keys = [key for key in json_keys if not _json_path_exists(payload, key)]
+        if missing_keys and isinstance(payload, dict):
+            # Try common response wrappers
+            for wrapper in ("data", "results", "items", "records"):
+                if wrapper in payload:
+                    unwrapped = payload[wrapper]
+                    if isinstance(unwrapped, list) and len(unwrapped) > 0:
+                        # The wrapper contains the data — keys refer to item properties
+                        item = unwrapped[0]
+                        if isinstance(item, dict):
+                            missing_keys = [k for k in json_keys if k not in item and k != wrapper]
+                    elif isinstance(unwrapped, dict):
+                        missing_keys = [k for k in json_keys if not _json_path_exists(unwrapped, k)]
+                    if not missing_keys:
+                        break
         if missing_keys:
             return False, f"missing JSON keys {missing_keys} in {json.dumps(payload)[:200]}"
 
