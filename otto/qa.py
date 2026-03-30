@@ -32,13 +32,20 @@ _QA_BASE_INSTRUCTIONS = """\
 You are a QA tester. Your job has two parts: VERIFY and BREAK.
 
 PART 1 — VERIFY (required)
-Testing methodology — use code inspection, scripts, curl, and unit checks:
-1. Verifiable [must] items FIRST — run targeted commands to verify each item.
-   Prefer deterministic targeted commands (single test, curl, node -e script).
-   Do NOT rely on code reading alone — run the code and verify actual behavior.
-   For API endpoints: start the server and make actual HTTP requests.
-   For data isolation: test with multiple users/accounts to verify boundaries.
-   For auth: test both authorized and unauthorized access paths.
+For EACH verifiable [must] item, write and run a targeted verification script.
+Not one big script — one per spec item. This ensures every spec is independently tested.
+
+Good proof: `python -c "from store import PostStore; s = PostStore(); p = s.create(title='T', content='C', author='A', tags=[]); assert p.status == 'draft'"` → exit 0
+Bad proof: "code inspection confirms create() stores posts correctly"
+
+Rules:
+- Every verifiable [must] item MUST have at least one command that was executed.
+  "Code inspection" alone is NOT acceptable proof for verifiable items.
+- Prefer deterministic targeted commands (single test, curl, node -e script).
+- For API endpoints: start the server and make actual HTTP requests.
+- For data isolation: test with multiple users/accounts to verify boundaries.
+- For auth: test both authorized and unauthorized access paths.
+- Test the programmatic API directly, not just through CLI wrappers.
 2. Non-verifiable [must ◈] items — start a dev server, navigate, verify in browser.
    Code inspection alone cannot confirm appearance.
    For non-visual subjective items: use your best judgment with evidence.
@@ -312,6 +319,55 @@ def _write_regression_script(script_path: Path, commands: list[str]) -> bool:
         return True
     except OSError:
         return False
+
+
+def _audit_proof_quality(verdict: dict, log_dir: Path | None = None) -> list[str]:
+    """Audit proof quality: flag [must] items with code-reading-only proofs.
+
+    Returns list of warning strings. Logs warnings to qa-agent.log if log_dir provided.
+    """
+    warnings: list[str] = []
+    _CODE_READING_PATTERNS = (
+        "code inspection", "source inspection", "reading", "confirmed by reading",
+        "source confirms", "code confirms", "inspection shows", "verified by reading",
+    )
+    _COMMAND_PATTERNS = (
+        "python", "pytest", "jest", "npm test", "curl", "node -e", "script:",
+        "→", "PASSED", "exit code", "ran ", "executed",
+    )
+
+    must_items = verdict.get("must_items", []) or []
+    code_reading_only = []
+    for item in must_items:
+        if item.get("status") != "pass":
+            continue
+        proof = item.get("proof", []) or []
+        evidence = str(item.get("evidence", ""))
+        all_text = " ".join(str(p) for p in proof) + " " + evidence
+
+        has_command = any(pat in all_text.lower() for pat in _COMMAND_PATTERNS)
+        has_code_reading = any(pat in all_text.lower() for pat in _CODE_READING_PATTERNS)
+
+        if has_code_reading and not has_command:
+            code_reading_only.append(
+                f"spec {item.get('spec_id', '?')}: {str(item.get('criterion', ''))[:60]}"
+            )
+
+    if code_reading_only:
+        total = sum(1 for i in must_items if i.get("status") == "pass")
+        pct = len(code_reading_only) * 100 // max(total, 1)
+        warnings.append(
+            f"PROOF QUALITY WARNING: {len(code_reading_only)}/{total} passed [must] items "
+            f"({pct}%) have code-reading-only proofs (no command executed):"
+        )
+        for item in code_reading_only:
+            warnings.append(f"  - {item}")
+
+    if warnings and log_dir:
+        from otto.observability import append_text_log
+        append_text_log(log_dir / "qa-agent.log", ["", "=" * 40, "PROOF QUALITY AUDIT", "=" * 40] + warnings + [""])
+
+    return warnings
 
 
 def _write_proof_artifacts(
@@ -1293,6 +1349,14 @@ async def run_qa(
                     task.get("prompt", ""),
                     float(final_result.get("cost_usd", 0.0) or 0.0),
                 )
+        except Exception:
+            pass
+
+    # Audit proof quality — warn loudly if specs have code-reading-only proofs
+    proof_warnings = _audit_proof_quality(final_result.get("verdict", {}), log_dir)
+    if proof_warnings and on_progress:
+        try:
+            on_progress("qa_warning", {"text": proof_warnings[0]})
         except Exception:
             pass
 
