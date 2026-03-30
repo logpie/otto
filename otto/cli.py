@@ -457,6 +457,21 @@ def build(intent, no_review, no_qa):
     if no_qa:
         config["skip_product_qa"] = True
 
+    # Generate build ID and initialize telemetry
+    build_id = f"build-{int(time.time())}-{os.getpid()}"
+    build_start = time.time()
+    from otto.telemetry import (
+        Telemetry, BuildStarted, ProductPlanCompleted, BuildCompleted,
+    )
+    telemetry = Telemetry(project_dir / "otto_logs")
+    telemetry.log(BuildStarted(build_id=build_id, intent=intent))
+
+    # Track costs across all phases
+    cost_planning = 0.0
+    cost_tasks = 0.0
+    cost_qa = 0.0
+    cost_context = 0.0
+
     # Step 1: Product planning
     from otto.product_planner import run_product_planner, ProductPlan
     import threading
@@ -478,6 +493,12 @@ def build(intent, no_review, no_qa):
             timer_thread.start()
             plan = asyncio.run(run_product_planner(intent, project_dir, config))
             _plan_done = True
+            cost_planning = plan.cost_usd
+            telemetry.log(ProductPlanCompleted(
+                build_id=build_id, mode=plan.mode,
+                num_tasks=len(plan.tasks), cost_usd=plan.cost_usd,
+                duration_s=plan.duration_s,
+            ))
     except Exception as e:
         _plan_done = True
         error_console.print(f"[error]Planning failed: {rich_escape(str(e))}[/error]")
@@ -590,6 +611,56 @@ def build(intent, no_review, no_qa):
 
     if outer_result is not None:
         exit_code = 0 if outer_result.get("product_passed") else 1
+        cost_qa = outer_result.get("total_cost", 0.0)
+
+    # Compute total task cost from tasks.yaml
+    final_tasks = load_tasks(tasks_path) if tasks_path.exists() else []
+    cost_tasks = sum(t.get("cost_usd", 0) for t in final_tasks)
+
+    # Read context update cost from log
+    context_log = project_dir / "otto_logs" / "product-context.log"
+    if context_log.exists():
+        import re as _re
+        for line in context_log.read_text().splitlines():
+            m = _re.search(r"\$(\d+\.\d+)", line)
+            if m:
+                cost_context += float(m.group(1))
+
+    cost_total = cost_planning + cost_tasks + cost_qa + cost_context
+    build_duration = time.time() - build_start
+
+    # Emit build completed event with full cost breakdown
+    product_passed = outer_result.get("product_passed", True) if outer_result else (exit_code == 0)
+    tasks_passed = sum(1 for t in final_tasks if t.get("status") == "passed")
+    tasks_failed = sum(1 for t in final_tasks if t.get("status") == "failed")
+
+    telemetry.log(BuildCompleted(
+        build_id=build_id, intent=intent,
+        product_passed=product_passed,
+        total_tasks=len(plan.tasks), tasks_passed=tasks_passed, tasks_failed=tasks_failed,
+        cost_planning=round(cost_planning, 4),
+        cost_tasks=round(cost_tasks, 4),
+        cost_qa=round(cost_qa, 4),
+        cost_context=round(cost_context, 4),
+        cost_total=round(cost_total, 4),
+        duration_s=round(build_duration, 1),
+    ))
+
+    # Print build summary
+    console.print()
+    console.print(f"  [bold]Build Summary[/bold]  ({build_id})")
+    console.print(f"  Intent: {rich_escape(intent[:80])}")
+    console.print(f"  Tasks: {tasks_passed} passed, {tasks_failed} failed")
+    console.print(f"  Cost breakdown:")
+    console.print(f"    Planning:  ${cost_planning:.2f}")
+    console.print(f"    Tasks:     ${cost_tasks:.2f}")
+    if cost_qa > 0:
+        console.print(f"    Product QA: ${cost_qa:.2f}")
+    if cost_context > 0:
+        console.print(f"    Context:   ${cost_context:.2f}")
+    console.print(f"    [bold]Total:     ${cost_total:.2f}[/bold]")
+    console.print(f"  Duration: {build_duration / 60:.1f} min")
+    console.print()
 
     sys.exit(exit_code)
 
