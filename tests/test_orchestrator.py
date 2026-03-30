@@ -19,6 +19,7 @@ from otto.orchestrator import (
     merge_batch_results,
     run_per,
 )
+from otto.outer_loop import run_outer_loop
 from otto.planner import Batch, ExecutionPlan, TaskPlan
 from otto.tasks import load_tasks, update_task
 from otto.telemetry import Telemetry
@@ -874,6 +875,86 @@ class TestRunPerIntegration:
         batch_qa_mock.assert_not_awaited()
         run_suite_mock.assert_called_once()
         assert run_suite_mock.call_args.kwargs["candidate_sha"] == "HEAD"
+
+
+class TestOuterLoop:
+    @pytest.mark.asyncio
+    async def test_skips_product_qa_when_fix_execution_fails(self, tmp_git_repo):
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        tasks_path.write_text(yaml.dump({"tasks": [
+            {"id": 1, "key": "fix-task", "prompt": "Fix the product", "status": "pending"},
+        ]}))
+        product_spec_path = tmp_git_repo / "product-spec.md"
+        product_spec_path.write_text("# Product Spec\n")
+
+        async def fake_run_per(config, tasks_path, project_dir):
+            update_task(tasks_path, "fix-task", status="failed", error="tests failed")
+            return 1
+
+        with patch("otto.orchestrator.run_per", side_effect=fake_run_per):
+            with patch("otto.product_qa.run_product_qa", new=AsyncMock(side_effect=AssertionError("QA should not run"))):
+                result = await run_outer_loop(
+                    product_spec_path=product_spec_path,
+                    project_dir=tmp_git_repo,
+                    tasks_path=tasks_path,
+                    config={},
+                )
+
+        assert result["product_passed"] is False
+        assert result["inner_loop_failed"] is True
+        assert result["failed_tasks"] == [{
+            "id": 1,
+            "key": "fix-task",
+            "prompt": "Fix the product",
+            "status": "failed",
+            "error": "tests failed",
+        }]
+
+    @pytest.mark.asyncio
+    async def test_stops_when_product_qa_makes_no_progress(self, tmp_git_repo):
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        tasks_path.write_text(yaml.dump({"tasks": []}))
+        product_spec_path = tmp_git_repo / "product-spec.md"
+        product_spec_path.write_text("# Product Spec\n")
+
+        qa_results = [
+            {
+                "product_passed": False,
+                "journeys": [
+                    {"name": "checkout", "passed": False, "error": "button broken", "evidence": "trace"},
+                ],
+                "cost_usd": 0.1,
+            },
+            {
+                "product_passed": False,
+                "journeys": [
+                    {"name": "checkout", "passed": False, "error": "button still broken", "evidence": "trace"},
+                ],
+                "cost_usd": 0.2,
+            },
+        ]
+
+        async def fake_run_per(config, tasks_path, project_dir):
+            for task in load_tasks(tasks_path):
+                if task.get("status") == "pending":
+                    update_task(tasks_path, task["key"], status="passed")
+            return 0
+
+        qa_mock = AsyncMock(side_effect=qa_results)
+        with patch("otto.orchestrator.run_per", side_effect=fake_run_per):
+            with patch("otto.product_qa.run_product_qa", qa_mock):
+                result = await run_outer_loop(
+                    product_spec_path=product_spec_path,
+                    project_dir=tmp_git_repo,
+                    tasks_path=tasks_path,
+                    config={},
+                    max_rounds=3,
+                )
+
+        assert result["product_passed"] is False
+        assert result["rounds"] == 2
+        assert result["fix_tasks_created"] == 1
+        assert qa_mock.await_count == 2
 
 
 class TestOrchestrationLogic:

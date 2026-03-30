@@ -1443,6 +1443,40 @@ async def run_per(
             # Persist any new learnings after each batch
             persist_learnings(project_dir, context)
 
+            # Update product context for successful tasks (i2p shared context)
+            context_path = project_dir / "context.md"
+            if context_path.exists() or len(pending) >= 3:
+                for result in batch_results:
+                    if result.success:
+                        try:
+                            from otto.product_context import update_product_context
+                            task = pending_by_key.get(result.task_key, {})
+                            # Get git diff for context update
+                            diff_text = result.diff_summary or ""
+                            if result.commit_sha:
+                                try:
+                                    import subprocess as sp
+                                    diff_result = sp.run(
+                                        ["git", "diff", f"{result.commit_sha}~1..{result.commit_sha}", "--stat"],
+                                        cwd=str(project_dir), capture_output=True, text=True, timeout=10,
+                                    )
+                                    if diff_result.returncode == 0:
+                                        diff_text = diff_result.stdout
+                                except Exception:
+                                    pass
+                            await update_product_context(
+                                project_dir=project_dir,
+                                task_key=result.task_key,
+                                task_prompt=str(task.get("prompt", "")),
+                                diff=diff_text,
+                                config=config,
+                            )
+                        except Exception as exc:
+                            _orchestrator_log(
+                                project_dir,
+                                f"product context update failed for {result.task_key}: {exc}",
+                            )
+
             telemetry.log(BatchCompleted(
                 batch_index=batch_idx - 1,
                 tasks_passed=batch_passed,

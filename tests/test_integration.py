@@ -1,11 +1,19 @@
 """Integration test — end-to-end otto flow with mocked agent."""
 
 import asyncio
+import json
 import subprocess
 from pathlib import Path
 from unittest.mock import patch, MagicMock, AsyncMock
 
+import pytest
+import yaml
+from click.testing import CliRunner
+
+from otto.cli import main
 from otto.config import create_config, load_config
+from otto.product_planner import PlannedTask, ProductPlan, _parse_planner_output
+from otto.product_qa import _parse_qa_output, _qa_model, _qa_settings
 from otto.runner import run_task_v45
 from otto.tasks import add_task, load_tasks
 
@@ -132,3 +140,147 @@ class TestEndToEnd:
         assert failed_task["status"] == "failed"
         assert failed_task["error_code"] == "internal_error"
         assert "setup boom" in failed_task["error"]
+
+
+class TestBuildCommand:
+    def test_build_skips_product_qa_after_inner_failure(
+        self,
+        tmp_git_repo,
+        monkeypatch,
+    ):
+        monkeypatch.chdir(tmp_git_repo)
+        create_config(tmp_git_repo)
+
+        tasks_path = tmp_git_repo / "tasks.yaml"
+
+        product_spec_path = tmp_git_repo / "product-spec.md"
+        product_spec_path.write_text("# Product Spec\n")
+        plan = ProductPlan(
+            mode="decomposed",
+            tasks=[PlannedTask(prompt="Build the actual product")],
+            product_spec_path=product_spec_path,
+            architecture_path=None,
+        )
+
+        async def fake_run_product_planner(intent, project_dir, config):
+            return plan
+
+        async def fake_run_per(config, tasks_path, project_dir):
+            persisted = yaml.safe_load(tasks_path.read_text())["tasks"]
+            # Find the new task and fail it
+            new_task = [t for t in persisted if t["prompt"] == "Build the actual product"][0]
+            new_task["status"] = "failed"
+            new_task["error"] = "tests failed"
+            tasks_path.write_text(yaml.dump({"tasks": persisted}))
+            return 1
+
+        runner = CliRunner()
+        with patch("otto.product_planner.run_product_planner", side_effect=fake_run_product_planner):
+            with patch("otto.orchestrator.run_per", side_effect=fake_run_per):
+                with patch("otto.outer_loop.run_outer_loop", side_effect=AssertionError("outer loop should not run")):
+                    result = runner.invoke(main, ["build", "demo app", "--no-review"])
+
+        assert result.exit_code == 1
+        assert "Skipping product QA because some tasks failed" in result.output
+
+    def test_build_exit_code_tracks_product_qa_result(self, tmp_git_repo, monkeypatch):
+        monkeypatch.chdir(tmp_git_repo)
+        create_config(tmp_git_repo)
+
+        product_spec_path = tmp_git_repo / "product-spec.md"
+        product_spec_path.write_text("# Product Spec\n")
+        plan = ProductPlan(
+            mode="decomposed",
+            tasks=[PlannedTask(prompt="Build the product")],
+            product_spec_path=product_spec_path,
+            architecture_path=None,
+        )
+
+        async def fake_run_product_planner(intent, project_dir, config):
+            return plan
+
+        async def fake_run_per(config, tasks_path, project_dir):
+            persisted = yaml.safe_load(tasks_path.read_text())["tasks"]
+            persisted[0]["status"] = "passed"
+            tasks_path.write_text(yaml.dump({"tasks": persisted}))
+            return 0
+
+        async def fake_run_outer_loop(**kwargs):
+            return {
+                "product_passed": False,
+                "rounds": 1,
+                "total_cost": 0.0,
+                "journeys": [
+                    {"name": "happy path", "passed": False, "error": "journey failed"},
+                ],
+                "fix_tasks_created": 0,
+            }
+
+        runner = CliRunner()
+        with patch("otto.product_planner.run_product_planner", side_effect=fake_run_product_planner):
+            with patch("otto.orchestrator.run_per", side_effect=fake_run_per):
+                with patch("otto.outer_loop.run_outer_loop", side_effect=fake_run_outer_loop):
+                    result = runner.invoke(main, ["build", "demo app", "--no-review"])
+
+        assert result.exit_code == 1
+        assert "Some journeys failed" in result.output
+
+    def test_build_sets_exit_code_when_product_qa_raises(self, tmp_git_repo, monkeypatch):
+        monkeypatch.chdir(tmp_git_repo)
+        create_config(tmp_git_repo)
+
+        product_spec_path = tmp_git_repo / "product-spec.md"
+        product_spec_path.write_text("# Product Spec\n")
+        plan = ProductPlan(
+            mode="decomposed",
+            tasks=[PlannedTask(prompt="Build the product")],
+            product_spec_path=product_spec_path,
+            architecture_path=None,
+        )
+
+        async def fake_run_product_planner(intent, project_dir, config):
+            return plan
+
+        async def fake_run_per(config, tasks_path, project_dir):
+            persisted = yaml.safe_load(tasks_path.read_text())["tasks"]
+            persisted[0]["status"] = "passed"
+            tasks_path.write_text(yaml.dump({"tasks": persisted}))
+            return 0
+
+        runner = CliRunner()
+        with patch("otto.product_planner.run_product_planner", side_effect=fake_run_product_planner):
+            with patch("otto.orchestrator.run_per", side_effect=fake_run_per):
+                with patch("otto.outer_loop.run_outer_loop", side_effect=RuntimeError("qa boom")):
+                    result = runner.invoke(main, ["build", "demo app", "--no-review"])
+
+        assert result.exit_code == 1
+        assert "Product QA failed: qa boom" in result.output
+
+
+class TestPlannerAndQaConfig:
+    def test_decomposed_plan_requires_product_spec_file(self, tmp_path):
+        raw = json.dumps({
+            "mode": "decomposed",
+            "tasks": [{"prompt": "Build feature A"}],
+        })
+
+        with pytest.raises(ValueError, match="product-spec.md"):
+            _parse_planner_output(raw, tmp_path)
+
+    def test_product_qa_config_prefers_qa_specific_values_with_planner_fallback(self):
+        assert _qa_settings({"planner_agent_settings": "user,project"}) == ["user", "project"]
+        assert _qa_model({"planner_model": "planner-model"}) == "planner-model"
+        assert _qa_settings({
+            "qa_agent_settings": "project",
+            "planner_agent_settings": "user,project",
+        }) == ["project"]
+        assert _qa_model({
+            "qa_model": "qa-model",
+            "planner_model": "planner-model",
+        }) == "qa-model"
+
+    def test_parse_qa_output_uses_outermost_json_object(self):
+        parsed = _parse_qa_output('prefix {"product_passed": true, "journeys": [{"name": "happy", "passed": true}]} suffix')
+
+        assert parsed["product_passed"] is True
+        assert parsed["journeys"][0]["name"] == "happy"

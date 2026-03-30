@@ -228,6 +228,26 @@ def _print_imported_tasks(tasks: list) -> None:
     console.print(f"\n[success]✓[/success] Imported [bold]{len(tasks)}[/bold] tasks. Review specs in tasks.yaml before running.")
 
 
+def _collect_failed_tasks(tasks: list[dict]) -> list[dict]:
+    """Return terminal task failures that should block product QA."""
+    failed_statuses = {"failed", "merge_failed", "blocked", "conflict"}
+    return [task for task in tasks if task.get("status") in failed_statuses]
+
+
+def _print_failed_tasks(tasks: list[dict]) -> None:
+    """Show which tasks blocked the build before product QA."""
+    if not tasks:
+        return
+
+    console.print("  [red]Skipping product QA because some tasks failed[/red]")
+    for task in tasks:
+        status = rich_escape(str(task.get("status", "failed")))
+        prompt = rich_escape(str(task.get("prompt", ""))[:80])
+        console.print(f"    [red]✗[/red] #{task.get('id', '?')} [{status}] {prompt}")
+        if task.get("error"):
+            console.print(f"      {rich_escape(str(task['error'])[:100])}")
+
+
 @main.command(context_settings=CONTEXT_SETTINGS)
 @click.argument("prompt", required=False)
 @click.option("--verify", default=None, help="Custom verification command")
@@ -409,6 +429,169 @@ def run(prompt, dry_run, no_spec, no_qa, no_test):
         sys.exit(exit_code)
 
 
+
+
+@main.command(context_settings=CONTEXT_SETTINGS)
+@click.argument("intent")
+@click.option("--no-review", is_flag=True, help="Skip plan review, execute immediately")
+@click.option("--no-qa", is_flag=True, help="Skip product-level QA after execution")
+def build(intent, no_review, no_qa):
+    """Build a product from a natural language intent.
+
+    Decomposes intent into tasks, executes them, and verifies the product.
+
+    Examples:
+        otto build "bookmark manager with tags and search"
+        otto build "CLI tool that converts CSV to JSON"
+        otto build "weather app like Apple's" --no-review
+    """
+    require_git()
+    project_dir = Path.cwd()
+    config_path = project_dir / "otto.yaml"
+    if not config_path.exists():
+        create_config(project_dir)
+        console.print(f"[yellow]First run — created otto.yaml[/yellow]")
+        console.print()
+    config = load_config(config_path)
+
+    if no_qa:
+        config["skip_product_qa"] = True
+
+    # Step 1: Product planning
+    from otto.product_planner import run_product_planner, ProductPlan
+    import threading
+
+    console.print()
+    _plan_start = time.time()
+    _plan_done = False
+
+    def _update_timer(status_widget):
+        while not _plan_done:
+            elapsed = int(time.time() - _plan_start)
+            status_widget.update(f"[dim]Planning... {elapsed}s[/dim]")
+            time.sleep(1)
+
+    plan: ProductPlan | None = None
+    try:
+        with console.status("[dim]Planning...[/dim]", spinner="dots") as status_widget:
+            timer_thread = threading.Thread(target=_update_timer, args=(status_widget,), daemon=True)
+            timer_thread.start()
+            plan = asyncio.run(run_product_planner(intent, project_dir, config))
+            _plan_done = True
+    except Exception as e:
+        _plan_done = True
+        error_console.print(f"[error]Planning failed: {rich_escape(str(e))}[/error]")
+        sys.exit(1)
+
+    # Step 2: Show plan and get approval
+    console.print()
+    if plan.mode == "single_task":
+        console.print(f"  [bold]Single task[/bold] (no decomposition needed)")
+        console.print(f"  {rich_escape(plan.tasks[0].prompt[:100])}")
+    else:
+        console.print(f"  [bold]Product Plan[/bold]  ({len(plan.tasks)} tasks)")
+        if plan.product_spec_path:
+            console.print(f"  [dim]Product spec: {plan.product_spec_path.name}[/dim]")
+        if plan.architecture_path:
+            console.print(f"  [dim]Architecture: {plan.architecture_path.name}[/dim]")
+        console.print()
+        for idx, task in enumerate(plan.tasks):
+            deps = ""
+            if task.depends_on:
+                deps = f" [dim](depends: {', '.join(f'#{d+1}' for d in task.depends_on)})[/dim]"
+            console.print(f"  #{idx+1}  {rich_escape(task.prompt[:80])}{deps}")
+
+    if plan.assumptions:
+        console.print()
+        console.print(f"  [yellow]Assumptions:[/yellow]")
+        for a in plan.assumptions:
+            console.print(f"    - {rich_escape(a)}")
+
+    console.print()
+    console.print(f"  [dim]Planning: ${plan.cost_usd:.2f}, {plan.duration_s:.0f}s[/dim]")
+    console.print()
+
+    if not no_review:
+        try:
+            choice = click.prompt(
+                "  [enter] accept  [e] edit  [q] quit",
+                default="", show_default=False, prompt_suffix=" "
+            )
+            if choice.lower() == "q":
+                console.print("  Aborted.")
+                return
+            if choice.lower() == "e":
+                # Open product-spec.md for editing if it exists
+                if plan.product_spec_path and plan.product_spec_path.exists():
+                    click.edit(filename=str(plan.product_spec_path))
+                    console.print(f"  [dim]Edited {plan.product_spec_path.name}. Continuing with current tasks.[/dim]")
+                else:
+                    console.print(f"  [dim]No product-spec.md to edit. Continuing.[/dim]")
+        except (KeyboardInterrupt, EOFError):
+            console.print("\n  Aborted.")
+            return
+
+    # Step 3: Add tasks to tasks.yaml
+    tasks_path = project_dir / "tasks.yaml"
+    task_batch = [
+        {
+            "prompt": t.prompt,
+            "depends_on": t.depends_on if t.depends_on else None,
+        }
+        for t in plan.tasks
+    ]
+    created = add_tasks(tasks_path, task_batch)
+    console.print(f"  [success]Added {len(created)} task(s) to tasks.yaml[/success]")
+
+    # Step 4: Execute via inner loop
+    console.print()
+    from otto.orchestrator import run_per
+    exit_code = asyncio.run(run_per(config, tasks_path, project_dir))
+
+    # Step 5: Product QA + fix loop (if decomposed and not skipped)
+    outer_result = None
+    if plan.mode == "decomposed" and not config.get("skip_product_qa"):
+        if exit_code == 0 and plan.product_spec_path and plan.product_spec_path.exists():
+            console.print()
+            console.print("  [bold]Product QA[/bold] — verifying user journeys...")
+            try:
+                from otto.outer_loop import run_outer_loop
+                outer_result = asyncio.run(run_outer_loop(
+                    product_spec_path=plan.product_spec_path,
+                    project_dir=project_dir,
+                    tasks_path=tasks_path,
+                    config=config,
+                ))
+
+                if outer_result.get("product_passed"):
+                    console.print(f"  [success]All journeys passed[/success]"
+                                  f" (round {outer_result.get('rounds', 1)})")
+                else:
+                    console.print(f"  [red]Some journeys failed[/red]"
+                                  f" (after {outer_result.get('rounds', 1)} round(s))")
+                    for j in outer_result.get("journeys", []):
+                        status_icon = "[success]✓[/success]" if j.get("passed") else "[red]✗[/red]"
+                        console.print(f"    {status_icon} {rich_escape(j.get('name', ''))}")
+                        if not j.get("passed") and j.get("error"):
+                            console.print(f"      {rich_escape(j['error'][:100])}")
+
+                    if outer_result.get("inner_loop_failed"):
+                        _print_failed_tasks(outer_result.get("failed_tasks", []))
+
+                if outer_result.get("fix_tasks_created", 0) > 0:
+                    console.print(f"  [dim]{outer_result['fix_tasks_created']} fix task(s) created[/dim]")
+                console.print(f"  [dim]Product QA cost: ${outer_result.get('total_cost', 0):.2f}[/dim]")
+
+            except Exception as e:
+                console.print(f"  [yellow]Product QA failed: {rich_escape(str(e))}[/yellow]")
+                exit_code = 1
+        elif exit_code != 0:
+            _print_failed_tasks(_collect_failed_tasks(load_tasks(tasks_path)))
+
+    if outer_result is not None:
+        exit_code = 0 if outer_result.get("product_passed") else 1
+
+    sys.exit(exit_code)
 
 
 @main.command(context_settings=CONTEXT_SETTINGS)
