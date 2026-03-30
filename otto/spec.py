@@ -21,9 +21,17 @@ from otto.display import print_agent_tool
 
 
 def _write_log(path: Path, lines: list[str]) -> None:
-    """Write log lines to file (best-effort)."""
+    """Append log lines to file (best-effort).
+
+    Uses append mode so retries accumulate rather than overwrite.
+    """
     try:
-        path.write_text("\n".join(lines))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            text = "\n".join(lines)
+            f.write(text)
+            if not text.endswith("\n"):
+                f.write("\n")
     except OSError:
         pass
 

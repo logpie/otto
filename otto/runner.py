@@ -721,6 +721,7 @@ async def _run_coding_agent(
     agent_log_lines: list[str] = []
     result_msg = None
     _last_block_name = ""
+    _agent_start = time.monotonic()
     async for message in query(prompt=coding_prompt, options=agent_opts):
         if isinstance(message, ResultMessage):
             result_msg = message
@@ -744,11 +745,13 @@ async def _run_coding_agent(
                             emit("agent_tool_result", detail=result_line, passed=is_pass)
                     _last_block_name = ""
                     continue
+                _elapsed = round(time.monotonic() - _agent_start, 1)
+                _ts_prefix = f"[{_elapsed:6.1f}s] "
                 if TextBlock and isinstance(block, TextBlock) and block.text:
-                    agent_log_lines.append(block.text)
+                    agent_log_lines.append(f"{_ts_prefix}{block.text}")
                 elif ToolUseBlock and isinstance(block, ToolUseBlock):
                     _last_block_name = block.name
-                    agent_log_lines.append(f"● {block.name}  {_tool_use_summary(block)}")
+                    agent_log_lines.append(f"{_ts_prefix}● {block.name}  {_tool_use_summary(block)}")
                     event = _build_agent_tool_event(block)
                     if event:
                         emit("agent_tool", **event)
@@ -1065,6 +1068,18 @@ async def _run_qa(
 
     # Persist the final QA report, including retried runs.
     _persist_qa_results(log_dir, qa_report, verdict, attempt_num=attempt)
+
+    # Per-attempt copy of proof-report.md (mirrors qa-report.md pattern above)
+    if attempt >= 0:
+        proof_src = log_dir / "qa-proofs" / "proof-report.md"
+        if proof_src.exists():
+            try:
+                shutil.copy2(
+                    proof_src,
+                    log_dir / "qa-proofs" / f"attempt-{attempt + 1}-proof-report.md",
+                )
+            except OSError:
+                pass
 
     failed_musts = [
         item for item in verdict.get("must_items", [])
