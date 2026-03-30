@@ -99,7 +99,7 @@ otto run --no-spec      Skip spec generation
 otto run --no-qa        Skip QA (merge after tests pass)
 otto run --no-test      Skip testing (merge after coding)
 otto run --max-parallel N  Override max_parallel for this run
-otto plan               Show execution plan without running
+otto run --dry-run      Show execution plan without running
 otto status             Show task table with specs, cost, timing
 otto show <id>          Show task details + QA verdict
 otto retry <id>         Reset a failed task to pending

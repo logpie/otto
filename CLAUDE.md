@@ -19,7 +19,7 @@ cat otto_logs/run-history.jsonl       # Cost, time, pass/fail per run
 | `attempt-N-verify.log` | Full test suite output for that attempt. |
 | `spec-agent.log` | What the spec agent read and generated. |
 | `qa-agent.log` | What the QA agent ran — Bash commands + output. **Check this when QA passes but verify.sh fails.** |
-| `qa-tier.log` | Why QA chose tier 0/1/2 — risk patterns, SPA detection, visual specs. |
+| `qa-tier.log` | QA decision log — task context, attempt info. |
 | `qa-report.md` | QA agent's reasoning text. |
 | `qa-verdict.json` | Structured verdict with per-item pass/fail + evidence. |
 | `qa-proofs/proof-report.md` | Human-readable proof per [must] item. |
@@ -41,7 +41,7 @@ cat otto_logs/run-history.jsonl       # Cost, time, pass/fail per run
 
 **"Why did QA pass when the code is wrong?"**
 → Read `qa-agent.log` — did QA actually run behavioral tests or just read code?
-→ Read `qa-tier.log` — was it tier 0 (skipped)?
+→ Read `qa-agent.log` — did QA actually test behaviorally or just read code?
 
 **"Why was this task serialized instead of parallelized?"**
 → Read `planner.log` — check relationship analysis and conflict detection.

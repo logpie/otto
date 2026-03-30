@@ -232,16 +232,8 @@ QA
   │
   ├─ Await spec (if still generating in background)
   │
-  ├─ Determine QA tier:
-  │    ├─ Tier 1: TARGETED (default — every task gets at least this)
-  │    │
-  │    └─ Tier 2: FULL + BROWSER
-  │         High-risk domains (auth, crypto, payment)
-  │         OR visual specs (◈ items)
-  │         OR SPA files changed
-  │         OR retry attempt (attempt > 0)
-  │
-  ├─ Run QA agent (CC, bypassPerms, chrome-devtools MCP)
+  ├─ Run QA agent (CC, bypassPerms, browser always available)
+  │    PART 1 — VERIFY:
   │    ├─ Test [must] items first (in order)
   │    │    └─ Any [must] fails? → write verdict immediately, stop
   │    ├─ Test [must ◈] visual items (browser required)
@@ -254,6 +246,10 @@ QA
   │    │    └─ Screenshot path (visual items)
   │    │
   │    └─ Write verdict JSON to output file
+  │
+  │    PART 2 — BREAK (after all specs pass):
+  │    ├─ 2-3 adversarial tool calls: boundary inputs, wrong types, edge cases
+  │    └─ Report in "extras" — do NOT fail [must] for out-of-spec behavior
   │
   ├─ Parse verdict:
   │    ├─ Structured JSON? → validate schema (must_passed + must_items)
@@ -450,7 +446,7 @@ your-project/
         ├── qa-report.md               # QA agent report
         ├── qa-verdict.json            # Structured verdict
         ├── qa-agent.log               # QA agent tool calls + output
-        ├── qa-tier.log                # Why QA chose tier 0/1/2
+        ├── qa-tier.log                # QA decision log
         ├── cost-warning.log           # Parallel $0 cost warnings
         └── qa-proofs/
             ├── proof-report.md        # Human-readable proof per must item
