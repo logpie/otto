@@ -62,7 +62,7 @@ Failed tasks get structured retry: the coding agent receives a focused failure e
         ease-in-out over 3s with modest scale(1.08)
       · [should] Accessible with aria-label
         role='img' and aria-label present
-  17:13:41  ✓ qa  109s  $0.39  tier 2  5 specs passed  5/5 proved
+  17:13:41  ✓ qa  109s  $0.39  tier 1  5 specs passed  5/5 proved
   17:13:41  ✓ passed  5m36s  $1.47
     3 files · 8 specs verified
        proofs: /tmp/project/otto_logs/abc12345/qa-proofs/proof-report.md

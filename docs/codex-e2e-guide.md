@@ -43,11 +43,11 @@ uv run --project /path/to/otto-audit otto run
 | `otto run "prompt"` | One-off: creates temp task, runs through full pipeline, cleans up |
 | `otto add "prompt"` | Adds a task to tasks.yaml (pending) |
 | `otto run` | Runs all pending tasks through planner → coding → test → QA → merge |
-| `otto plan` | **Preview only** — shows execution plan, does NOT persist or affect `otto run` |
+| `otto run --dry-run` | Show execution plan without running |
 | `otto status` | Shows current task states |
 | `otto status -w` | Live watch mode |
 
-**`otto plan` is informational.** `otto run` re-plans from scratch. Running `otto plan` before `otto run` is fine but unnecessary — they're independent.
+**`otto run --dry-run` is informational.** It runs the planner and shows the execution plan without executing tasks.
 
 ## Minimal Test Repo Setup
 

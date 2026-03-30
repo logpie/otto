@@ -22,12 +22,13 @@ otto run
   │     │     │
   │     │     ├─ PARALLEL (max_parallel > 1, batch_size > 1)
   │     │     │    Each task → own git worktree → code + test
-  │     │     │    Per-task QA deferred to batch QA phase
   │     │     │    Then → serial merge phase
   │     │     │
   │     │     └─ SERIAL (max_parallel = 1 or single task)
   │     │          Each task → own git worktree → code + test
-  │     │          Per-task QA runs inline (unless batch QA mode)
+  │     │
+  │     │     QA: unified run_qa() — single task = per-task QA,
+  │     │          multi-task = batch QA with combined specs
   │     │
   │     ├─ Merge conflicts:
   │     │    1. git merge (handles most cases)
@@ -145,7 +146,7 @@ run_task_v45(task, config, project_dir, task_work_dir=worktree)
   ║  ├─ Snapshot pre-existing untracked files             ║
   ║  ├─ Run baseline tests                                ║
   ║  │    └─ Baseline fails? → EXIT (error_code=baseline_fail) ║
-  ║  ├─ Record baseline test count + flaky test names     ║
+  ║  ├─ Record baseline test count                        ║
   ║  └─ Emit: phase=prepare, status=done                  ║
   ╚══════════════════════════════════════════════════════╝
          │
@@ -165,7 +166,7 @@ run_task_v45(task, config, project_dir, task_work_dir=worktree)
   ║    │    + learnings         ║    ║  Available by attempt 2        ║
   ║    │                       ║    ║                                ║
   ║    │  ◄ spec feeds into ◄──╫────║  → coding prompt (attempt 1+)  ║
-  ║    │                       ║    ║  → QA tier + acceptance criteria║
+  ║    │                       ║    ║  → QA acceptance criteria       ║
   ║    │                       ║    ╚════════════════════════════════╝
   ║    ├─ Run coding agent     ║
   ║    │  (CC, bypassPerms,    ║
@@ -403,7 +404,7 @@ Planner-derived states (set by _recompute_planner_state):
 | **Replanner** | CC default | ~$0.02-0.05 | After batch failure (with dependency context) |
 | **Spec gen** | CC default | ~$0.15-0.30 | Once per task (background thread) |
 | **Coding agent** | CC default | ~$0.50-1.50 | Per attempt (resumes session) |
-| **QA agent** | CC default | ~$0.30-1.00 | Per attempt (tier-dependent) |
+| **QA agent** | CC default | ~$0.30-1.00 | Per attempt (VERIFY + BREAK) |
 | **Merge re-apply** | CC default | ~$0.15-0.50 | Coding agent with full diff — adapts intelligently (e2e verified: ~$0.15) |
 | **Typical task** | | **~$1.00-2.50** | Single attempt, no retries |
 | **With retry** | | **~$2.50-4.00** | Coding + QA + retry coding + retry QA |
@@ -414,11 +415,11 @@ Planner-derived states (set by _recompute_planner_state):
 
 | Flag | Skips | Effect | Use Case |
 |------|-------|--------|----------|
-| `--no-spec` | Spec generation | QA runs "prompt-only" (elevated tier) | Quick iteration |
+| `--no-spec` | Spec generation | QA runs against original prompt only | Quick iteration |
 | `--no-qa` | QA phase entirely | Pass after tests succeed | Trusted changes |
 | `--no-test` | Testing phase | Pass after coding | Doc-only, config |
 
-These flags affect the per-task pipeline only. Post-merge verification in the parallel merge phase always runs tests (unless `skip_test` is also set in config).
+These flags affect the per-task pipeline. Post-merge test verification only runs in `--no-qa` mode (it's the sole integration gate there). In batch QA mode, a post-batch integration test replaces per-task post-merge tests.
 
 ---
 
@@ -443,9 +444,11 @@ your-project/
         ├── task-summary.json          # Per-phase cost + timing breakdown
         ├── attempt-N-agent.log        # Coding agent full log
         ├── attempt-N-verify.log       # Test suite output
-        ├── qa-report.md               # QA agent report
-        ├── qa-verdict.json            # Structured verdict
-        ├── qa-agent.log               # QA agent tool calls + output
+        ├── qa-report.md               # QA agent report (latest)
+        ├── qa-verdict.json            # Structured verdict (latest)
+        ├── attempt-N-qa-report.md     # Per-attempt QA report (preserved)
+        ├── attempt-N-qa-verdict.json  # Per-attempt verdict (preserved)
+        ├── qa-agent.log               # QA agent tool calls + timestamps (appends)
         ├── qa-tier.log                # QA decision log
         ├── cost-warning.log           # Parallel $0 cost warnings
         └── qa-proofs/
