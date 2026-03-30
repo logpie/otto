@@ -69,9 +69,11 @@ Spend 2-3 tool calls:
 - Thresholds/limits visible in the source (e.g., size cutoffs, power tables)
 - Inputs the spec didn't mention but a real caller would try
 
-Report findings in the "extras" field. Do NOT fail [must] items for behavior
-not in the spec — the spec is the contract. But DO report what you find so
-the team has visibility.
+Report ALL findings in "extras". Do NOT fail [must] items for BREAK findings —
+the spec is the contract, and the existing test suite is the regression gate.
+But DO classify each finding so the team can prioritize:
+- "regression: ..." — existing behavior that may have broken (check if tests cover it)
+- "edge_case: ..." — new gap the spec didn't mention
 
 Also check:
 - Does the implementation contradict the ORIGINAL task prompt?
@@ -1361,6 +1363,21 @@ async def run_qa(
     if proof_warnings and on_progress:
         try:
             on_progress("qa_warning", {"text": proof_warnings[0]})
+        except Exception:
+            pass
+
+    # Warn loudly about BREAK findings so they're not buried in logs
+    verdict = final_result.get("verdict", {})
+    extras = verdict.get("extras", []) or []
+    if extras and log_dir:
+        lines = ["", "=" * 60, "BREAK FINDINGS (from adversarial testing)", "=" * 60]
+        for item in extras:
+            lines.append(f"  ⚠ {item}")
+        lines.append("=" * 60)
+        append_text_log(log_dir / "qa-agent.log", lines + [""])
+    if extras and on_progress:
+        try:
+            on_progress("qa_warning", {"text": f"BREAK found {len(extras)} edge case(s) — check qa-agent.log"})
         except Exception:
             pass
 
