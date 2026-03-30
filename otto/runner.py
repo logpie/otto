@@ -481,8 +481,21 @@ def _log_warn(msg: str) -> None:
 
 
 def _write_log_safe(log_dir: Path, filename: str, content: str) -> None:
-    """Write a log file, silently ignoring OS errors."""
+    """Write a log file with timestamp header, silently ignoring OS errors."""
     try:
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        if filename.endswith(".json"):
+            # For JSON: inject timestamp into the object
+            try:
+                import json as _json
+                data = _json.loads(content)
+                if isinstance(data, dict) and "timestamp" not in data:
+                    data["_written_at"] = ts
+                    content = _json.dumps(data, indent=2)
+            except (ValueError, TypeError):
+                pass
+        elif filename.endswith((".md", ".log", ".sh", ".txt")):
+            content = f"<!-- generated: {ts} -->\n{content}"
         (log_dir / filename).write_text(content)
     except OSError:
         pass
@@ -511,6 +524,7 @@ def _write_task_summary_safe(
             "phase_timings": {name: round(value, 1) for name, value in phase_timings.items() if value or name in ("prepare", "coding", "test", "qa", "merge")},
             "phase_costs": {name: round(value, 4) for name, value in phase_costs.items() if value},
             "retry_reasons": retry_reasons,
+            "_written_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         },
     )
 
@@ -1395,6 +1409,7 @@ async def run_task_v45(
                 "completed": False,
                 "phases": _live_phases,
                 "recent_tools": list(_live_tools),
+                "_updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             }))
         except Exception:
             pass
@@ -1488,6 +1503,7 @@ async def run_task_v45(
                 "error": error[:200] if error else "",
                 "phases": final_phases,
                 "recent_tools": list(_live_tools),
+                "_updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             }))
         except Exception:
             pass

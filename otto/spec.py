@@ -21,13 +21,15 @@ from otto.display import print_agent_tool
 
 
 def _write_log(path: Path, lines: list[str]) -> None:
-    """Append log lines to file (best-effort).
+    """Append timestamped log lines to file (best-effort).
 
     Uses append mode so retries accumulate rather than overwrite.
     """
     try:
+        import time as _time
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "a", encoding="utf-8") as f:
+            f.write(f"[{_time.strftime('%Y-%m-%d %H:%M:%S')}]\n")
             text = "\n".join(lines)
             f.write(text)
             if not text.endswith("\n"):
