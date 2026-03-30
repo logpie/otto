@@ -309,7 +309,7 @@ def create_config(project_dir: Path) -> Path:
     exclude_path = git_meta_dir(project_dir) / "info" / "exclude"
     exclude_path.parent.mkdir(parents=True, exist_ok=True)
     existing = exclude_path.read_text() if exclude_path.exists() else ""
-    entries = ["tasks.yaml", ".tasks.lock", "otto_logs/", "otto.lock", "otto_arch/", ".otto-scratch/", ".otto-worktrees/"]
+    entries = ["tasks.yaml", ".tasks.lock", "otto_logs/", "otto.lock", "otto_arch/", ".otto-worktrees/"]
     to_add = [e for e in entries if e not in existing]
     if to_add:
         with open(exclude_path, "a") as f:

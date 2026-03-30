@@ -310,9 +310,8 @@ class TaskDisplay:
                 )
             elif name == "qa":
                 tier_labels = {
-                    "tier 0": "skip - all specs have tests",
+                    "tier 1": "targeted QA",
                     "tier 1": "targeted - checking spec gaps",
-                    "tier 2": "full - adversarial testing",
                 }
                 tier_label = detail if detail else ""
                 human_label = tier_labels.get(tier_label, tier_label)
