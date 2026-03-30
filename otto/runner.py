@@ -644,6 +644,7 @@ def _build_coding_prompt(
     spec: list | None,
     context: Any | None,
     sibling_context: str | None = None,
+    task_key: str | None = None,
 ) -> str:
     """Build the coding agent prompt for a given attempt.
 
@@ -652,16 +653,21 @@ def _build_coding_prompt(
     """
     coding_prompt = prompt
 
+    pilot_guidance, general_learnings = _split_observed_learnings_for_task(context, task_key)
+
     if attempt == 0 and not last_error:
         # ROUND 1: Bare CC — raw prompt + cross-task learnings + user feedback
         if sibling_context:
             coding_prompt += f"\n\n{sibling_context}"
         if feedback:
             coding_prompt += f"\n\nIMPORTANT feedback from the user:\n{feedback}"
-        if context and hasattr(context, 'observed_learnings') and context.observed_learnings:
+        if pilot_guidance:
+            coding_prompt += f"\n\nGUIDANCE FROM PRIOR ANALYSIS (specific to this task):\n"
+            coding_prompt += "\n".join(f"- {g}" for g in pilot_guidance)
+        if general_learnings:
             coding_prompt += f"\n\nFactual observations from prior tasks:\n"
             coding_prompt += "\n".join(
-                f"- [{l.source}] {l.text}" for l in context.observed_learnings
+                f"- [{l.source}] {l.text}" for l in general_learnings
             )
     else:
         # ROUND 2+: raw prompt + feedback + specs + raw errors + learnings
@@ -679,10 +685,13 @@ def _build_coding_prompt(
             coding_prompt += (
                 f"\n\nFix the specific failures above. Do not regress items that were passing."
             )
-        if context and hasattr(context, 'observed_learnings') and context.observed_learnings:
+        if pilot_guidance:
+            coding_prompt += f"\n\nGUIDANCE FROM PRIOR ANALYSIS (specific to this task):\n"
+            coding_prompt += "\n".join(f"- {g}" for g in pilot_guidance)
+        if general_learnings:
             coding_prompt += f"\n\nFactual observations from prior tasks:\n"
             coding_prompt += "\n".join(
-                f"- [{l.source}] {l.text}" for l in context.observed_learnings
+                f"- [{l.source}] {l.text}" for l in general_learnings
             )
 
     coding_prompt += (
@@ -694,6 +703,37 @@ def _build_coding_prompt(
         f"\n- Reuse existing test helpers and mock data factories — do not duplicate."
     )
     return coding_prompt
+
+
+def _parse_targeted_pilot_learning(text: str) -> tuple[str | None, str]:
+    """Return (target_task, clean_text) for targeted gate-pilot learnings."""
+    for prefix in ("[for ", "[retry guidance for "):
+        if not text.startswith(prefix):
+            continue
+        closing = text.find("] ")
+        if closing == -1:
+            return None, text
+        target = text[len(prefix):closing]
+        return target, text[closing + 2:]
+    return None, text
+
+
+def _split_observed_learnings_for_task(context: Any | None, task_key: str | None) -> tuple[list[str], list[Any]]:
+    """Separate task-targeted pilot guidance from general observed learnings."""
+    if not context or not hasattr(context, "observed_learnings"):
+        return [], []
+
+    pilot_guidance: list[str] = []
+    general_learnings: list[Any] = []
+    for learning in context.observed_learnings:
+        if learning.source == "gate_pilot":
+            target_task, clean_text = _parse_targeted_pilot_learning(learning.text)
+            if target_task is not None:
+                if task_key and target_task == task_key:
+                    pilot_guidance.append(clean_text)
+                continue
+        general_learnings.append(learning)
+    return pilot_guidance, general_learnings
 
 
 async def _run_coding_agent(
@@ -1704,6 +1744,7 @@ async def run_task_v45(
                 spec=spec,
                 context=context,
                 sibling_context=sibling_context,
+                task_key=key,
             )
 
             if attempt == 0 and not last_error:

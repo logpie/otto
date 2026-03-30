@@ -1,0 +1,3 @@
+Add a multiply(a, b) function to math.js and add comprehensive jest tests for it in math.test.js. Test edge cases: zero, negative numbers, floating point, very large numbers. Use describe/it/expect pattern.
+Add a divide(a, b) function to math.js that throws an error on division by zero. Add tests for it. Also add a modulo(a, b) function with tests. Test edge cases: divide by zero throws, negative modulo, floating point modulo.
+Add a power(base, exp) function and a sqrt(n) function to math.js. power should handle negative exponents. sqrt should throw on negative input. Add tests for both including edge cases: power(0,0)=1, negative exponents return fractions, sqrt of perfect squares, sqrt of negative throws.
