@@ -1,6 +1,7 @@
 """Otto CLI — entrypoint for all otto commands."""
 
 import asyncio
+import json
 import os
 import sys
 import tempfile
@@ -666,6 +667,120 @@ def build(intent, no_review, no_qa):
     console.print()
 
     sys.exit(exit_code)
+
+
+@main.command(context_settings=CONTEXT_SETTINGS)
+@click.argument("project_dir", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.argument("intent")
+@click.option("--port", "port_override", type=int, default=None, help="Connect to an already-running app on this port")
+@click.option("--output", default="-", help="Path to write the JSON report ('-' for stdout)")
+@click.option("--tier", type=click.IntRange(0, 2), default=1, show_default=True,
+              help="Certification tier: 0=adapter only, 1=baseline, 2=agentic (future)")
+def certify(project_dir, intent, port_override, output, tier):
+    """Certify a project against a product intent."""
+
+    from otto.certifier.adapter import analyze_project
+    from otto.certifier.baseline import (
+        certify as run_certify,
+        load_or_compile_matrix,
+        print_report,
+        save_report,
+    )
+    from otto.certifier.classifier import classify
+
+    project_dir = project_dir.resolve()
+    config: dict = {}
+
+    if tier == 2:
+        raise click.ClickException("Tier 2 agentic certification is not implemented yet")
+
+    matrix, matrix_source, matrix_path, compile_duration_s = load_or_compile_matrix(project_dir, intent, config=config)
+    profile = classify(project_dir)
+    if port_override is not None:
+        profile.port = int(port_override)
+        profile.extra["reuse_existing_app"] = True
+    test_config = analyze_project(project_dir)
+
+    if tier == 0:
+        payload = {
+            "summary": {
+                "project_dir": str(project_dir),
+                "intent": intent,
+                "tier": tier,
+                "product_type": profile.product_type,
+                "framework": profile.framework,
+                "port": profile.port,
+                "matrix_source": matrix_source,
+                "matrix_path": str(matrix_path),
+                "compiled_at": matrix.compiled_at,
+                "compile_cost_usd": matrix.cost_usd if matrix_source != "cache" else 0.0,
+                "compile_duration_s": compile_duration_s,
+                "claim_count": len(matrix.claims),
+                "critical_claim_count": len(matrix.critical_claims()),
+            },
+            "adapter": {
+                "auth_type": test_config.auth_type,
+                "register_endpoint": test_config.register_endpoint,
+                "login_endpoint": test_config.login_endpoint,
+                "seeded_users": [
+                    {"email": user.email, "role": user.role}
+                    for user in test_config.seeded_users
+                ],
+                "routes": [
+                    {
+                        "path": route.path,
+                        "methods": route.methods,
+                        "requires_auth": route.requires_auth,
+                        "requires_admin": route.requires_admin,
+                    }
+                    for route in test_config.routes
+                ],
+                "models": test_config.models,
+                "has_cart_model": test_config.has_cart_model,
+            },
+            "matrix": matrix.to_dict(),
+        }
+        click.echo(
+            "\n".join(
+                [
+                    "",
+                    "Certification: ADAPTER ONLY",
+                    f"Project:       {project_dir}",
+                    f"Type:          {profile.product_type}",
+                    f"Framework:     {profile.framework}",
+                    f"Claims:        {len(matrix.claims)} total, {len(matrix.critical_claims())} critical",
+                    f"Matrix:        {matrix_source}",
+                    f"Auth:          {test_config.auth_type}",
+                    "",
+                ]
+            )
+        )
+        payload_json = json.dumps(payload, indent=2, default=str)
+        if output in {"-", "stdout"}:
+            click.echo(payload_json)
+        else:
+            output_path = Path(output)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(payload_json)
+        return
+
+    result = run_certify(
+        project_dir,
+        intent,
+        config=config,
+        port_override=port_override,
+        matrix=matrix,
+        profile=profile,
+        test_config=test_config,
+    )
+    result.compile_duration_s = compile_duration_s
+    result.compile_cost_usd = matrix.cost_usd if matrix_source != "cache" else 0.0
+    result.compiled_at = matrix.compiled_at
+    result.matrix_source = matrix_source
+    result.matrix_path = str(matrix_path)
+
+    print_report(result)
+    save_report(result, output)
 
 
 @main.command(context_settings=CONTEXT_SETTINGS)

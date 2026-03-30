@@ -16,12 +16,14 @@ Evidence is captured for every check: command, response, pass/fail.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import re
 import signal
 import subprocess
+import sys
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -31,7 +33,7 @@ import requests
 
 from otto.certifier.adapter import SeededUser, TestConfig, analyze_project
 from otto.certifier.classifier import ProductProfile, classify
-from otto.certifier.intent_compiler import Claim, RequirementMatrix, compile_intent
+from otto.certifier.intent_compiler import Claim, RequirementMatrix, compile_intent, load_matrix, save_matrix
 
 logger = logging.getLogger("otto.certifier.baseline")
 
@@ -93,6 +95,11 @@ class BaselineResult:
     results: list[ClaimResult]
     app_start_evidence: Evidence | None = None
     duration_s: float = 0.0
+    compile_cost_usd: float = 0.0
+    compile_duration_s: float = 0.0
+    compiled_at: str = ""
+    matrix_source: str = ""
+    matrix_path: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -113,6 +120,15 @@ class ExecutionContext:
     authenticated_user: SeededUser | None = None
 
 
+@dataclass
+class BaselineRunState:
+    """Mutable state shared across claims in a single certification run."""
+
+    session: requests.Session = field(default_factory=requests.Session)
+    discoveries: dict[str, str] = field(default_factory=dict)
+    authenticated_user: SeededUser | None = None
+
+
 class AppRunner:
     """Manages starting and stopping the app under test."""
 
@@ -126,18 +142,17 @@ class AppRunner:
     def start(self, timeout: int = 30) -> Evidence:
         """Start the app and wait for it to be ready."""
 
-        if not self.profile.start_command:
-            return Evidence(
-                step="start app",
-                command="(no start command)",
-                expected="app starts",
-                actual="no start command detected",
-                passed=False,
-                outcome="fail",
-                timestamp=time.strftime("%H:%M:%S"),
-            )
-
-        if self.profile.extra.get("reuse_existing_app") and self._port_in_use():
+        if self.profile.extra.get("reuse_existing_app"):
+            if not self._port_in_use():
+                return Evidence(
+                    step="start app",
+                    command=f"(reuse existing app on {self.base_url})",
+                    expected="existing app responds on requested port",
+                    actual=f"no app responding on {self.base_url}",
+                    passed=False,
+                    outcome="fail",
+                    timestamp=time.strftime("%H:%M:%S"),
+                )
             try:
                 response = requests.get(self.base_url, timeout=2)
             except Exception as exc:
@@ -157,6 +172,17 @@ class AppRunner:
                 actual=f"HTTP {response.status_code} on {self.base_url}",
                 passed=(response.status_code < 500),
                 outcome="pass" if response.status_code < 500 else "fail",
+                timestamp=time.strftime("%H:%M:%S"),
+            )
+
+        if not self.profile.start_command:
+            return Evidence(
+                step="start app",
+                command="(no start command)",
+                expected="app starts",
+                actual="no start command detected",
+                passed=False,
+                outcome="fail",
                 timestamp=time.strftime("%H:%M:%S"),
             )
 
@@ -253,6 +279,7 @@ def run_baseline(
 
     start_time = time.time()
     results: list[ClaimResult] = []
+    run_state = BaselineRunState()
 
     runner = None
     app_evidence = None
@@ -296,7 +323,7 @@ def run_baseline(
         for claim in matrix.claims:
             if claim.priority == "nice" and claim.test_approach == "code-review":
                 continue
-            results.append(_test_claim(claim, base_url, project_dir, profile, test_config))
+            results.append(_test_claim(claim, base_url, project_dir, profile, test_config, run_state))
     finally:
         if runner:
             runner.stop()
@@ -337,6 +364,7 @@ def _test_claim(
     project_dir: Path,
     profile: ProductProfile,
     test_config: TestConfig | None = None,
+    run_state: BaselineRunState | None = None,
 ) -> ClaimResult:
     """Test a single claim by executing its structured steps."""
 
@@ -364,7 +392,7 @@ def _test_claim(
             error=structural_reason,
         )
 
-    context = _build_execution_context(claim, base_url, project_dir, profile, test_config)
+    context = _build_execution_context(claim, base_url, project_dir, profile, test_config, run_state)
     evidence: list[Evidence] = []
 
     for step in claim.test_steps:
@@ -373,6 +401,8 @@ def _test_claim(
     passed = any(item.outcome == "pass" for item in evidence) and not any(item.outcome == "fail" for item in evidence)
     outcome = _claim_outcome_from_evidence(evidence)
     error = _claim_error_from_evidence(evidence, outcome)
+    if run_state is not None:
+        run_state.authenticated_user = context.authenticated_user
 
     return ClaimResult(
         claim_id=claim.id,
@@ -392,6 +422,7 @@ def _build_execution_context(
     project_dir: Path,
     profile: ProductProfile,
     test_config: TestConfig | None = None,
+    run_state: BaselineRunState | None = None,
 ) -> ExecutionContext:
     seed = f"{claim.id}-{time.time_ns()}"
     email_token = abs(hash(seed)) % 1_000_000
@@ -417,7 +448,10 @@ def _build_execution_context(
         project_dir=project_dir,
         profile=profile,
         test_config=test_config,
+        session=run_state.session if run_state is not None else requests.Session(),
         variables=variables,
+        discoveries=run_state.discoveries if run_state is not None else {},
+        authenticated_user=run_state.authenticated_user if run_state is not None else None,
     )
 
 
@@ -871,7 +905,6 @@ def _authenticate_nextauth_user(context: ExecutionContext, user: SeededUser) -> 
         return False, f"CSRF token missing in {json.dumps(csrf_payload)[:200]}"
 
     callback_url = _build_url(context.base_url, config.login_endpoint or "/api/auth/callback/credentials")
-    base_origin = context.base_url.rstrip("/")
     try:
         response = context.session.post(
             callback_url,
@@ -879,21 +912,23 @@ def _authenticate_nextauth_user(context: ExecutionContext, user: SeededUser) -> 
                 "email": user.email,
                 "password": user.password,
                 "csrfToken": csrf_token,
-                "callbackUrl": base_origin + "/",
                 "redirect": "false",
                 "json": "true",
             },
             timeout=10,
             allow_redirects=False,
-            headers={
-                "Referer": base_origin + "/",
-                "Origin": base_origin,
-            },
         )
     except Exception as exc:
         return False, f"credentials callback failed: {exc}"
 
     _capture_response_state({"capture_auth": True}, response, context)
+    response_payload: dict[str, Any] | None
+    try:
+        parsed_payload = response.json()
+    except ValueError:
+        response_payload = None
+    else:
+        response_payload = parsed_payload if isinstance(parsed_payload, dict) else None
 
     session_url = _build_url(context.base_url, "/api/auth/session")
     try:
@@ -922,6 +957,8 @@ def _authenticate_nextauth_user(context: ExecutionContext, user: SeededUser) -> 
         return True, f"NextAuth session cookie stored after HTTP {response.status_code}"
 
     detail = _preview_response(response)
+    if response_payload and response_payload.get("url"):
+        detail = f"{detail}; callback returned url={response_payload['url']}"
     if session_error:
         detail = f"{detail}; session check error: {session_error}"
     return False, f"NextAuth login failed with HTTP {response.status_code}: {detail}"
@@ -1368,75 +1405,239 @@ def _dedupe_preserving_order(items: list[str]) -> list[str]:
     return ordered
 
 
+def matrix_cache_path(project_dir: Path, intent: str) -> Path:
+    digest = hashlib.sha256(intent.encode("utf-8")).hexdigest()[:16]
+    return project_dir / "otto_logs" / "certifier" / f"matrix-{digest}.json"
+
+
+def load_or_compile_matrix(
+    project_dir: Path,
+    intent: str,
+    config: dict[str, Any] | None = None,
+) -> tuple[RequirementMatrix, str, Path, float]:
+    """Return a cached requirement matrix when available, otherwise compile it."""
+
+    cache_path = matrix_cache_path(project_dir, intent)
+    if cache_path.exists():
+        return load_matrix(cache_path), "cache", cache_path, 0.0
+
+    started_at = time.monotonic()
+    matrix = asyncio.run(compile_intent(intent, config=config))
+    compile_duration_s = round(time.monotonic() - started_at, 1)
+    save_matrix(matrix, cache_path)
+    return matrix, "compiled", cache_path, compile_duration_s
+
+
 def certify(
     project_dir: Path,
     intent: str,
     config: dict[str, Any] | None = None,
     *,
     port_override: int | None = None,
+    matrix: RequirementMatrix | None = None,
+    profile: ProductProfile | None = None,
+    test_config: TestConfig | None = None,
 ) -> BaselineResult:
     """Full certification pipeline: compile → classify → adapt → baseline."""
 
     config = dict(config or {})
     effective_port = port_override or config.get("port_override")
+    compile_duration_s = 0.0
+    matrix_source = "provided"
+    matrix_path = ""
 
-    matrix = asyncio.run(compile_intent(intent, config=config))
-    profile = classify(project_dir)
+    if matrix is None:
+        matrix, matrix_source, resolved_matrix_path, compile_duration_s = load_or_compile_matrix(project_dir, intent, config=config)
+        matrix_path = str(resolved_matrix_path)
+
+    if profile is None:
+        profile = classify(project_dir)
     if effective_port is not None:
         profile.port = int(effective_port)
         profile.extra["reuse_existing_app"] = True
-    test_config = analyze_project(project_dir)
-    return run_baseline(project_dir, matrix, profile, test_config=test_config)
+    if test_config is None:
+        test_config = analyze_project(project_dir)
+
+    result = run_baseline(project_dir, matrix, profile, test_config=test_config)
+    result.compile_cost_usd = matrix.cost_usd if matrix_source != "cache" else 0.0
+    result.compile_duration_s = compile_duration_s
+    result.compiled_at = matrix.compiled_at
+    result.matrix_source = matrix_source
+    result.matrix_path = matrix_path
+    return result
+
+
+def _report_payload(result: BaselineResult) -> dict[str, Any]:
+    grouped = {
+        "not_implemented": [],
+        "fail": [],
+        "blocked_by_harness": [],
+        "not_applicable": [],
+        "pass": [],
+    }
+    for claim in result.results:
+        grouped.setdefault(claim.outcome, []).append(
+            {
+                "claim_id": claim.claim_id,
+                "description": claim.claim_description,
+                "priority": claim.priority,
+                "hard_fail": claim.hard_fail,
+                "outcome": claim.outcome,
+                "passed": claim.passed,
+                "error": claim.error,
+                "evidence": [asdict(item) for item in claim.evidence],
+            }
+        )
+
+    return {
+        "summary": {
+            "product_dir": result.product_dir,
+            "intent": result.intent,
+            "product_type": result.product_type,
+            "certified": result.certified,
+            "started": result.started,
+            "claims_tested": result.claims_tested,
+            "claims_passed": result.claims_passed,
+            "claims_failed": result.claims_failed,
+            "claims_not_implemented": result.claims_not_implemented,
+            "claims_blocked": result.claims_blocked,
+            "claims_not_applicable": result.claims_not_applicable,
+            "hard_fails": result.hard_fails,
+            "duration_s": result.duration_s,
+            "compile_cost_usd": result.compile_cost_usd,
+            "compile_duration_s": result.compile_duration_s,
+            "compiled_at": result.compiled_at,
+            "matrix_source": result.matrix_source,
+            "matrix_path": result.matrix_path,
+        },
+        "app_start_evidence": asdict(result.app_start_evidence) if result.app_start_evidence else None,
+        "claims_by_outcome": grouped,
+        "claims": [asdict(claim) for claim in result.results],
+    }
+
+
+def save_report(result: BaselineResult, path: Path | str) -> None:
+    """Save a structured report as JSON."""
+
+    path_str = str(path)
+    payload = json.dumps(_report_payload(result), indent=2, default=str)
+    if path_str in {"-", "stdout"}:
+        sys.stdout.write(payload + "\n")
+        return
+
+    resolved = Path(path)
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    resolved.write_text(payload)
 
 
 def save_result(result: BaselineResult, path: Path) -> None:
-    """Save baseline result to JSON."""
+    """Backward-compatible alias for save_report()."""
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(result.to_dict(), indent=2, default=str))
+    save_report(result, path)
 
 
-def print_report(result: BaselineResult) -> None:
-    """Print a human-readable certification report."""
+def _claim_outcome_order(outcome: str) -> int:
+    return {
+        "not_implemented": 0,
+        "fail": 1,
+        "blocked_by_harness": 2,
+        "not_applicable": 3,
+        "pass": 4,
+    }.get(outcome, 99)
 
-    print()
-    print(f"  {'CERTIFIED' if result.certified else 'NOT CERTIFIED'}")
-    print(f"  Product: {result.product_dir}")
-    print(f"  Type: {result.product_type}")
-    print(f"  App started: {'yes' if result.started else 'NO'}")
-    print(f"  Claims: {result.claims_passed}/{result.claims_tested} passed")
-    if result.claims_not_implemented:
-        print(f"  Not implemented: {result.claims_not_implemented}")
-    if result.claims_blocked:
-        print(f"  Blocked by harness: {result.claims_blocked}")
-    if result.claims_not_applicable:
-        print(f"  Not applicable: {result.claims_not_applicable}")
-    if result.hard_fails > 0:
-        print(f"  HARD FAILS: {result.hard_fails} critical claims failed")
-    print(f"  Duration: {result.duration_s}s")
-    print()
 
-    for claim in result.results:
-        icon = {
-            "pass": "PASS",
-            "fail": "FAIL",
-            "not_implemented": "NIMP",
-            "blocked_by_harness": "BLKD",
-            "not_applicable": "N/A",
-        }.get(claim.outcome, claim.outcome.upper())
-        flag = " [HARD FAIL]" if claim.outcome == "fail" and claim.hard_fail else ""
-        print(f"  {icon}  {claim.claim_id}: {claim.claim_description}{flag}")
+def _outcome_label(outcome: str) -> str:
+    return {
+        "not_implemented": "Not Implemented",
+        "fail": "Failures",
+        "blocked_by_harness": "Blocked",
+        "not_applicable": "Not Applicable",
+        "pass": "Passes",
+    }.get(outcome, outcome.replace("_", " ").title())
+
+
+def _status_label(result: BaselineResult) -> str:
+    return "CERTIFIED" if result.certified else "NOT CERTIFIED"
+
+
+def _format_seconds(seconds: float) -> str:
+    return f"{seconds:.1f}s"
+
+
+def _print_group(title: str, claims: list[ClaimResult]) -> None:
+    if not claims:
+        return
+
+    print(title)
+    for claim in claims:
+        suffix = " [HARD FAIL]" if claim.hard_fail and claim.outcome in {"fail", "not_implemented", "blocked_by_harness"} else ""
+        print(f"  {claim.claim_id}: {claim.claim_description}{suffix}")
         if claim.outcome != "pass":
             for item in claim.evidence:
                 if item.outcome == "pass":
                     continue
-                item_icon = {
-                    "fail": "FAIL",
-                    "blocked_by_harness": "SKIP",
-                    "not_implemented": "NIMP",
-                    "not_applicable": "N/A",
-                }.get(item.outcome, item.outcome.upper())
-                print(f"        {item_icon} {item.command}")
-                print(f"        expected: {item.expected}")
-                print(f"        actual:   {item.actual[:150]}")
+                print(f"    command:  {item.command}")
+                print(f"    expected: {item.expected}")
+                print(f"    actual:   {item.actual[:300]}")
+
+
+def _print_comparison_table(result: BaselineResult, other: BaselineResult) -> None:
+    rows = [
+        ("Certification", _status_label(result), _status_label(other), ""),
+        ("Claims passed", str(result.claims_passed), str(other.claims_passed), str(result.claims_passed - other.claims_passed)),
+        ("Claims failed", str(result.claims_failed), str(other.claims_failed), str(result.claims_failed - other.claims_failed)),
+        ("Not implemented", str(result.claims_not_implemented), str(other.claims_not_implemented), str(result.claims_not_implemented - other.claims_not_implemented)),
+        ("Hard fails", str(result.hard_fails), str(other.hard_fails), str(result.hard_fails - other.hard_fails)),
+        ("Duration", _format_seconds(result.duration_s), _format_seconds(other.duration_s), f"{result.duration_s - other.duration_s:+.1f}s"),
+        ("Compile cost", f"${result.compile_cost_usd:.3f}", f"${other.compile_cost_usd:.3f}", f"{result.compile_cost_usd - other.compile_cost_usd:+.3f}"),
+    ]
+
+    widths = [
+        max(len("Metric"), *(len(row[0]) for row in rows)),
+        max(len("Current"), *(len(row[1]) for row in rows)),
+        max(len("Other"), *(len(row[2]) for row in rows)),
+        max(len("Delta"), *(len(row[3]) for row in rows)),
+    ]
+    print("Comparison")
+    print(
+        f"  {'Metric'.ljust(widths[0])}  {'Current'.ljust(widths[1])}  "
+        f"{'Other'.ljust(widths[2])}  {'Delta'.ljust(widths[3])}"
+    )
+    for metric, current, other_value, delta in rows:
+        print(
+            f"  {metric.ljust(widths[0])}  {current.ljust(widths[1])}  "
+            f"{other_value.ljust(widths[2])}  {delta.ljust(widths[3])}"
+        )
+
+
+def print_report(result: BaselineResult, other: BaselineResult | None = None) -> None:
+    """Print a human-readable certification report."""
+
+    grouped: dict[str, list[ClaimResult]] = {}
+    for claim in sorted(result.results, key=lambda item: (_claim_outcome_order(item.outcome), item.claim_id)):
+        grouped.setdefault(claim.outcome, []).append(claim)
+
     print()
+    print(f"Certification: {_status_label(result)}")
+    print(f"Product:       {result.product_dir}")
+    print(f"Type:          {result.product_type}")
+    print(f"Claims:        {result.claims_passed}/{result.claims_tested} passed")
+    print(f"Hard fails:    {result.hard_fails}")
+    print(f"App started:   {'yes' if result.started else 'no'}")
+    print(f"Matrix:        {result.matrix_source or 'unknown'}")
+    if result.matrix_path:
+        print(f"Matrix path:   {result.matrix_path}")
+    if result.compiled_at:
+        print(f"Compiled at:   {result.compiled_at}")
+    print(f"Timing:        compile {_format_seconds(result.compile_duration_s)}, baseline {_format_seconds(result.duration_s)}")
+    print(f"Cost:          ${result.compile_cost_usd:.3f}")
+    print()
+
+    for outcome in ("not_implemented", "fail", "blocked_by_harness", "not_applicable", "pass"):
+        _print_group(_outcome_label(outcome), grouped.get(outcome, []))
+        if grouped.get(outcome):
+            print()
+
+    if other is not None:
+        _print_comparison_table(result, other)
+        print()

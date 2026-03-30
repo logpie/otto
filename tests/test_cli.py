@@ -8,6 +8,10 @@ import yaml
 from click.testing import CliRunner
 
 from otto.cli import main
+from otto.certifier.adapter import TestConfig as AdapterTestConfig
+from otto.certifier.baseline import BaselineResult
+from otto.certifier.classifier import ProductProfile
+from otto.certifier.intent_compiler import RequirementMatrix
 
 
 @pytest.fixture
@@ -189,6 +193,72 @@ class TestRun:
             result = runner.invoke(main, ["run", "Fix the broken command"])
 
         assert result.exit_code == 0
+
+
+class TestCertify:
+    def test_certify_runs_baseline_and_saves_report(self, runner, tmp_path):
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        output_path = tmp_path / "report.json"
+
+        matrix = RequirementMatrix(
+            intent="shop",
+            claims=[],
+            compiled_at="2026-03-30 12:00:00",
+            cost_usd=0.25,
+        )
+        profile = ProductProfile(
+            product_type="web",
+            framework="nextjs",
+            language="typescript",
+            start_command="npm run dev",
+            port=3000,
+            test_command="npm test",
+            interaction="browser",
+        )
+        test_config = AdapterTestConfig(auth_type="nextauth", login_endpoint="/api/auth/callback/credentials")
+        baseline_result = BaselineResult(
+            product_dir=str(project_dir),
+            intent="shop",
+            product_type="web",
+            started=True,
+            claims_tested=0,
+            claims_passed=0,
+            claims_failed=0,
+            claims_not_implemented=0,
+            claims_blocked=0,
+            claims_not_applicable=0,
+            hard_fails=0,
+            certified=True,
+            results=[],
+        )
+
+        with patch("otto.certifier.baseline.load_or_compile_matrix", return_value=(matrix, "cache", project_dir / "otto_logs" / "certifier" / "matrix.json", 0.0)), \
+             patch("otto.certifier.classifier.classify", return_value=profile), \
+             patch("otto.certifier.adapter.analyze_project", return_value=test_config), \
+             patch("otto.certifier.baseline.certify", return_value=baseline_result) as mock_certify, \
+             patch("otto.certifier.baseline.print_report") as mock_print_report, \
+             patch("otto.certifier.baseline.save_report") as mock_save_report:
+            result = runner.invoke(
+                main,
+                ["certify", str(project_dir), "shop", "--port", "3004", "--output", str(output_path)],
+            )
+
+        assert result.exit_code == 0
+        mock_certify.assert_called_once()
+        mock_print_report.assert_called_once_with(baseline_result)
+        mock_save_report.assert_called_once_with(baseline_result, str(output_path))
+        assert baseline_result.matrix_source == "cache"
+        assert baseline_result.matrix_path.endswith("matrix.json")
+
+    def test_certify_tier_2_is_not_implemented(self, runner, tmp_path):
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+
+        result = runner.invoke(main, ["certify", str(project_dir), "shop", "--tier", "2"])
+
+        assert result.exit_code != 0
+        assert "not implemented" in result.output.lower()
 
 
 class TestStatus:
