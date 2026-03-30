@@ -188,7 +188,7 @@ def preflight_checks(
                     framework_excludes.append(d)
 
     # Otto runtime entries
-    otto_excludes = ["otto_logs/", "otto_arch/", ".otto-scratch/", ".otto-worktrees/", "tasks.yaml", ".tasks.lock", "otto.yaml"]
+    otto_excludes = ["otto_logs/", "otto_arch/", ".otto-worktrees/", "tasks.yaml", ".tasks.lock", "otto.yaml"]
     missing_excludes = [e for e in otto_excludes if e not in existing_exclude]
 
     all_new_excludes = sorted(set(framework_excludes + missing_excludes))
@@ -689,10 +689,9 @@ def _build_coding_prompt(
         f"\n\nYou are working in {project_dir}. Do not create git commits."
         f" Do not ask questions — make decisions yourself and implement."
         f"\n\nTest hygiene:"
-        f"\n- Use .otto-scratch/ for throwaway verification scripts."
+        f"\n- Prefer extending existing test files over creating new ones."
         f"\n- Follow the repo's existing test conventions for permanent tests."
         f"\n- Reuse existing test helpers and mock data factories — do not duplicate."
-        f"\n- Prefer extending existing test files over creating new ones."
     )
     return coding_prompt
 
@@ -1567,9 +1566,6 @@ async def run_task_v45(
         ).stdout.strip()
         pre_existing_untracked = _snapshot_untracked(task_work_dir)
 
-        # Create scratch area for ephemeral test verification
-        scratch_dir = task_work_dir / ".otto-scratch"
-        scratch_dir.mkdir(exist_ok=True)
 
         custom_test_cmd = task.get("verify")
 

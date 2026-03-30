@@ -21,7 +21,7 @@ def _log_warn(msg: str) -> None:
 # Otto-owned paths — dirty changes to these are ignored (not user code).
 # Prefix-based: anything under these directories is otto-owned.
 _OTTO_OWNED_FILES = {"tasks.yaml", ".tasks.lock"}
-_OTTO_OWNED_PREFIXES = ("otto_logs/", "otto_arch/", ".otto-scratch/", ".otto/", ".otto-worktrees/")
+_OTTO_OWNED_PREFIXES = ("otto_logs/", "otto_arch/", ".otto/", ".otto-worktrees/")
 
 
 def _is_otto_owned(filepath: str) -> bool:
@@ -239,7 +239,7 @@ def _should_stage_untracked(rel_path: str) -> bool:
     obvious build artifacts/caches — even if .gitignore doesn't cover them.
     """
     # Otto runtime files — never commit
-    _OTTO_PATHS = ("otto_logs/", "otto_arch/", ".otto-scratch/",
+    _OTTO_PATHS = ("otto_logs/", "otto_arch/",
                    ".otto-worktrees/", "tasks.yaml", ".tasks.lock", "otto.lock")
     if any(rel_path == p or rel_path.startswith(p) for p in _OTTO_PATHS):
         return False

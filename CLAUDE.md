@@ -60,7 +60,7 @@ cat otto_logs/run-history.jsonl       # Cost, time, pass/fail per run
 
 ## Key Principles
 
-- Otto-owned paths (`otto_logs/`, `tasks.yaml`, `.otto-scratch/`, `.otto-worktrees/`) must NEVER leak into agent prompts, git commits, or diffs. Filter via `_is_otto_owned()`.
+- Otto-owned paths (`otto_logs/`, `tasks.yaml`, `.otto-worktrees/`) must NEVER leak into agent prompts, git commits, or diffs. Filter via `_is_otto_owned()`.
 - `system_prompt` must use `{"type": "preset", "preset": "claude_code"}` — NEVER `None` (blanks CC defaults), NEVER invented fields like `"append"`.
 - Trust the agent — give full data or skip entirely. Never truncate/cap what you pass to an agent.
 - Before blaming otto for a pressure test failure, verify the ground truth (`verify.sh`) is correct.

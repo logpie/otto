@@ -31,7 +31,7 @@ class TestCheckCleanTree:
         assert check_clean_tree(tmp_git_repo) is False
 
     def test_otto_owned_files_ignored(self, tmp_git_repo):
-        """Changes to otto_logs/ and .otto-scratch/ don't block runs."""
+        """Changes to otto_logs/ don't block runs."""
         # Create and track an otto_logs file, then modify it
         otto_dir = tmp_git_repo / "otto_logs"
         otto_dir.mkdir()
@@ -218,10 +218,11 @@ class TestShouldStageUntracked:
         assert _should_stage_untracked("module.pyc") is False
         assert _should_stage_untracked("lib.so") is False
 
-    def test_excludes_scratch_area(self):
+    def test_excludes_otto_runtime(self):
         from otto.runner import _should_stage_untracked
-        assert _should_stage_untracked(".otto-scratch/test_verify.py") is False
-        assert _should_stage_untracked(".otto-scratch/probes/check.sh") is False
+        assert _should_stage_untracked(".otto-worktrees/otto-task-abc/file.py") is False
+        assert _should_stage_untracked("otto_logs/task/agent.log") is False
+        assert _should_stage_untracked("tasks.yaml") is False
 
     def test_stages_test_files(self):
         """Test files are staged — prompt guidance handles test hygiene, not the gate."""

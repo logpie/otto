@@ -99,8 +99,8 @@ class TestIsOttoOwned:
         assert _is_otto_owned("otto_logs/foo.log") is True
         assert _is_otto_owned("otto_logs/task-abc/attempt-1-agent.log") is True
 
-    def test_otto_scratch_prefix_is_owned(self):
-        assert _is_otto_owned(".otto-scratch/tmp") is True
+    def test_otto_prefix_is_owned(self):
+        assert _is_otto_owned(".otto/config") is True
 
     def test_otto_worktrees_prefix_is_owned(self):
         assert _is_otto_owned(".otto-worktrees/otto-task-abc/README.md") is True

@@ -429,9 +429,8 @@ These flags affect the per-task pipeline. Post-merge test verification only runs
 your-project/
 ├── otto.yaml                          # Configuration
 ├── tasks.yaml                         # Task queue (pending/running/passed/failed)
-├── .otto-worktrees/                   # Parallel task worktrees (auto-cleaned)
-│   └── otto-task-{key}/               # One per parallel task
-├── .otto-scratch/                     # Temp workspace (per-task)
+├── .otto-worktrees/                   # Task worktrees (auto-cleaned)
+│   └── otto-task-{key}/               # One per task (serial + parallel)
 └── otto_logs/
     ├── run-history.jsonl              # One line per run: tasks, cost, time
     ├── v4_events.jsonl                # Telemetry events
