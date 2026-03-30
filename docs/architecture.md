@@ -145,7 +145,8 @@ run_task_v45(task, config, project_dir, task_work_dir=worktree)
   ║  ├─ Create log dir: otto_logs/{key}/                 ║
   ║  ├─ Snapshot pre-existing untracked files             ║
   ║  ├─ Run baseline tests                                ║
-  ║  │    └─ Baseline fails? → EXIT (error_code=baseline_fail) ║
+  ║  │    ├─ Infra failure? → WARN + continue (agent fixes) ║
+  ║  │    └─ Real test failure? → EXIT (baseline_fail)    ║
   ║  ├─ Record baseline test count                        ║
   ║  └─ Emit: phase=prepare, status=done                  ║
   ╚══════════════════════════════════════════════════════╝
@@ -249,8 +250,10 @@ QA
   │    └─ Write verdict JSON to output file
   │
   │    PART 2 — BREAK (after all specs pass):
+  │    ├─ Skim source to discover thresholds, branches, existing behaviors
   │    ├─ 2-3 adversarial tool calls: boundary inputs, wrong types, edge cases
-  │    └─ Report in "extras" — do NOT fail [must] for out-of-spec behavior
+  │    ├─ Classify: "regression" (existing broke) vs "edge_case" (new gap)
+  │    └─ All findings in "extras" — warning only, not gating
   │
   ├─ Parse verdict:
   │    ├─ Structured JSON? → validate schema (must_passed + must_items)
@@ -264,6 +267,12 @@ QA
   │    ├─ qa-proofs/must-N.md (per-item)
   │    ├─ qa-proofs/regression-check.sh (re-runnable)
   │    └─ qa-proofs/screenshot-*.png (browser captures)
+  │
+  ├─ Proof quality audit:
+  │    └─ Flag [must] items with code-reading-only proofs (no command)
+  │
+  ├─ BREAK findings warning (if any):
+  │    └─ Logged loudly in qa-agent.log + progress callback
   │
   ├─ All [must] passed? → proceed to merge
   │
@@ -504,11 +513,13 @@ Saves ~$2/retry by avoiding prompt cache invalidation.
 
 ```
 Baseline (run_task_v45 prepare phase):
+  _install_deps tries: pip install -e . then pip install -e ".[dev,test]"
   Auto-detect test command → run tests in worktree
   │
   ├─ Tests pass? → record count ("baseline: N tests passing")
-  └─ Tests fail with infra keywords? → EXIT (baseline_fail)
-       (ModuleNotFoundError, command not found, SyntaxError, etc.)
+  ├─ Infra failure? → WARN + continue (coding agent fixes deps)
+  │    (ModuleNotFoundError, command not found, SyntaxError, etc.)
+  └─ Real test failure? → EXIT (baseline_fail)
 
 After coding:
   Full test suite in clean disposable worktree (deterministic)
