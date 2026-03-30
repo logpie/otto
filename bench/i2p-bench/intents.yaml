@@ -1,0 +1,96 @@
+# i2p benchmark intents — product descriptions with evaluation criteria.
+# Neither builder (otto build nor bare CC) sees the evaluation journeys.
+# The same product QA runs against both outputs.
+
+intents:
+  - id: bookmark-manager
+    complexity: simple
+    intent: "Build a bookmark manager web app with tags and full-text search. Users can save URLs with titles and descriptions, organize with tags, and search across all bookmarks. Use Next.js with SQLite."
+    journeys:
+      - name: "Save and find"
+        steps:
+          - "Create 3 bookmarks with different URLs, titles, and descriptions"
+          - "Tag 2 of them with 'work'"
+          - "Search for a word that appears in only 1 bookmark's description"
+          - "Verify search returns exactly that bookmark"
+      - name: "Tag filtering"
+        steps:
+          - "Filter bookmarks by the 'work' tag"
+          - "Verify only the 2 tagged bookmarks appear"
+          - "Remove a tag from one bookmark"
+          - "Filter again — verify only 1 remains"
+    verify:
+      - "App starts without errors (npm run dev or npm start)"
+      - "Can create a bookmark via the UI or API"
+      - "Search returns relevant results"
+      - "Tags can be added and filtered"
+
+  - id: todo-cli
+    complexity: simple
+    intent: "Build a command-line todo app in Python. Commands: add <task>, list (shows all with status), done <id> (marks complete), delete <id>, search <query>. Stores data in a JSON file. Show colored output with rich library."
+    journeys:
+      - name: "Full lifecycle"
+        steps:
+          - "Add 3 tasks"
+          - "List — verify all 3 shown as pending"
+          - "Mark task 2 as done"
+          - "List — verify task 2 shows as complete"
+          - "Delete task 1"
+          - "List — verify only tasks 2 and 3 remain"
+      - name: "Search"
+        steps:
+          - "Add tasks with distinct words"
+          - "Search for a unique word"
+          - "Verify only matching task returned"
+    verify:
+      - "python todo.py add 'test task' creates a task"
+      - "python todo.py list shows tasks with status"
+      - "python todo.py done <id> marks task complete"
+      - "Data persists in JSON file across runs"
+
+  - id: expense-tracker
+    complexity: medium
+    intent: "Build an expense tracker web app with Next.js and SQLite. Features: add expenses (amount, category, description, date), view expenses in a sortable table, filter by category and date range, show spending summary by category with a bar chart, monthly spending trend line chart. Use Recharts for visualization."
+    journeys:
+      - name: "Track and review"
+        steps:
+          - "Add 5 expenses across 3 categories over 2 months"
+          - "View expense table — verify all 5 appear"
+          - "Filter by one category — verify correct subset"
+          - "Check category summary — verify totals are correct"
+      - name: "Charts render"
+        steps:
+          - "Navigate to summary/dashboard page"
+          - "Verify bar chart shows category breakdown"
+          - "Verify line chart shows monthly trend"
+    verify:
+      - "App starts without errors"
+      - "Can add an expense with amount, category, description"
+      - "Expense table displays and is sortable"
+      - "Category filter works"
+      - "Charts render (DOM elements exist)"
+
+  - id: chat-app
+    complexity: hard
+    intent: "Build a real-time chat app with Next.js. Features: user registration and login (email/password with NextAuth), create chat rooms, join/leave rooms, send messages that appear instantly for all users in the room (use Server-Sent Events or polling — no WebSocket libraries), message history persisted in SQLite, show online users per room. Use Prisma ORM."
+    journeys:
+      - name: "Two-user conversation"
+        steps:
+          - "Register user A and user B"
+          - "User A creates a room called 'general'"
+          - "User B joins 'general'"
+          - "User A sends a message"
+          - "Verify user B sees the message (within 5 seconds)"
+          - "Verify message appears in history after page reload"
+      - name: "Room management"
+        steps:
+          - "Create 2 rooms"
+          - "Join room 1, send a message"
+          - "Switch to room 2, verify room 1's messages don't appear"
+          - "Leave room 2, verify it no longer shows in user's room list"
+    verify:
+      - "App starts without errors"
+      - "Can register and login"
+      - "Can create and join rooms"
+      - "Messages persist and load on refresh"
+      - "Messages from one room don't leak to another"
