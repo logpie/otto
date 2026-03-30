@@ -283,10 +283,11 @@ class TestNormalizePlan:
 
         result = _normalize_plan(plan, tasks)
 
+        # t1 first (DEPENDENT before t2, UNCERTAIN before t3)
+        # t2 and t3 can parallelize (ADDITIVE = parallel OK)
         assert [[tp.task_key for tp in batch.tasks] for batch in result.batches] == [
             ["t1"],
-            ["t2"],
-            ["t3"],
+            ["t2", "t3"],
         ]
 
     def test_explicit_dependencies_are_serialized_even_if_model_groups_them(self):
@@ -418,7 +419,8 @@ class TestPlan:
         assert {tp.task_key for tp in result.batches[0].tasks} == {"t1", "t2"}
 
     @pytest.mark.asyncio
-    async def test_two_additive_tasks_serialized(self, tmp_path):
+    async def test_two_additive_tasks_parallel(self, tmp_path):
+        """ADDITIVE tasks (same file, different functions) can parallelize."""
         tasks = [
             {"key": "t1", "id": 1, "prompt": "Add slugify() to utils.py"},
             {"key": "t2", "id": 2, "prompt": "Add title_case() to utils.py"},
@@ -437,9 +439,9 @@ class TestPlan:
         with patch("otto.planner.run_agent_query", side_effect=fake_query):
             result = await plan(tasks, {}, tmp_path)
 
+        # ADDITIVE tasks stay in the same batch (parallel OK)
         assert [[tp.task_key for tp in batch.tasks] for batch in result.batches] == [
-            ["t1"],
-            ["t2"],
+            ["t1", "t2"],
         ]
         assert result.analysis[0]["relationship"] == "ADDITIVE"
 
@@ -531,8 +533,10 @@ class TestPlan:
             result = await plan(tasks, {}, tmp_path)
 
         assert len(result.batches) == 2
-        assert {tp.task_key for tp in result.batches[0].tasks} == {"t1", "t4"}
-        assert {tp.task_key for tp in result.batches[1].tasks} == {"t2", "t3"}
+        # ADDITIVE (t1↔t2) can parallelize, so batch 1 keeps t1, t2, t4
+        assert {tp.task_key for tp in result.batches[0].tasks} == {"t1", "t2", "t4"}
+        # t3 depends on t1, stays in batch 2
+        assert {tp.task_key for tp in result.batches[1].tasks} == {"t3"}
 
     @pytest.mark.asyncio
     async def test_single_task_skips_llm(self, tmp_path):

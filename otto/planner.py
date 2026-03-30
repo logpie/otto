@@ -410,10 +410,13 @@ def _serialize_analysis_batches(
             original_batch_by_key[task_plan.task_key] = batch_index
             original_order_by_key[task_plan.task_key] = (batch_index, task_index)
 
+    # Only UNCERTAIN forces serialization. ADDITIVE (same file, different
+    # functions) can parallelize — git merge handles non-overlapping changes,
+    # and the merge conflict resolver handles the rest.
     serialized_pairs = {
         frozenset((item["task_a"], item["task_b"]))
         for item in analysis
-        if item.get("relationship") in {"ADDITIVE", "UNCERTAIN"}
+        if item.get("relationship") in {"UNCERTAIN"}
         and item.get("task_a") in task_plans_by_key
         and item.get("task_b") in task_plans_by_key
         and item.get("task_a") != item.get("task_b")
@@ -786,16 +789,17 @@ CRITICAL: Every input task MUST appear in exactly one batch. Do NOT drop any tas
 
 Relationship labels:
 - INDEPENDENT: different files/components, parallel OK
-- ADDITIVE: same file, different functions/sections, serialize (same-file parallel causes merge conflicts)
-- DEPENDENT: task B needs task A output, serialize
-- CONTRADICTORY: incompatible goals for the same code — flag in conflicts BUT STILL schedule both in separate batches (the pipeline handles conflicts)
+- ADDITIVE: same file but different functions/sections — parallel OK (git merge handles non-overlapping changes; merge conflict resolver handles the rest). If tasks modify the SAME function/section, use UNCERTAIN instead.
+- DEPENDENT: task B needs task A output, serialize (later batch)
+- CONTRADICTORY: incompatible goals for the same code — flag in conflicts BUT STILL schedule both in separate batches
 - UNCERTAIN: not enough information, serialize conservatively
 
 Rules:
 - Respect explicit depends_on constraints.
-- CONTRADICTORY tasks go in conflicts AND in separate batches (do NOT exclude them).
-- ADDITIVE and UNCERTAIN pairs should not run in the same batch.
-- Only truly INDEPENDENT tasks (different files) should run in parallel.
+- INDEPENDENT and ADDITIVE tasks can run in parallel within a batch.
+- DEPENDENT tasks must be in later batches (after their dependency).
+- CONTRADICTORY tasks go in conflicts AND in separate batches.
+- UNCERTAIN pairs should not run in the same batch.
 - EVERY input task key MUST appear in exactly one batch.
 
 Return JSON only:
@@ -946,8 +950,8 @@ RULES:
 1. EVERY remaining task key MUST appear in exactly one batch (never drop tasks).
 2. Tasks that DEPEND on a failed task should be placed in a late batch with a note — they may fail but should still attempt.
 3. ROLLED_BACK tasks are safe to run — they passed before and just need re-execution.
-4. INDEPENDENT tasks can run in parallel within a batch.
-5. ADDITIVE tasks (same files) should be serialized.
+4. INDEPENDENT and ADDITIVE tasks can run in parallel within a batch.
+5. UNCERTAIN pairs should not run in the same batch.
 6. Keep batch count minimal — don't over-fragment.
 
 COMPLETED RESULTS:
