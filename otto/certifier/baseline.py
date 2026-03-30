@@ -1123,12 +1123,21 @@ def _select_seeded_user(context: ExecutionContext) -> SeededUser | None:
         return None
 
     claim_key = context.claim.id.lower()
+    # For admin-auth, use a NON-admin user to verify they get rejected
     non_admin_users = [user for user in config.seeded_users if user.role.lower() not in {"admin", "administrator"}]
     if claim_key == "admin-auth" and non_admin_users:
         return non_admin_users[0]
-    if claim_key.startswith("admin-"):
+    # For admin claims and auth-login, use admin user (most likely to succeed)
+    if claim_key.startswith("admin-") or claim_key in ("auth-login", "auth-logout"):
         return config.admin_user() or config.any_user()
-    return non_admin_users[0] if non_admin_users else config.any_user()
+    # For other claims, prefer a real customer user with valid credentials
+    # Filter out users whose email matches admin but role is customer (likely wrong password)
+    admin_user = config.admin_user()
+    clean_non_admin = [
+        u for u in non_admin_users
+        if not admin_user or u.email != admin_user.email
+    ]
+    return clean_non_admin[0] if clean_non_admin else config.any_user()
 
 
 def _apply_seeded_user(context: ExecutionContext, user: SeededUser) -> None:
