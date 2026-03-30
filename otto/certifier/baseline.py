@@ -127,6 +127,7 @@ class BaselineRunState:
     session: requests.Session = field(default_factory=requests.Session)
     discoveries: dict[str, str] = field(default_factory=dict)
     authenticated_user: SeededUser | None = None
+    auth_login_claim_ran: bool = False
 
 
 class AppRunner:
@@ -401,8 +402,15 @@ def _test_claim(
     passed = any(item.outcome == "pass" for item in evidence) and not any(item.outcome == "fail" for item in evidence)
     outcome = _claim_outcome_from_evidence(evidence)
     error = _claim_error_from_evidence(evidence, outcome)
+    if run_state is not None and _should_reclassify_as_auth_blocked(claim, evidence, run_state):
+        _mark_evidence_as_auth_blocked(evidence)
+        passed = False
+        outcome = "blocked_by_harness"
+        error = "auth session not established — harness limitation"
     if run_state is not None:
         run_state.authenticated_user = context.authenticated_user
+        if _is_auth_login_claim(claim):
+            run_state.auth_login_claim_ran = True
 
     return ClaimResult(
         claim_id=claim.id,
@@ -841,6 +849,35 @@ def _claim_uses_seed_auth_steps(claim: Claim) -> bool:
         isinstance(step, dict) and (_is_registration_step(step) or _is_login_step(step))
         for step in claim.test_steps
     )
+
+
+def _is_auth_login_claim(claim: Claim) -> bool:
+    return claim.id.lower() == "auth-login"
+
+
+def _should_reclassify_as_auth_blocked(
+    claim: Claim,
+    evidence: list[Evidence],
+    run_state: BaselineRunState,
+) -> bool:
+    return (
+        run_state.auth_login_claim_ran
+        and run_state.authenticated_user is None
+        and not _is_auth_login_claim(claim)
+        and any(
+            item.outcome == "fail" and re.search(r"\bHTTP 401\b", item.actual)
+            for item in evidence
+        )
+    )
+
+
+def _mark_evidence_as_auth_blocked(evidence: list[Evidence]) -> None:
+    reason = "auth session not established — harness limitation"
+    for item in evidence:
+        if item.outcome == "fail" and re.search(r"\bHTTP 401\b", item.actual):
+            item.outcome = "blocked_by_harness"
+            item.skipped = True
+            item.actual = f"{reason}; observed {item.actual}"
 
 
 def _claim_outcome_from_evidence(evidence: list[Evidence]) -> str:
@@ -1502,6 +1539,7 @@ def certify(
     *,
     port_override: int | None = None,
     matrix: RequirementMatrix | None = None,
+    matrix_path: Path | None = None,
     profile: ProductProfile | None = None,
     test_config: TestConfig | None = None,
 ) -> BaselineResult:
@@ -1511,11 +1549,16 @@ def certify(
     effective_port = port_override or config.get("port_override")
     compile_duration_s = 0.0
     matrix_source = "provided"
-    matrix_path = ""
+    resolved_matrix_path_str = ""
 
-    if matrix is None:
+    if matrix is None and matrix_path is not None:
+        resolved_matrix_path = Path(matrix_path)
+        matrix = load_matrix(resolved_matrix_path)
+        matrix_source = "file"
+        resolved_matrix_path_str = str(resolved_matrix_path)
+    elif matrix is None:
         matrix, matrix_source, resolved_matrix_path, compile_duration_s = load_or_compile_matrix(project_dir, intent, config=config)
-        matrix_path = str(resolved_matrix_path)
+        resolved_matrix_path_str = str(resolved_matrix_path)
 
     if profile is None:
         profile = classify(project_dir)
@@ -1530,7 +1573,7 @@ def certify(
     result.compile_duration_s = compile_duration_s
     result.compiled_at = matrix.compiled_at
     result.matrix_source = matrix_source
-    result.matrix_path = matrix_path
+    result.matrix_path = resolved_matrix_path_str
     return result
 
 
@@ -1576,6 +1619,8 @@ def _report_payload(result: BaselineResult) -> dict[str, Any]:
             "compiled_at": result.compiled_at,
             "matrix_source": result.matrix_source,
             "matrix_path": result.matrix_path,
+            "tier_0": _tier0_summary(result),
+            "tier_1": _tier1_summary(result),
         },
         "app_start_evidence": asdict(result.app_start_evidence) if result.app_start_evidence else None,
         "claims_by_outcome": grouped,
@@ -1601,6 +1646,55 @@ def save_result(result: BaselineResult, path: Path) -> None:
     """Backward-compatible alias for save_report()."""
 
     save_report(result, path)
+
+
+def _group_claims(result: BaselineResult) -> dict[str, list[ClaimResult]]:
+    grouped: dict[str, list[ClaimResult]] = {}
+    for claim in sorted(result.results, key=lambda item: (_claim_outcome_order(item.outcome), item.claim_id)):
+        grouped.setdefault(claim.outcome, []).append(claim)
+    return grouped
+
+
+def _tier0_counts(result: BaselineResult) -> tuple[int, int, int]:
+    denominator = sum(1 for claim in result.results if claim.outcome != "not_applicable")
+    not_implemented = sum(1 for claim in result.results if claim.outcome == "not_implemented")
+    present = max(denominator - not_implemented, 0)
+    return present, denominator, not_implemented
+
+
+def _tier1_counts(result: BaselineResult) -> tuple[int, int, int, int]:
+    passed = sum(1 for claim in result.results if claim.outcome == "pass")
+    failed = sum(1 for claim in result.results if claim.outcome == "fail")
+    blocked = sum(1 for claim in result.results if claim.outcome == "blocked_by_harness")
+    denominator = passed + failed
+    return passed, denominator, failed, blocked
+
+
+def _format_percent(numerator: int, denominator: int) -> str:
+    if denominator <= 0:
+        return "n/a"
+    return f"{round((numerator / denominator) * 100):d}%"
+
+
+def _tier0_summary(result: BaselineResult) -> dict[str, Any]:
+    present, total, not_implemented = _tier0_counts(result)
+    return {
+        "present": present,
+        "total": total,
+        "not_implemented": not_implemented,
+        "percent": _format_percent(present, total),
+    }
+
+
+def _tier1_summary(result: BaselineResult) -> dict[str, Any]:
+    passed, total, failed, blocked = _tier1_counts(result)
+    return {
+        "passed": passed,
+        "total": total,
+        "failed": failed,
+        "blocked": blocked,
+        "percent": _format_percent(passed, total),
+    }
 
 
 def _claim_outcome_order(outcome: str) -> int:
@@ -1639,6 +1733,8 @@ def _print_group(title: str, claims: list[ClaimResult]) -> None:
     for claim in claims:
         suffix = " [HARD FAIL]" if claim.hard_fail and claim.outcome in {"fail", "not_implemented", "blocked_by_harness"} else ""
         print(f"  {claim.claim_id}: {claim.claim_description}{suffix}")
+        if claim.outcome == "blocked_by_harness":
+            print(f"    reason:   {claim.error}")
         if claim.outcome != "pass":
             for item in claim.evidence:
                 if item.outcome == "pass":
@@ -1648,47 +1744,154 @@ def _print_group(title: str, claims: list[ClaimResult]) -> None:
                 print(f"    actual:   {item.actual[:300]}")
 
 
-def _print_comparison_table(result: BaselineResult, other: BaselineResult) -> None:
-    rows = [
-        ("Certification", _status_label(result), _status_label(other), ""),
-        ("Claims passed", str(result.claims_passed), str(other.claims_passed), str(result.claims_passed - other.claims_passed)),
-        ("Claims failed", str(result.claims_failed), str(other.claims_failed), str(result.claims_failed - other.claims_failed)),
-        ("Not implemented", str(result.claims_not_implemented), str(other.claims_not_implemented), str(result.claims_not_implemented - other.claims_not_implemented)),
-        ("Hard fails", str(result.hard_fails), str(other.hard_fails), str(result.hard_fails - other.hard_fails)),
-        ("Duration", _format_seconds(result.duration_s), _format_seconds(other.duration_s), f"{result.duration_s - other.duration_s:+.1f}s"),
-        ("Compile cost", f"${result.compile_cost_usd:.3f}", f"${other.compile_cost_usd:.3f}", f"{result.compile_cost_usd - other.compile_cost_usd:+.3f}"),
-    ]
+def _claim_outcome_map(result: BaselineResult) -> dict[str, ClaimResult]:
+    return {claim.claim_id: claim for claim in result.results}
 
-    widths = [
-        max(len("Metric"), *(len(row[0]) for row in rows)),
-        max(len("Current"), *(len(row[1]) for row in rows)),
-        max(len("Other"), *(len(row[2]) for row in rows)),
-        max(len("Delta"), *(len(row[3]) for row in rows)),
+
+def _format_tier0_cell(result: BaselineResult) -> str:
+    summary = _tier0_summary(result)
+    return f"{summary['present']}/{summary['total']} ({summary['percent']})"
+
+
+def _format_tier1_cell(result: BaselineResult) -> str:
+    summary = _tier1_summary(result)
+    return f"{summary['passed']}/{summary['total']} ({summary['percent']})"
+
+
+def _comparison_rows(result_a: BaselineResult, result_b: BaselineResult, labels: tuple[str, str]) -> list[str]:
+    label_a, label_b = labels
+    rows = [
+        f"## Comparison: {label_a} vs {label_b}",
+        "",
+        f"| Metric | {label_a} | {label_b} |",
+        "|---|---:|---:|",
+        f"| Tier 0 (structure) | {_format_tier0_cell(result_a)} | {_format_tier0_cell(result_b)} |",
+        f"| Tier 1 (runtime) | {_format_tier1_cell(result_a)} | {_format_tier1_cell(result_b)} |",
+        f"| Not implemented | {result_a.claims_not_implemented} | {result_b.claims_not_implemented} |",
+        f"| Blocked | {result_a.claims_blocked} | {result_b.claims_blocked} |",
+        f"| Failed | {result_a.claims_failed} | {result_b.claims_failed} |",
+        f"| Verdict | {_status_label(result_a)} | {_status_label(result_b)} |",
     ]
-    print("Comparison")
-    print(
-        f"  {'Metric'.ljust(widths[0])}  {'Current'.ljust(widths[1])}  "
-        f"{'Other'.ljust(widths[2])}  {'Delta'.ljust(widths[3])}"
+    return rows
+
+
+def compare(result_a: BaselineResult, result_b: BaselineResult, labels: tuple[str, str]) -> str:
+    """Return a markdown comparison of two certification runs."""
+
+    claim_map_a = _claim_outcome_map(result_a)
+    claim_map_b = _claim_outcome_map(result_b)
+    differing_ids = sorted(
+        claim_id
+        for claim_id in set(claim_map_a) | set(claim_map_b)
+        if claim_map_a.get(claim_id, ClaimResult("", "", "", False, False, "missing", [])).outcome
+        != claim_map_b.get(claim_id, ClaimResult("", "", "", False, False, "missing", [])).outcome
     )
-    for metric, current, other_value, delta in rows:
-        print(
-            f"  {metric.ljust(widths[0])}  {current.ljust(widths[1])}  "
-            f"{other_value.ljust(widths[2])}  {delta.ljust(widths[3])}"
+
+    lines = _comparison_rows(result_a, result_b, labels)
+    if not differing_ids:
+        lines.extend(["", "No claim outcome differences."])
+        return "\n".join(lines)
+
+    lines.extend(
+        [
+            "",
+            "| Claim | Description | " + labels[0] + " | " + labels[1] + " |",
+            "|---|---|---|---|",
+        ]
+    )
+    for claim_id in differing_ids:
+        claim_a = claim_map_a.get(claim_id)
+        claim_b = claim_map_b.get(claim_id)
+        description = (claim_a or claim_b).claim_description if (claim_a or claim_b) else ""
+        lines.append(
+            f"| `{claim_id}` | {description} | {(claim_a.outcome if claim_a else 'missing')} | {(claim_b.outcome if claim_b else 'missing')} |"
         )
+    return "\n".join(lines)
+
+
+def _claim_marker(claim: ClaimResult) -> str:
+    return {
+        "pass": "✓",
+        "fail": "✗",
+        "not_implemented": "✗",
+        "blocked_by_harness": "?",
+        "not_applicable": "-",
+    }.get(claim.outcome, "-")
+
+
+def _evidence_lines(claim: ClaimResult) -> list[str]:
+    lines: list[str] = []
+    if claim.outcome == "blocked_by_harness":
+        lines.append(f"Reason: {claim.error}")
+    for item in claim.evidence:
+        if claim.outcome != "pass" and item.outcome == "pass":
+            continue
+        if claim.outcome == "blocked_by_harness" and item.outcome == "pass":
+            continue
+        lines.append(f"- Command: `{item.command}`")
+        lines.append(f"- Expected: {item.expected}")
+        lines.append(f"- Actual: {item.actual}")
+    return lines
+
+
+def _claim_markdown(claim: ClaimResult) -> str:
+    lines = [f"- {_claim_marker(claim)} `{claim.claim_id}` {claim.claim_description}"]
+    lines.extend(_evidence_lines(claim))
+    return "\n".join(lines)
+
+
+def save_markdown_report(result: BaselineResult, path: Path) -> None:
+    """Save a human-readable markdown certification report."""
+
+    tier0 = _tier0_summary(result)
+    tier1 = _tier1_summary(result)
+    grouped = _group_claims(result)
+    section_titles = {
+        "not_implemented": "NOT IMPLEMENTED",
+        "fail": "FAILED",
+        "blocked_by_harness": "BLOCKED",
+        "pass": "PASSED",
+    }
+    lines = [
+        "# Certification Report",
+        "",
+        f"> **Product:** `{result.product_dir}`",
+        f"> **Tier 0 (structure):** {tier0['present']}/{tier0['total']} present ({tier0['percent']})",
+        f"> **Tier 1 (runtime):** {tier1['passed']}/{tier1['total']} passed ({tier1['percent']})",
+        f"> **Verdict:** {_status_label(result)}",
+        "",
+        "## NOT IMPLEMENTED",
+        "",
+    ]
+    for outcome in ("not_implemented", "fail", "blocked_by_harness", "pass"):
+        if outcome != "not_implemented":
+            lines.extend(["", f"## {section_titles[outcome]}", ""])
+        claims = grouped.get(outcome, [])
+        if not claims:
+            lines.append("_None_")
+            continue
+        lines.extend(_claim_markdown(claim) for claim in claims)
+    resolved = Path(path)
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    resolved.write_text("\n".join(lines) + "\n")
 
 
 def print_report(result: BaselineResult, other: BaselineResult | None = None) -> None:
     """Print a human-readable certification report."""
 
-    grouped: dict[str, list[ClaimResult]] = {}
-    for claim in sorted(result.results, key=lambda item: (_claim_outcome_order(item.outcome), item.claim_id)):
-        grouped.setdefault(claim.outcome, []).append(claim)
+    grouped = _group_claims(result)
+    tier0 = _tier0_summary(result)
+    tier1 = _tier1_summary(result)
 
     print()
     print(f"Certification: {_status_label(result)}")
     print(f"Product:       {result.product_dir}")
     print(f"Type:          {result.product_type}")
-    print(f"Claims:        {result.claims_passed}/{result.claims_tested} passed")
+    print(f"Tier 0:        {tier0['present']}/{tier0['total']} present ({tier0['percent']})")
+    print(f"               {tier0['not_implemented']} not implemented")
+    print(f"Tier 1:        {tier1['passed']}/{tier1['total']} passed ({tier1['percent']})")
+    print(f"               {tier1['blocked']} blocked")
+    print(f"               {tier1['failed']} failed")
     print(f"Hard fails:    {result.hard_fails}")
     print(f"App started:   {'yes' if result.started else 'no'}")
     print(f"Matrix:        {result.matrix_source or 'unknown'}")
@@ -1706,5 +1909,5 @@ def print_report(result: BaselineResult, other: BaselineResult | None = None) ->
             print()
 
     if other is not None:
-        _print_comparison_table(result, other)
+        print(compare(result, other, ("Current", "Other")))
         print()

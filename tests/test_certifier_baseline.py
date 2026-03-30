@@ -13,8 +13,11 @@ from otto.certifier.baseline import (
     _authenticate_nextauth_user,
     _build_execution_context,
     _test_claim,
+    certify,
+    compare,
     print_report,
     save_report,
+    save_markdown_report,
 )
 from otto.certifier.classifier import ProductProfile
 from otto.certifier.intent_compiler import Claim, load_matrix
@@ -280,19 +283,82 @@ def test_shared_run_state_reuses_authenticated_nextauth_session(monkeypatch):
     assert run_state.session.cookies.get("next-auth.session-token") == "session-1"
 
 
+def test_401_after_failed_auth_login_is_blocked_by_harness(monkeypatch):
+    user = SeededUser(email="user@store.com", password="user123", role="user")
+    test_config = AdapterTestConfig(
+        auth_type="session",
+        login_endpoint="/api/login",
+        seeded_users=[user],
+        has_cart_model=True,
+    )
+    run_state = BaselineRunState()
+
+    login_claim = Claim(
+        id="auth-login",
+        description="Users can login",
+        priority="critical",
+        category="feature",
+        test_approach="api",
+        test_steps=[
+            {
+                "action": "http",
+                "method": "POST",
+                "candidate_paths": ["/api/login"],
+                "expect_status": [200],
+            }
+        ],
+        hard_fail=True,
+    )
+    cart_claim = Claim(
+        id="cart-view",
+        description="Users can view cart",
+        priority="critical",
+        category="feature",
+        test_approach="api",
+        test_steps=[
+            {
+                "action": "http",
+                "method": "GET",
+                "candidate_paths": ["/api/cart"],
+                "expect_status": [200],
+            }
+        ],
+        hard_fail=True,
+    )
+
+    monkeypatch.setattr(
+        "otto.certifier.baseline._authenticate_generic_user",
+        lambda context, selected_user: (False, "seeded login failed"),
+    )
+    monkeypatch.setattr(
+        "requests.sessions.Session.request",
+        lambda self, method, url, **kwargs: FakeResponse(401, text="unauthorized"),
+    )
+
+    login_result = _test_claim(login_claim, "http://example.test", Path("."), _profile(), test_config, run_state)
+    cart_result = _test_claim(cart_claim, "http://example.test", Path("."), _profile(), test_config, run_state)
+
+    assert login_result.outcome == "fail"
+    assert run_state.auth_login_claim_ran is True
+    assert run_state.authenticated_user is None
+    assert cart_result.outcome == "blocked_by_harness"
+    assert cart_result.error == "auth session not established — harness limitation"
+    assert "observed HTTP 401" in cart_result.evidence[0].actual
+
+
 def test_print_report_groups_outcomes_and_shows_comparison(capsys):
     result = BaselineResult(
         product_dir="/tmp/app",
         intent="build a shop",
         product_type="web",
         started=True,
-        claims_tested=3,
+        claims_tested=4,
         claims_passed=1,
         claims_failed=1,
         claims_not_implemented=1,
-        claims_blocked=0,
+        claims_blocked=1,
         claims_not_applicable=0,
-        hard_fails=2,
+        hard_fails=3,
         certified=False,
         results=[
             ClaimResult(
@@ -322,6 +388,16 @@ def test_print_report_groups_outcomes_and_shows_comparison(capsys):
                 outcome="fail",
                 evidence=[Evidence(step="s", command="GET /fail", expected="200", actual="HTTP 500", passed=False, outcome="fail")],
             ),
+            ClaimResult(
+                claim_id="blocked-claim",
+                claim_description="blocked claim",
+                priority="critical",
+                hard_fail=True,
+                passed=False,
+                outcome="blocked_by_harness",
+                evidence=[Evidence(step="s", command="GET /cart", expected="200", actual="auth session not established — harness limitation; observed HTTP 401: unauthorized", passed=False, outcome="blocked_by_harness")],
+                error="auth session not established — harness limitation",
+            ),
         ],
         duration_s=12.3,
         compile_cost_usd=0.125,
@@ -335,13 +411,13 @@ def test_print_report_groups_outcomes_and_shows_comparison(capsys):
         intent="build a shop",
         product_type="web",
         started=True,
-        claims_tested=3,
+        claims_tested=4,
         claims_passed=0,
         claims_failed=2,
-        claims_not_implemented=1,
-        claims_blocked=0,
+        claims_not_implemented=2,
+        claims_blocked=1,
         claims_not_applicable=0,
-        hard_fails=3,
+        hard_fails=4,
         certified=False,
         results=[],
         duration_s=20.0,
@@ -352,11 +428,15 @@ def test_print_report_groups_outcomes_and_shows_comparison(capsys):
     output = capsys.readouterr().out
 
     assert "Certification: NOT CERTIFIED" in output
+    assert "Tier 0:        3/4 present (75%)" in output
+    assert "Tier 1:        1/2 passed (50%)" in output
+    assert "1 blocked" in output
     assert output.index("Not Implemented") < output.index("Failures") < output.index("Passes")
+    assert "reason:   auth session not established — harness limitation" in output
     assert "command:  GET /fail" in output
     assert "expected: 200" in output
     assert "actual:   HTTP 500" in output
-    assert "Comparison" in output
+    assert "## Comparison: Current vs Other" in output
 
 
 def test_save_report_writes_structured_json(tmp_path: Path):
@@ -392,6 +472,138 @@ def test_save_report_writes_structured_json(tmp_path: Path):
     payload = json.loads(output_path.read_text())
     assert payload["summary"]["certified"] is True
     assert payload["claims_by_outcome"]["pass"][0]["claim_id"] == "pass-claim"
+    assert payload["summary"]["tier_0"]["present"] == 1
+    assert payload["summary"]["tier_1"]["passed"] == 1
+
+
+def test_compare_returns_markdown_table():
+    result_a = BaselineResult(
+        product_dir="/tmp/a",
+        intent="build a shop",
+        product_type="web",
+        started=True,
+        claims_tested=2,
+        claims_passed=1,
+        claims_failed=0,
+        claims_not_implemented=0,
+        claims_blocked=1,
+        claims_not_applicable=0,
+        hard_fails=1,
+        certified=False,
+        results=[
+            ClaimResult("auth-login", "Users can login", "critical", True, False, "blocked_by_harness", [], error="auth session not established — harness limitation"),
+            ClaimResult("catalog-list", "Users can browse catalog", "critical", True, True, "pass", []),
+        ],
+    )
+    result_b = BaselineResult(
+        product_dir="/tmp/b",
+        intent="build a shop",
+        product_type="web",
+        started=True,
+        claims_tested=2,
+        claims_passed=1,
+        claims_failed=1,
+        claims_not_implemented=0,
+        claims_blocked=0,
+        claims_not_applicable=0,
+        hard_fails=1,
+        certified=False,
+        results=[
+            ClaimResult("auth-login", "Users can login", "critical", True, False, "fail", []),
+            ClaimResult("catalog-list", "Users can browse catalog", "critical", True, True, "pass", []),
+        ],
+    )
+
+    output = compare(result_a, result_b, ("Otto", "Bare CC"))
+
+    assert "## Comparison: Otto vs Bare CC" in output
+    assert "| Tier 0 (structure) | 2/2 (100%) | 2/2 (100%) |" in output
+    assert "| `auth-login` | Users can login | blocked_by_harness | fail |" in output
+
+
+def test_save_markdown_report_writes_sections(tmp_path: Path):
+    result = BaselineResult(
+        product_dir="/tmp/app",
+        intent="build a shop",
+        product_type="web",
+        started=True,
+        claims_tested=4,
+        claims_passed=1,
+        claims_failed=1,
+        claims_not_implemented=1,
+        claims_blocked=1,
+        claims_not_applicable=0,
+        hard_fails=2,
+        certified=False,
+        results=[
+            ClaimResult("missing-claim", "missing claim", "critical", True, False, "not_implemented", [Evidence(step="s", command="adapter", expected="route exists", actual="adapter found no route", passed=False, outcome="not_implemented")], error="adapter found no route"),
+            ClaimResult("fail-claim", "failing claim", "critical", True, False, "fail", [Evidence(step="s", command="GET /fail", expected="200", actual="HTTP 500", passed=False, outcome="fail")], error="HTTP 500"),
+            ClaimResult("blocked-claim", "blocked claim", "critical", True, False, "blocked_by_harness", [Evidence(step="s", command="GET /cart", expected="200", actual="auth session not established — harness limitation; observed HTTP 401: unauthorized", passed=False, outcome="blocked_by_harness")], error="auth session not established — harness limitation"),
+            ClaimResult("pass-claim", "passed claim", "critical", True, True, "pass", [Evidence(step="s", command="GET /ok", expected="200", actual="HTTP 200", passed=True, outcome="pass")]),
+        ],
+    )
+    output_path = tmp_path / "report.md"
+
+    save_markdown_report(result, output_path)
+
+    text = output_path.read_text()
+    assert "> **Tier 0 (structure):** 3/4 present (75%)" in text
+    assert "## NOT IMPLEMENTED" in text
+    assert "## FAILED" in text
+    assert "## BLOCKED" in text
+    assert "## PASSED" in text
+    assert "Reason: auth session not established — harness limitation" in text
+
+
+def test_certify_loads_matrix_from_matrix_path(monkeypatch, tmp_path: Path):
+    project_dir = tmp_path / "app"
+    project_dir.mkdir()
+    matrix_path = tmp_path / "shared-matrix.json"
+    matrix_path.write_text(
+        json.dumps(
+            {
+                "intent": "build a shop",
+                "claims": [
+                    {
+                        "id": "catalog-list",
+                        "description": "Users can browse catalog",
+                        "priority": "critical",
+                        "category": "feature",
+                        "test_approach": "api",
+                        "test_steps": [],
+                        "hard_fail": True,
+                    }
+                ],
+            }
+        )
+    )
+
+    monkeypatch.setattr("otto.certifier.baseline.classify", lambda project: _profile())
+    monkeypatch.setattr("otto.certifier.baseline.analyze_project", lambda project: AdapterTestConfig())
+    monkeypatch.setattr(
+        "otto.certifier.baseline.run_baseline",
+        lambda project_dir, matrix, profile, test_config=None: BaselineResult(
+            product_dir=str(project_dir),
+            intent=matrix.intent,
+            product_type=profile.product_type,
+            started=True,
+            claims_tested=1,
+            claims_passed=1,
+            claims_failed=0,
+            claims_not_implemented=0,
+            claims_blocked=0,
+            claims_not_applicable=0,
+            hard_fails=0,
+            certified=True,
+            results=[ClaimResult("catalog-list", "Users can browse catalog", "critical", True, True, "pass", [])],
+        ),
+    )
+
+    result = certify(project_dir, "build a shop", matrix_path=matrix_path)
+
+    assert result.intent == "build a shop"
+    assert result.matrix_source == "file"
+    assert result.matrix_path == str(matrix_path)
 
 
 def test_port_override_reuses_existing_app_without_autostart(monkeypatch, tmp_path: Path):
