@@ -398,6 +398,66 @@ class TestRunPerIntegration:
         assert set(executed) == {"task-one", "task-two", "task-three"}
 
     @pytest.mark.asyncio
+    async def test_pilot_skip_prunes_pending_before_rebatch_validation(self, tmp_git_repo):
+        import yaml
+        from otto.pilot import PilotDecision, RetryStrategy
+
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        tasks_path.write_text(yaml.dump({"tasks": [
+            {"id": 1, "key": "task-one", "prompt": "Task one", "status": "pending", "spec": ["one"]},
+            {"id": 2, "key": "task-two", "prompt": "Task two", "status": "pending", "spec": ["two"]},
+            {"id": 3, "key": "task-three", "prompt": "Task three", "status": "pending", "spec": ["three"]},
+            {"id": 4, "key": "task-four", "prompt": "Task four", "status": "pending", "spec": ["four"]},
+        ]}))
+
+        config = self._make_config(tmp_git_repo)
+        config["max_parallel"] = 1
+        initial_plan = ExecutionPlan(batches=[
+            Batch(tasks=[TaskPlan(task_key="task-one")]),
+            Batch(tasks=[
+                TaskPlan(task_key="task-two"),
+                TaskPlan(task_key="task-three"),
+                TaskPlan(task_key="task-four"),
+            ]),
+        ])
+        executed: list[str] = []
+        pilot_decision = PilotDecision(
+            failure_analysis={
+                "task-two": "dependency failed",
+                "task-three": "task became terminal",
+            },
+            retry_strategies={
+                "task-three": RetryStrategy(
+                    action="skip",
+                    guidance="",
+                    reason="task became terminal",
+                ),
+            },
+            skip_tasks=["task-two"],
+            routed_context=[],
+            new_learnings=[],
+            batches=[{"tasks": [{"task_key": "task-four"}]}],
+        )
+
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, task_work_dir=None, qa_mode="per_task", sibling_context=None):
+            executed.append(task_plan.task_key)
+            if task_plan.task_key == "task-one":
+                return TaskResult(task_key=task_plan.task_key, success=False, error="boom")
+            return TaskResult(task_key=task_plan.task_key, success=True)
+
+        with patch("otto.orchestrator.plan", AsyncMock(return_value=initial_plan)):
+            with patch("otto.orchestrator._invoke_pilot", AsyncMock(return_value=pilot_decision)):
+                with patch("otto.orchestrator.replan", AsyncMock(side_effect=AssertionError("replan should not run"))):
+                    with patch("otto.orchestrator.coding_loop", side_effect=fake_coding_loop):
+                        exit_code = await run_per(config, tasks_path, tmp_git_repo)
+
+        assert exit_code == 1
+        assert executed == ["task-one", "task-four"]
+        persisted = {task["key"]: task for task in load_tasks(tasks_path)}
+        assert persisted["task-two"]["status"] == "failed"
+        assert persisted["task-three"]["status"] == "failed"
+
+    @pytest.mark.asyncio
     async def test_all_done_reports_missing_or_interrupted_tasks(self, tmp_git_repo):
         """Interrupted runs should report unfinished tasks in AllDone telemetry."""
         import yaml

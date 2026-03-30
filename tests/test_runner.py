@@ -6,8 +6,10 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
+from otto.context import PipelineContext
 from otto.runner import (
     _audit_proof_sufficiency,
+    _build_coding_prompt,
     _build_qa_retry_error,
     _restore_workspace_state,
     check_clean_tree,
@@ -140,6 +142,52 @@ class TestQaProofHelpers:
         assert "Passed [must ◈] missing screenshot in qa-proofs/: Layout matches mock" in report
         assert mock_warn.call_count == 2
         assert ("qa_finding", {"text": "[warning] Passed [must] missing proof: API returns JSON"}) in emit_events
+
+
+class TestCodingPromptLearningRouting:
+    def test_round_one_filters_targeted_pilot_guidance(self, tmp_path):
+        context = PipelineContext()
+        context.add_learning("project uses pytest", source="task-a", kind="observed")
+        context.add_learning("[for task-b] use vitest not jest", source="gate_pilot", kind="observed")
+        context.add_learning("[retry guidance for task-c] inspect the migration state", source="gate_pilot", kind="observed")
+
+        prompt = _build_coding_prompt(
+            "Implement task B",
+            tmp_path,
+            attempt=0,
+            last_error=None,
+            last_error_source=None,
+            feedback="",
+            spec=None,
+            context=context,
+            task_key="task-b",
+        )
+
+        assert "GUIDANCE FROM PRIOR ANALYSIS (specific to this task):" in prompt
+        assert "- use vitest not jest" in prompt
+        assert "[for task-b]" not in prompt
+        assert "inspect the migration state" not in prompt
+        assert "- [task-a] project uses pytest" in prompt
+
+    def test_round_two_uses_exact_task_match_for_targeted_guidance(self, tmp_path):
+        context = PipelineContext()
+        context.add_learning("[for task-10] use the generated OpenAPI client", source="gate_pilot", kind="observed")
+        context.add_learning("[retry guidance for task-1] update the failing fixture", source="gate_pilot", kind="observed")
+
+        prompt = _build_coding_prompt(
+            "Implement task 1",
+            tmp_path,
+            attempt=1,
+            last_error="tests failed",
+            last_error_source="verify",
+            feedback="",
+            spec=None,
+            context=context,
+            task_key="task-1",
+        )
+
+        assert "- update the failing fixture" in prompt
+        assert "generated OpenAPI client" not in prompt
 
 
 class TestTamperDetection:

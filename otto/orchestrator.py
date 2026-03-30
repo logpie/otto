@@ -21,9 +21,11 @@ from typing import Any
 from otto.config import git_meta_dir
 from otto.context import Learning, PipelineContext, QAMode, TaskResult
 from otto.display import console, rich_escape
+from otto.pilot import invoke_pilot as _invoke_pilot, PilotDecision
 from otto.planner import (
     ExecutionPlan,
     plan,
+    parse_plan_json,
     replan,
     serial_plan,
 )
@@ -161,6 +163,88 @@ def persist_learnings(project_dir: Path, context: PipelineContext) -> None:
                 f.write(json.dumps(entry) + "\n")
     except OSError:
         pass
+
+
+def _apply_pilot_decision(
+    decision: PilotDecision,
+    remaining_plan: ExecutionPlan,
+    remaining_pending: list[dict[str, Any]],
+    context: PipelineContext,
+    config: dict[str, Any],
+    project_dir: Path,
+    tasks_file: Path,
+) -> bool:
+    """Apply a gate pilot decision to the pipeline state.
+
+    Returns True if the decision was successfully applied.
+    Does NOT handle rebatching — caller does that from decision.batches.
+    """
+    from otto.tasks import update_task
+
+    # Apply skip decisions
+    for task_key in decision.skip_tasks:
+        reason = (
+            decision.failure_analysis.get(task_key, "dependency failed or task became terminal")
+            if decision.failure_analysis
+            else "dependency failed or task became terminal"
+        )
+        update_task(tasks_file, task_key, status="failed", error=f"pilot: {reason}")
+        _orchestrator_log(
+            project_dir,
+            f"pilot: skip {task_key} — "
+            + reason,
+        )
+
+    # Apply routed context as targeted learnings
+    for rc in decision.routed_context:
+        context.add_learning(
+            text=f"[for {rc.target_task}] {rc.context}",
+            source="gate_pilot",
+            kind="observed",
+        )
+
+    # Apply retry strategies — store guidance for retry prompts
+    for task_key, strategy in decision.retry_strategies.items():
+        if strategy.action == "retry_different" and strategy.guidance:
+            context.add_learning(
+                text=f"[retry guidance for {task_key}] {strategy.guidance}",
+                source="gate_pilot",
+                kind="observed",
+            )
+        elif strategy.action == "skip":
+            update_task(
+                tasks_file, task_key, status="failed",
+                error=f"pilot: {strategy.reason}",
+            )
+
+    # Apply new learnings (inferred — logged but not injected into agents)
+    for learning_text in decision.new_learnings:
+        context.add_learning(text=learning_text, source="gate_pilot", kind="inferred")
+
+    # Log summary
+    _orchestrator_log(
+        project_dir,
+        f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] pilot decision applied",
+        f"failure_analysis: {json.dumps(decision.failure_analysis)}",
+        f"skip_tasks: {decision.skip_tasks}",
+        f"routed_context: {len(decision.routed_context)} items",
+        f"retry_strategies: {list(decision.retry_strategies.keys())}",
+        f"new_learnings: {decision.new_learnings}",
+        "",
+    )
+
+    persist_learnings(project_dir, context)
+    return True
+
+
+def _collect_pilot_skipped_task_keys(decision: PilotDecision) -> set[str]:
+    skipped_keys = {task_key for task_key in decision.skip_tasks if task_key}
+    skipped_keys.update(
+        task_key
+        for task_key, strategy in decision.retry_strategies.items()
+        if task_key and strategy.action == "skip"
+    )
+    return skipped_keys
 
 
 def cleanup_orphaned_worktrees(project_dir: Path) -> None:
@@ -1463,13 +1547,11 @@ async def run_per(
                 r.task_key for r in batch_results
                 if r.error_code in ("batch_qa_rolled_back", "batch_qa_infrastructure_error")
             }
-            all_failed_keys = {
+            historical_failed_keys = {
                 key for key, result in context.results.items() if not result.success
             }
 
             if not execution_plan.is_empty and batch_failed > 0 and not context.interrupted:
-                # Replan with accumulated context
-                console.print("  Replanning...", style="dim")
                 remaining_plan = execution_plan
                 remaining_pending = [
                     pending_by_key[task_plan.task_key]
@@ -1477,32 +1559,84 @@ async def run_per(
                     for task_plan in remaining_batch.tasks
                     if task_plan.task_key in pending_by_key
                 ]
-                replanned = await replan(
-                    context, remaining_plan, config, project_dir,
-                    failed_keys=all_failed_keys,
-                    rolled_back_keys=batch_rolled_back_keys,
-                    pending_by_key=pending_by_key,
-                )
-                if _plan_covers_pending(replanned, remaining_pending):
-                    execution_plan = replanned
-                    _orchestrator_log(
-                        project_dir,
-                        f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] replan",
-                        "replan triggered after batch failures",
-                        f"old structure: {_summarize_batch_structure(remaining_plan)}",
-                        f"new structure: {_summarize_batch_structure(replanned)}",
-                        "",
-                    )
+
+                # Gate pilot: richer failure analysis + routed context + rebatching
+                # Falls back to replan() if pilot fails or is disabled
+                use_pilot = config.get("pilot", True)
+                pilot_succeeded = False
+                if use_pilot:
+                    try:
+                        console.print("  Gate pilot analyzing...", style="dim")
+                        decision = await _invoke_pilot(
+                            batch_results=batch_results,
+                            remaining_plan=remaining_plan,
+                            context=context,
+                            config=config,
+                            project_dir=project_dir,
+                            batch_failed_keys=batch_failed_keys,
+                            batch_rolled_back_keys=batch_rolled_back_keys,
+                            pending_by_key=pending_by_key,
+                        )
+                        pilot_succeeded = _apply_pilot_decision(
+                            decision, remaining_plan, remaining_pending,
+                            context, config, project_dir, tasks_file,
+                        )
+                        if pilot_succeeded:
+                            skipped_keys = _collect_pilot_skipped_task_keys(decision)
+                            if skipped_keys:
+                                remaining_pending = [
+                                    task for task in remaining_pending
+                                    if task.get("key") not in skipped_keys
+                                ]
+                                remaining_plan = execution_plan.remaining_after(skipped_keys)
+                            # Rebuild execution_plan from pilot's batches
+                            pilot_plan = parse_plan_json(json.dumps({"batches": decision.batches}))
+                            if pilot_plan and _plan_covers_pending(pilot_plan, remaining_pending):
+                                execution_plan = pilot_plan
+                            else:
+                                # Pilot batching invalid — keep existing plan but still apply
+                                # the non-batching decisions (skips, context, strategies)
+                                execution_plan = remaining_plan
+                                _orchestrator_log(
+                                    project_dir,
+                                    f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] pilot",
+                                    "pilot rebatch rejected (invalid coverage), kept existing plan",
+                                    "",
+                                )
+                    except Exception as exc:
+                        _orchestrator_log(
+                            project_dir,
+                            f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] pilot failed",
+                            f"error: {exc}",
+                            "falling back to replan",
+                            "",
+                        )
+                        console.print(f"  [yellow]Pilot failed ({exc}), falling back to replan[/yellow]")
                 else:
-                    console.print("  [yellow]Replan returned invalid task coverage; keeping existing remaining plan[/yellow]")
-                    execution_plan = remaining_plan
-                    _orchestrator_log(
-                        project_dir,
-                        f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] replan",
-                        "replan triggered after batch failures but was rejected due to invalid coverage",
-                        f"kept structure: {_summarize_batch_structure(remaining_plan)}",
-                        "",
+                    _orchestrator_log(project_dir, "pilot: disabled via config, using replan")
+
+                if not pilot_succeeded:
+                    # Fallback: original replan behavior
+                    console.print("  Replanning...", style="dim")
+                    replanned = await replan(
+                        context, remaining_plan, config, project_dir,
+                        failed_keys=historical_failed_keys,
+                        rolled_back_keys=batch_rolled_back_keys,
+                        pending_by_key=pending_by_key,
                     )
+                    if _plan_covers_pending(replanned, remaining_pending):
+                        execution_plan = replanned
+                        _orchestrator_log(
+                            project_dir,
+                            f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] replan (fallback)",
+                            "replan triggered after pilot failure",
+                            f"old structure: {_summarize_batch_structure(remaining_plan)}",
+                            f"new structure: {_summarize_batch_structure(replanned)}",
+                            "",
+                        )
+                    else:
+                        console.print("  [yellow]Replan returned invalid task coverage; keeping existing remaining plan[/yellow]")
+                        execution_plan = remaining_plan
 
         # Step 4: Post-run test suite
         # Final deterministic check on integrated HEAD. Runs for --no-qa mode
