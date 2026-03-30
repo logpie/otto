@@ -90,10 +90,13 @@ def analyze_project(project_dir: Path) -> TestConfig:
 def _analyze_auth(project_dir: Path, config: TestConfig) -> None:
     """Detect auth mechanism and endpoints."""
 
-    # Check for NextAuth
-    nextauth_files = list(project_dir.glob("**/[...nextauth]/route.ts")) + \
-                     list(project_dir.glob("**/[...nextauth]/route.js"))
-    if nextauth_files:
+    # Check for NextAuth route handlers and configs.
+    nextauth_files = [
+        route_file
+        for route_file in _find_source_files(project_dir)
+        if route_file.name in ("route.ts", "route.js") and "[...nextauth]" in str(route_file)
+    ]
+    if nextauth_files or _project_uses_nextauth(project_dir):
         config.auth_type = "nextauth"
         config.auth_csrf_required = True
         config.login_candidates = ["/api/auth/callback/credentials"]
@@ -250,6 +253,7 @@ def _analyze_seeds(project_dir: Path, config: TestConfig) -> None:
             config.seeded_users.append(SeededUser(
                 email=email, password=password, role=role,
             ))
+    config.seeded_users = _dedupe_seeded_users(config.seeded_users)
 
 
 def _find_source_files(project_dir: Path) -> list[Path]:
@@ -262,6 +266,43 @@ def _find_source_files(project_dir: Path) -> list[Path]:
                 continue
             files.append(f)
     return files
+
+
+def _project_uses_nextauth(project_dir: Path) -> bool:
+    package_json = project_dir / "package.json"
+    if package_json.exists():
+        try:
+            pkg = json.loads(package_json.read_text())
+        except (json.JSONDecodeError, OSError):
+            pkg = {}
+        deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
+        if "next-auth" in deps or "@auth/core" in deps:
+            return True
+
+    for source_file in _find_source_files(project_dir):
+        try:
+            content = source_file.read_text()
+        except OSError:
+            continue
+        if "next-auth" in content and (
+            "NextAuth" in content
+            or "CredentialsProvider" in content
+            or "Credentials(" in content
+        ):
+            return True
+    return False
+
+
+def _dedupe_seeded_users(users: list[SeededUser]) -> list[SeededUser]:
+    seen: set[tuple[str, str, str]] = set()
+    deduped: list[SeededUser] = []
+    for user in users:
+        key = (user.email.lower(), user.password, user.role.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(user)
+    return deduped
 
 
 def print_config(config: TestConfig) -> None:
