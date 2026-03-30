@@ -1022,6 +1022,7 @@ MERGED DIFF:
 {diff}
 
 Write your JSON verdict to: {verdict_file}
+IMPORTANT: Use the Write tool (not bash heredoc/cat) to write the verdict file — it is faster and avoids truncation.
 Save any browser screenshots to: {screenshot_dir}/screenshot-<name>.png
 
 Use this JSON structure:
@@ -1090,6 +1091,7 @@ DIFF:
 {diff}
 
 Write your JSON verdict to: {verdict_file}
+IMPORTANT: Use the Write tool (not bash heredoc/cat) to write the verdict file — it is faster and avoids truncation.
 Save any browser screenshots to: {screenshot_dir}/screenshot-<name>.png
 
 Write your verdict as JSON:
