@@ -505,14 +505,25 @@ async def _run_batch_qa(
                 + "\n".join(lines)
             )
 
-    # QA2 fix: include prior batch tasks as context for cross-task awareness
+    # Prior tasks: include prompt + key must specs for cross-task awareness.
+    # Only enough context for integration checking — NOT full spec lists
+    # (full specs cause the agent to re-verify them, wasting time).
     if prior_tasks:
-        from otto.qa import format_batch_spec
-        prior_context = format_batch_spec(prior_tasks)
+        from otto.tasks import spec_text, spec_binding
+        prior_lines = []
+        for t in prior_tasks:
+            line = f"- #{t.get('id', '?')} {t.get('key', '?')[:8]}: {t.get('prompt', '')}"
+            # Include first 2 must specs as contract summary
+            specs = t.get("spec") or []
+            must_specs = [spec_text(s) for s in specs if spec_binding(s) == "must"][:2]
+            if must_specs:
+                line += "\n    Key contracts: " + "; ".join(must_specs)
+            prior_lines.append(line)
         diff = (
             f"{diff}\n\n"
-            f"PRIOR TASKS (already passed — do NOT re-verify, but consider interactions):\n"
-            f"{prior_context}"
+            f"PRIOR TASKS (already verified — only check integration with current task, "
+            f"do NOT re-verify their specs):\n"
+            + "\n".join(prior_lines)
         )
     if focus_task_keys:
         qa_result = await run_qa(
