@@ -60,11 +60,13 @@ If a blocking [must] fails, record proof for that item. For single-task QA you
 may stop early. For multi-task batch QA, continue checking ALL items for attribution.
 
 PART 2 — BREAK (after all specs pass)
-Spend 2-3 tool calls trying to break the implementation beyond what the
-spec covers. Think like a user who doesn't read docs:
+First, skim the source to discover thresholds, branches, and existing
+behaviors that the spec didn't mention — then try to break those.
+Spend 2-3 tool calls:
 - Boundary inputs: zero, empty string, null, negative, very large
 - Wrong types or missing required fields
 - Concurrent access if the code is stateful
+- Thresholds/limits visible in the source (e.g., size cutoffs, power tables)
 - Inputs the spec didn't mention but a real caller would try
 
 Report findings in the "extras" field. Do NOT fail [must] items for behavior
