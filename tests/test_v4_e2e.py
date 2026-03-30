@@ -278,7 +278,7 @@ class TestRunPerE2E:
         # Verify hello.py was merged to main
         assert (tmp_git_repo / "hello.py").exists()
         # Verify telemetry was written
-        events_file = tmp_git_repo / "otto_logs" / "v4_events.jsonl"
+        events_file = tmp_git_repo / "otto_logs" / "events.jsonl"
         assert events_file.exists()
 
     @pytest.mark.asyncio
@@ -384,7 +384,7 @@ class TestRunPerE2E:
         with patch("otto.orchestrator.coding_loop", side_effect=fake_coding_loop):
             await run_per(config, tasks_path, tmp_git_repo)
 
-        events_file = tmp_git_repo / "otto_logs" / "v4_events.jsonl"
+        events_file = tmp_git_repo / "otto_logs" / "events.jsonl"
         events = [json.loads(l) for l in events_file.read_text().strip().splitlines()]
         all_done = [e for e in events if e["event"] == "all_done"]
         assert len(all_done) == 1

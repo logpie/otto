@@ -433,7 +433,7 @@ your-project/
 │   └── otto-task-{key}/               # One per task (serial + parallel)
 └── otto_logs/
     ├── run-history.jsonl              # One line per run: tasks, cost, time
-    ├── v4_events.jsonl                # Telemetry events
+    ├── events.jsonl                # Telemetry events
     ├── learnings.jsonl                # Cross-run learnings
     ├── planner.log                    # Task analysis, relationships, batch structure
     ├── orchestrator.log               # Batch decisions, merge, parallel lifecycle
@@ -532,6 +532,6 @@ When something goes wrong, check in this order:
 9. **`otto_logs/planner.log`** — task analysis, relationships, batch structure
 10. **`otto_logs/orchestrator.log`** — batch decisions, merge, parallel lifecycle
 11. **`otto_logs/run-history.jsonl`** — cost/time trends across runs
-12. **`otto_logs/v4_events.jsonl`** — detailed telemetry events
+12. **`otto_logs/events.jsonl`** — detailed telemetry events
 13. **`git log --oneline -20`** — what got merged
 14. **`git worktree list`** — any orphaned worktrees?

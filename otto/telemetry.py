@@ -193,7 +193,7 @@ TelemetryEvent = (
 class Telemetry:
     """Write-only JSONL telemetry with optional v3 dual-write.
 
-    Events are appended to ``<log_dir>/v4_events.jsonl``. When legacy mode is
+    Events are appended to ``<log_dir>/events.jsonl``. When legacy mode is
     enabled, events are also translated to v3 formats (pilot_results.jsonl,
     live-state.json) so that ``otto status -w`` and ``otto show`` still work.
     """
@@ -201,7 +201,7 @@ class Telemetry:
     def __init__(self, log_dir: Path) -> None:
         self._log_dir = log_dir
         self._log_dir.mkdir(parents=True, exist_ok=True)
-        self._events_path = log_dir / "v4_events.jsonl"
+        self._events_path = log_dir / "events.jsonl"
         self._legacy_enabled = False
         self._legacy_results_path = log_dir / "pilot_results.jsonl"
         self._legacy_live_state_path = log_dir / "live-state.json"

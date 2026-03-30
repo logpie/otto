@@ -7,3 +7,5 @@ weather2/.next/
 .worktrees/
 otto.egg-info/
 bench/smoke/results/
+bench/i2p-projects/
+qkrem.md

@@ -159,4 +159,4 @@ class TestTelemetry:
 
     def test_events_path_property(self, tmp_path):
         t = Telemetry(tmp_path / "logs")
-        assert t.events_path == tmp_path / "logs" / "v4_events.jsonl"
+        assert t.events_path == tmp_path / "logs" / "events.jsonl"

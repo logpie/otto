@@ -31,7 +31,7 @@ cat otto_logs/run-history.jsonl       # Cost, time, pass/fail per run
 |------|-------------------|
 | `planner.log` | Task analysis, relationship classification, conflicts, batch structure, cost. **Check when tasks are batched wrong or dropped.** Single LLM call (no more two-phase shortlist). |
 | `orchestrator.log` | Batch decisions, merge attempts, parallel worktree lifecycle, replan triggers, rollback. **Check for parallel/merge issues.** |
-| `v4_events.jsonl` | Phase-level timeline with timestamps + cost. Grep for `phase_completed` events. **Reconstruct full run timeline.** |
+| `events.jsonl` | Phase-level timeline with timestamps + cost. Grep for `phase_completed` events. **Reconstruct full run timeline.** |
 | `run-history.jsonl` | One line per run: tasks, cost, time, failures. |
 
 ### Common debugging patterns
@@ -57,7 +57,7 @@ cat otto_logs/run-history.jsonl       # Cost, time, pass/fail per run
 
 **"Why did batch QA fail?"**
 → Read `otto_logs/batch-qa/qa-proofs/proof-report.md` — per-item results.
-→ Check `v4_events.jsonl` for `phase_completed` events around the batch QA time.
+→ Check `events.jsonl` for `phase_completed` events around the batch QA time.
 
 ## Logging Standards
 

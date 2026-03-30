@@ -427,7 +427,7 @@ class TestRunPerIntegration:
         assert exit_code == 1
         assert executed == ["task-one"]
 
-        events_path = tmp_git_repo / "otto_logs" / "v4_events.jsonl"
+        events_path = tmp_git_repo / "otto_logs" / "events.jsonl"
         all_done = json.loads(events_path.read_text().strip().splitlines()[-1])
         assert all_done["event"] == "all_done"
         assert all_done["total_missing_or_interrupted"] == 1
@@ -554,7 +554,7 @@ class TestRunPerIntegration:
         print_summary_mock.assert_called_once()
         assert print_summary_mock.call_args.kwargs["integration_passed"] is False
 
-        events_path = tmp_git_repo / "otto_logs" / "v4_events.jsonl"
+        events_path = tmp_git_repo / "otto_logs" / "events.jsonl"
         all_done = json.loads(events_path.read_text().strip().splitlines()[-1])
         assert all_done["event"] == "all_done"
         assert all_done["total_failed"] == 0
