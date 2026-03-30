@@ -59,4 +59,11 @@ report("Large numbers use googol", check_googol)
 raise SystemExit(1 if failures else 0)
 PY
 
-python3 verify_check.py
+# Install into a temp venv so import works after worktree cleanup
+_venv=$(mktemp -d)/venv
+python3 -m venv "$_venv" 2>/dev/null
+"$_venv/bin/pip" install -q -e . 2>/dev/null || true
+"$_venv/bin/python" verify_check.py
+_rc=$?
+rm -rf "$(dirname "$_venv")"
+exit $_rc
