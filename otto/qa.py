@@ -826,6 +826,26 @@ async def _run_qa_prompt(
                                 qa_actions.append(action)
                                 if tool_id:
                                     pending_tool_uses[tool_id] = action
+                            else:
+                                # Log all other tools (Write, Read, Glob, Grep, Edit)
+                                detail = ""
+                                if block.name == "Write":
+                                    detail = inp.get("file_path", "")
+                                elif block.name == "Read":
+                                    detail = inp.get("file_path", "")
+                                elif block.name in ("Grep", "Glob"):
+                                    detail = inp.get("pattern", "")
+                                elif block.name == "Edit":
+                                    detail = inp.get("file_path", "")
+                                action = {
+                                    "type": block.name.lower(),
+                                    "detail": str(detail)[:200],
+                                    "output": "",
+                                    "elapsed_s": _tool_ts,
+                                }
+                                qa_actions.append(action)
+                                if tool_id:
+                                    pending_tool_uses[tool_id] = action
                             if on_progress:
                                 try:
                                     event = _build_agent_tool_event(block)

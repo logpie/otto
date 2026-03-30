@@ -6,3 +6,8 @@ Requires-Dist: click>=8.0
 Requires-Dist: pyyaml>=6.0
 Requires-Dist: claude-agent-sdk>=0.1.0
 Requires-Dist: rich>=13.0
+Provides-Extra: dev
+Requires-Dist: pytest>=9.0; extra == "dev"
+Requires-Dist: pytest-asyncio>=1.0; extra == "dev"
+Requires-Dist: fastapi>=0.100; extra == "dev"
+Requires-Dist: httpx>=0.24; extra == "dev"
