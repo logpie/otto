@@ -562,6 +562,7 @@ def build(intent, no_review, no_qa):
         for t in plan.tasks
     ]
     created = add_tasks(tasks_path, task_batch)
+    build_task_keys = {t["key"] for t in created}
     console.print(f"  [success]Added {len(created)} task(s) to tasks.yaml[/success]")
 
     # Step 4: Execute via inner loop
@@ -613,9 +614,10 @@ def build(intent, no_review, no_qa):
         exit_code = 0 if outer_result.get("product_passed") else 1
         cost_qa = outer_result.get("total_cost", 0.0)
 
-    # Compute total task cost from tasks.yaml
-    final_tasks = load_tasks(tasks_path) if tasks_path.exists() else []
-    cost_tasks = sum(t.get("cost_usd", 0) for t in final_tasks)
+    # Compute costs scoped to THIS build's tasks only
+    all_tasks = load_tasks(tasks_path) if tasks_path.exists() else []
+    build_tasks = [t for t in all_tasks if t.get("key") in build_task_keys]
+    cost_tasks = sum(t.get("cost_usd", 0) for t in build_tasks)
 
     # Read context update cost from log
     context_log = project_dir / "otto_logs" / "product-context.log"
@@ -630,9 +632,10 @@ def build(intent, no_review, no_qa):
     build_duration = time.time() - build_start
 
     # Emit build completed event with full cost breakdown
+    FAILED_STATUSES = {"failed", "merge_failed", "blocked", "conflict"}
     product_passed = outer_result.get("product_passed", True) if outer_result else (exit_code == 0)
-    tasks_passed = sum(1 for t in final_tasks if t.get("status") == "passed")
-    tasks_failed = sum(1 for t in final_tasks if t.get("status") == "failed")
+    tasks_passed = sum(1 for t in build_tasks if t.get("status") == "passed")
+    tasks_failed = sum(1 for t in build_tasks if t.get("status") in FAILED_STATUSES)
 
     telemetry.log(BuildCompleted(
         build_id=build_id, intent=intent,
