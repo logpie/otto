@@ -101,7 +101,6 @@ class _QAQueryState:
     turn_count: int = 0
     early_verdict: dict[str, Any] | None = None
     verdict_write_confirmed: bool = False
-    verdict_write_confirmed_at: float | None = None
     verdict_write_tool_id: str | None = None
 
 
@@ -786,7 +785,6 @@ async def _run_qa_prompt(
     _qa_start_time = time.monotonic()
     query_state = _QAQueryState()
     _verdict_file_str = str(verdict_file)  # for matching Write targets
-    _POST_VERDICT_GRACE = 15  # seconds to allow after verdict before stopping
 
     from otto.display import build_agent_tool_event as _build_agent_tool_event
 
@@ -867,7 +865,6 @@ async def _run_qa_prompt(
                                             ):
                                                 state.early_verdict = candidate
                                                 state.verdict_write_confirmed = False
-                                                state.verdict_write_confirmed_at = None
                                                 state.verdict_write_tool_id = tool_id
                                         except (json.JSONDecodeError, TypeError):
                                             pass
@@ -924,16 +921,6 @@ async def _run_qa_prompt(
                                 and not getattr(block, "is_error", False)
                             ):
                                 state.verdict_write_confirmed = True
-                                state.verdict_write_confirmed_at = time.monotonic()
-
-                # Post-verdict grace timeout: once verdict is confirmed, allow
-                # a short grace period then raise TimeoutError to stop the session.
-                # This prevents the agent from spending turns reading back / rewriting.
-                if (
-                    state.verdict_write_confirmed_at
-                    and (time.monotonic() - state.verdict_write_confirmed_at) > _POST_VERDICT_GRACE
-                ):
-                    raise asyncio.TimeoutError()
 
             if result_msg:
                 raw_cost = getattr(result_msg, "total_cost_usd", None)
@@ -943,8 +930,7 @@ async def _run_qa_prompt(
 
         query_state = await asyncio.wait_for(_run_query(), timeout=qa_timeout)
     except asyncio.TimeoutError:
-        if not query_state.verdict_write_confirmed:
-            report_lines.append(f"\n[QA agent timed out after {qa_timeout}s]")
+        report_lines.append(f"\n[QA agent timed out after {qa_timeout}s]")
     except Exception as exc:
         error_str = str(exc)
         report_lines.append(f"\n[QA agent error: {error_str}]")
