@@ -1,6 +1,7 @@
 """Otto QA — adversarial QA agent, verdict parsing, risk-based tiering."""
 
 import asyncio
+from dataclasses import dataclass
 import json
 import re
 import tempfile
@@ -91,6 +92,17 @@ Do NOT generate a text summary before writing the verdict — put all analysis
 directly into the verdict JSON fields (evidence, proof, extras).
 Write the verdict file in a single Write call. Do NOT read it back or rewrite
 it — the Write tool is reliable. Every rewrite wastes significant time."""
+
+
+@dataclass
+class _QAQueryState:
+    qa_cost: float = 0.0
+    first_message_time: float | None = None
+    turn_count: int = 0
+    early_verdict: dict[str, Any] | None = None
+    verdict_write_confirmed: bool = False
+    verdict_write_confirmed_at: float | None = None
+    verdict_write_tool_id: str | None = None
 
 
 def format_spec_v45(spec: list) -> str:
@@ -762,29 +774,23 @@ async def _run_qa_prompt(
 
     qa_timeout = config.get("qa_timeout", 3600)
     report_lines: list[str] = []
-    qa_cost = 0.0
     qa_actions: list[dict] = []
     pending_tool_uses: dict[str, dict] = {}
     _qa_start_time = time.monotonic()
-    _first_message_time: float | None = None
-    _turn_count = 0
-    _early_verdict: dict[str, Any] | None = None  # captured from Write tool input
-    _verdict_write_confirmed = False  # True after ToolResult for verdict Write
-    _verdict_write_confirmed_at: float | None = None  # monotonic time of confirmation
-    _verdict_write_tool_id: str | None = None  # tool_use_id of the verdict Write
+    query_state = _QAQueryState()
     _verdict_file_str = str(verdict_file)  # for matching Write targets
     _POST_VERDICT_GRACE = 15  # seconds to allow after verdict before stopping
 
     from otto.display import build_agent_tool_event as _build_agent_tool_event
 
     try:
-        async def _run_query():
-            nonlocal qa_cost, _first_message_time, _turn_count, _early_verdict, _verdict_write_confirmed, _verdict_write_confirmed_at, _verdict_write_tool_id
+        async def _run_query() -> _QAQueryState:
+            state = query_state
             result_msg = None
             async for message in query(prompt=qa_prompt, options=qa_opts):
-                _turn_count += 1
-                if _first_message_time is None:
-                    _first_message_time = time.monotonic()
+                state.turn_count += 1
+                if state.first_message_time is None:
+                    state.first_message_time = time.monotonic()
                 if isinstance(message, ResultMessage):
                     result_msg = message
                 elif hasattr(message, "session_id") and hasattr(message, "is_error"):
@@ -847,7 +853,7 @@ async def _run_qa_prompt(
                                     detail = inp.get("file_path", "")
                                     # Early verdict capture: grab JSON from Write input
                                     if (
-                                        not _early_verdict
+                                        not state.early_verdict
                                         and str(detail) == _verdict_file_str
                                     ):
                                         try:
@@ -855,8 +861,8 @@ async def _run_qa_prompt(
                                             if isinstance(candidate, dict) and _is_verdict_complete(
                                                 candidate, expected_must_count=expected_must_count
                                             ):
-                                                _early_verdict = candidate
-                                                _verdict_write_tool_id = tool_id
+                                                state.early_verdict = candidate
+                                                state.verdict_write_tool_id = tool_id
                                         except (json.JSONDecodeError, TypeError):
                                             pass
                                 elif block.name == "Read":
@@ -907,30 +913,31 @@ async def _run_qa_prompt(
                                 pending_tool_uses[tid]["is_error"] = bool(getattr(block, "is_error", False))
                             # Check if this is the ToolResult for our verdict Write
                             if (
-                                _early_verdict
-                                and tid == _verdict_write_tool_id
+                                state.early_verdict
+                                and tid == state.verdict_write_tool_id
                                 and not getattr(block, "is_error", False)
                             ):
-                                _verdict_write_confirmed = True
-                                _verdict_write_confirmed_at = time.monotonic()
+                                state.verdict_write_confirmed = True
+                                state.verdict_write_confirmed_at = time.monotonic()
 
                 # Post-verdict grace timeout: once verdict is confirmed, allow
                 # a short grace period then raise TimeoutError to stop the session.
                 # This prevents the agent from spending turns reading back / rewriting.
                 if (
-                    _verdict_write_confirmed_at
-                    and (time.monotonic() - _verdict_write_confirmed_at) > _POST_VERDICT_GRACE
+                    state.verdict_write_confirmed_at
+                    and (time.monotonic() - state.verdict_write_confirmed_at) > _POST_VERDICT_GRACE
                 ):
                     raise asyncio.TimeoutError()
 
             if result_msg:
                 raw_cost = getattr(result_msg, "total_cost_usd", None)
                 if isinstance(raw_cost, (int, float)):
-                    qa_cost = float(raw_cost)
+                    state.qa_cost = float(raw_cost)
+            return state
 
-        await asyncio.wait_for(_run_query(), timeout=qa_timeout)
+        query_state = await asyncio.wait_for(_run_query(), timeout=qa_timeout)
     except asyncio.TimeoutError:
-        if not _verdict_write_confirmed:
+        if not query_state.verdict_write_confirmed:
             report_lines.append(f"\n[QA agent timed out after {qa_timeout}s]")
     except Exception as exc:
         error_str = str(exc)
@@ -943,7 +950,7 @@ async def _run_qa_prompt(
                         "must_passed": partial["must_passed"],
                         "verdict": partial,
                         "raw_report": "\n".join(report_lines),
-                        "cost_usd": qa_cost,
+                        "cost_usd": query_state.qa_cost,
                         "qa_actions": qa_actions,
                     }
             except (json.JSONDecodeError, OSError):
@@ -957,7 +964,7 @@ async def _run_qa_prompt(
                 "must_passed": None,
                 "verdict": None,
                 "raw_report": "\n".join(report_lines),
-                "cost_usd": qa_cost,
+                "cost_usd": query_state.qa_cost,
                 "qa_actions": qa_actions,
                 "infrastructure_error": True,
             }
@@ -966,7 +973,7 @@ async def _run_qa_prompt(
 
     # Prefer early-captured verdict (grabbed from Write tool input, already validated).
     # Fall back to file-based or text-based parsing.
-    verdict = _early_verdict
+    verdict = query_state.early_verdict
     if not verdict:
         if verdict_file.exists():
             try:
@@ -991,14 +998,14 @@ async def _run_qa_prompt(
 
     # Write QA agent log with timestamps for debugging
     _qa_total_time = round(time.monotonic() - _qa_start_time, 1)
-    _qa_init_time = round((_first_message_time or time.monotonic()) - _qa_start_time, 1)
+    _qa_init_time = round((query_state.first_message_time or time.monotonic()) - _qa_start_time, 1)
     if log_dir:
         try:
             log_dir.mkdir(parents=True, exist_ok=True)
             log_lines = [
                 f"{'=' * 60}",
                 f"QA RUN  must_count={expected_must_count}  {time.strftime('%Y-%m-%d %H:%M:%S')}",
-                f"SDK init: {_qa_init_time}s  total: {_qa_total_time}s  turns: {_turn_count}  cost: ${qa_cost:.2f}",
+                f"SDK init: {_qa_init_time}s  total: {_qa_total_time}s  turns: {query_state.turn_count}  cost: ${query_state.qa_cost:.2f}",
                 f"{'=' * 60}",
             ]
             for action in qa_actions:
@@ -1018,7 +1025,7 @@ async def _run_qa_prompt(
             if report_lines:
                 log_lines.append("")
                 log_lines.extend(report_lines[-10:])
-            log_lines.append(f"\nCost: ${qa_cost:.2f}  Time: {_qa_total_time}s (init: {_qa_init_time}s)")
+            log_lines.append(f"\nCost: ${query_state.qa_cost:.2f}  Time: {_qa_total_time}s (init: {_qa_init_time}s)")
             # Append (not overwrite) so retries are preserved
             from otto.observability import append_text_log
             append_text_log(log_dir / "qa-agent.log", log_lines + [""])
@@ -1029,7 +1036,7 @@ async def _run_qa_prompt(
         "must_passed": verdict.get("must_passed", False),
         "verdict": verdict,
         "raw_report": raw_report,
-        "cost_usd": qa_cost,
+        "cost_usd": query_state.qa_cost,
         "qa_actions": qa_actions,
     }
 
