@@ -350,7 +350,12 @@ After merge phase:
   │    └─ Fail? → HARD GATE: rollback batch, reset all tasks to pending
   │
   ├─ Batch QA (up to max_retries rounds)
-  │    ├─ Initial QA on integrated codebase
+  │    ├─ parallel_qa: false (default) → one session, combined specs
+  │    ├─ parallel_qa: true → per-task sessions via asyncio.gather
+  │    │    Each task gets own QA session running concurrently
+  │    │    Per-session chrome isolation (unique userDataDir)
+  │    │    Verdicts merged in Python, integration gated by post-batch test
+  │    │    Focused retries only re-verify failed tasks
   │    ├─ If [must] fails → re-code failed tasks → re-merge → re-QA
   │    ├─ Repeat up to max_retries rounds
   │    └─ After max_retries: rollback batch, mark failed tasks,
@@ -491,6 +496,7 @@ verify_timeout: 300          # Test suite timeout (seconds)
 max_task_time: 3600          # Per-task circuit breaker (seconds)
 qa_timeout: 3600             # QA agent timeout (seconds)
 max_parallel: 1              # 1=serial (default), 2+=parallel worktrees
+parallel_qa: false           # true=per-task QA sessions in parallel (faster, costlier)
 install_timeout: 120         # npm ci / pip install timeout in worktrees
 
 # Per-agent setting scopes (which CLAUDE.md files each agent reads)

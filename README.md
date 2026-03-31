@@ -137,7 +137,10 @@ Otto is infrastructure, not intelligence. The intelligence is Claude's. Otto pro
     │     (full diff as context, agent adapts intelligently,  │
     │      one agent — trust it to self-regulate)             │
     │                                                         │
-    │  4. Batch QA (one session, combined specs)              │
+    │  4. Batch QA                                            │
+    │     Default: one session, combined specs                │
+    │     parallel_qa: true → per-task sessions via           │
+    │       asyncio.gather (46% faster, +44% cost)            │
     │     Verify ALL [must] items on integrated codebase      │
     │     Generate cross-task integration tests               │
     │     If [must] fails → retry (up to max_retries rounds)  │
@@ -268,6 +271,7 @@ verify_timeout: 300       # seconds for test suite
 max_task_time: 3600       # 1hr circuit breaker per task
 qa_timeout: 3600          # QA agent timeout
 max_parallel: 1           # 1 = serial (default), 2+ = parallel worktrees
+parallel_qa: false        # true = per-task QA sessions in parallel (46% faster, +44% cost)
 install_timeout: 120      # seconds for npm ci / pip install in worktrees
 
 # Per-agent setting scopes (comma-separated: user, project)
