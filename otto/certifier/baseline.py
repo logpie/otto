@@ -1859,7 +1859,7 @@ def _expand_candidate_paths(method: str, raw_paths: list[str]) -> list[str]:
                 "/orders",
             ])
         elif "checkout" in lower:
-            expanded.extend(["/checkout", "/cart/checkout", "/api/checkout", "/api/orders"])
+            expanded.extend(["/api/checkout", "/api/payments", "/api/orders/checkout", "/checkout", "/cart/checkout"])
         elif "admin" in lower:
             expanded.extend(["/admin", "/admin/orders", "/admin/products", "/api/admin/orders", "/api/admin/products"])
 
