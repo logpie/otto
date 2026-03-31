@@ -525,7 +525,13 @@ async def _run_batch_qa(
             f"do NOT re-verify their specs):\n"
             + "\n".join(prior_lines)
         )
-    if focus_task_keys:
+    if focus_task_keys and config.get("parallel_qa"):
+        tasks_with_specs = [
+            task for task in tasks_with_specs
+            if task.get("key") in focus_task_keys
+        ]
+
+    if focus_task_keys and not config.get("parallel_qa"):
         qa_result = await run_qa(
             tasks_with_specs,
             config,
@@ -534,6 +540,132 @@ async def _run_batch_qa(
             retried_task_keys=focus_task_keys,
             log_dir=log_dir,
         )
+    elif config.get("parallel_qa") and len(tasks_with_specs) >= 2:
+        # EXPERIMENTAL: parallel per-task QA via asyncio.gather
+        # Each task gets its own QA session in parallel, then verdicts are merged.
+        _orchestrator_log(project_dir, f"parallel QA: dispatching {len(tasks_with_specs)} per-task sessions")
+
+        async def _run_single_task_qa(task: dict[str, Any], idx: int) -> dict[str, Any]:
+            task_key = task.get("key", "unknown")
+            task_log_dir = project_dir / "otto_logs" / task_key
+            task_log_dir.mkdir(parents=True, exist_ok=True)
+            def _progress(event_type: str, data: dict) -> None:
+                if event_type == "agent_tool":
+                    tool_name = data.get("name", "")
+                    detail = data.get("detail", "")[:60]
+                    console.print(f"        [{task_key[:8]}] {tool_name}  {rich_escape(detail)}", style="dim")
+            try:
+                return await run_qa(
+                    tasks=[task],
+                    config=config,
+                    project_dir=project_dir,
+                    diff=diff,
+                    on_progress=_progress,
+                    log_dir=task_log_dir,
+                    session_id=idx,
+                )
+            except Exception as exc:
+                _orchestrator_log(
+                    project_dir,
+                    f"parallel QA session failed for {task_key}: {exc}",
+                )
+                return {
+                    "must_passed": False,
+                    "verdict": {
+                        "must_passed": False,
+                        "must_items": [],
+                        "integration_findings": [],
+                        "regressions": [],
+                        "test_suite_passed": False,
+                        "extras": [],
+                    },
+                    "raw_report": f"[parallel QA session failed for {task_key}: {exc}]",
+                    "cost_usd": 0.0,
+                    "failed_task_keys": [task_key],
+                    "test_suite_passed": False,
+                    "infrastructure_error": True,
+                }
+
+        import time as _time_mod
+        _parallel_start = _time_mod.monotonic()
+        try:
+            per_task_results = await asyncio.gather(
+                *(_run_single_task_qa(t, i) for i, t in enumerate(tasks_with_specs))
+            )
+            _parallel_wall = round(_time_mod.monotonic() - _parallel_start, 1)
+
+            # Merge per-task verdicts into a batch-shaped result.
+            # Parallel QA does not exercise cross-task interactions itself; the
+            # post-batch integration test on integrated HEAD is the integration
+            # gate for this mode.
+            all_must_items = []
+            all_extras = []
+            total_qa_cost = 0.0
+            all_passed = True
+            failed_keys = []
+            test_suite_passed = True
+            infrastructure_error = False
+            for task, result in zip(tasks_with_specs, per_task_results):
+                task_key = task.get("key", "unknown")
+                total_qa_cost += float(result.get("cost_usd", 0.0) or 0.0)
+                verdict = result.get("verdict") or {}
+                for item in verdict.get("must_items", []) or []:
+                    if not item.get("task_key"):
+                        item["task_key"] = task_key
+                    all_must_items.append(item)
+                all_extras.extend(verdict.get("extras", []) or [])
+                if not result.get("must_passed"):
+                    all_passed = False
+                    failed_keys.append(task_key)
+                if not verdict.get("test_suite_passed", True):
+                    test_suite_passed = False
+                if result.get("infrastructure_error"):
+                    infrastructure_error = True
+
+            merged_verdict = {
+                "must_passed": all_passed,
+                "must_items": all_must_items,
+                "integration_findings": [],
+                "regressions": [],
+                "test_suite_passed": test_suite_passed,
+                "extras": all_extras,
+            }
+            qa_result = {
+                "must_passed": all_passed,
+                "verdict": merged_verdict,
+                "raw_report": (
+                    f"[parallel QA: {len(tasks_with_specs)} sessions, {_parallel_wall}s wall clock]\n"
+                    "[cross-task integration is gated by the post-batch integration test on HEAD]"
+                ),
+                "cost_usd": total_qa_cost,
+                "failed_task_keys": sorted(failed_keys),
+                "test_suite_passed": test_suite_passed,
+                "infrastructure_error": infrastructure_error,
+            }
+
+            _orchestrator_log(
+                project_dir,
+                f"parallel QA complete: {_parallel_wall}s wall, ${total_qa_cost:.2f}, "
+                f"{'PASS' if all_passed else 'FAIL'} ({len(all_must_items)} must items)",
+            )
+
+            from otto.qa import _write_proof_artifacts
+            try:
+                _write_proof_artifacts(
+                    log_dir,
+                    merged_verdict,
+                    [],
+                    {"key": "batch-qa"},
+                    f"Parallel batch QA summary for {len(tasks_with_specs)} task(s)",
+                    total_qa_cost,
+                )
+            except Exception:
+                pass
+        finally:
+            for i in range(len(tasks_with_specs)):
+                chrome_profile = Path.home() / ".cache" / "otto" / f"chrome-profile-{i}"
+                if chrome_profile.exists():
+                    shutil.rmtree(chrome_profile, ignore_errors=True)
     else:
         def _batch_qa_progress(event_type: str, data: dict) -> None:
             """Display batch QA progress in terminal."""

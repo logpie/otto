@@ -1,4 +1,5 @@
 go over notes
-show me proof of work.
-
 additive parallelsim
+*subagents for qa
+a2a comms for merge conflict?
+compile-then-execute for innerloop qa?

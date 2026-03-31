@@ -717,8 +717,12 @@ def _expected_batch_must_matrix(tasks_with_specs: list[dict[str, Any]]) -> set[t
     return expected
 
 
-def _build_qa_mcp_servers(enable_browser: bool) -> dict[str, dict]:
-    """Load browser MCP configuration when QA may need browser verification."""
+def _build_qa_mcp_servers(enable_browser: bool, *, session_id: int = 0) -> dict[str, dict]:
+    """Load browser MCP configuration when QA may need browser verification.
+
+    session_id: unique per parallel QA session. Each gets its own user data dir
+    to avoid contention between concurrent sessions.
+    """
     if not enable_browser:
         return {}
 
@@ -738,9 +742,13 @@ def _build_qa_mcp_servers(enable_browser: bool) -> dict[str, dict]:
                 args.append("--headless")
             if not any(a.startswith("--viewport") for a in args):
                 args.extend(["--viewport", "1280x720"])
-            if not any(a.startswith("--userDataDir") for a in args):
-                otto_chrome_profile = str(Path.home() / ".cache" / "otto" / "chrome-profile")
-                args.extend(["--userDataDir", otto_chrome_profile])
+            # Each parallel session gets its own user data dir to avoid conflicts
+            # Remove any existing --userDataDir before adding session-specific one
+            args = [a for a in args if not a.startswith("--userDataDir")]
+            chrome_profile = str(
+                Path.home() / ".cache" / "otto" / f"chrome-profile-{session_id}"
+            )
+            args.extend(["--userDataDir", chrome_profile])
             srv["args"] = args
             qa_mcp_servers[name] = srv
     except Exception:
@@ -759,9 +767,10 @@ async def _run_qa_prompt(
     enable_browser: bool = False,
     log_dir: Path | None = None,
     expected_must_count: int = 0,
+    session_id: int = 0,
 ) -> dict[str, Any]:
     """Execute a QA prompt and return parsed verdict plus captured actions."""
-    qa_mcp_servers = _build_qa_mcp_servers(enable_browser)
+    qa_mcp_servers = _build_qa_mcp_servers(enable_browser, session_id=session_id)
 
     _qa_settings = config.get("qa_agent_settings", "project").split(",")
     qa_opts = ClaudeAgentOptions(
@@ -1330,6 +1339,7 @@ async def run_qa(
     prev_failed: list[str] | None = None,
     focus_items: list | None = None,
     retried_task_keys: set[str] | None = None,
+    session_id: int = 0,
 ) -> dict[str, Any]:
     """Unified QA entry point -- single-task or batch.
 
@@ -1404,6 +1414,7 @@ async def run_qa(
         enable_browser=True,
         log_dir=log_dir,
         expected_must_count=expected_must_count,
+        session_id=session_id,
     )
 
     final_result = _finalize_qa_result(qa_result, tasks)
