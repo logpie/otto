@@ -352,10 +352,11 @@ After merge phase:
   ├─ Batch QA (up to max_retries rounds)
   │    ├─ parallel_qa: false (default) → one session, combined specs
   │    ├─ parallel_qa: true → per-task sessions via asyncio.gather
+  │    │    Code-only tasks only (falls back to flat if any ◈ visual specs)
   │    │    Each task gets own QA session running concurrently
-  │    │    Per-session chrome isolation (unique userDataDir)
   │    │    Verdicts merged in Python, integration gated by post-batch test
   │    │    Focused retries only re-verify failed tasks
+  │    │    Exception-safe: one session crash doesn't abort others
   │    ├─ If [must] fails → re-code failed tasks → re-merge → re-QA
   │    ├─ Repeat up to max_retries rounds
   │    └─ After max_retries: rollback batch, mark failed tasks,
