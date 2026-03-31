@@ -2410,13 +2410,19 @@ def _format_tier1_cell(result: BaselineResult) -> str:
 
 def _comparison_rows(result_a: BaselineResult, result_b: BaselineResult, labels: tuple[str, str]) -> list[str]:
     label_a, label_b = labels
+    def _overall(r: BaselineResult) -> str:
+        total = r.claims_tested - r.claims_not_applicable
+        pct = f"{round(r.claims_passed / total * 100)}%" if total > 0 else "n/a"
+        return f"{r.claims_passed}/{total} ({pct})"
+
     rows = [
         f"## Comparison: {label_a} vs {label_b}",
         "",
         f"| Metric | {label_a} | {label_b} |",
         "|---|---:|---:|",
-        f"| Tier 0 (structure) | {_format_tier0_cell(result_a)} | {_format_tier0_cell(result_b)} |",
-        f"| Tier 1 (runtime) | {_format_tier1_cell(result_a)} | {_format_tier1_cell(result_b)} |",
+        f"| **Score** | **{_overall(result_a)}** | **{_overall(result_b)}** |",
+        f"| Structure | {_format_tier0_cell(result_a)} | {_format_tier0_cell(result_b)} |",
+        f"| Runtime | {_format_tier1_cell(result_a)} | {_format_tier1_cell(result_b)} |",
         f"| Not implemented | {result_a.claims_not_implemented} | {result_b.claims_not_implemented} |",
         f"| Blocked | {result_a.claims_blocked} | {result_b.claims_blocked} |",
         f"| Failed | {result_a.claims_failed} | {result_b.claims_failed} |",
@@ -2549,15 +2555,22 @@ def print_report(result: BaselineResult, other: BaselineResult | None = None) ->
     tier1 = _tier1_summary(result)
     verdict = result.verdict or judge(result)
 
+    # Overall score: passed / total claims (not_implemented counts as failure)
+    total = result.claims_tested - result.claims_not_applicable
+    overall_passed = result.claims_passed
+    overall_pct = f"{round(overall_passed / total * 100)}%" if total > 0 else "n/a"
+
     print()
     print(f"Certification: {_status_label(result)}")
     print(f"Product:       {result.product_dir}")
     print(f"Type:          {result.product_type}")
-    print(f"Tier 0:        {tier0['present']}/{tier0['total']} present ({tier0['percent']})")
-    print(f"               {tier0['not_implemented']} not implemented")
-    print(f"Tier 1:        {tier1['passed']}/{tier1['total']} passed ({tier1['percent']})")
-    print(f"               {tier1['blocked']} blocked")
-    print(f"               {tier1['failed']} failed")
+    print(f"Score:         {overall_passed}/{total} ({overall_pct})")
+    print(f"  Structure:   {tier0['present']}/{tier0['total']} present ({tier0['percent']})")
+    print(f"  Runtime:     {tier1['passed']}/{tier1['total']} tested ({tier1['percent']})")
+    if tier0['not_implemented'] > 0:
+        print(f"  Missing:     {tier0['not_implemented']} not implemented")
+    if tier1['blocked'] > 0:
+        print(f"  Blocked:     {tier1['blocked']} (harness limitation)")
     print(f"Hard fails:    {result.hard_fails}")
     print(f"Confidence:    {round(verdict.confidence * 100):d}%")
     print(f"App started:   {'yes' if result.started else 'no'}")
