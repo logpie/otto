@@ -1,0 +1,125 @@
+# Otto Experiments & Work-in-Progress Index
+
+Quick reference for all experiments, branches, and deferred work. Check here before starting new work to avoid duplication or re-discovering known dead ends.
+
+Last updated: 2026-03-31
+
+---
+
+## Shipped to main
+
+| Feature | Date | Key commits | Findings doc |
+|---------|------|-------------|-------------|
+| Worktree unification | 2026-03-28 | `plan-worktree-unification.md` | — |
+| QA unification (run_qa) | 2026-03-30 | `plan-qa-unification.md` | — |
+| Additive parallelism | 2026-03-30 | `7ebe88d` | A/B validated: 27% total speedup |
+| QA speed + robustness | 2026-03-30 | `a2f9673` → `c021ab2` | 5 verdict bugs fixed, 12 tests added |
+| Parallel QA (code-only) | 2026-03-31 | `96e4ec4` | `docs/parallel-qa-findings.md` |
+| Greenfield fixes | 2026-03-31 | `6bea835`, `6cc614d` | pytest exit 5, jest, npm placeholder |
+
+---
+
+## Active branches & worktrees
+
+### `worktree-i2p` (worktree at `.claude/worktrees/i2p`)
+**Intent-to-product / Certifier.** Outer loop around v4.5 inner loop. Journey-level execution with dual scoring (journey + step), proof-of-work reports, self-healing.
+- **Status:** Active development. Stress testing across diverse products.
+- **Key docs:** `docs/certifier-e2e-results-2026-03-31.md`, `docs/certifier-hidden-inputs-audit.md`
+- **Memory:** `project_i2p_findings.md`, `project_certifier_generalization.md`
+- **Revisit:** Check if inner loop QA optimizations from main should be pulled in.
+
+### `worktree-gate-pilot` (worktree at `.claude/worktrees/gate-pilot`)
+**Gate pilot.** LLM intelligence at batch decision boundaries. i2p v2 spec with outer loop.
+- **Status:** Paused. Spec written, partial implementation.
+- **Key doc:** `e167ca1` — i2p v2 spec
+- **Revisit:** After i2p stabilizes on the i2p branch.
+
+---
+
+## Parked branches (no active worktree)
+
+### `native-subagents`
+**Native CC subagents for parallel execution.** Prepare/verify split + smoke test suite.
+- **Status:** Parked. Was exploring CC Agent tool for parallelism.
+- **Finding:** In-process SDK MCP breaks with Agent tool (see `feedback_inprocess_mcp.md`). External MCP subprocess required.
+- **Revisit:** If SDK adds first-class subagent support.
+
+### `display-polish`
+**Display improvements.** Explicit retry display, colored line counts, animated spinner.
+- **Status:** Parked. Cosmetic polish, low priority.
+- **Revisit:** When doing a UX pass.
+
+### `feat/bench-system`
+**Benchmark system.** Vague-spec task suite, rubric generation, testgen cost tracking.
+- **Status:** Parked. Bench infrastructure exists but not actively used.
+- **Memory:** `project_bench_direction.md`, `project_feature_bench.md`
+- **Revisit:** When measuring otto vs bare CC on new task types.
+
+### `feat/bench-v3`
+**SWE-bench integration.** Docker-based eval, first resolved SWE-bench instance.
+- **Status:** Parked. Running on ubuntu with Docker.
+- **Revisit:** When evaluating otto on real-world bugs.
+
+### `fix/baseline-tolerance`
+**Baseline test tolerance.** Tolerate pre-existing test failures in brownfield projects.
+- **Status:** Parked. Partially superseded by greenfield fixes on main (exit code 5, jest, npm).
+- **Revisit:** If brownfield projects with known-flaky tests are a priority.
+
+### `pressure-test`
+**Pressure test projects.** 6 complex projects (greenfield + brownfield), parallel + re-apply verified.
+- **Status:** Parked. Projects exist at `bench/pressure/projects/`.
+- **Key doc:** `docs/pressure-test-handover.md`
+- **Revisit:** For regression testing after major changes.
+
+---
+
+## Experiments completed (results only, no branch)
+
+### Prompt-driven QA subagents (2026-03-31)
+Told QA agent to dispatch Agent tool for parallel spec verification.
+- **Result:** Dead end. Agent dispatches serially, re-verifies everything. 2x slower, 2x cost.
+- **Findings in:** `docs/parallel-qa-findings.md`
+
+### Single-task spec-group splitting (2026-03-31)
+Split one task's specs into groups, verified in parallel sessions.
+- **Result:** Not worth it. 0-33% faster, 140-200% more expensive. Each group redundantly loads context.
+- **Findings in:** `docs/parallel-qa-findings.md`
+
+### Browser parallel QA (2026-03-31)
+Per-task parallel QA with chrome-devtools browser testing.
+- **Result:** Chrome isolation works (per-session userDataDir). Speed improvement inconclusive — 1 data point each, LLM variance dominates.
+- **Known issues:** Server port conflicts, `--port` flag unsupported by chrome-devtools-mcp, LLM text generation outliers.
+- **Findings in:** `docs/parallel-qa-findings.md`
+- **Revisit:** Need 3+ A/B runs on quiet machine, server port isolation fix.
+
+### QA verdict early-stop (2026-03-30)
+Grace timeout (15s) after verdict capture to cut the session short.
+- **Result:** Removed. Fragile (asyncio.TimeoutError injection), only saved ~10s, Codex recommended removal.
+- **Shipped then reverted:** `e850f84` (add) → `c021ab2` (remove)
+
+---
+
+## Deferred TODOs (from `project_v4_todos.md`)
+
+| Item | Priority | Notes |
+|------|----------|-------|
+| QA verdict MCP tool | Medium | Eliminates 40-70s verdict write/rewrite cycle. All QA modes benefit. |
+| Loop detection | Low | Detect >=90% similar diff on consecutive retries. ~20 lines. |
+| Spec gen scope creep | Low | Inferred requirements should default to [should] not [must]. |
+| Spec agent project map | Medium | Saves ~150s per `otto add` by giving instant project orientation. |
+| Merge conflict recovery | Medium | Rebase fails → retry on updated main. Enables robust multi-task. |
+
+---
+
+## Key handoff docs
+
+| Doc | What |
+|-----|------|
+| `docs/architecture.md` | Full pipeline reference + debugging guide |
+| `docs/parallel-qa-findings.md` | Parallel QA experiment results + next steps |
+| `docs/pressure-test-handover.md` | Pressure test methodology + golden project set |
+| `docs/codex-e2e-guide.md` | How to run otto e2e from Codex/fresh machine |
+| `docs/coderabbit-review-2026-03-28.md` | Full codebase audit (24 source files, 13K LOC) |
+| `docs/otto-review-handoff-2026-03-28.md` | Review handoff from 2026-03-28 session |
+| `docs/next-improvements.md` | Improvement list from 2026-03-21 |
+| `bench/ab-qa-test.sh` | A/B/C test runner for QA performance validation |
