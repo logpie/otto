@@ -103,7 +103,9 @@ def detect_test_command(project_dir: Path) -> str | None:
     if pkg_json.exists():
         try:
             pkg = json.loads(pkg_json.read_text())
-            if "test" in pkg.get("scripts", {}):
+            test_script = pkg.get("scripts", {}).get("test", "")
+            # Skip npm init placeholder: 'echo "Error: no test specified" && exit 1'
+            if test_script and "no test specified" not in test_script:
                 candidates.append("npm test")
         except (json.JSONDecodeError, KeyError):
             pass

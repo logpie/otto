@@ -224,8 +224,13 @@ def run_local_tests(
         return TierResult(tier="existing_tests", passed=True, skipped=True)
     try:
         result = _run_shell_command(test_command, workdir, timeout, env=env)
-        # pytest exit code 5 = "no tests collected" — treat as passed (greenfield)
-        passed = result.returncode == 0 or result.returncode == 5
+        # Exit code 5 (pytest "no tests collected") or exit code 1 with
+        # "No tests found" (jest) — treat as passed for greenfield projects
+        output = result.stdout + result.stderr
+        no_tests_found = result.returncode == 5 or (
+            result.returncode == 1 and "No tests found" in output
+        )
+        passed = result.returncode == 0 or no_tests_found
         return TierResult(
             tier="existing_tests",
             passed=passed,
