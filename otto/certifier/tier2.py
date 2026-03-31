@@ -181,16 +181,21 @@ def _execute_journey_spec(
 
         steps.append(step)
 
-        # Stop journey if step fails (flow is broken)
-        if not step.passed:
+        # Stop journey if a CRITICAL step fails (auth, core action)
+        # Non-critical steps (verify, get) record failure but continue
+        critical_actions = {"register", "login", "login_admin", "post", "put", "delete"}
+        if not step.passed and action in critical_actions:
             return JourneyResult(
                 name=spec.name, description=spec.description,
                 passed=False, steps=steps, stopped_at=action,
             )
 
+    passed_steps = sum(1 for s in steps if s.passed)
+    all_passed = passed_steps == len(steps)
     return JourneyResult(
         name=spec.name, description=spec.description,
-        passed=True, steps=steps,
+        passed=all_passed, steps=steps,
+        stopped_at="" if all_passed else f"{passed_steps}/{len(steps)} steps passed",
     )
 
 

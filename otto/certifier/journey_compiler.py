@@ -51,11 +51,15 @@ Each journey is a sequence of API calls where each step's output feeds the next.
 Think like a real user — what would they ACTUALLY DO with this product?
 
 Generate journeys for EVERY persona that would use this product:
-- New users (first-time registration, exploration)
+- Unauthenticated visitors (browsing, searching — NO registration needed)
+- New users (registration + first purchase/action)
 - Returning users (login, repeat actions)
 - Admin users (management, configuration)
-- Unauthenticated visitors (what can they see/do?)
 - Edge cases (empty states, errors, boundary conditions)
+
+IMPORTANT: Unauthenticated journeys must NOT start with registration or login.
+They test what a visitor can do WITHOUT an account. These journeys should use
+fresh_session and only GET/browse actions.
 
 For each journey, provide:
 - name: short descriptive name
