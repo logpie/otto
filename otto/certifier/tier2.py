@@ -70,10 +70,21 @@ class Tier2Result:
     duration_s: float = 0.0
     mode: str = "sequential"
 
-    def score(self) -> str:
+    def journey_score(self) -> str:
         if self.journeys_tested == 0:
             return "n/a"
         return f"{self.journeys_passed}/{self.journeys_tested} ({round(self.journeys_passed / self.journeys_tested * 100)}%)"
+
+    def step_score(self) -> str:
+        total = sum(len(j.steps) for j in self.journeys)
+        passed = sum(sum(1 for s in j.steps if s.passed) for j in self.journeys)
+        if total == 0:
+            return "n/a"
+        return f"{passed}/{total} ({round(passed / total * 100)}%)"
+
+    def score(self) -> str:
+        """Combined score showing both journey and step level."""
+        return f"Journeys: {self.journey_score()}, Steps: {self.step_score()}"
 
 
 def _tier2_log(project_dir: Path, *lines: str) -> None:
@@ -1134,7 +1145,8 @@ def save_tier2_markdown(result: Tier2Result, path: Path) -> None:
         "",
         f"> **Product:** `{result.product_dir}`",
         f"> **Mode:** {result.mode}",
-        f"> **Score:** {result.score()}",
+        f"> **Journeys:** {result.journey_score()}",
+        f"> **Steps:** {result.step_score()}",
         f"> **Duration:** {result.duration_s:.0f}s",
         "",
         "## What This Tests",
