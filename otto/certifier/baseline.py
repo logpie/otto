@@ -2594,6 +2594,37 @@ def save_markdown_report(result: BaselineResult, path: Path) -> None:
             lines.append("_None_")
             continue
         lines.extend(_claim_markdown(claim) for claim in claims)
+
+    # Scope disclaimer
+    lines.extend([
+        "",
+        "---",
+        "",
+        "## What This Report Measures",
+        "",
+        "This certification tests **whether claimed features exist and respond correctly**",
+        "to API probes and structural code analysis. It is Tier 1 (deterministic) certification.",
+        "",
+        "**What it DOES verify:**",
+        "- API endpoints exist and return expected status codes",
+        "- Request/response contracts match (JSON keys, body content)",
+        "- Authentication and authorization work at the API level",
+        "- Data models and database schemas exist",
+        "- Required integrations are present in source code",
+        "",
+        "**What it does NOT verify:**",
+        "- Real user experience (multi-step flows, navigation, form UX)",
+        "- Visual rendering (layout, styling, responsiveness)",
+        "- End-to-end payment processing (Stripe with real keys)",
+        "- Edge cases in UI interactions (back button, concurrent tabs, slow networks)",
+        "- Performance, accessibility, or security beyond basic auth checks",
+        "- Whether the product is actually *good* — only whether it *works*",
+        "",
+        "A passing score means the product implements the requested features.",
+        "It does not mean the product is ready for real users.",
+        "Tier 2 (agentic browser testing) covers the user experience gaps.",
+    ])
+
     resolved = Path(path)
     resolved.parent.mkdir(parents=True, exist_ok=True)
     resolved.write_text("\n".join(lines) + "\n")
