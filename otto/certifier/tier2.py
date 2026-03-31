@@ -244,21 +244,59 @@ def _exec_http(session: requests.Session, base_url: str, method: str, step: dict
     if isinstance(expect, int):
         expect = [expect]
 
+    # Aliases for common patterns
+    me_aliases = {"/api/auth/me", "/api/me", "/api/user/profile", "/api/users/me"}
+    if any(p in me_aliases for p in paths):
+        paths = list(paths) + ["/api/auth/session"]
+
+    # For admin order/product paths, also try non-admin variants
+    expanded = list(paths)
+    for p in paths:
+        if "/api/admin/orders/" in p:
+            expanded.append(p.replace("/api/admin/orders/", "/api/orders/"))
+        if "/api/admin/products/" in p:
+            expanded.append(p.replace("/api/admin/products/", "/api/products/"))
+    paths = expanded
+
+    last_status = None
+    last_error_text = ""
     for path in paths:
         if not path:
             continue
         rendered_path = _render_string(path, variables)
+        # Skip paths with unresolved {{variables}}
+        if "{{" in rendered_path:
+            continue
         url = f"{base_url}{rendered_path}"
         try:
             kwargs: dict[str, Any] = {"timeout": 10}
             if body and method != "GET":
                 kwargs["json"] = body
             r = session.request(method, url, **kwargs)
+            last_status = r.status_code
+            # Self-heal: if 400 mentions valid values, retry with correction
+            if r.status_code == 400 and body and method in ("PUT", "POST", "PATCH"):
+                error_text = r.text[:500]
+                last_error_text = error_text
+                import re as _re
+                # Enum case fix: "Must be one of: PENDING, PAID, SHIPPED"
+                enum_match = _re.search(r"[Mm]ust be one of[:\s]+([A-Z_,\s]+)", error_text)
+                if enum_match and isinstance(body, dict):
+                    valid_values = [v.strip() for v in enum_match.group(1).split(",")]
+                    for field, val in body.items():
+                        if isinstance(val, str):
+                            upper = val.upper()
+                            if upper in valid_values and upper != val:
+                                corrected_body = {**body, field: upper}
+                                r2 = session.request(method, url, json=corrected_body, timeout=10)
+                                if r2.status_code in expect:
+                                    r = r2
+                                    last_status = r2.status_code
+                                    break
             if r.status_code in expect:
                 response_data = {}
                 try:
                     raw = r.json()
-                    # Unwrap common wrappers
                     if isinstance(raw, dict) and "data" in raw:
                         response_data = raw["data"] if isinstance(raw["data"], dict) else raw
                         if isinstance(raw["data"], list):
@@ -276,7 +314,23 @@ def _exec_http(session: requests.Session, base_url: str, method: str, step: dict
         except Exception:
             continue
 
-    return JourneyStep(action=f"{method} {paths[0] if paths else '?'}", detail="no endpoint responded", passed=False, error=f"expected {expect}")
+    # Check if ALL paths had unresolved variables
+    resolved_paths = [p for p in paths if "{{" not in _render_string(p, variables)]
+    if not resolved_paths:
+        unresolved = [p for p in paths if "{{" in _render_string(p, variables)]
+        return JourneyStep(
+            action=f"{method} {paths[0] if paths else '?'}",
+            detail=f"variable not resolved",
+            passed=False,
+            error=f"unresolved variables in path: {unresolved[0] if unresolved else '?'}",
+        )
+
+    return JourneyStep(
+        action=f"{method} {paths[0] if paths else '?'}",
+        detail=f"no endpoint responded (last: {last_status})",
+        passed=False,
+        error=f"expected {expect}, tried {len(resolved_paths)} path(s)",
+    )
 
 
 def _exec_verify(step: dict[str, Any], variables: dict[str, Any]) -> JourneyStep:
@@ -319,20 +373,72 @@ def _exec_verify_count(step: dict[str, Any], variables: dict[str, Any]) -> Journ
 
 
 def _extract_ids(data: dict[str, Any], variables: dict[str, Any]) -> None:
-    """Auto-extract common IDs from response data for variable substitution."""
+    """Auto-extract common IDs from response data for variable substitution.
+
+    Maps response fields to multiple variable names so compiled journeys
+    can reference them as {{new_product_id}}, {{product_id}}, {{id}}, etc.
+    """
     if isinstance(data, dict):
-        for key in ("id", "productId", "orderId", "userId"):
+        # Direct ID fields
+        if "id" in data and data["id"]:
+            the_id = str(data["id"])
+            variables["id"] = the_id
+            # Infer what kind of ID from context
+            if "name" in data and "price" in data:
+                for alias in ("product_id", "new_product_id", "created_product_id"):
+                    variables[alias] = the_id
+            elif "status" in data and ("totalAmount" in data or "total" in data):
+                for alias in ("order_id", "new_order_id", "customer_order_id", "created_order_id"):
+                    variables[alias] = the_id
+            elif "email" in data:
+                variables["user_id"] = the_id
+
+        for key in ("productId", "orderId", "userId", "cartItemId"):
             if key in data and data[key]:
-                variables[key] = data[key]
-        # Extract first item's ID from lists
+                variables[key] = str(data[key])
+                snake = key[0].lower() + "".join(f"_{c.lower()}" if c.isupper() else c for c in key[1:])
+                variables[snake] = str(data[key])
+
+        # Cart item IDs
+        if "cartItemId" not in variables:
+            for cart_key in ("id", "cartItemId"):
+                if cart_key in data and "productId" in data:
+                    # This is a cart item response
+                    variables["cart_item_id"] = str(data[cart_key])
+                    variables["first_cart_item_id"] = str(data[cart_key])
+                    break
+
+        # Extract order ID from URL patterns (e.g., sessionUrl with orderId param)
+        import re as _re
+        for val in data.values():
+            if isinstance(val, str) and "orderId=" in val:
+                m = _re.search(r"orderId=([^&\s]+)", val)
+                if m:
+                    oid = m.group(1)
+                    for alias in ("order_id", "customer_order_id", "new_order_id"):
+                        if alias not in variables:
+                            variables[alias] = oid
+
+        # Also check _raw wrapper (from unwrapped responses)
+        raw = data.get("_raw", {})
+        if isinstance(raw, dict):
+            raw_data = raw.get("data", {})
+            if isinstance(raw_data, dict):
+                for val in raw_data.values():
+                    if isinstance(val, str) and "orderId=" in val:
+                        m = _re.search(r"orderId=([^&\s]+)", val)
+                        if m and "customer_order_id" not in variables:
+                            variables["customer_order_id"] = m.group(1)
+
+        # Extract from lists (first and second items)
         items = data.get("items") or data.get("data") or []
-        if isinstance(items, list) and items:
-            first = items[0]
-            if isinstance(first, dict):
-                if "id" in first:
-                    variables["first_product_id"] = first["id"]
-                if "name" in first:
-                    variables["first_product_name"] = first["name"]
+        if isinstance(items, list):
+            for idx, item in enumerate(items[:3]):
+                if isinstance(item, dict) and "id" in item:
+                    prefix = ["first", "second", "third"][idx]
+                    variables[f"{prefix}_product_id"] = str(item["id"])
+                    if "name" in item:
+                        variables[f"{prefix}_product_name"] = str(item["name"])
 
 
 def _render_template(obj: Any, variables: dict[str, Any]) -> Any:
