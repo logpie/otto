@@ -14,6 +14,7 @@ import pytest
 
 from otto.qa import (
     _finalize_qa_result,
+    _has_explicit_fail_markers,
     _is_verdict_complete,
     _parse_qa_verdict_json,
     determine_qa_tier,
@@ -166,6 +167,30 @@ class TestParseQaVerdictJson:
         assert result["must_passed"] is False
 
 
+# ── _has_explicit_fail_markers ──────────────────────────────────────────
+
+
+class TestHasExplicitFailMarkers:
+    def test_detects_fail(self):
+        assert _has_explicit_fail_markers("QA VERDICT: FAIL")
+
+    def test_detects_failed(self):
+        assert _has_explicit_fail_markers("spec 3 failed because of X")
+
+    def test_detects_failure(self):
+        assert _has_explicit_fail_markers("Test failure in module Y")
+
+    def test_no_markers_returns_false(self):
+        assert not _has_explicit_fail_markers("All specs verified. Everything works.")
+
+    def test_empty_string(self):
+        assert not _has_explicit_fail_markers("")
+
+    def test_case_insensitive(self):
+        assert _has_explicit_fail_markers("FAILED")
+        assert _has_explicit_fail_markers("Failed")
+
+
 # ── _finalize_qa_result ──────────────────────────────────────────────────
 
 
@@ -255,6 +280,77 @@ class TestFinalizeQaResultSingleTask:
         }
         result = _finalize_qa_result(qa_result, [task])
         assert "task-x" in result["failed_task_keys"]
+
+    def test_regressions_force_fail_single_task(self):
+        """Bug 3 fix: single-task must check regressions like batch mode."""
+        task = self._make_task(num_must=1)
+        qa_result = {
+            "must_passed": True,
+            "verdict": {
+                "must_passed": True,
+                "must_items": [{"spec_id": 1, "status": "pass"}],
+                "regressions": ["existing behavior broke"],
+            },
+            "raw_report": "",
+            "cost_usd": 0.1,
+        }
+        result = _finalize_qa_result(qa_result, [task])
+        assert result["must_passed"] is False
+
+    def test_test_suite_failed_forces_fail_single_task(self):
+        """Bug 3 fix: single-task must check test_suite_passed like batch mode."""
+        task = self._make_task(num_must=1)
+        qa_result = {
+            "must_passed": True,
+            "verdict": {
+                "must_passed": True,
+                "must_items": [{"spec_id": 1, "status": "pass"}],
+                "test_suite_passed": False,
+            },
+            "raw_report": "",
+            "cost_usd": 0.1,
+        }
+        result = _finalize_qa_result(qa_result, [task])
+        assert result["must_passed"] is False
+
+    def test_empty_must_items_falls_back_to_model_flag(self):
+        """Empty must_items: can't verify from items, trust model flag."""
+        task = self._make_task(num_must=0)
+        qa_result = {
+            "must_passed": True,
+            "verdict": {"must_passed": True, "must_items": []},
+            "raw_report": "",
+            "cost_usd": 0.1,
+        }
+        result = _finalize_qa_result(qa_result, [task])
+        assert result["must_passed"] is True
+
+    def test_empty_must_items_with_false_flag(self):
+        task = self._make_task(num_must=0)
+        qa_result = {
+            "must_passed": False,
+            "verdict": {"must_passed": False, "must_items": []},
+            "raw_report": "",
+            "cost_usd": 0.1,
+        }
+        result = _finalize_qa_result(qa_result, [task])
+        assert result["must_passed"] is False
+
+    def test_verdict_dict_synced_with_result(self):
+        """Verdict dict must_passed should match finalized result."""
+        task = self._make_task(num_must=1)
+        qa_result = {
+            "must_passed": True,
+            "verdict": {
+                "must_passed": True,  # model says pass
+                "must_items": [{"spec_id": 1, "status": "fail"}],  # but item failed
+            },
+            "raw_report": "",
+            "cost_usd": 0.1,
+        }
+        result = _finalize_qa_result(qa_result, [task])
+        assert result["must_passed"] is False
+        assert result["verdict"]["must_passed"] is False  # synced
 
 
 class TestFinalizeQaResultBatch:
@@ -407,6 +503,25 @@ class TestFinalizeQaResultBatch:
         }
         result = _finalize_qa_result(qa_result, tasks)
         assert result["infrastructure_error"] is True
+        assert result["must_passed"] is False
+
+    def test_empty_must_items_not_false_pass(self):
+        """Bug 2 (Codex): all([]) == True must not pass a task with no items."""
+        tasks = self._make_tasks()
+        qa_result = {
+            "must_passed": True,
+            "verdict": {
+                "must_passed": True,
+                "must_items": [],  # QA omitted all items
+                "integration_findings": [],
+                "regressions": [],
+                "test_suite_passed": True,
+            },
+            "raw_report": "",
+            "cost_usd": 0.5,
+        }
+        result = _finalize_qa_result(qa_result, tasks)
+        # With expected must items but none in verdict, should fail (missing coverage)
         assert result["must_passed"] is False
 
 
