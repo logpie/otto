@@ -54,10 +54,16 @@ class TestConfig:
     # Data model
     models: list[str] = field(default_factory=list)  # e.g. ["User", "Product", "Order"]
     has_cart_model: bool = False
+    schema_source_file: str = ""
+    model_fields: dict[str, dict[str, str]] = field(default_factory=dict)
+    creatable_fields: dict[str, list[str]] = field(default_factory=dict)
+    enum_values: dict[str, list[str]] = field(default_factory=dict)
 
     # Framework specifics
     api_base: str = "/api"
     response_wrapper: str = ""  # e.g. "data" if responses are {data: ...}
+    cli_frameworks: list[str] = field(default_factory=list)
+    cli_entrypoints: list[str] = field(default_factory=list)
 
     def admin_user(self) -> SeededUser | None:
         for u in self.seeded_users:
@@ -76,6 +82,7 @@ def analyze_project(project_dir: Path) -> TestConfig:
     _analyze_auth(project_dir, config)
     _analyze_routes(project_dir, config)
     _analyze_schema(project_dir, config)
+    _analyze_cli(project_dir, config)
     _analyze_seeds(project_dir, config)
 
     logger.info(
@@ -247,13 +254,51 @@ def _analyze_schema(project_dir: Path, config: TestConfig) -> None:
 
     try:
         content = schema_file.read_text()
+        config.schema_source_file = str(schema_file.relative_to(project_dir))
+
+        config.enum_values = _parse_prisma_enums(content)
+        model_names = re.findall(r'model\s+(\w+)\s*\{', content)
         for match in re.finditer(r'model\s+(\w+)\s*\{', content):
             model = match.group(1)
             config.models.append(model)
             if model.lower() in ("cartitem", "cart_item", "cart"):
                 config.has_cart_model = True
+        config.model_fields, config.creatable_fields = _parse_prisma_models(
+            content,
+            model_names=model_names,
+            enum_names=set(config.enum_values),
+        )
     except OSError:
         pass
+
+
+def _analyze_cli(project_dir: Path, config: TestConfig) -> None:
+    """Detect Python CLI entrypoints and parser frameworks."""
+
+    cli_frameworks: set[str] = set()
+    entrypoints: list[str] = []
+
+    for source_file in _find_source_files(project_dir):
+        if source_file.suffix != ".py":
+            continue
+        try:
+            content = source_file.read_text()
+        except OSError:
+            continue
+
+        lower = content.lower()
+        if "argparse" in lower or "argumentparser(" in lower or ".add_argument(" in lower:
+            cli_frameworks.add("argparse")
+            entrypoints.append(str(source_file.relative_to(project_dir)))
+        if "import click" in lower or "@click." in lower or "click.command(" in lower:
+            cli_frameworks.add("click")
+            entrypoints.append(str(source_file.relative_to(project_dir)))
+        if "import typer" in lower or "typer.typer(" in lower:
+            cli_frameworks.add("typer")
+            entrypoints.append(str(source_file.relative_to(project_dir)))
+
+    config.cli_frameworks = sorted(cli_frameworks)
+    config.cli_entrypoints = _dedupe_preserving_order(entrypoints)
 
 
 def _analyze_seeds(project_dir: Path, config: TestConfig) -> None:
@@ -334,6 +379,79 @@ def _dedupe_seeded_users(users: list[SeededUser]) -> list[SeededUser]:
         seen.add(key)
         deduped.append(user)
     return deduped
+
+
+def _parse_prisma_enums(content: str) -> dict[str, list[str]]:
+    enums: dict[str, list[str]] = {}
+    for match in re.finditer(r'enum\s+(\w+)\s*\{([^}]*)\}', content, re.DOTALL):
+        enum_name = match.group(1)
+        values = []
+        for raw_line in match.group(2).splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("//"):
+                continue
+            values.append(line.split()[0])
+        enums[enum_name] = values
+    return enums
+
+
+def _parse_prisma_models(
+    content: str,
+    *,
+    model_names: list[str],
+    enum_names: set[str],
+) -> tuple[dict[str, dict[str, str]], dict[str, list[str]]]:
+    scalar_types = {"String", "Int", "Float", "Boolean", "DateTime", "Json", "Decimal", "BigInt", "Bytes"}
+    known_model_names = set(model_names)
+    model_fields: dict[str, dict[str, str]] = {}
+    creatable_fields: dict[str, list[str]] = {}
+
+    for match in re.finditer(r'model\s+(\w+)\s*\{([^}]*)\}', content, re.DOTALL):
+        model_name = match.group(1)
+        fields: dict[str, str] = {}
+        writable_fields: list[str] = []
+
+        for raw_line in match.group(2).splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("//"):
+                continue
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+
+            field_name = parts[0]
+            field_type = parts[1]
+            base_type = field_type.rstrip("?").rstrip("[]")
+            is_relation = base_type in known_model_names
+            is_supported_scalar = base_type in scalar_types or base_type in enum_names
+            if not is_supported_scalar or is_relation:
+                continue
+
+            fields[field_name] = base_type
+
+            if field_name in {"id", "createdAt", "updatedAt"}:
+                continue
+            if field_type.endswith("[]"):
+                continue
+            if "@updatedAt" in line:
+                continue
+            writable_fields.append(field_name)
+
+        model_fields[model_name] = fields
+        creatable_fields[model_name] = writable_fields
+
+    return model_fields, creatable_fields
+
+
+def _dedupe_preserving_order(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        ordered.append(item)
+    return ordered
 
 
 def print_config(config: TestConfig) -> None:

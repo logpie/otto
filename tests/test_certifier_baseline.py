@@ -15,6 +15,7 @@ from otto.certifier.baseline import (
     _test_claim,
     certify,
     compare,
+    judge,
     print_report,
     save_report,
     save_markdown_report,
@@ -344,6 +345,168 @@ def test_401_after_failed_auth_login_is_blocked_by_harness(monkeypatch):
     assert cart_result.outcome == "blocked_by_harness"
     assert cart_result.error == "auth session not established — harness limitation"
     assert "observed HTTP 401" in cart_result.evidence[0].actual
+
+
+def test_auth_protected_route_uses_fresh_session(monkeypatch):
+    run_state = BaselineRunState()
+    run_state.session.cookies.set("next-auth.session-token", "session-1")
+
+    def fake_request(self, method, url, **kwargs):
+        assert not self.cookies
+        return FakeResponse(401, payload={"error": "Unauthorized"})
+
+    monkeypatch.setattr("requests.sessions.Session.request", fake_request)
+
+    claim = Claim(
+        id="auth-protected-route",
+        description="Protected routes reject unauthenticated users",
+        priority="critical",
+        category="security",
+        test_approach="api",
+        test_steps=[
+            {
+                "action": "http",
+                "method": "GET",
+                "candidate_paths": ["/api/cart"],
+                "expect_status": [401, 403],
+            }
+        ],
+        hard_fail=True,
+    )
+
+    result = _test_claim(
+        claim,
+        "http://example.test",
+        Path("."),
+        _profile(),
+        AdapterTestConfig(has_cart_model=True),
+        run_state,
+    )
+
+    assert result.passed is True
+    assert result.outcome == "pass"
+    assert result.proof["response"]["status"] == 401
+
+
+def test_http_step_self_heals_missing_crud_fields(monkeypatch):
+    attempts: list[dict] = []
+
+    def fake_request(self, method, url, **kwargs):
+        if method == "GET":
+            return FakeResponse(200, payload={"data": []})
+        body = kwargs.get("json", {})
+        attempts.append(body)
+        if len(attempts) == 1:
+            return FakeResponse(400, payload={"error": "Missing required fields: category, stock"})
+        return FakeResponse(201, payload={"id": "prod-1", "name": body["name"], "price": body["price"], "category": body["category"], "stock": body["stock"]})
+
+    monkeypatch.setattr("requests.sessions.Session.request", fake_request)
+
+    claim = Claim(
+        id="admin-create-product",
+        description="Admins can create products",
+        priority="critical",
+        category="feature",
+        test_approach="api",
+        test_steps=[
+            {
+                "action": "http",
+                "method": "POST",
+                "candidate_paths": ["/api/products"],
+                "body": {"name": "Widget", "description": "Test", "price": 29.99},
+                "expect_status": [201],
+                "expect_json_keys": ["id", "name", "price"],
+            }
+        ],
+        hard_fail=True,
+    )
+
+    result = _test_claim(
+        claim,
+        "http://example.test",
+        Path("."),
+        _profile(),
+        AdapterTestConfig(
+            creatable_fields={"Product": ["name", "description", "price", "category", "stock", "imageUrl"]},
+        ),
+    )
+
+    assert result.passed is True
+    assert len(attempts) == 2
+    assert attempts[1]["category"] == "General"
+    assert attempts[1]["stock"] == 100
+    assert result.proof["retries"][0]["response"]["status"] == 400
+
+
+def test_http_step_self_heals_enum_casing(monkeypatch):
+    attempts: list[dict] = []
+
+    def fake_request(self, method, url, **kwargs):
+        if method == "GET":
+            return FakeResponse(200, payload={"data": []})
+        body = kwargs.get("json", {})
+        attempts.append(body)
+        if len(attempts) == 1:
+            return FakeResponse(400, payload={"error": "Invalid status. Must be one of: PENDING, PAID, SHIPPED, DELIVERED, CANCELLED"})
+        return FakeResponse(200, payload={"data": {"id": "order-1", "status": body["status"]}})
+
+    monkeypatch.setattr("requests.sessions.Session.request", fake_request)
+
+    claim = Claim(
+        id="admin-manage-order-status",
+        description="Admins can update order status",
+        priority="important",
+        category="feature",
+        test_approach="api",
+        test_steps=[
+            {
+                "action": "http",
+                "method": "PUT",
+                "candidate_paths": ["/api/orders/order-1"],
+                "body": {"status": "shipped"},
+                "expect_status": [200],
+                "expect_body_contains": ["shipped"],
+            }
+        ],
+        hard_fail=False,
+    )
+
+    result = _test_claim(claim, "http://example.test", Path("."), _profile())
+
+    assert result.passed is True
+    assert attempts[1]["status"] == "SHIPPED"
+    assert result.proof["request"]["body"]["status"] == "SHIPPED"
+
+
+def test_judge_scores_and_confidence():
+    result = BaselineResult(
+        product_dir="/tmp/app",
+        intent="build a shop",
+        product_type="web",
+        started=True,
+        claims_tested=5,
+        claims_passed=4,
+        claims_failed=0,
+        claims_not_implemented=0,
+        claims_blocked=1,
+        claims_not_applicable=0,
+        hard_fails=0,
+        certified=False,
+        results=[
+            ClaimResult("claim-1", "claim 1", "critical", True, True, "pass", []),
+            ClaimResult("claim-2", "claim 2", "critical", True, True, "pass", []),
+            ClaimResult("claim-3", "claim 3", "critical", True, True, "pass", []),
+            ClaimResult("claim-4", "claim 4", "critical", True, True, "pass", []),
+            ClaimResult("claim-5", "claim 5", "critical", True, False, "blocked_by_harness", []),
+        ],
+    )
+
+    verdict = judge(result)
+
+    assert verdict.certified is True
+    assert verdict.tier0_score == 1.0
+    assert verdict.tier1_score == 1.0
+    assert verdict.confidence == 0.8
 
 
 def test_print_report_groups_outcomes_and_shows_comparison(capsys):

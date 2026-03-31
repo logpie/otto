@@ -113,7 +113,7 @@ def classify(project_dir: Path) -> ProductProfile:
 
     if profile.language == "python" or any(
         (project_dir / f).exists() for f in ["app.py", "main.py", "manage.py"]
-    ):
+    ) or any(project_dir.glob("*.py")):
         profile.language = "python"
 
         if (project_dir / "manage.py").exists():
@@ -143,6 +143,15 @@ def classify(project_dir: Path) -> ProductProfile:
                 if (project_dir / f).exists():
                     profile.start_command = f"python {f}"
                     break
+            if not profile.start_command:
+                for candidate in sorted(project_dir.glob("*.py")):
+                    try:
+                        content = candidate.read_text()
+                    except OSError:
+                        continue
+                    if "argparse" in content or "click" in content or "typer" in content:
+                        profile.start_command = f"python {candidate.name}"
+                        break
 
         # Python test command
         if (project_dir / "pytest.ini").exists() or \

@@ -90,6 +90,10 @@ RULES:
 - Mark registration, login, core CRUD, and primary user flow as critical.
 - Mark error handling, edge cases, UI polish as important or nice.
 - Every test step must be a dict with an "action" key.
+- For CRUD request bodies, include ALL plausible required fields, not just the obvious ones.
+- For update/delete claims on a single record, include API candidate paths with an explicit resource ID variant.
+- For access-control claims, prefer genuinely protected or admin-only endpoints over public catalog routes.
+- For checkout/payment claims, include a realistic shipping or billing payload when the API would need one.
 - Allowed actions:
   - "http": may include "method", "path", "candidate_paths", "body",
     "body_variants", "expect_status", "expect_body_contains", "expect_json_keys"
@@ -272,13 +276,15 @@ def _normalize_claim_steps(claim: dict[str, Any]) -> list[TestStep]:
 
     raw_steps = claim.get("test_steps", [])
     if all(isinstance(step, dict) for step in raw_steps):
-        return [_normalize_structured_step(step) for step in raw_steps]
-    return _normalize_legacy_steps(
+        steps = [_normalize_structured_step(step) for step in raw_steps]
+    else:
+        steps = _normalize_legacy_steps(
         claim_id=claim.get("id", ""),
         description=claim.get("description", ""),
         test_approach=claim.get("test_approach", "api"),
         raw_steps=raw_steps,
-    )
+        )
+    return _enrich_claim_steps(claim.get("id", ""), steps)
 
 
 def _normalize_structured_step(step: dict[str, Any]) -> TestStep:
@@ -294,6 +300,124 @@ def _normalize_structured_step(step: dict[str, Any]) -> TestStep:
     if normalized["action"] == "check_exists":
         normalized.setdefault("target", "http")
     return normalized
+
+
+def _enrich_claim_steps(claim_id: str, steps: list[TestStep]) -> list[TestStep]:
+    claim_key = claim_id.lower()
+    enriched = [dict(step) for step in steps]
+
+    for step in enriched:
+        if str(step.get("action", "")).lower() != "http":
+            continue
+
+        method = str(step.get("method", "GET")).upper()
+        candidate_paths = _step_candidate_paths(step)
+        body = step.get("body")
+        body_variants = step.get("body_variants")
+
+        if claim_key == "checkout-stripe-integration" and method == "POST":
+            if body in (None, {}):
+                step["body"] = _default_checkout_body()
+
+        if claim_key == "admin-create-product" and method == "POST":
+            step["body"] = _ensure_product_fields(body)
+            if isinstance(body_variants, list):
+                step["body_variants"] = [_ensure_product_fields(variant) for variant in body_variants]
+
+        if claim_key in {"admin-edit-product", "admin-delete-product"} and method in {"PUT", "PATCH", "DELETE"}:
+            step["candidate_paths"] = _merge_candidate_paths(
+                candidate_paths,
+                [
+                    "/api/products/{{product_id}}",
+                    "/api/admin/products/{{product_id}}",
+                    "/admin/api/products/{{product_id}}",
+                ],
+            )
+
+        if claim_key in {"admin-manage-order-status", "admin-update-order-status"} and method in {"PUT", "PATCH"}:
+            step["candidate_paths"] = _merge_candidate_paths(
+                candidate_paths,
+                [
+                    "/api/orders/{{order_id}}",
+                    "/api/admin/orders/{{order_id}}",
+                    "/api/admin/orders/{{order_id}}/status",
+                ],
+            )
+            step["body_variants"] = _merge_body_variants(
+                step.get("body"),
+                step.get("body_variants"),
+                [{"status": "SHIPPED"}],
+            )
+
+        if claim_key in {"admin-no-public-access", "admin-authorization"} and method == "GET":
+            step["candidate_paths"] = _merge_candidate_paths(
+                candidate_paths,
+                [
+                    "/api/admin/stats",
+                    "/api/admin/orders",
+                    "/api/admin/products",
+                ],
+            )
+
+    return enriched
+
+
+def _default_checkout_body() -> dict[str, Any]:
+    return {
+        "shippingAddress": {
+            "name": "Baseline Test User",
+            "address": "123 Market Street",
+            "city": "San Francisco",
+            "state": "CA",
+            "zip": "94103",
+            "country": "US",
+        }
+    }
+
+
+def _ensure_product_fields(body: Any) -> Any:
+    if not isinstance(body, dict):
+        return body
+    enriched = dict(body)
+    enriched.setdefault("category", "General")
+    enriched.setdefault("stock", 100)
+    enriched.setdefault("imageUrl", "https://placehold.co/400x300")
+    return enriched
+
+
+def _merge_candidate_paths(existing: list[str], additions: list[str]) -> list[str]:
+    seen: set[str] = set()
+    merged: list[str] = []
+    for path in [*existing, *additions]:
+        path_str = str(path)
+        if path_str in seen:
+            continue
+        seen.add(path_str)
+        merged.append(path_str)
+    return merged
+
+
+def _merge_body_variants(
+    body: Any,
+    body_variants: Any,
+    additions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    for variant in ([body] if isinstance(body, dict) else []) + (body_variants or []) + additions:
+        if not isinstance(variant, dict):
+            continue
+        if variant not in merged:
+            merged.append(dict(variant))
+    return merged
+
+
+def _step_candidate_paths(step: dict[str, Any]) -> list[str]:
+    candidate_paths = step.get("candidate_paths")
+    if isinstance(candidate_paths, list) and candidate_paths:
+        return [str(path) for path in candidate_paths]
+    if step.get("path"):
+        return [str(step["path"])]
+    return []
 
 
 def _normalize_legacy_steps(
