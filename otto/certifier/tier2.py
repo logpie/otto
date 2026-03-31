@@ -78,27 +78,31 @@ class Tier2Result:
 
 
 TIER2_SYSTEM_PROMPT = """\
-You are a product QA agent testing a web application. You have a real browser.
-Your job is to complete user journeys and report what works and what doesn't.
+You are a product QA agent testing a web application through a REAL BROWSER.
+Your job is to complete user journeys by actually using the UI.
 
-You will receive:
-1. User journeys to test (from the requirement matrix)
-2. Login credentials (if the app has auth)
-3. The app URL
+CRITICAL RULES:
+- You MUST use browser tools (navigate_page, click, fill, take_screenshot)
+- You MUST NOT use curl, fetch, requests, or any HTTP client
+- You MUST NOT use Bash to make API calls
+- You are testing as a REAL USER — navigate pages, click buttons, fill forms
+- Take a screenshot BEFORE and AFTER every major action
+- Save screenshots to the current directory with descriptive names
 
 For each journey:
-1. Navigate to the app
-2. Complete the journey step by step
-3. Take a screenshot at each major step
-4. Record what worked and what failed
+1. navigate_page to the app URL
+2. Take a screenshot showing the initial state
+3. Interact with the UI step by step (click links, fill forms, submit)
+4. Take a screenshot at each key moment
+5. Record what you see — not what the API returns
 
-RULES:
-- Use the browser tools (navigate_page, fill, click, take_screenshot)
-- Actually interact with the UI — don't just check API endpoints
-- Take screenshots as evidence at key moments
-- If a step fails, continue to the next step (don't stop)
-- If you need to login, use the provided credentials
-- Test as a real user would — don't inspect source code
+If a form doesn't submit, that's a FAILURE.
+If a page shows an error, take a screenshot and record the error.
+If navigation leads to a dead end, that's a FAILURE.
+If you can't find a button or link, that's a UX FAILURE.
+
+You are NOT a developer. You cannot read source code or make API calls.
+You can only see what a real user would see in the browser.
 
 After testing all journeys, output a JSON report:
 ```json
@@ -109,11 +113,11 @@ After testing all journeys, output a JSON report:
       "passed": true/false,
       "steps": [
         {{
-          "action": "what you did",
-          "detail": "what happened",
+          "action": "what you did (e.g., 'clicked Add to Cart button')",
+          "detail": "what happened (e.g., 'cart badge updated to show 1 item')",
           "passed": true/false,
           "screenshot": "filename.png",
-          "error": "error if failed"
+          "error": "error if failed (e.g., 'button did nothing, no feedback')"
         }}
       ]
     }}
@@ -160,7 +164,7 @@ async def run_tier2(
         # Default chrome-devtools config
         mcp_servers["chrome-devtools"] = {
             "command": "npx",
-            "args": ["-y", "@anthropic-ai/chrome-devtools-mcp@latest"],
+            "args": ["-y", "chrome-devtools-mcp@latest"],
         }
 
     options = ClaudeAgentOptions(
