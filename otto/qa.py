@@ -32,8 +32,9 @@ _QA_BASE_INSTRUCTIONS = """\
 You are a QA tester. Your job has two parts: VERIFY and BREAK.
 
 PART 1 — VERIFY (required)
-For EACH verifiable [must] item, write and run a targeted verification script.
-Not one big script — one per spec item. This ensures every spec is independently tested.
+For EACH verifiable [must] item, run a targeted verification command.
+You may batch related specs (same function/feature) into one script to save
+time, but each spec must have a clear pass/fail indicator in the output.
 
 Good proof: `python -c "from store import PostStore; s = PostStore(); p = s.create(title='T', content='C', author='A', tags=[]); assert p.status == 'draft'"` → exit 0
 Bad proof: "code inspection confirms create() stores posts correctly"
@@ -83,7 +84,13 @@ When taking browser screenshots, ALWAYS save to a file path:
   take_screenshot(filePath="<proof_dir>/screenshot-<name>.png")
 Do NOT take screenshots without filePath — inline screenshots break the message pipe.
 
-Kill any servers you started (by PID, not pkill)."""
+Kill any servers you started (by PID, not pkill).
+
+WORKFLOW: Run tests first, then write the verdict immediately.
+Do NOT generate a text summary before writing the verdict — put all analysis
+directly into the verdict JSON fields (evidence, proof, extras).
+Write the verdict file in a single Write call. Do NOT read it back or rewrite
+it — the Write tool is reliable. Every rewrite wastes significant time."""
 
 
 def format_spec_v45(spec: list) -> str:
@@ -606,7 +613,8 @@ def _write_batch_proof_artifacts(
             if task_key in (item.get("tasks_involved") or [])
         ]
         task_passed = (
-            all(item.get("status") == "pass" for item in task_must_items)
+            bool(task_must_items)
+            and all(item.get("status") == "pass" for item in task_must_items)
             and not any(item.get("status") == "fail" for item in task_integration_findings)
             and not regressions
             and bool(test_suite_passed)
@@ -760,12 +768,18 @@ async def _run_qa_prompt(
     _qa_start_time = time.monotonic()
     _first_message_time: float | None = None
     _turn_count = 0
+    _early_verdict: dict[str, Any] | None = None  # captured from Write tool input
+    _verdict_write_confirmed = False  # True after ToolResult for verdict Write
+    _verdict_write_confirmed_at: float | None = None  # monotonic time of confirmation
+    _verdict_write_tool_id: str | None = None  # tool_use_id of the verdict Write
+    _verdict_file_str = str(verdict_file)  # for matching Write targets
+    _POST_VERDICT_GRACE = 15  # seconds to allow after verdict before stopping
 
     from otto.display import build_agent_tool_event as _build_agent_tool_event
 
     try:
         async def _run_query():
-            nonlocal qa_cost, _first_message_time, _turn_count
+            nonlocal qa_cost, _first_message_time, _turn_count, _early_verdict, _verdict_write_confirmed, _verdict_write_confirmed_at, _verdict_write_tool_id
             result_msg = None
             async for message in query(prompt=qa_prompt, options=qa_opts):
                 _turn_count += 1
@@ -831,6 +845,20 @@ async def _run_qa_prompt(
                                 detail = ""
                                 if block.name == "Write":
                                     detail = inp.get("file_path", "")
+                                    # Early verdict capture: grab JSON from Write input
+                                    if (
+                                        not _early_verdict
+                                        and str(detail) == _verdict_file_str
+                                    ):
+                                        try:
+                                            candidate = json.loads(inp.get("content", ""))
+                                            if isinstance(candidate, dict) and _is_verdict_complete(
+                                                candidate, expected_must_count=expected_must_count
+                                            ):
+                                                _early_verdict = candidate
+                                                _verdict_write_tool_id = tool_id
+                                        except (json.JSONDecodeError, TypeError):
+                                            pass
                                 elif block.name == "Read":
                                     detail = inp.get("file_path", "")
                                 elif block.name in ("Grep", "Glob"):
@@ -877,6 +905,23 @@ async def _run_qa_prompt(
                                     getattr(block, "content", "")
                                 )
                                 pending_tool_uses[tid]["is_error"] = bool(getattr(block, "is_error", False))
+                            # Check if this is the ToolResult for our verdict Write
+                            if (
+                                _early_verdict
+                                and tid == _verdict_write_tool_id
+                                and not getattr(block, "is_error", False)
+                            ):
+                                _verdict_write_confirmed = True
+                                _verdict_write_confirmed_at = time.monotonic()
+
+                # Post-verdict grace timeout: once verdict is confirmed, allow
+                # a short grace period then raise TimeoutError to stop the session.
+                # This prevents the agent from spending turns reading back / rewriting.
+                if (
+                    _verdict_write_confirmed_at
+                    and (time.monotonic() - _verdict_write_confirmed_at) > _POST_VERDICT_GRACE
+                ):
+                    raise asyncio.TimeoutError()
 
             if result_msg:
                 raw_cost = getattr(result_msg, "total_cost_usd", None)
@@ -885,7 +930,8 @@ async def _run_qa_prompt(
 
         await asyncio.wait_for(_run_query(), timeout=qa_timeout)
     except asyncio.TimeoutError:
-        report_lines.append(f"\n[QA agent timed out after {qa_timeout}s]")
+        if not _verdict_write_confirmed:
+            report_lines.append(f"\n[QA agent timed out after {qa_timeout}s]")
     except Exception as exc:
         error_str = str(exc)
         report_lines.append(f"\n[QA agent error: {error_str}]")
@@ -917,18 +963,22 @@ async def _run_qa_prompt(
             }
 
     raw_report = "\n".join(report_lines)
-    verdict = None
-    if verdict_file.exists():
-        try:
-            verdict_text = verdict_file.read_text().strip()
-            if verdict_text:
-                verdict = json.loads(verdict_text)
-        except (json.JSONDecodeError, OSError) as parse_err:
-            report_lines.append(f"\n[Verdict file parse error: {parse_err}]")
-        finally:
+
+    # Prefer early-captured verdict (grabbed from Write tool input, already validated).
+    # Fall back to file-based or text-based parsing.
+    verdict = _early_verdict
+    if not verdict:
+        if verdict_file.exists():
+            try:
+                verdict_text = verdict_file.read_text().strip()
+                if verdict_text:
+                    verdict = json.loads(verdict_text)
+            except (json.JSONDecodeError, OSError) as parse_err:
+                report_lines.append(f"\n[Verdict file parse error: {parse_err}]")
+            finally:
+                verdict_file.unlink(missing_ok=True)
+        else:
             verdict_file.unlink(missing_ok=True)
-    else:
-        verdict_file.unlink(missing_ok=True)
 
     if not verdict or not _is_verdict_complete(verdict, expected_must_count=expected_must_count):
         # Try parsing verdict from agent's text output (agent often repeats it)
@@ -1045,11 +1095,14 @@ ACCEPTANCE CRITERIA:
 MERGED DIFF:
 {diff}
 
-Write your JSON verdict to: {verdict_file}
-IMPORTANT: Use the Write tool (not bash heredoc/cat) to write the verdict file — it is faster and avoids truncation.
-Save any browser screenshots to: {screenshot_dir}/screenshot-<name>.png
+VERDICT: After running ALL verification commands and BREAK tests, immediately
+write your verdict JSON using the Write tool. One Write call, no rewriting.
+Put all reasoning into the JSON fields — do not generate a text summary first.
 
-Use this JSON structure:
+Write to: {verdict_file}
+Screenshots to: {screenshot_dir}/screenshot-<name>.png
+
+JSON structure:
 {{
   "must_passed": true,
   "must_items": [
@@ -1059,7 +1112,8 @@ Use this JSON structure:
     {{"description": "...", "status": "pass/fail", "test": "...", "tasks_involved": ["abc123", "def456"]}}
   ],
   "regressions": [],
-  "test_suite_passed": true
+  "test_suite_passed": true,
+  "extras": ["edge_case: description of finding"]
 }}"""
 
     else:
@@ -1114,11 +1168,14 @@ ACCEPTANCE CRITERIA:
 DIFF:
 {diff}
 
-Write your JSON verdict to: {verdict_file}
-IMPORTANT: Use the Write tool (not bash heredoc/cat) to write the verdict file — it is faster and avoids truncation.
-Save any browser screenshots to: {screenshot_dir}/screenshot-<name>.png
+VERDICT: After running ALL verification commands and BREAK tests, immediately
+write your verdict JSON using the Write tool. One Write call, no rewriting.
+Put all reasoning into the JSON fields — do not generate a text summary first.
 
-Write your verdict as JSON:
+Write to: {verdict_file}
+Screenshots to: {screenshot_dir}/screenshot-<name>.png
+
+JSON structure:
 {{
   "must_passed": true/false,
   "must_items": [
@@ -1129,7 +1186,7 @@ Write your verdict as JSON:
   ],
   "regressions": [],
   "prompt_intent": "Implementation matches/diverges from original prompt because...",
-  "extras": ["boundary: rate=0 causes ValueError \u2014 may want to handle as burst-only mode"]
+  "extras": ["edge_case: description of finding"]
 }}"""
 
 
@@ -1154,6 +1211,7 @@ def _finalize_qa_result(
 
     if is_batch:
         # --- Batch finalization ---
+        must_items = verdict.get("must_items", []) or []
         integration_findings = verdict.get("integration_findings", []) or []
         integration_failed = any(item.get("status") == "fail" for item in integration_findings)
         regressions = verdict.get("regressions", []) or []
@@ -1161,7 +1219,7 @@ def _finalize_qa_result(
 
         expected_pairs = _expected_batch_must_matrix(tasks)
         actual_pairs: set[tuple[str, int]] = set()
-        for item in verdict.get("must_items", []) or []:
+        for item in must_items:
             task_key = str(item.get("task_key", "") or "").strip()
             try:
                 sid = int(item.get("spec_id"))
@@ -1179,18 +1237,25 @@ def _finalize_qa_result(
                     for tk, sid in missing_pairs
                 ],
             }
+        # Recompute from actual items; if empty, fall back to model flag
+        if must_items:
+            must_passed = all(item.get("status") == "pass" for item in must_items)
+        else:
+            must_passed = bool(qa_result.get("must_passed"))
         overall_passed = (
-            bool(qa_result.get("must_passed"))
+            must_passed
             and not infrastructure_error
             and not missing_pairs
             and not integration_failed
             and not regressions
             and bool(test_suite_passed)
         )
+        # Sync verdict dict so proof report matches result
+        verdict["must_passed"] = overall_passed
 
         failed_task_keys: set[str] = {
             item.get("task_key")
-            for item in verdict.get("must_items", []) or []
+            for item in must_items
             if item.get("status") == "fail" and item.get("task_key")
         }
         for item in integration_findings:
@@ -1216,19 +1281,28 @@ def _finalize_qa_result(
         task_key = task.get("key", "unknown")
         spec = task.get("spec") or []
         expected_must_count = sum(1 for item in spec if spec_binding(item) == "must")
+        must_items = verdict.get("must_items", []) or []
 
-        must_passed = qa_result.get("must_passed", False)
+        # Recompute must_passed from actual items (don't trust model flag).
+        # If must_items is empty, fall back to model's flag — we can't verify.
+        if must_items:
+            must_passed = all(item.get("status") == "pass" for item in must_items)
+        else:
+            must_passed = qa_result.get("must_passed", False)
 
         # Inject task_key into must_items for consistency
-        for item in verdict.get("must_items", []) or []:
+        for item in must_items:
             if not item.get("task_key"):
                 item["task_key"] = task_key
 
         # Validate expected_must_count for pass verdicts
         if must_passed and expected_must_count > 0:
-            actual_must = len(verdict.get("must_items", []) or [])
+            actual_must = len(must_items)
             if actual_must < expected_must_count:
                 must_passed = False
+
+        # Sync verdict dict so proof report matches result
+        verdict["must_passed"] = must_passed
 
         return {
             "must_passed": must_passed,
@@ -1237,7 +1311,7 @@ def _finalize_qa_result(
             "cost_usd": qa_result.get("cost_usd", 0.0),
             "failed_task_keys": sorted(
                 {item.get("task_key") or task_key
-                 for item in verdict.get("must_items", []) or []
+                 for item in must_items
                  if item.get("status") == "fail"}
             ),
             "test_suite_passed": bool(verdict.get("test_suite_passed", True)),

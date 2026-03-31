@@ -350,7 +350,7 @@ class TestRunQaAgentStreamCapture:
             content: list
 
         async def fake_query(*, prompt, options=None):
-            match = re.search(r"Write your JSON verdict to: (.+\.json)", prompt)
+            match = re.search(r"Write (?:your JSON verdict )?to: (.+\.json)", prompt)
             assert match, "QA prompt should include verdict file path"
             Path(match.group(1)).write_text(json.dumps({
                 "must_passed": True,
