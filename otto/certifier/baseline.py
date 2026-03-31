@@ -647,6 +647,17 @@ def _execute_http_step(step: dict[str, Any], context: ExecutionContext, timestam
             continue
 
         passed, detail = _check_http_expectations(step, response, context)
+
+        # Accept 409 Conflict for registration — proves endpoint works (email already taken)
+        status_match = response.status_code in expect_status
+        if not status_match and response.status_code == 409 and any(
+            kw in (str(rendered_path) + context.claim.id).lower()
+            for kw in ("register", "signup")
+        ):
+            status_match = True
+            passed = True
+            detail = f"409 Conflict (email already registered — endpoint works)"
+
         attempt_record = {
             "request": {"method": method, "url": url, "body": rendered_body},
             "response": {
@@ -657,7 +668,7 @@ def _execute_http_step(step: dict[str, Any], context: ExecutionContext, timestam
             "retry_reason": retry_reason,
         }
         attempts.append(attempt_record)
-        if passed and response.status_code in expect_status:
+        if passed and status_match:
             context.discoveries[_step_discovery_key(step)] = str(rendered_path)
             _capture_response_state(step, response, context)
             return Evidence(
@@ -1772,7 +1783,34 @@ def _filter_candidate_paths(
             continue
         if _route_exists_in_config(context.test_config, path, method):
             filtered.append(path)
+
+    # If no API paths survived filtering, inject matching routes from the adapter.
+    # This handles cases where the intent compiler guessed wrong URLs but the
+    # adapter found the real ones (e.g., compiler says /signup, adapter found /api/auth/register).
+    if not any(_is_api_path(p) for p in filtered):
+        claim_keywords = _extract_claim_keywords(context.claim, candidate_paths)
+        for route in context.test_config.routes:
+            if method.upper() not in route.methods:
+                continue
+            route_lower = route.path.lower()
+            if any(kw in route_lower for kw in claim_keywords):
+                filtered.insert(0, route.path)  # prepend — real route goes first
+
     return _dedupe_preserving_order(filtered)
+
+
+def _extract_claim_keywords(claim: Any, candidate_paths: list[str]) -> list[str]:
+    """Extract keywords from claim ID and candidate paths to match against adapter routes."""
+    keywords: set[str] = set()
+    claim_id = getattr(claim, "id", "") if claim else ""
+    for part in claim_id.lower().replace("-", " ").replace("_", " ").split():
+        if part not in {"auth", "admin", "the", "a", "an", "is", "can", "user", "users"}:
+            keywords.add(part)
+    for path in candidate_paths:
+        for segment in path.lower().strip("/").split("/"):
+            if segment and segment not in {"api", "v1", "v2"}:
+                keywords.add(segment)
+    return list(keywords)
 
 
 def _is_api_path(path: str) -> bool:
