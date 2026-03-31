@@ -1428,3 +1428,233 @@ class TestInstallTimeout:
         """install_timeout and verify_timeout should be separate config values."""
         from otto.config import DEFAULT_CONFIG
         assert DEFAULT_CONFIG["install_timeout"] != DEFAULT_CONFIG["verify_timeout"]
+
+
+# ── Parallel QA ─────────────────────────────────────────────────────────
+
+
+class TestParallelQA:
+    """Tests for parallel per-task QA via asyncio.gather."""
+
+    def _make_tasks(self, visual=False):
+        """Create task list. If visual=True, add a non-verifiable ◈ spec."""
+        spec1 = [{"text": "A works", "binding": "must", "verifiable": True}]
+        spec2 = [{"text": "B works", "binding": "must", "verifiable": True}]
+        if visual:
+            spec1.append({"text": "A looks good", "binding": "must", "verifiable": False})
+        return [
+            {"key": "t1", "prompt": "Task A", "spec": spec1},
+            {"key": "t2", "prompt": "Task B", "spec": spec2},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_parallel_dispatches_per_task_sessions(self, tmp_path):
+        """parallel_qa=True with code-only tasks dispatches per-task run_qa calls."""
+        call_args = []
+
+        async def fake_run_qa(tasks, config, project_dir, diff, **kw):
+            call_args.append([t["key"] for t in tasks])
+            return {
+                "must_passed": True,
+                "verdict": {"must_passed": True, "must_items": [
+                    {"task_key": tasks[0]["key"], "spec_id": 1, "status": "pass"},
+                ]},
+                "raw_report": "",
+                "cost_usd": 0.50,
+            }
+
+        config = {"parallel_qa": True}
+        tasks = self._make_tasks()
+        with patch("otto.orchestrator.run_qa", side_effect=fake_run_qa):
+            result = await _run_batch_qa(
+                tasks, config, tmp_path, tmp_path / "tasks.yaml",
+                MagicMock(), MagicMock(),
+            )
+
+        # Should dispatch 2 separate per-task calls, not 1 batch call
+        assert len(call_args) == 2
+        assert call_args[0] == ["t1"]
+        assert call_args[1] == ["t2"]
+        assert result["must_passed"] is True
+        assert result["cost_usd"] == 1.0  # 2 × $0.50
+
+    @pytest.mark.asyncio
+    async def test_parallel_falls_back_for_visual_specs(self, tmp_path):
+        """parallel_qa=True with ◈ specs falls back to flat batch QA."""
+        call_args = []
+
+        async def fake_run_qa(tasks, config, project_dir, diff, **kw):
+            call_args.append([t["key"] for t in tasks])
+            return {
+                "must_passed": True,
+                "verdict": {"must_passed": True, "must_items": []},
+                "raw_report": "",
+                "cost_usd": 0.50,
+            }
+
+        config = {"parallel_qa": True}
+        tasks = self._make_tasks(visual=True)  # has ◈ spec
+        with patch("otto.orchestrator.run_qa", side_effect=fake_run_qa):
+            result = await _run_batch_qa(
+                tasks, config, tmp_path, tmp_path / "tasks.yaml",
+                MagicMock(), MagicMock(),
+            )
+
+        # Should dispatch 1 batch call (flat), not 2 per-task calls
+        assert len(call_args) == 1
+        assert sorted(call_args[0]) == ["t1", "t2"]
+
+    @pytest.mark.asyncio
+    async def test_parallel_merge_propagates_failure(self, tmp_path):
+        """When one parallel session fails, merged result reflects it."""
+        call_count = 0
+
+        async def fake_run_qa(tasks, config, project_dir, diff, **kw):
+            nonlocal call_count
+            call_count += 1
+            key = tasks[0]["key"]
+            if key == "t2":
+                return {
+                    "must_passed": False,
+                    "verdict": {"must_passed": False, "must_items": [
+                        {"task_key": "t2", "spec_id": 1, "status": "fail",
+                         "evidence": "B broken"},
+                    ]},
+                    "raw_report": "",
+                    "cost_usd": 0.40,
+                }
+            return {
+                "must_passed": True,
+                "verdict": {"must_passed": True, "must_items": [
+                    {"task_key": "t1", "spec_id": 1, "status": "pass"},
+                ]},
+                "raw_report": "",
+                "cost_usd": 0.50,
+            }
+
+        config = {"parallel_qa": True}
+        tasks = self._make_tasks()
+        with patch("otto.orchestrator.run_qa", side_effect=fake_run_qa):
+            result = await _run_batch_qa(
+                tasks, config, tmp_path, tmp_path / "tasks.yaml",
+                MagicMock(), MagicMock(),
+            )
+
+        assert result["must_passed"] is False
+        assert "t2" in result["failed_task_keys"]
+        assert len(result["verdict"]["must_items"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_parallel_propagates_infrastructure_error(self, tmp_path):
+        """Infrastructure error in one session propagates to merged result."""
+        async def fake_run_qa(tasks, config, project_dir, diff, **kw):
+            key = tasks[0]["key"]
+            if key == "t1":
+                return {
+                    "must_passed": None,
+                    "verdict": {},
+                    "raw_report": "",
+                    "cost_usd": 0.0,
+                    "infrastructure_error": True,
+                }
+            return {
+                "must_passed": True,
+                "verdict": {"must_passed": True, "must_items": [
+                    {"task_key": "t2", "spec_id": 1, "status": "pass"},
+                ]},
+                "raw_report": "",
+                "cost_usd": 0.50,
+            }
+
+        config = {"parallel_qa": True}
+        tasks = self._make_tasks()
+        with patch("otto.orchestrator.run_qa", side_effect=fake_run_qa):
+            result = await _run_batch_qa(
+                tasks, config, tmp_path, tmp_path / "tasks.yaml",
+                MagicMock(), MagicMock(),
+            )
+
+        assert result["infrastructure_error"] is True
+
+    @pytest.mark.asyncio
+    async def test_parallel_exception_in_one_session_doesnt_crash(self, tmp_path):
+        """If one per-task QA session throws, others still complete."""
+        async def fake_run_qa(tasks, config, project_dir, diff, **kw):
+            key = tasks[0]["key"]
+            if key == "t1":
+                raise RuntimeError("SDK crashed")
+            return {
+                "must_passed": True,
+                "verdict": {"must_passed": True, "must_items": [
+                    {"task_key": "t2", "spec_id": 1, "status": "pass"},
+                ]},
+                "raw_report": "",
+                "cost_usd": 0.50,
+            }
+
+        config = {"parallel_qa": True}
+        tasks = self._make_tasks()
+        with patch("otto.orchestrator.run_qa", side_effect=fake_run_qa):
+            result = await _run_batch_qa(
+                tasks, config, tmp_path, tmp_path / "tasks.yaml",
+                MagicMock(), MagicMock(),
+            )
+
+        # t1 crashed → must_passed=False, t2 passed
+        assert result["must_passed"] is False
+        assert "t1" in result["failed_task_keys"]
+
+    @pytest.mark.asyncio
+    async def test_parallel_disabled_by_default(self, tmp_path):
+        """Without parallel_qa config, uses flat batch QA."""
+        call_args = []
+
+        async def fake_run_qa(tasks, config, project_dir, diff, **kw):
+            call_args.append([t["key"] for t in tasks])
+            return {
+                "must_passed": True,
+                "verdict": {"must_passed": True, "must_items": []},
+                "raw_report": "",
+                "cost_usd": 0.50,
+            }
+
+        config = {}  # no parallel_qa
+        tasks = self._make_tasks()
+        with patch("otto.orchestrator.run_qa", side_effect=fake_run_qa):
+            result = await _run_batch_qa(
+                tasks, config, tmp_path, tmp_path / "tasks.yaml",
+                MagicMock(), MagicMock(),
+            )
+
+        # Should be 1 batch call with both tasks
+        assert len(call_args) == 1
+        assert sorted(call_args[0]) == ["t1", "t2"]
+
+    @pytest.mark.asyncio
+    async def test_parallel_focused_retries_filter_tasks(self, tmp_path):
+        """Focused retries only dispatch sessions for focused task keys."""
+        call_args = []
+
+        async def fake_run_qa(tasks, config, project_dir, diff, **kw):
+            call_args.append([t["key"] for t in tasks])
+            return {
+                "must_passed": True,
+                "verdict": {"must_passed": True, "must_items": [
+                    {"task_key": tasks[0]["key"], "spec_id": 1, "status": "pass"},
+                ]},
+                "raw_report": "",
+                "cost_usd": 0.50,
+            }
+
+        config = {"parallel_qa": True}
+        tasks = self._make_tasks()
+        with patch("otto.orchestrator.run_qa", side_effect=fake_run_qa):
+            result = await _run_batch_qa(
+                tasks, config, tmp_path, tmp_path / "tasks.yaml",
+                MagicMock(), MagicMock(),
+                focus_task_keys={"t2"},
+            )
+
+        # Should only dispatch session for t2, not t1
+        assert len(call_args) == 1
+        assert call_args[0] == ["t2"]
