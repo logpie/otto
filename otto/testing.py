@@ -224,9 +224,11 @@ def run_local_tests(
         return TierResult(tier="existing_tests", passed=True, skipped=True)
     try:
         result = _run_shell_command(test_command, workdir, timeout, env=env)
+        # pytest exit code 5 = "no tests collected" — treat as passed (greenfield)
+        passed = result.returncode == 0 or result.returncode == 5
         return TierResult(
             tier="existing_tests",
-            passed=result.returncode == 0,
+            passed=passed,
             output=result.stdout + result.stderr,
         )
     except subprocess.TimeoutExpired:
