@@ -217,6 +217,13 @@ def _parse_qa_verdict_json(report: str) -> dict[str, Any]:
     }
 
 
+def _has_explicit_fail_markers(report: str) -> bool:
+    """Return True when the report text explicitly signals failure."""
+    import re as _re
+
+    return bool(_re.search(r"\bfail(?:ed|ing|s|ure|ures)?\b", report, _re.IGNORECASE))
+
+
 # ---------------------------------------------------------------------------
 # Proof artifact helpers
 # ---------------------------------------------------------------------------
@@ -852,16 +859,15 @@ async def _run_qa_prompt(
                                 if block.name == "Write":
                                     detail = inp.get("file_path", "")
                                     # Early verdict capture: grab JSON from Write input
-                                    if (
-                                        not state.early_verdict
-                                        and str(detail) == _verdict_file_str
-                                    ):
+                                    if str(detail) == _verdict_file_str:
                                         try:
                                             candidate = json.loads(inp.get("content", ""))
                                             if isinstance(candidate, dict) and _is_verdict_complete(
                                                 candidate, expected_must_count=expected_must_count
                                             ):
                                                 state.early_verdict = candidate
+                                                state.verdict_write_confirmed = False
+                                                state.verdict_write_confirmed_at = None
                                                 state.verdict_write_tool_id = tool_id
                                         except (json.JSONDecodeError, TypeError):
                                             pass
@@ -987,13 +993,17 @@ async def _run_qa_prompt(
         else:
             verdict_file.unlink(missing_ok=True)
 
+    parse_infrastructure_error = False
     if not verdict or not _is_verdict_complete(verdict, expected_must_count=expected_must_count):
         # Try parsing verdict from agent's text output (agent often repeats it)
         verdict = _parse_qa_verdict_json(raw_report)
+        if verdict.get("_legacy_parse") and not _has_explicit_fail_markers(raw_report):
+            verdict["must_passed"] = None
+            parse_infrastructure_error = True
         # Legacy/fallback verdicts claiming pass without must_items evidence
         # are not trustworthy — force fail. But if the raw report contains
         # valid structured JSON with must_items, trust it.
-        if not _is_verdict_complete(verdict, expected_must_count=expected_must_count):
+        elif not _is_verdict_complete(verdict, expected_must_count=expected_must_count):
             verdict["must_passed"] = False
 
     # Write QA agent log with timestamps for debugging
@@ -1038,6 +1048,7 @@ async def _run_qa_prompt(
         "raw_report": raw_report,
         "cost_usd": query_state.qa_cost,
         "qa_actions": qa_actions,
+        "infrastructure_error": parse_infrastructure_error,
     }
 
 
@@ -1307,6 +1318,10 @@ def _finalize_qa_result(
             actual_must = len(must_items)
             if actual_must < expected_must_count:
                 must_passed = False
+        regressions = verdict.get("regressions", []) or []
+        test_suite_passed = verdict.get("test_suite_passed", True)
+        if must_passed and (regressions or not test_suite_passed):
+            must_passed = False
 
         # Sync verdict dict so proof report matches result
         verdict["must_passed"] = must_passed
@@ -1321,7 +1336,7 @@ def _finalize_qa_result(
                  for item in must_items
                  if item.get("status") == "fail"}
             ),
-            "test_suite_passed": bool(verdict.get("test_suite_passed", True)),
+            "test_suite_passed": bool(test_suite_passed),
             "infrastructure_error": infrastructure_error,
         }
 
