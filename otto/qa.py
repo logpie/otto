@@ -100,8 +100,6 @@ class _QAQueryState:
     first_message_time: float | None = None
     turn_count: int = 0
     early_verdict: dict[str, Any] | None = None
-    verdict_write_confirmed: bool = False
-    verdict_write_tool_id: str | None = None
 
 
 def format_spec_v45(spec: list) -> str:
@@ -864,8 +862,6 @@ async def _run_qa_prompt(
                                                 candidate, expected_must_count=expected_must_count
                                             ):
                                                 state.early_verdict = candidate
-                                                state.verdict_write_confirmed = False
-                                                state.verdict_write_tool_id = tool_id
                                         except (json.JSONDecodeError, TypeError):
                                             pass
                                 elif block.name == "Read":
@@ -914,13 +910,6 @@ async def _run_qa_prompt(
                                     getattr(block, "content", "")
                                 )
                                 pending_tool_uses[tid]["is_error"] = bool(getattr(block, "is_error", False))
-                            # Check if this is the ToolResult for our verdict Write
-                            if (
-                                state.early_verdict
-                                and tid == state.verdict_write_tool_id
-                                and not getattr(block, "is_error", False)
-                            ):
-                                state.verdict_write_confirmed = True
 
             if result_msg:
                 raw_cost = getattr(result_msg, "total_cost_usd", None)
@@ -930,7 +919,10 @@ async def _run_qa_prompt(
 
         query_state = await asyncio.wait_for(_run_query(), timeout=qa_timeout)
     except asyncio.TimeoutError:
-        report_lines.append(f"\n[QA agent timed out after {qa_timeout}s]")
+        if query_state.early_verdict:
+            report_lines.append(f"\n[QA agent timed out after {qa_timeout}s — verdict already captured]")
+        else:
+            report_lines.append(f"\n[QA agent timed out after {qa_timeout}s]")
     except Exception as exc:
         error_str = str(exc)
         report_lines.append(f"\n[QA agent error: {error_str}]")
