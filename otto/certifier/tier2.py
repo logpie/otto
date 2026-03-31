@@ -40,12 +40,21 @@ logger = logging.getLogger("otto.certifier.tier2")
 
 
 @dataclass
+class StepProof:
+    """Evidence for a single journey step."""
+    timestamp: str = ""
+    request: dict[str, Any] = field(default_factory=dict)   # method, url, body
+    response: dict[str, Any] = field(default_factory=dict)   # status, body (truncated)
+
+
+@dataclass
 class JourneyStep:
     action: str
     detail: str
     passed: bool
     data: dict[str, Any] = field(default_factory=dict)  # output for next step
     error: str = ""
+    proof: StepProof = field(default_factory=StepProof)
 
 
 @dataclass
@@ -221,7 +230,18 @@ def _exec_register(session: requests.Session, base_url: str, config: TestConfig,
         try:
             r = session.post(f"{base_url}{path}", json={"email": email, "password": password, "name": name}, timeout=10)
             if r.status_code in (200, 201, 409):
-                return JourneyStep(action="register", detail=f"POST {path} → {r.status_code}", passed=True, data=r.json() if r.status_code != 409 else {"email": email})
+                resp_body = {}
+                try: resp_body = r.json()
+                except Exception: pass
+                return JourneyStep(
+                    action="register", detail=f"POST {path} → {r.status_code}",
+                    passed=True, data=resp_body if r.status_code != 409 else {"email": email},
+                    proof=StepProof(
+                        timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        request={"method": "POST", "url": f"{base_url}{path}", "body": {"email": email, "password": "***", "name": name}},
+                        response={"status": r.status_code, "body": resp_body},
+                    ),
+                )
         except Exception:
             continue
     return JourneyStep(action="register", detail="registration failed", passed=False, error="no register endpoint responded")
@@ -323,9 +343,24 @@ def _exec_http(session: requests.Session, base_url: str, method: str, step: dict
                         response_data = raw
                 except Exception:
                     pass
+                response_body_preview = {}
+                try:
+                    response_body_preview = r.json()
+                    if isinstance(response_body_preview, (dict, list)):
+                        preview_str = json.dumps(response_body_preview)
+                        if len(preview_str) > 500:
+                            response_body_preview = json.loads(preview_str[:500] + "...")
+                except Exception:
+                    response_body_preview = {"text": r.text[:200]}
+
                 return JourneyStep(
                     action=f"{method} {rendered_path}", detail=f"{r.status_code}",
                     passed=True, data=response_data,
+                    proof=StepProof(
+                        timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        request={"method": method, "url": url, "body": body},
+                        response={"status": r.status_code, "body": response_body_preview},
+                    ),
                 )
         except Exception:
             continue
@@ -1127,8 +1162,12 @@ def save_tier2_report(result: Tier2Result, path: Path) -> None:
                         "action": s.action,
                         "detail": s.detail,
                         "passed": s.passed,
-                        "data": s.data,
                         "error": s.error,
+                        "proof": {
+                            "timestamp": s.proof.timestamp,
+                            "request": s.proof.request,
+                            "response": s.proof.response,
+                        } if s.proof.timestamp else None,
                     }
                     for s in j.steps
                 ],
