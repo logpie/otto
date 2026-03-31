@@ -83,8 +83,13 @@ def run_tier2_sequential(
     test_config: TestConfig,
     base_url: str,
     project_dir: Path,
+    matrix: RequirementMatrix | None = None,
 ) -> Tier2Result:
-    """Run Tier 2 sequential journey tests. No LLM needed."""
+    """Run Tier 2 sequential journey tests. No LLM needed.
+
+    Journeys are derived from claims in the matrix (if provided)
+    plus standard flows based on adapter-discovered features.
+    """
     start_time = time.monotonic()
 
     _tier2_log(
@@ -95,14 +100,20 @@ def run_tier2_sequential(
 
     journeys = []
 
-    # Journey 1: Full shopping flow
-    journeys.append(_test_shopping_journey(test_config, base_url))
+    # Core journeys based on adapter-discovered features
+    if test_config.register_endpoint or test_config.has_cart_model:
+        journeys.append(_test_shopping_journey(test_config, base_url))
 
-    # Journey 2: Admin management flow
-    journeys.append(_test_admin_journey(test_config, base_url))
+    if test_config.admin_user():
+        journeys.append(_test_admin_journey(test_config, base_url))
 
-    # Journey 3: Error handling flow
+    # Always test error handling
     journeys.append(_test_error_journey(test_config, base_url))
+
+    # Additional journeys from matrix claims (features not covered above)
+    if matrix:
+        extra = _derive_extra_journeys(matrix, test_config, base_url)
+        journeys.extend(extra)
 
     duration_s = round(time.monotonic() - start_time, 1)
     passed = sum(1 for j in journeys if j.passed)
@@ -534,6 +545,164 @@ def _test_error_journey(config: TestConfig, base_url: str) -> JourneyResult:
 # ---------------------------------------------------------------------------
 # Reports
 # ---------------------------------------------------------------------------
+
+def _derive_extra_journeys(
+    matrix: RequirementMatrix,
+    config: TestConfig,
+    base_url: str,
+) -> list[JourneyResult]:
+    """Derive additional journeys from uncovered matrix claims."""
+    extra: list[JourneyResult] = []
+
+    # Search/filter journey — if catalog claims mention search
+    has_search = any("search" in c.id.lower() or "filter" in c.id.lower() for c in matrix.claims)
+    if has_search:
+        extra.append(_test_search_journey(config, base_url))
+
+    # Data persistence journey — verify state survives across sessions
+    has_persistence = any("persist" in c.id.lower() or "history" in c.id.lower() for c in matrix.claims)
+    if has_persistence:
+        extra.append(_test_persistence_journey(config, base_url))
+
+    return extra
+
+
+def _test_search_journey(config: TestConfig, base_url: str) -> JourneyResult:
+    """Search for products and verify results are relevant."""
+    steps: list[JourneyStep] = []
+    session = requests.Session()
+
+    # Authenticate if needed
+    if config.auth_type == "nextauth" and config.any_user():
+        user = config.any_user()
+        try:
+            csrf = session.get(f"{base_url}/api/auth/csrf", timeout=10).json().get("csrfToken", "")
+            session.post(f"{base_url}/api/auth/callback/credentials", data={
+                "email": user.email, "password": user.password,
+                "csrfToken": csrf, "redirect": "false", "json": "true",
+            }, timeout=10, allow_redirects=False)
+        except Exception:
+            pass
+
+    # Step 1: Get products to know what to search for
+    product_name = None
+    for path in ["/api/products"]:
+        try:
+            r = session.get(f"{base_url}{path}", timeout=10)
+            if r.status_code == 200:
+                data = r.json()
+                products = data if isinstance(data, list) else data.get("data") or data.get("products") or []
+                if products and len(products) > 0:
+                    product_name = products[0].get("name", "")
+                    steps.append(JourneyStep(
+                        action="get_product_name", detail=f"Found product: {product_name}", passed=True,
+                    ))
+                    break
+        except Exception:
+            pass
+
+    if not product_name:
+        steps.append(JourneyStep(action="get_product_name", detail="no products found", passed=False, error="catalog empty"))
+        return JourneyResult(name="Search", description="Search products and verify results", passed=False, steps=steps, stopped_at="get_product_name")
+
+    # Step 2: Search for first word of product name
+    search_term = product_name.split()[0] if product_name else "test"
+    for param in ["q", "search", "query"]:
+        try:
+            r = session.get(f"{base_url}/api/products", params={param: search_term}, timeout=10)
+            if r.status_code == 200:
+                data = r.json()
+                results = data if isinstance(data, list) else data.get("data") or data.get("products") or []
+                if isinstance(results, list) and len(results) < 20:  # filtered, not all products
+                    found = any(search_term.lower() in json.dumps(p).lower() for p in results)
+                    steps.append(JourneyStep(
+                        action="search",
+                        detail=f"Search '{search_term}' ({param}=) → {len(results)} results, target {'found' if found else 'not found'}",
+                        passed=found,
+                        error="" if found else f"search for '{search_term}' didn't find '{product_name}'",
+                    ))
+                    all_passed = all(s.passed for s in steps)
+                    return JourneyResult(name="Search", description="Search products and verify results", passed=all_passed, steps=steps)
+        except Exception:
+            continue
+
+    steps.append(JourneyStep(action="search", detail="no search param worked", passed=False, error="search not functional"))
+    return JourneyResult(name="Search", description="Search products and verify results", passed=False, steps=steps)
+
+
+def _test_persistence_journey(config: TestConfig, base_url: str) -> JourneyResult:
+    """Verify data persists across sessions."""
+    steps: list[JourneyStep] = []
+
+    # Session 1: Create something
+    s1 = requests.Session()
+    if config.auth_type == "nextauth" and config.any_user():
+        user = config.any_user()
+        try:
+            csrf = s1.get(f"{base_url}/api/auth/csrf", timeout=10).json().get("csrfToken", "")
+            s1.post(f"{base_url}/api/auth/callback/credentials", data={
+                "email": user.email, "password": user.password,
+                "csrfToken": csrf, "redirect": "false", "json": "true",
+            }, timeout=10, allow_redirects=False)
+        except Exception:
+            pass
+
+    # Add to cart in session 1
+    product_id = None
+    try:
+        r = s1.get(f"{base_url}/api/products", timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            products = data if isinstance(data, list) else data.get("data") or data.get("products") or []
+            if products:
+                product_id = products[0].get("id")
+    except Exception:
+        pass
+
+    if product_id:
+        try:
+            r = s1.post(f"{base_url}/api/cart", json={"productId": product_id, "quantity": 1}, timeout=10)
+            steps.append(JourneyStep(
+                action="session1_add_cart", detail=f"Added product {product_id} to cart ({r.status_code})",
+                passed=r.status_code in (200, 201),
+            ))
+        except Exception as e:
+            steps.append(JourneyStep(action="session1_add_cart", detail=str(e), passed=False, error=str(e)))
+
+    # Session 2: Fresh login, check cart persists
+    s2 = requests.Session()
+    if config.auth_type == "nextauth" and config.any_user():
+        user = config.any_user()
+        try:
+            csrf = s2.get(f"{base_url}/api/auth/csrf", timeout=10).json().get("csrfToken", "")
+            s2.post(f"{base_url}/api/auth/callback/credentials", data={
+                "email": user.email, "password": user.password,
+                "csrfToken": csrf, "redirect": "false", "json": "true",
+            }, timeout=10, allow_redirects=False)
+        except Exception:
+            pass
+
+    try:
+        r = s2.get(f"{base_url}/api/cart", timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            items = data if isinstance(data, list) else data.get("data") or data.get("items") or []
+            has_items = isinstance(items, list) and len(items) > 0
+            steps.append(JourneyStep(
+                action="session2_check_cart",
+                detail=f"New session, cart has {len(items) if isinstance(items, list) else '?'} item(s)",
+                passed=has_items,
+                error="" if has_items else "cart empty after re-login — data not persisted",
+            ))
+    except Exception as e:
+        steps.append(JourneyStep(action="session2_check_cart", detail=str(e), passed=False, error=str(e)))
+
+    all_passed = all(s.passed for s in steps)
+    return JourneyResult(
+        name="Data Persistence", description="Cart data survives across sessions",
+        passed=all_passed, steps=steps,
+    )
+
 
 def save_tier2_report(result: Tier2Result, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
