@@ -98,7 +98,6 @@ otto run "prompt"       One-off: add + run in single command
 otto run --no-spec      Skip spec generation
 otto run --no-qa        Skip QA (merge after tests pass)
 otto run --no-test      Skip testing (merge after coding)
-otto run --max-parallel N  Override max_parallel for this run
 otto run --dry-run      Show execution plan without running
 otto status             Show task table with specs, cost, timing
 otto show <id>          Show task details + QA verdict
@@ -125,7 +124,8 @@ Otto is infrastructure, not intelligence. The intelligence is Claude's. Otto pro
     │  1. Smart Planner                                       │
     │     Analyzes task relationships:                        │
     │     INDEPENDENT → parallel  DEPENDENT → serialize       │
-    │     ADDITIVE (same file) → serialize                    │
+    │     ADDITIVE (same file, diff functions) → parallel     │
+    │     UNCERTAIN (same function) → serialize               │
     │     CONTRADICTORY → flag + separate batches (never drop) │
     │                                                         │
     │  2. Per-task pipeline (parallel worktrees):             │
@@ -173,7 +173,7 @@ Independent tasks within a batch run concurrently in git worktrees:
 
 - **Within-batch** = parallel (tasks are independent, each in its own worktree)
 - **Cross-batch** = serial (later batches depend on earlier results)
-- **Same-file tasks** = serialized (additive overlap causes reliable merge conflicts)
+- **Same-file, different functions** = parallel (ADDITIVE — merge conflicts auto-resolved)
 - **Merge conflict** = coding agent re-applies with full diff as context (one agent, adapts intelligently — simple conflicts resolve fast, complex ones get more exploration)
 - **Batch QA** = one session on integrated codebase with combined specs, behavioral testing required
 
@@ -191,7 +191,7 @@ Each spec item has a binding level and verifiability marker:
 
 ### QA verdict
 
-QA produces structured JSON with per-item evidence and proof:
+QA produces structured JSON with per-item evidence and proof. Verdict acquisition uses 3-layer fallback: (1) early capture from Write tool stream, (2) verdict temp file, (3) text parsing. `must_passed` is recomputed from actual item statuses — never trusting the model's self-reported flag.
 
 ```json
 {
@@ -286,7 +286,7 @@ Set `max_parallel: 2` (or higher) to run independent tasks concurrently. Each ta
 
 ```
 otto/
-  cli.py             — CLI (add, run, plan, status, show, retry, drop, revert, logs)
+  cli.py             — CLI (add, run, status, show, retry, drop, revert, logs)
   runner.py           — v4.5 pipeline: bare CC coding, structured QA, retry
   spec.py             — Spec generation with [must]/[should]/◈ classification
   testing.py          — Testing in disposable worktrees

@@ -18,7 +18,7 @@ cat otto_logs/run-history.jsonl       # Cost, time, pass/fail per run
 | `attempt-N-agent.log` | What the coding agent did — tool calls, file reads/writes. |
 | `attempt-N-verify.log` | Full test suite output for that attempt. |
 | `spec-agent.log` | What the spec agent read and generated. |
-| `qa-agent.log` | What the QA agent ran — Bash commands + output. **Check this when QA passes but verify.sh fails.** |
+| `qa-agent.log` | What the QA agent ran — ALL tool calls (Bash, Write, Read, Grep, etc.) + timestamps. **Check this when QA passes but verify.sh fails.** |
 | `qa-tier.log` | QA decision log — task context, attempt info. |
 | `qa-report.md` | QA agent's reasoning text. |
 | `qa-verdict.json` | Structured verdict with per-item pass/fail + evidence. |
