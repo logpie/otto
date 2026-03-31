@@ -143,7 +143,6 @@ def run_tier2_from_journeys(
     report_dir = project_dir / "certifier-reports"
     report_dir.mkdir(parents=True, exist_ok=True)
     save_tier2_report(tier2_result, report_dir / "tier2-report.json")
-    save_tier2_markdown(tier2_result, report_dir / "tier2-report.md")
 
     _tier2_log(project_dir, f"Tier 2 done: {tier2_result.score()}, {duration_s}s")
     return tier2_result
@@ -569,7 +568,6 @@ def run_tier2_sequential(
     report_dir = project_dir / "certifier-reports"
     report_dir.mkdir(parents=True, exist_ok=True)
     save_tier2_report(result, report_dir / "tier2-report.json")
-    save_tier2_markdown(result, report_dir / "tier2-report.md")
 
     _tier2_log(
         project_dir,
