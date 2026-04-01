@@ -178,6 +178,25 @@ class TestWriteProofArtifacts:
         # should notes NOT in proof report (they're in must-N.md only)
         assert "Good variable names" not in content
 
+    def test_proof_report_marks_cost_unavailable(self, tmp_path):
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        verdict = self._make_verdict()
+        task = {"key": "test123"}
+        _write_proof_artifacts(
+            log_dir,
+            verdict,
+            [],
+            task,
+            "Test prompt",
+            0.0,
+            cost_available=False,
+        )
+
+        content = (log_dir / "qa-proofs" / "proof-report.md").read_text()
+        assert "QA cost unavailable" in content
+        assert "QA $0.00" not in content
+
     def test_no_bash_commands_no_script(self, tmp_path):
         log_dir = tmp_path / "logs"
         log_dir.mkdir()
@@ -506,6 +525,63 @@ class TestRunBatchQaAgentProofArtifacts:
         assert (tmp_path / "otto_logs" / "task-two" / "qa-proofs" / "must-1.md").read_text().find("task two works") >= 0
         assert "Integration Findings" in batch_report.read_text()
         assert "tasks integrate cleanly" in task_one_report.read_text()
+
+    @pytest.mark.asyncio
+    async def test_single_task_batch_context_syncs_task_artifacts(self, tmp_path):
+        task = {
+            "id": 1,
+            "key": "task-single",
+            "prompt": "Implement single task",
+            "spec": [{"text": "single task works", "binding": "must"}],
+        }
+        task_log_dir = tmp_path / "otto_logs" / "task-single"
+        task_log_dir.mkdir(parents=True, exist_ok=True)
+        stale_proofs = task_log_dir / "qa-proofs"
+        stale_proofs.mkdir(parents=True, exist_ok=True)
+        (stale_proofs / "proof-report.md").write_text("STALE FAILED REPORT")
+
+        qa_result = {
+            "must_passed": True,
+            "verdict": {
+                "must_passed": True,
+                "must_items": [
+                    {
+                        "task_key": "task-single",
+                        "spec_id": 1,
+                        "criterion": "single task works",
+                        "status": "pass",
+                        "evidence": "pytest passed",
+                        "proof": ["pytest tests/test_single.py -q"],
+                    },
+                ],
+                "integration_findings": [],
+                "regressions": [],
+                "test_suite_passed": True,
+            },
+            "raw_report": "single batch qa passed",
+            "cost_usd": 0.0,
+            "qa_actions": [
+                {"type": "bash", "command": "pytest tests/test_single.py -q", "output": "1 passed", "is_error": False},
+            ],
+            "usage": {},
+        }
+
+        with patch("otto.qa._run_qa_prompt", new=AsyncMock(return_value=qa_result)):
+            result = await run_qa(
+                [task],
+                {"provider": "codex"},
+                tmp_path,
+                diff="diff --git a/app.py b/app.py",
+                log_dir=tmp_path / "otto_logs" / "batch-qa-single",
+                batch_context=True,
+            )
+
+        assert result["must_passed"] is True
+        assert (task_log_dir / "qa-report.md").exists()
+        assert (task_log_dir / "qa-verdict.json").exists()
+        proof_report = (task_log_dir / "qa-proofs" / "proof-report.md").read_text()
+        assert "STALE FAILED REPORT" not in proof_report
+        assert "✓ PASSED" in proof_report
 
 
 class TestFinalizeQaResult:

@@ -13,6 +13,7 @@ from otto.testing import (
     TierResult,
     TestSuiteResult,
     _install_deps,
+    _subprocess_env,
     run_local_tests,
     run_tier3,
     run_integration_gate,
@@ -63,6 +64,19 @@ class TestRunLocalTests:
             call(4321, signal.SIGTERM),
             call(4321, signal.SIGKILL),
         ]
+
+
+class TestSubprocessEnv:
+    def test_adds_src_to_pythonpath_when_present(self, tmp_path):
+        (tmp_path / "src").mkdir()
+        env = _subprocess_env(tmp_path)
+        assert env["PYTHONPATH"].split(os.pathsep)[0] == str(tmp_path / "src")
+
+    def test_prepends_project_venv_bin_when_present(self, tmp_path):
+        venv_bin = tmp_path / ".venv" / "bin"
+        venv_bin.mkdir(parents=True)
+        env = _subprocess_env(tmp_path)
+        assert env["PATH"].split(os.pathsep)[0] == str(venv_bin)
 
 
 

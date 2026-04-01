@@ -19,11 +19,13 @@ from otto.agent import (
     ToolResultBlock,
     ToolUseBlock,
     _subprocess_env,
+    merge_usage,
+    normalize_usage,
     query,
     tool_use_summary as _tool_use_summary,
 )
 
-from otto.config import git_meta_dir, detect_test_command
+from otto.config import agent_provider, git_meta_dir, detect_test_command
 from otto.context import QAMode
 from otto.display import _truncate_at_word, console, format_cost, format_duration, rich_escape
 from otto.git_ops import (
@@ -47,6 +49,29 @@ from otto.tasks import load_tasks, update_task
 from otto.testing import run_test_suite, _subprocess_env
 from otto.claim_verify import verify_claims, format_claim_findings
 from otto.retry_excerpt import build_retry_excerpt
+
+
+def _display_cost_text(cost: float, *, available: bool) -> str:
+    """Render cost for terminal output."""
+    if not available:
+        return "cost unavailable"
+    return f"${cost:.2f}"
+
+
+def _usage_text(token_usage: dict[str, int]) -> str:
+    """Render a concise token-usage summary."""
+    if not token_usage:
+        return ""
+    parts = []
+    if token_usage.get("input_tokens"):
+        parts.append(f"in {token_usage['input_tokens']}")
+    if token_usage.get("cached_input_tokens"):
+        parts.append(f"cache {token_usage['cached_input_tokens']}")
+    if token_usage.get("output_tokens"):
+        parts.append(f"out {token_usage['output_tokens']}")
+    if token_usage.get("total_tokens"):
+        parts.append(f"total {token_usage['total_tokens']}")
+    return "tokens " + ", ".join(parts) if parts else ""
 
 
 def _suggest_claude_md(project_dir: Path) -> None:
@@ -187,6 +212,16 @@ def preflight_checks(
                 if d not in existing_exclude and d.rstrip("/") not in existing_exclude:
                     framework_excludes.append(d)
 
+    # Greenfield heuristics before manifests exist.
+    if any(project_dir.rglob("*.py")):
+        for entry in ("__pycache__/", ".pytest_cache/", ".venv/"):
+            if entry not in existing_exclude and entry.rstrip("/") not in existing_exclude:
+                framework_excludes.append(entry)
+    if any(project_dir.rglob("*.js")) or any(project_dir.rglob("*.ts")) or any(project_dir.rglob("*.tsx")):
+        for entry in ("node_modules/", "dist/", "coverage/"):
+            if entry not in existing_exclude and entry.rstrip("/") not in existing_exclude:
+                framework_excludes.append(entry)
+
     # Otto runtime entries
     otto_excludes = ["otto_logs/", "otto_arch/", ".otto-worktrees/", "tasks.yaml", ".tasks.lock", "otto.yaml"]
     missing_excludes = [e for e in otto_excludes if e not in existing_exclude]
@@ -266,6 +301,7 @@ async def coding_loop(
     from otto.telemetry import AgentToolCall, TaskFailed, TaskMerged, TaskStarted
 
     task_key = task_plan.task_key
+    cost_available = agent_provider(config) != "codex"
 
     # Load task from tasks.yaml
     tasks = load_tasks(tasks_file) if tasks_file else []
@@ -345,6 +381,8 @@ async def coding_loop(
         try:
             # Route to legacy JSONL
             if telemetry._legacy_enabled:
+                if event_type == "agent_tool":
+                    return
                 telemetry._emit_legacy_progress({
                     "tool": "progress",
                     "event": event_type,
@@ -369,6 +407,7 @@ async def coding_loop(
 
         duration = time.monotonic() - task_start
         cost = float(result.get("cost_usd", 0.0) or 0.0)
+        cost_available = bool(result.get("cost_available", True))
         elapsed_str = display.stop()
 
         if result.get("success"):
@@ -383,12 +422,12 @@ async def coding_loop(
             if is_verified_only:
                 console.print(
                     f"  [blue]{time.strftime('%H:%M:%S')}  \u25c9 verified[/blue]  "
-                    f"[dim]{elapsed_str}  ${cost:.2f}  (merge pending)[/dim]"
+                    f"[dim]{elapsed_str}  {_display_cost_text(cost, available=cost_available)}  (merge pending)[/dim]"
                 )
             else:
                 console.print(
                     f"  [green]{time.strftime('%H:%M:%S')}  \u2713 passed[/green]  "
-                    f"[dim]{elapsed_str}  ${cost:.2f}[/dim]"
+                    f"[dim]{elapsed_str}  {_display_cost_text(cost, available=cost_available)}[/dim]"
                 )
             task_meta = task
             if tasks_file:
@@ -416,6 +455,7 @@ async def coding_loop(
                 telemetry.log(TaskMerged(
                     task_key=task_key, task_id=task_id,
                     cost_usd=cost, duration_s=duration,
+                    cost_available=agent_provider(config) != "codex",
                     diff_summary=result.get("diff_summary", ""),
                 ))
 
@@ -425,17 +465,19 @@ async def coding_loop(
                 cost_usd=cost, duration_s=duration,
                 qa_report=result.get("qa_report", ""),
                 diff_summary=result.get("diff_summary", ""),
+                token_usage=result.get("token_usage", {}) or {},
             )
 
         error = str(result.get("error", "") or "")
         console.print(
             f"    {time.strftime('%H:%M:%S')}  [red]\u2717[/red] failed  "
-            f"[dim]{elapsed_str}  ${cost:.2f}[/dim]"
+            f"[dim]{elapsed_str}  {_display_cost_text(cost, available=cost_available)}[/dim]"
         )
         telemetry.log(TaskFailed(
             task_key=task_key, task_id=task_id,
             error=error,
             cost_usd=cost, duration_s=duration,
+            cost_available=agent_provider(config) != "codex",
         ))
         return TaskResult(
             task_key=task_key, success=False,
@@ -445,6 +487,7 @@ async def coding_loop(
             qa_report=result.get("qa_report", ""),
             diff_summary=result.get("diff_summary", ""),
             review_ref=result.get("review_ref"),
+            token_usage=result.get("token_usage", {}) or {},
         )
 
     except Exception as exc:
@@ -507,6 +550,9 @@ def _write_task_summary_safe(
     task_key: str,
     status: str,
     total_cost_usd: float,
+    cost_available: bool = True,
+    token_usage: dict[str, int] | None = None,
+    phase_token_usage: dict[str, dict[str, int]] | None = None,
     total_duration_s: float,
     attempts: int,
     phase_timings: dict[str, float],
@@ -519,10 +565,13 @@ def _write_task_summary_safe(
             "task_key": task_key,
             "status": status,
             "total_cost_usd": round(total_cost_usd, 4),
+            "cost_available": cost_available,
+            "token_usage": token_usage or {},
             "total_duration_s": round(total_duration_s, 1),
             "attempts": attempts,
             "phase_timings": {name: round(value, 1) for name, value in phase_timings.items() if value or name in ("prepare", "coding", "test", "qa", "merge")},
             "phase_costs": {name: round(value, 4) for name, value in phase_costs.items() if value},
+            "phase_token_usage": phase_token_usage or {},
             "retry_reasons": retry_reasons,
             "_written_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         },
@@ -653,7 +702,7 @@ def _build_coding_prompt(
     coding_prompt = prompt
 
     if attempt == 0 and not last_error:
-        # ROUND 1: Bare CC — raw prompt + cross-task learnings + user feedback
+        # ROUND 1: bare coding agent — raw prompt + cross-task learnings + user feedback
         if sibling_context:
             coding_prompt += f"\n\n{sibling_context}"
         if feedback:
@@ -716,15 +765,16 @@ async def _run_coding_agent(
         permission_mode="bypassPermissions",
         cwd=str(work_dir),
         setting_sources=_coding_settings,
-        env=_subprocess_env(),
-        # Use CC's default system prompt (Glob over find, etc.)
-        # None would blank it; preset keeps CC's defaults.
+        env=_subprocess_env(work_dir),
+        # Use the Claude Code preset when the Claude provider is active.
+        # Other providers may ignore it.
         system_prompt={"type": "preset", "preset": "claude_code"},
         # NO max_turns — agent finishes naturally
+        provider=agent_provider(config),
     )
     if config.get("model"):
         agent_opts.model = config["model"]
-    if session_id:
+    if session_id and agent_provider(config) != "codex":
         agent_opts.resume = session_id
     # Don't define custom subagents — the built-in Agent tool
     # is available by default. Custom definitions with vague prompts
@@ -1048,6 +1098,7 @@ async def _run_qa(
     )
     qa_elapsed = round(time.monotonic() - qa_start, 1)
     total_qa_cost = qa_result.get("cost_usd", 0.0)
+    qa_usage = qa_result.get("usage", {}) or {}
     add_cost(total_qa_cost)
     qa_report = qa_result.get("raw_report", "")
     if qa_warning:
@@ -1069,6 +1120,7 @@ async def _run_qa(
         )
         qa_result["_retried"] = True
         retry_qa_cost = qa_result.get("cost_usd", 0.0)
+        qa_usage = merge_usage(qa_usage, qa_result.get("usage", {}) or {})
         add_cost(retry_qa_cost)
         total_qa_cost += retry_qa_cost
         qa_elapsed = round(time.monotonic() - qa_start, 1)
@@ -1126,6 +1178,7 @@ async def _run_qa(
         "verdict": verdict,
         "must_passed": qa_result["must_passed"],
         "cost_usd": total_qa_cost,
+        "usage": qa_usage,
         "qa_elapsed": qa_elapsed,
         "failed_musts": failed_musts,
         "prev_failed_criteria": [
@@ -1190,6 +1243,7 @@ async def _handle_no_changes(
             "last_error": f"No code changes produced and no spec available.\nAgent: {last_text}",
             "last_error_source": "coding",
             "cost_usd": 0.0,
+            "token_usage": {},
         }
 
     # Run QA against existing (unchanged) code
@@ -1212,6 +1266,7 @@ async def _handle_no_changes(
     )
     qa_elapsed_nc = round(time.monotonic() - qa_start_nc, 1)
     qa_cost_nc = qa_result_nc.get("cost_usd", 0.0)
+    qa_usage_nc = qa_result_nc.get("usage", {}) or {}
     add_cost(qa_cost_nc)
     qa_report_nc = qa_result_nc.get("raw_report", "")
 
@@ -1239,6 +1294,7 @@ async def _handle_no_changes(
             "qa_report": qa_report_nc,
             "diff_summary": "No changes needed — QA verified existing code",
             "cost_usd": qa_cost_nc,
+            "token_usage": qa_usage_nc,
         }
 
     # QA found gaps — retry with QA findings
@@ -1260,6 +1316,7 @@ async def _handle_no_changes(
         "last_error": _build_qa_retry_error(failed_musts, qa_report_nc),
         "last_error_source": "qa",
         "cost_usd": qa_cost_nc,
+        "token_usage": qa_usage_nc,
     }
 
 
@@ -1274,15 +1331,15 @@ async def run_task_v45(
     qa_mode: str = QAMode.PER_TASK,
     sibling_context: str | None = None,
 ) -> dict[str, Any]:
-    """v4.5 per-task execution loop — bare CC + parallel spec gen + verify + QA.
+    """v4.5 per-task execution loop — coding agent + parallel spec gen + verify + QA.
 
     Key differences from run_task_with_qa():
-    - Attempt 1 = bare CC (raw prompt, no custom system prompt, no spec)
+    - Attempt 1 = bare coding agent (raw prompt, no custom system prompt, no spec)
     - Spec gen runs in parallel with coding, awaited before QA
     - Structured JSON QA verdict with [must]/[should] binding
     - QA with browser available (agent decides per-item)
     - Durable candidate refs (never discard verified code)
-    - Session resume on retry
+    - Session resume on retry when supported by the provider
 
     Args:
         project_dir: repo root — for git ops, config, logs, tasks.yaml.
@@ -1306,6 +1363,7 @@ async def run_task_v45(
 
     task_start = time.monotonic()
     total_cost = 0.0
+    total_token_usage: dict[str, int] = {}
     session_id = None
     _prev_session_cost: float = 0.0  # tracks cumulative SDK cost for delta calculation
     _prev_session_id: str | None = None  # tracks which session the cost belongs to
@@ -1325,6 +1383,7 @@ async def run_task_v45(
     }
     phase_costs: dict[str, float] = {}
     retry_reasons: list[str] = []
+    phase_token_usage: dict[str, dict[str, int]] = {}
     spec = task.get("spec")
     batch_qa_mode = qa_mode == QAMode.BATCH
     skip_qa_mode = qa_mode == QAMode.SKIP
@@ -1336,6 +1395,7 @@ async def run_task_v45(
     _result_error_code_unset = object()
     log_dir = project_dir / "otto_logs" / key
     log_dir.mkdir(parents=True, exist_ok=True)
+    cost_available = agent_provider(config) != "codex"
 
     # Live state for otto status -w — per-task file under otto_logs/{key}/
     _live_state_file = log_dir / "live-state.json"
@@ -1400,11 +1460,25 @@ async def run_task_v45(
                 _live_tools.append(f"{tool_name}  {detail}" if detail else tool_name)
                 if len(_live_tools) > 20:
                     _live_tools[:] = _live_tools[-20:]
+                phase_telemetry = getattr(on_progress, "_telemetry", None) if on_progress else None
+                if phase_telemetry:
+                    try:
+                        from otto.telemetry import AgentToolCall
+
+                        phase_telemetry.log(AgentToolCall(
+                            task_key=key,
+                            name=str(tool_name or ""),
+                            detail=str(detail or "")[:200],
+                        ))
+                    except Exception:
+                        pass
             _live_state_file.write_text(json.dumps({
                 "task_key": key, "task_id": task_id,
                 "prompt": prompt[:80],
                 "elapsed_s": round(time.monotonic() - task_start, 1),
                 "cost_usd": total_cost,
+                "cost_available": cost_available,
+                "token_usage": total_token_usage,
                 "completed": False,
                 "phases": _live_phases,
                 "recent_tools": list(_live_tools),
@@ -1431,16 +1505,24 @@ async def run_task_v45(
             spec_task = None
 
     async def _await_spec_task() -> list | None:
-        nonlocal spec, spec_task, total_cost, spec_generation_error
+        nonlocal spec, spec_task, total_cost, spec_generation_error, total_token_usage, phase_token_usage
         if not spec_task or spec:
             return spec
 
         # Check if spec gen already finished before we needed it
         already_done = spec_task.done()
         try:
-            spec_items, spec_cost, spec_error = await spec_task
+            spec_result = await spec_task
         finally:
             spec_task = None
+
+        if isinstance(spec_result, tuple) and len(spec_result) == 4:
+            spec_items, spec_cost, spec_error, spec_usage = spec_result
+        elif isinstance(spec_result, tuple) and len(spec_result) == 3:
+            spec_items, spec_cost, spec_error = spec_result
+            spec_usage = {}
+        else:
+            spec_items, spec_cost, spec_error, spec_usage = [], 0.0, "invalid spec result", {}
 
         # Use the thread's own finish timestamp for accurate runtime
         if _spec_finish_time and spec_started_at:
@@ -1450,6 +1532,9 @@ async def run_task_v45(
         else:
             spec_elapsed = 0.0
         total_cost += spec_cost
+        if spec_usage:
+            phase_token_usage["spec_gen"] = merge_usage(phase_token_usage.get("spec_gen"), spec_usage)
+            total_token_usage = merge_usage(total_token_usage, spec_usage)
         if spec_items:
             spec = spec_items
             if tasks_file:
@@ -1497,6 +1582,8 @@ async def run_task_v45(
                 "prompt": prompt[:80],
                 "elapsed_s": round(duration, 1),
                 "cost_usd": total_cost,
+                "cost_available": cost_available,
+                "token_usage": total_token_usage,
                 "status": status,
                 "completed": True,
                 "error": error[:200] if error else "",
@@ -1511,6 +1598,9 @@ async def run_task_v45(
             task_key=key,
             status=status,
             total_cost_usd=total_cost,
+            cost_available=cost_available,
+            token_usage=total_token_usage,
+            phase_token_usage=phase_token_usage,
             total_duration_s=duration,
             attempts=total_attempts,
             phase_timings=summary_phase_timings,
@@ -1520,7 +1610,12 @@ async def run_task_v45(
         if tasks_file:
             try:
                 from datetime import datetime, timezone
-                updates: dict[str, Any] = {"status": status, "cost_usd": total_cost}
+                updates: dict[str, Any] = {"status": status}
+                if cost_available:
+                    updates["cost_usd"] = total_cost
+                else:
+                    updates["cost_usd"] = None
+                updates["token_usage"] = total_token_usage or None
                 if duration > 0:
                     updates["duration_s"] = round(duration, 1)
                 if status in ("passed", "failed", "blocked"):
@@ -1534,16 +1629,18 @@ async def run_task_v45(
                 update_task(tasks_file, key, **updates)
             except Exception:
                 pass
-        return {
-            "success": success,
-            "status": status,
-            "cost_usd": total_cost,
-            "error": error,
-            "diff_summary": diff_summary,
-            "qa_report": qa_report,
-            "phase_timings": phase_timings,
-            "review_ref": review_ref,
-        }
+            return {
+                "success": success,
+                "status": status,
+                "cost_usd": total_cost,
+                "cost_available": cost_available,
+                "token_usage": total_token_usage,
+                "error": error,
+                "diff_summary": diff_summary,
+                "qa_report": qa_report,
+                "phase_timings": phase_timings,
+                "review_ref": review_ref,
+            }
 
     def _add_cost(amount: float) -> None:
         nonlocal total_cost
@@ -1649,12 +1746,18 @@ async def run_task_v45(
             def _run_spec_gen_thread():
                 nonlocal _spec_finish_time
                 try:
-                    result = generate_spec_sync(prompt, task_work_dir, setting_sources=_spec_settings, log_dir=log_dir)
+                    result = generate_spec_sync(
+                        prompt,
+                        task_work_dir,
+                        setting_sources=_spec_settings,
+                        log_dir=log_dir,
+                        config=config,
+                    )
                     _spec_finish_time = time.monotonic()
                     return result
                 except Exception as exc:
                     _spec_finish_time = time.monotonic()
-                    return None, 0.0, f"spec generation failed: {exc}"
+                    return None, 0.0, f"spec generation failed: {exc}", {}
 
             emit("phase", name="spec_gen", status="running")
             spec_started_at = time.monotonic()
@@ -1707,7 +1810,7 @@ async def run_task_v45(
             )
 
             if attempt == 0 and not last_error:
-                coding_detail = "bare CC"
+                coding_detail = "coding agent"
             else:
                 reason = last_error_source or "unknown"
                 coding_detail = f"attempt {attempt_num} — {reason} failed"
@@ -1728,6 +1831,11 @@ async def run_task_v45(
                     if tasks_file:
                         update_task(tasks_file, key, session_id=session_id)
 
+                coding_usage = normalize_usage(getattr(result_msg, "usage", None))
+                if coding_usage:
+                    phase_token_usage["coding"] = merge_usage(phase_token_usage.get("coding"), coding_usage)
+                    total_token_usage = merge_usage(total_token_usage, coding_usage)
+
                 attempt_cost, _prev_session_id, _prev_session_cost = _extract_attempt_cost(
                     result_msg, _prev_session_id, _prev_session_cost,
                 )
@@ -1739,17 +1847,18 @@ async def run_task_v45(
                 # Warn if SDK returned $0 for a non-trivial coding run
                 # (known issue: concurrent parallel sessions may lose cost)
                 if attempt_cost == 0 and coding_elapsed > 10:
-                    from otto.observability import append_text_log
-                    append_text_log(
-                        log_dir / "cost-warning.log",
-                        [
-                            f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] WARNING: $0 cost for {coding_elapsed:.0f}s coding",
-                            f"session_id: {session_id}",
-                            f"result_msg.total_cost_usd: {getattr(result_msg, 'total_cost_usd', 'missing')}",
-                            f"This may be an SDK bug with concurrent parallel sessions.",
-                            "",
-                        ],
-                    )
+                    if cost_available:
+                        from otto.observability import append_text_log
+                        append_text_log(
+                            log_dir / "cost-warning.log",
+                            [
+                                f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] WARNING: $0 cost for {coding_elapsed:.0f}s coding",
+                                f"session_id: {session_id}",
+                                f"result_msg.total_cost_usd: {getattr(result_msg, 'total_cost_usd', 'missing')}",
+                                f"This may be an SDK bug with concurrent parallel sessions.",
+                                "",
+                            ],
+                        )
 
             except Exception as e:
                 coding_elapsed = round(time.monotonic() - coding_start, 1)
@@ -1806,6 +1915,10 @@ async def run_task_v45(
                 # _handle_no_changes may have awaited spec, update local ref
                 if not spec_task or (spec_task and spec_task.done()):
                     spec_task = None
+                nc_usage = nc_result.get("token_usage", {}) or {}
+                if nc_usage:
+                    phase_token_usage["qa"] = merge_usage(phase_token_usage.get("qa"), nc_usage)
+                    total_token_usage = merge_usage(total_token_usage, nc_usage)
                 if nc_result["action"] == "pass":
                     status = nc_result.get("status", "passed")
                     return _result(True, status,
@@ -1927,6 +2040,10 @@ async def run_task_v45(
                     add_cost=_add_cost,
                 )
                 qa_report = qa_out["qa_report"]
+                qa_usage = qa_out.get("usage", {}) or {}
+                if qa_usage:
+                    phase_token_usage["qa"] = merge_usage(phase_token_usage.get("qa"), qa_usage)
+                    total_token_usage = merge_usage(total_token_usage, qa_usage)
                 phase_timings["qa"] = phase_timings.get("qa", 0) + qa_out["qa_elapsed"]
 
                 if not qa_out["must_passed"]:

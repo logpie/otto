@@ -27,6 +27,7 @@ class TaskResult:
     diff_summary: str = ""
     duration_s: float = 0.0
     review_ref: str | None = None  # refs/otto/candidates/<key>/attempt-N for failed tasks
+    token_usage: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -90,6 +91,14 @@ class PipelineContext:
     def total_cost(self) -> float:
         """Total cost across all tasks."""
         return sum(self.costs.values())
+
+    @property
+    def total_token_usage(self) -> dict[str, int]:
+        total: dict[str, int] = {}
+        for result in self.results.values():
+            for key, value in (result.token_usage or {}).items():
+                total[key] = total.get(key, 0) + int(value)
+        return total
 
     @property
     def passed_count(self) -> int:

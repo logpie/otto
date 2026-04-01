@@ -29,6 +29,7 @@ class TaskMerged:
     task_key: str = ""
     task_id: int = 0
     cost_usd: float = 0.0
+    cost_available: bool = True
     duration_s: float = 0.0
     diff_summary: str = ""
     timestamp: float = 0.0
@@ -41,6 +42,7 @@ class TaskFailed:
     task_id: int = 0
     error: str = ""
     cost_usd: float = 0.0
+    cost_available: bool = True
     duration_s: float = 0.0
     timestamp: float = 0.0
 
@@ -109,6 +111,8 @@ class AllDone:
     total_failed: int = 0
     total_missing_or_interrupted: int = 0
     total_cost: float = 0.0
+    cost_available: bool = True
+    token_usage: dict[str, int] = field(default_factory=dict)
     total_duration_s: float = 0.0
     timestamp: float = 0.0
 

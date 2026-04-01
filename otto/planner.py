@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from otto.agent import ClaudeAgentOptions, _subprocess_env, run_agent_query
+from otto.config import planner_provider
 from otto.observability import append_text_log
 
 logger = logging.getLogger("otto.planner")
@@ -677,9 +678,10 @@ async def _run_planner_prompt(
         permission_mode="bypassPermissions",
         cwd=str(project_dir),
         setting_sources=_planner_settings(config),
-        env=_subprocess_env(),
+        env=_subprocess_env(project_dir),
         effort=effort,
         system_prompt={"type": "preset", "preset": "claude_code"},
+        provider=planner_provider(config),
     )
     if model:
         options.model = model

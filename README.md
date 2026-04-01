@@ -1,8 +1,13 @@
 # Otto
 
-Autonomous coding agent that makes Claude safe to run unattended.
+Autonomous coding agent runner that makes coding agents safe to run unattended.
 
-Otto wraps Claude Code in a reliability harness: task queue, git isolation, structured QA, and evidence-based verification. You describe what you want, Otto handles the rest.
+Otto wraps coding agents in a reliability harness: task queue, git isolation, structured QA, and evidence-based verification. You describe what you want, Otto handles the rest.
+
+Provider support:
+- `claude` is the default provider.
+- `codex` is supported through the local `codex` CLI using your existing ChatGPT login.
+- `model` and `planner_model` are optional overrides; if unset, Otto defers to the provider's default model.
 
 ## How it works
 
@@ -13,7 +18,7 @@ otto run
 
 For each task, Otto:
 
-1. **Runs a bare CC coding agent** — raw prompt, no spec bottleneck. The coding agent explores the codebase, implements the feature, and runs tests on its own.
+1. **Runs a coding agent directly** — raw prompt, no spec bottleneck. The coding agent explores the codebase, implements the feature, and runs tests on its own.
 2. **Generates acceptance spec in parallel** — `[must]` (gating) and `[should]` (advisory) criteria with `◈` markers for visual/subjective items. Runs in a separate thread alongside coding.
 3. **Verifies externally** — runs all tests in a clean disposable worktree.
 4. **QA agent reviews** — two-part testing: VERIFY (check every [must] spec with evidence) then BREAK (adversarial boundary testing beyond specs). Browser available for visual items.
@@ -29,7 +34,7 @@ Failed tasks get structured retry: the coding agent receives a focused failure e
   ● Running  #1  abc12345
   17:08:20  ✓ prepare  16s  baseline: 109 tests passing
 
-  17:08:20  ● coding  (bare CC)  · spec gen
+  17:08:20  ● coding  (coding agent)  · spec gen
       ● Bash  find src -type f -name "*.tsx" | sort
       ● Read  src/types/weather.ts
       ... explored 13 files
@@ -75,9 +80,16 @@ Failed tasks get structured retry: the coding agent receives a focused failure e
 ```bash
 # Install
 uv pip install -e .
+# Optional: install Claude SDK support too
+uv pip install -e '.[claude]'
 
 # In any git repo — add tasks
 cd your-project
+
+# Optional: switch providers in otto.yaml
+# provider: codex
+# model: gpt-5
+
 otto add "Add a search function that matches case-insensitively"
 otto add "Fix the slow API response — must be under 300ms"
 
@@ -117,7 +129,7 @@ otto revert --all       Undo all otto commits + clear queue
 
 ### v5 pipeline
 
-Otto is infrastructure, not intelligence. The intelligence is Claude's. Otto provides:
+Otto is infrastructure, not intelligence. The intelligence comes from the configured provider. Otto provides:
 
 ```
     ┌─────────────────────────────────────────────────────────┐

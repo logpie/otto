@@ -1,5 +1,6 @@
 """Tests for otto.runner module."""
 
+import asyncio
 import subprocess
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -9,6 +10,7 @@ import pytest
 from otto.runner import (
     _audit_proof_sufficiency,
     _build_qa_retry_error,
+    _run_coding_agent,
     _restore_workspace_state,
     check_clean_tree,
     build_candidate_commit,
@@ -140,6 +142,35 @@ class TestQaProofHelpers:
         assert "Passed [must ◈] missing screenshot in qa-proofs/: Layout matches mock" in report
         assert mock_warn.call_count == 2
         assert ("qa_finding", {"text": "[warning] Passed [must] missing proof: API returns JSON"}) in emit_events
+
+
+class TestCodingAgentProviderBehavior:
+    @pytest.mark.asyncio
+    async def test_codex_does_not_resume_prior_session(self, tmp_path):
+        seen = {}
+
+        async def fake_query(*, prompt, options=None):
+            seen["resume"] = options.resume
+            result = MagicMock()
+            result.session_id = "thread-new"
+            result.is_error = False
+            result.result = "done"
+            result.total_cost_usd = 0.0
+            yield result
+
+        with patch("otto.runner.query", side_effect=fake_query):
+            session_id, _result_msg, _log_lines = await _run_coding_agent(
+                "fix it",
+                {"provider": "codex"},
+                tmp_path,
+                session_id="prior-thread",
+                emit=lambda *args, **kwargs: None,
+                log_dir=tmp_path,
+                attempt_num=1,
+            )
+
+        assert seen["resume"] is None
+        assert session_id == "thread-new"
 
 
 class TestTamperDetection:

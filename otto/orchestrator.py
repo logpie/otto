@@ -18,16 +18,16 @@ import time
 from pathlib import Path
 from typing import Any
 
-from otto.config import git_meta_dir
+from otto.config import agent_provider, git_meta_dir, planner_provider
 from otto.context import Learning, PipelineContext, QAMode, TaskResult
 from otto.display import console, rich_escape
+from otto.observability import append_text_log, update_json_file
 from otto.planner import (
     ExecutionPlan,
     plan,
     replan,
     serial_plan,
 )
-from otto.observability import append_text_log
 from otto.runner import (
     _print_summary,
     coding_loop,
@@ -63,6 +63,51 @@ def _stamp_proof_commit_sha(project_dir: Path, task_key: str, commit_sha: str) -
 
 def _orchestrator_log(project_dir: Path, *lines: str) -> None:
     append_text_log(project_dir / "otto_logs" / "orchestrator.log", lines)
+
+
+def _cost_available(config: dict[str, Any]) -> bool:
+    """Whether Otto can record meaningful monetary cost for this run."""
+    providers = {
+        agent_provider(config),
+        planner_provider(config),
+    }
+    return "codex" not in providers
+
+
+def _refresh_task_live_state(
+    project_dir: Path,
+    task_key: str,
+    *,
+    status: str,
+    merge_status: str,
+    completed: bool,
+    error: str = "",
+) -> None:
+    """Update a task's live-state.json after merge/failure transitions."""
+    live_state_path = project_dir / "otto_logs" / task_key / "live-state.json"
+
+    def _mutate(data: dict[str, Any]) -> dict[str, Any]:
+        phases = dict(data.get("phases") or {})
+        merge_phase = dict(phases.get("merge") or {})
+        merge_phase["status"] = merge_status
+        phases["merge"] = merge_phase
+        data["status"] = status
+        data["completed"] = completed
+        data["error"] = error[:200] if error else ""
+        data["phases"] = phases
+        data["_updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        return data
+
+    update_json_file(live_state_path, _mutate)
+
+    summary_path = project_dir / "otto_logs" / task_key / "task-summary.json"
+
+    def _mutate_summary(data: dict[str, Any]) -> dict[str, Any]:
+        data["status"] = status
+        data["_written_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        return data
+
+    update_json_file(summary_path, _mutate_summary)
 
 
 def _format_batch_structure(batch: Any, pending_by_key: dict[str, dict[str, Any]], *, mode: str) -> list[str]:
@@ -446,11 +491,12 @@ async def _run_batch_qa(
 
         log_dir = project_dir / "otto_logs" / task["key"]
         log_dir.mkdir(parents=True, exist_ok=True)
-        spec_items, cost, error = await async_generate_spec(
+        spec_items, cost, error, _usage = await async_generate_spec(
             task.get("prompt", ""),
             project_dir,
             setting_sources=spec_settings,
             log_dir=log_dir,
+            config=config,
         )
         spec_cost += cost
         if spec_items:
@@ -539,6 +585,7 @@ async def _run_batch_qa(
             diff=diff,
             retried_task_keys=focus_task_keys,
             log_dir=log_dir,
+            batch_context=True,
         )
     elif config.get("parallel_qa") and len(tasks_with_specs) >= 2:
         # Parallel per-task QA via asyncio.gather.
@@ -569,6 +616,7 @@ async def _run_batch_qa(
                     on_progress=_progress,
                     log_dir=task_log_dir,
                     session_id=idx,
+                    batch_context=True,
                 )
             except Exception as exc:
                 import traceback
@@ -700,6 +748,7 @@ async def _run_batch_qa(
             diff=diff,
             on_progress=_batch_qa_progress,
             log_dir=log_dir,
+            batch_context=True,
         )
     total_cost = spec_cost + float(qa_result.get("cost_usd", 0.0) or 0.0)
     raw_report = qa_result.get("raw_report", "")
@@ -1563,6 +1612,7 @@ async def run_per(
                                 diff_summary=result.diff_summary,
                                 duration_s=result.duration_s,
                                 review_ref=result.review_ref,
+                                token_usage=result.token_usage,
                             )
                             for result in batch_results
                         ]
@@ -1720,6 +1770,8 @@ async def run_per(
             total_failed=context.failed_count + len(terminal_nonexecuted),
             total_missing_or_interrupted=len(missing_keys),
             total_cost=context.total_cost,
+            cost_available=_cost_available(config),
+            token_usage=context.total_token_usage,
             total_duration_s=run_duration,
         ))
 
@@ -1756,6 +1808,7 @@ async def run_per(
         # Record run history
         _record_run_history(
             project_dir,
+            config,
             results,
             run_duration,
             context.total_cost,
@@ -1869,6 +1922,13 @@ def merge_batch_results(
                     update_task(tasks_file, task_key, status="merged", error=None, error_code=None, feedback=None)
                 except Exception:
                     pass
+                _refresh_task_live_state(
+                    project_dir,
+                    task_key,
+                    status="merged",
+                    merge_status="done",
+                    completed=False,
+                )
                 merged_results.append(TaskResult(
                     task_key=task_key, success=True,
                     commit_sha=None,
@@ -1876,6 +1936,7 @@ def merge_batch_results(
                     duration_s=result.duration_s,
                     diff_summary=result.diff_summary,
                     qa_report=result.qa_report,
+                    token_usage=result.token_usage,
                 ))
                 _orchestrator_log(project_dir, f"task={task_key} merge result=skip no-changes-batch")
                 continue
@@ -1885,11 +1946,20 @@ def merge_batch_results(
                 update_task(tasks_file, task_key, status="merge_failed", error=error)
             except Exception:
                 pass
+            _refresh_task_live_state(
+                project_dir,
+                task_key,
+                status="merge_failed",
+                merge_status="fail",
+                completed=True,
+                error=error,
+            )
             merged_results.append(TaskResult(
                 task_key=task_key, success=False,
                 error_code="merge_failed",
                 error=error, cost_usd=result.cost_usd,
                 duration_s=result.duration_s,
+                token_usage=result.token_usage,
             ))
             _orchestrator_log(project_dir, f"task={task_key} merge result=fail reason=no candidate ref")
             continue
@@ -1907,6 +1977,14 @@ def merge_batch_results(
                             error=error, error_code="merge_conflict")
             except Exception:
                 pass
+            _refresh_task_live_state(
+                project_dir,
+                task_key,
+                status="merge_failed",
+                merge_status="fail",
+                completed=True,
+                error=error,
+            )
             merged_results.append(TaskResult(
                 task_key=task_key, success=False,
                 error_code="merge_conflict",
@@ -1914,6 +1992,7 @@ def merge_batch_results(
                 duration_s=result.duration_s,
                 diff_summary=result.diff_summary,
                 qa_report=result.qa_report,
+                token_usage=result.token_usage,
             ))
             _orchestrator_log(project_dir, f"task={task_key} merge result=conflict")
             continue
@@ -1941,9 +2020,18 @@ def merge_batch_results(
                                 error=error, error_code="post_merge_test_fail")
                 except Exception:
                     pass
+                _refresh_task_live_state(
+                    project_dir,
+                    task_key,
+                    status="merge_failed",
+                    merge_status="fail",
+                    completed=True,
+                    error=error,
+                )
                 telemetry.log(TaskFailed(
                     task_key=task_key, task_id=task_id,
                     error=error, cost_usd=result.cost_usd,
+                    cost_available=_cost_available(config),
                 ))
                 merged_results.append(TaskResult(
                     task_key=task_key, success=False,
@@ -1952,6 +2040,7 @@ def merge_batch_results(
                     duration_s=result.duration_s,
                     diff_summary=result.diff_summary,
                     qa_report=result.qa_report,
+                    token_usage=result.token_usage,
                 ))
                 _orchestrator_log(project_dir, f"task={task_key} merge result=fail reason=post-merge test failure")
                 continue
@@ -1968,9 +2057,18 @@ def merge_batch_results(
                             error=error, error_code="merge_ff_failed")
             except Exception:
                 pass
+            _refresh_task_live_state(
+                project_dir,
+                task_key,
+                status="merge_failed",
+                merge_status="fail",
+                completed=True,
+                error=error,
+            )
             telemetry.log(TaskFailed(
                 task_key=task_key, task_id=task_id,
                 error=error, cost_usd=result.cost_usd,
+                cost_available=_cost_available(config),
             ))
             merged_results.append(TaskResult(
                 task_key=task_key, success=False,
@@ -1979,6 +2077,7 @@ def merge_batch_results(
                 duration_s=result.duration_s,
                 diff_summary=result.diff_summary,
                 qa_report=result.qa_report,
+                token_usage=result.token_usage,
             ))
             _orchestrator_log(project_dir, f"task={task_key} merge result=fail reason=fast-forward failed")
             continue
@@ -1996,10 +2095,18 @@ def merge_batch_results(
             )
         except Exception:
             pass
+        _refresh_task_live_state(
+            project_dir,
+            task_key,
+            status="merged" if qa_mode == QAMode.BATCH else "passed",
+            merge_status="done",
+            completed=qa_mode != QAMode.BATCH,
+        )
 
         telemetry.log(TaskMerged(
             task_key=task_key, task_id=task_id,
             cost_usd=result.cost_usd,
+            cost_available=_cost_available(config),
             duration_s=result.duration_s,
             diff_summary=result.diff_summary,
         ))
@@ -2011,6 +2118,7 @@ def merge_batch_results(
             duration_s=result.duration_s,
             diff_summary=result.diff_summary,
             qa_report=result.qa_report,
+            token_usage=result.token_usage,
         ))
         _orchestrator_log(project_dir, f"task={task_key} merge result=success commit={new_sha[:12]}")
 
@@ -2162,6 +2270,7 @@ async def _run_batch_parallel(
 
 def _record_run_history(
     project_dir: Path,
+    config: dict[str, Any],
     results: list[tuple[dict, bool]],
     run_duration: float,
     total_cost: float,
@@ -2177,6 +2286,13 @@ def _record_run_history(
         history_file.parent.mkdir(parents=True, exist_ok=True)
         tasks_passed = sum(1 for _, s in results if s)
         tasks_failed = sum(1 for _, s in results if not s)
+        token_usage: dict[str, int] = {}
+        for task, _success in results:
+            usage = task.get("token_usage") or {}
+            if isinstance(usage, dict):
+                for key, value in usage.items():
+                    if isinstance(value, (int, float)):
+                        token_usage[key] = token_usage.get(key, 0) + int(value)
         failure_summary = ""
         if tasks_failed > 0:
             failed_tasks = [(t, s) for t, s in results if not s]
@@ -2213,6 +2329,8 @@ def _record_run_history(
             "tasks_passed": tasks_passed,
             "tasks_failed": tasks_failed,
             "cost_usd": round(total_cost, 4),
+            "cost_available": _cost_available(config),
+            "token_usage": token_usage,
             "time_s": round(run_duration, 1),
             "commit": commit_sha,
             "failure_summary": failure_summary,

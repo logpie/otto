@@ -9,11 +9,13 @@ import yaml
 
 from otto.config import (
     DEFAULT_CONFIG,
+    agent_provider,
     create_config,
     detect_default_branch,
     detect_test_command,
     git_meta_dir,
     load_config,
+    planner_provider,
 )
 
 
@@ -53,6 +55,7 @@ class TestLoadConfig:
         config_path.write_text(yaml.dump({"test_command": "pytest"}))
         cfg = load_config(config_path)
         assert cfg["max_retries"] == DEFAULT_CONFIG["max_retries"]
+        assert cfg["provider"] == DEFAULT_CONFIG["provider"]
         assert cfg["model"] == DEFAULT_CONFIG["model"]
         assert cfg["planner_model"] == DEFAULT_CONFIG["planner_model"]
         assert cfg["planner_effort"] == DEFAULT_CONFIG["planner_effort"]
@@ -67,6 +70,31 @@ class TestLoadConfig:
         config_path.write_text("")
         cfg = load_config(config_path)
         assert cfg == DEFAULT_CONFIG
+
+    def test_normalizes_provider_fields(self, tmp_git_repo):
+        config_path = tmp_git_repo / "otto.yaml"
+        config_path.write_text(yaml.dump({
+            "provider": "CODEX",
+            "planner_provider": "claude",
+        }))
+        cfg = load_config(config_path)
+        assert cfg["provider"] == "codex"
+        assert cfg["planner_provider"] == "claude"
+
+    def test_rejects_invalid_provider(self, tmp_git_repo):
+        config_path = tmp_git_repo / "otto.yaml"
+        config_path.write_text(yaml.dump({"provider": "not-a-provider"}))
+        with pytest.raises(ValueError, match="Invalid provider"):
+            load_config(config_path)
+
+
+class TestProviderHelpers:
+    def test_agent_provider_defaults_to_claude(self):
+        assert agent_provider({}) == "claude"
+
+    def test_planner_provider_falls_back_to_agent_provider(self):
+        cfg = {"provider": "codex", "planner_provider": None}
+        assert planner_provider(cfg) == "codex"
 
 
 class TestDetectTestCommand:

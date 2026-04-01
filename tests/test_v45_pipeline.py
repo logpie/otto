@@ -16,6 +16,7 @@ from otto.qa import (
     format_batch_spec,
     format_spec_v45,
 )
+from otto.agent import AssistantMessage, ToolUseBlock
 from otto.runner import (
     _anchor_candidate_ref,
     _find_best_candidate_ref,
@@ -380,6 +381,69 @@ class TestRunTaskV45:
         phase_events = [event for event in events if event["event"] == "phase_completed"]
         assert any(event["phase"] == "prepare" and event["status"] == "running" for event in phase_events)
         assert any(event["phase"] == "merge" and event["status"] == "pending" for event in phase_events)
+
+    @pytest.mark.asyncio
+    async def test_agent_tool_events_are_emitted_to_v4_telemetry(self, tmp_git_repo):
+        from otto.telemetry import Telemetry
+
+        default_branch = _current_branch(tmp_git_repo)
+        task = {
+            "id": 1,
+            "key": "tasktelemetrytool001",
+            "prompt": "Add feature.txt",
+            "status": "pending",
+        }
+        tasks_path = _write_task(tmp_git_repo, task)
+        config = {
+            "default_branch": default_branch,
+            "max_retries": 0,
+            "verify_timeout": 30,
+            "max_task_time": 60,
+            "test_command": None,
+            "skip_qa": True,
+        }
+        telemetry = Telemetry(tmp_git_repo / "otto_logs")
+
+        async def fake_query(*, prompt, options=None):
+            yield AssistantMessage(content=[
+                ToolUseBlock(name="Bash", input={"command": "pytest -q"}),
+            ])
+            (tmp_git_repo / "feature.txt").write_text("hello\n")
+            yield SimpleNamespace(
+                session_id="sess-telemetry",
+                is_error=False,
+                total_cost_usd=0.0,
+                result="ok",
+            )
+
+        def on_progress(event_type, data):
+            pass
+
+        setattr(on_progress, "_telemetry", telemetry)
+
+        with patch("otto.runner.query", new=fake_query):
+            with patch("otto.runner.run_test_suite", return_value=TestSuiteResult(
+                passed=True,
+                tiers=[TierResult("tier1", True, "1 passed")],
+            )):
+                result = await run_task_v45(
+                    task,
+                    config,
+                    tmp_git_repo,
+                    tasks_path,
+                    on_progress=on_progress,
+                    qa_mode="skip",
+                )
+
+        assert result["success"] is True
+        events = [
+            json.loads(line)
+            for line in telemetry.events_path.read_text().splitlines()
+            if line.strip()
+        ]
+        tool_events = [event for event in events if event["event"] == "agent_tool"]
+        assert tool_events
+        assert tool_events[0]["name"] == "Bash"
 
     @pytest.mark.asyncio
     async def test_batch_mode_skips_spec_gen_and_qa_and_returns_verified(self, tmp_git_repo):

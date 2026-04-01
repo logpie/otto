@@ -30,6 +30,7 @@ otto.egg-info/dependency_links.txt
 otto.egg-info/entry_points.txt
 otto.egg-info/requires.txt
 otto.egg-info/top_level.txt
+tests/test_agent.py
 tests/test_claim_verify.py
 tests/test_cli.py
 tests/test_config.py

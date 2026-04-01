@@ -13,6 +13,7 @@ import yaml
 
 from otto.context import PipelineContext, QAMode, TaskResult
 from otto.orchestrator import (
+    _record_run_history,
     _run_batch_qa,
     _run_batch_parallel,
     cleanup_orphaned_worktrees,
@@ -1190,6 +1191,53 @@ class TestMergeParallelResults:
 
         assert merged[0].success is True
         assert load_tasks(tasks_path)[0]["status"] == "merged"
+
+    def test_merge_updates_live_state_to_passed(self, tmp_git_repo):
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        tasks_path.write_text(yaml.dump({"tasks": [
+            {"id": 1, "key": "task-live", "prompt": "Task live", "status": "verified"},
+        ]}))
+        log_dir = tmp_git_repo / "otto_logs" / "task-live"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / "live-state.json").write_text(json.dumps({
+            "task_key": "task-live",
+            "status": "verified",
+            "completed": True,
+            "phases": {"merge": {"status": "pending", "time_s": 0.0}},
+        }))
+        (log_dir / "task-summary.json").write_text(json.dumps({
+            "task_key": "task-live",
+            "status": "verified",
+        }))
+        telemetry = Telemetry(tmp_git_repo / "otto_logs")
+
+        self._create_candidate_commit(tmp_git_repo, "task-live", "live.txt", "ok\n")
+        results = [TaskResult(task_key="task-live", success=True)]
+
+        merged = merge_batch_results(results, self._make_config(), tmp_git_repo, tasks_path, telemetry)
+
+        assert merged[0].success is True
+        live_state = json.loads((log_dir / "live-state.json").read_text())
+        summary = json.loads((log_dir / "task-summary.json").read_text())
+        assert live_state["status"] == "passed"
+        assert live_state["phases"]["merge"]["status"] == "done"
+        assert summary["status"] == "passed"
+
+    def test_record_run_history_marks_codex_cost_unavailable(self, tmp_git_repo):
+        config = self._make_config()
+        config["provider"] = "codex"
+
+        _record_run_history(
+            tmp_git_repo,
+            config,
+            results=[({"id": 1, "error": ""}, True)],
+            run_duration=12.3,
+            total_cost=0.0,
+        )
+
+        history_path = tmp_git_repo / "otto_logs" / "run-history.jsonl"
+        entry = json.loads(history_path.read_text().strip().splitlines()[-1])
+        assert entry["cost_available"] is False
 
 
 class TestMergeCandidate:

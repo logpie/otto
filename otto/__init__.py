@@ -1,3 +1,3 @@
-"""Otto — Autonomous Claude Code agent runner."""
+"""Otto — autonomous coding agent runner."""
 
 __version__ = "0.1.0"

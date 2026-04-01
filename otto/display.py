@@ -1,6 +1,6 @@
 """Otto display system — permanent scrolling log with live status footer.
 
-Design principle: look like Claude Code. Minimal chrome, clean spacing,
+Design principle: coding-agent CLI output. Minimal chrome, clean spacing,
 semantic color, let the content speak. No decorative icons, no fancy
 formatting — just clear information hierarchy.
 
@@ -78,7 +78,7 @@ def _shorten_path(path: str) -> str:
 
 
 def print_agent_tool(block, quiet: bool = False) -> str:
-    """Print an agent tool use block (CC style) and return a log line."""
+    """Print an agent tool use block and return a log line."""
     name = block.name
     inputs = block.input or {}
     detail = _extract_tool_detail(name, inputs)
@@ -183,7 +183,7 @@ PHASE_ORDER = ["prepare", "spec_gen", "coding", "test", "qa", "merge"]
 class TaskDisplay:
     """Task progress: permanent scrolling log + live status footer.
 
-    CC-inspired: minimal chrome, clean spacing, semantic color.
+    Minimal chrome, clean spacing, semantic color.
     """
 
     def __init__(self, console_=None):
@@ -358,7 +358,7 @@ class TaskDisplay:
 
     def add_tool(self, line: str = "", name: str = "", detail: str = "",
                  data: dict | None = None) -> None:
-        """Print a tool call permanently (CC style with inline content). Thread-safe."""
+        """Print a tool call permanently with inline content. Thread-safe."""
         # Support both old API (name=, detail=) and new (data=)
         if data:
             name = data.get("name", name)
@@ -519,7 +519,7 @@ class TaskDisplay:
             # Read/Glob/Grep: dim bullet + name + detail (background exploration)
             self._console.print(f"      [dim]\u25cf {name}  {short}[/dim]")
 
-        # Inline diff/preview below tool call (like CC)
+        # Inline diff/preview below tool call
         if data:
             self._render_inline_diff(name, data)
 
