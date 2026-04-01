@@ -1177,6 +1177,8 @@ async def run_per(
                                 status="pending",
                                 error=None, error_code=None, session_id=None,
                                 feedback=merge_feedback,
+                                review_ref=None,
+                                completed_at=None,
                             )
                         except Exception:
                             continue
@@ -1236,7 +1238,9 @@ async def run_per(
                                     if r.success:
                                         try:
                                             update_task(tasks_file, r.task_key, status="pending",
-                                                        error=None, error_code=None, feedback=None)
+                                                        attempts=None,
+                                                        error=None, error_code=None, feedback=None,
+                                                        session_id=None, review_ref=None, completed_at=None)
                                         except Exception:
                                             pass
                                 batch_results = [
@@ -1346,10 +1350,13 @@ async def run_per(
                                         tasks_file,
                                         fkey,
                                         status="pending",
+                                        attempts=None,
                                         error=None,
                                         error_code=None,
                                         feedback=feedback,
                                         session_id=None,
+                                        review_ref=None,
+                                        completed_at=None,
                                     )
                                 except Exception:
                                     pass
@@ -1454,10 +1461,13 @@ async def run_per(
                                         tasks_file,
                                         task_key,
                                         status="pending",
+                                        attempts=None,
                                         error=None,
                                         error_code=None,
                                         feedback=None,
                                         session_id=None,
+                                        review_ref=None,
+                                        completed_at=None,
                                     )
                                 except Exception:
                                     pass
@@ -1486,10 +1496,13 @@ async def run_per(
                                         tasks_file,
                                         task_key,
                                         status="pending",
+                                        attempts=None,
                                         error=None,
                                         error_code=None,
                                         feedback=None,
                                         session_id=None,
+                                        review_ref=None,
+                                        completed_at=None,
                                     )
                                 except Exception:
                                     pass
@@ -1542,9 +1555,13 @@ async def run_per(
                                         tasks_file,
                                         task_key,
                                         status="pending",
+                                        attempts=None,
                                         error=None,
                                         error_code=None,
                                         feedback=None,
+                                        session_id=None,
+                                        review_ref=None,
+                                        completed_at=None,
                                     )
                                 except Exception:
                                     pass
