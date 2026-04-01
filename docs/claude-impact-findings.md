@@ -4,6 +4,9 @@ Living document for bugs and behavioral findings discovered while hardening Otto
 
 Last updated: 2026-03-31
 
+Current fixing commit on `feat/otto-codex-support`:
+- `4360b24` — Add Codex provider support and harden batch observability
+
 ## Purpose
 
 This is not a Codex-specific bug list.
@@ -19,7 +22,7 @@ Use this as a handoff/reference doc when asking Claude to review or continue wor
 
 ### 1. Per-task `live-state.json` was stale after merge
 
-Status: fixed on `feat/otto-codex-support`
+Status: fixed in commit `4360b24`
 
 What was wrong:
 - Task runner wrote final `live-state.json` at `verified`
@@ -37,7 +40,7 @@ Fix:
 
 ### 2. Per-task `task-summary.json` was stale after merge
 
-Status: fixed on `feat/otto-codex-support`
+Status: fixed in commit `4360b24`
 
 What was wrong:
 - `task-summary.json` was written by task execution at `verified`
@@ -53,7 +56,7 @@ Fix:
 
 ### 3. `v4_events.jsonl` was missing `agent_tool` events
 
-Status: fixed on `feat/otto-codex-support`
+Status: fixed in commit `4360b24`
 
 What was wrong:
 - Live display and legacy `pilot_results.jsonl` received tool events
@@ -69,7 +72,7 @@ Fix:
 
 ### 4. Greenfield auto-ignore heuristics were too weak
 
-Status: improved on `feat/otto-codex-support`
+Status: improved in commit `4360b24`
 
 What was wrong:
 - `.git/info/exclude` only added framework ignores after detecting manifests like `pyproject.toml`
@@ -85,7 +88,7 @@ Fix:
 
 ### 5. Batch QA could leave stale or missing per-task QA artifacts
 
-Status: fixed on `feat/otto-codex-support`
+Status: fixed in commit `4360b24`
 
 What was wrong:
 - In batch mode, shared QA artifacts lived under `otto_logs/batch-qa-*`
@@ -108,7 +111,7 @@ Fix:
 
 ### 6. Proof reports assumed cost was always available
 
-Status: fixed on `feat/otto-codex-support`
+Status: fixed in commit `4360b24`
 
 What was wrong:
 - Proof report headers always rendered `QA $X.XX`
