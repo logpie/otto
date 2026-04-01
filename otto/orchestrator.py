@@ -543,7 +543,13 @@ async def _run_batch_qa(
     elif config.get("parallel_qa") and len(tasks_with_specs) >= 2:
         # Parallel per-task QA via asyncio.gather.
         # Each session gets its own AGENT_BROWSER_SESSION for browser isolation.
-        _orchestrator_log(project_dir, f"parallel QA: dispatching {len(tasks_with_specs)} per-task sessions")
+        import time as _ts_mod
+        _dispatch_ts = _ts_mod.strftime("%Y-%m-%d %H:%M:%S")
+        task_keys_str = ", ".join(t.get("key", "?")[:8] for t in tasks_with_specs)
+        _orchestrator_log(
+            project_dir,
+            f"[{_dispatch_ts}] parallel QA: dispatching {len(tasks_with_specs)} per-task sessions ({task_keys_str})",
+        )
 
         async def _run_single_task_qa(task: dict[str, Any], idx: int) -> dict[str, Any]:
             task_key = task.get("key", "unknown")
@@ -567,7 +573,7 @@ async def _run_batch_qa(
             except Exception as exc:
                 _orchestrator_log(
                     project_dir,
-                    f"parallel QA session failed for {task_key}: {exc}",
+                    f"[{_ts_mod.strftime('%Y-%m-%d %H:%M:%S')}] parallel QA session CRASHED for {task_key}: {exc}",
                 )
                 return {
                     "must_passed": False,
@@ -642,11 +648,27 @@ async def _run_batch_qa(
             "infrastructure_error": infrastructure_error,
         }
 
-        _orchestrator_log(
-            project_dir,
-            f"parallel QA complete: {_parallel_wall}s wall, ${total_qa_cost:.2f}, "
+        # Log per-session detail for debugging
+        _complete_ts = _ts_mod.strftime("%Y-%m-%d %H:%M:%S")
+        per_session_lines = [
+            f"[{_complete_ts}] parallel QA complete: {_parallel_wall}s wall, ${total_qa_cost:.2f}, "
             f"{'PASS' if all_passed else 'FAIL'} ({len(all_must_items)} must items)",
-        )
+        ]
+        for task, result in zip(tasks_with_specs, per_task_results):
+            tk = task.get("key", "?")[:12]
+            cost = float(result.get("cost_usd", 0.0) or 0.0)
+            passed = result.get("must_passed")
+            infra = result.get("infrastructure_error")
+            v = result.get("verdict") or {}
+            must_n = len(v.get("must_items", []) or [])
+            extras_n = len(v.get("extras", []) or [])
+            status = "INFRA" if infra else ("PASS" if passed else "FAIL")
+            per_session_lines.append(
+                f"  session {tk}: {status}  must={must_n}  extras={extras_n}  cost=${cost:.2f}"
+            )
+        if failed_keys:
+            per_session_lines.append(f"  failed tasks: {', '.join(sorted(failed_keys))}")
+        _orchestrator_log(project_dir, *per_session_lines)
 
         from otto.qa import _write_proof_artifacts
         try:
