@@ -6,6 +6,7 @@ from unittest.mock import patch, AsyncMock, MagicMock
 import pytest
 
 from otto.planner import (
+    BatchUnit,
     _normalize_plan,
     Batch,
     ExecutionPlan,
@@ -95,6 +96,14 @@ class TestExecutionPlan:
         ])
         remaining = plan.remaining_after({"t1"})
         assert remaining.is_empty
+
+    def test_batch_units_flatten_to_tasks(self):
+        batch = Batch(units=[
+            BatchUnit(tasks=[TaskPlan(task_key="t1")]),
+            BatchUnit(tasks=[TaskPlan(task_key="t2"), TaskPlan(task_key="t3")]),
+        ])
+        assert [tp.task_key for tp in batch.tasks] == ["t1", "t2", "t3"]
+        assert batch.units[1].is_integrated is True
 
 
 class TestParsePlanJson:
@@ -196,6 +205,24 @@ class TestParsePlanJson:
         assert plan.total_tasks == 0
         assert plan.conflicts[0]["tasks"] == ["t1", "t2"]
         assert plan.analysis[0]["relationship"] == "CONTRADICTORY"
+
+    def test_units_schema_parses(self):
+        raw = json.dumps({
+            "batches": [
+                {
+                    "units": [
+                        {"task_keys": ["t1"]},
+                        {"task_keys": ["t2", "t3"]},
+                    ]
+                }
+            ]
+        })
+        plan = parse_plan_json(raw)
+        assert plan is not None
+        assert len(plan.batches) == 1
+        assert len(plan.batches[0].units) == 2
+        assert [tp.task_key for tp in plan.batches[0].tasks] == ["t1", "t2", "t3"]
+        assert plan.batches[0].units[1].task_keys == ["t2", "t3"]
 
 
 class TestDefaultPlan:

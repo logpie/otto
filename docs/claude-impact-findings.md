@@ -153,6 +153,53 @@ Why this matters for Claude:
 - Some of this wording is still correct because Claude remains a real provider path
 - But mixed generic/provider-specific language makes maintenance harder and invites wrong abstractions
 
+### 7. Task decomposition can trade away useful whole-system context
+
+Status: open product/design finding
+
+What we observed:
+- In the serious `multi-blog-engine` comparison, Otto executed the benchmark as
+  3 pre-defined tasks (data layer → service layer → CLI), while bare Codex got
+  one monolithic prompt containing all 3 layers together.
+- The task-3 CLI layer initially missed an empty-file persistence edge case that
+  bare Codex handled in its one-shot implementation.
+
+Why this matters for Claude too:
+- This is not a Codex-only phenomenon. It is a harness/decomposition effect.
+- Any provider can lose valuable global context when later-layer tasks are split
+  away from the earlier product shape.
+- For layered product-building tasks, decomposition can improve control while
+  simultaneously making the model think too locally.
+
+Practical implication:
+- Otto should not assume that "more decomposition" is always better.
+- For some prompt shapes, especially strongly layered work with one coherent
+  product surface, a single integrated coding pass may outperform staged task
+  execution on first-try quality.
+
+Suggested direction:
+- Add a planner mode that can classify some task sets as "keep integrated"
+  instead of always splitting execution into narrowly scoped later-layer tasks.
+- Alternatively, pass a stronger holistic context packet from earlier tasks into
+  later tasks so the model retains whole-system intent, not just local diffs.
+
+Working vocabulary:
+- `task` = the user-visible unit of intent
+- `batch` = the set of work Otto advances together before the next global decision point
+- recommended batch definition:
+  "the set of work that Otto chooses to advance together before the next global decision point"
+
+Current design recommendation:
+- keep `batch` as the orchestrator unit
+- do not introduce a new top-level "execution unit" concept
+- if integrated execution is added later, prefer a small batch attribute such as:
+  - `execution_style: separate | integrated`
+  rather than inventing more nouns
+
+Reason:
+- `batch` already matches Otto's merge / batch-QA / rollback / replan behavior
+- the confusion comes from overloading batch semantics, not from the `batch` concept itself
+
 ## Real-World Validation That Matters For Claude Too
 
 These scenarios were exercised with Codex, but they validate provider-agnostic Otto paths that Claude also uses:
@@ -205,6 +252,24 @@ These are not confirmed Claude bugs today, but Claude should sanity-check them w
 3. Legacy `pilot_results.jsonl` path: keep watching for duplicate event writes whenever telemetry bridging changes.
 4. Greenfield repo cleanliness: confirm there are no remaining nested artifact directories escaping `.git/info/exclude`.
 5. Batch QA audit trail: confirm per-task proof/report artifacts stay correct after any future retry/refactor.
+6. Decomposition policy: identify which prompt/task shapes should remain integrated rather than being split into narrow sequential layers.
+
+## Planned Direction
+
+Current next-step design work:
+- semantic grouping inside batches
+- planner emits batches made of execution units
+- singleton unit = current per-task execution
+- multi-task unit = one integrated coding pass
+
+Design note:
+- see [`docs/plans/2026-04-01-semantic-grouping.md`](plans/2026-04-01-semantic-grouping.md)
+
+Rationale:
+- preserve `batch` as the top-level orchestrator concept
+- avoid inventing more public-facing workflow concepts than necessary
+- allow tightly layered tasks to keep whole-system context
+- keep conflict-heavy tasks on the current separated path
 
 ## Recommended Next Claude Review Questions
 
