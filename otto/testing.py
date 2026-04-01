@@ -240,7 +240,7 @@ def run_local_tests(
         return TierResult(
             tier="existing_tests",
             passed=False,
-            output=f"Timeout after {timeout}s",
+            output=f"Timeout after {timeout}s running: {test_command}",
         )
 
 

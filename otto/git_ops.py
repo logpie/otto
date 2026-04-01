@@ -405,6 +405,17 @@ def merge_candidate(
         cwd=repo_root, capture_output=True, text=True,
     )
     if merge.returncode != 0:
+        # Log which files conflicted before aborting
+        conflict_files = subprocess.run(
+            ["git", "diff", "--name-only", "--diff-filter=U"],
+            cwd=repo_root, capture_output=True, text=True,
+        ).stdout.strip()
+        if conflict_files:
+            from otto.observability import append_text_log
+            append_text_log(
+                repo_root / "otto_logs" / "orchestrator.log",
+                [f"  merge conflict files: {conflict_files.replace(chr(10), ', ')}"],
+            )
         _abort_merge_and_cleanup(repo_root, default_branch, temp_branch)
         return False, ""
 

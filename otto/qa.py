@@ -837,6 +837,11 @@ async def _run_qa_prompt(
                                                 candidate, expected_must_count=expected_must_count
                                             ):
                                                 state.early_verdict = candidate
+                                                if log_dir:
+                                                    append_text_log(log_dir / "qa-agent.log", [
+                                                        f"[{round(time.monotonic() - _qa_start_time, 1):6.1f}s] "
+                                                        f"early verdict captured at turn {state.turn_count}"
+                                                    ])
                                         except (json.JSONDecodeError, TypeError):
                                             pass
                                 elif block.name == "Read":
@@ -948,11 +953,17 @@ async def _run_qa_prompt(
 
     parse_infrastructure_error = False
     if not verdict or not _is_verdict_complete(verdict, expected_must_count=expected_must_count):
+        verdict_source = "early_capture" if query_state.early_verdict else "file" if verdict else "none"
         # Try parsing verdict from agent's text output (agent often repeats it)
         verdict = _parse_qa_verdict_json(raw_report)
         if verdict.get("_legacy_parse") and not _has_explicit_fail_markers(raw_report):
             verdict["must_passed"] = None
             parse_infrastructure_error = True
+            if log_dir:
+                append_text_log(log_dir / "qa-agent.log", [
+                    f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] verdict parse → infrastructure_error "
+                    f"(source={verdict_source}, legacy_parse=True, no explicit fail markers)"
+                ])
         # Legacy/fallback verdicts claiming pass without must_items evidence
         # are not trustworthy — force fail. But if the raw report contains
         # valid structured JSON with must_items, trust it.
