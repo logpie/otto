@@ -200,6 +200,15 @@ Reason:
 - `batch` already matches Otto's merge / batch-QA / rollback / replan behavior
 - the confusion comes from overloading batch semantics, not from the `batch` concept itself
 
+Follow-up evidence from real runs:
+- grouping an entire 3-task layered chain into one integrated unit was too coarse on `multi-blog-engine`
+- grouping the first 2 tightly layered tasks and leaving the 3rd as its own unit performed much better
+- the same pair-grouping policy also looked reasonable on `multi-expense-tracker`
+
+Current practical recommendation:
+- prefer small integrated units (especially pairs)
+- do not default to 3+ task integrated chains without stronger evidence
+
 ## Real-World Validation That Matters For Claude Too
 
 These scenarios were exercised with Codex, but they validate provider-agnostic Otto paths that Claude also uses:
@@ -264,6 +273,8 @@ Current next-step design work:
 
 Design note:
 - see [`docs/plans/2026-04-01-semantic-grouping.md`](plans/2026-04-01-semantic-grouping.md)
+- comparison note:
+  - [`docs/codex-vs-otto-comparison-2026-04-01.md`](codex-vs-otto-comparison-2026-04-01.md)
 
 Rationale:
 - preserve `batch` as the top-level orchestrator concept

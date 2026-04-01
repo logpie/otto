@@ -19,6 +19,8 @@ from otto.observability import append_text_log
 
 logger = logging.getLogger("otto.planner")
 
+MAX_INTEGRATED_UNIT_SIZE = 2
+
 RELATIONSHIP_VALUES = {
     "INDEPENDENT",
     "ADDITIVE",
@@ -653,6 +655,26 @@ def _serialize_analysis_units(
     return [Batch(units=units) for units in serialized_batches if units]
 
 
+def _normalize_batch_units(batches: list[Batch]) -> list[Batch]:
+    """Apply structural normalization to planner-emitted units.
+
+    Current policy: integrated units are capped at MAX_INTEGRATED_UNIT_SIZE tasks.
+    This keeps grouped retries from becoming too coarse on long layered chains.
+    """
+    normalized_batches: list[Batch] = []
+    for batch in batches:
+        normalized_units: list[BatchUnit] = []
+        for unit in batch.units:
+            if len(unit.tasks) <= MAX_INTEGRATED_UNIT_SIZE:
+                normalized_units.append(unit)
+                continue
+            tasks = list(unit.tasks)
+            for idx in range(0, len(tasks), MAX_INTEGRATED_UNIT_SIZE):
+                normalized_units.append(BatchUnit(tasks=tasks[idx:idx + MAX_INTEGRATED_UNIT_SIZE]))
+        normalized_batches.append(Batch(units=normalized_units))
+    return normalized_batches
+
+
 def _normalize_plan(plan: ExecutionPlan, tasks: list[dict[str, Any]]) -> ExecutionPlan:
     valid_keys = {str(task.get("key", "") or "") for task in tasks if task.get("key")}
     explicit_analysis = _explicit_dependency_analysis(tasks)
@@ -752,7 +774,7 @@ def _normalize_plan(plan: ExecutionPlan, tasks: list[dict[str, Any]]) -> Executi
             seed_batches.append(Batch.from_tasks([TaskPlan(task_key=key)]))
         logger.warning("Planner dropped %d task(s): %s — added as serial batches", len(missing_keys), ", ".join(sorted(missing_keys)))
 
-    batches = _serialize_analysis_units(seed_batches, analysis)
+    batches = _normalize_batch_units(_serialize_analysis_units(seed_batches, analysis))
 
     return ExecutionPlan(
         batches=batches,
