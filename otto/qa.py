@@ -3,7 +3,9 @@
 import asyncio
 from dataclasses import dataclass
 import json
+import os
 import re
+import shutil
 import tempfile
 import time
 from pathlib import Path
@@ -81,9 +83,13 @@ Also check:
 - Does the implementation contradict the ORIGINAL task prompt?
 - Does it break existing functionality?
 
-When taking browser screenshots, ALWAYS save to a file path:
-  take_screenshot(filePath="<proof_dir>/screenshot-<name>.png")
-Do NOT take screenshots without filePath — inline screenshots break the message pipe.
+For visual ◈ verification, use agent-browser via Bash (NOT MCP browser tools):
+  agent-browser open http://localhost:PORT     # navigate
+  agent-browser snapshot -i                     # accessibility tree with @refs
+  agent-browser click @e3                       # click by ref
+  agent-browser screenshot the screenshot directory provided below
+  agent-browser close                           # cleanup when done
+Start a dev server first, seed test data, then use agent-browser to verify visuals.
 
 Kill any servers you started (by PID, not pkill).
 
@@ -717,38 +723,6 @@ def _expected_batch_must_matrix(tasks_with_specs: list[dict[str, Any]]) -> set[t
     return expected
 
 
-def _build_qa_mcp_servers(enable_browser: bool) -> dict[str, dict]:
-    """Load browser MCP configuration when QA may need browser verification."""
-    if not enable_browser:
-        return {}
-
-    qa_mcp_servers = {}
-    user_claude_json = Path.home() / ".claude.json"
-    if not user_claude_json.exists():
-        return qa_mcp_servers
-
-    try:
-        user_config = json.loads(user_claude_json.read_text())
-        for name, srv in user_config.get("mcpServers", {}).items():
-            if name != "chrome-devtools":
-                continue
-            srv = dict(srv)
-            args = list(srv.get("args", []))
-            if "--headless" not in args:
-                args.append("--headless")
-            if not any(a.startswith("--viewport") for a in args):
-                args.extend(["--viewport", "1280x720"])
-            if not any(a.startswith("--userDataDir") for a in args):
-                otto_chrome_profile = str(Path.home() / ".cache" / "otto" / "chrome-profile")
-                args.extend(["--userDataDir", otto_chrome_profile])
-            srv["args"] = args
-            qa_mcp_servers[name] = srv
-    except Exception:
-        return {}
-
-    return qa_mcp_servers
-
-
 async def _run_qa_prompt(
     *,
     qa_prompt: str,
@@ -756,23 +730,24 @@ async def _run_qa_prompt(
     project_dir: Path,
     verdict_file: Path,
     on_progress: Any = None,
-    enable_browser: bool = False,
     log_dir: Path | None = None,
     expected_must_count: int = 0,
+    session_id: int = 0,
 ) -> dict[str, Any]:
     """Execute a QA prompt and return parsed verdict plus captured actions."""
-    qa_mcp_servers = _build_qa_mcp_servers(enable_browser)
+    qa_env = _subprocess_env()
+    # Each parallel QA session gets its own agent-browser session for isolation
+    qa_env["AGENT_BROWSER_SESSION"] = f"otto-qa-{os.getpid()}-{session_id}"
+    qa_env["AGENT_BROWSER_HEADED"] = "false"
 
     _qa_settings = config.get("qa_agent_settings", "project").split(",")
     qa_opts = ClaudeAgentOptions(
         permission_mode="bypassPermissions",
         cwd=str(project_dir),
         setting_sources=_qa_settings,
-        env=_subprocess_env(),
+        env=qa_env,
         system_prompt={"type": "preset", "preset": "claude_code"},
     )
-    if qa_mcp_servers:
-        qa_opts.mcp_servers = qa_mcp_servers
     if config.get("model"):
         qa_opts.model = config["model"]
 
@@ -1330,6 +1305,7 @@ async def run_qa(
     prev_failed: list[str] | None = None,
     focus_items: list | None = None,
     retried_task_keys: set[str] | None = None,
+    session_id: int = 0,
 ) -> dict[str, Any]:
     """Unified QA entry point -- single-task or batch.
 
@@ -1353,6 +1329,11 @@ async def run_qa(
     from otto.tasks import spec_binding
 
     is_batch = len(tasks) > 1
+    requires_browser = any(
+        not item.get("verifiable", True)
+        for task in tasks
+        for item in (task.get("spec") or [])
+    )
 
     # Log tier decision
     if log_dir:
@@ -1366,7 +1347,7 @@ async def run_qa(
                 f"tasks: {task_count}",
                 f"total specs: {spec_count}",
                 f"retry round: {'yes — focused on ' + ', '.join(sorted(retried_task_keys)) if is_retry else 'no (initial)'}",
-                f"browser: enabled",
+                f"browser: {'required' if requires_browser else 'not required'}",
                 f"reason: batch QA verifies integrated codebase with combined specs + cross-task integration tests",
                 "",
             ])
@@ -1395,16 +1376,30 @@ async def run_qa(
         retried_task_keys=retried_task_keys,
     )
 
-    qa_result = await _run_qa_prompt(
-        qa_prompt=qa_prompt,
-        config=config,
-        project_dir=project_dir,
-        verdict_file=verdict_file,
-        on_progress=on_progress,
-        enable_browser=True,
-        log_dir=log_dir,
-        expected_must_count=expected_must_count,
-    )
+    if requires_browser and shutil.which("agent-browser") is None:
+        message = (
+            "QA requires agent-browser for visual verification, but `agent-browser` "
+            "is not installed or not on PATH."
+        )
+        qa_result = {
+            "must_passed": False,
+            "verdict": None,
+            "raw_report": message,
+            "cost_usd": 0.0,
+            "qa_actions": [],
+            "infrastructure_error": True,
+        }
+    else:
+        qa_result = await _run_qa_prompt(
+            qa_prompt=qa_prompt,
+            config=config,
+            project_dir=project_dir,
+            verdict_file=verdict_file,
+            on_progress=on_progress,
+            log_dir=log_dir,
+            expected_must_count=expected_must_count,
+            session_id=session_id,
+        )
 
     final_result = _finalize_qa_result(qa_result, tasks)
 

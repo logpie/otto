@@ -540,14 +540,9 @@ async def _run_batch_qa(
             retried_task_keys=focus_task_keys,
             log_dir=log_dir,
         )
-    elif config.get("parallel_qa") and len(tasks_with_specs) >= 2 and not any(
-        not item.get("verifiable", True)
-        for task in tasks_with_specs
-        for item in (task.get("spec") or [])
-    ):
-        # Parallel per-task QA via asyncio.gather — code-only tasks.
-        # Falls back to flat batch QA when any task has visual ◈ specs
-        # (browser QA parallelism is unvalidated for speed).
+    elif config.get("parallel_qa") and len(tasks_with_specs) >= 2:
+        # Parallel per-task QA via asyncio.gather.
+        # Each session gets its own AGENT_BROWSER_SESSION for browser isolation.
         _orchestrator_log(project_dir, f"parallel QA: dispatching {len(tasks_with_specs)} per-task sessions")
 
         async def _run_single_task_qa(task: dict[str, Any], idx: int) -> dict[str, Any]:
@@ -567,6 +562,7 @@ async def _run_batch_qa(
                     diff=diff,
                     on_progress=_progress,
                     log_dir=task_log_dir,
+                    session_id=idx,
                 )
             except Exception as exc:
                 _orchestrator_log(

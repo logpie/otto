@@ -1479,15 +1479,17 @@ class TestParallelQA:
         assert result["cost_usd"] == 1.0  # 2 × $0.50
 
     @pytest.mark.asyncio
-    async def test_parallel_falls_back_for_visual_specs(self, tmp_path):
-        """parallel_qa=True with ◈ specs falls back to flat batch QA."""
+    async def test_parallel_works_with_visual_specs(self, tmp_path):
+        """parallel_qa=True with ◈ specs still parallelizes (agent-browser handles concurrency)."""
         call_args = []
 
         async def fake_run_qa(tasks, config, project_dir, diff, **kw):
             call_args.append([t["key"] for t in tasks])
             return {
                 "must_passed": True,
-                "verdict": {"must_passed": True, "must_items": []},
+                "verdict": {"must_passed": True, "must_items": [
+                    {"task_key": tasks[0]["key"], "spec_id": 1, "status": "pass"},
+                ]},
                 "raw_report": "",
                 "cost_usd": 0.50,
             }
@@ -1500,9 +1502,10 @@ class TestParallelQA:
                 MagicMock(), MagicMock(),
             )
 
-        # Should dispatch 1 batch call (flat), not 2 per-task calls
-        assert len(call_args) == 1
-        assert sorted(call_args[0]) == ["t1", "t2"]
+        # agent-browser handles concurrent sessions — should still parallelize
+        assert len(call_args) == 2
+        assert call_args[0] == ["t1"]
+        assert call_args[1] == ["t2"]
 
     @pytest.mark.asyncio
     async def test_parallel_merge_propagates_failure(self, tmp_path):
