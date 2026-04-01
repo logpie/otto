@@ -486,6 +486,12 @@ def _anchor_candidate_ref(project_dir: Path, task_key: str, attempt_num: int, co
     if result.returncode != 0:
         stderr = (result.stderr or "").strip()
         raise RuntimeError(f"failed to anchor candidate ref {ref_name}: {stderr or 'git update-ref failed'}")
+    from otto.observability import append_text_log
+    import time as _time
+    append_text_log(
+        project_dir / "otto_logs" / "orchestrator.log",
+        [f"[{_time.strftime('%Y-%m-%d %H:%M:%S')}] anchor ref: {ref_name} → {commit_sha[:12]}"],
+    )
     return ref_name
 
 

@@ -831,7 +831,10 @@ Project context (git ls-files, capped at 200):
         )
         result = parse_plan_json(raw_output)
         if result is None:
-            raise ValueError("planner parse failed")
+            raise ValueError(
+                f"planner parse failed: raw output ({len(raw_output)} chars): "
+                f"{raw_output[:300]!r}"
+            )
         normalized = _normalize_plan(result, tasks)
         _planner_log(
             project_dir,
@@ -857,6 +860,7 @@ Project context (git ls-files, capped at 200):
             project_dir,
             f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] planner fallback",
             f"fallback trigger: planner failed ({exc})",
+            f"error detail: {exc!r}",
             "final batch structure:",
             *_format_batches(fallback),
             "",
@@ -990,7 +994,11 @@ Return JSON only:
         )
         replanned = parse_plan_json(raw_output)
         if replanned is None or replanned.is_empty:
-            raise ValueError("replan parse failed")
+            reason = "empty plan" if (replanned is not None and replanned.is_empty) else "parse returned None"
+            raise ValueError(
+                f"replan parse failed ({reason}): raw output ({len(raw_output)} chars): "
+                f"{raw_output[:300]!r}"
+            )
         # Use full task dicts (with id, depends_on) so _normalize_plan can
         # enforce explicit dependency constraints deterministically.
         normalize_input = [
@@ -1034,6 +1042,7 @@ Return JSON only:
                 else ""
             ),
             f"fallback trigger: replan failed ({exc})",
+            f"error detail: {exc!r}",
             "final batch structure:",
             *_format_batches(fallback),
             "",

@@ -297,7 +297,14 @@ Write only [must]/[should] criteria lines to the file — no headings, notes, or
     if spec_file.exists():
         text = spec_file.read_text()
         spec_file.unlink()
-        return _parse_spec_output(text), spec_cost, None
+        parsed_items = _parse_spec_output(text)
+        filtered_items = filter_generated_spec_items(parsed_items)
+        skipped = len(parsed_items) - len(filtered_items)
+        summary = f"spec parsed: items={len(filtered_items)}"
+        if skipped:
+            summary += f" skipped={skipped}"
+        _write_log(spec_log_dir / "spec-agent.log", [summary])
+        return parsed_items, spec_cost, None
 
     # Clean up temp file if it doesn't exist (shouldn't happen, but be safe)
     spec_file.unlink(missing_ok=True)

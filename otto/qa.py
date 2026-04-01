@@ -978,7 +978,7 @@ async def _run_qa_prompt(
             log_dir.mkdir(parents=True, exist_ok=True)
             log_lines = [
                 f"{'=' * 60}",
-                f"QA RUN  must_count={expected_must_count}  {time.strftime('%Y-%m-%d %H:%M:%S')}",
+                f"QA RUN  must_count={expected_must_count}  session_id={session_id}  {time.strftime('%Y-%m-%d %H:%M:%S')}",
                 f"SDK init: {_qa_init_time}s  total: {_qa_total_time}s  turns: {query_state.turn_count}  cost: ${query_state.qa_cost:.2f}",
                 f"{'=' * 60}",
             ]

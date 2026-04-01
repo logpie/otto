@@ -1651,6 +1651,7 @@ async def run_per(
                         project_dir,
                         f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] replan",
                         "replan triggered after batch failures",
+                        f"replan: {len(remaining_plan.batches)} batches → {len(replanned.batches)} batches",
                         f"old structure: {_summarize_batch_structure(remaining_plan)}",
                         f"new structure: {_summarize_batch_structure(replanned)}",
                         "",
@@ -1662,6 +1663,7 @@ async def run_per(
                         project_dir,
                         f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] replan",
                         "replan triggered after batch failures but was rejected due to invalid coverage",
+                        f"replan: {len(remaining_plan.batches)} batches → rejected (invalid coverage)",
                         f"kept structure: {_summarize_batch_structure(remaining_plan)}",
                         "",
                     )
@@ -2129,9 +2131,9 @@ async def _run_batch_parallel(
 
     async def _run_one(task_plan: Any) -> TaskResult:
         task_key = task_plan.task_key
-        _orchestrator_log(project_dir, f"  parallel: {task_key[:8]} waiting for semaphore (max_parallel={max_parallel})")
+        _orchestrator_log(project_dir, f"  [{time.strftime('%Y-%m-%d %H:%M:%S')}] parallel: {task_key[:8]} waiting for semaphore (max_parallel={max_parallel})")
         async with semaphore:
-            _orchestrator_log(project_dir, f"  parallel: {task_key[:8]} acquired semaphore")
+            _orchestrator_log(project_dir, f"  [{time.strftime('%Y-%m-%d %H:%M:%S')}] parallel: {task_key[:8]} acquired semaphore")
             sib_ctx = (sibling_contexts or {}).get(task_key)
             return await _run_task_in_worktree(
                 task_plan, context, config, project_dir,
