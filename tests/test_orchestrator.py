@@ -20,7 +20,7 @@ from otto.orchestrator import (
     merge_batch_results,
     run_per,
 )
-from otto.planner import Batch, ExecutionPlan, TaskPlan
+from otto.planner import Batch, BatchUnit, ExecutionPlan, TaskPlan
 from otto.tasks import load_tasks, update_task
 from otto.telemetry import Telemetry
 
@@ -249,6 +249,121 @@ class TestRunPerIntegration:
 
         assert exit_code == 0
         assert rerun_calls == ["task-merge"]
+
+    @pytest.mark.asyncio
+    async def test_batch_qa_retry_reruns_integrated_unit_once(self, tmp_git_repo):
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        tasks_path.write_text(yaml.dump({"tasks": [
+            {"id": 1, "key": "task-a", "prompt": "Task A", "status": "pending"},
+            {"id": 2, "key": "task-b", "prompt": "Task B", "status": "pending"},
+        ]}))
+
+        config = self._make_config(tmp_git_repo)
+        config["max_parallel"] = 1
+
+        execution_plan = ExecutionPlan(batches=[
+            Batch(units=[BatchUnit(tasks=[TaskPlan(task_key="task-a"), TaskPlan(task_key="task-b")])]),
+        ])
+
+        def fake_preflight_checks(*args, **kwargs):
+            return None, load_tasks(tasks_path)
+
+        async def fake_run_integrated_unit(unit, pending_by_key, context, config, project_dir, telemetry, task_file, base_sha, qa_mode="per_task"):
+            for key in ["task-a", "task-b"]:
+                update_task(task_file, key, status="verified")
+            return [
+                TaskResult(task_key="task-a", success=True, unit_key="unit-ab", unit_task_keys=["task-a", "task-b"]),
+                TaskResult(task_key="task-b", success=True, unit_key="unit-ab", unit_task_keys=["task-a", "task-b"]),
+            ]
+
+        def fake_merge_batch_results(results, config, project_dir, task_file, telemetry, qa_mode="per_task"):
+            for result in results:
+                update_task(task_file, result.task_key, status="merged")
+            return results
+
+        batch_qa_calls = 0
+
+        async def fake_run_batch_qa(merged_tasks, config, project_dir, tasks_file, telemetry, context, **kwargs):
+            nonlocal batch_qa_calls
+            batch_qa_calls += 1
+            if batch_qa_calls == 1:
+                return {
+                    "must_passed": False,
+                    "verdict": {"must_passed": False, "must_items": [], "regressions": []},
+                    "raw_report": "task-a failed",
+                    "failed_task_keys": ["task-a"],
+                    "cost_usd": 0.0,
+                }
+            return {
+                "must_passed": True,
+                "verdict": {"must_passed": True, "must_items": [], "regressions": []},
+                "raw_report": "all good",
+                "failed_task_keys": [],
+                "cost_usd": 0.0,
+            }
+
+        with patch("otto.orchestrator.preflight_checks", side_effect=fake_preflight_checks):
+            with patch("otto.orchestrator.plan", new=AsyncMock(return_value=execution_plan)):
+                with patch("otto.orchestrator._run_integrated_unit_in_worktree", side_effect=fake_run_integrated_unit) as integrated_mock:
+                    with patch("otto.orchestrator.merge_batch_results", side_effect=fake_merge_batch_results):
+                        with patch("otto.orchestrator._run_batch_qa", side_effect=fake_run_batch_qa):
+                            with patch("otto.orchestrator._print_summary"):
+                                with patch("otto.orchestrator._record_run_history"):
+                                    exit_code = await run_per(config, tasks_path, tmp_git_repo)
+
+        assert exit_code == 0
+        assert integrated_mock.call_count == 2  # initial run + one unit retry
+
+    @pytest.mark.asyncio
+    async def test_run_per_executes_integrated_unit_once(self, tmp_git_repo):
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        tasks_path.write_text(yaml.dump({"tasks": [
+            {"id": 1, "key": "task-a", "prompt": "Task A", "status": "pending"},
+            {"id": 2, "key": "task-b", "prompt": "Task B", "status": "pending"},
+        ]}))
+
+        config = self._make_config(tmp_git_repo)
+        config["max_parallel"] = 1
+        execution_plan = ExecutionPlan(batches=[
+            Batch(units=[BatchUnit(tasks=[TaskPlan(task_key="task-a"), TaskPlan(task_key="task-b")])]),
+        ])
+
+        def fake_preflight_checks(*args, **kwargs):
+            return None, load_tasks(tasks_path)
+
+        async def fake_run_integrated_unit(unit, pending_by_key, context, config, project_dir, telemetry, task_file, base_sha, qa_mode="per_task"):
+            for key in ["task-a", "task-b"]:
+                update_task(task_file, key, status="verified")
+            return [
+                TaskResult(task_key="task-a", success=True, unit_key="unit-ab", unit_task_keys=["task-a", "task-b"]),
+                TaskResult(task_key="task-b", success=True, unit_key="unit-ab", unit_task_keys=["task-a", "task-b"]),
+            ]
+
+        def fake_merge_batch_results(results, config, project_dir, task_file, telemetry, qa_mode="per_task"):
+            for result in results:
+                update_task(task_file, result.task_key, status="merged" if qa_mode == QAMode.BATCH else "passed")
+            return results
+
+        async def fake_run_batch_qa(*args, **kwargs):
+            return {
+                "must_passed": True,
+                "verdict": {"must_passed": True, "must_items": [], "regressions": []},
+                "raw_report": "all good",
+                "failed_task_keys": [],
+                "cost_usd": 0.0,
+            }
+
+        with patch("otto.orchestrator.preflight_checks", side_effect=fake_preflight_checks):
+            with patch("otto.orchestrator.plan", new=AsyncMock(return_value=execution_plan)):
+                with patch("otto.orchestrator._run_integrated_unit_in_worktree", side_effect=fake_run_integrated_unit) as integrated_mock:
+                    with patch("otto.orchestrator.merge_batch_results", side_effect=fake_merge_batch_results):
+                        with patch("otto.orchestrator._run_batch_qa", side_effect=fake_run_batch_qa):
+                            with patch("otto.orchestrator._print_summary"):
+                                with patch("otto.orchestrator._record_run_history"):
+                                    exit_code = await run_per(config, tasks_path, tmp_git_repo)
+
+        assert exit_code == 0
+        assert integrated_mock.call_count == 1
 
     @pytest.mark.asyncio
     async def test_signal_sets_interrupted(self, tmp_git_repo):
@@ -1323,7 +1438,7 @@ class TestRunBatchParallel:
 
         with patch("otto.git_ops.create_task_worktree", side_effect=RuntimeError("setup boom")):
             results = await _run_batch_parallel(
-                batch, context, config, tmp_git_repo, telemetry, tasks_path, max_parallel=1,
+                batch, {"task-boom": {"key": "task-boom", "prompt": "boom"}}, context, config, tmp_git_repo, telemetry, tasks_path, max_parallel=1,
             )
 
         assert len(results) == 1
@@ -1380,11 +1495,61 @@ class TestRunBatchParallel:
                 with patch("otto.git_ops.cleanup_task_worktree"):
                     with patch("otto.orchestrator.coding_loop", side_effect=fake_coding_loop):
                         results = await _run_batch_parallel(
-                            batch, context, config, tmp_git_repo, telemetry, tasks_path, max_parallel=1,
+                            batch, {
+                                "task-one": {"key": "task-one", "prompt": "one"},
+                                "task-two": {"key": "task-two", "prompt": "two"},
+                            }, context, config, tmp_git_repo, telemetry, tasks_path, max_parallel=1,
                         )
 
         assert all(result.success for result in results)
         assert max_active_setup == 1
+
+    @pytest.mark.asyncio
+    async def test_integrated_unit_runs_once_and_expands_results(self, tmp_git_repo):
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        tasks_path.write_text(yaml.dump({"tasks": [
+            {"id": 1, "key": "task-a", "prompt": "A", "status": "pending"},
+            {"id": 2, "key": "task-b", "prompt": "B", "status": "pending"},
+            {"id": 3, "key": "task-c", "prompt": "C", "status": "pending"},
+        ]}))
+        batch = Batch(units=[
+            BatchUnit(tasks=[TaskPlan(task_key="task-a"), TaskPlan(task_key="task-b")]),
+            BatchUnit(tasks=[TaskPlan(task_key="task-c")]),
+        ])
+        config = {"default_branch": "main", "verify_timeout": 60}
+        telemetry = Telemetry(tmp_git_repo / "otto_logs")
+        context = PipelineContext()
+
+        async def fake_run_integrated_unit(*args, **kwargs):
+            return [
+                TaskResult(task_key="task-a", success=True, unit_key="unit-ab", unit_task_keys=["task-a", "task-b"]),
+                TaskResult(task_key="task-b", success=True, unit_key="unit-ab", unit_task_keys=["task-a", "task-b"]),
+            ]
+
+        async def fake_run_task(*args, **kwargs):
+            return TaskResult(task_key="task-c", success=True)
+
+        with patch("otto.orchestrator._run_integrated_unit_in_worktree", side_effect=fake_run_integrated_unit) as integrated_mock:
+            with patch("otto.orchestrator._run_task_in_worktree", side_effect=fake_run_task) as task_mock:
+                results = await _run_batch_parallel(
+                    batch,
+                    {
+                        "task-a": {"key": "task-a", "prompt": "A"},
+                        "task-b": {"key": "task-b", "prompt": "B"},
+                        "task-c": {"key": "task-c", "prompt": "C"},
+                    },
+                    context,
+                    config,
+                    tmp_git_repo,
+                    telemetry,
+                    tasks_path,
+                    max_parallel=2,
+                )
+
+        assert integrated_mock.call_count == 1
+        assert task_mock.call_count == 1
+        assert [r.task_key for r in results] == ["task-a", "task-b", "task-c"]
+        assert all(r.success for r in results)
 
 
 class TestCrashRecovery:

@@ -18,6 +18,8 @@ class TaskResult:
     """Result of a single task execution in the v4 pipeline."""
     task_key: str
     success: bool
+    unit_key: str | None = None
+    unit_task_keys: list[str] = field(default_factory=list)
     commit_sha: str | None = None
     worktree: Path | None = None
     cost_usd: float = 0.0

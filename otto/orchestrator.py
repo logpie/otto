@@ -9,6 +9,7 @@ Entry point: run_per()
 """
 import asyncio
 import fcntl
+import hashlib
 import json
 import shutil
 import signal
@@ -139,6 +140,33 @@ def _flatten_unit_tasks(units: list[BatchUnit]) -> list[Any]:
     for unit in units:
         tasks.extend(unit.tasks)
     return tasks
+
+
+def _unit_members(batch: Any, task_key: str) -> list[str]:
+    for unit in batch.units:
+        keys = [task.task_key for task in unit.tasks]
+        if task_key in keys:
+            return keys
+    return [task_key]
+
+
+def _unit_key(task_keys: list[str]) -> str:
+    payload = ",".join(sorted(task_keys)).encode("utf-8")
+    return f"unit-{hashlib.sha256(payload).hexdigest()[:12]}"
+
+
+def _unit_prompt(task_plans: list[Any], pending_by_key: dict[str, dict[str, Any]]) -> str:
+    lines = [
+        "Implement all of the following tightly related tasks together as one coherent change.",
+        "Do not create git commits.",
+        "Make sure the final implementation satisfies all tasks together, not one at a time.",
+        "",
+        "Tasks:",
+    ]
+    for idx, task_plan in enumerate(task_plans, start=1):
+        task = pending_by_key.get(task_plan.task_key, {})
+        lines.append(f"{idx}. #{task.get('id', '?')} {task.get('prompt', '')}")
+    return "\n".join(lines)
 
 
 def load_learnings(project_dir: Path, context: PipelineContext) -> None:
@@ -1052,12 +1080,13 @@ async def run_per(
             batch_idx += 1
             batch_task_plans = _flatten_unit_tasks(batch.units)
             batch_size = len(batch_task_plans)
+            unit_count = len(batch.units)
             abort_after_batch = False
 
-            use_parallel = max_parallel > 1 and batch_size > 1
+            use_parallel = max_parallel > 1 and unit_count > 1
             if batch_size > 1:
                 mode_label = "parallel" if use_parallel else "sequential"
-                console.print(f"\n  [bold]Batch {batch_idx}[/bold]  [dim]{batch_size} tasks ({mode_label})[/dim]")
+                console.print(f"\n  [bold]Batch {batch_idx}[/bold]  [dim]{batch_size} tasks, {unit_count} units ({mode_label})[/dim]")
             else:
                 console.print(f"\n  [bold]Batch {batch_idx}[/bold]  [dim]1 task[/dim]")
             _orchestrator_log(
@@ -1075,7 +1104,7 @@ async def run_per(
                     for tp in batch_task_plans
                 }
                 batch_results = await _run_batch_parallel(
-                    batch, context, config, project_dir, telemetry, tasks_file,
+                    batch, pending_by_key, context, config, project_dir, telemetry, tasks_file,
                     max_parallel=max_parallel,
                     qa_mode=qa_mode,
                     sibling_contexts=sib_ctxs,
@@ -1087,15 +1116,30 @@ async def run_per(
                     cwd=project_dir, capture_output=True, text=True, check=True,
                 ).stdout.strip()
                 batch_results: list[TaskResult] = []
-                for task_plan in batch_task_plans:
-                    sibling_ctx = _build_sibling_context(
-                        task_plan.task_key, batch, pending_by_key, execution_plan.analysis,
-                    )
-                    result = await _run_task_in_worktree(
-                        task_plan, context, config, project_dir, telemetry, tasks_file,
-                        base_sha, qa_mode=qa_mode, sibling_context=sibling_ctx,
-                    )
-                    batch_results.append(result)
+                for unit in batch.units:
+                    if len(unit.tasks) > 1:
+                        results = await _run_integrated_unit_in_worktree(
+                            unit,
+                            pending_by_key,
+                            context,
+                            config,
+                            project_dir,
+                            telemetry,
+                            tasks_file,
+                            base_sha,
+                            qa_mode=qa_mode,
+                        )
+                        batch_results.extend(results)
+                    else:
+                        task_plan = unit.tasks[0]
+                        sibling_ctx = _build_sibling_context(
+                            task_plan.task_key, batch, pending_by_key, execution_plan.analysis,
+                        )
+                        result = await _run_task_in_worktree(
+                            task_plan, context, config, project_dir, telemetry, tasks_file,
+                            base_sha, qa_mode=qa_mode, sibling_context=sibling_ctx,
+                        )
+                        batch_results.append(result)
                     if context.interrupted:
                         break
 
@@ -1117,10 +1161,16 @@ async def run_per(
                     console.print(
                         f"\n  [yellow]Re-applying {len(merge_failed)} merge-failed task(s) on updated main...[/yellow]"
                     )
+                    seen_unit_keys: set[str] = set()
                     for failed_result in merge_failed:
                         if context.interrupted:
                             break
                         fkey = failed_result.task_key
+                        member_keys = failed_result.unit_task_keys or _unit_members(batch, fkey)
+                        rerun_unit_key = failed_result.unit_key or _unit_key(member_keys)
+                        if rerun_unit_key in seen_unit_keys:
+                            continue
+                        seen_unit_keys.add(rerun_unit_key)
                         tp = next((t for t in batch_task_plans if t.task_key == fkey), None)
                         if not tp:
                             continue
@@ -1198,21 +1248,47 @@ async def run_per(
                             ["git", "rev-parse", "HEAD"],
                             cwd=project_dir, capture_output=True, text=True, check=True,
                         ).stdout.strip()
-                        retry_result = await _run_task_in_worktree(
-                            tp, context, config, project_dir,
-                            telemetry, tasks_file, retry_base_sha,
-                            qa_mode=qa_mode,
-                        )
-                        if retry_result.success:
-                            rerun_merged = merge_batch_results(
-                                [retry_result], config, project_dir, tasks_file, telemetry,
+                        if len(member_keys) > 1:
+                            unit = next(
+                                (u for u in batch.units if [task.task_key for task in u.tasks] == member_keys),
+                                None,
+                            )
+                            if not unit:
+                                continue
+                            retry_results = await _run_integrated_unit_in_worktree(
+                                unit,
+                                pending_by_key,
+                                context,
+                                config,
+                                project_dir,
+                                telemetry,
+                                tasks_file,
+                                retry_base_sha,
                                 qa_mode=qa_mode,
                             )
-                            retry_result = rerun_merged[0]
-                        batch_results = [
-                            retry_result if r.task_key == fkey else r
-                            for r in batch_results
-                        ]
+                            if all(result.success for result in retry_results):
+                                retry_results = merge_batch_results(
+                                    retry_results, config, project_dir, tasks_file, telemetry,
+                                    qa_mode=qa_mode,
+                                )
+                            retry_map = {result.task_key: result for result in retry_results}
+                            batch_results = [retry_map.get(result.task_key, result) for result in batch_results]
+                        else:
+                            retry_result = await _run_task_in_worktree(
+                                tp, context, config, project_dir,
+                                telemetry, tasks_file, retry_base_sha,
+                                qa_mode=qa_mode,
+                            )
+                            if retry_result.success:
+                                rerun_merged = merge_batch_results(
+                                    [retry_result], config, project_dir, tasks_file, telemetry,
+                                    qa_mode=qa_mode,
+                                )
+                                retry_result = rerun_merged[0]
+                            batch_results = [
+                                retry_result if r.task_key == fkey else r
+                                for r in batch_results
+                            ]
 
                 # Post-batch deterministic test suite: run once on integrated HEAD
                 # instead of N per-task post-merge tests. Catches integration failures
@@ -1332,22 +1408,8 @@ async def run_per(
                                 f"{len(qa_failed_keys)} failed task(s): {sorted(qa_failed_keys)}",
                             )
 
-                            for fkey in qa_failed_keys:
-                                feedback = _build_batch_qa_feedback(fkey, final_batch_qa)
-                                try:
-                                    update_task(
-                                        tasks_file,
-                                        fkey,
-                                        status="merged",
-                                        error=failure_summary,
-                                        error_code="batch_qa_failed",
-                                        feedback=feedback,
-                                        session_id=None,
-                                    )
-                                except Exception:
-                                    pass
-
                             retried_keys: set[str] = set()
+                            retried_unit_keys: set[str] = set()
                             for fkey in sorted(qa_failed_keys):
                                 if context.interrupted:
                                     break
@@ -1355,21 +1417,27 @@ async def run_per(
                                 previous_result = next((r for r in batch_results if r.task_key == fkey), None)
                                 if not task_plan or previous_result is None:
                                     continue
+                                member_keys = previous_result.unit_task_keys or _unit_members(batch, fkey)
+                                rerun_unit_key = previous_result.unit_key or _unit_key(member_keys)
+                                if rerun_unit_key in retried_unit_keys:
+                                    continue
+                                retried_unit_keys.add(rerun_unit_key)
 
                                 feedback = _build_batch_qa_feedback(fkey, final_batch_qa)
                                 try:
-                                    update_task(
-                                        tasks_file,
-                                        fkey,
-                                        status="pending",
-                                        attempts=None,
-                                        error=None,
-                                        error_code=None,
-                                        feedback=feedback,
-                                        session_id=None,
-                                        review_ref=None,
-                                        completed_at=None,
-                                    )
+                                    for key in member_keys:
+                                        update_task(
+                                            tasks_file,
+                                            key,
+                                            status="pending",
+                                            attempts=None,
+                                            error=None,
+                                            error_code=None,
+                                            feedback=feedback,
+                                            session_id=None,
+                                            review_ref=None,
+                                            completed_at=None,
+                                        )
                                 except Exception:
                                     pass
 
@@ -1377,40 +1445,93 @@ async def run_per(
                                     ["git", "rev-parse", "HEAD"],
                                     cwd=project_dir, capture_output=True, text=True, check=True,
                                 ).stdout.strip()
-                                raw_retry_result = await _run_task_in_worktree(
-                                    task_plan,
-                                    context,
-                                    config,
-                                    project_dir,
-                                    telemetry,
-                                    tasks_file,
-                                    qa_retry_base_sha,
-                                    qa_mode=qa_mode,
-                                )
-                                retry_result = _combine_task_results(previous_result, raw_retry_result)
-                                if raw_retry_result.success:
-                                    rerun_merged = merge_batch_results(
-                                        [raw_retry_result], config, project_dir, tasks_file, telemetry,
+                                if len(member_keys) > 1:
+                                    unit = next(
+                                        (u for u in batch.units if [task.task_key for task in u.tasks] == member_keys),
+                                        None,
+                                    )
+                                    if not unit:
+                                        continue
+                                    raw_retry_results = await _run_integrated_unit_in_worktree(
+                                        unit,
+                                        pending_by_key,
+                                        context,
+                                        config,
+                                        project_dir,
+                                        telemetry,
+                                        tasks_file,
+                                        qa_retry_base_sha,
                                         qa_mode=qa_mode,
                                     )
-                                    retry_result = _combine_task_results(previous_result, rerun_merged[0])
-                                    retried_keys.add(fkey)
-                                else:
-                                    try:
-                                        update_task(
-                                            tasks_file,
-                                            fkey,
-                                            status="failed",
-                                            error=retry_result.error,
-                                            error_code=retry_result.error_code,
+                                    retry_results = [
+                                        _combine_task_results(
+                                            next((r for r in batch_results if r.task_key == result.task_key), result),
+                                            result,
                                         )
-                                    except Exception:
-                                        pass
+                                        for result in raw_retry_results
+                                    ]
+                                    if all(result.success for result in raw_retry_results):
+                                        rerun_merged = merge_batch_results(
+                                            raw_retry_results, config, project_dir, tasks_file, telemetry,
+                                            qa_mode=qa_mode,
+                                        )
+                                        retry_results = [
+                                            _combine_task_results(
+                                                next((r for r in batch_results if r.task_key == result.task_key), result),
+                                                result,
+                                            )
+                                            for result in rerun_merged
+                                        ]
+                                        retried_keys.update(member_keys)
+                                    else:
+                                        for retry_result in retry_results:
+                                            try:
+                                                update_task(
+                                                    tasks_file,
+                                                    retry_result.task_key,
+                                                    status="failed",
+                                                    error=retry_result.error,
+                                                    error_code=retry_result.error_code,
+                                                )
+                                            except Exception:
+                                                pass
+                                    retry_map = {result.task_key: result for result in retry_results}
+                                    batch_results = [retry_map.get(result.task_key, result) for result in batch_results]
+                                else:
+                                    raw_retry_result = await _run_task_in_worktree(
+                                        task_plan,
+                                        context,
+                                        config,
+                                        project_dir,
+                                        telemetry,
+                                        tasks_file,
+                                        qa_retry_base_sha,
+                                        qa_mode=qa_mode,
+                                    )
+                                    retry_result = _combine_task_results(previous_result, raw_retry_result)
+                                    if raw_retry_result.success:
+                                        rerun_merged = merge_batch_results(
+                                            [raw_retry_result], config, project_dir, tasks_file, telemetry,
+                                            qa_mode=qa_mode,
+                                        )
+                                        retry_result = _combine_task_results(previous_result, rerun_merged[0])
+                                        retried_keys.add(fkey)
+                                    else:
+                                        try:
+                                            update_task(
+                                                tasks_file,
+                                                fkey,
+                                                status="failed",
+                                                error=retry_result.error,
+                                                error_code=retry_result.error_code,
+                                            )
+                                        except Exception:
+                                            pass
 
-                                batch_results = [
-                                    retry_result if r.task_key == fkey else r
-                                    for r in batch_results
-                                ]
+                                    batch_results = [
+                                        retry_result if r.task_key == fkey else r
+                                        for r in batch_results
+                                    ]
 
                             persisted_tasks = {
                                 task["key"]: task
@@ -2240,8 +2361,161 @@ async def _run_task_in_worktree(
                 console.print(f"[yellow]Warning: worktree cleanup failed for {task_key}: {e}[/yellow]")
 
 
+async def _run_integrated_unit_in_worktree(
+    unit: BatchUnit,
+    pending_by_key: dict[str, dict[str, Any]],
+    context: Any,
+    config: dict[str, Any],
+    project_dir: Path,
+    telemetry: Any,
+    tasks_file: Path,
+    base_sha: str,
+    *,
+    qa_mode: str = QAMode.PER_TASK,
+) -> list[TaskResult]:
+    """Run a multi-task unit as one integrated coding/test execution."""
+    from otto.git_ops import create_task_worktree, cleanup_task_worktree
+    from otto.git_ops import _anchor_candidate_ref, _find_best_candidate_ref
+    from otto.testing import _install_deps
+    from otto.runner import run_task_v45
+
+    member_keys = [task.task_key for task in unit.tasks]
+    synthetic_key = _unit_key(member_keys)
+    install_timeout = config.get("install_timeout", config.get("verify_timeout", 300))
+    worktree_path: Path | None = None
+
+    try:
+        wt_start = time.monotonic()
+        worktree_path = await asyncio.to_thread(
+            create_task_worktree, project_dir, synthetic_key, base_sha,
+        )
+        wt_elapsed = time.monotonic() - wt_start
+        _orchestrator_log(project_dir, f"  integrated unit: {synthetic_key[:8]} created ({wt_elapsed:.1f}s)")
+
+        install_start = time.monotonic()
+        try:
+            await asyncio.to_thread(_install_deps, worktree_path, install_timeout)
+            install_elapsed = time.monotonic() - install_start
+            _orchestrator_log(project_dir, f"  integrated unit: {synthetic_key[:8]} deps installed ({install_elapsed:.1f}s)")
+        except Exception as install_exc:
+            install_elapsed = time.monotonic() - install_start
+            _orchestrator_log(project_dir, f"  integrated unit: {synthetic_key[:8]} deps install FAILED ({install_elapsed:.1f}s): {install_exc}")
+
+        synthetic_task = {
+            "id": 0,
+            "key": synthetic_key,
+            "prompt": _unit_prompt(unit.tasks, pending_by_key),
+            "status": "pending",
+            "max_retries": max(
+                int((pending_by_key.get(task_key, {}) or {}).get("max_retries", config.get("max_retries", 0)) or 0)
+                for task_key in member_keys
+            ),
+        }
+        result = await run_task_v45(
+            synthetic_task,
+            config,
+            project_dir,
+            tasks_file=None,
+            task_work_dir=worktree_path,
+            qa_mode=qa_mode,
+        )
+
+        unit_success = bool(result.get("success"))
+        cost_usd = float(result.get("cost_usd", 0.0) or 0.0)
+        token_usage = dict(result.get("token_usage", {}) or {})
+        duration_s = float(result.get("duration_s", 0.0) or 0.0)
+        if duration_s <= 0:
+            duration_s = 0.0
+        diff_summary = str(result.get("diff_summary", "") or "")
+        qa_report = str(result.get("qa_report", "") or "")
+        error = str(result.get("error", "") or "") or None
+        error_code = result.get("error_code")
+
+        task_count = max(len(member_keys), 1)
+        split_cost = cost_usd / task_count if cost_usd else 0.0
+        split_usage = {
+            key: value // task_count
+            for key, value in token_usage.items()
+            if isinstance(value, int)
+        }
+        remainders = {
+            key: (value % task_count)
+            for key, value in token_usage.items()
+            if isinstance(value, int)
+        }
+
+        candidate_sha = None
+        if unit_success:
+            candidate_ref = _find_best_candidate_ref(worktree_path, synthetic_key)
+            if candidate_ref:
+                resolve = subprocess.run(
+                    ["git", "rev-parse", candidate_ref],
+                    cwd=worktree_path, capture_output=True, text=True,
+                )
+                if resolve.returncode == 0:
+                    candidate_sha = resolve.stdout.strip()
+                    for task_key in member_keys:
+                        _anchor_candidate_ref(worktree_path, task_key, 1, candidate_sha)
+                        if tasks_file:
+                            try:
+                                update_task(
+                                    tasks_file,
+                                    task_key,
+                                    status="verified" if qa_mode == QAMode.BATCH else "passed",
+                                    error=None,
+                                    error_code=None,
+                                )
+                            except Exception:
+                                pass
+
+        expanded: list[TaskResult] = []
+        for index, task_key in enumerate(member_keys):
+            task_usage = dict(split_usage)
+            for key, remainder in remainders.items():
+                if index < remainder:
+                    task_usage[key] = task_usage.get(key, 0) + 1
+            expanded.append(TaskResult(
+                task_key=task_key,
+                success=unit_success,
+                unit_key=synthetic_key,
+                unit_task_keys=list(member_keys),
+                commit_sha=candidate_sha,
+                cost_usd=split_cost,
+                token_usage=task_usage,
+                duration_s=duration_s,
+                diff_summary=diff_summary,
+                qa_report=qa_report,
+                error=error,
+                error_code=error_code,
+                review_ref=result.get("review_ref"),
+            ))
+        return expanded
+
+    except Exception as exc:
+        error = f"integrated unit execution error: {exc}"
+        _orchestrator_log(project_dir, f"  integrated unit: {synthetic_key[:8]} EXCEPTION: {exc}")
+        return [
+            TaskResult(
+                task_key=task_key,
+                success=False,
+                unit_key=synthetic_key,
+                unit_task_keys=list(member_keys),
+                error=error,
+            )
+            for task_key in member_keys
+        ]
+    finally:
+        if worktree_path:
+            try:
+                await asyncio.to_thread(cleanup_task_worktree, project_dir, synthetic_key)
+                _orchestrator_log(project_dir, f"  integrated unit: {synthetic_key[:8]} cleaned up")
+            except Exception as e:
+                _orchestrator_log(project_dir, f"  integrated unit: {synthetic_key[:8]} cleanup FAILED: {e}")
+
+
 async def _run_batch_parallel(
     batch: Any,  # planner.Batch
+    pending_by_key: dict[str, dict[str, Any]],
     context: Any,  # PipelineContext
     config: dict[str, Any],
     project_dir: Path,
@@ -2252,11 +2526,10 @@ async def _run_batch_parallel(
     qa_mode: str = QAMode.PER_TASK,
     sibling_contexts: dict[str, str | None] | None = None,
 ) -> list[TaskResult]:
-    """Run a batch of tasks in parallel using per-task git worktrees.
+    """Run a batch of units in parallel.
 
-    Each task gets its own worktree created from the current HEAD.
-    Tasks run concurrently up to max_parallel via asyncio.Semaphore.
-    Worktrees are cleaned up after all tasks complete.
+    Singleton units use the existing per-task worktree path.
+    Multi-task units use one integrated worktree and return expanded TaskResults.
     """
     # Get base SHA (current HEAD on default branch)
     base_sha = subprocess.run(
@@ -2266,34 +2539,47 @@ async def _run_batch_parallel(
 
     semaphore = asyncio.Semaphore(max_parallel)
 
-    async def _run_one(task_plan: Any) -> TaskResult:
-        task_key = task_plan.task_key
-        _orchestrator_log(project_dir, f"  [{time.strftime('%Y-%m-%d %H:%M:%S')}] parallel: {task_key[:8]} waiting for semaphore (max_parallel={max_parallel})")
+    async def _run_one(unit: BatchUnit) -> list[TaskResult]:
+        unit_keys = ",".join(task.task_key[:8] for task in unit.tasks)
+        _orchestrator_log(project_dir, f"  [{time.strftime('%Y-%m-%d %H:%M:%S')}] parallel: {unit_keys} waiting for semaphore (max_parallel={max_parallel})")
         async with semaphore:
-            _orchestrator_log(project_dir, f"  [{time.strftime('%Y-%m-%d %H:%M:%S')}] parallel: {task_key[:8]} acquired semaphore")
-            sib_ctx = (sibling_contexts or {}).get(task_key)
-            return await _run_task_in_worktree(
+            _orchestrator_log(project_dir, f"  [{time.strftime('%Y-%m-%d %H:%M:%S')}] parallel: {unit_keys} acquired semaphore")
+            if len(unit.tasks) > 1:
+                return await _run_integrated_unit_in_worktree(
+                    unit,
+                    pending_by_key,
+                    context,
+                    config,
+                    project_dir,
+                    telemetry,
+                    tasks_file,
+                    base_sha,
+                    qa_mode=qa_mode,
+                )
+            task_plan = unit.tasks[0]
+            sib_ctx = (sibling_contexts or {}).get(task_plan.task_key)
+            result = await _run_task_in_worktree(
                 task_plan, context, config, project_dir,
                 telemetry, tasks_file, base_sha,
                 qa_mode=qa_mode, sibling_context=sib_ctx,
             )
+            return [result]
 
-    # Launch all tasks concurrently
-    task_plans = _flatten_unit_tasks(batch.units)
-    tasks = [_run_one(tp) for tp in task_plans]
+    # Launch all units concurrently
+    tasks = [_run_one(unit) for unit in batch.units]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     # Convert exceptions to failed TaskResults
     batch_results: list[TaskResult] = []
     for i, result in enumerate(results):
         if isinstance(result, Exception):
-            task_key = task_plans[i].task_key
-            batch_results.append(TaskResult(
-                task_key=task_key, success=False,
-                error=f"unexpected exception: {result}",
-            ))
+            for task_plan in batch.units[i].tasks:
+                batch_results.append(TaskResult(
+                    task_key=task_plan.task_key, success=False,
+                    error=f"unexpected exception: {result}",
+                ))
         else:
-            batch_results.append(result)
+            batch_results.extend(result)
 
     return batch_results
 
