@@ -973,7 +973,9 @@ Rules:
 - A batch contains one or more execution units.
 - A singleton unit like {{"task_keys": ["a"]}} means task `a` runs normally on its own.
 - A multi-task unit like {{"task_keys": ["a", "b"]}} means tasks `a` and `b` should be executed together as one integrated coding pass because they form one coherent feature slice.
-- Prefer integrated units for tightly layered tasks that are really one product slice (for example: data layer + service layer, or service layer + CLI wrapper for the same feature).
+- Strongly prefer integrated units for tightly layered tasks that are really one product slice (for example: data layer + service layer, or service layer + CLI wrapper for the same feature).
+- If tasks form a short dependency chain where each later task is explicitly "on top of" the previous layer, default to one integrated unit unless there is a clear reason not to.
+- Do not treat all DEPENDENT tasks as separate by default. Many dependent tasks are better executed together.
 - Do NOT over-group. Keep unrelated, contradictory, or loosely related tasks in separate singleton units.
 
 Return JSON only:
@@ -995,6 +997,11 @@ Tasks:
 
 Project context (git ls-files, capped at 200):
 {_project_context(project_dir)}
+
+Examples:
+- data layer + service layer + CLI for one small feature → usually one integrated unit
+- unrelated bug fixes in different files → separate singleton units
+- conflicting same-file rewrites with different goals → separate singleton units
 """
         raw_output, cost_usd, duration_s = await _run_planner_prompt(
             prompt,
