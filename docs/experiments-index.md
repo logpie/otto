@@ -2,7 +2,7 @@
 
 Quick reference for all experiments, branches, and deferred work. Check here before starting new work to avoid duplication or re-discovering known dead ends.
 
-Last updated: 2026-03-31
+Last updated: 2026-04-01
 
 ---
 
@@ -14,8 +14,9 @@ Last updated: 2026-03-31
 | QA unification (run_qa) | 2026-03-30 | `plan-qa-unification.md` | — |
 | Additive parallelism | 2026-03-30 | `7ebe88d` | A/B validated: 27% total speedup |
 | QA speed + robustness | 2026-03-30 | `a2f9673` → `c021ab2` | 5 verdict bugs fixed, 12 tests added |
-| Parallel QA (code-only) | 2026-03-31 | `96e4ec4` | `docs/parallel-qa-findings.md` |
+| Parallel QA | 2026-03-31 | `96e4ec4` | `docs/parallel-qa-findings.md` |
 | Greenfield fixes | 2026-03-31 | `6bea835`, `6cc614d` | pytest exit 5, jest, npm placeholder |
+| Agent-browser for QA | 2026-03-31 | `ecf9cd6` | Replaces chrome-devtools-mcp. 36% cheaper, parallel browser works |
 
 ---
 
@@ -85,12 +86,10 @@ Split one task's specs into groups, verified in parallel sessions.
 - **Result:** Not worth it. 0-33% faster, 140-200% more expensive. Each group redundantly loads context.
 - **Findings in:** `docs/parallel-qa-findings.md`
 
-### Browser parallel QA (2026-03-31)
-Per-task parallel QA with chrome-devtools browser testing.
-- **Result:** Chrome isolation works (per-session userDataDir). Speed improvement inconclusive — 1 data point each, LLM variance dominates.
-- **Known issues:** Server port conflicts, `--port` flag unsupported by chrome-devtools-mcp, LLM text generation outliers.
-- **Findings in:** `docs/parallel-qa-findings.md`
-- **Revisit:** Need 3+ A/B runs on quiet machine, server port isolation fix.
+### Browser parallel QA with chrome-devtools-mcp (2026-03-31)
+Per-task parallel QA with chrome-devtools MCP browser testing.
+- **Result:** Failed — chrome-devtools-mcp is a singleton, 2/3 sessions silently failed.
+- **Resolution:** Replaced with agent-browser CLI (shipped `ecf9cd6`). Agent-browser supports concurrent sessions natively via `--session` flag. All 3 parallel sessions now work with browser verification.
 
 ### QA verdict early-stop (2026-03-30)
 Grace timeout (15s) after verdict capture to cut the session short.
