@@ -571,9 +571,11 @@ async def _run_batch_qa(
                     session_id=idx,
                 )
             except Exception as exc:
+                import traceback
                 _orchestrator_log(
                     project_dir,
                     f"[{_ts_mod.strftime('%Y-%m-%d %H:%M:%S')}] parallel QA session CRASHED for {task_key}: {exc}",
+                    f"  traceback: {traceback.format_exc().strip().splitlines()[-3:]}",
                 )
                 return {
                     "must_passed": False,
@@ -663,8 +665,9 @@ async def _run_batch_qa(
             must_n = len(v.get("must_items", []) or [])
             extras_n = len(v.get("extras", []) or [])
             status = "INFRA" if infra else ("PASS" if passed else "FAIL")
+            log_pointer = f"  → see otto_logs/{task.get('key', '?')}/qa-agent.log" if status != "PASS" else ""
             per_session_lines.append(
-                f"  session {tk}: {status}  must={must_n}  extras={extras_n}  cost=${cost:.2f}"
+                f"  session {tk}: {status}  must={must_n}  extras={extras_n}  cost=${cost:.2f}{log_pointer}"
             )
         if failed_keys:
             per_session_lines.append(f"  failed tasks: {', '.join(sorted(failed_keys))}")
