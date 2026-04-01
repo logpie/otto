@@ -23,6 +23,7 @@ from otto.context import Learning, PipelineContext, QAMode, TaskResult
 from otto.display import console, rich_escape
 from otto.observability import append_text_log, update_json_file
 from otto.planner import (
+    BatchUnit,
     ExecutionPlan,
     plan,
     replan,
@@ -111,13 +112,16 @@ def _refresh_task_live_state(
 
 
 def _format_batch_structure(batch: Any, pending_by_key: dict[str, dict[str, Any]], *, mode: str) -> list[str]:
-    lines = [f"batch structure: mode={mode} size={len(batch.tasks)}"]
-    for task_plan in batch.tasks:
-        task = pending_by_key.get(task_plan.task_key, {})
-        lines.append(
-            f"- #{task.get('id', '?')} {task_plan.task_key}: "
-            f"{str(task.get('prompt', '') or '')[:120]}"
-        )
+    lines = [f"batch structure: mode={mode} tasks={len(batch.tasks)} units={len(batch.units)}"]
+    for idx, unit in enumerate(batch.units, start=1):
+        unit_mode = "integrated" if unit.is_integrated else "single"
+        lines.append(f"  unit {idx}: mode={unit_mode} size={len(unit.tasks)}")
+        for task_plan in unit.tasks:
+            task = pending_by_key.get(task_plan.task_key, {})
+            lines.append(
+                f"  - #{task.get('id', '?')} {task_plan.task_key}: "
+                f"{str(task.get('prompt', '') or '')[:120]}"
+            )
     return lines
 
 
@@ -125,9 +129,16 @@ def _summarize_batch_structure(plan: ExecutionPlan) -> str:
     if not plan.batches:
         return "(none)"
     return "; ".join(
-        f"batch {idx}: {', '.join(task.task_key for task in batch.tasks)}"
+        f"batch {idx}: {' | '.join('{' + ', '.join(task.task_key for task in unit.tasks) + '}' if unit.is_integrated else ', '.join(task.task_key for task in unit.tasks) for unit in batch.units)}"
         for idx, batch in enumerate(plan.batches, start=1)
     )
+
+
+def _flatten_unit_tasks(units: list[BatchUnit]) -> list[Any]:
+    tasks: list[Any] = []
+    for unit in units:
+        tasks.extend(unit.tasks)
+    return tasks
 
 
 def load_learnings(project_dir: Path, context: PipelineContext) -> None:
@@ -286,7 +297,7 @@ def _build_sibling_context(
     doesn't filter by authenticated user" when a sibling task adds auth.
     """
     siblings = [
-        tp for tp in batch.tasks
+        tp for tp in _flatten_unit_tasks(batch.units)
         if tp.task_key != task_key and tp.task_key in pending_by_key
     ]
     if not siblings:
@@ -1039,7 +1050,8 @@ async def run_per(
         while not execution_plan.is_empty and not context.interrupted:
             batch = execution_plan.batches[0]
             batch_idx += 1
-            batch_size = len(batch.tasks)
+            batch_task_plans = _flatten_unit_tasks(batch.units)
+            batch_size = len(batch_task_plans)
             abort_after_batch = False
 
             use_parallel = max_parallel > 1 and batch_size > 1
@@ -1060,7 +1072,7 @@ async def run_per(
                     tp.task_key: _build_sibling_context(
                         tp.task_key, batch, pending_by_key, execution_plan.analysis,
                     )
-                    for tp in batch.tasks
+                    for tp in batch_task_plans
                 }
                 batch_results = await _run_batch_parallel(
                     batch, context, config, project_dir, telemetry, tasks_file,
@@ -1075,7 +1087,7 @@ async def run_per(
                     cwd=project_dir, capture_output=True, text=True, check=True,
                 ).stdout.strip()
                 batch_results: list[TaskResult] = []
-                for task_plan in batch.tasks:
+                for task_plan in batch_task_plans:
                     sibling_ctx = _build_sibling_context(
                         task_plan.task_key, batch, pending_by_key, execution_plan.analysis,
                     )
@@ -1109,7 +1121,7 @@ async def run_per(
                         if context.interrupted:
                             break
                         fkey = failed_result.task_key
-                        tp = next((t for t in batch.tasks if t.task_key == fkey), None)
+                        tp = next((t for t in batch_task_plans if t.task_key == fkey), None)
                         if not tp:
                             continue
 
@@ -1256,7 +1268,7 @@ async def run_per(
                                 ]
 
                 if qa_mode == QAMode.BATCH and not context.interrupted:
-                    batch_keys = {tp.task_key for tp in batch.tasks}
+                    batch_keys = {tp.task_key for tp in batch_task_plans}
                     batch_qa_costs: dict[str, float] = {}
                     qa_reports_by_task: dict[str, str] = {}
                     # Load current batch's merged tasks for QA verification
@@ -1339,7 +1351,7 @@ async def run_per(
                             for fkey in sorted(qa_failed_keys):
                                 if context.interrupted:
                                     break
-                                task_plan = next((t for t in batch.tasks if t.task_key == fkey), None)
+                                task_plan = next((t for t in batch_task_plans if t.task_key == fkey), None)
                                 previous_result = next((r for r in batch_results if r.task_key == fkey), None)
                                 if not task_plan or previous_result is None:
                                     continue
@@ -1703,7 +1715,7 @@ async def run_per(
                 remaining_pending = [
                     pending_by_key[task_plan.task_key]
                     for remaining_batch in remaining_plan.batches
-                    for task_plan in remaining_batch.tasks
+                    for task_plan in _flatten_unit_tasks(remaining_batch.units)
                     if task_plan.task_key in pending_by_key
                 ]
                 replanned = await replan(
@@ -2267,14 +2279,15 @@ async def _run_batch_parallel(
             )
 
     # Launch all tasks concurrently
-    tasks = [_run_one(tp) for tp in batch.tasks]
+    task_plans = _flatten_unit_tasks(batch.units)
+    tasks = [_run_one(tp) for tp in task_plans]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     # Convert exceptions to failed TaskResults
     batch_results: list[TaskResult] = []
     for i, result in enumerate(results):
         if isinstance(result, Exception):
-            task_key = batch.tasks[i].task_key
+            task_key = task_plans[i].task_key
             batch_results.append(TaskResult(
                 task_key=task_key, success=False,
                 error=f"unexpected exception: {result}",
