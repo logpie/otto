@@ -1629,18 +1629,18 @@ async def run_task_v45(
                 update_task(tasks_file, key, **updates)
             except Exception:
                 pass
-            return {
-                "success": success,
-                "status": status,
-                "cost_usd": total_cost,
-                "cost_available": cost_available,
-                "token_usage": total_token_usage,
-                "error": error,
-                "diff_summary": diff_summary,
-                "qa_report": qa_report,
-                "phase_timings": phase_timings,
-                "review_ref": review_ref,
-            }
+        return {
+            "success": success,
+            "status": status,
+            "cost_usd": total_cost,
+            "cost_available": cost_available,
+            "token_usage": total_token_usage,
+            "error": error,
+            "diff_summary": diff_summary,
+            "qa_report": qa_report,
+            "phase_timings": phase_timings,
+            "review_ref": review_ref,
+        }
 
     def _add_cost(amount: float) -> None:
         nonlocal total_cost

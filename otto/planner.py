@@ -558,6 +558,101 @@ def _serialize_analysis_batches(
     return [Batch.from_tasks(tasks) for tasks in serialized_task_lists if tasks]
 
 
+def _serialize_analysis_units(
+    batches: list[Batch],
+    analysis: list[dict[str, Any]],
+) -> list[Batch]:
+    unit_entries: list[tuple[int, int, BatchUnit]] = []
+    task_to_unit: dict[str, int] = {}
+
+    for batch_index, batch in enumerate(batches):
+        for unit_index, unit in enumerate(batch.units):
+            global_index = len(unit_entries)
+            unit_entries.append((batch_index, unit_index, unit))
+            for task in unit.tasks:
+                task_to_unit[task.task_key] = global_index
+
+    if not unit_entries:
+        return []
+
+    invalid_units: set[int] = set()
+    dependency_predecessors: dict[int, set[int]] = {i: set() for i in range(len(unit_entries))}
+    uncertain_pairs: set[frozenset[int]] = set()
+
+    for item in analysis:
+        task_a = str(item.get("task_a", "") or "")
+        task_b = str(item.get("task_b", "") or "")
+        relationship = item.get("relationship")
+        if task_a not in task_to_unit or task_b not in task_to_unit:
+            continue
+        unit_a = task_to_unit[task_a]
+        unit_b = task_to_unit[task_b]
+        if relationship == "DEPENDENT":
+            if unit_a != unit_b:
+                dependency_predecessors[unit_b].add(unit_a)
+        elif relationship == "UNCERTAIN":
+            if unit_a == unit_b:
+                invalid_units.add(unit_a)
+            else:
+                uncertain_pairs.add(frozenset((unit_a, unit_b)))
+        elif relationship == "CONTRADICTORY" and unit_a == unit_b:
+            invalid_units.add(unit_a)
+
+    normalized_units: list[tuple[int, int, BatchUnit]] = []
+    for idx, (batch_index, unit_index, unit) in enumerate(unit_entries):
+        if idx in invalid_units:
+            for offset, task in enumerate(unit.tasks):
+                normalized_units.append((batch_index, unit_index + offset, BatchUnit(tasks=[task])))
+        else:
+            normalized_units.append((batch_index, unit_index, unit))
+
+    serialized_batches: list[list[BatchUnit]] = []
+    unit_batch_by_index: dict[int, int] = {}
+    pending_indices = list(range(len(normalized_units)))
+
+    while pending_indices:
+        next_pending: list[int] = []
+        progressed = False
+        for idx in pending_indices:
+            original_batch, _unit_order, unit = normalized_units[idx]
+            predecessors = dependency_predecessors.get(idx, set())
+            if any(pred not in unit_batch_by_index for pred in predecessors):
+                next_pending.append(idx)
+                continue
+
+            target_batch = original_batch
+            if predecessors:
+                target_batch = max(target_batch, max(unit_batch_by_index[pred] + 1 for pred in predecessors))
+
+            while True:
+                while len(serialized_batches) <= target_batch:
+                    serialized_batches.append([])
+                existing_indices = [
+                    other_idx
+                    for other_idx, batch_idx in unit_batch_by_index.items()
+                    if batch_idx == target_batch
+                ]
+                if any(frozenset((idx, other_idx)) in uncertain_pairs for other_idx in existing_indices):
+                    target_batch += 1
+                    continue
+                serialized_batches[target_batch].append(unit)
+                unit_batch_by_index[idx] = target_batch
+                progressed = True
+                break
+
+        if progressed:
+            pending_indices = next_pending
+            continue
+
+        for idx in next_pending:
+            _batch_index, _unit_order, unit = normalized_units[idx]
+            serialized_batches.append([unit])
+            unit_batch_by_index[idx] = len(serialized_batches) - 1
+        break
+
+    return [Batch(units=units) for units in serialized_batches if units]
+
+
 def _normalize_plan(plan: ExecutionPlan, tasks: list[dict[str, Any]]) -> ExecutionPlan:
     valid_keys = {str(task.get("key", "") or "") for task in tasks if task.get("key")}
     explicit_analysis = _explicit_dependency_analysis(tasks)
@@ -635,16 +730,20 @@ def _normalize_plan(plan: ExecutionPlan, tasks: list[dict[str, Any]]) -> Executi
     seed_batches: list[Batch] = []
     seen_planned: set[str] = set()
     for batch in plan.batches:
-        normalized_tasks: list[TaskPlan] = []
-        for task_plan in batch.tasks:
-            if task_plan.task_key not in valid_keys:
-                continue
-            if task_plan.task_key in seen_planned:
-                continue
-            seen_planned.add(task_plan.task_key)
-            normalized_tasks.append(task_plan)
-        if normalized_tasks:
-            seed_batches.append(Batch.from_tasks(normalized_tasks))
+        normalized_units: list[BatchUnit] = []
+        for unit in batch.units:
+            normalized_tasks: list[TaskPlan] = []
+            for task_plan in unit.tasks:
+                if task_plan.task_key not in valid_keys:
+                    continue
+                if task_plan.task_key in seen_planned:
+                    continue
+                seen_planned.add(task_plan.task_key)
+                normalized_tasks.append(task_plan)
+            if normalized_tasks:
+                normalized_units.append(BatchUnit(tasks=normalized_tasks))
+        if normalized_units:
+            seed_batches.append(Batch(units=normalized_units))
 
     # Add any tasks missing from the plan (planner dropped them)
     missing_keys = valid_keys - seen_planned
@@ -653,7 +752,7 @@ def _normalize_plan(plan: ExecutionPlan, tasks: list[dict[str, Any]]) -> Executi
             seed_batches.append(Batch.from_tasks([TaskPlan(task_key=key)]))
         logger.warning("Planner dropped %d task(s): %s — added as serial batches", len(missing_keys), ", ".join(sorted(missing_keys)))
 
-    batches = _serialize_analysis_batches(seed_batches, analysis)
+    batches = _serialize_analysis_units(seed_batches, analysis)
 
     return ExecutionPlan(
         batches=batches,
@@ -865,10 +964,17 @@ Relationship labels:
 Rules:
 - Respect explicit depends_on constraints.
 - INDEPENDENT and ADDITIVE tasks can run in parallel within a batch.
-- DEPENDENT tasks must be in later batches (after their dependency).
-- CONTRADICTORY tasks go in conflicts AND in separate batches.
-- UNCERTAIN pairs should not run in the same batch.
-- EVERY input task key MUST appear in exactly one batch.
+- DEPENDENT tasks can be handled in either of two ways:
+  1. separate singleton units in later batches
+  2. the same integrated unit in one batch, but only when they are tightly layered parts of one coherent feature slice
+- CONTRADICTORY tasks go in conflicts AND in separate units/batches.
+- UNCERTAIN pairs should not run in the same unit or the same batch.
+- EVERY input task key MUST appear in exactly one batch and exactly one unit.
+- A batch contains one or more execution units.
+- A singleton unit like {{"task_keys": ["a"]}} means task `a` runs normally on its own.
+- A multi-task unit like {{"task_keys": ["a", "b"]}} means tasks `a` and `b` should be executed together as one integrated coding pass because they form one coherent feature slice.
+- Prefer integrated units for tightly layered tasks that are really one product slice (for example: data layer + service layer, or service layer + CLI wrapper for the same feature).
+- Do NOT over-group. Keep unrelated, contradictory, or loosely related tasks in separate singleton units.
 
 Return JSON only:
 {{
@@ -879,7 +985,7 @@ Return JSON only:
     {{"tasks": ["a", "b"], "description": "what conflicts", "suggestion": "how to resolve"}}
   ],
   "batches": [
-    {{"tasks": [{{"task_key": "a", "strategy": "direct", "effort": "high"}}]}}
+    {{"units": [{{"task_keys": ["a"]}}, {{"task_keys": ["b", "c"]}}]}}
   ],
   "learnings": []
 }}
@@ -1038,7 +1144,7 @@ REMAINING TASKS:
 Return JSON only:
 {{
   "batches": [
-    {{"tasks": [{{"task_key": "key", "strategy": "direct"}}]}}
+    {{"units": [{{"task_keys": ["key"]}}]}}
   ],
   "learnings": ["any new learnings from the failure pattern"]
 }}

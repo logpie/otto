@@ -84,6 +84,7 @@ def _refresh_task_live_state(
     merge_status: str,
     completed: bool,
     error: str = "",
+    token_usage: dict[str, int] | None = None,
 ) -> None:
     """Update a task's live-state.json after merge/failure transitions."""
     live_state_path = project_dir / "otto_logs" / task_key / "live-state.json"
@@ -97,6 +98,8 @@ def _refresh_task_live_state(
         data["completed"] = completed
         data["error"] = error[:200] if error else ""
         data["phases"] = phases
+        if token_usage is not None:
+            data["token_usage"] = token_usage
         data["_updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
         return data
 
@@ -106,6 +109,8 @@ def _refresh_task_live_state(
 
     def _mutate_summary(data: dict[str, Any]) -> dict[str, Any]:
         data["status"] = status
+        if token_usage is not None:
+            data["token_usage"] = token_usage
         data["_written_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
         return data
 
@@ -1710,6 +1715,17 @@ async def run_per(
                                     )
                                 except Exception:
                                     pass
+                                _refresh_task_live_state(
+                                    project_dir,
+                                    task_key,
+                                    status="passed",
+                                    merge_status="done",
+                                    completed=True,
+                                    token_usage=next(
+                                        (r.token_usage for r in batch_results if r.task_key == task_key),
+                                        {},
+                                    ),
+                                )
                                 # Stamp commit SHA now that batch QA confirmed this task passed
                                 commit_sha = next(
                                     (r.commit_sha for r in batch_results if r.task_key == task_key and r.commit_sha),
@@ -2454,19 +2470,16 @@ async def _run_integrated_unit_in_worktree(
                 )
                 if resolve.returncode == 0:
                     candidate_sha = resolve.stdout.strip()
-                    for task_key in member_keys:
-                        _anchor_candidate_ref(worktree_path, task_key, 1, candidate_sha)
-                        if tasks_file:
-                            try:
-                                update_task(
-                                    tasks_file,
-                                    task_key,
-                                    status="verified" if qa_mode == QAMode.BATCH else "passed",
-                                    error=None,
-                                    error_code=None,
-                                )
-                            except Exception:
-                                pass
+            if not candidate_sha:
+                head_result = subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    cwd=worktree_path, capture_output=True, text=True,
+                )
+                if head_result.returncode == 0:
+                    candidate_sha = head_result.stdout.strip()
+            if candidate_sha:
+                for task_key in member_keys:
+                    _anchor_candidate_ref(worktree_path, task_key, 1, candidate_sha)
 
         expanded: list[TaskResult] = []
         for index, task_key in enumerate(member_keys):
@@ -2474,6 +2487,28 @@ async def _run_integrated_unit_in_worktree(
             for key, remainder in remainders.items():
                 if index < remainder:
                     task_usage[key] = task_usage.get(key, 0) + 1
+            if candidate_sha and tasks_file:
+                try:
+                    update_task(
+                        tasks_file,
+                        task_key,
+                        status="verified" if qa_mode == QAMode.BATCH else "passed",
+                        error=None,
+                        error_code=None,
+                        token_usage=task_usage or None,
+                        cost_usd=split_cost if split_cost else None,
+                        duration_s=duration_s if duration_s else None,
+                    )
+                    _refresh_task_live_state(
+                        project_dir,
+                        task_key,
+                        status="verified" if qa_mode == QAMode.BATCH else "passed",
+                        merge_status="pending" if qa_mode == QAMode.BATCH else "done",
+                        completed=qa_mode != QAMode.BATCH,
+                        token_usage=task_usage,
+                    )
+                except Exception:
+                    pass
             expanded.append(TaskResult(
                 task_key=task_key,
                 success=unit_success,

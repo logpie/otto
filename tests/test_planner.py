@@ -224,6 +224,26 @@ class TestParsePlanJson:
         assert [tp.task_key for tp in plan.batches[0].tasks] == ["t1", "t2", "t3"]
         assert plan.batches[0].units[1].task_keys == ["t2", "t3"]
 
+    def test_normalize_plan_preserves_integrated_units(self):
+        tasks = [
+            {"key": "t1", "id": 1, "prompt": "data layer"},
+            {"key": "t2", "id": 2, "prompt": "service layer", "depends_on": [1]},
+        ]
+        plan = ExecutionPlan(
+            batches=[
+                Batch(units=[
+                    BatchUnit(tasks=[TaskPlan(task_key="t1"), TaskPlan(task_key="t2")]),
+                ])
+            ],
+            analysis=[
+                {"task_a": "t1", "task_b": "t2", "relationship": "DEPENDENT", "reason": "layered"},
+            ],
+        )
+        normalized = _normalize_plan(plan, tasks)
+        assert len(normalized.batches) == 1
+        assert len(normalized.batches[0].units) == 1
+        assert normalized.batches[0].units[0].task_keys == ["t1", "t2"]
+
 
 class TestDefaultPlan:
     def test_single_task(self):
