@@ -14,6 +14,7 @@ import yaml
 from otto.context import PipelineContext, QAMode, TaskResult
 from otto.orchestrator import (
     _record_run_history,
+    _refresh_task_live_state,
     _run_batch_qa,
     _run_batch_parallel,
     cleanup_orphaned_worktrees,
@@ -44,6 +45,45 @@ class TestCleanupOrphanedWorktrees:
         assert not (wt_dir / "otto-task1").exists()
         assert not (wt_dir / "otto-task2").exists()
         assert (wt_dir / "other-thing").exists()
+
+
+class TestRefreshTaskLiveState:
+    def test_populates_duration_cost_and_phase_timings(self, tmp_path):
+        task_dir = tmp_path / "otto_logs" / "task-1"
+        task_dir.mkdir(parents=True)
+
+        _refresh_task_live_state(
+            tmp_path,
+            "task-1",
+            status="merged",
+            merge_status="done",
+            completed=False,
+            token_usage={"input_tokens": 10},
+            elapsed_s=12.3,
+            cost_available=False,
+            cost_usd=0.0,
+            phase_timings={"prepare": 1.0, "coding": 8.5, "test": 2.8},
+            attempts=2,
+        )
+
+        live_state = json.loads((task_dir / "live-state.json").read_text())
+        assert live_state["status"] == "merged"
+        assert live_state["elapsed_s"] == 12.3
+        assert live_state["cost_available"] is False
+        assert live_state["cost_usd"] == 0.0
+        assert live_state["token_usage"] == {"input_tokens": 10}
+        assert live_state["phases"]["prepare"]["time_s"] == 1.0
+        assert live_state["phases"]["coding"]["time_s"] == 8.5
+        assert live_state["phases"]["test"]["time_s"] == 2.8
+        assert live_state["phases"]["merge"]["status"] == "done"
+
+        summary = json.loads((task_dir / "task-summary.json").read_text())
+        assert summary["status"] == "merged"
+        assert summary["total_duration_s"] == 12.3
+        assert summary["cost_available"] is False
+        assert summary["total_cost_usd"] == 0.0
+        assert summary["attempts"] == 2
+        assert summary["phase_timings"]["coding"] == 8.5
 
 
 class TestRunPerIntegration:

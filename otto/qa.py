@@ -1031,7 +1031,6 @@ async def _run_qa_prompt(
                 log_lines.extend(report_lines[-10:])
             log_lines.append(f"\nCost: ${query_state.qa_cost:.2f}  Time: {_qa_total_time}s (init: {_qa_init_time}s)")
             # Append (not overwrite) so retries are preserved
-            from otto.observability import append_text_log
             append_text_log(log_dir / "qa-agent.log", log_lines + [""])
         except Exception:
             pass
@@ -1074,6 +1073,10 @@ def _build_qa_prompt(
 PROJECT TEST COMMAND:
 Use this as the default full-suite regression command unless you discover a clearly more accurate project-local equivalent:
   {test_command}
+
+If that command fails only because of an environment/wrapper issue such as an executable not being on PATH
+(for example `jest: command not found` from an `npm test` script), immediately retry with the project-local
+equivalent (`npx`, `pnpm exec`, `python -m`, etc.) before treating it as a product regression.
 """
 
     if is_batch:

@@ -18,7 +18,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "planner_provider": None,       # planner-only provider override (None = provider)
     "model": None,                  # override provider model (e.g. sonnet, gpt-5)
     "planner_model": None,          # planner-only model override (None = provider default)
-    "planner_effort": "medium",     # planner reasoning effort
+    "planner_effort": "high",       # planner reasoning effort
 
     # Timeouts
     "install_timeout": 120,         # seconds for dependency installation in worktrees

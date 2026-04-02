@@ -85,6 +85,11 @@ def _refresh_task_live_state(
     completed: bool,
     error: str = "",
     token_usage: dict[str, int] | None = None,
+    elapsed_s: float | None = None,
+    cost_available: bool | None = None,
+    cost_usd: float | None = None,
+    phase_timings: dict[str, float] | None = None,
+    attempts: int | None = None,
 ) -> None:
     """Update a task's live-state.json after merge/failure transitions."""
     live_state_path = project_dir / "otto_logs" / task_key / "live-state.json"
@@ -94,12 +99,26 @@ def _refresh_task_live_state(
         merge_phase = dict(phases.get("merge") or {})
         merge_phase["status"] = merge_status
         phases["merge"] = merge_phase
+        if phase_timings:
+            for phase_name, phase_time in phase_timings.items():
+                phase_data = dict(phases.get(phase_name) or {})
+                if phase_time:
+                    phase_data["time_s"] = round(float(phase_time), 1)
+                if phase_name != "merge" and phase_data.get("status") in (None, "", "pending"):
+                    phase_data["status"] = "done"
+                phases[phase_name] = phase_data
         data["status"] = status
         data["completed"] = completed
         data["error"] = error[:200] if error else ""
         data["phases"] = phases
         if token_usage is not None:
             data["token_usage"] = token_usage
+        if elapsed_s is not None:
+            data["elapsed_s"] = round(float(elapsed_s), 1)
+        if cost_available is not None:
+            data["cost_available"] = cost_available
+        if cost_usd is not None:
+            data["cost_usd"] = round(float(cost_usd), 4)
         data["_updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
         return data
 
@@ -111,6 +130,19 @@ def _refresh_task_live_state(
         data["status"] = status
         if token_usage is not None:
             data["token_usage"] = token_usage
+        if elapsed_s is not None:
+            data["total_duration_s"] = round(float(elapsed_s), 1)
+        if cost_available is not None:
+            data["cost_available"] = cost_available
+        if cost_usd is not None:
+            data["total_cost_usd"] = round(float(cost_usd), 4)
+        if phase_timings:
+            data["phase_timings"] = {
+                name: round(float(value), 1)
+                for name, value in phase_timings.items()
+            }
+        if attempts is not None:
+            data["attempts"] = int(attempts)
         data["_written_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
         return data
 
@@ -2442,6 +2474,12 @@ async def _run_integrated_unit_in_worktree(
         duration_s = float(result.get("duration_s", 0.0) or 0.0)
         if duration_s <= 0:
             duration_s = 0.0
+        attempts = int(result.get("attempts", 1) or 1)
+        phase_timings = {
+            str(name): float(value)
+            for name, value in dict(result.get("phase_timings", {}) or {}).items()
+            if isinstance(value, (int, float))
+        }
         diff_summary = str(result.get("diff_summary", "") or "")
         qa_report = str(result.get("qa_report", "") or "")
         error = str(result.get("error", "") or "") or None
@@ -2506,6 +2544,11 @@ async def _run_integrated_unit_in_worktree(
                         merge_status="pending" if qa_mode == QAMode.BATCH else "done",
                         completed=qa_mode != QAMode.BATCH,
                         token_usage=task_usage,
+                        elapsed_s=duration_s if duration_s else None,
+                        cost_available=agent_provider(config) != "codex",
+                        cost_usd=split_cost if split_cost else 0.0,
+                        phase_timings=phase_timings or None,
+                        attempts=attempts,
                     )
                 except Exception:
                     pass

@@ -244,7 +244,7 @@ class TestParsePlanJson:
         assert len(normalized.batches[0].units) == 1
         assert normalized.batches[0].units[0].task_keys == ["t1", "t2"]
 
-    def test_normalize_plan_splits_large_integrated_units(self):
+    def test_normalize_plan_preserves_large_integrated_units(self):
         tasks = [
             {"key": "t1", "id": 1, "prompt": "data"},
             {"key": "t2", "id": 2, "prompt": "service", "depends_on": [1]},
@@ -267,7 +267,31 @@ class TestParsePlanJson:
         )
         normalized = _normalize_plan(plan, tasks)
         assert len(normalized.batches) == 1
-        assert [unit.task_keys for unit in normalized.batches[0].units] == [["t1", "t2"], ["t3"]]
+        assert [unit.task_keys for unit in normalized.batches[0].units] == [["t1", "t2", "t3"]]
+
+    def test_normalize_plan_serializes_dependent_sibling_units_into_later_batches(self):
+        tasks = [
+            {"key": "t1", "id": 1, "prompt": "data"},
+            {"key": "t2", "id": 2, "prompt": "analytics", "depends_on": [1]},
+            {"key": "t3", "id": 3, "prompt": "api", "depends_on": [2]},
+        ]
+        plan = ExecutionPlan(
+            batches=[
+                Batch(units=[
+                    BatchUnit(tasks=[TaskPlan(task_key="t1"), TaskPlan(task_key="t2")]),
+                    BatchUnit(tasks=[TaskPlan(task_key="t3")]),
+                ])
+            ],
+            analysis=[
+                {"task_a": "t1", "task_b": "t2", "relationship": "DEPENDENT", "reason": "layered"},
+                {"task_a": "t1", "task_b": "t3", "relationship": "DEPENDENT", "reason": "api needs data"},
+                {"task_a": "t2", "task_b": "t3", "relationship": "DEPENDENT", "reason": "api needs analytics"},
+            ],
+        )
+        normalized = _normalize_plan(plan, tasks)
+        assert len(normalized.batches) == 2
+        assert [unit.task_keys for unit in normalized.batches[0].units] == [["t1", "t2"]]
+        assert [unit.task_keys for unit in normalized.batches[1].units] == [["t3"]]
 
 
 class TestDefaultPlan:

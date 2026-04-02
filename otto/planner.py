@@ -19,8 +19,6 @@ from otto.observability import append_text_log
 
 logger = logging.getLogger("otto.planner")
 
-MAX_INTEGRATED_UNIT_SIZE = 2
-
 RELATIONSHIP_VALUES = {
     "INDEPENDENT",
     "ADDITIVE",
@@ -655,26 +653,6 @@ def _serialize_analysis_units(
     return [Batch(units=units) for units in serialized_batches if units]
 
 
-def _normalize_batch_units(batches: list[Batch]) -> list[Batch]:
-    """Apply structural normalization to planner-emitted units.
-
-    Current policy: integrated units are capped at MAX_INTEGRATED_UNIT_SIZE tasks.
-    This keeps grouped retries from becoming too coarse on long layered chains.
-    """
-    normalized_batches: list[Batch] = []
-    for batch in batches:
-        normalized_units: list[BatchUnit] = []
-        for unit in batch.units:
-            if len(unit.tasks) <= MAX_INTEGRATED_UNIT_SIZE:
-                normalized_units.append(unit)
-                continue
-            tasks = list(unit.tasks)
-            for idx in range(0, len(tasks), MAX_INTEGRATED_UNIT_SIZE):
-                normalized_units.append(BatchUnit(tasks=tasks[idx:idx + MAX_INTEGRATED_UNIT_SIZE]))
-        normalized_batches.append(Batch(units=normalized_units))
-    return normalized_batches
-
-
 def _normalize_plan(plan: ExecutionPlan, tasks: list[dict[str, Any]]) -> ExecutionPlan:
     valid_keys = {str(task.get("key", "") or "") for task in tasks if task.get("key")}
     explicit_analysis = _explicit_dependency_analysis(tasks)
@@ -774,7 +752,10 @@ def _normalize_plan(plan: ExecutionPlan, tasks: list[dict[str, Any]]) -> Executi
             seed_batches.append(Batch.from_tasks([TaskPlan(task_key=key)]))
         logger.warning("Planner dropped %d task(s): %s — added as serial batches", len(missing_keys), ", ".join(sorted(missing_keys)))
 
-    batches = _normalize_batch_units(_serialize_analysis_units(seed_batches, analysis))
+    # Planner owns unit grouping decisions. Post-processing may serialize units
+    # into later batches to satisfy dependency/uncertainty constraints, but it
+    # must not rewrite the unit boundaries themselves.
+    batches = _serialize_analysis_units(seed_batches, analysis)
 
     return ExecutionPlan(
         batches=batches,
@@ -987,7 +968,7 @@ Rules:
 - Respect explicit depends_on constraints.
 - INDEPENDENT and ADDITIVE tasks can run in parallel within a batch.
 - DEPENDENT tasks can be handled in either of two ways:
-  1. separate singleton units in later batches
+  1. separate units with later checkpoint(s)
   2. the same integrated unit in one batch, but only when they are tightly layered parts of one coherent feature slice
 - CONTRADICTORY tasks go in conflicts AND in separate units/batches.
 - UNCERTAIN pairs should not run in the same unit or the same batch.
@@ -995,9 +976,12 @@ Rules:
 - A batch contains one or more execution units.
 - A singleton unit like {{"task_keys": ["a"]}} means task `a` runs normally on its own.
 - A multi-task unit like {{"task_keys": ["a", "b"]}} means tasks `a` and `b` should be executed together as one integrated coding pass because they form one coherent feature slice.
-- Strongly prefer integrated units for tightly layered tasks that are really one product slice (for example: data layer + service layer, or service layer + CLI wrapper for the same feature).
-- If tasks form a short dependency chain where each later task is explicitly "on top of" the previous layer, default to one integrated unit unless there is a clear reason not to.
-- Do not treat all DEPENDENT tasks as separate by default. Many dependent tasks are better executed together.
+- Single-batch execution is valid when the tasks together are one coherent feature slice and there is little value in an earlier integration checkpoint.
+- Multiple batches are valid when later work benefits from an earlier merged checkpoint, or when retry/rollback should stay narrower than the whole feature.
+- Use integrated units for tightly layered tasks when preserving whole-system context is likely more valuable than staged checkpoints.
+- Before grouping 3 or more tasks into one integrated unit, ask whether a partial failure would make retry too coarse. If retrying the whole slice would likely be wasteful, prefer smaller units or an earlier checkpoint.
+- A long dependency chain is NOT automatically one unit. Only keep 3+ tasks together when they are truly one inseparable feature slice that should usually be implemented and retried as a whole.
+- Do not treat all DEPENDENT tasks as separate by default, but do not collapse them all into one unit by default either.
 - Do NOT over-group. Keep unrelated, contradictory, or loosely related tasks in separate singleton units.
 
 Return JSON only:

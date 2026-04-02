@@ -785,39 +785,46 @@ async def _run_coding_agent(
     result_msg = None
     _last_block_name = ""
     _agent_start = time.monotonic()
-    async for message in query(prompt=coding_prompt, options=agent_opts):
-        if isinstance(message, ResultMessage):
-            result_msg = message
-        elif hasattr(message, "session_id") and hasattr(message, "is_error"):
-            result_msg = message
-        elif AssistantMessage and isinstance(message, AssistantMessage):
-            for block in message.content:
-                if ToolResultBlock and isinstance(block, ToolResultBlock):
-                    content = str(getattr(block, "content", ""))
-                    if content and _last_block_name == "Bash":
-                        result_line = ""
-                        for rl in reversed(content.splitlines()):
-                            ls = rl.strip()
-                            if any(kw in ls.lower() for kw in
-                                   ["passed", "failed", "tests:", "test suites:"]):
-                                if any(c.isdigit() for c in ls):
-                                    result_line = ls[:70]
-                                    break
-                        if result_line:
-                            is_pass = "passed" in result_line.lower() and "failed" not in result_line.lower()
-                            emit("agent_tool_result", detail=result_line, passed=is_pass)
-                    _last_block_name = ""
-                    continue
-                _elapsed = round(time.monotonic() - _agent_start, 1)
-                _ts_prefix = f"[{_elapsed:6.1f}s] "
-                if TextBlock and isinstance(block, TextBlock) and block.text:
-                    agent_log_lines.append(f"{_ts_prefix}{block.text}")
-                elif ToolUseBlock and isinstance(block, ToolUseBlock):
-                    _last_block_name = block.name
-                    agent_log_lines.append(f"{_ts_prefix}● {block.name}  {_tool_use_summary(block)}")
-                    event = _build_agent_tool_event(block)
-                    if event:
-                        emit("agent_tool", **event)
+    try:
+        async for message in query(prompt=coding_prompt, options=agent_opts):
+            if isinstance(message, ResultMessage):
+                result_msg = message
+            elif hasattr(message, "session_id") and hasattr(message, "is_error"):
+                result_msg = message
+            elif AssistantMessage and isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if ToolResultBlock and isinstance(block, ToolResultBlock):
+                        content = str(getattr(block, "content", ""))
+                        if content and _last_block_name == "Bash":
+                            result_line = ""
+                            for rl in reversed(content.splitlines()):
+                                ls = rl.strip()
+                                if any(kw in ls.lower() for kw in
+                                       ["passed", "failed", "tests:", "test suites:"]):
+                                    if any(c.isdigit() for c in ls):
+                                        result_line = ls[:70]
+                                        break
+                            if result_line:
+                                is_pass = "passed" in result_line.lower() and "failed" not in result_line.lower()
+                                emit("agent_tool_result", detail=result_line, passed=is_pass)
+                        _last_block_name = ""
+                        continue
+                    _elapsed = round(time.monotonic() - _agent_start, 1)
+                    _ts_prefix = f"[{_elapsed:6.1f}s] "
+                    if TextBlock and isinstance(block, TextBlock) and block.text:
+                        agent_log_lines.append(f"{_ts_prefix}{block.text}")
+                    elif ToolUseBlock and isinstance(block, ToolUseBlock):
+                        _last_block_name = block.name
+                        agent_log_lines.append(f"{_ts_prefix}● {block.name}  {_tool_use_summary(block)}")
+                        event = _build_agent_tool_event(block)
+                        if event:
+                            emit("agent_tool", **event)
+    except Exception as exc:
+        _elapsed = round(time.monotonic() - _agent_start, 1)
+        agent_log_lines.append(f"[{_elapsed:6.1f}s] CODING AGENT ERROR: {exc}")
+        _write_log_safe(log_dir, f"attempt-{attempt_num}-agent.log",
+                        "\n".join(agent_log_lines))
+        raise
 
     # Persist agent log
     _write_log_safe(log_dir, f"attempt-{attempt_num}-agent.log",
@@ -1635,6 +1642,8 @@ async def run_task_v45(
             "cost_usd": total_cost,
             "cost_available": cost_available,
             "token_usage": total_token_usage,
+            "duration_s": duration,
+            "attempts": total_attempts,
             "error": error,
             "diff_summary": diff_summary,
             "qa_report": qa_report,

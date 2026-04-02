@@ -172,6 +172,28 @@ class TestCodingAgentProviderBehavior:
         assert seen["resume"] is None
         assert session_id == "thread-new"
 
+    @pytest.mark.asyncio
+    async def test_coding_agent_persists_partial_log_on_query_exception(self, tmp_path):
+        async def fake_query(*, prompt, options=None):
+            raise RuntimeError("stream exploded")
+            yield  # pragma: no cover
+
+        with patch("otto.runner.query", side_effect=fake_query):
+            with pytest.raises(RuntimeError, match="stream exploded"):
+                await _run_coding_agent(
+                    "fix it",
+                    {"provider": "codex"},
+                    tmp_path,
+                    session_id=None,
+                    emit=lambda *args, **kwargs: None,
+                    log_dir=tmp_path,
+                    attempt_num=1,
+                )
+
+        log_path = tmp_path / "attempt-1-agent.log"
+        assert log_path.exists()
+        assert "CODING AGENT ERROR: stream exploded" in log_path.read_text()
+
 
 class TestTamperDetection:
     def test_detects_modified_test_file(self, tmp_git_repo):

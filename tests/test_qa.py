@@ -9,10 +9,12 @@ Covers:
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
 from otto.qa import (
+    _build_qa_prompt,
     _finalize_qa_result,
     _has_explicit_fail_markers,
     _is_verdict_complete,
@@ -570,6 +572,26 @@ class TestFormatBatchSpec:
         }]
         result = format_batch_spec(tasks)
         assert "\u25c8" in result  # ◈ marker
+
+
+class TestBuildQaPrompt:
+    def test_test_command_section_mentions_wrapper_fallbacks(self):
+        prompt = _build_qa_prompt(
+            tasks=[{
+                "key": "task-1",
+                "prompt": "Build API",
+                "spec": [{"text": "works", "binding": "must", "verifiable": True}],
+            }],
+            project_dir=Path("/tmp/demo"),
+            verdict_file=Path("/tmp/verdict.json"),
+            screenshot_dir=Path("/tmp/screens"),
+            diff="diff --git a b",
+            test_command="npm test",
+        )
+        assert "PROJECT TEST COMMAND" in prompt
+        assert "npm test" in prompt
+        assert "jest: command not found" in prompt
+        assert "project-local equivalent" in prompt
 
 
 # ── determine_qa_tier ────────────────────────────────────────────────────
