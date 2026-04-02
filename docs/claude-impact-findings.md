@@ -2,10 +2,18 @@
 
 Living document for bugs and behavioral findings discovered while hardening Otto for other providers, but which also affect or would affect Claude-based Otto runs.
 
-Last updated: 2026-03-31
+Last updated: 2026-04-02
 
 Current fixing commit on `feat/otto-codex-support`:
 - `4360b24` — Add Codex provider support and harden batch observability
+- `d9200d5` — Add planner batch unit schema groundwork
+- `424d614` — Make orchestrator unit-aware for batch execution
+- `0f908f6` — Add integrated unit execution and retry plumbing
+- `b0f0331` — Implement semantic grouping with planner units
+- `d7e7272` — Harden multi-blog-engine verifier assumptions
+- `d2f4859` — Bias planner toward integrated layered units
+- `fb8cbac` — Cap integrated units to small layered groups
+- `a742e93` — Fix planner, QA, and benchmark observability
 
 ## Purpose
 
@@ -126,6 +134,100 @@ Why this affects Claude:
 Fix:
 - Proof reports now render `QA cost unavailable` when cost is not measurable
 
+### 7. Post-plan integrated-unit capping could rewrite planner intent
+
+Status: fixed in commit `a742e93`
+
+What was wrong:
+- planner output was post-processed by a hard size cap that split integrated
+  units after planning
+- that could erase dependency staging the planner had just reasoned about
+- on the real `multi-expense-tracker` grouped run, all task pairs were logged
+  as `DEPENDENT`, but the final structure still ran `{task1, task2}` beside
+  `{task3}` in the same batch because the post-pass cap rewrote the unit shape
+
+Why this affects Claude:
+- entirely provider-agnostic planner/orchestrator behavior
+- Claude runs using the same semantic-grouping path would inherit the same
+  bad execution structure and the same wasted retry/conflict work
+
+Fix:
+- removed hard post-plan integrated-unit splitting
+- planner now owns unit boundaries again
+- post-processing may still serialize units into later batches for
+  dependency/uncertainty reasons, but it does not rewrite unit composition
+
+### 8. Planner default reasoning effort was still too low for batching decisions
+
+Status: fixed in commit `a742e93`
+
+What was wrong:
+- normal runs were still using `planner_effort: medium` by default
+- with semantic grouping now affecting unit formation and checkpoint placement,
+  that default was too weak and increased plan variance on the same inputs
+
+Why this affects Claude:
+- the batching decision is a shared provider-agnostic orchestration decision
+- a low-effort planner can make unstable decomposition choices for Claude too
+
+Fix:
+- default planner effort is now `high`
+
+### 9. QA could crash after doing the real work because of a logging shadow bug
+
+Status: fixed in commit `a742e93`
+
+What was wrong:
+- `otto/qa.py` imported `append_text_log` at module scope
+- `_run_qa_prompt()` also re-imported it inside the function
+- that made `append_text_log` a local variable in Python, so earlier uses in
+  the same function could fail with:
+  `cannot access local variable 'append_text_log' where it is not associated with a value`
+- real effect: the task implementation and verification could be correct, but
+  Otto would still fail the task on an internal QA crash
+
+Why this affects Claude:
+- entirely provider-agnostic QA path
+- any Claude task reaching that path could fail even after correct coding/test work
+
+Fix:
+- removed the local re-import and used the module-level binding consistently
+
+### 10. Integrated-unit/member-task observability was too sparse
+
+Status: fixed in commit `a742e93`
+
+What was wrong:
+- synthetic integrated units wrote a rich `task-summary.json` and `live-state.json`
+- but the expanded member tasks only got sparse merge-status stubs
+- benchmark copies also dropped `otto_logs/`, so postmortem debugging often
+  lacked the evidence needed to explain a run from artifacts alone
+
+Why this affects Claude:
+- same orchestrator path
+- same task-level observability gap
+
+Fix:
+- member task live-state/summary now carry duration, cost availability,
+  phase timings, and attempts when expanded from an integrated unit
+- benchmark harness now preserves `otto_logs/` and other run artifacts
+
+### 11. Coding-agent exceptions could lose the partial attempt transcript
+
+Status: fixed in commit `a742e93`
+
+What was wrong:
+- if the coding-agent/query path threw mid-stream, Otto could fail with only a
+  terse phase error and no persisted partial `attempt-N-agent.log`
+- this made provider/runtime failures hard to debug from copied artifacts
+
+Why this affects Claude:
+- same coding-agent wrapper path
+- same missing transcript problem on Claude failures
+
+Fix:
+- partial coding-agent transcript is now persisted even when the stream/query throws
+
 ## Important Notes, Not Strictly Bugs
 
 ### 5. Telemetry file is still named `v4_events.jsonl`
@@ -153,7 +255,7 @@ Why this matters for Claude:
 - Some of this wording is still correct because Claude remains a real provider path
 - But mixed generic/provider-specific language makes maintenance harder and invites wrong abstractions
 
-### 7. Task decomposition can trade away useful whole-system context
+### 12. Task decomposition can trade away useful whole-system context
 
 Status: open product/design finding
 
@@ -206,8 +308,9 @@ Follow-up evidence from real runs:
 - the same pair-grouping policy also looked reasonable on `multi-expense-tracker`
 
 Current practical recommendation:
-- prefer small integrated units (especially pairs)
-- do not default to 3+ task integrated chains without stronger evidence
+- do not hard-cap unit size mechanically after planning
+- let the planner choose one batch / one unit when holistic execution is truly the better shape
+- still teach the planner to think about retry coarseness and checkpoint value before grouping 3+ tasks together
 
 ## Real-World Validation That Matters For Claude Too
 
@@ -241,6 +344,22 @@ Observed:
 Claude relevance:
 - Validates parallel worktrees, merge conflict handling, re-apply, post-batch integration gate, and batch-QA retry path
 
+### Clean single-task Otto vs bare Codex comparison
+
+Scenario:
+- `bench/pressure/projects/real-citty-feature`
+
+Observed:
+- bare Codex benchmark run: external verify PASS in about `151s`
+- Otto using Codex provider: external verify PASS in about `377s`
+- this is a clean pair where both runners passed the same external verifier
+
+Claude relevance:
+- reminds reviewers that single-task clean repos can still favor the bare model
+  on speed even when Otto's harness is functioning correctly
+- the right question is not just "did Otto pass", but whether its extra control
+  bought anything over the direct model path on that task shape
+
 ## Things That Were Codex-Specific And Should Not Be Regressed Back Into Claude
 
 These are here so future reviewers do not misclassify them:
@@ -262,6 +381,11 @@ These are not confirmed Claude bugs today, but Claude should sanity-check them w
 4. Greenfield repo cleanliness: confirm there are no remaining nested artifact directories escaping `.git/info/exclude`.
 5. Batch QA audit trail: confirm per-task proof/report artifacts stay correct after any future retry/refactor.
 6. Decomposition policy: identify which prompt/task shapes should remain integrated rather than being split into narrow sequential layers.
+7. Planner variance: measure whether repeated planner calls on the same task set
+   still flip between serial and grouped shapes even at `planner_effort=high`.
+8. Direct replay question: on fresh bare-Codex outputs, run Otto's own
+   spec/QA layer against the produced code and compare that verdict to
+   external `verify.sh`.
 
 ## Planned Direction
 
@@ -290,3 +414,5 @@ If continuing from this doc, ask Claude to check:
 2. Are there any other telemetry events visible in display/legacy logs but still absent from `v4_events.jsonl`?
 3. Should `v4_events.jsonl` be renamed now, or only after all readers/tests are migrated?
 4. Are there remaining Claude-only assumptions in prompts/config that should be split from generic provider behavior?
+5. Do copied benchmark artifacts now contain enough evidence to debug a failure
+   from logs alone without needing the original `/tmp` workdir?
