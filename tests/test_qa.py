@@ -19,6 +19,7 @@ from otto.qa import (
     _has_explicit_fail_markers,
     _is_verdict_complete,
     _parse_qa_verdict_json,
+    _salvage_single_task_verdict_from_actions,
     determine_qa_tier,
     format_batch_spec,
 )
@@ -592,6 +593,63 @@ class TestBuildQaPrompt:
         assert "npm test" in prompt
         assert "jest: command not found" in prompt
         assert "project-local equivalent" in prompt
+
+
+class TestSalvageVerdictFromActions:
+    def test_salvages_single_task_verdict_from_explicit_spec_markers(self):
+        qa_result = {
+            "qa_actions": [
+                {
+                    "type": "bash",
+                    "output": "SPEC 1: PASS\nspec_2_help_aliases=PASS\nSPEC 3: PASS\n",
+                }
+            ]
+        }
+        tasks = [{
+            "key": "task-1",
+            "spec": [
+                {"text": "first", "binding": "must"},
+                {"text": "second", "binding": "must"},
+                {"text": "third", "binding": "must"},
+            ],
+        }]
+
+        verdict = _salvage_single_task_verdict_from_actions(qa_result, tasks)
+
+        assert verdict is not None
+        assert verdict["must_passed"] is True
+        assert len(verdict["must_items"]) == 3
+        assert verdict["_salvaged_from_actions"] is True
+        assert [item["status"] for item in verdict["must_items"]] == ["pass", "pass", "pass"]
+
+    def test_requires_full_coverage_of_must_items(self):
+        qa_result = {
+            "qa_actions": [{"type": "bash", "output": "SPEC 1: PASS\n"}]
+        }
+        tasks = [{
+            "key": "task-1",
+            "spec": [
+                {"text": "first", "binding": "must"},
+                {"text": "second", "binding": "must"},
+            ],
+        }]
+        assert _salvage_single_task_verdict_from_actions(qa_result, tasks) is None
+
+    def test_preserves_failures_when_any_spec_marker_fails(self):
+        qa_result = {
+            "qa_actions": [{"type": "bash", "output": "SPEC 1: PASS\nSPEC 2: FAIL\n"}]
+        }
+        tasks = [{
+            "key": "task-1",
+            "spec": [
+                {"text": "first", "binding": "must"},
+                {"text": "second", "binding": "must"},
+            ],
+        }]
+        verdict = _salvage_single_task_verdict_from_actions(qa_result, tasks)
+        assert verdict is not None
+        assert verdict["must_passed"] is False
+        assert [item["status"] for item in verdict["must_items"]] == ["pass", "fail"]
 
 
 # ── determine_qa_tier ────────────────────────────────────────────────────

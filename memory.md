@@ -43,6 +43,13 @@
 - `real-semver-bugfix`
   - bare Codex: verify PASS, 89s
   - Otto on Codex: FAIL, but due to an Otto/Codex-streaming-path failure (`Separator is not found, and chunk exceed the limit`), not a clean feature miss
+
+## Otto Spec Replay On Bare Outputs
+
+- Fresh preserved bare-Codex outputs were replayed against Otto's own saved task specs and QA layer.
+- `real-citty-feature`: bare output passed Otto spec/QA (`must_passed=true`) on replay.
+- `real-semver-bugfix`: bare output also passed Otto spec/QA (`must_passed=true`) on replay when evaluated on the Claude QA path.
+- Current interpretation: for these clean single-task real-repo cases, bare Codex can satisfy Otto's spec bar; the harder problem was Otto QA robustness, not stricter specs.
 - `real-radash-feature`
   - bare Codex: verify PASS, 106s
 - `real-semver-bugfix`

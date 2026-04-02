@@ -14,6 +14,7 @@ Current fixing commit on `feat/otto-codex-support`:
 - `d2f4859` — Bias planner toward integrated layered units
 - `fb8cbac` — Cap integrated units to small layered groups
 - `a742e93` — Fix planner, QA, and benchmark observability
+- `HEAD (working tree)` — QA replay robustness for bare-output certification
 
 ## Purpose
 
@@ -359,6 +360,29 @@ Claude relevance:
   on speed even when Otto's harness is functioning correctly
 - the right question is not just "did Otto pass", but whether its extra control
   bought anything over the direct model path on that task shape
+
+### Direct replay of Otto's spec/QA bar on bare-Codex outputs
+
+Scenario:
+- fresh bare-Codex benchmark outputs were preserved via benchmark snapshots
+- Otto's own generated task specs were then replayed against those exact outputs
+  without rerunning implementation
+
+Observed:
+- `real-citty-feature`
+  - bare Codex external verify: PASS
+  - Otto spec/QA replay on bare output: PASS (`must_passed=true`) on Claude path
+- `real-semver-bugfix`
+  - bare Codex external verify: PASS
+  - Otto spec/QA replay on bare output: PASS (`must_passed=true`) on Claude path
+
+Interpretation:
+- these fresh replays do not support the theory that Otto's spec bar is
+  inherently stricter than bare Codex's output quality on these clean
+  single-task real-repo cases
+- at least for these tasks, bare Codex appears able to satisfy Otto's own
+  acceptance criteria when evaluated against the same output artifact
+- the bigger issue was Otto QA robustness, not spec strictness
 
 ## Things That Were Codex-Specific And Should Not Be Regressed Back Into Claude
 
