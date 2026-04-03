@@ -55,6 +55,7 @@ class TestLoadConfig:
         config_path.write_text(yaml.dump({"test_command": "pytest"}))
         cfg = load_config(config_path)
         assert cfg["max_retries"] == DEFAULT_CONFIG["max_retries"]
+        assert cfg["proof_of_work"] is False
         assert cfg["provider"] == DEFAULT_CONFIG["provider"]
         assert cfg["model"] == DEFAULT_CONFIG["model"]
         assert cfg["planner_model"] == DEFAULT_CONFIG["planner_model"]

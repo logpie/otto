@@ -9,6 +9,7 @@ import pytest
 
 from otto.runner import (
     _audit_proof_sufficiency,
+    _build_coding_prompt,
     _build_qa_retry_error,
     _run_coding_agent,
     _restore_workspace_state,
@@ -142,6 +143,27 @@ class TestQaProofHelpers:
         assert "Passed [must ◈] missing screenshot in qa-proofs/: Layout matches mock" in report
         assert mock_warn.call_count == 2
         assert ("qa_finding", {"text": "[warning] Passed [must] missing proof: API returns JSON"}) in emit_events
+
+
+class TestCodingPrompt:
+    def test_retry_prompt_includes_spec_when_prior_attempts_exist(self, tmp_path):
+        prompt = _build_coding_prompt(
+            "Build widget",
+            tmp_path,
+            full_project_brief="1. #1 Build data layer\n2. #2 Build API",
+            attempt=1,
+            last_error=None,
+            last_error_source=None,
+            feedback="Batch QA found issues after your task was merged onto current main.",
+            spec=[{"text": "Widget returns JSON", "binding": "must"}],
+            context=None,
+        )
+
+        assert "FULL PROJECT BRIEF" in prompt
+        assert "CURRENT ASSIGNMENT" in prompt
+        assert "Build data layer" in prompt
+        assert "Acceptance criteria" in prompt
+        assert "[must] Widget returns JSON" in prompt
 
 
 class TestCodingAgentProviderBehavior:

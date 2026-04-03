@@ -686,6 +686,7 @@ def _build_coding_prompt(
     prompt: str,
     project_dir: Path,
     *,
+    full_project_brief: str | None,
     attempt: int,
     last_error: str | None,
     last_error_source: str | None,
@@ -700,6 +701,13 @@ def _build_coding_prompt(
     Round 2+: adds spec, raw error output, and fix instructions.
     """
     coding_prompt = prompt
+    if full_project_brief:
+        coding_prompt = (
+            "FULL PROJECT BRIEF:\n"
+            f"{full_project_brief}\n\n"
+            "CURRENT ASSIGNMENT:\n"
+            f"{prompt}"
+        )
 
     if attempt == 0 and not last_error:
         # ROUND 1: bare coding agent — raw prompt + cross-task learnings + user feedback
@@ -1063,6 +1071,7 @@ async def _run_qa(
     log_dir: Path,
     add_cost: Any,
     qa_spec_override: list | None = None,
+    require_full_test_suite: bool = True,
 ) -> dict[str, Any]:
     """Run QA with risk-based tiering, verdict processing, and infra-error retry.
 
@@ -1102,6 +1111,8 @@ async def _run_qa(
         prev_failed=prev_failed_criteria if prev_failed_criteria else None,
         on_progress=on_progress,
         log_dir=log_dir,
+        require_full_test_suite=require_full_test_suite,
+        proof_of_work=bool(config.get("proof_of_work", False)),
     )
     qa_elapsed = round(time.monotonic() - qa_start, 1)
     total_qa_cost = qa_result.get("cost_usd", 0.0)
@@ -1124,6 +1135,8 @@ async def _run_qa(
             prev_failed=prev_failed_criteria,
             on_progress=on_progress,
             log_dir=log_dir,
+            require_full_test_suite=require_full_test_suite,
+            proof_of_work=bool(config.get("proof_of_work", False)),
         )
         qa_result["_retried"] = True
         retry_qa_cost = qa_result.get("cost_usd", 0.0)
@@ -1337,6 +1350,7 @@ async def run_task_v45(
     task_work_dir: Path | None = None,
     qa_mode: str = QAMode.PER_TASK,
     sibling_context: str | None = None,
+    full_project_brief: str | None = None,
 ) -> dict[str, Any]:
     """v4.5 per-task execution loop — coding agent + parallel spec gen + verify + QA.
 
@@ -1747,7 +1761,7 @@ async def run_task_v45(
         # Fire spec gen in a separate thread for true parallelism.
         # asyncio.create_task shares the event loop and gets starved by coding.
         # to_thread runs generate_spec_sync() with its own event loop.
-        if not spec and not config.get("skip_spec") and not batch_qa_mode and not skip_qa_mode:
+        if not spec and not config.get("skip_spec") and not skip_qa_mode:
             from otto.spec import generate_spec_sync
 
             _spec_settings = config.get("spec_agent_settings", "project").split(",")
@@ -1809,7 +1823,8 @@ async def run_task_v45(
             feedback = task.get("feedback", "")
             coding_prompt = _build_coding_prompt(
                 prompt, task_work_dir,
-                attempt=attempt,
+                full_project_brief=full_project_brief,
+                attempt=prior_attempts + attempt,
                 last_error=last_error,
                 last_error_source=last_error_source,
                 feedback=feedback,
@@ -2026,7 +2041,10 @@ async def run_task_v45(
                 emit("phase", name="qa", status="done", time_s=0,
                      detail="skipped (skip_qa)")
             elif batch_qa_mode:
-                await _cancel_spec_task()
+                if spec_task and not spec:
+                    await _await_spec_task()
+                else:
+                    await _cancel_spec_task()
             else:
                 # Await specs before QA (if still generating)
                 if spec_task and not spec:

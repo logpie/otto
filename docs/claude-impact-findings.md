@@ -2,7 +2,7 @@
 
 Living document for bugs and behavioral findings discovered while hardening Otto for other providers, but which also affect or would affect Claude-based Otto runs.
 
-Last updated: 2026-04-02
+Last updated: 2026-04-03
 
 Current fixing commit on `feat/otto-codex-support`:
 - `4360b24` — Add Codex provider support and harden batch observability
@@ -15,6 +15,7 @@ Current fixing commit on `feat/otto-codex-support`:
 - `fb8cbac` — Cap integrated units to small layered groups
 - `a742e93` — Fix planner, QA, and benchmark observability
 - `HEAD (working tree)` — QA replay robustness for bare-output certification
+- `HEAD (working tree)` — Decouple proof-of-work from merge gating, add fixed-plan benchmarking, and tighten QA evidence reuse/profiling
 
 ## Purpose
 
@@ -228,6 +229,67 @@ Why this affects Claude:
 
 Fix:
 - partial coding-agent transcript is now persisted even when the stream/query throws
+
+### 12. `proof_of_work` was coupled to merge-gating QA policy
+
+Status: fixed in working tree
+
+What was wrong:
+- `proof_of_work` was intended as audit/reporting metadata
+- but the flag changed the actual QA prompt and therefore changed merge-gating behavior
+- that meant the same task could take different retry paths or batch-QA shapes depending on a reporting flag
+
+Why this affects Claude:
+- completely provider-agnostic
+- any Claude-backed Otto run using the same QA path would inherit the same hidden control-flow coupling
+
+Fix:
+- `proof_of_work` is now metadata only
+- merge-gating QA prompt/contract is identical for `true` and `false`
+- the flag remains in `qa-profile.json` and logs for audit/profiling only
+
+### 13. Benchmark comparisons needed a fixed-plan mode
+
+Status: fixed in working tree
+
+What was wrong:
+- planner variance was large enough that A/B timing comparisons could flip between:
+  - integrated `2-batch` shapes
+  - serialized `3-batch` shapes
+- this made provider/QA-policy comparisons noisy and easy to misread
+
+Why this affects Claude:
+- same planner/orchestrator path
+- Claude comparisons are just as vulnerable to false conclusions if plan shape drifts between runs
+
+Fix:
+- added `fixed_plan` config support
+- supports deterministic batch/unit layouts by `task_ids` or `task_keys`
+- benchmark runs can now compare two settings under the exact same execution plan
+
+### 14. Batch-QA cost was dominated by executable certification, not by the proof-of-work flag
+
+Status: characterized in working tree
+
+What we found:
+- after decoupling `proof_of_work`, fixed-plan blog runs showed near-identical runtime with the flag on/off
+- the real cost center remained post-merge batch QA itself:
+  - grouped executable probes
+  - integration probes
+  - verdict synthesis overhead
+
+Why this affects Claude:
+- provider-agnostic finding about Otto’s QA contract
+- Claude runs would pay the same kind of certification cost under the same batch-QA design
+
+Current mitigation:
+- QA prompt now biases toward reusing existing repo tests first
+- prompts explicitly prefer existing full-stack/shared-boundary tests before inventing new integration probes
+- prompts also push for compact verdict payloads to reduce verdict-synthesis overhead
+
+Current best-known prompt shape:
+- the “compact/reuse” variant improved fixed-plan blog runtime materially
+- a later “small probe” prompt variant regressed by causing more bespoke probe churn and a batch-QA retry, so that change was intentionally rolled back
 
 ## Important Notes, Not Strictly Bugs
 

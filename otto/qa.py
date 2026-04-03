@@ -33,10 +33,10 @@ except (ImportError, AttributeError):
     UserMessage = None  # type: ignore[assignment,misc]
 
 
-_QA_BASE_INSTRUCTIONS = """\
-You are a QA tester. Your job has two parts: VERIFY and BREAK.
+_QA_VERIFY_INSTRUCTIONS = """\
+You are a QA tester. Your primary job is VERIFY.
 
-PART 1 — VERIFY (required)
+VERIFY (required)
 For EACH verifiable [must] item, run a targeted verification command.
 You may batch related specs (same function/feature) into one script to save
 time, but each spec must have a clear pass/fail indicator in the output.
@@ -47,6 +47,8 @@ Bad proof: "code inspection confirms create() stores posts correctly"
 Rules:
 - Every verifiable [must] item MUST have at least one command that was executed.
   "Code inspection" alone is NOT acceptable proof for verifiable items.
+- Prefer reusing existing project tests as primary evidence when they directly cover a [must].
+- Only add a new bespoke probe when existing tests or one grouped command do not already cover the behavior clearly enough.
 - Prefer deterministic targeted commands (single test, curl, node -e script).
 - For API endpoints: start the server and make actual HTTP requests.
 - For data isolation: test with multiple users/accounts to verify boundaries.
@@ -58,28 +60,17 @@ Rules:
 3. [should] items — note observations, do not block merge.
 
 Items marked ◈ cannot be verified by code alone. Visual items MUST use browser.
-Run the full existing test suite once for broad regression coverage.
 
 For each [must] item, record at least one targeted proof tied to that spec_id.
 Prefer a deterministic targeted command (single test, curl, script).
+One executed command may support multiple [must] items if the mapping is explicit in the output/evidence.
+Keep `evidence` terse: one short sentence that names the behavior proved.
+Keep each `proof` entry terse too: short command/result references, not long narrative paragraphs.
 If a blocking [must] fails, record proof for that item. For single-task QA you
 may stop early. For multi-task batch QA, continue checking ALL items for attribution.
+"""
 
-PART 2 — BREAK (after all specs pass)
-First, skim the source to discover thresholds, branches, and existing
-behaviors that the spec didn't mention — then try to break those.
-Spend 2-3 tool calls:
-- Boundary inputs: zero, empty string, null, negative, very large
-- Wrong types or missing required fields
-- Concurrent access if the code is stateful
-- Thresholds/limits visible in the source (e.g., size cutoffs, power tables)
-- Inputs the spec didn't mention but a real caller would try
-
-Report ALL findings in "extras". Do NOT fail [must] items for BREAK findings —
-the spec is the contract, and the existing test suite is the regression gate.
-But DO classify each finding so the team can prioritize:
-- "regression: ..." — existing behavior that may have broken (check if tests cover it)
-- "edge_case: ..." — new gap the spec didn't mention
+_QA_COMMON_INSTRUCTIONS = """
 
 Also check:
 - Does the implementation contradict the ORIGINAL task prompt?
@@ -101,10 +92,113 @@ directly into the verdict JSON fields (evidence, proof, extras).
 Write the verdict file in a single Write call. Do NOT read it back or rewrite
 it — the Write tool is reliable. Every rewrite wastes significant time."""
 
+
+def _qa_base_instructions(*, proof_of_work: bool) -> str:
+    return (
+        _QA_VERIFY_INSTRUCTIONS
+        + """
+
+LIGHT CERTIFICATION MODE
+- Reuse existing tests and focused project-local commands whenever they already demonstrate the contract.
+- Keep new probes minimal. Prefer one grouped probe per feature area over many bespoke harnesses.
+- Do not re-prove a behavior with a new script if an existing passing repo test already demonstrates it clearly.
+- Prefer citing an existing passing repo test plus one terse evidence sentence over writing a large bespoke proof script.
+- BREAK exploration is OFF by default in this mode.
+- Only run an extra edge-case probe when a concrete regression signal or ambiguity appears during verification.
+- Do not manufacture exhaustive evidence once the required [must] items are already clearly covered.
+"""
+        + _QA_COMMON_INSTRUCTIONS
+    )
+
 _SPEC_RESULT_PATTERNS = [
     re.compile(r"\bSPEC\s+(\d+)\s*:\s*(PASS|FAIL)\b", re.IGNORECASE),
     re.compile(r"\bspec_(\d+)[^=\n]*=\s*(PASS|FAIL)\b", re.IGNORECASE),
 ]
+
+
+def _qa_profile_bucket(cmd: str) -> str:
+    lower = cmd.lower()
+    if any(token in lower for token in ("cat <<", "cat >", "verdict", "summary.json")):
+        return "verdict_write"
+    if "npm install" in lower or "pnpm install" in lower or "pip install" in lower:
+        return "install"
+    if any(token in lower for token in ("pytest", "npm test", "npx jest", "vitest", "cargo test", "go test")):
+        return "test_run"
+    if any(token in lower for token in ("sed -n", "rg -n", "rg --files", "pwd", "git status", "cat ", "ls -")):
+        return "source_read"
+    if any(token in lower for token in ("http", "fetch(", "createapp", "localhost", "analyticsengine", "blogservice")):
+        return "integration_probe"
+    if "break" in lower:
+        return "break_probe"
+    if any(token in lower for token in ("python - <<", "node <<", "node - <<")):
+        return "direct_api"
+    return "other"
+
+
+def _qa_profile_label(cmd: str) -> str:
+    stripped = cmd.strip()
+    if "\n" in stripped and ("python - <<" in stripped or "node <<" in stripped or "node - <<" in stripped):
+        body_lines = stripped.splitlines()[1:]
+        for line in body_lines:
+            clean = line.strip()
+            if not clean:
+                continue
+            if clean.startswith(("from ", "import ", "const ", "def ", "class ")):
+                return clean[:80]
+            return clean[:80]
+    return stripped[:80]
+
+
+def _qa_profile_steps(qa_actions: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, float]]:
+    totals: dict[str, float] = {
+        "source_read": 0.0,
+        "test_run": 0.0,
+        "direct_api": 0.0,
+        "integration_probe": 0.0,
+        "break_probe": 0.0,
+        "install": 0.0,
+        "verdict_write": 0.0,
+        "other": 0.0,
+    }
+    steps: list[dict[str, Any]] = []
+    last_ts = 0.0
+    for action in qa_actions:
+        if action.get("type") != "bash":
+            continue
+        ts = float(action.get("elapsed_s", 0.0) or 0.0)
+        delta = max(0.0, ts - last_ts)
+        last_ts = ts
+        bucket = str(action.get("profile_bucket", "other") or "other")
+        totals[bucket] = totals.get(bucket, 0.0) + delta
+        steps.append({
+            "ts": ts,
+            "delta": delta,
+            "bucket": bucket,
+            "label": str(action.get("profile_label", "") or "").strip(),
+            "command": str(action.get("command", "") or ""),
+            "is_error": bool(action.get("is_error", False)),
+        })
+    return steps, totals
+
+
+def _qa_profile_summary_lines(qa_actions: list[dict[str, Any]]) -> list[str]:
+    steps, totals = _qa_profile_steps(qa_actions)
+
+    nonzero = [(name, secs) for name, secs in totals.items() if secs > 0]
+    if not nonzero:
+        return []
+    lines = ["", "=" * 40, "QA PROFILE SUMMARY", "=" * 40]
+    for name, secs in sorted(nonzero, key=lambda item: item[1], reverse=True):
+        lines.append(f"{name:>18}: {secs:6.1f}s")
+    top_steps = sorted(steps, key=lambda step: step["delta"], reverse=True)[:5]
+    if top_steps:
+        lines.append("-" * 40)
+        lines.append("top steps:")
+        for step in top_steps:
+            label = step["label"] or step["command"][:80]
+            lines.append(f"  {step['bucket']:>16}  {step['delta']:6.1f}s  {label[:90]}")
+    lines.append("=" * 40)
+    return lines
 
 
 @dataclass
@@ -734,8 +828,9 @@ def format_batch_spec(tasks_with_specs: list[dict]) -> str:
     sections.extend([
         "## Cross-Task Integration",
         "Identify interactions between tasks that share files, data, APIs, or dependencies.",
-        "Generate and run targeted integration tests for those interactions.",
-        "Run the full test suite as a regression check.",
+        "Prefer existing full-stack or shared-boundary repo tests as the first source of integration evidence.",
+        "Generate a new targeted integration test only when the shared boundary is not already covered clearly enough by an existing passing test.",
+        "Run the full test suite as a regression check when requested by the QA prompt.",
     ])
     return "\n".join(sections).strip()
 
@@ -764,6 +859,7 @@ async def _run_qa_prompt(
     log_dir: Path | None = None,
     expected_must_count: int = 0,
     session_id: int = 0,
+    proof_of_work: bool = False,
 ) -> dict[str, Any]:
     """Execute a QA prompt and return parsed verdict plus captured actions."""
     qa_env = _subprocess_env(project_dir)
@@ -836,6 +932,8 @@ async def _run_qa_prompt(
                                     "output": "",
                                     "is_error": False,
                                     "elapsed_s": _tool_ts,
+                                    "profile_bucket": _qa_profile_bucket(inp.get("command", "")),
+                                    "profile_label": _qa_profile_label(inp.get("command", "")),
                                 }
                                 qa_actions.append(action)
                                 if tool_id:
@@ -1015,6 +1113,7 @@ async def _run_qa_prompt(
                 f"{'=' * 60}",
                 f"QA RUN  must_count={expected_must_count}  session_id={session_id}  {time.strftime('%Y-%m-%d %H:%M:%S')}",
                 f"SDK init: {_qa_init_time}s  total: {_qa_total_time}s  turns: {query_state.turn_count}  cost: ${query_state.qa_cost:.2f}",
+                f"proof_of_work: {'on' if proof_of_work else 'off'}",
                 f"{'=' * 60}",
             ]
             for action in qa_actions:
@@ -1023,8 +1122,10 @@ async def _run_qa_prompt(
                 ts_str = f"[{ts:6.1f}s]"
                 if atype == "bash":
                     cmd = action.get("command", "")[:120]
+                    label = action.get("profile_label", "")
                     output = action.get("output", "")[:200]
-                    log_lines.append(f"{ts_str} ● Bash  {cmd}")
+                    suffix = f"  [{label}]" if label and label[:120] != cmd else ""
+                    log_lines.append(f"{ts_str} ● Bash  {cmd}{suffix}")
                     if output:
                         log_lines.append(f"         → {output}")
                 elif atype == "browser":
@@ -1034,7 +1135,22 @@ async def _run_qa_prompt(
             if report_lines:
                 log_lines.append("")
                 log_lines.extend(report_lines[-10:])
+            log_lines.extend(_qa_profile_summary_lines(qa_actions))
             log_lines.append(f"\nCost: ${query_state.qa_cost:.2f}  Time: {_qa_total_time}s (init: {_qa_init_time}s)")
+            steps, bucket_totals = _qa_profile_steps(qa_actions)
+            write_json_file(
+                log_dir / "qa-profile.json",
+                {
+                    "proof_of_work": bool(proof_of_work),
+                    "total_s": _qa_total_time,
+                    "sdk_init_s": _qa_init_time,
+                    "turns": query_state.turn_count,
+                    "cost_usd": query_state.qa_cost,
+                    "bucket_totals": bucket_totals,
+                    "steps": steps,
+                    "top_steps": sorted(steps, key=lambda step: step["delta"], reverse=True)[:10],
+                },
+            )
             # Append (not overwrite) so retries are preserved
             append_text_log(log_dir / "qa-agent.log", log_lines + [""])
         except Exception:
@@ -1062,6 +1178,9 @@ def _build_qa_prompt(
     prev_failed: list[str] | None = None,
     focus_items: list | None = None,
     retried_task_keys: set[str] | None = None,
+    light_batch_qa: bool = False,
+    require_full_test_suite: bool = True,
+    proof_of_work: bool = False,
 ) -> str:
     """Build QA prompt for single-task or multi-task (batch) QA.
 
@@ -1073,7 +1192,8 @@ def _build_qa_prompt(
     is_batch = len(tasks) > 1
     test_command_section = ""
     if test_command:
-        test_command_section = f"""
+        if require_full_test_suite:
+            test_command_section = f"""
 
 PROJECT TEST COMMAND:
 Use this as the default full-suite regression command unless you discover a clearly more accurate project-local equivalent:
@@ -1082,6 +1202,51 @@ Use this as the default full-suite regression command unless you discover a clea
 If that command fails only because of an environment/wrapper issue such as an executable not being on PATH
 (for example `jest: command not found` from an `npm test` script), immediately retry with the project-local
 equivalent (`npx`, `pnpm exec`, `python -m`, etc.) before treating it as a product regression.
+"""
+        else:
+            test_command_section = f"""
+
+PROJECT TEST COMMAND:
+A broad regression command is available if you truly need it:
+  {test_command}
+
+Do not treat this as the default action for this focused QA session.
+Prefer targeted checks first, and only escalate to the broad command if targeted evidence indicates a wider regression risk.
+
+If that command fails only because of an environment/wrapper issue such as an executable not being on PATH
+(for example `jest: command not found` from an `npm test` script), immediately retry with the project-local
+equivalent (`npx`, `pnpm exec`, `python -m`, etc.) before treating it as a product regression.
+"""
+
+    light_batch_section = ""
+    if light_batch_qa:
+        light_batch_section = """
+
+LIGHT BATCH QA:
+This batch contains exactly one newly merged task.
+- Verify only this task's [must] items directly.
+- Treat prior tasks as already verified context; do NOT re-verify their full contracts.
+- Prefer the smallest relevant regression signal you can justify.
+- If targeted checks are sufficient and consistent, do NOT rerun the same full-suite coverage just because it exists.
+- Run at most 1-2 integration checks involving prior verified tasks.
+- Skip broad BREAK exploration unless a concrete risk appears in the current task or integration path.
+"""
+
+    regression_scope_section = "\n\nREGRESSION SCOPE:\n"
+    if require_full_test_suite:
+        regression_scope_section += "- Run the full existing test suite once for broad regression coverage.\n"
+    else:
+        regression_scope_section += (
+            "This QA session is one focused check inside a larger orchestration flow.\n"
+            "- Do NOT rerun the full existing test suite in this session unless targeted evidence points to a regression that cannot be resolved with focused checks.\n"
+            "- Prefer targeted regression signals tied to the task(s) under review.\n"
+        )
+
+    proof_mode_section = """
+
+PROOF OF WORK FLAG:
+- This flag is audit/reporting metadata only. It must NOT change merge-gating QA behavior.
+- Keep certification behavior stable regardless of whether proof-of-work artifacts are being requested elsewhere.
 """
 
     if is_batch:
@@ -1093,26 +1258,40 @@ equivalent (`npx`, `pnpm exec`, `python -m`, etc.) before treating it as a produ
         retry_focus = ""
         if retried_task_keys:
             focus_list = ", ".join(sorted(retried_task_keys))
+            retry_backstop = (
+                "- Keep the full test suite as a regression backstop."
+                if require_full_test_suite
+                else "- Use targeted regression checks as the backstop for this focused retry."
+            )
             retry_focus = f"""
 
 RETRY ROUND:
 Focus the must-item re-check on these retried task(s): {focus_list}
 - Re-check ALL [must] items for those task(s), not only the previously failing items.
 - Re-run cross-task checks that involve those task(s) or shared files they touch.
-- Keep the full test suite as a regression backstop.
+{retry_backstop}
 """
 
-        batch_additions = """
-Verify ALL [must] items exhaustively. Do not stop at the first failure.
+        batch_regression_requirement = (
+            "Run the full existing test suite as a regression check."
+            if require_full_test_suite
+            else "Use focused regression checks for this session; do not rerun the full existing test suite here unless targeted evidence requires it."
+        )
+        batch_additions = f"""
+Verify ALL [must] items, but keep the evidence set lean.
 Every verdict item must include the owning task_key for attribution.
 Return exactly one `must_items` entry for every [must] spec listed below. Do not omit any task/spec pair.
-For each [must] item, record targeted proof (command + output), not just code inspection.
+Reuse existing tests and grouped probes when they clearly cover multiple items.
+Prefer existing repo tests as the first source of evidence for task-local behavior.
+Only add new probes for uncovered musts or shared-boundary interactions.
+If an existing passing full-stack repo test already covers a shared boundary, cite that test instead of inventing a separate custom integration probe.
 
-Generate and run cross-task integration tests for interactions between these tasks.
-Run the full existing test suite as a regression check."""
+Run only the smallest integration checks needed to cover interactions between these tasks.
+{batch_regression_requirement}"""
 
-        return f"""{_QA_BASE_INSTRUCTIONS}{test_command_section}
-{batch_additions}{retry_focus}
+        verdict_intro = "VERDICT: After running the verification commands and any narrowly justified follow-up checks, immediately"
+        return f"""{_qa_base_instructions(proof_of_work=proof_of_work)}{test_command_section}
+{batch_additions}{retry_focus}{regression_scope_section}{proof_mode_section}
 
 You are working in {project_dir}. All project files are in this directory. Do not search outside it.
 
@@ -1125,9 +1304,11 @@ ACCEPTANCE CRITERIA:
 MERGED DIFF:
 {diff}
 
-VERDICT: After running ALL verification commands and BREAK tests, immediately
+{verdict_intro}
 write your verdict JSON using the Write tool. One Write call, no rewriting.
 Put all reasoning into the JSON fields — do not generate a text summary first.
+Keep the JSON compact. Do not write long essays into `evidence`, `proof`, or `extras`.
+Keep each `evidence` field to one sentence. Keep `proof` arrays short. Do not restate the whole test/probe script in prose.
 
 Write to: {verdict_file}
 Screenshots to: {screenshot_dir}/screenshot-<name>.png
@@ -1182,7 +1363,8 @@ JSON structure:
             focus_section = "\n\nFocus your testing on these items that lack test coverage:\n"
             focus_section += "\n".join(f"  - {t}" for t in focus_texts)
 
-        return f"""{_QA_BASE_INSTRUCTIONS}{test_command_section}
+        verdict_intro = "VERDICT: After running the verification commands and any narrowly justified follow-up checks, immediately"
+        return f"""{_qa_base_instructions(proof_of_work=proof_of_work)}{test_command_section}{light_batch_section}{regression_scope_section}{proof_mode_section}
 
 Test this implementation against the acceptance criteria and the original task prompt.
 
@@ -1198,9 +1380,11 @@ ACCEPTANCE CRITERIA:
 DIFF:
 {diff}
 
-VERDICT: After running ALL verification commands and BREAK tests, immediately
+{verdict_intro}
 write your verdict JSON using the Write tool. One Write call, no rewriting.
 Put all reasoning into the JSON fields — do not generate a text summary first.
+Keep the JSON compact. Do not write long essays into `evidence`, `proof`, or `extras`.
+Keep each `evidence` field to one sentence. Keep `proof` arrays short. Do not restate the whole test/probe script in prose.
 
 Write to: {verdict_file}
 Screenshots to: {screenshot_dir}/screenshot-<name>.png
@@ -1510,6 +1694,9 @@ async def run_qa(
     retried_task_keys: set[str] | None = None,
     session_id: int = 0,
     batch_context: bool = False,
+    light_batch_qa: bool = False,
+    require_full_test_suite: bool = True,
+    proof_of_work: bool = False,
 ) -> dict[str, Any]:
     """Unified QA entry point -- single-task or batch.
 
@@ -1580,6 +1767,9 @@ async def run_qa(
         prev_failed=prev_failed,
         focus_items=focus_items,
         retried_task_keys=retried_task_keys,
+        light_batch_qa=light_batch_qa,
+        require_full_test_suite=require_full_test_suite,
+        proof_of_work=proof_of_work,
     )
 
     if requires_browser and shutil.which("agent-browser") is None:
@@ -1605,6 +1795,7 @@ async def run_qa(
             log_dir=log_dir,
             expected_must_count=expected_must_count,
             session_id=session_id,
+            proof_of_work=proof_of_work,
         )
 
     verdict = qa_result.get("verdict")

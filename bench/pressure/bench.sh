@@ -262,15 +262,21 @@ run_bare_codex() {
         codex_args+=($CODEX_EXTRA_ARGS)
     fi
 
+    local cmd=(
+        "$CODEX_BIN" exec
+        --skip-git-repo-check
+        --dangerously-bypass-approvals-and-sandbox
+        --ephemeral
+        -C "$work_dir"
+    )
+    if (( ${#codex_args[@]} > 0 )); then
+        cmd+=("${codex_args[@]}")
+    fi
+    cmd+=("$task_text")
+
     (
         cd "$work_dir"
-        "$CODEX_BIN" exec \
-            --skip-git-repo-check \
-            --dangerously-bypass-approvals-and-sandbox \
-            --ephemeral \
-            -C "$work_dir" \
-            "${codex_args[@]}" \
-            "$task_text" 2>&1
+        "${cmd[@]}" 2>&1
     ) | tee "$proj_results/output.txt"
     return ${PIPESTATUS[0]}
 }

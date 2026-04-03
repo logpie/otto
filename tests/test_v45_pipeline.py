@@ -446,7 +446,7 @@ class TestRunTaskV45:
         assert tool_events[0]["name"] == "Bash"
 
     @pytest.mark.asyncio
-    async def test_batch_mode_skips_spec_gen_and_qa_and_returns_verified(self, tmp_git_repo):
+    async def test_batch_mode_generates_spec_but_skips_qa_and_returns_verified(self, tmp_git_repo):
         default_branch = _current_branch(tmp_git_repo)
         task = {
             "id": 1,
@@ -473,7 +473,12 @@ class TestRunTaskV45:
             )
 
         with patch("otto.runner.query", new=fake_query):
-            with patch("otto.spec.generate_spec_sync") as spec_mock:
+            with patch("otto.spec.generate_spec_sync", return_value=(
+                [{"text": "Creates feature.txt", "binding": "must"}],
+                0.0,
+                None,
+                {},
+            )) as spec_mock:
                 with patch("otto.runner.run_qa") as qa_mock:
                     with patch("otto.runner.run_test_suite", return_value=TestSuiteResult(
                         passed=True,
@@ -487,7 +492,8 @@ class TestRunTaskV45:
         assert result["success"] is True
         assert result["status"] == "verified"
         assert persisted["status"] == "verified"
-        spec_mock.assert_not_called()
+        assert persisted["spec"][0]["text"] == "Creates feature.txt"
+        spec_mock.assert_called_once()
         qa_mock.assert_not_called()
 
     @pytest.mark.asyncio
