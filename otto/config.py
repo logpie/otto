@@ -14,6 +14,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "max_parallel": 1,              # 0 or 1 = serial (default); >1 = parallel tasks per batch
     "parallel_qa": True,            # per-task QA sessions in parallel (faster, costlier)
     "proof_of_work": False,         # audit/reporting metadata only; must not change merge-gating QA behavior
+    "execution_mode": "monolithic", # monolithic = one integrated coding pass; planned = planner/batches
+    "spec_generation_mode": "parallel",  # parallel = overlap with coding, before_coding = block and feed spec into attempt 1
     "test_command": None,           # auto-detected if not set
     "provider": "claude",           # coding agent provider (claude or codex)
     "planner_provider": None,       # planner-only provider override (None = provider)
@@ -339,6 +341,8 @@ def create_config(project_dir: Path) -> Path:
     lines += f"# max_parallel: 1                # 0 or 1 = serial (default); >1 = parallel tasks per batch\n"
     lines += f"# parallel_qa: true              # per-task QA sessions in parallel (faster, costlier)\n"
     lines += f"# proof_of_work: false           # audit/reporting metadata only; should not affect merge-gating QA behavior\n"
+    lines += f"# execution_mode: monolithic     # monolithic = one integrated coding pass; planned = planner/batches\n"
+    lines += f"# spec_generation_mode: parallel # parallel or before_coding; before_coding feeds spec into attempt 1\n"
     lines += "\n# Timeouts:\n"
     lines += f"# verify_timeout: 300            # seconds for test suite in verify\n"
     lines += f"# max_task_time: 3600            # 1hr circuit breaker per task\n"

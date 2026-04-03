@@ -151,6 +151,7 @@ class TestCodingPrompt:
             "Build widget",
             tmp_path,
             full_project_brief="1. #1 Build data layer\n2. #2 Build API",
+            use_spec_on_first_attempt=False,
             attempt=1,
             last_error=None,
             last_error_source=None,
@@ -162,6 +163,23 @@ class TestCodingPrompt:
         assert "FULL PROJECT BRIEF" in prompt
         assert "CURRENT ASSIGNMENT" in prompt
         assert "Build data layer" in prompt
+        assert "Acceptance criteria" in prompt
+        assert "[must] Widget returns JSON" in prompt
+
+    def test_first_attempt_can_include_spec_when_enabled(self, tmp_path):
+        prompt = _build_coding_prompt(
+            "Build widget",
+            tmp_path,
+            full_project_brief=None,
+            use_spec_on_first_attempt=True,
+            attempt=0,
+            last_error=None,
+            last_error_source=None,
+            feedback="",
+            spec=[{"text": "Widget returns JSON", "binding": "must"}],
+            context=None,
+        )
+
         assert "Acceptance criteria" in prompt
         assert "[must] Widget returns JSON" in prompt
 

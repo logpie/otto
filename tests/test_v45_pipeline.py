@@ -898,6 +898,61 @@ class TestRunTaskV45:
         assert persisted["cost_usd"] == pytest.approx(0.37)
 
     @pytest.mark.asyncio
+    async def test_before_coding_spec_mode_injects_spec_into_first_attempt(self, tmp_git_repo):
+        default_branch = _current_branch(tmp_git_repo)
+        task = {
+            "id": 1,
+            "key": "taskspecbefore1",
+            "prompt": "Add feature.txt",
+            "status": "pending",
+        }
+        tasks_path = _write_task(tmp_git_repo, task)
+        config = {
+            "default_branch": default_branch,
+            "max_retries": 0,
+            "verify_timeout": 30,
+            "max_task_time": 60,
+            "test_command": None,
+            "spec_generation_mode": "before_coding",
+        }
+        prompts = []
+        events = []
+
+        async def fake_query(*, prompt, options=None):
+            prompts.append(prompt)
+            (tmp_git_repo / "feature.txt").write_text("hello\n")
+            yield SimpleNamespace(
+                session_id="sess-before-spec",
+                is_error=False,
+                total_cost_usd=0.0,
+                result="ok",
+            )
+
+        def fake_spec_sync(prompt, project_dir, **kwargs):
+            events.append("spec")
+            return ([{"text": "Creates feature.txt", "binding": "must"}], 0.0, None, {})
+
+        with patch("otto.runner.query", new=fake_query):
+            with patch("otto.spec.generate_spec_sync", side_effect=fake_spec_sync):
+                with patch("otto.runner.run_test_suite", return_value=TestSuiteResult(
+                    passed=True,
+                    tiers=[TierResult("tier1", True, "1 passed")],
+                )):
+                    with patch("otto.runner.run_qa", new=AsyncMock(return_value={
+                        "must_passed": True,
+                        "verdict": {"must_passed": True, "must_items": []},
+                        "raw_report": "QA PASS",
+                        "cost_usd": 0.0,
+                    })):
+                        result = await run_task_v45(task, config, tmp_git_repo, tasks_path)
+
+        assert result["success"] is True
+        assert events == ["spec"]
+        assert len(prompts) == 1
+        assert "Acceptance criteria" in prompts[0]
+        assert "[must] Creates feature.txt" in prompts[0]
+
+    @pytest.mark.asyncio
     async def test_progress_events_preserve_visual_markers_and_neutral_should_notes(self, tmp_git_repo):
         """Spec and QA progress events should preserve ◈ markers and neutral should notes."""
         default_branch = _current_branch(tmp_git_repo)

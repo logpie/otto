@@ -16,6 +16,7 @@ Current fixing commit on `feat/otto-codex-support`:
 - `a742e93` — Fix planner, QA, and benchmark observability
 - `HEAD (working tree)` — QA replay robustness for bare-output certification
 - `HEAD (working tree)` — Decouple proof-of-work from merge gating, add fixed-plan benchmarking, and tighten QA evidence reuse/profiling
+- `HEAD (working tree)` — Add first-class monolithic execution mode, spec-before-coding option, and fix monolithic skip-QA merge finalization
 
 ## Purpose
 
@@ -290,6 +291,103 @@ Current mitigation:
 Current best-known prompt shape:
 - the “compact/reuse” variant improved fixed-plan blog runtime materially
 - a later “small probe” prompt variant regressed by causing more bespoke probe churn and a batch-QA retry, so that change was intentionally rolled back
+
+### 15. Otto needed a true monolithic execution mode, not just a planner shortcut
+
+Status: fixed in working tree
+
+What was wrong:
+- small coherent projects were still forced through planner/batch abstractions by default
+- even when the intended comparison target was “bare Codex with one full-project prompt”
+- this made it hard to measure the real cost/value of specgen, QA, planning, and merge logic independently
+
+Why this affects Claude:
+- completely provider-agnostic orchestration design
+- Claude-backed Otto runs would pay the same batching/planning tax on small cohesive projects
+
+Fix:
+- added `execution_mode: monolithic`
+- monolithic mode bypasses the planner and creates one integrated execution unit spanning all pending tasks
+- this gives Otto a first-class “trust the coding agent” path
+
+### 16. Monolithic skip-QA integrated runs could pass without actually merging code
+
+Status: fixed in working tree
+
+What was wrong:
+- in monolithic `skip_qa` runs, integrated-unit results were marked `passed`
+- merge eligibility only looked for `status == verified`
+- result: Otto could report `PASS`, archive an almost-empty final tree, and fail external verify because the produced code never landed on main
+
+Why this affects Claude:
+- provider-agnostic finalization bug
+- any Claude-backed monolithic/skip-QA run using the same merge path could silently drop the actual implementation
+
+Fix:
+- merge eligibility now includes successful `passed` results when a candidate ref exists
+- regression test added to ensure worktree-backed `passed` results still merge
+
+### 17. Raw full-project prompt shape matters a lot on the monolithic path
+
+Status: improved in working tree
+
+What we found:
+- monolithic execution was still wrapping the full project in Otto’s integrated-unit prompt shape
+- that was materially different from the bare-Codex “single uninterrupted user brief” path
+
+Fix:
+- monolithic integrated execution now uses a literal concatenation of the original task prompts as the coding prompt
+- it no longer prepends an extra full-project brief wrapper on top of that same content
+
+Observed effect:
+- with `execution_mode: monolithic`, `skip_spec: true`, and `skip_qa: true`, Otto reached a clean baseline on `multi-blog-engine`
+- fresh result:
+  - Otto monolithic: external verify PASS in ~`302s`
+  - bare Codex comparison run: external verify FAIL in ~`325s`
+
+Interpretation:
+- this is the first benchmark where Otto’s “trust the coding agent” path behaved like a legitimate bare-like baseline rather than a broken wrapper
+
+### 18. Serial spec-before-coding is a real quality/performance tradeoff
+
+Status: implemented and measured in working tree
+
+What changed:
+- added `spec_generation_mode`
+  - `parallel` (existing behavior)
+  - `before_coding`
+- in `before_coding` mode, Otto waits for specgen before attempt 1 and injects the generated spec into the first coding prompt
+
+Why this affects Claude:
+- provider-agnostic runner behavior
+- Claude-backed Otto would see the same attempt-1 grounding change
+
+Observed effect on `multi-blog-engine` monolithic runs:
+- `skip_spec: false`, `skip_qa: false`, `spec_generation_mode: before_coding`
+  - external verify PASS
+  - no retry loop needed
+- this gave a strong quality path, but certification remained expensive
+
+Current best-known QA prompt state for this path:
+- compact verdicts
+- stronger repo-test reuse
+- prefer existing full-stack/shared-boundary tests
+- that reduced the spec-before-coding + QA blog run from ~`855s` to ~`779s` while keeping external verify PASS
+
+### 19. Provider-neutral instructions hint still needed cleanup
+
+Status: fixed in working tree
+
+What was wrong:
+- Otto printed `No CLAUDE.md found...` even on Codex runs
+- this was only a UI wording issue, but it was confusing and implied the wrong provider was active
+
+Why this affects Claude:
+- not a Claude runtime bug, but a provider-neutral UX/documentation issue exposed during multi-provider work
+
+Fix:
+- wording now says no project instructions file was found and clarifies that Otto currently passes through `CLAUDE.md`
+- this keeps the real file name visible without implying the provider is Claude
 
 ## Important Notes, Not Strictly Bugs
 

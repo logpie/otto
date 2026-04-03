@@ -27,6 +27,7 @@ from otto.planner import (
     Batch,
     BatchUnit,
     ExecutionPlan,
+    TaskPlan,
     parse_plan_json,
     plan,
     replan,
@@ -155,6 +156,14 @@ def _fixed_execution_plan(
         )
         return None
     return execution_plan
+
+
+def _monolithic_execution_plan(pending: list[dict[str, Any]]) -> ExecutionPlan:
+    """Build a single integrated execution unit spanning all pending tasks."""
+    task_plans = [TaskPlan(task_key=str(task["key"])) for task in pending if task.get("key")]
+    return ExecutionPlan(
+        batches=[Batch(units=[BatchUnit(tasks=task_plans)])] if task_plans else []
+    )
 
 
 def _refresh_task_live_state(
@@ -349,6 +358,18 @@ def _project_brief(pending_by_key: dict[str, dict[str, Any]]) -> str:
         f"{idx}. #{task.get('id', '?')} {task.get('prompt', '')}"
         for idx, task in enumerate(tasks, start=1)
     )
+
+
+def _project_prompt_literal(pending_by_key: dict[str, dict[str, Any]]) -> str:
+    tasks = sorted(
+        pending_by_key.values(),
+        key=lambda task: int(task.get("id", 0) or 0),
+    )
+    return " ".join(
+        str(task.get("prompt", "") or "").strip()
+        for task in tasks
+        if str(task.get("prompt", "") or "").strip()
+    ).strip()
 
 
 def _unit_feedback(member_keys: list[str], pending_by_key: dict[str, dict[str, Any]]) -> str:
@@ -1378,8 +1399,21 @@ async def run_per(
 
         # Step 2: Plan
         console.print("  Planning...", style="dim")
-        execution_plan = _fixed_execution_plan(config, pending, project_dir)
-        if execution_plan is not None:
+        execution_mode = str(config.get("execution_mode", "monolithic") or "monolithic").strip().lower()
+        execution_plan = None
+        if execution_mode == "monolithic" and len(pending) > 1:
+            execution_plan = _monolithic_execution_plan(pending)
+            from otto.planner import _planner_log as _planner_log  # local import to avoid wider dependency surface
+            _planner_log(
+                project_dir,
+                f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] monolithic execution request",
+                "planner LLM bypassed: using one integrated execution unit across all pending tasks",
+                "final batch structure:",
+                *[f"- {line}" for line in _summarize_batch_structure(execution_plan).splitlines()],
+            )
+        else:
+            execution_plan = _fixed_execution_plan(config, pending, project_dir)
+        if execution_plan is not None and not (execution_mode == "monolithic" and len(pending) > 1):
             from otto.planner import _planner_log as _planner_log  # local import to avoid wider dependency surface
             _planner_log(
                 project_dir,
@@ -1388,7 +1422,7 @@ async def run_per(
                 "final batch structure:",
                 *[f"- {line}" for line in _summarize_batch_structure(execution_plan).splitlines()],
             )
-        else:
+        if execution_plan is None:
             execution_plan = await plan(pending, config, project_dir)
         if not _plan_covers_pending(execution_plan, pending):
             console.print("  [yellow]Planner returned invalid task coverage; falling back to serial plan[/yellow]")
@@ -2469,14 +2503,23 @@ def merge_batch_results(
 
     tasks_by_key = {task.get("key"): task for task in load_tasks(tasks_file)}
 
-    # Separate verified (needs merge) from already-passed and failed results.
-    verified_results = [
-        r for r in results
-        if r.success and tasks_by_key.get(r.task_key, {}).get("status") == "verified"
-    ]
+    def _needs_merge(result: TaskResult) -> bool:
+        if not result.success:
+            return False
+        status = tasks_by_key.get(result.task_key, {}).get("status")
+        if status == "verified":
+            return True
+        if status == "passed":
+            candidate_ref = _find_best_candidate_ref(project_dir, result.task_key)
+            return bool(candidate_ref)
+        return False
+
+    # Separate worktree-backed successes that still need merge from already-final
+    # successes and failures.
+    verified_results = [r for r in results if _needs_merge(r)]
     passthrough_results = [
         r for r in results
-        if not (r.success and tasks_by_key.get(r.task_key, {}).get("status") == "verified")
+        if not _needs_merge(r)
     ]
 
     # Sort verified tasks by key for deterministic merge order
@@ -2868,10 +2911,18 @@ async def _run_integrated_unit_in_worktree(
             int((pending_by_key.get(task_key, {}) or {}).get("attempts", 0) or 0)
             for task_key in member_keys
         ]
+        is_monolithic_unit = (
+            str(config.get("execution_mode", "") or "").strip().lower() == "monolithic"
+            and set(member_keys) == set(pending_by_key.keys())
+        )
         synthetic_task = {
             "id": 0,
             "key": synthetic_key,
-            "prompt": _unit_prompt(unit.tasks, pending_by_key, analysis=planner_analysis),
+            "prompt": (
+                _project_prompt_literal(pending_by_key)
+                if is_monolithic_unit
+                else _unit_prompt(unit.tasks, pending_by_key, analysis=planner_analysis)
+            ),
             "status": "pending",
             "attempts": max(member_attempts) if member_attempts else 0,
             "feedback": _unit_feedback(member_keys, pending_by_key),
@@ -2888,7 +2939,7 @@ async def _run_integrated_unit_in_worktree(
             tasks_file=None,
             task_work_dir=worktree_path,
             qa_mode=qa_mode,
-            full_project_brief=full_project_brief,
+            full_project_brief=None if is_monolithic_unit else full_project_brief,
         )
 
         unit_success = bool(result.get("success"))

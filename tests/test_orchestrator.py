@@ -78,6 +78,17 @@ class TestIntegratedUnitPrompt:
         assert "Planner analysis" in prompt
         assert "LAYERED" in prompt
 
+    def test_project_prompt_literal_concatenates_raw_prompts(self):
+        from otto.orchestrator import _project_prompt_literal
+
+        prompt = _project_prompt_literal({
+            "task-a": {"id": 1, "prompt": "Build data layer."},
+            "task-b": {"id": 2, "prompt": "Build service layer."},
+            "task-c": {"id": 3, "prompt": "Build CLI."},
+        })
+
+        assert prompt == "Build data layer. Build service layer. Build CLI."
+
 
 class TestFixedExecutionPlan:
     def test_resolves_task_ids_to_keys(self, tmp_path):
@@ -240,6 +251,7 @@ class TestRunPerIntegration:
             "verify_timeout": 60,
             "max_parallel": 2,
             "effort": "high",
+            "execution_mode": "planned",
         }
 
     @pytest.mark.asyncio
@@ -254,6 +266,53 @@ class TestRunPerIntegration:
         config = self._make_config(tmp_git_repo)
         exit_code = await run_per(config, tasks_path, tmp_git_repo)
         assert exit_code == 0
+
+    @pytest.mark.asyncio
+    async def test_monolithic_mode_bypasses_planner_and_runs_one_integrated_unit(self, tmp_git_repo):
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        tasks_path.write_text(yaml.dump({"tasks": [
+            {"id": 1, "key": "task-a", "prompt": "Task A", "status": "pending"},
+            {"id": 2, "key": "task-b", "prompt": "Task B", "status": "pending"},
+            {"id": 3, "key": "task-c", "prompt": "Task C", "status": "pending"},
+        ]}))
+
+        config = self._make_config(tmp_git_repo)
+        config["execution_mode"] = "monolithic"
+
+        async def fake_run_integrated_unit(unit, pending_by_key, context, config, project_dir, telemetry, task_file, base_sha, qa_mode="per_task", **kwargs):
+            assert [tp.task_key for tp in unit.tasks] == ["task-a", "task-b", "task-c"]
+            assert qa_mode == QAMode.BATCH
+            for key in ["task-a", "task-b", "task-c"]:
+                update_task(task_file, key, status="verified")
+            return [
+                TaskResult(task_key=key, success=True, unit_key="unit-abc", unit_task_keys=["task-a", "task-b", "task-c"])
+                for key in ["task-a", "task-b", "task-c"]
+            ]
+
+        def fake_merge_batch_results(results, config, project_dir, task_file, telemetry, qa_mode="per_task"):
+            for result in results:
+                update_task(task_file, result.task_key, status="merged")
+            return results
+
+        async def fake_run_batch_qa(*args, **kwargs):
+            return {
+                "must_passed": True,
+                "verdict": {"must_passed": True, "must_items": [], "regressions": []},
+                "raw_report": "ok",
+                "failed_task_keys": [],
+                "cost_usd": 0.0,
+            }
+
+        with patch("otto.orchestrator.plan", AsyncMock(side_effect=AssertionError("planner should not run"))):
+            with patch("otto.orchestrator._run_integrated_unit_in_worktree", side_effect=fake_run_integrated_unit) as integrated_mock:
+                with patch("otto.orchestrator.merge_batch_results", side_effect=fake_merge_batch_results):
+                    with patch("otto.orchestrator._run_batch_qa", side_effect=fake_run_batch_qa):
+                        with patch("otto.orchestrator._print_summary"):
+                            with patch("otto.orchestrator._record_run_history"):
+                                exit_code = await run_per(config, tasks_path, tmp_git_repo)
+
+        assert exit_code == 0
+        integrated_mock.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_single_task_success(self, tmp_git_repo):
@@ -1265,6 +1324,31 @@ class TestMergeParallelResults:
         subprocess.run(["git", "reset", "--hard", "HEAD~1"], cwd=repo, capture_output=True)
         _anchor_candidate_ref(repo, task_key, 1, sha)
         return sha
+
+    def test_passed_result_with_candidate_ref_still_merges(self, tmp_git_repo):
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        tasks_path.write_text(yaml.dump({"tasks": [
+            {"id": 1, "key": "task-aaa", "prompt": "Task A", "status": "passed"},
+        ]}))
+        log_dir = tmp_git_repo / "otto_logs"
+        log_dir.mkdir(exist_ok=True)
+        telemetry = Telemetry(log_dir)
+
+        sha = self._create_candidate_commit(tmp_git_repo, "task-aaa", "a.txt", "aaa\n")
+        config = self._make_config()
+
+        merged = merge_batch_results(
+            [TaskResult(task_key="task-aaa", success=True, commit_sha=sha)],
+            config,
+            tmp_git_repo,
+            tasks_path,
+            telemetry,
+            qa_mode=QAMode.SKIP,
+        )
+
+        assert len(merged) == 1
+        assert merged[0].success is True
+        assert (tmp_git_repo / "a.txt").exists()
 
     def test_both_tasks_merge_no_conflict(self, tmp_git_repo):
         """Two tasks touching different files should both merge successfully."""

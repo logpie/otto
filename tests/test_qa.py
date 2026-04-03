@@ -734,6 +734,8 @@ class TestBuildQaPrompt:
         assert "If an existing passing full-stack repo test already covers a shared boundary" in prompt
         assert "Prefer existing full-stack or shared-boundary repo tests as the first source of integration evidence." in prompt
         assert "Generate a new targeted integration test only when the shared boundary is not already covered clearly enough" in prompt
+        assert "You may omit `criterion` text in `must_items`" in prompt
+        assert "Prefer this compact shape" in prompt
 
     def test_default_prompt_requires_full_suite_once(self):
         prompt = _build_qa_prompt(
@@ -806,6 +808,58 @@ class TestSalvageVerdictFromActions:
         assert verdict is not None
         assert verdict["must_passed"] is False
         assert [item["status"] for item in verdict["must_items"]] == ["pass", "fail"]
+
+
+class TestFinalizeQaResultCompaction:
+    def test_single_task_backfills_missing_criterion_and_trims_proof(self):
+        qa_result = {
+            "must_passed": True,
+            "verdict": {
+                "must_passed": True,
+                "must_items": [
+                    {"spec_id": 1, "status": "pass", "evidence": "works " * 100, "proof": ["a", "b", "c"]},
+                ],
+                "regressions": [],
+                "test_suite_passed": True,
+            },
+        }
+        tasks = [{
+            "key": "task-1",
+            "spec": [{"text": "first must", "binding": "must", "verifiable": True}],
+        }]
+
+        result = _finalize_qa_result(qa_result, tasks)
+        item = result["verdict"]["must_items"][0]
+        assert item["criterion"] == "first must"
+        assert item["proof"] == ["a", "b"]
+        assert len(item["evidence"]) <= 240
+
+    def test_batch_backfills_missing_criterion_and_default_integration_description(self):
+        qa_result = {
+            "must_passed": True,
+            "verdict": {
+                "must_passed": True,
+                "must_items": [
+                    {"task_key": "task-a", "spec_id": 1, "status": "pass", "evidence": "ok", "proof": ["x", "y", "z"]},
+                ],
+                "integration_findings": [
+                    {"status": "pass", "tasks_involved": ["task-a", "task-b"], "test": "pytest -q"}
+                ],
+                "regressions": [],
+                "test_suite_passed": True,
+            },
+        }
+        tasks = [
+            {"key": "task-a", "spec": [{"text": "alpha must", "binding": "must"}]},
+            {"key": "task-b", "spec": [{"text": "beta must", "binding": "must"}]},
+        ]
+
+        result = _finalize_qa_result(qa_result, tasks)
+        item = result["verdict"]["must_items"][0]
+        integ = result["verdict"]["integration_findings"][0]
+        assert item["criterion"] == "alpha must"
+        assert item["proof"] == ["x", "y"]
+        assert integ["description"] == "Integration check"
 
 
 # ── determine_qa_tier ────────────────────────────────────────────────────

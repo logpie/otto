@@ -1309,6 +1309,9 @@ write your verdict JSON using the Write tool. One Write call, no rewriting.
 Put all reasoning into the JSON fields — do not generate a text summary first.
 Keep the JSON compact. Do not write long essays into `evidence`, `proof`, or `extras`.
 Keep each `evidence` field to one sentence. Keep `proof` arrays short. Do not restate the whole test/probe script in prose.
+You may omit `criterion` text in `must_items`; Otto will backfill it from `task_key` + `spec_id`.
+Prefer this compact shape: `task_key`, `spec_id`, `status`, `evidence`, `proof`.
+Use at most 1-2 short proof entries per item.
 
 Write to: {verdict_file}
 Screenshots to: {screenshot_dir}/screenshot-<name>.png
@@ -1317,10 +1320,10 @@ JSON structure:
 {{
   "must_passed": true,
   "must_items": [
-    {{"task_key": "abc123", "spec_id": 1, "criterion": "...", "status": "pass/fail", "evidence": "...", "proof": ["..."]}}
+    {{"task_key": "abc123", "spec_id": 1, "status": "pass/fail", "evidence": "...", "proof": ["..."]}}
   ],
   "integration_findings": [
-    {{"description": "...", "status": "pass/fail", "test": "...", "tasks_involved": ["abc123", "def456"]}}
+    {{"status": "pass/fail", "test": "...", "tasks_involved": ["abc123", "def456"]}}
   ],
   "regressions": [],
   "test_suite_passed": true,
@@ -1385,6 +1388,9 @@ write your verdict JSON using the Write tool. One Write call, no rewriting.
 Put all reasoning into the JSON fields — do not generate a text summary first.
 Keep the JSON compact. Do not write long essays into `evidence`, `proof`, or `extras`.
 Keep each `evidence` field to one sentence. Keep `proof` arrays short. Do not restate the whole test/probe script in prose.
+You may omit `criterion` text in `must_items`; Otto will backfill it from `spec_id`.
+Prefer this compact shape: `spec_id`, `status`, `evidence`, `proof`.
+Use at most 1-2 short proof entries per item.
 
 Write to: {verdict_file}
 Screenshots to: {screenshot_dir}/screenshot-<name>.png
@@ -1393,7 +1399,7 @@ JSON structure:
 {{
   "must_passed": true/false,
   "must_items": [
-    {{"spec_id": 1, "criterion": "...", "status": "pass/fail", "evidence": "...", "proof": ["ran jest: 5 passed", "curl /api returns 200"]}}
+    {{"spec_id": 1, "status": "pass/fail", "evidence": "...", "proof": ["ran jest: 5 passed"]}}
   ],
   "should_notes": [
     {{"criterion": "...", "observation": "...", "screenshot": "path or null"}}
@@ -1423,6 +1429,16 @@ def _finalize_qa_result(
     infrastructure_error = bool(qa_result.get("infrastructure_error", False))
     is_batch = len(tasks) > 1
 
+    def _normalize_text(value: Any, fallback: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return fallback
+        return text
+
+    def _normalize_proof_list(value: Any) -> list[str]:
+        proof = [str(item).strip() for item in (value or []) if str(item).strip()]
+        return proof[:2]
+
     if is_batch:
         # --- Batch finalization ---
         must_items = verdict.get("must_items", []) or []
@@ -1430,6 +1446,34 @@ def _finalize_qa_result(
         integration_failed = any(item.get("status") == "fail" for item in integration_findings)
         regressions = verdict.get("regressions", []) or []
         test_suite_passed = verdict.get("test_suite_passed", True)
+
+        spec_text_by_pair: dict[tuple[str, int], str] = {}
+        for task in tasks:
+            task_key = str(task.get("key", "") or "").strip()
+            for spec_id, item in enumerate(task.get("spec") or [], start=1):
+                text = str(item.get("text", "") or "").strip()
+                if task_key and text:
+                    spec_text_by_pair[(task_key, spec_id)] = text
+
+        for item in must_items:
+            task_key = str(item.get("task_key", "") or "").strip()
+            try:
+                sid = int(item.get("spec_id"))
+            except (TypeError, ValueError):
+                sid = None
+            if task_key and sid is not None:
+                item["criterion"] = _normalize_text(
+                    item.get("criterion"),
+                    spec_text_by_pair.get((task_key, sid), f"spec {sid}"),
+                )
+            item["proof"] = _normalize_proof_list(item.get("proof"))
+            if "evidence" in item:
+                item["evidence"] = str(item.get("evidence", "") or "").strip()[:240]
+
+        for item in integration_findings:
+            item["description"] = _normalize_text(item.get("description"), "Integration check")
+            if "test" in item:
+                item["test"] = str(item.get("test", "") or "").strip()[:240]
 
         expected_pairs = _expected_batch_must_matrix(tasks)
         actual_pairs: set[tuple[str, int]] = set()
@@ -1496,6 +1540,33 @@ def _finalize_qa_result(
         spec = task.get("spec") or []
         expected_must_count = sum(1 for item in spec if spec_binding(item) == "must")
         must_items = verdict.get("must_items", []) or []
+
+        def _single_task_display_specs() -> list[tuple[int, str]]:
+            from otto.tasks import spec_is_verifiable, spec_text
+
+            def _spec_sort_key(item):
+                b = spec_binding(item)
+                v = spec_is_verifiable(item)
+                if b == "must" and v:
+                    return 0
+                elif b == "must":
+                    return 1
+                return 2
+
+            sorted_spec = sorted(spec, key=_spec_sort_key)
+            return [(idx, spec_text(item)) for idx, item in enumerate(sorted_spec, start=1)]
+
+        spec_text_by_id = {idx: text for idx, text in _single_task_display_specs()}
+        for item in must_items:
+            try:
+                sid = int(item.get("spec_id"))
+            except (TypeError, ValueError):
+                sid = None
+            if sid is not None:
+                item["criterion"] = _normalize_text(item.get("criterion"), spec_text_by_id.get(sid, f"spec {sid}"))
+            item["proof"] = _normalize_proof_list(item.get("proof"))
+            if "evidence" in item:
+                item["evidence"] = str(item.get("evidence", "") or "").strip()[:240]
 
         # Recompute must_passed from actual items (don't trust model flag).
         # If must_items is empty, fall back to model's flag — we can't verify.

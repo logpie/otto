@@ -127,17 +127,17 @@ def _suggest_claude_md(project_dir: Path) -> None:
     # Print suggestion
     if hints:
         console.print(
-            f"  [yellow]Tip:[/yellow] No CLAUDE.md found. Detected patterns:"
+            f"  [yellow]Tip:[/yellow] No project instructions file found (`CLAUDE.md`). Detected patterns:"
         )
         for h in hints:
             console.print(f"    [dim]- {h}[/dim]")
         console.print(
-            f"  [dim]Create CLAUDE.md with project conventions — the coding agent will follow them.[/dim]"
+            f"  [dim]Create `CLAUDE.md` with project conventions — Otto will pass it through to the coding agent.[/dim]"
         )
     else:
         console.print(
-            "  [yellow]Tip:[/yellow] No CLAUDE.md found. Create one with project conventions"
-            " — the coding agent will follow them."
+            "  [yellow]Tip:[/yellow] No project instructions file found (`CLAUDE.md`). "
+            "Create one with project conventions and Otto will pass it through to the coding agent."
         )
 
 
@@ -183,7 +183,7 @@ def preflight_checks(
         return (2, [])
 
     # ── Step 2: Non-destructive setup (no commits, no branch changes) ─
-    # Suggest CLAUDE.md if missing — coding agents read it for project conventions
+    # Suggest project instructions if missing — Otto currently passes through CLAUDE.md
     if not (project_dir / "CLAUDE.md").exists():
         _suggest_claude_md(project_dir)
 
@@ -687,6 +687,7 @@ def _build_coding_prompt(
     project_dir: Path,
     *,
     full_project_brief: str | None,
+    use_spec_on_first_attempt: bool,
     attempt: int,
     last_error: str | None,
     last_error_source: str | None,
@@ -711,6 +712,9 @@ def _build_coding_prompt(
 
     if attempt == 0 and not last_error:
         # ROUND 1: bare coding agent — raw prompt + cross-task learnings + user feedback
+        if use_spec_on_first_attempt and spec:
+            coding_prompt += f"\n\nAcceptance criteria (satisfy [must], exceed where helpful):\n"
+            coding_prompt += format_spec_v45(spec)
         if sibling_context:
             coding_prompt += f"\n\n{sibling_context}"
         if feedback:
@@ -1413,6 +1417,7 @@ async def run_task_v45(
     spec_started_at: float | None = None
     _spec_finish_time: float | None = None  # set by spec gen thread on completion
     spec_generation_error = ""
+    spec_generation_mode = str(config.get("spec_generation_mode", "parallel") or "parallel").strip().lower()
     _result_error_code_unset = object()
     log_dir = project_dir / "otto_logs" / key
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -1785,6 +1790,8 @@ async def run_task_v45(
             emit("phase", name="spec_gen", status="running")
             spec_started_at = time.monotonic()
             spec_task = asyncio.create_task(asyncio.to_thread(_run_spec_gen_thread))
+            if spec_generation_mode == "before_coding":
+                await _await_spec_task()
 
         for attempt in range(remaining):
             attempt_num = prior_attempts + attempt + 1
@@ -1824,6 +1831,7 @@ async def run_task_v45(
             coding_prompt = _build_coding_prompt(
                 prompt, task_work_dir,
                 full_project_brief=full_project_brief,
+                use_spec_on_first_attempt=(spec_generation_mode == "before_coding"),
                 attempt=prior_attempts + attempt,
                 last_error=last_error,
                 last_error_source=last_error_source,
