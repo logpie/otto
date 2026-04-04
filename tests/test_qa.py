@@ -712,6 +712,7 @@ class TestBuildQaPrompt:
             require_full_test_suite=False,
         )
         assert "Prefer reusing existing project tests as primary evidence" in prompt
+        assert "If the repo tests already cover all [must] items clearly enough, stop there and write the verdict" in prompt
         assert "Only add a new bespoke probe when existing tests" in prompt
         assert "One executed command may support multiple [must] items" in prompt
         assert "Keep `evidence` terse" in prompt
@@ -734,6 +735,7 @@ class TestBuildQaPrompt:
         assert "If an existing passing full-stack repo test already covers a shared boundary" in prompt
         assert "Prefer existing full-stack or shared-boundary repo tests as the first source of integration evidence." in prompt
         assert "Generate a new targeted integration test only when the shared boundary is not already covered clearly enough" in prompt
+        assert "If nothing remains uncovered, write the verdict immediately." in prompt
         assert "You may omit `criterion` text in `must_items`" in prompt
         assert "Prefer this compact shape" in prompt
 
@@ -860,7 +862,6 @@ class TestFinalizeQaResultCompaction:
         assert item["criterion"] == "alpha must"
         assert item["proof"] == ["x", "y"]
         assert integ["description"] == "Integration check"
-
 
 # ── determine_qa_tier ────────────────────────────────────────────────────
 

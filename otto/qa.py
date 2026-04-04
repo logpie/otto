@@ -49,6 +49,8 @@ Rules:
   "Code inspection" alone is NOT acceptable proof for verifiable items.
 - Prefer reusing existing project tests as primary evidence when they directly cover a [must].
 - Only add a new bespoke probe when existing tests or one grouped command do not already cover the behavior clearly enough.
+- After running the most relevant existing repo tests, pause and map which specific `spec_id`s are still uncovered or ambiguous.
+- If the repo tests already cover all [must] items clearly enough, stop there and write the verdict — do not add extra probes.
 - Prefer deterministic targeted commands (single test, curl, node -e script).
 - For API endpoints: start the server and make actual HTTP requests.
 - For data isolation: test with multiple users/accounts to verify boundaries.
@@ -103,6 +105,7 @@ LIGHT CERTIFICATION MODE
 - Keep new probes minimal. Prefer one grouped probe per feature area over many bespoke harnesses.
 - Do not re-prove a behavior with a new script if an existing passing repo test already demonstrates it clearly.
 - Prefer citing an existing passing repo test plus one terse evidence sentence over writing a large bespoke proof script.
+- If the repo tests already cover the task cleanly, do not create any additional bespoke proof script.
 - BREAK exploration is OFF by default in this mode.
 - Only run an extra edge-case probe when a concrete regression signal or ambiguity appears during verification.
 - Do not manufacture exhaustive evidence once the required [must] items are already clearly covered.
@@ -1285,6 +1288,8 @@ Reuse existing tests and grouped probes when they clearly cover multiple items.
 Prefer existing repo tests as the first source of evidence for task-local behavior.
 Only add new probes for uncovered musts or shared-boundary interactions.
 If an existing passing full-stack repo test already covers a shared boundary, cite that test instead of inventing a separate custom integration probe.
+After the repo tests pass, explicitly identify which `task_key/spec_id` pairs are still uncovered before writing any new probe.
+If nothing remains uncovered, write the verdict immediately.
 
 Run only the smallest integration checks needed to cover interactions between these tasks.
 {batch_regression_requirement}"""

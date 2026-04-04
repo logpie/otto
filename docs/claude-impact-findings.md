@@ -373,6 +373,24 @@ Current best-known QA prompt state for this path:
 - stronger repo-test reuse
 - prefer existing full-stack/shared-boundary tests
 - that reduced the spec-before-coding + QA blog run from ~`855s` to ~`779s` while keeping external verify PASS
+- a follow-up “testreuse” prompt refinement improved the same monolithic
+  spec-before-coding + QA blog benchmark further to about `713s`, still with
+  external verify PASS
+
+Current best-known monolithic baselines:
+- monolithic + `skip_spec: true` + `skip_qa: true`
+  - Otto (Codex provider) reached external verify PASS on `multi-blog-engine`
+    in about `302s`
+- monolithic + `spec_generation_mode: before_coding` + QA enabled
+  - Otto (Codex provider) reached external verify PASS on `multi-blog-engine`
+    in about `713s`
+
+Interpretation:
+- this gives Claude reviewers a clean baseline pair:
+  - “trust the coding agent” monolithic path
+  - “spec-grounded + certified” monolithic path
+- comparisons against planned/batched Otto runs should use these as the new
+  reference points rather than older batch-heavy blog timings
 
 ### 19. Provider-neutral instructions hint still needed cleanup
 
