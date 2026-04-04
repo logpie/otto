@@ -18,6 +18,7 @@ class TestTaskResult:
         assert r.diff_summary == ""
         assert r.duration_s == 0.0
         assert r.review_ref is None
+        assert r.token_usage == {}
 
     def test_full_result(self):
         r = TaskResult(
@@ -35,6 +36,12 @@ class TestTaskResult:
         assert r.commit_sha == "deadbeef"
         assert r.cost_usd == 1.23
         assert r.error == "tests failed"
+
+    def test_total_token_usage(self):
+        ctx = PipelineContext()
+        ctx.add_success(TaskResult(task_key="t1", success=True, token_usage={"input_tokens": 10, "output_tokens": 2}))
+        ctx.add_failure(TaskResult(task_key="t2", success=False, token_usage={"input_tokens": 5, "output_tokens": 1}))
+        assert ctx.total_token_usage == {"input_tokens": 15, "output_tokens": 3}
 
 
 class TestPipelineContext:

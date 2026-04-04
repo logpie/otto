@@ -6,7 +6,9 @@ from unittest.mock import patch, AsyncMock, MagicMock
 import pytest
 
 from otto.planner import (
+    BatchUnit,
     _normalize_plan,
+    _serialize_analysis_units,
     Batch,
     ExecutionPlan,
     TaskPlan,
@@ -95,6 +97,14 @@ class TestExecutionPlan:
         ])
         remaining = plan.remaining_after({"t1"})
         assert remaining.is_empty
+
+    def test_batch_units_flatten_to_tasks(self):
+        batch = Batch(units=[
+            BatchUnit(tasks=[TaskPlan(task_key="t1")]),
+            BatchUnit(tasks=[TaskPlan(task_key="t2"), TaskPlan(task_key="t3")]),
+        ])
+        assert [tp.task_key for tp in batch.tasks] == ["t1", "t2", "t3"]
+        assert batch.units[1].is_integrated is True
 
 
 class TestParsePlanJson:
@@ -197,6 +207,93 @@ class TestParsePlanJson:
         assert plan.conflicts[0]["tasks"] == ["t1", "t2"]
         assert plan.analysis[0]["relationship"] == "CONTRADICTORY"
 
+    def test_units_schema_parses(self):
+        raw = json.dumps({
+            "batches": [
+                {
+                    "units": [
+                        {"task_keys": ["t1"]},
+                        {"task_keys": ["t2", "t3"]},
+                    ]
+                }
+            ]
+        })
+        plan = parse_plan_json(raw)
+        assert plan is not None
+        assert len(plan.batches) == 1
+        assert len(plan.batches[0].units) == 2
+        assert [tp.task_key for tp in plan.batches[0].tasks] == ["t1", "t2", "t3"]
+        assert plan.batches[0].units[1].task_keys == ["t2", "t3"]
+
+    def test_normalize_plan_preserves_integrated_units(self):
+        tasks = [
+            {"key": "t1", "id": 1, "prompt": "data layer"},
+            {"key": "t2", "id": 2, "prompt": "service layer", "depends_on": [1]},
+        ]
+        plan = ExecutionPlan(
+            batches=[
+                Batch(units=[
+                    BatchUnit(tasks=[TaskPlan(task_key="t1"), TaskPlan(task_key="t2")]),
+                ])
+            ],
+            analysis=[
+                {"task_a": "t1", "task_b": "t2", "relationship": "DEPENDENT", "reason": "layered"},
+            ],
+        )
+        normalized = _normalize_plan(plan, tasks)
+        assert len(normalized.batches) == 1
+        assert len(normalized.batches[0].units) == 1
+        assert normalized.batches[0].units[0].task_keys == ["t1", "t2"]
+
+    def test_normalize_plan_preserves_large_integrated_units(self):
+        tasks = [
+            {"key": "t1", "id": 1, "prompt": "data"},
+            {"key": "t2", "id": 2, "prompt": "service", "depends_on": [1]},
+            {"key": "t3", "id": 3, "prompt": "cli", "depends_on": [2]},
+        ]
+        plan = ExecutionPlan(
+            batches=[
+                Batch(units=[
+                    BatchUnit(tasks=[
+                        TaskPlan(task_key="t1"),
+                        TaskPlan(task_key="t2"),
+                        TaskPlan(task_key="t3"),
+                    ])
+                ])
+            ],
+            analysis=[
+                {"task_a": "t1", "task_b": "t2", "relationship": "DEPENDENT", "reason": "layered"},
+                {"task_a": "t2", "task_b": "t3", "relationship": "DEPENDENT", "reason": "layered"},
+            ],
+        )
+        normalized = _normalize_plan(plan, tasks)
+        assert len(normalized.batches) == 1
+        assert [unit.task_keys for unit in normalized.batches[0].units] == [["t1", "t2", "t3"]]
+
+    def test_normalize_plan_serializes_dependent_sibling_units_into_later_batches(self):
+        tasks = [
+            {"key": "t1", "id": 1, "prompt": "data"},
+            {"key": "t2", "id": 2, "prompt": "analytics", "depends_on": [1]},
+            {"key": "t3", "id": 3, "prompt": "api", "depends_on": [2]},
+        ]
+        plan = ExecutionPlan(
+            batches=[
+                Batch(units=[
+                    BatchUnit(tasks=[TaskPlan(task_key="t1"), TaskPlan(task_key="t2")]),
+                    BatchUnit(tasks=[TaskPlan(task_key="t3")]),
+                ])
+            ],
+            analysis=[
+                {"task_a": "t1", "task_b": "t2", "relationship": "DEPENDENT", "reason": "layered"},
+                {"task_a": "t1", "task_b": "t3", "relationship": "DEPENDENT", "reason": "api needs data"},
+                {"task_a": "t2", "task_b": "t3", "relationship": "DEPENDENT", "reason": "api needs analytics"},
+            ],
+        )
+        normalized = _normalize_plan(plan, tasks)
+        assert len(normalized.batches) == 2
+        assert [unit.task_keys for unit in normalized.batches[0].units] == [["t1", "t2"]]
+        assert [unit.task_keys for unit in normalized.batches[1].units] == [["t3"]]
+
 
 class TestDefaultPlan:
     def test_single_task(self):
@@ -283,10 +380,11 @@ class TestNormalizePlan:
 
         result = _normalize_plan(plan, tasks)
 
+        # t1 first (DEPENDENT before t2, UNCERTAIN before t3)
+        # t2 and t3 can parallelize (ADDITIVE = parallel OK)
         assert [[tp.task_key for tp in batch.tasks] for batch in result.batches] == [
             ["t1"],
-            ["t2"],
-            ["t3"],
+            ["t2", "t3"],
         ]
 
     def test_explicit_dependencies_are_serialized_even_if_model_groups_them(self):
@@ -418,7 +516,8 @@ class TestPlan:
         assert {tp.task_key for tp in result.batches[0].tasks} == {"t1", "t2"}
 
     @pytest.mark.asyncio
-    async def test_two_additive_tasks_serialized(self, tmp_path):
+    async def test_two_additive_tasks_parallel(self, tmp_path):
+        """ADDITIVE tasks (same file, different functions) can parallelize."""
         tasks = [
             {"key": "t1", "id": 1, "prompt": "Add slugify() to utils.py"},
             {"key": "t2", "id": 2, "prompt": "Add title_case() to utils.py"},
@@ -437,9 +536,9 @@ class TestPlan:
         with patch("otto.planner.run_agent_query", side_effect=fake_query):
             result = await plan(tasks, {}, tmp_path)
 
+        # ADDITIVE tasks stay in the same batch (parallel OK)
         assert [[tp.task_key for tp in batch.tasks] for batch in result.batches] == [
-            ["t1"],
-            ["t2"],
+            ["t1", "t2"],
         ]
         assert result.analysis[0]["relationship"] == "ADDITIVE"
 
@@ -531,8 +630,10 @@ class TestPlan:
             result = await plan(tasks, {}, tmp_path)
 
         assert len(result.batches) == 2
-        assert {tp.task_key for tp in result.batches[0].tasks} == {"t1", "t4"}
-        assert {tp.task_key for tp in result.batches[1].tasks} == {"t2", "t3"}
+        # ADDITIVE (t1↔t2) can parallelize, so batch 1 keeps t1, t2, t4
+        assert {tp.task_key for tp in result.batches[0].tasks} == {"t1", "t2", "t4"}
+        # t3 depends on t1, stays in batch 2
+        assert {tp.task_key for tp in result.batches[1].tasks} == {"t3"}
 
     @pytest.mark.asyncio
     async def test_single_task_skips_llm(self, tmp_path):
@@ -691,3 +792,113 @@ class TestReplan:
         ]
         assert result.analysis == remaining.analysis
         assert result.learnings == ["reordered based on recent results"]
+
+
+class TestSerializeAnalysisUnitsIndexRemap:
+    """Regression tests for index remapping after splitting invalid integrated units."""
+
+    def test_dependency_remapped_after_uncertain_split(self):
+        """Unit 0 has [A,B] with UNCERTAIN(A,B) => split. Unit 1 depends on Unit 0.
+
+        Before fix: dependency_predecessors said new index 1 (B) depends on old index 0,
+        but new index 2 (original unit 1) was the one that should depend on 0 and 1.
+        """
+        batches = [
+            Batch(units=[
+                BatchUnit(tasks=[TaskPlan(task_key="A"), TaskPlan(task_key="B")]),
+                BatchUnit(tasks=[TaskPlan(task_key="C")]),
+            ])
+        ]
+        analysis = [
+            {"task_a": "A", "task_b": "B", "relationship": "UNCERTAIN", "reason": "might conflict"},
+            {"task_a": "A", "task_b": "C", "relationship": "DEPENDENT", "reason": "C needs A"},
+        ]
+        result = _serialize_analysis_units(batches, analysis)
+
+        # After split: units are [A], [B], [C].
+        # C depends on A => C must be in a later batch than A.
+        # A and B are UNCERTAIN => must be in different batches.
+        batch_keys = [[tp.task_key for u in batch.units for tp in u.tasks] for batch in result]
+
+        # Find which batch each task lands in
+        task_batch = {}
+        for i, batch in enumerate(result):
+            for unit in batch.units:
+                for tp in unit.tasks:
+                    task_batch[tp.task_key] = i
+
+        assert task_batch["A"] != task_batch["B"], "UNCERTAIN tasks must be in different batches"
+        assert task_batch["C"] > task_batch["A"], "C depends on A, must be in a later batch"
+
+    def test_dependency_remapped_after_contradictory_split(self):
+        """CONTRADICTORY within a unit splits it; dependency from another unit remaps."""
+        batches = [
+            Batch(units=[
+                BatchUnit(tasks=[TaskPlan(task_key="X"), TaskPlan(task_key="Y")]),
+                BatchUnit(tasks=[TaskPlan(task_key="Z")]),
+            ])
+        ]
+        analysis = [
+            {"task_a": "X", "task_b": "Y", "relationship": "CONTRADICTORY", "reason": "conflict"},
+            {"task_a": "Y", "task_b": "Z", "relationship": "DEPENDENT", "reason": "Z needs Y"},
+        ]
+        result = _serialize_analysis_units(batches, analysis)
+
+        task_batch = {}
+        for i, batch in enumerate(result):
+            for unit in batch.units:
+                for tp in unit.tasks:
+                    task_batch[tp.task_key] = i
+
+        # X and Y were in same unit but CONTRADICTORY => split => different batches
+        assert task_batch["X"] != task_batch["Y"], "CONTRADICTORY tasks must be in different batches"
+        # Z depends on Y => Z must come after Y
+        assert task_batch["Z"] > task_batch["Y"], "Z depends on Y, must be in a later batch"
+
+    def test_cross_unit_contradictory_separated(self):
+        """CONTRADICTORY tasks in different units must not share a batch."""
+        batches = [
+            Batch(units=[
+                BatchUnit(tasks=[TaskPlan(task_key="P")]),
+                BatchUnit(tasks=[TaskPlan(task_key="Q")]),
+            ])
+        ]
+        analysis = [
+            {"task_a": "P", "task_b": "Q", "relationship": "CONTRADICTORY", "reason": "incompatible"},
+        ]
+        result = _serialize_analysis_units(batches, analysis)
+
+        task_batch = {}
+        for i, batch in enumerate(result):
+            for unit in batch.units:
+                for tp in unit.tasks:
+                    task_batch[tp.task_key] = i
+
+        assert task_batch["P"] != task_batch["Q"], (
+            "Cross-unit CONTRADICTORY tasks must be in different batches"
+        )
+
+    def test_uncertain_pairs_remapped_after_split(self):
+        """UNCERTAIN pair referencing a split unit gets remapped to all new sub-units."""
+        batches = [
+            Batch(units=[
+                # Unit 0: will be split because of UNCERTAIN(A,B)
+                BatchUnit(tasks=[TaskPlan(task_key="A"), TaskPlan(task_key="B")]),
+                # Unit 1: has UNCERTAIN relationship with unit 0
+                BatchUnit(tasks=[TaskPlan(task_key="C")]),
+            ])
+        ]
+        analysis = [
+            {"task_a": "A", "task_b": "B", "relationship": "UNCERTAIN", "reason": "intra split"},
+            {"task_a": "A", "task_b": "C", "relationship": "UNCERTAIN", "reason": "cross uncertain"},
+        ]
+        result = _serialize_analysis_units(batches, analysis)
+
+        task_batch = {}
+        for i, batch in enumerate(result):
+            for unit in batch.units:
+                for tp in unit.tasks:
+                    task_batch[tp.task_key] = i
+
+        assert task_batch["A"] != task_batch["B"], "Intra-unit UNCERTAIN must separate"
+        assert task_batch["A"] != task_batch["C"], "Cross-unit UNCERTAIN must separate"

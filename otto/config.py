@@ -12,10 +12,17 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "default_branch": "main",
     "max_retries": 3,
     "max_parallel": 1,              # 0 or 1 = serial (default); >1 = parallel tasks per batch
+    "parallel_qa": True,            # per-task QA sessions in parallel (faster, costlier)
+    "proof_of_work": False,         # audit/reporting metadata only; must not change merge-gating QA behavior
+    "execution_mode": "monolithic", # monolithic = one integrated coding pass; planned = planner/batches
+    "spec_generation_mode": "parallel",  # parallel = overlap with coding, before_coding = block and feed spec into attempt 1
     "test_command": None,           # auto-detected if not set
-    "model": None,                  # override Claude model (e.g. sonnet)
-    "planner_model": None,          # planner-only model override (None = CC default)
+    "provider": "claude",           # coding agent provider (claude or codex)
+    "planner_provider": None,       # planner-only provider override (None = provider)
+    "model": None,                  # override provider model (e.g. sonnet, gpt-5)
+    "planner_model": None,          # planner-only model override (None = provider default)
     "planner_effort": "medium",     # planner reasoning effort
+    "fixed_plan": None,             # optional fixed execution plan for deterministic benchmarking/debugging
 
     # Timeouts
     "install_timeout": 120,         # seconds for dependency installation in worktrees
@@ -36,6 +43,43 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "qa_agent_settings": "project",
     "planner_agent_settings": "project",
 }
+
+SUPPORTED_PROVIDERS = {"claude", "codex"}
+
+
+def normalize_provider(
+    value: str | None,
+    *,
+    default: str | None = None,
+    key: str = "provider",
+) -> str | None:
+    """Normalize provider strings and reject unsupported values."""
+    if value is None or value == "":
+        return default
+    provider = str(value).strip().lower()
+    if provider not in SUPPORTED_PROVIDERS:
+        choices = ", ".join(sorted(SUPPORTED_PROVIDERS))
+        raise ValueError(f"Invalid {key}: {value!r}. Expected one of: {choices}")
+    return provider
+
+
+def agent_provider(config: dict[str, Any]) -> str:
+    """Return the effective provider for coding/spec/QA agents."""
+    return normalize_provider(
+        config.get("provider"),
+        default=DEFAULT_CONFIG["provider"],
+        key="provider",
+    ) or DEFAULT_CONFIG["provider"]
+
+
+def planner_provider(config: dict[str, Any]) -> str:
+    """Return the effective planner provider."""
+    provider = normalize_provider(
+        config.get("planner_provider"),
+        default=None,
+        key="planner_provider",
+    )
+    return provider or agent_provider(config)
 
 
 def git_meta_dir(project_dir: Path) -> Path:
@@ -83,6 +127,12 @@ def load_config(config_path: Path) -> dict[str, Any]:
         return dict(DEFAULT_CONFIG)
     raw = yaml.safe_load(config_path.read_text()) or {}
     config = {**DEFAULT_CONFIG, **raw}
+    config["provider"] = agent_provider(config)
+    config["planner_provider"] = normalize_provider(
+        config.get("planner_provider"),
+        default=None,
+        key="planner_provider",
+    )
     # Auto-detect test_command if not explicitly configured
     if "test_command" not in raw:
         config["test_command"] = detect_test_command(config_path.parent)
@@ -103,7 +153,9 @@ def detect_test_command(project_dir: Path) -> str | None:
     if pkg_json.exists():
         try:
             pkg = json.loads(pkg_json.read_text())
-            if "test" in pkg.get("scripts", {}):
+            test_script = pkg.get("scripts", {}).get("test", "")
+            # Skip npm init placeholder: 'echo "Error: no test specified" && exit 1'
+            if test_script and "no test specified" not in test_script:
                 candidates.append("npm test")
         except (json.JSONDecodeError, KeyError):
             pass
@@ -287,12 +339,23 @@ def create_config(project_dir: Path) -> Path:
     lines += "\n"
     lines += "\n# Parallelism:\n"
     lines += f"# max_parallel: 1                # 0 or 1 = serial (default); >1 = parallel tasks per batch\n"
+    lines += f"# parallel_qa: true              # per-task QA sessions in parallel (faster, costlier)\n"
+    lines += f"# proof_of_work: false           # audit/reporting metadata only; should not affect merge-gating QA behavior\n"
+    lines += f"# execution_mode: monolithic     # monolithic = one integrated coding pass; planned = planner/batches\n"
+    lines += f"# spec_generation_mode: parallel # parallel or before_coding; before_coding feeds spec into attempt 1\n"
     lines += "\n# Timeouts:\n"
     lines += f"# verify_timeout: 300            # seconds for test suite in verify\n"
     lines += f"# max_task_time: 3600            # 1hr circuit breaker per task\n"
     lines += f"# qa_timeout: 3600               # 1hr circuit breaker for QA agent\n"
-    lines += "\n# Model:\n"
-    lines += f"# model: null                    # override Claude model (e.g. sonnet)\n"
+    lines += "\n# Provider + model:\n"
+    lines += f"# provider: claude              # claude or codex\n"
+    lines += f"# planner_provider: null        # override planner provider only\n"
+    lines += f"# model: null                   # examples: sonnet, gpt-5.4, gpt-5.1, gpt-5-codex, gpt-5.1-codex\n"
+    lines += f"#                               # other current Codex options include gpt-5.4-mini, gpt-5.4-nano,\n"
+    lines += f"#                               # gpt-5.3-codex, gpt-5.2-codex, gpt-5.1-codex-max, gpt-5.1-codex-mini\n"
+    lines += f"#                               # if unset, Otto uses the provider's local/default model\n"
+    lines += f"# planner_model: null           # override planner model only; same model IDs as above\n"
+    lines += f"# fixed_plan: null             # optional fixed execution plan (by task_ids/task_keys) for deterministic benchmarking\n"
     lines += "\n# Harness toggles (disable phases for debugging):\n"
     lines += f"# skip_spec: false               # skip spec generation\n"
     lines += f"# skip_qa: false                 # skip QA (merge after tests pass)\n"

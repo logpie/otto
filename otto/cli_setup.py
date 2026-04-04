@@ -7,7 +7,8 @@ from pathlib import Path
 
 import click
 
-from otto.config import create_config
+from otto.agent import AssistantMessage, ClaudeAgentOptions, ResultMessage, TextBlock, _subprocess_env, query
+from otto.config import create_config, load_config
 from otto.display import console
 from otto.theme import error_console
 
@@ -84,26 +85,25 @@ def _gather_project_context(project_dir: Path) -> list[str]:
     return parts
 
 
-async def _run_setup_query(prompt: str, project_dir: Path) -> str:
+async def _run_setup_query(prompt: str, project_dir: Path, config: dict | None = None) -> str:
     """Run a single LLM query for setup and return the text result."""
-    try:
-        from claude_agent_sdk import query, ClaudeAgentOptions
-    except ImportError:
-        from otto._agent_stub import query, ClaudeAgentOptions
-
     opts = ClaudeAgentOptions(
         permission_mode="bypassPermissions",
         cwd=str(project_dir),
         setting_sources=[],
         system_prompt="You are a project analyst. Output ONLY the markdown content for CLAUDE.md. No explanation, no preamble, no tool use.",
+        env=_subprocess_env(project_dir),
+        provider=(config or {}).get("provider", "claude"),
     )
+    if config and config.get("model"):
+        opts.model = config["model"]
     result_text = ""
     async for message in query(prompt=prompt, options=opts):
-        if hasattr(message, "result") and message.result:
+        if isinstance(message, ResultMessage) and message.result:
             result_text = message.result
-        elif hasattr(message, "content"):
-            for block in getattr(message, "content", []):
-                if hasattr(block, "text"):
+        elif isinstance(message, AssistantMessage):
+            for block in message.content:
+                if isinstance(block, TextBlock):
                     result_text += block.text
     return result_text
 
@@ -189,7 +189,7 @@ Guidelines:
 Output ONLY the markdown content."""
 
         console.print("[dim]Generating CLAUDE.md...[/dim]")
-        result_text = asyncio.run(_run_setup_query(prompt, project_dir))
+        result_text = asyncio.run(_run_setup_query(prompt, project_dir, load_config(config_path)))
 
         if not result_text.strip() and claude_md.exists():
             result_text = _read_text_if_possible(claude_md, 10000) or ""

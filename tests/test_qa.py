@@ -9,13 +9,18 @@ Covers:
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
 from otto.qa import (
+    _build_qa_prompt,
     _finalize_qa_result,
+    _has_explicit_fail_markers,
     _is_verdict_complete,
     _parse_qa_verdict_json,
+    _salvage_single_task_verdict_from_actions,
+    _salvage_single_task_verdict_from_proof_coverage,
     determine_qa_tier,
     format_batch_spec,
 )
@@ -166,6 +171,30 @@ class TestParseQaVerdictJson:
         assert result["must_passed"] is False
 
 
+# ── _has_explicit_fail_markers ──────────────────────────────────────────
+
+
+class TestHasExplicitFailMarkers:
+    def test_detects_fail(self):
+        assert _has_explicit_fail_markers("QA VERDICT: FAIL")
+
+    def test_detects_failed(self):
+        assert _has_explicit_fail_markers("spec 3 failed because of X")
+
+    def test_detects_failure(self):
+        assert _has_explicit_fail_markers("Test failure in module Y")
+
+    def test_no_markers_returns_false(self):
+        assert not _has_explicit_fail_markers("All specs verified. Everything works.")
+
+    def test_empty_string(self):
+        assert not _has_explicit_fail_markers("")
+
+    def test_case_insensitive(self):
+        assert _has_explicit_fail_markers("FAILED")
+        assert _has_explicit_fail_markers("Failed")
+
+
 # ── _finalize_qa_result ──────────────────────────────────────────────────
 
 
@@ -255,6 +284,77 @@ class TestFinalizeQaResultSingleTask:
         }
         result = _finalize_qa_result(qa_result, [task])
         assert "task-x" in result["failed_task_keys"]
+
+    def test_regressions_force_fail_single_task(self):
+        """Bug 3 fix: single-task must check regressions like batch mode."""
+        task = self._make_task(num_must=1)
+        qa_result = {
+            "must_passed": True,
+            "verdict": {
+                "must_passed": True,
+                "must_items": [{"spec_id": 1, "status": "pass"}],
+                "regressions": ["existing behavior broke"],
+            },
+            "raw_report": "",
+            "cost_usd": 0.1,
+        }
+        result = _finalize_qa_result(qa_result, [task])
+        assert result["must_passed"] is False
+
+    def test_test_suite_failed_forces_fail_single_task(self):
+        """Bug 3 fix: single-task must check test_suite_passed like batch mode."""
+        task = self._make_task(num_must=1)
+        qa_result = {
+            "must_passed": True,
+            "verdict": {
+                "must_passed": True,
+                "must_items": [{"spec_id": 1, "status": "pass"}],
+                "test_suite_passed": False,
+            },
+            "raw_report": "",
+            "cost_usd": 0.1,
+        }
+        result = _finalize_qa_result(qa_result, [task])
+        assert result["must_passed"] is False
+
+    def test_empty_must_items_falls_back_to_model_flag(self):
+        """Empty must_items: can't verify from items, trust model flag."""
+        task = self._make_task(num_must=0)
+        qa_result = {
+            "must_passed": True,
+            "verdict": {"must_passed": True, "must_items": []},
+            "raw_report": "",
+            "cost_usd": 0.1,
+        }
+        result = _finalize_qa_result(qa_result, [task])
+        assert result["must_passed"] is True
+
+    def test_empty_must_items_with_false_flag(self):
+        task = self._make_task(num_must=0)
+        qa_result = {
+            "must_passed": False,
+            "verdict": {"must_passed": False, "must_items": []},
+            "raw_report": "",
+            "cost_usd": 0.1,
+        }
+        result = _finalize_qa_result(qa_result, [task])
+        assert result["must_passed"] is False
+
+    def test_verdict_dict_synced_with_result(self):
+        """Verdict dict must_passed should match finalized result."""
+        task = self._make_task(num_must=1)
+        qa_result = {
+            "must_passed": True,
+            "verdict": {
+                "must_passed": True,  # model says pass
+                "must_items": [{"spec_id": 1, "status": "fail"}],  # but item failed
+            },
+            "raw_report": "",
+            "cost_usd": 0.1,
+        }
+        result = _finalize_qa_result(qa_result, [task])
+        assert result["must_passed"] is False
+        assert result["verdict"]["must_passed"] is False  # synced
 
 
 class TestFinalizeQaResultBatch:
@@ -409,6 +509,25 @@ class TestFinalizeQaResultBatch:
         assert result["infrastructure_error"] is True
         assert result["must_passed"] is False
 
+    def test_empty_must_items_not_false_pass(self):
+        """Bug 2 (Codex): all([]) == True must not pass a task with no items."""
+        tasks = self._make_tasks()
+        qa_result = {
+            "must_passed": True,
+            "verdict": {
+                "must_passed": True,
+                "must_items": [],  # QA omitted all items
+                "integration_findings": [],
+                "regressions": [],
+                "test_suite_passed": True,
+            },
+            "raw_report": "",
+            "cost_usd": 0.5,
+        }
+        result = _finalize_qa_result(qa_result, tasks)
+        # With expected must items but none in verdict, should fail (missing coverage)
+        assert result["must_passed"] is False
+
 
 # ── format_batch_spec ────────────────────────────────────────────────────
 
@@ -457,6 +576,294 @@ class TestFormatBatchSpec:
         assert "\u25c8" in result  # ◈ marker
 
 
+class TestBuildQaPrompt:
+    def test_test_command_section_mentions_wrapper_fallbacks(self):
+        prompt = _build_qa_prompt(
+            tasks=[{
+                "key": "task-1",
+                "prompt": "Build API",
+                "spec": [{"text": "works", "binding": "must", "verifiable": True}],
+            }],
+            project_dir=Path("/tmp/demo"),
+            verdict_file=Path("/tmp/verdict.json"),
+            screenshot_dir=Path("/tmp/screens"),
+            diff="diff --git a b",
+            test_command="npm test",
+        )
+        assert "PROJECT TEST COMMAND" in prompt
+        assert "npm test" in prompt
+        assert "jest: command not found" in prompt
+        assert "project-local equivalent" in prompt
+
+    def test_focused_prompt_does_not_frame_test_command_as_default_full_suite(self):
+        prompt = _build_qa_prompt(
+            tasks=[{
+                "key": "task-1",
+                "prompt": "Build API",
+                "spec": [{"text": "works", "binding": "must", "verifiable": True}],
+            }],
+            project_dir=Path("/tmp/demo"),
+            verdict_file=Path("/tmp/verdict.json"),
+            screenshot_dir=Path("/tmp/screens"),
+            diff="diff --git a b",
+            test_command="npm test",
+            require_full_test_suite=False,
+        )
+        assert "A broad regression command is available if you truly need it" in prompt
+        assert "Do not treat this as the default action" in prompt
+
+    def test_light_batch_prompt_adds_lightweight_guidance(self):
+        prompt = _build_qa_prompt(
+            tasks=[{
+                "key": "task-1",
+                "prompt": "Build API",
+                "spec": [{"text": "works", "binding": "must", "verifiable": True}],
+            }],
+            project_dir=Path("/tmp/demo"),
+            verdict_file=Path("/tmp/verdict.json"),
+            screenshot_dir=Path("/tmp/screens"),
+            diff="diff --git a b",
+            test_command="npm test",
+            light_batch_qa=True,
+        )
+        assert "LIGHT BATCH QA" in prompt
+        assert "already verified context" in prompt
+        assert "at most 1-2 integration checks" in prompt
+
+    def test_parallel_unit_prompt_avoids_full_suite_rerun(self):
+        prompt = _build_qa_prompt(
+            tasks=[{
+                "key": "task-1",
+                "prompt": "Build API",
+                "spec": [{"text": "works", "binding": "must", "verifiable": True}],
+            }],
+            project_dir=Path("/tmp/demo"),
+            verdict_file=Path("/tmp/verdict.json"),
+            screenshot_dir=Path("/tmp/screens"),
+            diff="diff --git a b",
+            test_command="npm test",
+            require_full_test_suite=False,
+        )
+        assert "REGRESSION SCOPE" in prompt
+        assert "Do NOT rerun the full existing test suite in this session" in prompt
+
+    def test_proof_of_work_flag_does_not_change_prompt_contract(self):
+        prompt_off = _build_qa_prompt(
+            tasks=[{
+                "key": "task-1",
+                "prompt": "Build API",
+                "spec": [{"text": "works", "binding": "must", "verifiable": True}],
+            }],
+            project_dir=Path("/tmp/demo"),
+            verdict_file=Path("/tmp/verdict.json"),
+            screenshot_dir=Path("/tmp/screens"),
+            diff="diff --git a b",
+            test_command="npm test",
+            require_full_test_suite=False,
+            proof_of_work=False,
+        )
+        prompt_on = _build_qa_prompt(
+            tasks=[{
+                "key": "task-1",
+                "prompt": "Build API",
+                "spec": [{"text": "works", "binding": "must", "verifiable": True}],
+            }],
+            project_dir=Path("/tmp/demo"),
+            verdict_file=Path("/tmp/verdict.json"),
+            screenshot_dir=Path("/tmp/screens"),
+            diff="diff --git a b",
+            test_command="npm test",
+            require_full_test_suite=False,
+            proof_of_work=True,
+        )
+        assert "PROOF OF WORK FLAG" in prompt_off
+        assert "audit/reporting metadata only" in prompt_off
+        assert "BREAK exploration is OFF by default in this mode." in prompt_off
+        assert "After running the verification commands and any narrowly justified follow-up checks" in prompt_off
+        assert prompt_on == prompt_off
+
+        batch_prompt = _build_qa_prompt(
+            tasks=[
+                {"key": "task-1", "id": 1, "prompt": "Build API", "spec": [{"text": "works", "binding": "must", "verifiable": True}]},
+                {"key": "task-2", "id": 2, "prompt": "Build UI", "spec": [{"text": "renders", "binding": "must", "verifiable": True}]},
+            ],
+            project_dir=Path("/tmp/demo"),
+            verdict_file=Path("/tmp/verdict.json"),
+            screenshot_dir=Path("/tmp/screens"),
+            diff="diff --git a b",
+            test_command="npm test",
+            require_full_test_suite=False,
+            proof_of_work=False,
+        )
+        assert "Prefer existing repo tests as the first source of evidence" in batch_prompt
+        assert "Only add new probes for uncovered musts or shared-boundary interactions." in batch_prompt
+
+    def test_base_prompt_biases_toward_existing_tests_first(self):
+        prompt = _build_qa_prompt(
+            tasks=[{
+                "key": "task-1",
+                "prompt": "Build API",
+                "spec": [{"text": "works", "binding": "must", "verifiable": True}],
+            }],
+            project_dir=Path("/tmp/demo"),
+            verdict_file=Path("/tmp/verdict.json"),
+            screenshot_dir=Path("/tmp/screens"),
+            diff="diff --git a b",
+            test_command="pytest -q",
+            require_full_test_suite=False,
+        )
+        assert "Prefer reusing existing project tests as primary evidence" in prompt
+        assert "If the repo tests already cover all [must] items clearly enough, stop there and write the verdict" in prompt
+        assert "Only add a new bespoke probe when existing tests" in prompt
+        assert "One executed command may support multiple [must] items" in prompt
+        assert "Keep `evidence` terse" in prompt
+        assert "Keep the JSON compact" in prompt
+        assert "Keep each `evidence` field to one sentence." in prompt
+
+    def test_batch_prompt_prefers_existing_integration_tests(self):
+        prompt = _build_qa_prompt(
+            tasks=[
+                {"key": "task-1", "id": 1, "prompt": "Build data layer", "spec": [{"text": "alpha", "binding": "must", "verifiable": True}]},
+                {"key": "task-2", "id": 2, "prompt": "Build service layer", "spec": [{"text": "beta", "binding": "must", "verifiable": True}]},
+            ],
+            project_dir=Path("/tmp/demo"),
+            verdict_file=Path("/tmp/verdict.json"),
+            screenshot_dir=Path("/tmp/screens"),
+            diff="diff --git a b",
+            test_command="pytest -q",
+            require_full_test_suite=False,
+        )
+        assert "If an existing passing full-stack repo test already covers a shared boundary" in prompt
+        assert "Prefer existing full-stack or shared-boundary repo tests as the first source of integration evidence." in prompt
+        assert "Generate a new targeted integration test only when the shared boundary is not already covered clearly enough" in prompt
+        assert "If nothing remains uncovered, write the verdict immediately." in prompt
+        assert "You may omit `criterion` text in `must_items`" in prompt
+        assert "Prefer this compact shape" in prompt
+
+    def test_default_prompt_requires_full_suite_once(self):
+        prompt = _build_qa_prompt(
+            tasks=[{
+                "key": "task-1",
+                "prompt": "Build API",
+                "spec": [{"text": "works", "binding": "must", "verifiable": True}],
+            }],
+            project_dir=Path("/tmp/demo"),
+            verdict_file=Path("/tmp/verdict.json"),
+            screenshot_dir=Path("/tmp/screens"),
+            diff="diff --git a b",
+            test_command="npm test",
+        )
+        assert "REGRESSION SCOPE" in prompt
+        assert "Run the full existing test suite once for broad regression coverage." in prompt
+
+class TestSalvageVerdictFromActions:
+    def test_salvages_single_task_verdict_from_explicit_spec_markers(self):
+        qa_result = {
+            "qa_actions": [
+                {
+                    "type": "bash",
+                    "output": "SPEC 1: PASS\nspec_2_help_aliases=PASS\nSPEC 3: PASS\n",
+                }
+            ]
+        }
+        tasks = [{
+            "key": "task-1",
+            "spec": [
+                {"text": "first", "binding": "must"},
+                {"text": "second", "binding": "must"},
+                {"text": "third", "binding": "must"},
+            ],
+        }]
+
+        verdict = _salvage_single_task_verdict_from_actions(qa_result, tasks)
+
+        assert verdict is not None
+        assert verdict["must_passed"] is True
+        assert len(verdict["must_items"]) == 3
+        assert verdict["_salvaged_from_actions"] is True
+        assert [item["status"] for item in verdict["must_items"]] == ["pass", "pass", "pass"]
+
+    def test_requires_full_coverage_of_must_items(self):
+        qa_result = {
+            "qa_actions": [{"type": "bash", "output": "SPEC 1: PASS\n"}]
+        }
+        tasks = [{
+            "key": "task-1",
+            "spec": [
+                {"text": "first", "binding": "must"},
+                {"text": "second", "binding": "must"},
+            ],
+        }]
+        assert _salvage_single_task_verdict_from_actions(qa_result, tasks) is None
+
+    def test_preserves_failures_when_any_spec_marker_fails(self):
+        qa_result = {
+            "qa_actions": [{"type": "bash", "output": "SPEC 1: PASS\nSPEC 2: FAIL\n"}]
+        }
+        tasks = [{
+            "key": "task-1",
+            "spec": [
+                {"text": "first", "binding": "must"},
+                {"text": "second", "binding": "must"},
+            ],
+        }]
+        verdict = _salvage_single_task_verdict_from_actions(qa_result, tasks)
+        assert verdict is not None
+        assert verdict["must_passed"] is False
+        assert [item["status"] for item in verdict["must_items"]] == ["pass", "fail"]
+
+
+class TestFinalizeQaResultCompaction:
+    def test_single_task_backfills_missing_criterion_and_trims_proof(self):
+        qa_result = {
+            "must_passed": True,
+            "verdict": {
+                "must_passed": True,
+                "must_items": [
+                    {"spec_id": 1, "status": "pass", "evidence": "works " * 100, "proof": ["a", "b", "c"]},
+                ],
+                "regressions": [],
+                "test_suite_passed": True,
+            },
+        }
+        tasks = [{
+            "key": "task-1",
+            "spec": [{"text": "first must", "binding": "must", "verifiable": True}],
+        }]
+
+        result = _finalize_qa_result(qa_result, tasks)
+        item = result["verdict"]["must_items"][0]
+        assert item["criterion"] == "first must"
+        assert item["proof"] == ["a", "b"]
+        assert len(item["evidence"]) <= 240
+
+    def test_batch_backfills_missing_criterion_and_default_integration_description(self):
+        qa_result = {
+            "must_passed": True,
+            "verdict": {
+                "must_passed": True,
+                "must_items": [
+                    {"task_key": "task-a", "spec_id": 1, "status": "pass", "evidence": "ok", "proof": ["x", "y", "z"]},
+                ],
+                "integration_findings": [
+                    {"status": "pass", "tasks_involved": ["task-a", "task-b"], "test": "pytest -q"}
+                ],
+                "regressions": [],
+                "test_suite_passed": True,
+            },
+        }
+        tasks = [
+            {"key": "task-a", "spec": [{"text": "alpha must", "binding": "must"}]},
+            {"key": "task-b", "spec": [{"text": "beta must", "binding": "must"}]},
+        ]
+
+        result = _finalize_qa_result(qa_result, tasks)
+        item = result["verdict"]["must_items"][0]
+        integ = result["verdict"]["integration_findings"][0]
+        assert item["criterion"] == "alpha must"
+        assert item["proof"] == ["x", "y"]
+        assert integ["description"] == "Integration check"
+
 # ── determine_qa_tier ────────────────────────────────────────────────────
 
 
@@ -491,3 +898,155 @@ class TestDetermineQaTier:
         content = log_file.read_text()
         assert "logged" in content
         assert "tier: 1" in content
+
+
+# ── _salvage_single_task_verdict_from_proof_coverage (Bug #10) ──────────
+
+
+class TestSalvageFromProofCoverageBug10:
+    """Bug #10: salvage must not override infrastructure_error, regressions,
+    or test_suite_passed=False."""
+
+    def _make_task(self):
+        return {
+            "key": "task-1",
+            "spec": [
+                {"text": "first", "binding": "must"},
+                {"text": "second", "binding": "must"},
+            ],
+        }
+
+    def _salvage(self, final_result=None, log_dir=None):
+        return _salvage_single_task_verdict_from_proof_coverage(
+            [self._make_task()],
+            proof_coverage="2/2",
+            raw_report="Acceptance criteria passed.",
+            log_dir=log_dir,
+            final_result=final_result,
+        )
+
+    def test_salvages_when_failure_is_format_issue(self):
+        """Normal salvage path: no infra error, no regressions, tests passed."""
+        final_result = {
+            "must_passed": False,
+            "infrastructure_error": False,
+            "test_suite_passed": True,
+            "verdict": {"regressions": []},
+        }
+        result = self._salvage(final_result=final_result)
+        assert result is not None
+        assert result["must_passed"] is True
+
+    def test_rejects_when_infrastructure_error(self):
+        final_result = {
+            "must_passed": False,
+            "infrastructure_error": True,
+            "test_suite_passed": True,
+            "verdict": {"regressions": []},
+        }
+        assert self._salvage(final_result=final_result) is None
+
+    def test_rejects_when_test_suite_failed(self):
+        final_result = {
+            "must_passed": False,
+            "infrastructure_error": False,
+            "test_suite_passed": False,
+            "verdict": {"regressions": []},
+        }
+        assert self._salvage(final_result=final_result) is None
+
+    def test_rejects_when_regressions_present(self):
+        final_result = {
+            "must_passed": False,
+            "infrastructure_error": False,
+            "test_suite_passed": True,
+            "verdict": {"regressions": ["existing behavior broke"]},
+        }
+        assert self._salvage(final_result=final_result) is None
+
+    def test_backwards_compat_no_final_result(self):
+        """When final_result is not passed (None), salvage proceeds (old behavior)."""
+        result = self._salvage(final_result=None)
+        assert result is not None
+        assert result["must_passed"] is True
+
+
+# ── _salvage_single_task_verdict_from_actions scoping (Bug #14) ─────────
+
+
+class TestSalvageFromActionsScopesBug14:
+    """Bug #14: salvage from actions must only read qa-agent.log lines from
+    the current attempt (after the last QA RUN header), not earlier retries."""
+
+    def test_ignores_spec_markers_from_earlier_attempt(self, tmp_path):
+        """If attempt-1 had SPEC 1: PASS but attempt-2 only has SPEC 1: FAIL,
+        the salvage must see FAIL, not the stale PASS."""
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        qa_log = log_dir / "qa-agent.log"
+        qa_log.write_text(
+            "============================================================\n"
+            "QA RUN  must_count=1  session_id=0  2026-01-01 00:00:00\n"
+            "============================================================\n"
+            "[  1.0s] ● Bash  echo test\n"
+            "         → SPEC 1: PASS\n"
+            "\n"
+            "============================================================\n"
+            "QA RUN  must_count=1  session_id=0  2026-01-01 00:01:00\n"
+            "============================================================\n"
+            "[  1.0s] ● Bash  echo test\n"
+            "         → SPEC 1: FAIL\n"
+        )
+
+        qa_result = {"qa_actions": [], "raw_report": ""}
+        tasks = [{"key": "task-1", "spec": [{"text": "first", "binding": "must"}]}]
+
+        verdict = _salvage_single_task_verdict_from_actions(qa_result, tasks, log_dir=log_dir)
+        assert verdict is not None
+        assert verdict["must_passed"] is False
+        assert verdict["must_items"][0]["status"] == "fail"
+
+    def test_uses_full_log_when_no_qa_run_header(self, tmp_path):
+        """If qa-agent.log has no QA RUN header, use the full log (fallback)."""
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        qa_log = log_dir / "qa-agent.log"
+        qa_log.write_text("SPEC 1: PASS\n")
+
+        qa_result = {"qa_actions": [], "raw_report": ""}
+        tasks = [{"key": "task-1", "spec": [{"text": "first", "binding": "must"}]}]
+
+        verdict = _salvage_single_task_verdict_from_actions(qa_result, tasks, log_dir=log_dir)
+        assert verdict is not None
+        assert verdict["must_passed"] is True
+
+    def test_stale_pass_from_attempt1_not_picked_up(self, tmp_path):
+        """Attempt-1 had all specs PASS, attempt-2 has no markers at all.
+        Salvage should return None (missing coverage), not a false positive."""
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        qa_log = log_dir / "qa-agent.log"
+        qa_log.write_text(
+            "============================================================\n"
+            "QA RUN  must_count=2  session_id=0  2026-01-01 00:00:00\n"
+            "============================================================\n"
+            "         → SPEC 1: PASS\n"
+            "         → SPEC 2: PASS\n"
+            "\n"
+            "============================================================\n"
+            "QA RUN  must_count=2  session_id=0  2026-01-01 00:01:00\n"
+            "============================================================\n"
+            "[  1.0s] ● Bash  echo no markers here\n"
+        )
+
+        qa_result = {"qa_actions": [], "raw_report": ""}
+        tasks = [{
+            "key": "task-1",
+            "spec": [
+                {"text": "first", "binding": "must"},
+                {"text": "second", "binding": "must"},
+            ],
+        }]
+
+        verdict = _salvage_single_task_verdict_from_actions(qa_result, tasks, log_dir=log_dir)
+        assert verdict is None

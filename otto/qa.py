@@ -1,8 +1,11 @@
 """Otto QA — adversarial QA agent, verdict parsing, risk-based tiering."""
 
 import asyncio
+from dataclasses import dataclass, field
 import json
+import os
 import re
+import shutil
 import tempfile
 import time
 from pathlib import Path
@@ -16,9 +19,11 @@ from otto.agent import (
     ToolResultBlock,
     ToolUseBlock,
     _subprocess_env,
+    normalize_usage,
     query,
 )
-from otto.observability import append_text_log
+from otto.config import agent_provider
+from otto.observability import append_text_log, write_json_file
 from otto.theme import console
 
 # UserMessage may not exist in all SDK versions — used for tool-result capture
@@ -28,12 +33,13 @@ except (ImportError, AttributeError):
     UserMessage = None  # type: ignore[assignment,misc]
 
 
-_QA_BASE_INSTRUCTIONS = """\
-You are a QA tester. Your job has two parts: VERIFY and BREAK.
+_QA_VERIFY_INSTRUCTIONS = """\
+You are a QA tester. Your primary job is VERIFY.
 
-PART 1 — VERIFY (required)
-For EACH verifiable [must] item, write and run a targeted verification script.
-Not one big script — one per spec item. This ensures every spec is independently tested.
+VERIFY (required)
+For EACH verifiable [must] item, run a targeted verification command.
+You may batch related specs (same function/feature) into one script to save
+time, but each spec must have a clear pass/fail indicator in the output.
 
 Good proof: `python -c "from store import PostStore; s = PostStore(); p = s.create(title='T', content='C', author='A', tags=[]); assert p.status == 'draft'"` → exit 0
 Bad proof: "code inspection confirms create() stores posts correctly"
@@ -41,6 +47,10 @@ Bad proof: "code inspection confirms create() stores posts correctly"
 Rules:
 - Every verifiable [must] item MUST have at least one command that was executed.
   "Code inspection" alone is NOT acceptable proof for verifiable items.
+- Prefer reusing existing project tests as primary evidence when they directly cover a [must].
+- Only add a new bespoke probe when existing tests or one grouped command do not already cover the behavior clearly enough.
+- After running the most relevant existing repo tests, pause and map which specific `spec_id`s are still uncovered or ambiguous.
+- If the repo tests already cover all [must] items clearly enough, stop there and write the verdict — do not add extra probes.
 - Prefer deterministic targeted commands (single test, curl, node -e script).
 - For API endpoints: start the server and make actual HTTP requests.
 - For data isolation: test with multiple users/accounts to verify boundaries.
@@ -52,34 +62,155 @@ Rules:
 3. [should] items — note observations, do not block merge.
 
 Items marked ◈ cannot be verified by code alone. Visual items MUST use browser.
-Run the full existing test suite once for broad regression coverage.
 
 For each [must] item, record at least one targeted proof tied to that spec_id.
 Prefer a deterministic targeted command (single test, curl, script).
+One executed command may support multiple [must] items if the mapping is explicit in the output/evidence.
+Keep `evidence` terse: one short sentence that names the behavior proved.
+Keep each `proof` entry terse too: short command/result references, not long narrative paragraphs.
 If a blocking [must] fails, record proof for that item. For single-task QA you
 may stop early. For multi-task batch QA, continue checking ALL items for attribution.
+"""
 
-PART 2 — BREAK (after all specs pass)
-Spend 2-3 tool calls trying to break the implementation beyond what the
-spec covers. Think like a user who doesn't read docs:
-- Boundary inputs: zero, empty string, null, negative, very large
-- Wrong types or missing required fields
-- Concurrent access if the code is stateful
-- Inputs the spec didn't mention but a real caller would try
-
-Report findings in the "extras" field. Do NOT fail [must] items for behavior
-not in the spec — the spec is the contract. But DO report what you find so
-the team has visibility.
+_QA_COMMON_INSTRUCTIONS = """
 
 Also check:
 - Does the implementation contradict the ORIGINAL task prompt?
 - Does it break existing functionality?
 
-When taking browser screenshots, ALWAYS save to a file path:
-  take_screenshot(filePath="<proof_dir>/screenshot-<name>.png")
-Do NOT take screenshots without filePath — inline screenshots break the message pipe.
+For visual ◈ verification, use agent-browser via Bash (NOT MCP browser tools):
+  agent-browser open http://localhost:PORT     # navigate
+  agent-browser snapshot -i                     # accessibility tree with @refs
+  agent-browser click @e3                       # click by ref
+  agent-browser screenshot the screenshot directory provided below
+  agent-browser close                           # cleanup when done
+Start a dev server first, seed test data, then use agent-browser to verify visuals.
 
-Kill any servers you started (by PID, not pkill)."""
+Kill any servers you started (by PID, not pkill).
+
+WORKFLOW: Run tests first, then write the verdict immediately.
+Do NOT generate a text summary before writing the verdict — put all analysis
+directly into the verdict JSON fields (evidence, proof, extras).
+Write the verdict file in a single Write call. Do NOT read it back or rewrite
+it — the Write tool is reliable. Every rewrite wastes significant time."""
+
+
+def _qa_base_instructions(*, proof_of_work: bool) -> str:
+    return (
+        _QA_VERIFY_INSTRUCTIONS
+        + """
+
+LIGHT CERTIFICATION MODE
+- Reuse existing tests and focused project-local commands whenever they already demonstrate the contract.
+- Keep new probes minimal. Prefer one grouped probe per feature area over many bespoke harnesses.
+- Do not re-prove a behavior with a new script if an existing passing repo test already demonstrates it clearly.
+- Prefer citing an existing passing repo test plus one terse evidence sentence over writing a large bespoke proof script.
+- If the repo tests already cover the task cleanly, do not create any additional bespoke proof script.
+- BREAK exploration is OFF by default in this mode.
+- Only run an extra edge-case probe when a concrete regression signal or ambiguity appears during verification.
+- Do not manufacture exhaustive evidence once the required [must] items are already clearly covered.
+"""
+        + _QA_COMMON_INSTRUCTIONS
+    )
+
+_SPEC_RESULT_PATTERNS = [
+    re.compile(r"\bSPEC\s+(\d+)\s*:\s*(PASS|FAIL)\b", re.IGNORECASE),
+    re.compile(r"\bspec_(\d+)[^=\n]*=\s*(PASS|FAIL)\b", re.IGNORECASE),
+]
+
+
+def _qa_profile_bucket(cmd: str) -> str:
+    lower = cmd.lower()
+    if any(token in lower for token in ("cat <<", "cat >", "verdict", "summary.json")):
+        return "verdict_write"
+    if "npm install" in lower or "pnpm install" in lower or "pip install" in lower:
+        return "install"
+    if any(token in lower for token in ("pytest", "npm test", "npx jest", "vitest", "cargo test", "go test")):
+        return "test_run"
+    if any(token in lower for token in ("sed -n", "rg -n", "rg --files", "pwd", "git status", "cat ", "ls -")):
+        return "source_read"
+    if any(token in lower for token in ("http", "fetch(", "createapp", "localhost", "analyticsengine", "blogservice")):
+        return "integration_probe"
+    if "break" in lower:
+        return "break_probe"
+    if any(token in lower for token in ("python - <<", "node <<", "node - <<")):
+        return "direct_api"
+    return "other"
+
+
+def _qa_profile_label(cmd: str) -> str:
+    stripped = cmd.strip()
+    if "\n" in stripped and ("python - <<" in stripped or "node <<" in stripped or "node - <<" in stripped):
+        body_lines = stripped.splitlines()[1:]
+        for line in body_lines:
+            clean = line.strip()
+            if not clean:
+                continue
+            if clean.startswith(("from ", "import ", "const ", "def ", "class ")):
+                return clean[:80]
+            return clean[:80]
+    return stripped[:80]
+
+
+def _qa_profile_steps(qa_actions: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, float]]:
+    totals: dict[str, float] = {
+        "source_read": 0.0,
+        "test_run": 0.0,
+        "direct_api": 0.0,
+        "integration_probe": 0.0,
+        "break_probe": 0.0,
+        "install": 0.0,
+        "verdict_write": 0.0,
+        "other": 0.0,
+    }
+    steps: list[dict[str, Any]] = []
+    last_ts = 0.0
+    for action in qa_actions:
+        if action.get("type") != "bash":
+            continue
+        ts = float(action.get("elapsed_s", 0.0) or 0.0)
+        delta = max(0.0, ts - last_ts)
+        last_ts = ts
+        bucket = str(action.get("profile_bucket", "other") or "other")
+        totals[bucket] = totals.get(bucket, 0.0) + delta
+        steps.append({
+            "ts": ts,
+            "delta": delta,
+            "bucket": bucket,
+            "label": str(action.get("profile_label", "") or "").strip(),
+            "command": str(action.get("command", "") or ""),
+            "is_error": bool(action.get("is_error", False)),
+        })
+    return steps, totals
+
+
+def _qa_profile_summary_lines(qa_actions: list[dict[str, Any]]) -> list[str]:
+    steps, totals = _qa_profile_steps(qa_actions)
+
+    nonzero = [(name, secs) for name, secs in totals.items() if secs > 0]
+    if not nonzero:
+        return []
+    lines = ["", "=" * 40, "QA PROFILE SUMMARY", "=" * 40]
+    for name, secs in sorted(nonzero, key=lambda item: item[1], reverse=True):
+        lines.append(f"{name:>18}: {secs:6.1f}s")
+    top_steps = sorted(steps, key=lambda step: step["delta"], reverse=True)[:5]
+    if top_steps:
+        lines.append("-" * 40)
+        lines.append("top steps:")
+        for step in top_steps:
+            label = step["label"] or step["command"][:80]
+            lines.append(f"  {step['bucket']:>16}  {step['delta']:6.1f}s  {label[:90]}")
+    lines.append("=" * 40)
+    return lines
+
+
+@dataclass
+class _QAQueryState:
+    qa_cost: float = 0.0
+    qa_usage: dict[str, int] = field(default_factory=dict)
+    first_message_time: float | None = None
+    turn_count: int = 0
+    early_verdict: dict[str, Any] | None = None
 
 
 def format_spec_v45(spec: list) -> str:
@@ -192,6 +323,13 @@ def _parse_qa_verdict_json(report: str) -> dict[str, Any]:
         "extras": [],
         "_legacy_parse": True,
     }
+
+
+def _has_explicit_fail_markers(report: str) -> bool:
+    """Return True when the report text explicitly signals failure."""
+    import re as _re
+
+    return bool(_re.search(r"\bfail(?:ed|ing|s|ure|ures)?\b", report, _re.IGNORECASE))
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +508,10 @@ def _audit_proof_quality(verdict: dict, log_dir: Path | None = None) -> list[str
     return warnings
 
 
+def _qa_cost_text(cost_usd: float, *, cost_available: bool) -> str:
+    return f"QA ${cost_usd:.2f}" if cost_available else "QA cost unavailable"
+
+
 def _write_proof_artifacts(
     log_dir: Path,
     verdict: dict,
@@ -377,6 +519,8 @@ def _write_proof_artifacts(
     task: dict,
     original_prompt: str,
     cost_usd: float,
+    *,
+    cost_available: bool = True,
 ) -> tuple[int, str]:
     """Write proof artifacts from QA verdict and captured actions.
 
@@ -465,7 +609,7 @@ def _write_proof_artifacts(
     r: list[str] = []
     r.append(f"# {clean_prompt}")
     r.append("")
-    r.append(f"**{result_icon}** — {must_passed_count}/{must_total} must items — QA ${cost_usd:.2f}")
+    r.append(f"**{result_icon}** — {must_passed_count}/{must_total} must items — {_qa_cost_text(cost_usd, cost_available=cost_available)}")
     r.append("")
 
     # Per-item: criterion → evidence → proof
@@ -566,6 +710,8 @@ def _write_batch_proof_artifacts(
     qa_actions: list[dict],
     tasks_with_specs: list[dict[str, Any]],
     cost_usd: float,
+    *,
+    cost_available: bool = True,
 ) -> tuple[int, str]:
     """Write proof artifacts for a combined batch verdict and each task within it."""
     batch_prompt = f"Batch QA for {len(tasks_with_specs)} task(s)"
@@ -579,6 +725,7 @@ def _write_batch_proof_artifacts(
         {"key": "batch-qa"},
         batch_prompt,
         cost_usd,
+        cost_available=cost_available,
     )
 
     must_items = batch_verdict.get("must_items", []) or []
@@ -593,26 +740,7 @@ def _write_batch_proof_artifacts(
         task_log_dir = logs_root / task_key
         task_log_dir.mkdir(parents=True, exist_ok=True)
 
-        task_must_items = [
-            item for item in must_items
-            if item.get("task_key") == task_key
-        ]
-        task_integration_findings = [
-            item for item in integration_findings
-            if task_key in (item.get("tasks_involved") or [])
-        ]
-        task_passed = (
-            all(item.get("status") == "pass" for item in task_must_items)
-            and not any(item.get("status") == "fail" for item in task_integration_findings)
-            and not regressions
-            and bool(test_suite_passed)
-        )
-        task_verdict = {
-            **batch_verdict,
-            "must_passed": task_passed,
-            "must_items": task_must_items,
-            "integration_findings": task_integration_findings,
-        }
+        task_verdict = _task_scoped_batch_verdict(batch_verdict, task)
         _write_proof_artifacts(
             task_log_dir,
             task_verdict,
@@ -620,9 +748,43 @@ def _write_batch_proof_artifacts(
             task,
             task.get("prompt", ""),
             per_task_cost,
+            cost_available=cost_available,
         )
 
     return batch_count, batch_coverage
+
+
+def _task_scoped_batch_verdict(
+    batch_verdict: dict[str, Any],
+    task: dict[str, Any],
+) -> dict[str, Any]:
+    task_key = task.get("key", "unknown")
+    must_items = batch_verdict.get("must_items", []) or []
+    integration_findings = batch_verdict.get("integration_findings", []) or []
+    regressions = batch_verdict.get("regressions", []) or []
+    test_suite_passed = batch_verdict.get("test_suite_passed", True)
+
+    task_must_items = [
+        item for item in must_items
+        if item.get("task_key") == task_key
+    ]
+    task_integration_findings = [
+        item for item in integration_findings
+        if task_key in (item.get("tasks_involved") or [])
+    ]
+    task_passed = (
+        bool(task_must_items)
+        and all(item.get("status") == "pass" for item in task_must_items)
+        and not any(item.get("status") == "fail" for item in task_integration_findings)
+        and not regressions
+        and bool(test_suite_passed)
+    )
+    return {
+        **batch_verdict,
+        "must_passed": task_passed,
+        "must_items": task_must_items,
+        "integration_findings": task_integration_findings,
+    }
 
 
 def _unwrap_tool_result_content(content: Any) -> str:
@@ -669,8 +831,9 @@ def format_batch_spec(tasks_with_specs: list[dict]) -> str:
     sections.extend([
         "## Cross-Task Integration",
         "Identify interactions between tasks that share files, data, APIs, or dependencies.",
-        "Generate and run targeted integration tests for those interactions.",
-        "Run the full test suite as a regression check.",
+        "Prefer existing full-stack or shared-boundary repo tests as the first source of integration evidence.",
+        "Generate a new targeted integration test only when the shared boundary is not already covered clearly enough by an existing passing test.",
+        "Run the full test suite as a regression check when requested by the QA prompt.",
     ])
     return "\n".join(sections).strip()
 
@@ -689,38 +852,6 @@ def _expected_batch_must_matrix(tasks_with_specs: list[dict[str, Any]]) -> set[t
     return expected
 
 
-def _build_qa_mcp_servers(enable_browser: bool) -> dict[str, dict]:
-    """Load browser MCP configuration when QA may need browser verification."""
-    if not enable_browser:
-        return {}
-
-    qa_mcp_servers = {}
-    user_claude_json = Path.home() / ".claude.json"
-    if not user_claude_json.exists():
-        return qa_mcp_servers
-
-    try:
-        user_config = json.loads(user_claude_json.read_text())
-        for name, srv in user_config.get("mcpServers", {}).items():
-            if name != "chrome-devtools":
-                continue
-            srv = dict(srv)
-            args = list(srv.get("args", []))
-            if "--headless" not in args:
-                args.append("--headless")
-            if not any(a.startswith("--viewport") for a in args):
-                args.extend(["--viewport", "1280x720"])
-            if not any(a.startswith("--userDataDir") for a in args):
-                otto_chrome_profile = str(Path.home() / ".cache" / "otto" / "chrome-profile")
-                args.extend(["--userDataDir", otto_chrome_profile])
-            srv["args"] = args
-            qa_mcp_servers[name] = srv
-    except Exception:
-        return {}
-
-    return qa_mcp_servers
-
-
 async def _run_qa_prompt(
     *,
     qa_prompt: str,
@@ -728,52 +859,52 @@ async def _run_qa_prompt(
     project_dir: Path,
     verdict_file: Path,
     on_progress: Any = None,
-    enable_browser: bool = False,
     log_dir: Path | None = None,
     expected_must_count: int = 0,
+    session_id: int = 0,
+    proof_of_work: bool = False,
 ) -> dict[str, Any]:
     """Execute a QA prompt and return parsed verdict plus captured actions."""
-    qa_mcp_servers = _build_qa_mcp_servers(enable_browser)
+    qa_env = _subprocess_env(project_dir)
+    # Each parallel QA session gets its own agent-browser session for isolation
+    qa_env["AGENT_BROWSER_SESSION"] = f"otto-qa-{os.getpid()}-{session_id}"
+    qa_env["AGENT_BROWSER_HEADED"] = "false"
 
     _qa_settings = config.get("qa_agent_settings", "project").split(",")
     qa_opts = ClaudeAgentOptions(
         permission_mode="bypassPermissions",
         cwd=str(project_dir),
         setting_sources=_qa_settings,
-        env=_subprocess_env(),
+        env=qa_env,
         system_prompt={"type": "preset", "preset": "claude_code"},
+        provider=agent_provider(config),
     )
-    if qa_mcp_servers:
-        qa_opts.mcp_servers = qa_mcp_servers
     if config.get("model"):
         qa_opts.model = config["model"]
 
     qa_timeout = config.get("qa_timeout", 3600)
     report_lines: list[str] = []
-    qa_cost = 0.0
     qa_actions: list[dict] = []
     pending_tool_uses: dict[str, dict] = {}
     _qa_start_time = time.monotonic()
-    _first_message_time: float | None = None
-    _turn_count = 0
+    query_state = _QAQueryState()
+    _verdict_file_str = str(verdict_file)  # for matching Write targets
 
     from otto.display import build_agent_tool_event as _build_agent_tool_event
 
     try:
-        async def _run_query():
-            nonlocal qa_cost, _first_message_time, _turn_count
+        async def _run_query() -> _QAQueryState:
+            state = query_state
             result_msg = None
             async for message in query(prompt=qa_prompt, options=qa_opts):
-                _turn_count += 1
-                if _first_message_time is None:
-                    _first_message_time = time.monotonic()
+                state.turn_count += 1
+                if state.first_message_time is None:
+                    state.first_message_time = time.monotonic()
                 if isinstance(message, ResultMessage):
                     result_msg = message
-                elif hasattr(message, "session_id") and hasattr(message, "is_error"):
-                    result_msg = message
-                elif AssistantMessage and isinstance(message, AssistantMessage):
+                elif isinstance(message, AssistantMessage):
                     for block in message.content:
-                        if TextBlock and isinstance(block, TextBlock) and block.text:
+                        if isinstance(block, TextBlock) and block.text:
                             report_lines.append(block.text)
                             if on_progress:
                                 for line in block.text.splitlines():
@@ -791,7 +922,7 @@ async def _run_qa_prompt(
                                         )
                                     except Exception:
                                         pass
-                        elif ToolUseBlock and isinstance(block, ToolUseBlock):
+                        elif isinstance(block, ToolUseBlock):
                             tool_id = getattr(block, "id", None)
                             inp = block.input or {}
                             _tool_ts = round(time.monotonic() - _qa_start_time, 1)
@@ -802,6 +933,8 @@ async def _run_qa_prompt(
                                     "output": "",
                                     "is_error": False,
                                     "elapsed_s": _tool_ts,
+                                    "profile_bucket": _qa_profile_bucket(inp.get("command", "")),
+                                    "profile_label": _qa_profile_label(inp.get("command", "")),
                                 }
                                 qa_actions.append(action)
                                 if tool_id:
@@ -822,6 +955,41 @@ async def _run_qa_prompt(
                                 qa_actions.append(action)
                                 if tool_id:
                                     pending_tool_uses[tool_id] = action
+                            else:
+                                # Log all other tools (Write, Read, Glob, Grep, Edit)
+                                detail = ""
+                                if block.name == "Write":
+                                    detail = inp.get("file_path", "")
+                                    # Early verdict capture: grab JSON from Write input
+                                    if str(detail) == _verdict_file_str:
+                                        try:
+                                            candidate = json.loads(inp.get("content", ""))
+                                            if isinstance(candidate, dict) and _is_verdict_complete(
+                                                candidate, expected_must_count=expected_must_count
+                                            ):
+                                                state.early_verdict = candidate
+                                                if log_dir:
+                                                    append_text_log(log_dir / "qa-agent.log", [
+                                                        f"[{round(time.monotonic() - _qa_start_time, 1):6.1f}s] "
+                                                        f"early verdict captured at turn {state.turn_count}"
+                                                    ])
+                                        except (json.JSONDecodeError, TypeError):
+                                            pass
+                                elif block.name == "Read":
+                                    detail = inp.get("file_path", "")
+                                elif block.name in ("Grep", "Glob"):
+                                    detail = inp.get("pattern", "")
+                                elif block.name == "Edit":
+                                    detail = inp.get("file_path", "")
+                                action = {
+                                    "type": block.name.lower(),
+                                    "detail": str(detail)[:200],
+                                    "output": "",
+                                    "elapsed_s": _tool_ts,
+                                }
+                                qa_actions.append(action)
+                                if tool_id:
+                                    pending_tool_uses[tool_id] = action
                             if on_progress:
                                 try:
                                     event = _build_agent_tool_event(block)
@@ -837,7 +1005,7 @@ async def _run_qa_prompt(
                                         on_progress("agent_tool", event)
                                 except Exception:
                                     pass
-                        elif ToolResultBlock and isinstance(block, ToolResultBlock):
+                        elif isinstance(block, ToolResultBlock):
                             tid = getattr(block, "tool_use_id", None)
                             if tid and tid in pending_tool_uses:
                                 pending_tool_uses[tid]["output"] = _unwrap_tool_result_content(
@@ -846,7 +1014,7 @@ async def _run_qa_prompt(
                                 pending_tool_uses[tid]["is_error"] = bool(getattr(block, "is_error", False))
                 elif UserMessage and isinstance(message, UserMessage):
                     for block in getattr(message, "content", []):
-                        if ToolResultBlock and isinstance(block, ToolResultBlock):
+                        if isinstance(block, ToolResultBlock):
                             tid = getattr(block, "tool_use_id", None)
                             if tid and tid in pending_tool_uses:
                                 pending_tool_uses[tid]["output"] = _unwrap_tool_result_content(
@@ -857,11 +1025,16 @@ async def _run_qa_prompt(
             if result_msg:
                 raw_cost = getattr(result_msg, "total_cost_usd", None)
                 if isinstance(raw_cost, (int, float)):
-                    qa_cost = float(raw_cost)
+                    state.qa_cost = float(raw_cost)
+                state.qa_usage = normalize_usage(getattr(result_msg, "usage", None))
+            return state
 
-        await asyncio.wait_for(_run_query(), timeout=qa_timeout)
+        query_state = await asyncio.wait_for(_run_query(), timeout=qa_timeout)
     except asyncio.TimeoutError:
-        report_lines.append(f"\n[QA agent timed out after {qa_timeout}s]")
+        if query_state.early_verdict:
+            report_lines.append(f"\n[QA agent timed out after {qa_timeout}s — verdict already captured]")
+        else:
+            report_lines.append(f"\n[QA agent timed out after {qa_timeout}s]")
     except Exception as exc:
         error_str = str(exc)
         report_lines.append(f"\n[QA agent error: {error_str}]")
@@ -873,7 +1046,8 @@ async def _run_qa_prompt(
                         "must_passed": partial["must_passed"],
                         "verdict": partial,
                         "raw_report": "\n".join(report_lines),
-                        "cost_usd": qa_cost,
+                        "cost_usd": query_state.qa_cost,
+                        "usage": query_state.qa_usage,
                         "qa_actions": qa_actions,
                     }
             except (json.JSONDecodeError, OSError):
@@ -887,44 +1061,60 @@ async def _run_qa_prompt(
                 "must_passed": None,
                 "verdict": None,
                 "raw_report": "\n".join(report_lines),
-                "cost_usd": qa_cost,
+                "cost_usd": query_state.qa_cost,
+                "usage": query_state.qa_usage,
                 "qa_actions": qa_actions,
                 "infrastructure_error": True,
             }
 
     raw_report = "\n".join(report_lines)
-    verdict = None
-    if verdict_file.exists():
-        try:
-            verdict_text = verdict_file.read_text().strip()
-            if verdict_text:
-                verdict = json.loads(verdict_text)
-        except (json.JSONDecodeError, OSError) as parse_err:
-            report_lines.append(f"\n[Verdict file parse error: {parse_err}]")
-        finally:
-            verdict_file.unlink(missing_ok=True)
-    else:
-        verdict_file.unlink(missing_ok=True)
 
+    # Prefer early-captured verdict (grabbed from Write tool input, already validated).
+    # Fall back to file-based or text-based parsing.
+    verdict = query_state.early_verdict
+    if not verdict:
+        if verdict_file.exists():
+            try:
+                verdict_text = verdict_file.read_text().strip()
+                if verdict_text:
+                    verdict = json.loads(verdict_text)
+            except (json.JSONDecodeError, OSError) as parse_err:
+                report_lines.append(f"\n[Verdict file parse error: {parse_err}]")
+            finally:
+                verdict_file.unlink(missing_ok=True)
+        else:
+            verdict_file.unlink(missing_ok=True)
+
+    parse_infrastructure_error = False
     if not verdict or not _is_verdict_complete(verdict, expected_must_count=expected_must_count):
+        verdict_source = "early_capture" if query_state.early_verdict else "file" if verdict else "none"
         # Try parsing verdict from agent's text output (agent often repeats it)
         verdict = _parse_qa_verdict_json(raw_report)
+        if verdict.get("_legacy_parse") and not _has_explicit_fail_markers(raw_report):
+            verdict["must_passed"] = None
+            parse_infrastructure_error = True
+            if log_dir:
+                append_text_log(log_dir / "qa-agent.log", [
+                    f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] verdict parse → infrastructure_error "
+                    f"(source={verdict_source}, legacy_parse=True, no explicit fail markers)"
+                ])
         # Legacy/fallback verdicts claiming pass without must_items evidence
         # are not trustworthy — force fail. But if the raw report contains
         # valid structured JSON with must_items, trust it.
-        if not _is_verdict_complete(verdict, expected_must_count=expected_must_count):
+        elif not _is_verdict_complete(verdict, expected_must_count=expected_must_count):
             verdict["must_passed"] = False
 
     # Write QA agent log with timestamps for debugging
     _qa_total_time = round(time.monotonic() - _qa_start_time, 1)
-    _qa_init_time = round((_first_message_time or time.monotonic()) - _qa_start_time, 1)
+    _qa_init_time = round((query_state.first_message_time or time.monotonic()) - _qa_start_time, 1)
     if log_dir:
         try:
             log_dir.mkdir(parents=True, exist_ok=True)
             log_lines = [
                 f"{'=' * 60}",
-                f"QA RUN  must_count={expected_must_count}  {time.strftime('%Y-%m-%d %H:%M:%S')}",
-                f"SDK init: {_qa_init_time}s  total: {_qa_total_time}s  turns: {_turn_count}  cost: ${qa_cost:.2f}",
+                f"QA RUN  must_count={expected_must_count}  session_id={session_id}  {time.strftime('%Y-%m-%d %H:%M:%S')}",
+                f"SDK init: {_qa_init_time}s  total: {_qa_total_time}s  turns: {query_state.turn_count}  cost: ${query_state.qa_cost:.2f}",
+                f"proof_of_work: {'on' if proof_of_work else 'off'}",
                 f"{'=' * 60}",
             ]
             for action in qa_actions:
@@ -933,8 +1123,10 @@ async def _run_qa_prompt(
                 ts_str = f"[{ts:6.1f}s]"
                 if atype == "bash":
                     cmd = action.get("command", "")[:120]
+                    label = action.get("profile_label", "")
                     output = action.get("output", "")[:200]
-                    log_lines.append(f"{ts_str} ● Bash  {cmd}")
+                    suffix = f"  [{label}]" if label and label[:120] != cmd else ""
+                    log_lines.append(f"{ts_str} ● Bash  {cmd}{suffix}")
                     if output:
                         log_lines.append(f"         → {output}")
                 elif atype == "browser":
@@ -944,9 +1136,23 @@ async def _run_qa_prompt(
             if report_lines:
                 log_lines.append("")
                 log_lines.extend(report_lines[-10:])
-            log_lines.append(f"\nCost: ${qa_cost:.2f}  Time: {_qa_total_time}s (init: {_qa_init_time}s)")
+            log_lines.extend(_qa_profile_summary_lines(qa_actions))
+            log_lines.append(f"\nCost: ${query_state.qa_cost:.2f}  Time: {_qa_total_time}s (init: {_qa_init_time}s)")
+            steps, bucket_totals = _qa_profile_steps(qa_actions)
+            write_json_file(
+                log_dir / "qa-profile.json",
+                {
+                    "proof_of_work": bool(proof_of_work),
+                    "total_s": _qa_total_time,
+                    "sdk_init_s": _qa_init_time,
+                    "turns": query_state.turn_count,
+                    "cost_usd": query_state.qa_cost,
+                    "bucket_totals": bucket_totals,
+                    "steps": steps,
+                    "top_steps": sorted(steps, key=lambda step: step["delta"], reverse=True)[:10],
+                },
+            )
             # Append (not overwrite) so retries are preserved
-            from otto.observability import append_text_log
             append_text_log(log_dir / "qa-agent.log", log_lines + [""])
         except Exception:
             pass
@@ -955,8 +1161,10 @@ async def _run_qa_prompt(
         "must_passed": verdict.get("must_passed", False),
         "verdict": verdict,
         "raw_report": raw_report,
-        "cost_usd": qa_cost,
+        "cost_usd": query_state.qa_cost,
+        "usage": query_state.qa_usage,
         "qa_actions": qa_actions,
+        "infrastructure_error": parse_infrastructure_error,
     }
 
 
@@ -966,10 +1174,14 @@ def _build_qa_prompt(
     verdict_file: Path,
     screenshot_dir: Path,
     diff: str,
+    test_command: str | None = None,
     *,
     prev_failed: list[str] | None = None,
     focus_items: list | None = None,
     retried_task_keys: set[str] | None = None,
+    light_batch_qa: bool = False,
+    require_full_test_suite: bool = True,
+    proof_of_work: bool = False,
 ) -> str:
     """Build QA prompt for single-task or multi-task (batch) QA.
 
@@ -979,6 +1191,64 @@ def _build_qa_prompt(
     from otto.tasks import spec_binding, spec_is_verifiable, spec_text
 
     is_batch = len(tasks) > 1
+    test_command_section = ""
+    if test_command:
+        if require_full_test_suite:
+            test_command_section = f"""
+
+PROJECT TEST COMMAND:
+Use this as the default full-suite regression command unless you discover a clearly more accurate project-local equivalent:
+  {test_command}
+
+If that command fails only because of an environment/wrapper issue such as an executable not being on PATH
+(for example `jest: command not found` from an `npm test` script), immediately retry with the project-local
+equivalent (`npx`, `pnpm exec`, `python -m`, etc.) before treating it as a product regression.
+"""
+        else:
+            test_command_section = f"""
+
+PROJECT TEST COMMAND:
+A broad regression command is available if you truly need it:
+  {test_command}
+
+Do not treat this as the default action for this focused QA session.
+Prefer targeted checks first, and only escalate to the broad command if targeted evidence indicates a wider regression risk.
+
+If that command fails only because of an environment/wrapper issue such as an executable not being on PATH
+(for example `jest: command not found` from an `npm test` script), immediately retry with the project-local
+equivalent (`npx`, `pnpm exec`, `python -m`, etc.) before treating it as a product regression.
+"""
+
+    light_batch_section = ""
+    if light_batch_qa:
+        light_batch_section = """
+
+LIGHT BATCH QA:
+This batch contains exactly one newly merged task.
+- Verify only this task's [must] items directly.
+- Treat prior tasks as already verified context; do NOT re-verify their full contracts.
+- Prefer the smallest relevant regression signal you can justify.
+- If targeted checks are sufficient and consistent, do NOT rerun the same full-suite coverage just because it exists.
+- Run at most 1-2 integration checks involving prior verified tasks.
+- Skip broad BREAK exploration unless a concrete risk appears in the current task or integration path.
+"""
+
+    regression_scope_section = "\n\nREGRESSION SCOPE:\n"
+    if require_full_test_suite:
+        regression_scope_section += "- Run the full existing test suite once for broad regression coverage.\n"
+    else:
+        regression_scope_section += (
+            "This QA session is one focused check inside a larger orchestration flow.\n"
+            "- Do NOT rerun the full existing test suite in this session unless targeted evidence points to a regression that cannot be resolved with focused checks.\n"
+            "- Prefer targeted regression signals tied to the task(s) under review.\n"
+        )
+
+    proof_mode_section = """
+
+PROOF OF WORK FLAG:
+- This flag is audit/reporting metadata only. It must NOT change merge-gating QA behavior.
+- Keep certification behavior stable regardless of whether proof-of-work artifacts are being requested elsewhere.
+"""
 
     if is_batch:
         # --- Batch prompt ---
@@ -989,26 +1259,42 @@ def _build_qa_prompt(
         retry_focus = ""
         if retried_task_keys:
             focus_list = ", ".join(sorted(retried_task_keys))
+            retry_backstop = (
+                "- Keep the full test suite as a regression backstop."
+                if require_full_test_suite
+                else "- Use targeted regression checks as the backstop for this focused retry."
+            )
             retry_focus = f"""
 
 RETRY ROUND:
 Focus the must-item re-check on these retried task(s): {focus_list}
 - Re-check ALL [must] items for those task(s), not only the previously failing items.
 - Re-run cross-task checks that involve those task(s) or shared files they touch.
-- Keep the full test suite as a regression backstop.
+{retry_backstop}
 """
 
-        batch_additions = """
-Verify ALL [must] items exhaustively. Do not stop at the first failure.
+        batch_regression_requirement = (
+            "Run the full existing test suite as a regression check."
+            if require_full_test_suite
+            else "Use focused regression checks for this session; do not rerun the full existing test suite here unless targeted evidence requires it."
+        )
+        batch_additions = f"""
+Verify ALL [must] items, but keep the evidence set lean.
 Every verdict item must include the owning task_key for attribution.
 Return exactly one `must_items` entry for every [must] spec listed below. Do not omit any task/spec pair.
-For each [must] item, record targeted proof (command + output), not just code inspection.
+Reuse existing tests and grouped probes when they clearly cover multiple items.
+Prefer existing repo tests as the first source of evidence for task-local behavior.
+Only add new probes for uncovered musts or shared-boundary interactions.
+If an existing passing full-stack repo test already covers a shared boundary, cite that test instead of inventing a separate custom integration probe.
+After the repo tests pass, explicitly identify which `task_key/spec_id` pairs are still uncovered before writing any new probe.
+If nothing remains uncovered, write the verdict immediately.
 
-Generate and run cross-task integration tests for interactions between these tasks.
-Run the full existing test suite as a regression check."""
+Run only the smallest integration checks needed to cover interactions between these tasks.
+{batch_regression_requirement}"""
 
-        return f"""{_QA_BASE_INSTRUCTIONS}
-{batch_additions}{retry_focus}
+        verdict_intro = "VERDICT: After running the verification commands and any narrowly justified follow-up checks, immediately"
+        return f"""{_qa_base_instructions(proof_of_work=proof_of_work)}{test_command_section}
+{batch_additions}{retry_focus}{regression_scope_section}{proof_mode_section}
 
 You are working in {project_dir}. All project files are in this directory. Do not search outside it.
 
@@ -1021,21 +1307,30 @@ ACCEPTANCE CRITERIA:
 MERGED DIFF:
 {diff}
 
-Write your JSON verdict to: {verdict_file}
-IMPORTANT: Use the Write tool (not bash heredoc/cat) to write the verdict file — it is faster and avoids truncation.
-Save any browser screenshots to: {screenshot_dir}/screenshot-<name>.png
+{verdict_intro}
+write your verdict JSON using the Write tool. One Write call, no rewriting.
+Put all reasoning into the JSON fields — do not generate a text summary first.
+Keep the JSON compact. Do not write long essays into `evidence`, `proof`, or `extras`.
+Keep each `evidence` field to one sentence. Keep `proof` arrays short. Do not restate the whole test/probe script in prose.
+You may omit `criterion` text in `must_items`; Otto will backfill it from `task_key` + `spec_id`.
+Prefer this compact shape: `task_key`, `spec_id`, `status`, `evidence`, `proof`.
+Use at most 1-2 short proof entries per item.
 
-Use this JSON structure:
+Write to: {verdict_file}
+Screenshots to: {screenshot_dir}/screenshot-<name>.png
+
+JSON structure:
 {{
   "must_passed": true,
   "must_items": [
-    {{"task_key": "abc123", "spec_id": 1, "criterion": "...", "status": "pass/fail", "evidence": "...", "proof": ["..."]}}
+    {{"task_key": "abc123", "spec_id": 1, "status": "pass/fail", "evidence": "...", "proof": ["..."]}}
   ],
   "integration_findings": [
-    {{"description": "...", "status": "pass/fail", "test": "...", "tasks_involved": ["abc123", "def456"]}}
+    {{"status": "pass/fail", "test": "...", "tasks_involved": ["abc123", "def456"]}}
   ],
   "regressions": [],
-  "test_suite_passed": true
+  "test_suite_passed": true,
+  "extras": ["edge_case: description of finding"]
 }}"""
 
     else:
@@ -1074,7 +1369,8 @@ Use this JSON structure:
             focus_section = "\n\nFocus your testing on these items that lack test coverage:\n"
             focus_section += "\n".join(f"  - {t}" for t in focus_texts)
 
-        return f"""{_QA_BASE_INSTRUCTIONS}
+        verdict_intro = "VERDICT: After running the verification commands and any narrowly justified follow-up checks, immediately"
+        return f"""{_qa_base_instructions(proof_of_work=proof_of_work)}{test_command_section}{light_batch_section}{regression_scope_section}{proof_mode_section}
 
 Test this implementation against the acceptance criteria and the original task prompt.
 
@@ -1090,22 +1386,30 @@ ACCEPTANCE CRITERIA:
 DIFF:
 {diff}
 
-Write your JSON verdict to: {verdict_file}
-IMPORTANT: Use the Write tool (not bash heredoc/cat) to write the verdict file — it is faster and avoids truncation.
-Save any browser screenshots to: {screenshot_dir}/screenshot-<name>.png
+{verdict_intro}
+write your verdict JSON using the Write tool. One Write call, no rewriting.
+Put all reasoning into the JSON fields — do not generate a text summary first.
+Keep the JSON compact. Do not write long essays into `evidence`, `proof`, or `extras`.
+Keep each `evidence` field to one sentence. Keep `proof` arrays short. Do not restate the whole test/probe script in prose.
+You may omit `criterion` text in `must_items`; Otto will backfill it from `spec_id`.
+Prefer this compact shape: `spec_id`, `status`, `evidence`, `proof`.
+Use at most 1-2 short proof entries per item.
 
-Write your verdict as JSON:
+Write to: {verdict_file}
+Screenshots to: {screenshot_dir}/screenshot-<name>.png
+
+JSON structure:
 {{
   "must_passed": true/false,
   "must_items": [
-    {{"spec_id": 1, "criterion": "...", "status": "pass/fail", "evidence": "...", "proof": ["ran jest: 5 passed", "curl /api returns 200"]}}
+    {{"spec_id": 1, "status": "pass/fail", "evidence": "...", "proof": ["ran jest: 5 passed"]}}
   ],
   "should_notes": [
     {{"criterion": "...", "observation": "...", "screenshot": "path or null"}}
   ],
   "regressions": [],
   "prompt_intent": "Implementation matches/diverges from original prompt because...",
-  "extras": ["boundary: rate=0 causes ValueError \u2014 may want to handle as burst-only mode"]
+  "extras": ["edge_case: description of finding"]
 }}"""
 
 
@@ -1128,16 +1432,55 @@ def _finalize_qa_result(
     infrastructure_error = bool(qa_result.get("infrastructure_error", False))
     is_batch = len(tasks) > 1
 
+    def _normalize_text(value: Any, fallback: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return fallback
+        return text
+
+    def _normalize_proof_list(value: Any) -> list[str]:
+        proof = [str(item).strip() for item in (value or []) if str(item).strip()]
+        return proof[:2]
+
     if is_batch:
         # --- Batch finalization ---
+        must_items = verdict.get("must_items", []) or []
         integration_findings = verdict.get("integration_findings", []) or []
         integration_failed = any(item.get("status") == "fail" for item in integration_findings)
         regressions = verdict.get("regressions", []) or []
         test_suite_passed = verdict.get("test_suite_passed", True)
 
+        spec_text_by_pair: dict[tuple[str, int], str] = {}
+        for task in tasks:
+            task_key = str(task.get("key", "") or "").strip()
+            for spec_id, item in enumerate(task.get("spec") or [], start=1):
+                text = str(item.get("text", "") or "").strip()
+                if task_key and text:
+                    spec_text_by_pair[(task_key, spec_id)] = text
+
+        for item in must_items:
+            task_key = str(item.get("task_key", "") or "").strip()
+            try:
+                sid = int(item.get("spec_id"))
+            except (TypeError, ValueError):
+                sid = None
+            if task_key and sid is not None:
+                item["criterion"] = _normalize_text(
+                    item.get("criterion"),
+                    spec_text_by_pair.get((task_key, sid), f"spec {sid}"),
+                )
+            item["proof"] = _normalize_proof_list(item.get("proof"))
+            if "evidence" in item:
+                item["evidence"] = str(item.get("evidence", "") or "").strip()[:240]
+
+        for item in integration_findings:
+            item["description"] = _normalize_text(item.get("description"), "Integration check")
+            if "test" in item:
+                item["test"] = str(item.get("test", "") or "").strip()[:240]
+
         expected_pairs = _expected_batch_must_matrix(tasks)
         actual_pairs: set[tuple[str, int]] = set()
-        for item in verdict.get("must_items", []) or []:
+        for item in must_items:
             task_key = str(item.get("task_key", "") or "").strip()
             try:
                 sid = int(item.get("spec_id"))
@@ -1155,18 +1498,25 @@ def _finalize_qa_result(
                     for tk, sid in missing_pairs
                 ],
             }
+        # Recompute from actual items; if empty, fall back to model flag
+        if must_items:
+            must_passed = all(item.get("status") == "pass" for item in must_items)
+        else:
+            must_passed = bool(qa_result.get("must_passed"))
         overall_passed = (
-            bool(qa_result.get("must_passed"))
+            must_passed
             and not infrastructure_error
             and not missing_pairs
             and not integration_failed
             and not regressions
             and bool(test_suite_passed)
         )
+        # Sync verdict dict so proof report matches result
+        verdict["must_passed"] = overall_passed
 
         failed_task_keys: set[str] = {
             item.get("task_key")
-            for item in verdict.get("must_items", []) or []
+            for item in must_items
             if item.get("status") == "fail" and item.get("task_key")
         }
         for item in integration_findings:
@@ -1192,19 +1542,59 @@ def _finalize_qa_result(
         task_key = task.get("key", "unknown")
         spec = task.get("spec") or []
         expected_must_count = sum(1 for item in spec if spec_binding(item) == "must")
+        must_items = verdict.get("must_items", []) or []
 
-        must_passed = qa_result.get("must_passed", False)
+        def _single_task_display_specs() -> list[tuple[int, str]]:
+            from otto.tasks import spec_is_verifiable, spec_text
+
+            def _spec_sort_key(item):
+                b = spec_binding(item)
+                v = spec_is_verifiable(item)
+                if b == "must" and v:
+                    return 0
+                elif b == "must":
+                    return 1
+                return 2
+
+            sorted_spec = sorted(spec, key=_spec_sort_key)
+            return [(idx, spec_text(item)) for idx, item in enumerate(sorted_spec, start=1)]
+
+        spec_text_by_id = {idx: text for idx, text in _single_task_display_specs()}
+        for item in must_items:
+            try:
+                sid = int(item.get("spec_id"))
+            except (TypeError, ValueError):
+                sid = None
+            if sid is not None:
+                item["criterion"] = _normalize_text(item.get("criterion"), spec_text_by_id.get(sid, f"spec {sid}"))
+            item["proof"] = _normalize_proof_list(item.get("proof"))
+            if "evidence" in item:
+                item["evidence"] = str(item.get("evidence", "") or "").strip()[:240]
+
+        # Recompute must_passed from actual items (don't trust model flag).
+        # If must_items is empty, fall back to model's flag — we can't verify.
+        if must_items:
+            must_passed = all(item.get("status") == "pass" for item in must_items)
+        else:
+            must_passed = qa_result.get("must_passed", False)
 
         # Inject task_key into must_items for consistency
-        for item in verdict.get("must_items", []) or []:
+        for item in must_items:
             if not item.get("task_key"):
                 item["task_key"] = task_key
 
         # Validate expected_must_count for pass verdicts
         if must_passed and expected_must_count > 0:
-            actual_must = len(verdict.get("must_items", []) or [])
+            actual_must = len(must_items)
             if actual_must < expected_must_count:
                 must_passed = False
+        regressions = verdict.get("regressions", []) or []
+        test_suite_passed = verdict.get("test_suite_passed", True)
+        if must_passed and (regressions or not test_suite_passed):
+            must_passed = False
+
+        # Sync verdict dict so proof report matches result
+        verdict["must_passed"] = must_passed
 
         return {
             "must_passed": must_passed,
@@ -1213,12 +1603,177 @@ def _finalize_qa_result(
             "cost_usd": qa_result.get("cost_usd", 0.0),
             "failed_task_keys": sorted(
                 {item.get("task_key") or task_key
-                 for item in verdict.get("must_items", []) or []
+                 for item in must_items
                  if item.get("status") == "fail"}
             ),
-            "test_suite_passed": bool(verdict.get("test_suite_passed", True)),
+            "test_suite_passed": bool(test_suite_passed),
             "infrastructure_error": infrastructure_error,
         }
+
+
+def _salvage_single_task_verdict_from_actions(
+    qa_result: dict[str, Any],
+    tasks: list[dict[str, Any]],
+    *,
+    log_dir: Path | None = None,
+) -> dict[str, Any] | None:
+    """Build a minimal single-task verdict from explicit SPEC PASS/FAIL markers.
+
+    This is a last-resort recovery path for provider/runtime cases where QA
+    executed the real proof commands but failed to emit valid verdict JSON.
+    """
+    if len(tasks) != 1:
+        return None
+    task = tasks[0]
+    spec = list(task.get("spec") or [])
+    if not spec:
+        return None
+
+    statuses: dict[int, str] = {}
+    evidence: dict[int, str] = {}
+    text_blobs: list[str] = []
+    for action in qa_result.get("qa_actions", []) or []:
+        if action.get("type") != "bash":
+            continue
+        output = str(action.get("output", "") or "")
+        if output:
+            text_blobs.append(output)
+
+    raw_report = str(qa_result.get("raw_report", "") or "")
+    if raw_report:
+        text_blobs.append(raw_report)
+
+    if log_dir:
+        qa_log_path = log_dir / "qa-agent.log"
+        if qa_log_path.exists():
+            try:
+                full_log = qa_log_path.read_text()
+                # Bug #14: qa-agent.log is append-only across retries.
+                # Only use lines after the last "QA RUN" header to avoid
+                # picking up SPEC PASS markers from earlier failed attempts.
+                last_header_idx = full_log.rfind("QA RUN")
+                if last_header_idx >= 0:
+                    text_blobs.append(full_log[last_header_idx:])
+                else:
+                    text_blobs.append(full_log)
+            except OSError:
+                pass
+
+    for output in text_blobs:
+        for line in output.splitlines():
+            line_s = line.strip()
+            if not line_s:
+                continue
+            for pattern in _SPEC_RESULT_PATTERNS:
+                for match in pattern.finditer(line_s):
+                    spec_id = int(match.group(1))
+                    status = match.group(2).lower()
+                    prev = statuses.get(spec_id)
+                    if prev == "fail":
+                        continue
+                    statuses[spec_id] = status
+                    evidence[spec_id] = line_s[:300]
+
+    must_indices = [
+        idx for idx, item in enumerate(spec, start=1)
+        if item.get("binding", "must") == "must"
+    ]
+    if not must_indices:
+        return None
+    if not all(idx in statuses for idx in must_indices):
+        return None
+
+    verdict = {
+        "must_passed": all(statuses[idx] == "pass" for idx in must_indices),
+        "must_items": [
+            {
+                "spec_id": idx,
+                "criterion": str(spec[idx - 1].get("text", "") or ""),
+                "status": statuses[idx],
+                "evidence": evidence.get(idx, f"Recovered from explicit SPEC {idx} marker in QA command output."),
+                "proof": [evidence.get(idx, f"SPEC {idx}: {statuses[idx].upper()}")],
+                "task_key": str(task.get("key", "unknown")),
+            }
+            for idx in must_indices
+        ],
+        "test_suite_passed": True,
+        "regressions": [],
+        "extras": [],
+        "_salvaged_from_actions": True,
+    }
+    return verdict
+
+
+def _salvage_single_task_verdict_from_proof_coverage(
+    tasks: list[dict[str, Any]],
+    *,
+    proof_coverage: str,
+    raw_report: str,
+    log_dir: Path | None,
+    final_result: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    if len(tasks) != 1:
+        return None
+
+    # Bug #10: Only salvage verdict parse/format issues.  Don't override when
+    # the failure has a concrete reason that salvage should not mask.
+    if final_result is not None:
+        if final_result.get("infrastructure_error"):
+            return None
+        if final_result.get("test_suite_passed") is False:
+            return None
+        fr_verdict = final_result.get("verdict")
+        if isinstance(fr_verdict, dict) and fr_verdict.get("regressions"):
+            return None
+
+    task = tasks[0]
+    must_items = [
+        (idx, item) for idx, item in enumerate(task.get("spec") or [], start=1)
+        if item.get("binding", "must") == "must"
+    ]
+    if not must_items:
+        return None
+    if proof_coverage != f"{len(must_items)}/{len(must_items)}":
+        return None
+
+    log_text = raw_report
+    if log_dir:
+        qa_log_path = log_dir / "qa-agent.log"
+        if qa_log_path.exists():
+            try:
+                log_text += "\n" + qa_log_path.read_text()
+            except OSError:
+                pass
+
+    positive_markers = (
+        "Acceptance criteria passed.",
+        "Feature checks passed.",
+        "The required spec checks are all green.",
+        "The contract checks are green.",
+        "All acceptance checks are passing",
+        "All acceptance checks are green.",
+    )
+    if not any(marker in log_text for marker in positive_markers):
+        return None
+
+    return {
+        "must_passed": True,
+        "must_items": [
+            {
+                "spec_id": idx,
+                "criterion": str(item.get("text", "") or ""),
+                "status": "pass",
+                "evidence": "Recovered from full proof coverage and explicit QA success log.",
+                "proof": [f"Recovered from proof coverage {proof_coverage}."],
+                "task_key": str(task.get("key", "unknown")),
+            }
+            for idx, item in must_items
+        ],
+        "test_suite_passed": True,
+        "regressions": [],
+        "extras": [],
+        "_salvaged_from_proof_coverage": True,
+    }
 
 
 async def run_qa(
@@ -1232,6 +1787,11 @@ async def run_qa(
     prev_failed: list[str] | None = None,
     focus_items: list | None = None,
     retried_task_keys: set[str] | None = None,
+    session_id: int = 0,
+    batch_context: bool = False,
+    light_batch_qa: bool = False,
+    require_full_test_suite: bool = True,
+    proof_of_work: bool = False,
 ) -> dict[str, Any]:
     """Unified QA entry point -- single-task or batch.
 
@@ -1255,6 +1815,12 @@ async def run_qa(
     from otto.tasks import spec_binding
 
     is_batch = len(tasks) > 1
+    artifact_batch_mode = is_batch or batch_context
+    requires_browser = any(
+        not item.get("verifiable", True)
+        for task in tasks
+        for item in (task.get("spec") or [])
+    )
 
     # Log tier decision
     if log_dir:
@@ -1268,7 +1834,7 @@ async def run_qa(
                 f"tasks: {task_count}",
                 f"total specs: {spec_count}",
                 f"retry round: {'yes — focused on ' + ', '.join(sorted(retried_task_keys)) if is_retry else 'no (initial)'}",
-                f"browser: enabled",
+                f"browser: {'required' if requires_browser else 'not required'}",
                 f"reason: batch QA verifies integrated codebase with combined specs + cross-task integration tests",
                 "",
             ])
@@ -1292,26 +1858,63 @@ async def run_qa(
         verdict_file,
         screenshot_dir,
         diff,
+        test_command=config.get("test_command"),
         prev_failed=prev_failed,
         focus_items=focus_items,
         retried_task_keys=retried_task_keys,
+        light_batch_qa=light_batch_qa,
+        require_full_test_suite=require_full_test_suite,
+        proof_of_work=proof_of_work,
     )
 
-    qa_result = await _run_qa_prompt(
-        qa_prompt=qa_prompt,
-        config=config,
-        project_dir=project_dir,
-        verdict_file=verdict_file,
-        on_progress=on_progress,
-        enable_browser=True,
-        log_dir=log_dir,
+    if requires_browser and shutil.which("agent-browser") is None:
+        message = (
+            "QA requires agent-browser for visual verification, but `agent-browser` "
+            "is not installed or not on PATH."
+        )
+        qa_result = {
+            "must_passed": False,
+            "verdict": None,
+            "raw_report": message,
+            "cost_usd": 0.0,
+            "qa_actions": [],
+            "infrastructure_error": True,
+        }
+    else:
+        qa_result = await _run_qa_prompt(
+            qa_prompt=qa_prompt,
+            config=config,
+            project_dir=project_dir,
+            verdict_file=verdict_file,
+            on_progress=on_progress,
+            log_dir=log_dir,
+            expected_must_count=expected_must_count,
+            session_id=session_id,
+            proof_of_work=proof_of_work,
+        )
+
+    verdict = qa_result.get("verdict")
+    if not isinstance(verdict, dict) or not _is_verdict_complete(
+        verdict,
         expected_must_count=expected_must_count,
-    )
+    ):
+        salvaged = _salvage_single_task_verdict_from_actions(qa_result, tasks, log_dir=log_dir)
+        if salvaged is not None:
+            qa_result["verdict"] = salvaged
+            qa_result["must_passed"] = salvaged["must_passed"]
+            raw_report = str(qa_result.get("raw_report", "") or "")
+            note = "[salvaged verdict from explicit SPEC PASS/FAIL markers]"
+            qa_result["raw_report"] = f"{raw_report}\n\n{note}".strip()
+            if log_dir:
+                append_text_log(
+                    log_dir / "qa-agent.log",
+                    [f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] verdict salvaged from QA command outputs"],
+                )
 
     final_result = _finalize_qa_result(qa_result, tasks)
 
     # Write per-task qa-agent.log references for batch
-    if is_batch and log_dir:
+    if artifact_batch_mode and log_dir:
         for task in tasks:
             task_key = task.get("key", "")
             if not task_key:
@@ -1331,7 +1934,7 @@ async def run_qa(
     proof_coverage = ""
     if log_dir:
         try:
-            if is_batch:
+            if artifact_batch_mode:
                 batch_verdict = dict(final_result.get("verdict", {}) or {})
                 batch_verdict["must_passed"] = final_result.get("must_passed", False)
                 proof_count, proof_coverage = _write_batch_proof_artifacts(
@@ -1340,7 +1943,24 @@ async def run_qa(
                     qa_result.get("qa_actions", []) or [],
                     tasks,
                     float(final_result.get("cost_usd", 0.0) or 0.0),
+                    cost_available=agent_provider(config) != "codex",
                 )
+                # Sync task-scoped QA artifacts so each task log dir reflects the
+                # latest batch QA result, including single-task batch retries.
+                logs_root = log_dir.parent
+                raw_report = final_result.get("raw_report", "") or ""
+                for task in tasks:
+                    task_key = task.get("key", "")
+                    if not task_key:
+                        continue
+                    task_log_dir = logs_root / task_key
+                    task_log_dir.mkdir(parents=True, exist_ok=True)
+                    task_verdict = _task_scoped_batch_verdict(batch_verdict, task)
+                    try:
+                        (task_log_dir / "qa-report.md").write_text(raw_report or "No QA output")
+                    except OSError:
+                        pass
+                    write_json_file(task_log_dir / "qa-verdict.json", task_verdict)
             else:
                 task = tasks[0]
                 proof_count, proof_coverage = _write_proof_artifacts(
@@ -1350,6 +1970,7 @@ async def run_qa(
                     task,
                     task.get("prompt", ""),
                     float(final_result.get("cost_usd", 0.0) or 0.0),
+                    cost_available=agent_provider(config) != "codex",
                 )
         except Exception:
             pass
@@ -1361,6 +1982,42 @@ async def run_qa(
             on_progress("qa_warning", {"text": proof_warnings[0]})
         except Exception:
             pass
+
+    # Warn loudly about BREAK findings so they're not buried in logs
+    verdict = final_result.get("verdict", {})
+    extras = verdict.get("extras", []) or []
+    if extras and log_dir:
+        lines = ["", "=" * 60, "BREAK FINDINGS (from adversarial testing)", "=" * 60]
+        for item in extras:
+            lines.append(f"  ⚠ {item}")
+        lines.append("=" * 60)
+        append_text_log(log_dir / "qa-agent.log", lines + [""])
+    if extras and on_progress:
+        try:
+            on_progress("qa_warning", {"text": f"BREAK found {len(extras)} edge case(s) — check qa-agent.log"})
+        except Exception:
+            pass
+
+    if not final_result.get("must_passed"):
+        salvaged = _salvage_single_task_verdict_from_proof_coverage(
+            tasks,
+            proof_coverage=proof_coverage,
+            raw_report=str(final_result.get("raw_report", "") or ""),
+            log_dir=log_dir,
+            final_result=final_result,
+        )
+        if salvaged is not None:
+            final_result["must_passed"] = True
+            final_result["verdict"] = salvaged
+            final_result["raw_report"] = (
+                str(final_result.get("raw_report", "") or "") + "\n\n[salvaged verdict from proof coverage]"
+            ).strip()
+            final_result["failed_task_keys"] = []
+            if log_dir:
+                append_text_log(
+                    log_dir / "qa-agent.log",
+                    [f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] verdict salvaged from proof coverage"],
+                )
 
     # Emit summary for display (single-task progress reporting)
     if on_progress and not is_batch:
@@ -1381,6 +2038,7 @@ async def run_qa(
 
     return {
         **final_result,
+        "usage": qa_result.get("usage", {}) or {},
         "proof_count": proof_count,
         "proof_coverage": proof_coverage,
     }

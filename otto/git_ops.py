@@ -405,6 +405,17 @@ def merge_candidate(
         cwd=repo_root, capture_output=True, text=True,
     )
     if merge.returncode != 0:
+        # Log which files conflicted before aborting
+        conflict_files = subprocess.run(
+            ["git", "diff", "--name-only", "--diff-filter=U"],
+            cwd=repo_root, capture_output=True, text=True,
+        ).stdout.strip()
+        if conflict_files:
+            from otto.observability import append_text_log
+            append_text_log(
+                repo_root / "otto_logs" / "orchestrator.log",
+                [f"  merge conflict files: {conflict_files.replace(chr(10), ', ')}"],
+            )
         _abort_merge_and_cleanup(repo_root, default_branch, temp_branch)
         return False, ""
 
@@ -475,6 +486,12 @@ def _anchor_candidate_ref(project_dir: Path, task_key: str, attempt_num: int, co
     if result.returncode != 0:
         stderr = (result.stderr or "").strip()
         raise RuntimeError(f"failed to anchor candidate ref {ref_name}: {stderr or 'git update-ref failed'}")
+    from otto.observability import append_text_log
+    import time as _time
+    append_text_log(
+        project_dir / "otto_logs" / "orchestrator.log",
+        [f"[{_time.strftime('%Y-%m-%d %H:%M:%S')}] anchor ref: {ref_name} → {commit_sha[:12]}"],
+    )
     return ref_name
 
 

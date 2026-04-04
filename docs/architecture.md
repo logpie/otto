@@ -2,6 +2,9 @@
 
 This document is the source of truth for otto's execution pipeline. Use it for debugging, onboarding, and understanding what happens when you run `otto run`.
 
+Related living notes:
+- Claude/provider-agnostic bugs and findings discovered during Codex hardening: [`docs/claude-impact-findings.md`](claude-impact-findings.md)
+
 ## Overview
 
 ```
@@ -10,10 +13,10 @@ otto run
   ├─ 1. Preflight (validate branch/tree, stale recovery, no mutations)
   ├─ 2. Smart Planner (single LLM call, high effort)
   │     ├─ INDEPENDENT → parallel batch
-  │     ├─ ADDITIVE (same file) → serialize
+  │     ├─ ADDITIVE (same file, diff functions) → parallel
   │     ├─ DEPENDENT → serialize (later batch)
   │     ├─ CONTRADICTORY → flag + schedule in separate batches (never drop)
-  │     └─ UNCERTAIN → serialize (conservative)
+  │     └─ UNCERTAIN (same function) → serialize (conservative)
   │     Missing tasks auto-added as serial batches (safety net)
   │
   ├─ 3. PER Loop (Plan-Execute-Replan)
@@ -93,10 +96,10 @@ plan(pending_tasks)
        │
        ├─ Pairwise relationship analysis:
        │    INDEPENDENT → parallel batch
-       │    ADDITIVE (same file) → serialize
+       │    ADDITIVE (same file, diff functions) → parallel
        │    DEPENDENT → serialize (later batch)
        │    CONTRADICTORY → separate batches (never dropped)
-       │    UNCERTAIN → serialize (conservative)
+       │    UNCERTAIN (same function) → serialize (conservative)
        │
        ├─ Respects depends_on constraints (topological sort)
        ├─ Missing tasks auto-added as serial batches (safety net)
@@ -145,7 +148,8 @@ run_task_v45(task, config, project_dir, task_work_dir=worktree)
   ║  ├─ Create log dir: otto_logs/{key}/                 ║
   ║  ├─ Snapshot pre-existing untracked files             ║
   ║  ├─ Run baseline tests                                ║
-  ║  │    └─ Baseline fails? → EXIT (error_code=baseline_fail) ║
+  ║  │    ├─ Infra failure? → WARN + continue (agent fixes) ║
+  ║  │    └─ Real test failure? → EXIT (baseline_fail)    ║
   ║  ├─ Record baseline test count                        ║
   ║  └─ Emit: phase=prepare, status=done                  ║
   ╚══════════════════════════════════════════════════════╝
@@ -249,21 +253,42 @@ QA
   │    └─ Write verdict JSON to output file
   │
   │    PART 2 — BREAK (after all specs pass):
+  │    ├─ Skim source to discover thresholds, branches, existing behaviors
   │    ├─ 2-3 adversarial tool calls: boundary inputs, wrong types, edge cases
-  │    └─ Report in "extras" — do NOT fail [must] for out-of-spec behavior
+  │    ├─ Classify: "regression" (existing broke) vs "edge_case" (new gap)
+  │    └─ All findings in "extras" — warning only, not gating
   │
-  ├─ Parse verdict:
-  │    ├─ Structured JSON? → validate schema (must_passed + must_items)
-  │    │    └─ Incomplete? → force must_passed=False
-  │    └─ Fallback: regex for "VERDICT: PASS/FAIL" (forced fail if no evidence)
+  ├─ Verdict acquisition (3-layer fallback):
+  │    ├─ Layer 1: Early capture — intercept JSON from Write tool input
+  │    │    stream, validate with _is_verdict_complete(), confirm via
+  │    │    ToolResult. 15s grace timeout after confirmation to stop session.
+  │    │    Keeps LATEST valid Write (not first — honors agent corrections).
+  │    ├─ Layer 2: File-based — read verdict temp file, parse JSON, validate.
+  │    └─ Layer 3: Text parsing — search agent text for JSON blocks,
+  │         fallback to legacy "VERDICT: PASS/FAIL" detection.
+  │         Parse failure (no JSON, no fail markers) → infrastructure_error
+  │         (prevents false coding retries on unparseable verdicts).
   │
-  ├─ Infrastructure error? → sleep 5s, retry once
+  ├─ Verdict validation:
+  │    ├─ must_passed recomputed from actual must_items statuses
+  │    │    (model's self-reported flag is advisory, not trusted)
+  │    ├─ Empty must_items → fall back to model flag (can't verify)
+  │    ├─ Single-task: checks regressions + test_suite_passed (same as batch)
+  │    └─ Batch: coverage matrix validation (expected vs actual spec pairs)
+  │
+  ├─ Infrastructure error? → retry QA (not coding)
   │
   ├─ Write proof artifacts:
   │    ├─ qa-proofs/proof-report.md (human-readable)
   │    ├─ qa-proofs/must-N.md (per-item)
   │    ├─ qa-proofs/regression-check.sh (re-runnable)
   │    └─ qa-proofs/screenshot-*.png (browser captures)
+  │
+  ├─ Proof quality audit:
+  │    └─ Flag [must] items with code-reading-only proofs (no command)
+  │
+  ├─ BREAK findings warning (if any):
+  │    └─ Logged loudly in qa-agent.log + progress callback
   │
   ├─ All [must] passed? → proceed to merge
   │
@@ -328,7 +353,13 @@ After merge phase:
   │    └─ Fail? → HARD GATE: rollback batch, reset all tasks to pending
   │
   ├─ Batch QA (up to max_retries rounds)
-  │    ├─ Initial QA on integrated codebase
+  │    ├─ parallel_qa: false (default) → one session, combined specs
+  │    ├─ parallel_qa: true → per-task sessions via asyncio.gather
+  │    │    Code-only tasks only (falls back to flat if any ◈ visual specs)
+  │    │    Each task gets own QA session running concurrently
+  │    │    Verdicts merged in Python, integration gated by post-batch test
+  │    │    Focused retries only re-verify failed tasks
+  │    │    Exception-safe: one session crash doesn't abort others
   │    ├─ If [must] fails → re-code failed tasks → re-merge → re-QA
   │    ├─ Repeat up to max_retries rounds
   │    └─ After max_retries: rollback batch, mark failed tasks,
@@ -447,7 +478,7 @@ your-project/
         ├── qa-verdict.json            # Structured verdict (latest)
         ├── attempt-N-qa-report.md     # Per-attempt QA report (preserved)
         ├── attempt-N-qa-verdict.json  # Per-attempt verdict (preserved)
-        ├── qa-agent.log               # QA agent tool calls + timestamps (appends)
+        ├── qa-agent.log               # QA agent ALL tool calls + timestamps (Bash, Write, Read, Grep, etc.)
         ├── qa-tier.log                # QA decision log
         ├── cost-warning.log           # Parallel $0 cost warnings
         └── qa-proofs/
@@ -469,6 +500,7 @@ verify_timeout: 300          # Test suite timeout (seconds)
 max_task_time: 3600          # Per-task circuit breaker (seconds)
 qa_timeout: 3600             # QA agent timeout (seconds)
 max_parallel: 1              # 1=serial (default), 2+=parallel worktrees
+parallel_qa: false           # true=per-task QA sessions in parallel (faster, costlier)
 install_timeout: 120         # npm ci / pip install timeout in worktrees
 
 # Per-agent setting scopes (which CLAUDE.md files each agent reads)
@@ -504,11 +536,13 @@ Saves ~$2/retry by avoiding prompt cache invalidation.
 
 ```
 Baseline (run_task_v45 prepare phase):
+  _install_deps tries: pip install -e . then pip install -e ".[dev,test]"
   Auto-detect test command → run tests in worktree
   │
   ├─ Tests pass? → record count ("baseline: N tests passing")
-  └─ Tests fail with infra keywords? → EXIT (baseline_fail)
-       (ModuleNotFoundError, command not found, SyntaxError, etc.)
+  ├─ Infra failure? → WARN + continue (coding agent fixes deps)
+  │    (ModuleNotFoundError, command not found, SyntaxError, etc.)
+  └─ Real test failure? → EXIT (baseline_fail)
 
 After coding:
   Full test suite in clean disposable worktree (deterministic)

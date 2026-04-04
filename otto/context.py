@@ -18,6 +18,8 @@ class TaskResult:
     """Result of a single task execution in the v4 pipeline."""
     task_key: str
     success: bool
+    unit_key: str | None = None
+    unit_task_keys: list[str] = field(default_factory=list)
     commit_sha: str | None = None
     worktree: Path | None = None
     cost_usd: float = 0.0
@@ -27,6 +29,7 @@ class TaskResult:
     diff_summary: str = ""
     duration_s: float = 0.0
     review_ref: str | None = None  # refs/otto/candidates/<key>/attempt-N for failed tasks
+    token_usage: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -78,18 +81,26 @@ class PipelineContext:
         """Record a successful task result."""
         self.results[result.task_key] = result
         if result.cost_usd > 0:
-            self.costs[result.task_key] = result.cost_usd
+            self.costs[result.task_key] = self.costs.get(result.task_key, 0.0) + result.cost_usd
 
     def add_failure(self, result: TaskResult) -> None:
         """Record a failed task result."""
         self.results[result.task_key] = result
         if result.cost_usd > 0:
-            self.costs[result.task_key] = result.cost_usd
+            self.costs[result.task_key] = self.costs.get(result.task_key, 0.0) + result.cost_usd
 
     @property
     def total_cost(self) -> float:
         """Total cost across all tasks."""
         return sum(self.costs.values())
+
+    @property
+    def total_token_usage(self) -> dict[str, int]:
+        total: dict[str, int] = {}
+        for result in self.results.values():
+            for key, value in (result.token_usage or {}).items():
+                total[key] = total.get(key, 0) + int(value)
+        return total
 
     @property
     def passed_count(self) -> int:

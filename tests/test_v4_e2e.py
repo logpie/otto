@@ -44,6 +44,7 @@ def _setup_project(repo):
         "max_parallel": 2,
         "effort": "high",
         "orchestrator": "v4",
+        "execution_mode": "planned",
     }
     (repo / "otto.yaml").write_text(yaml.dump(config))
     return config
@@ -70,7 +71,7 @@ class TestCLIDispatch:
         # Dry run just checks config, doesn't need LLM
         result = runner.invoke(main, ["run", "--dry-run"])
         assert result.exit_code == 0
-        assert "Pending tasks: 0" in result.output
+        assert "No pending tasks" in result.output or "Pending tasks: 0" in result.output
 
 
 # ---------------------------------------------------------------------------

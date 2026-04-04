@@ -10,8 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
-def _subprocess_env() -> dict:
-    """Return an env dict with the current Python's bin dir prepended to PATH.
+def _subprocess_env(project_dir: Path | None = None) -> dict:
+    """Return an env dict with Python/tooling paths tuned for the target project.
 
     This ensures that when otto invokes ``pytest`` (or other venv tools) via
     shell=True, the subprocess can find them even if the caller's shell did not
@@ -33,6 +33,19 @@ def _subprocess_env() -> dict:
     # (pop alone doesn't help since os.environ is read separately by the SDK).
     env.pop("CLAUDECODE", None)
     env["CLAUDECODE"] = ""
+    if project_dir:
+        src_dir = project_dir / "src"
+        if src_dir.is_dir():
+            existing = env.get("PYTHONPATH", "")
+            parts = [str(src_dir)]
+            if existing:
+                parts.append(existing)
+            env["PYTHONPATH"] = os.pathsep.join(parts)
+        project_venv_bin = project_dir / ".venv" / "bin"
+        if project_venv_bin.is_dir():
+            existing = env.get("PATH", "")
+            if str(project_venv_bin) not in existing.split(os.pathsep):
+                env["PATH"] = str(project_venv_bin) + os.pathsep + existing
     return env
 
 
@@ -224,16 +237,23 @@ def run_local_tests(
         return TierResult(tier="existing_tests", passed=True, skipped=True)
     try:
         result = _run_shell_command(test_command, workdir, timeout, env=env)
+        # Exit code 5 (pytest "no tests collected") or exit code 1 with
+        # "No tests found" (jest) — treat as passed for greenfield projects
+        output = result.stdout + result.stderr
+        no_tests_found = result.returncode == 5 or (
+            result.returncode == 1 and "No tests found" in output
+        )
+        passed = result.returncode == 0 or no_tests_found
         return TierResult(
             tier="existing_tests",
-            passed=result.returncode == 0,
+            passed=passed,
             output=result.stdout + result.stderr,
         )
     except subprocess.TimeoutExpired:
         return TierResult(
             tier="existing_tests",
             passed=False,
-            output=f"Timeout after {timeout}s",
+            output=f"Timeout after {timeout}s running: {test_command}",
         )
 
 

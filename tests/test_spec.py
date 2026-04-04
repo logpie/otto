@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
+from otto.agent import ResultMessage
 from otto.spec import (
     async_generate_spec,
     generate_spec,
@@ -147,7 +148,6 @@ class TestGenerateSpec:
                     "2. no matches returns empty list\n"
                     "3. partial matches work\n"
                 )
-            from otto._agent_stub import ResultMessage
             yield ResultMessage(session_id="s1")
 
         mock_query.side_effect = fake_query
@@ -175,11 +175,12 @@ class TestGenerateSpec:
 
         mock_query.side_effect = fake_query
 
-        spec, cost, error = asyncio.run(async_generate_spec("Add search", tmp_path))
+        spec, cost, error, usage = asyncio.run(async_generate_spec("Add search", tmp_path))
 
         assert spec == []
         assert cost == 0.0
         assert error == "agent failed"
+        assert usage == {}
 
 
 class TestParseMarkdownTasks:
@@ -197,7 +198,6 @@ class TestParseMarkdownTasks:
                     {"prompt": "Add search method", "spec": ["case-insensitive"]},
                     {"prompt": "Add tags support", "spec": ["by_tag filters"]},
                 ]))
-            from otto._agent_stub import ResultMessage
             yield ResultMessage(session_id="s1")
 
         mock_query.side_effect = fake_query
@@ -238,7 +238,6 @@ class TestParseMarkdownTasks:
                 FakeTextBlock("thinking out loud"),
                 FakeToolUseBlock("Read", {"file_path": "src/app.py"}),
             ])
-            from otto._agent_stub import ResultMessage
             yield ResultMessage(session_id="s1")
 
         mock_query.side_effect = fake_query
@@ -255,7 +254,6 @@ class TestParseMarkdownTasks:
         md_file.write_text("# Task\nDo something.\n")
 
         async def fake_query(*, prompt, options=None):
-            from otto._agent_stub import ResultMessage
             yield ResultMessage(session_id="s1")
 
         mock_query.side_effect = fake_query
@@ -270,7 +268,6 @@ class TestParseMarkdownTasks:
         md_file.write_text("# Task\nDo something.\n")
 
         async def fake_query(*, prompt, options=None):
-            from otto._agent_stub import ResultMessage
             yield ResultMessage(session_id="s1", is_error=True, result="agent exploded")
 
         mock_query.side_effect = fake_query

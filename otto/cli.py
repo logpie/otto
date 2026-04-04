@@ -107,15 +107,17 @@ async def _run_one_off_with_display(
     finally:
         elapsed_str = display.stop()
         cost = float((result or {}).get("cost_usd", 0.0) or 0.0)
+        cost_available = bool((result or {}).get("cost_available", True))
+        cost_text = format_cost(cost) if cost_available else "cost unavailable"
         if result and result.get("success"):
             console.print(
                 f"    {time.strftime('%H:%M:%S')}  [green]✓[/green] passed  "
-                f"[dim]{elapsed_str}  {format_cost(cost)}[/dim]"
+                f"[dim]{elapsed_str}  {cost_text}[/dim]"
             )
         else:
             console.print(
                 f"    {time.strftime('%H:%M:%S')}  [red]✗[/red] failed  "
-                f"[dim]{elapsed_str}  {format_cost(cost)}[/dim]"
+                f"[dim]{elapsed_str}  {cost_text}[/dim]"
             )
 
 
@@ -125,7 +127,7 @@ async def _run_one_off_with_display(
 
 @click.group(context_settings=CONTEXT_SETTINGS)
 def main():
-    """Otto — autonomous Claude Code agent runner.
+    """Otto — autonomous coding agent runner.
 
     Run 'otto COMMAND -h' for command-specific options.
     """
@@ -133,7 +135,7 @@ def main():
 
 
 
-def _import_tasks(import_path: Path, tasks_path: Path) -> None:
+def _import_tasks(import_path: Path, tasks_path: Path, config: dict | None = None) -> None:
     """Import tasks from .md, .txt, or .yaml files with spec generation.
 
     Replaces any existing tasks — the import file is the source of truth.
@@ -146,7 +148,7 @@ def _import_tasks(import_path: Path, tasks_path: Path) -> None:
 
     if suffix == ".md":
         console.print(f"Parsing {rich_escape(import_path.name)} (this may take 10-20s)...")
-        parsed = parse_markdown_tasks(import_path, project_dir)
+        parsed = parse_markdown_tasks(import_path, project_dir, config=config)
         console.print(f"Extracted {len(parsed)} tasks from markdown.\n")
         for t in parsed:
             item = {"prompt": t["prompt"]}
@@ -166,7 +168,7 @@ def _import_tasks(import_path: Path, tasks_path: Path) -> None:
         console.print(f"Found {len(lines)} tasks in {rich_escape(import_path.name)}.\n")
         for i, line in enumerate(lines, 1):
             console.print(f"  [dim]{i}/{len(lines)}[/dim] {rich_escape(line[:50])}")
-            spec_items = filter_generated_spec_items(generate_spec(line, project_dir))
+            spec_items = filter_generated_spec_items(generate_spec(line, project_dir, config=config))
             item = {"prompt": line}
             if spec_items:
                 item["spec"] = spec_items
@@ -187,7 +189,7 @@ def _import_tasks(import_path: Path, tasks_path: Path) -> None:
                 console.print(f"  [dim]{i}/{len(imported)}[/dim] {rich_escape(t['prompt'][:50])}")
             else:
                 console.print(f"  [dim]{i}/{len(imported)}[/dim] {rich_escape(t['prompt'][:50])}")
-                spec_items = filter_generated_spec_items(generate_spec(t["prompt"], project_dir))
+                spec_items = filter_generated_spec_items(generate_spec(t["prompt"], project_dir, config=config))
                 if spec_items:
                     item["spec"] = spec_items
                     console.print(f"  {len(spec_items)} criteria generated")
@@ -270,11 +272,13 @@ def add(prompt, verify, max_retries, import_file, gen_spec):
         console.print(f"  Run [bold]otto setup[/bold] to generate CLAUDE.md with project conventions.")
         console.print(f"  The coding agent follows CLAUDE.md — it makes a real difference.")
         console.print()
+    else:
+        config = load_config(config_path)
 
     tasks_path = project_dir / "tasks.yaml"
 
     if import_file:
-        _import_tasks(Path(import_file), tasks_path)
+        _import_tasks(Path(import_file), tasks_path, config=config)
         console.print(f"\n  [dim]Run 'otto arch' to analyze codebase and establish shared conventions[/dim]")
         return
 
@@ -303,7 +307,7 @@ def add(prompt, verify, max_retries, import_file, gen_spec):
         with console.status("[dim]Generating spec...[/dim]", spinner="dots") as status:
             timer_thread = threading.Thread(target=_update_timer, args=(status,), daemon=True)
             timer_thread.start()
-            spec_items = generate_spec(prompt, Path.cwd())
+            spec_items = generate_spec(prompt, Path.cwd(), config=config)
             _spec_done = True
     except Exception as e:
         error_console.print(f"[error]\u2717[/error] Spec generation failed: {rich_escape(str(e))}")

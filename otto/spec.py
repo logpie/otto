@@ -6,6 +6,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
+from typing import Any
 
 from otto.agent import (
     AssistantMessage,
@@ -14,9 +15,12 @@ from otto.agent import (
     TextBlock,
     ThinkingBlock,
     ToolUseBlock,
+    _subprocess_env,
+    normalize_usage,
     query,
     tool_use_summary as _tool_use_summary,
 )
+from otto.config import agent_provider
 from otto.display import print_agent_tool
 
 
@@ -112,30 +116,76 @@ def _parse_spec_output(text: str) -> list:
     return items
 
 
-def generate_spec(prompt: str, project_dir: Path, setting_sources: list[str] | None = None, log_dir: Path | None = None) -> list:
+def generate_spec(
+    prompt: str,
+    project_dir: Path,
+    setting_sources: list[str] | None = None,
+    log_dir: Path | None = None,
+    config: dict[str, Any] | None = None,
+) -> list:
     """Generate a spec for a single task using an agentic QA engineer.
 
     Returns a list of spec items (dicts with text/verifiable),
     or empty list on failure.
     """
-    spec, _cost, _error = asyncio.run(_run_spec_agent(prompt, project_dir, setting_sources=setting_sources, log_dir=log_dir))
+    spec, _cost, _error, _usage = asyncio.run(
+        _run_spec_agent(
+            prompt,
+            project_dir,
+            setting_sources=setting_sources,
+            log_dir=log_dir,
+            config=config,
+        )
+    )
     return spec
 
 
-def generate_spec_sync(prompt: str, project_dir: Path, setting_sources: list[str] | None = None, log_dir: Path | None = None) -> tuple[list, float, str | None]:
-    """Sync version returning full (spec_items, cost, error) tuple.
+def generate_spec_sync(
+    prompt: str,
+    project_dir: Path,
+    setting_sources: list[str] | None = None,
+    log_dir: Path | None = None,
+    config: dict[str, Any] | None = None,
+) -> tuple[list, float, str | None, dict[str, int]]:
+    """Sync version returning full (spec_items, cost, error, usage) tuple.
 
     Safe to call from asyncio.to_thread() — creates its own event loop.
     """
-    return asyncio.run(_run_spec_agent(prompt, project_dir, setting_sources=setting_sources, log_dir=log_dir))
+    return asyncio.run(
+        _run_spec_agent(
+            prompt,
+            project_dir,
+            setting_sources=setting_sources,
+            log_dir=log_dir,
+            config=config,
+        )
+    )
 
 
-async def async_generate_spec(prompt: str, project_dir: Path, setting_sources: list[str] | None = None, log_dir: Path | None = None) -> tuple[list, float, str | None]:
-    """Async version of generate_spec. Returns (spec_items, cost, error)."""
-    return await _run_spec_agent(prompt, project_dir, setting_sources=setting_sources, log_dir=log_dir)
+async def async_generate_spec(
+    prompt: str,
+    project_dir: Path,
+    setting_sources: list[str] | None = None,
+    log_dir: Path | None = None,
+    config: dict[str, Any] | None = None,
+) -> tuple[list, float, str | None, dict[str, int]]:
+    """Async version of generate_spec. Returns (spec_items, cost, error, usage)."""
+    return await _run_spec_agent(
+        prompt,
+        project_dir,
+        setting_sources=setting_sources,
+        log_dir=log_dir,
+        config=config,
+    )
 
 
-async def _run_spec_agent(prompt: str, project_dir: Path, setting_sources: list[str] | None = None, log_dir: Path | None = None) -> tuple[list, float, str | None]:
+async def _run_spec_agent(
+    prompt: str,
+    project_dir: Path,
+    setting_sources: list[str] | None = None,
+    log_dir: Path | None = None,
+    config: dict[str, Any] | None = None,
+) -> tuple[list, float, str | None, dict[str, int]]:
     """Run the spec generation agent.
 
     Uses a structured system prompt for constraint faithfulness,
@@ -236,14 +286,18 @@ Write only [must]/[should] criteria lines to the file — no headings, notes, or
     log_lines: list[str] = []
 
     spec_cost = 0.0
+    spec_usage: dict[str, int] = {}
     try:
         agent_opts = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
             cwd=str(project_dir),
             system_prompt={"type": "preset", "preset": "claude_code"},
             setting_sources=setting_sources or ["project"],
-            env=dict(os.environ),
+            env=_subprocess_env(project_dir),
+            provider=agent_provider(config or {}),
         )
+        if config and config.get("model"):
+            agent_opts.model = config["model"]
 
         num_turns = 0
         result_msg = None
@@ -253,22 +307,18 @@ Write only [must]/[should] criteria lines to the file — no headings, notes, or
                 raw_cost = getattr(message, "total_cost_usd", None)
                 if isinstance(raw_cost, (int, float)):
                     spec_cost = float(raw_cost)
-            elif hasattr(message, "session_id") and hasattr(message, "is_error"):
-                result_msg = message
-                raw_cost = getattr(message, "total_cost_usd", None)
-                if isinstance(raw_cost, (int, float)):
-                    spec_cost = float(raw_cost)
-            elif AssistantMessage and isinstance(message, AssistantMessage):
+                spec_usage = normalize_usage(getattr(result_msg, "usage", None))
+            elif isinstance(message, AssistantMessage):
                 num_turns += 1
                 for block in message.content:
-                    if ThinkingBlock and isinstance(block, ThinkingBlock):
+                    if isinstance(block, ThinkingBlock):
                         thinking = getattr(block, "thinking", "")
                         if thinking:
                             log_lines.append(f"[thinking] {thinking}")
-                    elif TextBlock and isinstance(block, TextBlock) and block.text:
+                    elif isinstance(block, TextBlock) and block.text:
                         # Don't print spec agent narration — log only
                         log_lines.append(block.text)
-                    elif ToolUseBlock and isinstance(block, ToolUseBlock):
+                    elif isinstance(block, ToolUseBlock):
                         print_agent_tool(block, quiet=True)
                         log_lines.append(f"● {block.name}  {_tool_use_summary(block)}")
 
@@ -289,7 +339,7 @@ Write only [must]/[should] criteria lines to the file — no headings, notes, or
         # Clean up temp file on error path
         if spec_file.exists():
             spec_file.unlink(missing_ok=True)
-        return [], spec_cost, error_msg
+        return [], spec_cost, error_msg, spec_usage
 
     _write_log(spec_log_dir / "spec-agent.log", log_lines)
 
@@ -297,7 +347,14 @@ Write only [must]/[should] criteria lines to the file — no headings, notes, or
     if spec_file.exists():
         text = spec_file.read_text()
         spec_file.unlink()
-        return _parse_spec_output(text), spec_cost, None
+        parsed_items = _parse_spec_output(text)
+        filtered_items = filter_generated_spec_items(parsed_items)
+        skipped = len(parsed_items) - len(filtered_items)
+        summary = f"spec parsed: items={len(filtered_items)}"
+        if skipped:
+            summary += f" skipped={skipped}"
+        _write_log(spec_log_dir / "spec-agent.log", [summary])
+        return filtered_items, spec_cost, None, spec_usage
 
     # Clean up temp file if it doesn't exist (shouldn't happen, but be safe)
     spec_file.unlink(missing_ok=True)
@@ -305,10 +362,14 @@ Write only [must]/[should] criteria lines to the file — no headings, notes, or
     print(f"  spec agent error: {error_msg}", flush=True)
     log_lines.append(f"ERROR: {error_msg}")
     _write_log(spec_log_dir / "spec-agent.log", log_lines)
-    return [], spec_cost, error_msg
+    return [], spec_cost, error_msg, spec_usage
 
 
-def parse_markdown_tasks(md_file: Path, project_dir: Path) -> list[dict]:
+def parse_markdown_tasks(
+    md_file: Path,
+    project_dir: Path,
+    config: dict[str, Any] | None = None,
+) -> list[dict]:
     """Parse a markdown file into structured tasks using an agentic PM.
 
     The agent explores the project, reads the markdown, and outputs a JSON
@@ -317,10 +378,14 @@ def parse_markdown_tasks(md_file: Path, project_dir: Path) -> list[dict]:
     Returns list of task dicts.
     Raises ValueError on parse failure or invalid task structure.
     """
-    return asyncio.run(_run_markdown_agent(md_file, project_dir))
+    return asyncio.run(_run_markdown_agent(md_file, project_dir, config))
 
 
-async def _run_markdown_agent(md_file: Path, project_dir: Path) -> list[dict]:
+async def _run_markdown_agent(
+    md_file: Path,
+    project_dir: Path,
+    config: dict[str, Any] | None = None,
+) -> list[dict]:
     """Run the markdown parsing agent."""
     md_content = md_file.read_text()
     with tempfile.NamedTemporaryFile(suffix=".json", prefix="otto_tasks_", delete=False) as temp_file:
@@ -361,19 +426,21 @@ Example: [{{"prompt": "Add search", "spec": ["search works", "case-insensitive"]
         agent_opts = ClaudeAgentOptions(
             permission_mode="bypassPermissions",
             cwd=str(project_dir),
+            env=_subprocess_env(project_dir),
+            provider=agent_provider(config or {}),
         )
+        if config and config.get("model"):
+            agent_opts.model = config["model"]
 
         result_msg = None
         async for message in query(prompt=agent_prompt, options=agent_opts):
             if isinstance(message, ResultMessage):
                 result_msg = message
-            elif hasattr(message, "session_id") and hasattr(message, "is_error"):
-                result_msg = message
-            elif AssistantMessage and isinstance(message, AssistantMessage):
+            elif isinstance(message, AssistantMessage):
                 for block in message.content:
-                    if TextBlock and isinstance(block, TextBlock) and block.text:
+                    if isinstance(block, TextBlock) and block.text:
                         log_lines.append(block.text)
-                    elif ToolUseBlock and isinstance(block, ToolUseBlock):
+                    elif isinstance(block, ToolUseBlock):
                         print_agent_tool(block, quiet=True)
                         log_lines.append(f"\u25cf {block.name}  {_tool_use_summary(block)}")
         if result_msg and getattr(result_msg, "is_error", False):
