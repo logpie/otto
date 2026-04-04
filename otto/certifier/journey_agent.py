@@ -21,7 +21,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from otto.agent import ClaudeAgentOptions, _subprocess_env, run_agent_query
+from otto.agent import (
+    ClaudeAgentOptions,
+    ResultMessage,
+    AssistantMessage,
+    TextBlock,
+    ToolUseBlock,
+    _subprocess_env,
+    query,
+)
 from otto.certifier.manifest import ProductManifest, format_manifest_for_agent
 from otto.certifier.stories import UserStory
 from otto.observability import append_text_log
@@ -257,7 +265,6 @@ async def verify_story(
         setting_sources=["project"],
         env=_subprocess_env(),
         system_prompt=JOURNEY_AGENT_SYSTEM_PROMPT,
-        max_turns=40,  # safety cap — 7-8 step story + BREAK should finish in ~30 turns
     )
     if mcp_servers:
         options.mcp_servers = mcp_servers
@@ -277,20 +284,57 @@ async def verify_story(
         ],
     )
 
-    raw_output, cost, _result = await run_agent_query(prompt, options)
-    cost_usd = float(cost or 0.0)
+    # Direct query loop — break when verdict file is written.
+    # This is the root fix for the agent hang: instead of waiting for
+    # the session to end naturally (agent may keep talking), we intercept
+    # the Write tool call for the verdict file and stop immediately.
+    text_parts: list[str] = []
+    cost_usd = 0.0
+    verdict_captured: dict[str, Any] | None = None
+    verdict_file_str = str(verdict_file)
+
+    async for message in query(prompt=prompt, options=options):
+        if isinstance(message, ResultMessage):
+            raw_cost = getattr(message, "total_cost_usd", None)
+            if isinstance(raw_cost, (int, float)):
+                cost_usd = float(raw_cost)
+            break
+        elif isinstance(message, AssistantMessage):
+            for block in message.content:
+                if isinstance(block, TextBlock) and block.text:
+                    text_parts.append(block.text)
+                elif isinstance(block, ToolUseBlock):
+                    if block.name == "Write":
+                        inp = block.input if isinstance(block.input, dict) else {}
+                        file_path = str(inp.get("file_path", ""))
+                        if file_path == verdict_file_str:
+                            # Verdict written — capture it and stop
+                            try:
+                                verdict_captured = json.loads(inp.get("content", ""))
+                            except (json.JSONDecodeError, TypeError):
+                                pass
+                            # Let this turn complete, then break on next iteration
+        # Break after the turn where verdict was written
+        if verdict_captured is not None:
+            break
+
     duration_s = round(time.monotonic() - started_at, 1)
+    raw_output = "".join(text_parts)
 
     append_text_log(
         log_dir / "journey-agent.log",
         [
             f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Story completed: {story.title}",
             f"cost: ${cost_usd:.3f}, duration: {duration_s}s",
+            f"verdict_source: {'write_intercept' if verdict_captured else 'file_or_prose'}",
         ],
     )
 
-    # Parse verdict from file (preferred) or from agent output
-    result = _parse_verdict(verdict_file, raw_output, story)
+    # Use intercepted verdict (preferred), fall back to file/prose parsing
+    if verdict_captured and isinstance(verdict_captured, dict):
+        result = _verdict_from_dict(verdict_captured, story)
+    else:
+        result = _parse_verdict(verdict_file, raw_output, story)
     result.cost_usd = cost_usd
     result.duration_s = duration_s
 
@@ -299,6 +343,40 @@ async def verify_story(
     raw_log.write_text(raw_output)
 
     return result
+
+
+def _verdict_from_dict(verdict: dict[str, Any], story: UserStory) -> JourneyResult:
+    """Convert a verdict dict into a JourneyResult."""
+    steps = []
+    for s in verdict.get("steps", []):
+        steps.append(StepResult(
+            action=s.get("action", ""),
+            outcome=s.get("outcome", "blocked"),
+            verification=s.get("verification", ""),
+            diagnosis=s.get("diagnosis", ""),
+            fix_suggestion=s.get("fix_suggestion", ""),
+        ))
+    break_findings = []
+    for b in verdict.get("break_findings", []):
+        break_findings.append(BreakFinding(
+            technique=b.get("technique", ""),
+            description=b.get("description", ""),
+            result=b.get("result", ""),
+            severity=b.get("severity", "minor"),
+            fix_suggestion=b.get("fix_suggestion", ""),
+        ))
+    return JourneyResult(
+        story_id=story.id,
+        story_title=story.title,
+        persona=story.persona,
+        passed=verdict.get("story_passed", False),
+        steps=steps,
+        break_findings=break_findings,
+        summary=verdict.get("summary", ""),
+        blocked_at=verdict.get("blocked_at", ""),
+        diagnosis=verdict.get("diagnosis", ""),
+        fix_suggestion=verdict.get("fix_suggestion", ""),
+    )
 
 
 def _parse_verdict(
@@ -355,38 +433,7 @@ def _parse_verdict(
             diagnosis="" if prose_passed else "Agent did not write verdict file; inferred from prose",
         )
 
-    steps = []
-    for s in verdict.get("steps", []):
-        steps.append(StepResult(
-            action=s.get("action", ""),
-            outcome=s.get("outcome", "blocked"),
-            verification=s.get("verification", ""),
-            diagnosis=s.get("diagnosis", ""),
-            fix_suggestion=s.get("fix_suggestion", ""),
-        ))
-
-    break_findings = []
-    for b in verdict.get("break_findings", []):
-        break_findings.append(BreakFinding(
-            technique=b.get("technique", ""),
-            description=b.get("description", ""),
-            result=b.get("result", ""),
-            severity=b.get("severity", "minor"),
-            fix_suggestion=b.get("fix_suggestion", ""),
-        ))
-
-    return JourneyResult(
-        story_id=story.id,
-        story_title=story.title,
-        persona=story.persona,
-        passed=verdict.get("story_passed", False),
-        steps=steps,
-        break_findings=break_findings,
-        summary=verdict.get("summary", ""),
-        blocked_at=verdict.get("blocked_at", ""),
-        diagnosis=verdict.get("diagnosis", ""),
-        fix_suggestion=verdict.get("fix_suggestion", ""),
-    )
+    return _verdict_from_dict(verdict, story)
 
 
 # ---------------------------------------------------------------------------
