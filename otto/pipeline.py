@@ -293,15 +293,21 @@ async def build_agent_driven(
     build_id = f"build-{int(time.time())}-{os.getpid()}"
     build_dir = project_dir / "otto_logs" / "builds" / build_id
     build_dir.mkdir(parents=True, exist_ok=True)
-    pre_existing_untracked = _snapshot_untracked(project_dir)
 
-    # Fail early on dirty workspace — don't waste a build turn
+    # Write and commit build artifacts (intent.md, otto.yaml) BEFORE clean-start check.
+    # These are created by the pipeline/CLI and should be committed, not flagged.
+    grounding_path = project_dir / "intent.md"
+    if not grounding_path.exists():
+        grounding_path.write_text(intent)
+    _commit_artifacts(project_dir)
+
+    # Now check for a clean workspace (after our own artifacts are committed)
+    pre_existing_untracked = _snapshot_untracked(project_dir)
     if not check_clean_tree(project_dir):
         raise RuntimeError(
             "Agent-driven build requires a clean working tree. "
             "Commit or stash your changes before running otto build --agent-driven."
         )
-    # Filter to eligible untracked (non-otto-owned source files)
     from otto.git_ops import _should_stage_untracked
     eligible_untracked = {f for f in pre_existing_untracked if _should_stage_untracked(f)}
     if eligible_untracked:
@@ -310,12 +316,6 @@ async def build_agent_driven(
             f"Found: {', '.join(sorted(eligible_untracked)[:5])}. "
             f"Add them to .gitignore or commit them first."
         )
-
-    # Write intent to project root
-    grounding_path = project_dir / "intent.md"
-    if not grounding_path.exists():
-        grounding_path.write_text(intent)
-    _commit_artifacts(project_dir)
 
     # Configure agent
     max_rounds = int(config.get("max_verification_rounds", 3))
@@ -397,14 +397,21 @@ async def build_agent_driven(
             break_findings=last_break_findings,
         )
 
-        # Certify in isolated worktree
-        report = certify_with_retry(
-            intent=intent,
-            candidate_sha=candidate_sha,
-            project_dir=project_dir,
-            config=config,
-            port_override=config.get("port_override"),
-            skip_story_ids=None,  # TODO: targeted re-verify
+        # Certify in isolated worktree.
+        # Run in executor: certifier uses asyncio.run() internally,
+        # which can't be called from the running event loop.
+        import asyncio as _asyncio
+        _loop = _asyncio.get_event_loop()
+        report = await _loop.run_in_executor(
+            None,
+            lambda: certify_with_retry(
+                intent=intent,
+                candidate_sha=candidate_sha,
+                project_dir=project_dir,
+                config=config,
+                port_override=config.get("port_override"),
+                skip_story_ids=None,  # TODO: targeted re-verify
+            ),
         )
         certifier_total_cost += float(report.cost_usd or 0.0)
         checkpoint_findings = _report_findings_payload(report)
@@ -706,13 +713,18 @@ async def resume_agent_driven(
         if not candidate_sha:
             break
 
-        report = certify_with_retry(
-            intent=session.intent,
-            candidate_sha=candidate_sha,
-            project_dir=project_dir,
-            config=config,
-            port_override=config.get("port_override"),
-            skip_story_ids=None,
+        import asyncio as _asyncio
+        _loop = _asyncio.get_event_loop()
+        report = await _loop.run_in_executor(
+            None,
+            lambda: certify_with_retry(
+                intent=session.intent,
+                candidate_sha=candidate_sha,
+                project_dir=project_dir,
+                config=config,
+                port_override=config.get("port_override"),
+                skip_story_ids=None,
+            ),
         )
         certifier_total_cost += float(report.cost_usd or 0.0)
         checkpoint_findings = _report_findings_payload(report)
@@ -890,10 +902,12 @@ def _format_checkpoint_feedback(findings: list[dict[str, Any]] | None) -> str | 
 
 def _commit_artifacts(project_dir: Path) -> None:
     """Commit build artifacts so worktrees can see them."""
-    files = ["tasks.yaml"]
-    for name in ["intent.md", "product-spec.md", "architecture.md"]:
+    files = []
+    for name in ["tasks.yaml", "otto.yaml", "intent.md", "product-spec.md", "architecture.md"]:
         if (project_dir / name).exists():
             files.append(name)
+    if not files:
+        return
     subprocess.run(["git", "add"] + files, cwd=project_dir, capture_output=True)
     subprocess.run(
         ["git", "commit", "-m", "otto: build artifacts"],
