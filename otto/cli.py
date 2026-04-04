@@ -499,10 +499,10 @@ def run(prompt, dry_run, no_spec, no_qa, no_test):
 @click.option("--no-review", is_flag=True, help="Skip plan review, execute immediately")
 @click.option("--no-qa", is_flag=True, help="Skip product-level QA after execution")
 @click.option("--plan/--no-plan", "use_planner", default=None, help="Force planner on/off")
-@click.option("--agent-driven", is_flag=True, help="Use agent-driven build (experimental)")
+@click.option("--continuous", is_flag=True, help="Use session-continuous build (experimental)")
+@click.option("--agentic", is_flag=True, help="Use agentic build — agent calls certify() tool (experimental)")
 @click.option("--interactive", is_flag=True, help="Pause for human input after each certification round")
-@click.option("--variant", type=click.Choice(["a", "b"]), default="b", help="Agent-driven variant (a=agentic, b=orchestrated)")
-def build(intent, no_review, no_qa, use_planner, agent_driven, interactive, variant):
+def build(intent, no_review, no_qa, use_planner, continuous, agentic, interactive):
     """Build a product from a natural language intent.
 
     By default, one agent builds the entire product (monolithic).
@@ -530,17 +530,20 @@ def build(intent, no_review, no_qa, use_planner, agent_driven, interactive, vari
         config["no_review"] = True
 
     # Run the pipeline
-    from otto.pipeline import build_product, build_agent_driven, BuildResult
+    from otto.pipeline import build_product, build_continuous, build_agentic, BuildResult
 
     build_start = time.time()
     console.print()
 
     try:
-        if agent_driven:
-            if variant == "a":
-                console.print(
-                    "  [yellow]Warning:[/yellow] Variant A is not implemented yet and requires MCP/custom tool handlers for certify()."
-                )
+        if agentic:
+            console.print(
+                "  [yellow]Warning:[/yellow] Agentic mode is not implemented yet and requires MCP/custom tool handlers for certify()."
+            )
+            result: BuildResult = asyncio.run(
+                build_agentic(intent, project_dir, config)
+            )
+        elif continuous:
             on_feedback = None
             if interactive:
                 async def _interactive_feedback(report):
@@ -553,8 +556,8 @@ def build(intent, no_review, no_qa, use_planner, agent_driven, interactive, vari
                         return None
                 on_feedback = _interactive_feedback
             result: BuildResult = asyncio.run(
-                build_agent_driven(intent, project_dir, config,
-                                   variant=variant, on_human_feedback=on_feedback)
+                build_continuous(intent, project_dir, config,
+                                 on_human_feedback=on_feedback)
             )
         else:
             result: BuildResult = asyncio.run(build_product(intent, project_dir, config))
@@ -575,7 +578,7 @@ def build(intent, no_review, no_qa, use_planner, agent_driven, interactive, vari
 @click.argument("checkpoint_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option("--interactive", is_flag=True, help="Pause for human input after each certification round")
 def resume_build(checkpoint_path, interactive):
-    """Resume an agent-driven build from a saved checkpoint."""
+    """Resume a continuous build from a saved checkpoint."""
     require_git()
     project_dir = Path.cwd()
     config_path = project_dir / "otto.yaml"
@@ -583,7 +586,7 @@ def resume_build(checkpoint_path, interactive):
         raise click.ClickException("otto.yaml not found in the current project")
     config = load_config(config_path)
 
-    from otto.pipeline import resume_agent_driven
+    from otto.pipeline import resume_continuous
     from otto.session import SessionCheckpoint
 
     checkpoint = SessionCheckpoint.load(checkpoint_path)
@@ -604,7 +607,7 @@ def resume_build(checkpoint_path, interactive):
     build_start = time.time()
     try:
         result = asyncio.run(
-            resume_agent_driven(checkpoint_path, project_dir, config, on_human_feedback=on_feedback)
+            resume_continuous(checkpoint_path, project_dir, config, on_human_feedback=on_feedback)
         )
     except KeyboardInterrupt:
         console.print("\n  Aborted.")

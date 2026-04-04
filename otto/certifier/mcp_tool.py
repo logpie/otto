@@ -4,7 +4,7 @@ The agent calls certify() when it believes the product is ready for user testing
 The tool snapshots the current code, runs the certifier in an isolated worktree,
 and returns coarse actionable findings.
 
-This is Variant A of the agent-driven build: the agent drives the loop.
+This is the agentic build mode: the agent drives the loop.
 """
 
 from __future__ import annotations

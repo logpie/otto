@@ -210,22 +210,22 @@ class TestBuildCommand:
         assert result.exit_code == 1
         assert "qa boom" in result.output
 
-    def test_build_warns_when_variant_a_requested(self, tmp_git_repo, monkeypatch):
+    def test_build_warns_when_agentic_requested(self, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
         create_config(tmp_git_repo)
 
         runner = CliRunner()
         with patch(
-            "otto.pipeline.build_agent_driven",
-            side_effect=NotImplementedError("Variant A is not yet implemented"),
+            "otto.pipeline.build_agentic",
+            side_effect=NotImplementedError("Agentic mode is not yet implemented"),
         ):
             result = runner.invoke(
                 main,
-                ["build", "demo app", "--agent-driven", "--variant", "a", "--no-review"],
+                ["build", "demo app", "--agentic", "--no-review"],
             )
 
         assert result.exit_code == 1
-        assert "Variant A is not implemented yet" in result.output
+        assert "Agentic mode is not implemented yet" in result.output
 
     def test_resume_build_uses_checkpoint(self, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
@@ -257,7 +257,7 @@ class TestBuildCommand:
             return BuildResult(passed=True, build_id="build-123", rounds=2, total_cost=1.2)
 
         runner = CliRunner()
-        with patch("otto.pipeline.resume_agent_driven", side_effect=fake_resume):
+        with patch("otto.pipeline.resume_continuous", side_effect=fake_resume):
             result = runner.invoke(main, ["resume-build", str(checkpoint_path)])
 
         assert result.exit_code == 0

@@ -1,4 +1,4 @@
-"""Tests for agent-driven build infrastructure: session, feedback, isolated certifier."""
+"""Tests for continuous/agentic build infrastructure: session, feedback, isolated certifier."""
 
 import json
 import subprocess
@@ -257,7 +257,7 @@ class TestFeedback:
         assert finding_fingerprints(findings_a) != finding_fingerprints(findings_b)
 
 
-class TestAgentDrivenBuild:
+class TestContinuousBuild:
     def test_snapshot_candidate_rejects_pre_existing_untracked_source_files(self, tmp_git_repo):
         from otto.pipeline import _snapshot_candidate
 
@@ -282,9 +282,9 @@ class TestAgentDrivenBuild:
         build_mock.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_variant_b_passes_first_round(self, tmp_git_repo):
+    async def test_continuous_passes_first_round(self, tmp_git_repo):
         """Agent builds, certifier passes on round 1."""
-        from otto.pipeline import build_agent_driven
+        from otto.pipeline import build_continuous
 
         async def fake_query(prompt, options, **kwargs):
             return "built the product", 0.3, SimpleNamespace(
@@ -301,8 +301,10 @@ class TestAgentDrivenBuild:
              patch("otto.session.agent_provider", return_value="claude"), \
              patch("otto.certifier.isolated.certify_with_retry", return_value=passing_report), \
              patch("otto.pipeline._snapshot_candidate", return_value="abc1234"), \
-             patch("otto.pipeline._commit_artifacts"):
-            result = await build_agent_driven(
+             patch("otto.pipeline._commit_artifacts"), \
+             patch("otto.git_ops._snapshot_untracked", return_value=set()), \
+             patch("otto.git_ops.check_clean_tree", return_value=True):
+            result = await build_continuous(
                 "Build a todo app", tmp_git_repo, {"default_branch": "main"},
             )
 
@@ -310,18 +312,18 @@ class TestAgentDrivenBuild:
         assert result.rounds == 1
 
     @pytest.mark.asyncio
-    async def test_variant_a_is_explicitly_unimplemented(self, tmp_git_repo):
-        from otto.pipeline import build_agent_driven
+    async def test_agentic_is_explicitly_unimplemented(self, tmp_git_repo):
+        from otto.pipeline import build_agentic
 
         with pytest.raises(NotImplementedError, match="not yet implemented"):
-            await build_agent_driven(
-                "Build a todo app", tmp_git_repo, {"default_branch": "main"}, variant="a",
+            await build_agentic(
+                "Build a todo app", tmp_git_repo, {"default_branch": "main"},
             )
 
     @pytest.mark.asyncio
-    async def test_variant_b_fix_loop(self, tmp_git_repo):
+    async def test_continuous_fix_loop(self, tmp_git_repo):
         """Agent builds, certifier fails, agent fixes, certifier passes."""
-        from otto.pipeline import build_agent_driven
+        from otto.pipeline import build_continuous
 
         call_count = 0
 
@@ -355,8 +357,10 @@ class TestAgentDrivenBuild:
              patch("otto.session.agent_provider", return_value="claude"), \
              patch("otto.certifier.isolated.certify_with_retry", side_effect=fake_certifier), \
              patch("otto.pipeline._snapshot_candidate", return_value="abc1234"), \
-             patch("otto.pipeline._commit_artifacts"):
-            result = await build_agent_driven(
+             patch("otto.pipeline._commit_artifacts"), \
+             patch("otto.git_ops._snapshot_untracked", return_value=set()), \
+             patch("otto.git_ops.check_clean_tree", return_value=True):
+            result = await build_continuous(
                 "Build a todo app", tmp_git_repo, {"default_branch": "main"},
             )
 
@@ -368,7 +372,7 @@ class TestAgentDrivenBuild:
 
     @pytest.mark.asyncio
     async def test_resume_from_checkpoint_continues_from_last_state(self, tmp_git_repo):
-        from otto.pipeline import resume_agent_driven
+        from otto.pipeline import resume_continuous
 
         checkpoint_dir = tmp_git_repo / "otto_logs" / "builds" / "build-123"
         checkpoint_dir.mkdir(parents=True)
@@ -412,7 +416,7 @@ class TestAgentDrivenBuild:
              patch("otto.session.agent_provider", return_value="claude"), \
              patch("otto.certifier.isolated.certify_with_retry", return_value=passing_report), \
              patch("otto.pipeline._snapshot_candidate", return_value="def5678"):
-            result = await resume_agent_driven(
+            result = await resume_continuous(
                 checkpoint_dir / "checkpoint.json",
                 tmp_git_repo,
                 {"default_branch": "main"},

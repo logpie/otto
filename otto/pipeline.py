@@ -240,7 +240,7 @@ def _read_last_run_cost(project_dir: Path) -> float:
     return 0.0
 
 
-VARIANT_B_SYSTEM_PROMPT = """\
+CONTINUOUS_SYSTEM_PROMPT = """\
 You are building a product. Build it, write tests, make them pass.
 When you're done building, provide your final status as structured output.
 
@@ -251,37 +251,32 @@ Rules:
 - Do not invent features not in the intent
 """
 
-VARIANT_B_BUILD_PROMPT = """\
+CONTINUOUS_BUILD_PROMPT = """\
 Build this product:
 
 {intent}
 """
 
-VARIANT_B_FIX_PROMPT = """\
+CONTINUOUS_FIX_PROMPT = """\
 A user tested your product and found these issues:
 
 {feedback}
 """
 
 
-async def build_agent_driven(
+async def build_continuous(
     intent: str,
     project_dir: Path,
     config: dict[str, Any],
     *,
-    variant: str = "b",
     on_human_feedback: Any = None,
 ) -> BuildResult:
-    """Agent-driven build: continuous session with certifier feedback.
+    """Continuous build: session-continuous mode with certifier feedback.
 
-    Variant B (default): orchestrator drives the loop, injects feedback.
-    Variant A: agent calls certify() tool — fully agentic.
-
+    The orchestrator drives the loop, injects feedback.
     The coding agent keeps its session across build→certify→fix cycles.
     No session killing, no fix tasks, no context loss.
     """
-    if variant == "a":
-        return await _build_variant_a(intent, project_dir, config)
 
     from otto.agent import ClaudeAgentOptions, _subprocess_env
     from otto.certifier.isolated import certify_with_retry
@@ -305,14 +300,14 @@ async def build_agent_driven(
     pre_existing_untracked = _snapshot_untracked(project_dir)
     if not check_clean_tree(project_dir):
         raise RuntimeError(
-            "Agent-driven build requires a clean working tree. "
-            "Commit or stash your changes before running otto build --agent-driven."
+            "Continuous build requires a clean working tree. "
+            "Commit or stash your changes before running otto build --continuous."
         )
     from otto.git_ops import _should_stage_untracked
     eligible_untracked = {f for f in pre_existing_untracked if _should_stage_untracked(f)}
     if eligible_untracked:
         raise RuntimeError(
-            f"Agent-driven build requires no pre-existing untracked source files. "
+            f"Continuous build requires no pre-existing untracked source files. "
             f"Found: {', '.join(sorted(eligible_untracked)[:5])}. "
             f"Add them to .gitignore or commit them first."
         )
@@ -323,7 +318,7 @@ async def build_agent_driven(
     options = ClaudeAgentOptions(
         permission_mode="bypassPermissions",
         cwd=str(project_dir),
-        system_prompt=VARIANT_B_SYSTEM_PROMPT,
+        system_prompt=CONTINUOUS_SYSTEM_PROMPT,
         env=_subprocess_env(),
         setting_sources=["project"],
     )
@@ -340,7 +335,7 @@ async def build_agent_driven(
     )
 
     # Round 0: Build
-    build_prompt = VARIANT_B_BUILD_PROMPT.format(intent=intent)
+    build_prompt = CONTINUOUS_BUILD_PROMPT.format(intent=intent)
     result = await session.start(build_prompt)
     session.checkpoint(
         None,
@@ -480,7 +475,7 @@ async def build_agent_driven(
                 feedback += f"\n\nAdditional feedback from the user:\n{human}"
 
         # Resume session with feedback
-        fix_prompt = VARIANT_B_FIX_PROMPT.format(feedback=feedback)
+        fix_prompt = CONTINUOUS_FIX_PROMPT.format(feedback=feedback)
         result = await session.resume(fix_prompt)
         session.checkpoint(
             candidate_sha,
@@ -504,7 +499,7 @@ async def build_agent_driven(
     )
 
 
-VARIANT_A_SYSTEM_PROMPT = """\
+AGENTIC_SYSTEM_PROMPT = """\
 You are building a product from scratch. You are an autonomous developer.
 
 1. Read the intent carefully. Plan your approach.
@@ -524,12 +519,12 @@ certify() returns {status, issues, warnings}:
 """
 
 
-async def _build_variant_a(
+async def build_agentic(
     intent: str,
     project_dir: Path,
     config: dict[str, Any],
 ) -> BuildResult:
-    """Variant A: agent calls certify() as a tool. Fully agentic."""
+    """Agentic build: agent calls certify() as a tool. Fully agentic."""
     from otto.certifier.mcp_tool import CertifyTool
 
     _ = CertifyTool(
@@ -539,19 +534,19 @@ async def _build_variant_a(
         max_calls=int(config.get("max_verification_rounds", 3)),
     )
     raise NotImplementedError(
-        "Variant A is not yet implemented. It requires MCP/custom tool handler support for certify(). "
+        "Agentic mode is not yet implemented. It requires MCP/custom tool handler support for certify(). "
         "The CertifyTool code is preserved for that future integration."
     )
 
 
-async def resume_agent_driven(
+async def resume_continuous(
     checkpoint_path: Path,
     project_dir: Path,
     config: dict[str, Any],
     *,
     on_human_feedback: Any = None,
 ) -> BuildResult:
-    """Resume an agent-driven Variant B build from a saved checkpoint."""
+    """Resume a continuous build from a saved checkpoint."""
     from otto.agent import ClaudeAgentOptions, _subprocess_env
     from otto.certifier.isolated import certify_with_retry
     from otto.certifier.report import CertificationOutcome
@@ -563,7 +558,7 @@ async def resume_agent_driven(
     options = ClaudeAgentOptions(
         permission_mode="bypassPermissions",
         cwd=str(project_dir),
-        system_prompt=VARIANT_B_SYSTEM_PROMPT,
+        system_prompt=CONTINUOUS_SYSTEM_PROMPT,
         env=_subprocess_env(),
         setting_sources=["project"],
     )
@@ -597,14 +592,14 @@ async def resume_agent_driven(
     # Same clean-start enforcement as fresh builds
     if not check_clean_tree(project_dir):
         raise RuntimeError(
-            "Resumed agent-driven build requires a clean working tree. "
+            "Resumed continuous build requires a clean working tree. "
             "Commit or stash your changes before resuming."
         )
     from otto.git_ops import _should_stage_untracked
     eligible_untracked = {f for f in pre_existing_untracked if _should_stage_untracked(f)}
     if eligible_untracked:
         raise RuntimeError(
-            f"Resumed agent-driven build requires no pre-existing untracked source files. "
+            f"Resumed continuous build requires no pre-existing untracked source files. "
             f"Found: {', '.join(sorted(eligible_untracked)[:5])}. "
             f"Add them to .gitignore or commit them first."
         )
@@ -644,7 +639,7 @@ async def resume_agent_driven(
             )
         feedback = _format_checkpoint_feedback(cp.findings)
         if feedback:
-            result = await session.resume(VARIANT_B_FIX_PROMPT.format(feedback=feedback))
+            result = await session.resume(CONTINUOUS_FIX_PROMPT.format(feedback=feedback))
             round_num += 1
             current_status = result.end_status
             session.checkpoint(
@@ -769,7 +764,7 @@ async def resume_agent_driven(
             if human:
                 feedback += f"\n\nAdditional feedback from the user:\n{human}"
 
-        result = await session.resume(VARIANT_B_FIX_PROMPT.format(feedback=feedback))
+        result = await session.resume(CONTINUOUS_FIX_PROMPT.format(feedback=feedback))
         round_num += 1
         current_status = result.end_status
         session.checkpoint(
@@ -831,7 +826,7 @@ def _snapshot_candidate(
         if len(eligible_pre_existing) > 5:
             preview += f", ... (+{len(eligible_pre_existing) - 5} more)"
         raise RuntimeError(
-            "Agent-driven candidate snapshot refused because the repo already had eligible "
+            "Candidate snapshot refused because the repo already had eligible "
             f"untracked files before the agent run: {preview}"
         )
 
