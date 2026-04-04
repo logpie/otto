@@ -291,11 +291,9 @@ class AppRunner:
         self.process = None
 
     def _port_in_use(self) -> bool:
-        try:
-            requests.get(f"http://localhost:{self.port}", timeout=1)
-            return True
-        except Exception:
-            return False
+        import socket
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            return s.connect_ex(("localhost", self.port)) == 0
 
 
 def run_baseline(
