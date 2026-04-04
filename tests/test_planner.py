@@ -8,6 +8,7 @@ import pytest
 from otto.planner import (
     BatchUnit,
     _normalize_plan,
+    _serialize_analysis_units,
     Batch,
     ExecutionPlan,
     TaskPlan,
@@ -791,3 +792,113 @@ class TestReplan:
         ]
         assert result.analysis == remaining.analysis
         assert result.learnings == ["reordered based on recent results"]
+
+
+class TestSerializeAnalysisUnitsIndexRemap:
+    """Regression tests for index remapping after splitting invalid integrated units."""
+
+    def test_dependency_remapped_after_uncertain_split(self):
+        """Unit 0 has [A,B] with UNCERTAIN(A,B) => split. Unit 1 depends on Unit 0.
+
+        Before fix: dependency_predecessors said new index 1 (B) depends on old index 0,
+        but new index 2 (original unit 1) was the one that should depend on 0 and 1.
+        """
+        batches = [
+            Batch(units=[
+                BatchUnit(tasks=[TaskPlan(task_key="A"), TaskPlan(task_key="B")]),
+                BatchUnit(tasks=[TaskPlan(task_key="C")]),
+            ])
+        ]
+        analysis = [
+            {"task_a": "A", "task_b": "B", "relationship": "UNCERTAIN", "reason": "might conflict"},
+            {"task_a": "A", "task_b": "C", "relationship": "DEPENDENT", "reason": "C needs A"},
+        ]
+        result = _serialize_analysis_units(batches, analysis)
+
+        # After split: units are [A], [B], [C].
+        # C depends on A => C must be in a later batch than A.
+        # A and B are UNCERTAIN => must be in different batches.
+        batch_keys = [[tp.task_key for u in batch.units for tp in u.tasks] for batch in result]
+
+        # Find which batch each task lands in
+        task_batch = {}
+        for i, batch in enumerate(result):
+            for unit in batch.units:
+                for tp in unit.tasks:
+                    task_batch[tp.task_key] = i
+
+        assert task_batch["A"] != task_batch["B"], "UNCERTAIN tasks must be in different batches"
+        assert task_batch["C"] > task_batch["A"], "C depends on A, must be in a later batch"
+
+    def test_dependency_remapped_after_contradictory_split(self):
+        """CONTRADICTORY within a unit splits it; dependency from another unit remaps."""
+        batches = [
+            Batch(units=[
+                BatchUnit(tasks=[TaskPlan(task_key="X"), TaskPlan(task_key="Y")]),
+                BatchUnit(tasks=[TaskPlan(task_key="Z")]),
+            ])
+        ]
+        analysis = [
+            {"task_a": "X", "task_b": "Y", "relationship": "CONTRADICTORY", "reason": "conflict"},
+            {"task_a": "Y", "task_b": "Z", "relationship": "DEPENDENT", "reason": "Z needs Y"},
+        ]
+        result = _serialize_analysis_units(batches, analysis)
+
+        task_batch = {}
+        for i, batch in enumerate(result):
+            for unit in batch.units:
+                for tp in unit.tasks:
+                    task_batch[tp.task_key] = i
+
+        # X and Y were in same unit but CONTRADICTORY => split => different batches
+        assert task_batch["X"] != task_batch["Y"], "CONTRADICTORY tasks must be in different batches"
+        # Z depends on Y => Z must come after Y
+        assert task_batch["Z"] > task_batch["Y"], "Z depends on Y, must be in a later batch"
+
+    def test_cross_unit_contradictory_separated(self):
+        """CONTRADICTORY tasks in different units must not share a batch."""
+        batches = [
+            Batch(units=[
+                BatchUnit(tasks=[TaskPlan(task_key="P")]),
+                BatchUnit(tasks=[TaskPlan(task_key="Q")]),
+            ])
+        ]
+        analysis = [
+            {"task_a": "P", "task_b": "Q", "relationship": "CONTRADICTORY", "reason": "incompatible"},
+        ]
+        result = _serialize_analysis_units(batches, analysis)
+
+        task_batch = {}
+        for i, batch in enumerate(result):
+            for unit in batch.units:
+                for tp in unit.tasks:
+                    task_batch[tp.task_key] = i
+
+        assert task_batch["P"] != task_batch["Q"], (
+            "Cross-unit CONTRADICTORY tasks must be in different batches"
+        )
+
+    def test_uncertain_pairs_remapped_after_split(self):
+        """UNCERTAIN pair referencing a split unit gets remapped to all new sub-units."""
+        batches = [
+            Batch(units=[
+                # Unit 0: will be split because of UNCERTAIN(A,B)
+                BatchUnit(tasks=[TaskPlan(task_key="A"), TaskPlan(task_key="B")]),
+                # Unit 1: has UNCERTAIN relationship with unit 0
+                BatchUnit(tasks=[TaskPlan(task_key="C")]),
+            ])
+        ]
+        analysis = [
+            {"task_a": "A", "task_b": "B", "relationship": "UNCERTAIN", "reason": "intra split"},
+            {"task_a": "A", "task_b": "C", "relationship": "UNCERTAIN", "reason": "cross uncertain"},
+        ]
+        result = _serialize_analysis_units(batches, analysis)
+
+        task_batch = {}
+        for i, batch in enumerate(result):
+            for unit in batch.units:
+                for tp in unit.tasks:
+                    task_batch[tp.task_key] = i
+
+        assert task_batch["A"] != task_batch["B"], "Intra-unit UNCERTAIN must separate"
+        assert task_batch["A"] != task_batch["C"], "Cross-unit UNCERTAIN must separate"

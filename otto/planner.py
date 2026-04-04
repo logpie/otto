@@ -464,100 +464,6 @@ def _explicit_dependency_analysis(tasks: list[dict[str, Any]]) -> list[dict[str,
     return analysis
 
 
-def _serialize_analysis_batches(
-    batches: list[Batch],
-    analysis: list[dict[str, Any]],
-) -> list[Batch]:
-    task_plans_by_key: dict[str, TaskPlan] = {}
-    original_batch_by_key: dict[str, int] = {}
-    original_order_by_key: dict[str, tuple[int, int]] = {}
-    for batch_index, batch in enumerate(batches):
-        for task_index, task_plan in enumerate(batch.tasks):
-            task_plans_by_key[task_plan.task_key] = task_plan
-            original_batch_by_key[task_plan.task_key] = batch_index
-            original_order_by_key[task_plan.task_key] = (batch_index, task_index)
-
-    # Only UNCERTAIN forces serialization. ADDITIVE (same file, different
-    # functions) can parallelize — git merge handles non-overlapping changes,
-    # and the merge conflict resolver handles the rest.
-    serialized_pairs = {
-        frozenset((item["task_a"], item["task_b"]))
-        for item in analysis
-        if item.get("relationship") in {"UNCERTAIN"}
-        and item.get("task_a") in task_plans_by_key
-        and item.get("task_b") in task_plans_by_key
-        and item.get("task_a") != item.get("task_b")
-    }
-    dependency_predecessors: dict[str, set[str]] = {
-        task_key: set() for task_key in task_plans_by_key
-    }
-    for item in analysis:
-        if item.get("relationship") != "DEPENDENT":
-            continue
-        task_a = str(item.get("task_a", "") or "")
-        task_b = str(item.get("task_b", "") or "")
-        if (
-            task_a not in task_plans_by_key
-            or task_b not in task_plans_by_key
-            or task_a == task_b
-        ):
-            continue
-        dependency_predecessors[task_b].add(task_a)
-
-    if not serialized_pairs and not any(dependency_predecessors.values()):
-        return batches
-
-    serialized_task_lists: list[list[TaskPlan]] = []
-    task_batch_by_key: dict[str, int] = {}
-    pending_keys = sorted(task_plans_by_key, key=original_order_by_key.__getitem__)
-    while pending_keys:
-        next_pending: list[str] = []
-        progressed = False
-        for task_key in pending_keys:
-            predecessors = dependency_predecessors.get(task_key, set())
-            if any(pred not in task_batch_by_key for pred in predecessors):
-                next_pending.append(task_key)
-                continue
-
-            task_plan = task_plans_by_key[task_key]
-            target_batch = original_batch_by_key[task_key]
-            if predecessors:
-                target_batch = max(
-                    target_batch,
-                    max(task_batch_by_key[pred] + 1 for pred in predecessors),
-                )
-            while True:
-                while len(serialized_task_lists) <= target_batch:
-                    serialized_task_lists.append([])
-                existing_keys = {
-                    existing.task_key
-                    for existing in serialized_task_lists[target_batch]
-                }
-                if any(
-                    frozenset((task_key, other_key)) in serialized_pairs
-                    for other_key in existing_keys
-                ):
-                    target_batch += 1
-                    continue
-                serialized_task_lists[target_batch].append(task_plan)
-                task_batch_by_key[task_key] = target_batch
-                progressed = True
-                break
-
-        if progressed:
-            pending_keys = next_pending
-            continue
-
-        # Dependency cycles are invalid, but keep execution deterministic and conservative.
-        for task_key in next_pending:
-            task_plan = task_plans_by_key[task_key]
-            serialized_task_lists.append([task_plan])
-            task_batch_by_key[task_key] = len(serialized_task_lists) - 1
-        break
-
-    return [Batch.from_tasks(tasks) for tasks in serialized_task_lists if tasks]
-
-
 def _serialize_analysis_units(
     batches: list[Batch],
     analysis: list[dict[str, Any]],
@@ -578,6 +484,9 @@ def _serialize_analysis_units(
     invalid_units: set[int] = set()
     dependency_predecessors: dict[int, set[int]] = {i: set() for i in range(len(unit_entries))}
     uncertain_pairs: set[frozenset[int]] = set()
+    # Track task-level separation needs within invalid units so that after
+    # splitting, the individual singleton units are placed in different batches.
+    intra_separation_tasks: set[frozenset[str]] = set()
 
     for item in analysis:
         task_a = str(item.get("task_a", "") or "")
@@ -593,18 +502,63 @@ def _serialize_analysis_units(
         elif relationship == "UNCERTAIN":
             if unit_a == unit_b:
                 invalid_units.add(unit_a)
+                intra_separation_tasks.add(frozenset((task_a, task_b)))
             else:
                 uncertain_pairs.add(frozenset((unit_a, unit_b)))
-        elif relationship == "CONTRADICTORY" and unit_a == unit_b:
-            invalid_units.add(unit_a)
+        elif relationship == "CONTRADICTORY":
+            if unit_a == unit_b:
+                invalid_units.add(unit_a)
+                intra_separation_tasks.add(frozenset((task_a, task_b)))
+            else:
+                uncertain_pairs.add(frozenset((unit_a, unit_b)))
 
+    # Build normalized_units by splitting invalid units into singletons,
+    # and remap dependency_predecessors / uncertain_pairs to new indices.
+    old_to_new: dict[int, list[int]] = {}
+    task_to_new_index: dict[str, int] = {}
     normalized_units: list[tuple[int, int, BatchUnit]] = []
     for idx, (batch_index, unit_index, unit) in enumerate(unit_entries):
         if idx in invalid_units:
+            new_indices: list[int] = []
             for offset, task in enumerate(unit.tasks):
+                new_idx = len(normalized_units)
+                new_indices.append(new_idx)
+                task_to_new_index[task.task_key] = new_idx
                 normalized_units.append((batch_index, unit_index + offset, BatchUnit(tasks=[task])))
+            old_to_new[idx] = new_indices
         else:
+            old_to_new[idx] = [len(normalized_units)]
             normalized_units.append((batch_index, unit_index, unit))
+
+    # Rebuild dependency_predecessors with new indices.
+    new_dependency_predecessors: dict[int, set[int]] = {i: set() for i in range(len(normalized_units))}
+    for old_target, old_preds in dependency_predecessors.items():
+        for new_target in old_to_new.get(old_target, []):
+            for old_pred in old_preds:
+                new_dependency_predecessors[new_target].update(old_to_new.get(old_pred, []))
+    dependency_predecessors = new_dependency_predecessors
+
+    # Rebuild uncertain_pairs with new indices.
+    new_uncertain_pairs: set[frozenset[int]] = set()
+    for pair in uncertain_pairs:
+        pair_list = list(pair)
+        if len(pair_list) < 2:
+            continue
+        old_a, old_b = pair_list[0], pair_list[1]
+        for new_a in old_to_new.get(old_a, []):
+            for new_b in old_to_new.get(old_b, []):
+                if new_a != new_b:
+                    new_uncertain_pairs.add(frozenset((new_a, new_b)))
+    # Convert intra-unit task separation pairs to new-index uncertain_pairs.
+    for task_pair in intra_separation_tasks:
+        pair_list = list(task_pair)
+        if len(pair_list) < 2:
+            continue
+        idx_a = task_to_new_index.get(pair_list[0])
+        idx_b = task_to_new_index.get(pair_list[1])
+        if idx_a is not None and idx_b is not None and idx_a != idx_b:
+            new_uncertain_pairs.add(frozenset((idx_a, idx_b)))
+    uncertain_pairs = new_uncertain_pairs
 
     serialized_batches: list[list[BatchUnit]] = []
     unit_batch_by_index: dict[int, int] = {}
@@ -765,40 +719,6 @@ def _normalize_plan(plan: ExecutionPlan, tasks: list[dict[str, Any]]) -> Executi
     )
 
 
-def _parse_shortlist_json(raw: str) -> list[dict[str, str]] | None:
-    try:
-        data = json.loads(_strip_json_wrapper(raw))
-    except (json.JSONDecodeError, ValueError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    candidates = data.get("candidates")
-    if not isinstance(candidates, list):
-        return None
-    parsed: list[dict[str, str]] = []
-    for item in candidates:
-        if not isinstance(item, dict):
-            continue
-        task_a = str(item.get("task_a", "") or "").strip()
-        task_b = str(item.get("task_b", "") or "").strip()
-        if not task_a or not task_b or task_a == task_b:
-            continue
-        parsed.append(
-            {
-                "task_a": task_a,
-                "task_b": task_b,
-                "reason": str(item.get("reason", "") or ""),
-            }
-        )
-    return parsed
-
-
-def _shortlist_signature(item: dict[str, str]) -> tuple[str, str]:
-    task_a = item["task_a"]
-    task_b = item["task_b"]
-    return tuple(sorted((task_a, task_b)))
-
-
 def _project_context(project_dir: Path) -> str:
     try:
         result = subprocess.run(
@@ -856,66 +776,6 @@ async def _run_planner_prompt(
     started_at = time.monotonic()
     raw_output, cost, _result = await run_agent_query(prompt, options)
     return raw_output, float(cost or 0.0), round(time.monotonic() - started_at, 1)
-
-
-async def _shortlist_pairs(
-    tasks: list[dict[str, Any]],
-    config: dict[str, Any],
-    project_dir: Path,
-) -> list[dict[str, str]]:
-    task_summary = _task_summary(tasks)
-    _planner_log(
-        project_dir,
-        f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] shortlist request",
-        "task summary sent to LLM:",
-        task_summary or "- (none)",
-    )
-    prompt = f"""You are triaging coding task relationships.
-
-Review ALL tasks below and return ONLY suspicious task pairs that need deeper review.
-Suspicious means any likely overlap, dependency, contradiction, or uncertainty.
-Do not include obviously independent pairs.
-
-Return JSON only:
-{{
-  "candidates": [
-    {{"task_a": "task_key_a", "task_b": "task_key_b", "reason": "brief reason"}}
-  ]
-}}
-
-Tasks:
-{_task_summary(tasks)}
-"""
-    raw_output, cost_usd, duration_s = await _run_planner_prompt(
-        prompt,
-        config,
-        project_dir,
-        model="haiku",
-        effort="low",
-    )
-    candidates = _parse_shortlist_json(raw_output)
-    if candidates is None:
-        raise ValueError("shortlist parse failed")
-
-    valid_keys = {str(task.get("key", "") or "") for task in tasks if task.get("key")}
-    normalized: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-    for item in candidates:
-        if item["task_a"] not in valid_keys or item["task_b"] not in valid_keys:
-            continue
-        signature = _shortlist_signature(item)
-        if signature in seen:
-            continue
-        seen.add(signature)
-        normalized.append(item)
-    _planner_log(
-        project_dir,
-        f"shortlist LLM call: model=haiku effort=low time_s={duration_s:.1f} cost_usd={cost_usd:.4f}",
-        "shortlist results:",
-        *_format_shortlist(normalized),
-        "",
-    )
-    return normalized
 
 
 async def plan(

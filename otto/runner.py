@@ -1668,6 +1668,7 @@ async def run_task_v45(
             "qa_report": qa_report,
             "phase_timings": phase_timings,
             "review_ref": review_ref,
+            "spec": spec or [],
         }
 
     def _add_cost(amount: float) -> None:

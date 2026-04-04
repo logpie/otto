@@ -185,7 +185,7 @@ async def _run_spec_agent(
     setting_sources: list[str] | None = None,
     log_dir: Path | None = None,
     config: dict[str, Any] | None = None,
-) -> tuple[list, float, str | None]:
+) -> tuple[list, float, str | None, dict[str, int]]:
     """Run the spec generation agent.
 
     Uses a structured system prompt for constraint faithfulness,
@@ -360,7 +360,7 @@ Write only [must]/[should] criteria lines to the file — no headings, notes, or
         if skipped:
             summary += f" skipped={skipped}"
         _write_log(spec_log_dir / "spec-agent.log", [summary])
-        return parsed_items, spec_cost, None, spec_usage
+        return filtered_items, spec_cost, None, spec_usage
 
     # Clean up temp file if it doesn't exist (shouldn't happen, but be safe)
     spec_file.unlink(missing_ok=True)

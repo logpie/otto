@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from otto.agent import merge_usage
 from otto.config import agent_provider, git_meta_dir, planner_provider
 from otto.context import Learning, PipelineContext, QAMode, TaskResult
 from otto.display import console, rich_escape
@@ -1252,6 +1253,9 @@ def _combine_task_results(previous: TaskResult, current: TaskResult) -> TaskResu
         diff_summary=current.diff_summary or previous.diff_summary,
         duration_s=(previous.duration_s or 0.0) + (current.duration_s or 0.0),
         review_ref=current.review_ref or previous.review_ref,
+        token_usage=merge_usage(previous.token_usage, current.token_usage),
+        unit_key=current.unit_key or previous.unit_key,
+        unit_task_keys=current.unit_task_keys or previous.unit_task_keys,
     )
 
 
@@ -2961,22 +2965,32 @@ async def _run_integrated_unit_in_worktree(
 
         # Propagate the unit's generated spec to member tasks so batch QA
         # doesn't re-run spec generation for each member (wastes ~$0.2/task).
-        if tasks_file:
+        # Note: run_task_v45 is called with tasks_file=None for integrated units,
+        # so the spec is never persisted to tasks.yaml during execution. Read it
+        # from the result dict which always carries the spec.
+        unit_spec = result.get("spec") or []
+        if not unit_spec:
+            # Fallback: check tasks.yaml in case a future code path passes tasks_file
+            if tasks_file:
+                try:
+                    all_tasks = load_tasks(tasks_file)
+                    unit_task = next(
+                        (t for t in all_tasks if t.get("key") == synthetic_key),
+                        None,
+                    )
+                    unit_spec = (unit_task.get("spec") or []) if unit_task else []
+                except Exception:
+                    pass
+        if unit_spec and tasks_file:
             try:
                 all_tasks = load_tasks(tasks_file)
-                unit_task = next(
-                    (t for t in all_tasks if t.get("key") == synthetic_key),
-                    None,
-                )
-                unit_spec = (unit_task.get("spec") or []) if unit_task else []
-                if unit_spec:
-                    for task_key in member_keys:
-                        member_task = next(
-                            (t for t in all_tasks if t.get("key") == task_key),
-                            None,
-                        )
-                        if member_task and not member_task.get("spec"):
-                            update_task(tasks_file, task_key, spec=unit_spec)
+                for task_key in member_keys:
+                    member_task = next(
+                        (t for t in all_tasks if t.get("key") == task_key),
+                        None,
+                    )
+                    if member_task and not member_task.get("spec"):
+                        update_task(tasks_file, task_key, spec=unit_spec)
             except Exception:
                 pass
 
