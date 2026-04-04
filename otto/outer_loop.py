@@ -173,6 +173,15 @@ async def run_product_verification(
                 "fix_tasks_created": fix_tasks_created,
             }
 
+        # Infrastructure error (app didn't start, story compilation failed, etc.)
+        # — not a product bug, don't create fix tasks
+        if result.get("error"):
+            _outer_log(
+                project_dir,
+                f"INFRA ERROR (round {round_num}): {result['error'][:200]}",
+            )
+            break
+
         # Failed — generate fix tasks
         failed_journeys = [
             j for j in result.get("journeys", [])
@@ -185,6 +194,11 @@ async def run_product_verification(
             f"FAILED (round {round_num}): {failure_count} journey(s) failed",
             f"  stories: {[j.get('name') for j in failed_journeys]}",
         )
+
+        # No journey failures (all passed but product_passed is False?) — stop
+        if failure_count == 0:
+            _outer_log(project_dir, "no journey failures to fix — stopping")
+            break
 
         # Stop conditions
         if round_num >= max_rounds:
