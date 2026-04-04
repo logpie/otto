@@ -300,7 +300,8 @@ async def verify_story(
             if isinstance(raw_cost, (int, float)):
                 cost_usd = float(raw_cost)
             # Structured output is on the ResultMessage
-            structured = getattr(message, "structured_output", None)
+            # SDK uses "structured" not "structured_output"
+            structured = getattr(message, "structured", None)
             if isinstance(structured, dict):
                 verdict_data = structured
             break
