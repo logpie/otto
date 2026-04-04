@@ -42,16 +42,25 @@ def _specs_from_journeys(failed_journeys: list[dict[str, Any]]) -> list[dict[str
     return specs
 
 
-def _bundle_fix_tasks(failed_journeys: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
+def _grounding_reference(product_spec_path: Path) -> str:
+    """Render the grounding file name for fix prompts."""
+    return product_spec_path.name or str(product_spec_path)
+
+
+def _bundle_fix_tasks(
+    failed_journeys: list[dict[str, Any]],
+    product_spec_path: Path,
+) -> tuple[str, list[dict[str, Any]]]:
     """Bundle all failed journeys into a single fix task prompt + specs.
 
     Returns (prompt, specs). Specs come from the certifier diagnosis —
     no need for spec gen, the certifier already knows what to verify.
     """
     specs = _specs_from_journeys(failed_journeys)
+    grounding_ref = _grounding_reference(product_spec_path)
 
     if len(failed_journeys) == 1:
-        return _fix_task_from_journey(failed_journeys[0]), specs
+        return _fix_task_from_journey(failed_journeys[0], product_spec_path), specs
 
     lines = [f"Fix {len(failed_journeys)} product issues found by user journey testing:\n"]
     for i, story in enumerate(failed_journeys, 1):
@@ -71,12 +80,12 @@ def _bundle_fix_tasks(failed_journeys: list[dict[str, Any]]) -> tuple[str, list[
 
     lines.append(
         "Fix all issues above. Do not change the product spec or scope. "
-        "See product-spec.md for the full product definition."
+        f"See {grounding_ref} for the full product definition."
     )
     return "\n".join(lines), specs
 
 
-def _fix_task_from_journey(story: dict[str, Any]) -> str:
+def _fix_task_from_journey(story: dict[str, Any], product_spec_path: Path) -> str:
     """Build a targeted fix task prompt from a failed journey story.
 
     Includes: what failed, where it failed, diagnosis, suggested fix,
@@ -87,6 +96,7 @@ def _fix_task_from_journey(story: dict[str, Any]) -> str:
     fix_suggestion = story.get("fix_suggestion", "")
     blocked_at = story.get("blocked_at", "")
     steps = story.get("steps", [])
+    grounding_ref = _grounding_reference(product_spec_path)
 
     lines = [f"Fix product issue: user story '{name}' failed"]
     if blocked_at:
@@ -110,7 +120,7 @@ def _fix_task_from_journey(story: dict[str, Any]) -> str:
 
     lines.append(
         "\nFix the specific failure. Do not change the product spec or scope. "
-        "See product-spec.md for the full product definition."
+        f"See {grounding_ref} for the full product definition."
     )
     return "\n".join(lines)
 
@@ -254,7 +264,7 @@ async def run_product_verification(
 
         # Bundle all failures into one fix task with targeted specs.
         # Specs come from certifier diagnosis — skip spec gen.
-        fix_prompt, fix_specs = _bundle_fix_tasks(failed_journeys)
+        fix_prompt, fix_specs = _bundle_fix_tasks(failed_journeys, product_spec_path)
         add_task(tasks_path, fix_prompt, spec=fix_specs)
         fix_tasks_created += 1
         _verification_log(

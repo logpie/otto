@@ -59,7 +59,7 @@ async def build_product(
 ) -> BuildResult:
     """The entire otto build pipeline: plan -> build -> certify -> fix -> verify."""
     import asyncio
-    from otto.tasks import add_tasks, load_tasks
+    from otto.tasks import add_tasks, clear_pending_tasks, load_tasks
 
     build_id = f"build-{int(time.time())}-{os.getpid()}"
     build_dir = project_dir / "otto_logs" / "builds" / build_id
@@ -73,6 +73,7 @@ async def build_product(
     grounding_path = project_dir / "intent.md"
     if not grounding_path.exists():
         grounding_path.write_text(intent)
+    certifier_grounding_path = grounding_path
 
     # Plan (optional)
     if mode.use_planner:
@@ -82,7 +83,8 @@ async def build_product(
         mode = mode.finalize(plan.mode)
 
         # Certifier grounding = product-spec.md (what planner wrote)
-        certifier_intent = (plan.product_spec_path or grounding_path).read_text()
+        certifier_grounding_path = plan.product_spec_path or grounding_path
+        certifier_intent = certifier_grounding_path.read_text()
 
         tasks = [
             {"prompt": t.prompt, "depends_on": t.depends_on if t.depends_on else None}
@@ -104,7 +106,9 @@ async def build_product(
         tasks = [{"prompt": f"Build the product described below.\n\n{intent}"}]
 
     # Persist artifacts before worktree creation
-    add_tasks(tasks_path, tasks)
+    clear_pending_tasks(tasks_path)
+    created_tasks = add_tasks(tasks_path, tasks)
+    build_task_keys = {str(task.get("key", "") or "") for task in created_tasks}
 
     _commit_artifacts(project_dir)
 
@@ -113,10 +117,11 @@ async def build_product(
     exit_code = await run_per(config, tasks_path, project_dir)
 
     all_tasks = load_tasks(tasks_path) if tasks_path.exists() else []
-    tasks_passed = sum(1 for t in all_tasks if t.get("status") == "passed")
-    tasks_failed = sum(1 for t in all_tasks if t.get("status") in ("failed", "merge_failed"))
+    build_tasks = [task for task in all_tasks if str(task.get("key", "") or "") in build_task_keys]
+    tasks_passed = sum(1 for task in build_tasks if task.get("status") in ("passed", "merged", "verified"))
+    tasks_failed = sum(1 for task in build_tasks if task.get("status") in ("failed", "merge_failed"))
 
-    if exit_code != 0 and tasks_passed == 0:
+    if exit_code != 0 and tasks_failed > 0 and config.get("skip_product_qa"):
         return BuildResult(
             passed=False, build_id=build_id, error="build failed",
             total_cost=total_cost, tasks_passed=tasks_passed, tasks_failed=tasks_failed,
@@ -124,20 +129,24 @@ async def build_product(
 
     # Certify -> Fix -> Verify
     if not config.get("skip_product_qa"):
-        from otto.verification import run_product_verification
         config.setdefault("proof_of_work", True)
 
         loop = asyncio.get_event_loop()
         verify_result = await loop.run_in_executor(
             None,
             lambda: _run_verification_sync(
-                certifier_intent, project_dir, tasks_path, config,
+                certifier_intent,
+                certifier_grounding_path,
+                project_dir,
+                tasks_path,
+                config,
             ),
         )
         total_cost += verify_result.get("total_cost", 0.0)
+        verification_passed = bool(verify_result.get("product_passed", False))
 
         return BuildResult(
-            passed=verify_result.get("product_passed", False),
+            passed=verification_passed,
             build_id=build_id,
             rounds=verify_result.get("rounds", 1),
             total_cost=total_cost,
@@ -147,19 +156,23 @@ async def build_product(
         )
 
     return BuildResult(
-        passed=True, build_id=build_id, total_cost=total_cost,
+        passed=exit_code == 0 and tasks_failed == 0, build_id=build_id, total_cost=total_cost,
         tasks_passed=tasks_passed, tasks_failed=tasks_failed,
     )
 
 
 def _run_verification_sync(
-    intent: str, project_dir: Path, tasks_path: Path, config: dict[str, Any],
+    intent: str,
+    product_spec_path: Path,
+    project_dir: Path,
+    tasks_path: Path,
+    config: dict[str, Any],
 ) -> dict[str, Any]:
     """Run verification synchronously (certifier uses asyncio.run internally)."""
     import asyncio
     from otto.verification import run_product_verification
     return asyncio.run(run_product_verification(
-        product_spec_path=project_dir / "intent.md",
+        product_spec_path=product_spec_path,
         project_dir=project_dir,
         tasks_path=tasks_path,
         config=config,

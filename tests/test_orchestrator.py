@@ -1340,6 +1340,77 @@ class TestOuterLoop:
         assert result["fix_tasks_created"] == 1
         assert certifier_mock.call_count == 2
 
+    @pytest.mark.asyncio
+    async def test_fix_prompts_use_passed_grounding_file(self, tmp_git_repo):
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        tasks_path.write_text(yaml.dump({"tasks": []}))
+        intent_path = tmp_git_repo / "intent.md"
+        intent_path.write_text("# Intent\n")
+
+        qa_results = [
+            {
+                "product_passed": False,
+                "journeys": [
+                    {
+                        "name": "checkout",
+                        "passed": False,
+                        "diagnosis": "submit button is disabled",
+                        "fix_suggestion": "enable the button after form validation",
+                        "steps": [
+                            {
+                                "action": "Click Submit",
+                                "outcome": "fail",
+                                "diagnosis": "button never enables",
+                                "fix_suggestion": "enable after valid input",
+                            }
+                        ],
+                    },
+                ],
+                "cost_usd": 0.1,
+            },
+            {
+                "product_passed": False,
+                "journeys": [
+                    {
+                        "name": "checkout",
+                        "passed": False,
+                        "diagnosis": "submit button is still disabled",
+                        "fix_suggestion": "keep investigating",
+                        "steps": [
+                            {
+                                "action": "Click Submit",
+                                "outcome": "fail",
+                                "diagnosis": "button never enables",
+                            }
+                        ],
+                    },
+                ],
+                "cost_usd": 0.1,
+            },
+        ]
+
+        async def fake_run_per(config, tasks_path, project_dir):
+            for task in load_tasks(tasks_path):
+                if task.get("status") == "pending":
+                    update_task(tasks_path, task["key"], status="passed")
+            return 0
+
+        certifier_mock = MagicMock(side_effect=qa_results)
+        with patch("otto.orchestrator.run_per", side_effect=fake_run_per):
+            with patch("otto.certifier.run_certifier_v2", certifier_mock):
+                result = await run_product_verification(
+                    product_spec_path=intent_path,
+                    project_dir=tmp_git_repo,
+                    tasks_path=tasks_path,
+                    config={},
+                    intent="test product",
+                    max_rounds=3,
+                )
+
+        assert result["product_passed"] is False
+        prompts = [task["prompt"] for task in load_tasks(tasks_path)]
+        assert any("See intent.md for the full product definition." in prompt for prompt in prompts)
+
 
 class TestOrchestrationLogic:
     """Unit tests for plan-execute-replan logic."""

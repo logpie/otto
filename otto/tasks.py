@@ -361,6 +361,17 @@ def add_tasks(
     return [created[key] for key in created_keys]
 
 
+def clear_pending_tasks(tasks_path: Path) -> int:
+    """Remove pending tasks atomically, preserving completed task history."""
+
+    def _clear(tasks: list[dict[str, Any]]) -> int:
+        original_len = len(tasks)
+        tasks[:] = [task for task in tasks if task.get("status") != "pending"]
+        return original_len - len(tasks)
+
+    return mutate_and_recompute(tasks_path, _clear)
+
+
 def update_task(tasks_path: Path, key: str, **updates) -> dict[str, Any]:
     """Update a task by key. Thread-safe via flock. Raises KeyError if not found."""
     if "status" in updates and updates["status"] is not None:
