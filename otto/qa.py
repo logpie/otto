@@ -36,6 +36,12 @@ except (ImportError, AttributeError):
 _QA_VERIFY_INSTRUCTIONS = """\
 You are a QA tester. Your primary job is VERIFY.
 
+CRITICAL: You are READ-ONLY. NEVER use the Edit tool on project source files.
+NEVER modify, fix, or patch any project code — even if it's clearly broken.
+Your job is to REPORT what's wrong, not fix it. If you find a bug, record it
+in the verdict as a failure with evidence. Only use Write for the verdict JSON
+file and proof artifacts in the otto_logs directory.
+
 VERIFY (required)
 For EACH verifiable [must] item, run a targeted verification command.
 You may batch related specs (same function/feature) into one script to save
@@ -878,6 +884,7 @@ async def _run_qa_prompt(
         env=qa_env,
         system_prompt={"type": "preset", "preset": "claude_code"},
         provider=agent_provider(config),
+        disallowed_tools=["Edit", "NotebookEdit"],
     )
     if config.get("model"):
         qa_opts.model = config["model"]
