@@ -77,6 +77,7 @@ class ResultMessage:
     result: str | None = None
     total_cost_usd: float | None = None
     usage: dict[str, Any] | None = None
+    structured_output: Any = None
 
 
 @dataclass
@@ -265,6 +266,7 @@ def _normalize_message(message: Any) -> Any | None:
             result=getattr(message, "result", None),
             total_cost_usd=getattr(message, "total_cost_usd", None),
             usage=getattr(message, "usage", None),
+            structured_output=getattr(message, "structured_output", None),
         )
     if isinstance(message, AssistantMessage):
         return message
