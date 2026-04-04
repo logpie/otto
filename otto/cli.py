@@ -265,6 +265,50 @@ def _print_failed_tasks(tasks: list[dict]) -> None:
             console.print(f"      {rich_escape(str(task['error'])[:100])}")
 
 
+def _print_build_result(intent: str, result, build_duration: float) -> None:
+    """Render build verification output and summary."""
+    if result.journeys:
+        console.print()
+        if result.passed:
+            console.print(f"  [success]All journeys passed[/success]"
+                          f" (round {result.rounds})")
+        else:
+            console.print(f"  [red]Some journeys failed[/red]"
+                          f" (after {result.rounds} round(s))")
+        for j in result.journeys:
+            status_icon = "[success]✓[/success]" if j.get("passed") else "[red]✗[/red]"
+            console.print(f"    {status_icon} {rich_escape(j.get('name', ''))}")
+
+    if result.break_findings:
+        console.print()
+        high_count = sum(1 for b in result.break_findings if b.get("severity") in ("critical", "important"))
+        warn_count = len(result.break_findings) - high_count
+        if high_count:
+            console.print(f"  [red bold]⚠ {high_count} quality issue(s) found (will trigger fix)[/red bold]")
+        if warn_count:
+            console.print(f"  [yellow]⚠ {warn_count} quality warning(s)[/yellow]")
+        for b in result.break_findings:
+            sev = b.get("severity", "?")
+            desc = rich_escape(b.get("description", "")[:100])
+            if sev in ("critical", "important"):
+                console.print(f"    [red]✗ [{sev}] {desc}[/red]")
+            else:
+                console.print(f"    [yellow]! [{sev}] {desc}[/yellow]")
+            fix = b.get("fix_suggestion", "")
+            if fix:
+                console.print(f"      fix: {rich_escape(fix[:120])}")
+
+    console.print()
+    console.print(f"  [bold]Build Summary[/bold]  ({result.build_id})")
+    console.print(f"  Intent: {rich_escape(intent[:80])}")
+    console.print(f"  Tasks: {result.tasks_passed} passed, {result.tasks_failed} failed")
+    console.print(f"  [bold]Total cost: ${result.total_cost:.2f}[/bold]")
+    console.print(f"  Duration: {build_duration / 60:.1f} min")
+    if result.error:
+        console.print(f"  [red]Error: {rich_escape(result.error[:100])}[/red]")
+    console.print()
+
+
 @main.command(context_settings=CONTEXT_SETTINGS)
 @click.argument("prompt", required=False)
 @click.option("--verify", default=None, help="Custom verification command")
@@ -493,6 +537,10 @@ def build(intent, no_review, no_qa, use_planner, agent_driven, interactive, vari
 
     try:
         if agent_driven:
+            if variant == "a":
+                console.print(
+                    "  [yellow]Warning:[/yellow] Variant A is not implemented yet and requires MCP/custom tool handlers for certify()."
+                )
             on_feedback = None
             if interactive:
                 async def _interactive_feedback(report):
@@ -518,51 +566,54 @@ def build(intent, no_review, no_qa, use_planner, agent_driven, interactive, vari
         sys.exit(1)
 
     build_duration = time.time() - build_start
+    _print_build_result(intent, result, build_duration)
 
-    # Display verification results
-    if result.journeys:
-        console.print()
-        if result.passed:
-            console.print(f"  [success]All journeys passed[/success]"
-                          f" (round {result.rounds})")
-        else:
-            console.print(f"  [red]Some journeys failed[/red]"
-                          f" (after {result.rounds} round(s))")
-        for j in result.journeys:
-            status_icon = "[success]✓[/success]" if j.get("passed") else "[red]✗[/red]"
-            console.print(f"    {status_icon} {rich_escape(j.get('name', ''))}")
+    sys.exit(0 if result.passed else 1)
 
-    # Break findings — always show loudly, even on pass
-    if result.break_findings:
-        console.print()
-        high_count = sum(1 for b in result.break_findings if b.get("severity") in ("critical", "important"))
-        warn_count = len(result.break_findings) - high_count
-        if high_count:
-            console.print(f"  [red bold]⚠ {high_count} quality issue(s) found (will trigger fix)[/red bold]")
-        if warn_count:
-            console.print(f"  [yellow]⚠ {warn_count} quality warning(s)[/yellow]")
-        for b in result.break_findings:
-            sev = b.get("severity", "?")
-            desc = rich_escape(b.get("description", "")[:100])
-            if sev in ("critical", "important"):
-                console.print(f"    [red]✗ [{sev}] {desc}[/red]")
-            else:
-                console.print(f"    [yellow]! [{sev}] {desc}[/yellow]")
-            fix = b.get("fix_suggestion", "")
-            if fix:
-                console.print(f"      fix: {rich_escape(fix[:120])}")
 
-    # Print build summary
-    console.print()
-    console.print(f"  [bold]Build Summary[/bold]  ({result.build_id})")
-    console.print(f"  Intent: {rich_escape(intent[:80])}")
-    console.print(f"  Tasks: {result.tasks_passed} passed, {result.tasks_failed} failed")
-    console.print(f"  [bold]Total cost: ${result.total_cost:.2f}[/bold]")
-    console.print(f"  Duration: {build_duration / 60:.1f} min")
-    if result.error:
-        console.print(f"  [red]Error: {rich_escape(result.error[:100])}[/red]")
-    console.print()
+@main.command("resume-build", context_settings=CONTEXT_SETTINGS)
+@click.argument("checkpoint_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--interactive", is_flag=True, help="Pause for human input after each certification round")
+def resume_build(checkpoint_path, interactive):
+    """Resume an agent-driven build from a saved checkpoint."""
+    require_git()
+    project_dir = Path.cwd()
+    config_path = project_dir / "otto.yaml"
+    if not config_path.exists():
+        raise click.ClickException("otto.yaml not found in the current project")
+    config = load_config(config_path)
 
+    from otto.pipeline import resume_agent_driven
+    from otto.session import SessionCheckpoint
+
+    checkpoint = SessionCheckpoint.load(checkpoint_path)
+    if checkpoint is None:
+        raise click.ClickException(f"Could not load checkpoint: {checkpoint_path}")
+
+    on_feedback = None
+    if interactive:
+        async def _interactive_feedback(report):
+            console.print("\n  [bold]Interactive mode:[/bold] Enter feedback (empty to continue):")
+            try:
+                user_input = input("  > ").strip()
+                return user_input if user_input else None
+            except (EOFError, KeyboardInterrupt):
+                return None
+        on_feedback = _interactive_feedback
+
+    build_start = time.time()
+    try:
+        result = asyncio.run(
+            resume_agent_driven(checkpoint_path, project_dir, config, on_human_feedback=on_feedback)
+        )
+    except KeyboardInterrupt:
+        console.print("\n  Aborted.")
+        sys.exit(1)
+    except Exception as e:
+        error_console.print(f"[error]Build failed: {rich_escape(str(e))}[/error]")
+        sys.exit(1)
+
+    _print_build_result(checkpoint.intent or "resumed build", result, time.time() - build_start)
     sys.exit(0 if result.passed else 1)
 
 

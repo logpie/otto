@@ -1,6 +1,7 @@
 """Tests for agent-driven build infrastructure: session, feedback, isolated certifier."""
 
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch, AsyncMock, MagicMock
@@ -134,6 +135,71 @@ class TestAgentSession:
         assert session.session_id == "sess-new"
         assert call_count == 2  # first failed, second succeeded
 
+    @pytest.mark.asyncio
+    async def test_resume_fallback_on_error_result(self, tmp_git_repo):
+        call_count = 0
+
+        async def fake_query(prompt, options, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1 and getattr(options, "resume", None):
+                return "resume failed", 0.1, SimpleNamespace(
+                    session_id="sess-abc",
+                    is_error=True,
+                    subtype="error",
+                )
+            return "fixed via state package", 0.4, SimpleNamespace(session_id="sess-new")
+
+        with patch("otto.session.run_agent_query", side_effect=fake_query), \
+             patch("otto.session.agent_provider", return_value="claude"):
+            session = AgentSession(
+                intent="build todo",
+                options=MagicMock(permission_mode="bypassPermissions", cwd="/tmp",
+                                  model=None, system_prompt=None, mcp_servers=None,
+                                  env=None, setting_sources=None, disallowed_tools=None,
+                                  output_format=None),
+                project_dir=tmp_git_repo,
+            )
+            session.session_id = "sess-abc"
+            session._supports_resume = True
+            result = await session.resume("Fix bugs")
+
+        assert result.text == "fixed via state package"
+        assert session.session_id == "sess-new"
+        assert call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_start_raises_on_missing_result_message(self, tmp_git_repo):
+        async def fake_query(prompt, options, **kwargs):
+            return "built the product", 0.5, None
+
+        with patch("otto.session.run_agent_query", side_effect=fake_query), \
+             patch("otto.session.agent_provider", return_value="claude"):
+            session = AgentSession(
+                intent="build todo", options=MagicMock(), project_dir=tmp_git_repo,
+            )
+            with pytest.raises(RuntimeError, match="session start returned no result message"):
+                await session.start("Build a todo app")
+
+    @pytest.mark.asyncio
+    async def test_resume_with_state_package_raises_on_error_result(self, tmp_git_repo):
+        async def fake_query(prompt, options, **kwargs):
+            return "resume failed", 0.1, SimpleNamespace(
+                session_id="sess-new",
+                is_error=True,
+                subtype="error",
+            )
+
+        with patch("otto.session.run_agent_query", side_effect=fake_query), \
+             patch("otto.session.agent_provider", return_value="openai"):
+            session = AgentSession(
+                intent="build todo",
+                options=MagicMock(),
+                project_dir=tmp_git_repo,
+            )
+            with pytest.raises(RuntimeError, match="state package resume returned invalid result"):
+                await session.resume("Fix bugs")
+
 
 class TestFeedback:
     def test_format_actionable_findings(self):
@@ -192,6 +258,29 @@ class TestFeedback:
 
 
 class TestAgentDrivenBuild:
+    def test_snapshot_candidate_rejects_pre_existing_untracked_source_files(self, tmp_git_repo):
+        from otto.pipeline import _snapshot_candidate
+
+        base_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=tmp_git_repo,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        (tmp_git_repo / "scratch.py").write_text("print('keep me out')\n")
+
+        with patch("otto.git_ops.build_candidate_commit") as build_mock:
+            with pytest.raises(RuntimeError, match="eligible untracked files"):
+                _snapshot_candidate(
+                    tmp_git_repo,
+                    1,
+                    base_sha,
+                    pre_existing_untracked={"scratch.py"},
+                )
+
+        build_mock.assert_not_called()
+
     @pytest.mark.asyncio
     async def test_variant_b_passes_first_round(self, tmp_git_repo):
         """Agent builds, certifier passes on round 1."""
@@ -219,6 +308,15 @@ class TestAgentDrivenBuild:
 
         assert result.passed is True
         assert result.rounds == 1
+
+    @pytest.mark.asyncio
+    async def test_variant_a_is_explicitly_unimplemented(self, tmp_git_repo):
+        from otto.pipeline import build_agent_driven
+
+        with pytest.raises(NotImplementedError, match="not yet implemented"):
+            await build_agent_driven(
+                "Build a todo app", tmp_git_repo, {"default_branch": "main"}, variant="a",
+            )
 
     @pytest.mark.asyncio
     async def test_variant_b_fix_loop(self, tmp_git_repo):
@@ -266,3 +364,60 @@ class TestAgentDrivenBuild:
         assert result.rounds == 2
         assert call_count == 2  # build + fix
         assert len(certifier_calls) == 2
+        assert result.total_cost == pytest.approx(3.10)
+
+    @pytest.mark.asyncio
+    async def test_resume_from_checkpoint_continues_from_last_state(self, tmp_git_repo):
+        from otto.pipeline import resume_agent_driven
+
+        checkpoint_dir = tmp_git_repo / "otto_logs" / "builds" / "build-123"
+        checkpoint_dir.mkdir(parents=True)
+        SessionCheckpoint(
+            session_id="s1",
+            base_sha="base123",
+            round=0,
+            verification_round=1,
+            state="certified",
+            certifier_outcome="failed",
+            candidate_sha="abc1234",
+            intent="Build a todo app",
+            last_status="ready_for_review",
+            last_summary="built the product",
+            findings=[{
+                "severity": "critical",
+                "category": "journey",
+                "description": "XSS found",
+                "diagnosis": "unescaped HTML",
+                "fix_suggestion": "escape it",
+                "story_id": "story-1",
+            }],
+            cost_so_far=1.8,
+            agent_cost_so_far=0.3,
+            certifier_cost_so_far=1.5,
+        ).save(checkpoint_dir / "checkpoint.json")
+
+        async def fake_query(prompt, options, **kwargs):
+            return "fixed the bugs", 0.2, SimpleNamespace(
+                session_id="s1",
+                structured_output={"status": "ready_for_review", "summary": "fixed"},
+            )
+
+        passing_report = CertificationReport(
+            product_type="web", interaction="http",
+            outcome=CertificationOutcome.PASSED,
+            cost_usd=1.00, duration_s=200.0,
+        )
+
+        with patch("otto.session.run_agent_query", side_effect=fake_query), \
+             patch("otto.session.agent_provider", return_value="claude"), \
+             patch("otto.certifier.isolated.certify_with_retry", return_value=passing_report), \
+             patch("otto.pipeline._snapshot_candidate", return_value="def5678"):
+            result = await resume_agent_driven(
+                checkpoint_dir / "checkpoint.json",
+                tmp_git_repo,
+                {"default_branch": "main"},
+            )
+
+        assert result.passed is True
+        assert result.rounds == 2
+        assert result.total_cost == pytest.approx(3.0)

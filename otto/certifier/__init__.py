@@ -396,6 +396,7 @@ def run_unified_certifier(
     all_findings: list[Finding] = []
     tiers: list[TierResult] = []
     total_cost = 0.0
+    infra_error = False
 
     # Classify and analyze
     profile = classify(project_dir)
@@ -503,6 +504,7 @@ def run_unified_certifier(
                     tier4.status.value, tier4.duration_s, tier4.cost_usd)
     except Exception as exc:
         logger.exception("Unified certifier failed unexpectedly")
+        infra_error = True
         blocked = _blocked_tier_result(
             tier=0,
             name="certifier",
@@ -525,6 +527,8 @@ def run_unified_certifier(
 
     if has_critical:
         outcome = CertificationOutcome.FAILED
+    elif infra_error:
+        outcome = CertificationOutcome.INFRA_ERROR
     elif any_blocked:
         outcome = CertificationOutcome.BLOCKED
     else:

@@ -20,6 +20,7 @@ class CertificationOutcome(Enum):
     PASSED = "passed"
     FAILED = "failed"
     BLOCKED = "blocked"
+    INFRA_ERROR = "infra_error"
 
 
 class TierStatus(Enum):

@@ -47,6 +47,14 @@ def run_isolated_certifier(
     effective_cache = cache_dir or DEFAULT_CACHE_DIR
     effective_cache.mkdir(parents=True, exist_ok=True)
 
+    configured_port = port_override if port_override is not None else config.get("port_override")
+    if configured_port is not None:
+        logger.warning(
+            "Ignoring port_override=%s in isolated certifier mode; isolated runs must start their own app",
+            configured_port,
+        )
+        config.pop("port_override", None)
+
     # Thread cache_dir through config so certifier loaders use it
     config["certifier_cache_dir"] = str(effective_cache)
 
@@ -60,16 +68,16 @@ def run_isolated_certifier(
             intent=intent,
             project_dir=wt_dir,
             config=config,
-            port_override=port_override,
+            port_override=None,
             skip_story_ids=skip_story_ids,
         )
+
+        # Copy reports before the temporary worktree is cleaned up.
+        _copy_reports(wt_dir, project_dir)
 
     duration = round(time.monotonic() - start, 1)
     logger.info("Isolated certifier done: outcome=%s, %.1fs, $%.3f",
                 report.outcome.value, duration, report.cost_usd)
-
-    # Copy reports back to main project's otto_logs for observability
-    _copy_reports(wt_dir, project_dir)
 
     return report
 
@@ -153,21 +161,38 @@ def certify_with_retry(
     skip_story_ids: set[str] | None = None,
 ) -> Any:
     """Run isolated certifier with retry on infra errors."""
-    from otto.certifier.report import CertificationOutcome
+    from otto.certifier.report import CertificationOutcome, CertificationReport, Finding
 
     for attempt in range(max_retries + 1):
-        report = run_isolated_certifier(
-            intent=intent,
-            candidate_sha=candidate_sha,
-            project_dir=project_dir,
-            config=config,
-            cache_dir=cache_dir,
-            port_override=port_override,
-            skip_story_ids=skip_story_ids,
-        )
-        if not hasattr(CertificationOutcome, "INFRA_ERROR"):
-            # INFRA_ERROR not yet in enum — treat BLOCKED as potential infra
-            break
+        try:
+            report = run_isolated_certifier(
+                intent=intent,
+                candidate_sha=candidate_sha,
+                project_dir=project_dir,
+                config=config,
+                cache_dir=cache_dir,
+                port_override=port_override,
+                skip_story_ids=skip_story_ids,
+            )
+        except Exception as exc:
+            logger.exception("Isolated certifier crashed")
+            report = CertificationReport(
+                product_type="unknown",
+                interaction="unknown",
+                findings=[
+                    Finding(
+                        tier=0,
+                        severity="warning",
+                        category="harness",
+                        description="Isolated certifier crashed unexpectedly",
+                        diagnosis=str(exc),
+                        fix_suggestion="Inspect certifier infrastructure and retry",
+                    )
+                ],
+                outcome=CertificationOutcome.INFRA_ERROR,
+                cost_usd=0.0,
+                duration_s=0.0,
+            )
         if report.outcome != CertificationOutcome.INFRA_ERROR:
             break
         if attempt < max_retries:

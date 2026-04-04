@@ -210,6 +210,59 @@ class TestBuildCommand:
         assert result.exit_code == 1
         assert "qa boom" in result.output
 
+    def test_build_warns_when_variant_a_requested(self, tmp_git_repo, monkeypatch):
+        monkeypatch.chdir(tmp_git_repo)
+        create_config(tmp_git_repo)
+
+        runner = CliRunner()
+        with patch(
+            "otto.pipeline.build_agent_driven",
+            side_effect=NotImplementedError("Variant A is not yet implemented"),
+        ):
+            result = runner.invoke(
+                main,
+                ["build", "demo app", "--agent-driven", "--variant", "a", "--no-review"],
+            )
+
+        assert result.exit_code == 1
+        assert "Variant A is not implemented yet" in result.output
+
+    def test_resume_build_uses_checkpoint(self, tmp_git_repo, monkeypatch):
+        monkeypatch.chdir(tmp_git_repo)
+        create_config(tmp_git_repo)
+
+        checkpoint_dir = tmp_git_repo / "otto_logs" / "builds" / "build-123"
+        checkpoint_dir.mkdir(parents=True)
+        checkpoint_path = checkpoint_dir / "checkpoint.json"
+        checkpoint_path.write_text(json.dumps({
+            "session_id": "s1",
+            "base_sha": "abc123",
+            "round": 1,
+            "verification_round": 2,
+            "state": "fixing",
+            "certifier_outcome": "failed",
+            "candidate_sha": "def456",
+            "intent": "resume this build",
+            "last_status": "ready_for_review",
+            "last_summary": "partial build",
+            "findings": [],
+            "cost_so_far": 1.2,
+            "agent_cost_so_far": 0.5,
+            "certifier_cost_so_far": 0.7,
+        }))
+
+        from otto.pipeline import BuildResult
+
+        async def fake_resume(checkpoint_path, project_dir, config, **kwargs):
+            return BuildResult(passed=True, build_id="build-123", rounds=2, total_cost=1.2)
+
+        runner = CliRunner()
+        with patch("otto.pipeline.resume_agent_driven", side_effect=fake_resume):
+            result = runner.invoke(main, ["resume-build", str(checkpoint_path)])
+
+        assert result.exit_code == 0
+        assert "resume this build" in result.output
+
 
 class TestPipelineE2E:
     """E2E tests for the full pipeline: build → certify → fix → verify.

@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger("otto.pipeline")
 
 
 @dataclass
@@ -284,12 +287,29 @@ async def build_agent_driven(
     from otto.certifier.isolated import certify_with_retry
     from otto.certifier.report import CertificationOutcome
     from otto.feedback import format_certifier_as_feedback, finding_fingerprints
-    from otto.git_ops import build_candidate_commit
+    from otto.git_ops import _snapshot_untracked, check_clean_tree
     from otto.session import AgentSession
 
     build_id = f"build-{int(time.time())}-{os.getpid()}"
     build_dir = project_dir / "otto_logs" / "builds" / build_id
     build_dir.mkdir(parents=True, exist_ok=True)
+    pre_existing_untracked = _snapshot_untracked(project_dir)
+
+    # Fail early on dirty workspace — don't waste a build turn
+    if not check_clean_tree(project_dir):
+        raise RuntimeError(
+            "Agent-driven build requires a clean working tree. "
+            "Commit or stash your changes before running otto build --agent-driven."
+        )
+    # Filter to eligible untracked (non-otto-owned source files)
+    from otto.git_ops import _should_stage_untracked
+    eligible_untracked = {f for f in pre_existing_untracked if _should_stage_untracked(f)}
+    if eligible_untracked:
+        raise RuntimeError(
+            f"Agent-driven build requires no pre-existing untracked source files. "
+            f"Found: {', '.join(sorted(eligible_untracked)[:5])}. "
+            f"Add them to .gitignore or commit them first."
+        )
 
     # Write intent to project root
     grounding_path = project_dir / "intent.md"
@@ -322,8 +342,16 @@ async def build_agent_driven(
     # Round 0: Build
     build_prompt = VARIANT_B_BUILD_PROMPT.format(intent=intent)
     result = await session.start(build_prompt)
+    session.checkpoint(
+        None,
+        state="building",
+        verification_round=1,
+        last_status=result.end_status,
+    )
 
     report = None
+    certifier_total_cost = 0.0
+    checkpoint_findings: list[dict[str, Any]] | None = None
     prev_fingerprints: set[str] = set()
     last_journeys: list[dict[str, Any]] = []
     last_break_findings: list[dict[str, Any]] = []
@@ -338,12 +366,36 @@ async def build_agent_driven(
                 human = await on_human_feedback(None)
                 if human:
                     result = await session.resume(human)
+                    session.checkpoint(
+                        None,
+                        findings=checkpoint_findings,
+                        state="building",
+                        verification_round=round_num,
+                        last_status=result.end_status,
+                        certifier_cost_so_far=certifier_total_cost,
+                        journeys=last_journeys,
+                        break_findings=last_break_findings,
+                    )
                     continue
             break
 
         # Snapshot candidate
-        candidate_sha = _snapshot_candidate(project_dir, round_num, session.base_sha)
-        session.checkpoint(candidate_sha, state="certifying")
+        candidate_sha = _snapshot_candidate(
+            project_dir,
+            round_num,
+            session.base_sha,
+            pre_existing_untracked=pre_existing_untracked,
+        )
+        session.checkpoint(
+            candidate_sha,
+            findings=checkpoint_findings,
+            state="certifying",
+            verification_round=round_num,
+            last_status=result.end_status,
+            certifier_cost_so_far=certifier_total_cost,
+            journeys=last_journeys,
+            break_findings=last_break_findings,
+        )
 
         # Certify in isolated worktree
         report = certify_with_retry(
@@ -354,13 +406,8 @@ async def build_agent_driven(
             port_override=config.get("port_override"),
             skip_story_ids=None,  # TODO: targeted re-verify
         )
-        session.checkpoint(
-            candidate_sha,
-            findings=[{"description": f.description, "severity": f.severity}
-                      for f in report.findings] if report.findings else None,
-            state="certified",
-            certifier_outcome=report.outcome.value,
-        )
+        certifier_total_cost += float(report.cost_usd or 0.0)
+        checkpoint_findings = _report_findings_payload(report)
 
         # Extract display data
         tier4 = next((t for t in report.tiers if t.tier == 4), None)
@@ -372,6 +419,17 @@ async def build_agent_driven(
              "story_id": f.story_id}
             for f in report.break_findings()
         ]
+        session.checkpoint(
+            candidate_sha,
+            findings=checkpoint_findings,
+            state="certified",
+            certifier_outcome=report.outcome.value,
+            verification_round=round_num,
+            last_status=result.end_status,
+            certifier_cost_so_far=certifier_total_cost,
+            journeys=last_journeys,
+            break_findings=last_break_findings,
+        )
 
         # Outcome dispatch
         if report.outcome == CertificationOutcome.PASSED:
@@ -381,13 +439,20 @@ async def build_agent_driven(
                     result = await session.resume(
                         f"Product passed testing. The user has additional feedback:\n{human}"
                     )
+                    session.checkpoint(
+                        candidate_sha,
+                        findings=checkpoint_findings,
+                        state="fixing",
+                        verification_round=round_num + 1,
+                        last_status=result.end_status,
+                        certifier_cost_so_far=certifier_total_cost,
+                        journeys=last_journeys,
+                        break_findings=last_break_findings,
+                    )
                     continue
             break
 
-        if report.outcome in (CertificationOutcome.BLOCKED,):
-            break
-        # INFRA_ERROR already retried by certify_with_retry
-        if hasattr(CertificationOutcome, "INFRA_ERROR") and report.outcome == CertificationOutcome.INFRA_ERROR:
+        if report.outcome in (CertificationOutcome.BLOCKED, CertificationOutcome.INFRA_ERROR):
             break
 
         # Format actionable findings as feedback
@@ -408,16 +473,25 @@ async def build_agent_driven(
                 feedback += f"\n\nAdditional feedback from the user:\n{human}"
 
         # Resume session with feedback
-        session.checkpoint(candidate_sha, state="fixing")
         fix_prompt = VARIANT_B_FIX_PROMPT.format(feedback=feedback)
         result = await session.resume(fix_prompt)
+        session.checkpoint(
+            candidate_sha,
+            findings=checkpoint_findings,
+            state="fixing",
+            verification_round=round_num + 1,
+            last_status=result.end_status,
+            certifier_cost_so_far=certifier_total_cost,
+            journeys=last_journeys,
+            break_findings=last_break_findings,
+        )
 
     passed = report.passed if report else False
     return BuildResult(
         passed=passed,
         build_id=build_id,
         rounds=round_num if report else 0,
-        total_cost=session.total_cost + (report.cost_usd if report else 0),
+        total_cost=session.total_cost + certifier_total_cost,
         journeys=last_journeys,
         break_findings=last_break_findings,
     )
@@ -449,42 +523,40 @@ async def _build_variant_a(
     config: dict[str, Any],
 ) -> BuildResult:
     """Variant A: agent calls certify() as a tool. Fully agentic."""
-    from otto.agent import ClaudeAgentOptions, _subprocess_env, run_agent_query
     from otto.certifier.mcp_tool import CertifyTool
 
-    build_id = f"build-{int(time.time())}-{os.getpid()}"
-    build_dir = project_dir / "otto_logs" / "builds" / build_id
-    build_dir.mkdir(parents=True, exist_ok=True)
-
-    # Write intent
-    grounding_path = project_dir / "intent.md"
-    if not grounding_path.exists():
-        grounding_path.write_text(intent)
-    _commit_artifacts(project_dir)
-
-    # Create certify tool
-    certify_tool = CertifyTool(
+    _ = CertifyTool(
         project_dir=project_dir,
         intent=intent,
         config=config,
         max_calls=int(config.get("max_verification_rounds", 3)),
     )
+    raise NotImplementedError(
+        "Variant A is not yet implemented. It requires MCP/custom tool handler support for certify(). "
+        "The CertifyTool code is preserved for that future integration."
+    )
 
-    # The agent gets standard CC tools + certify()
-    # NOTE: certify() is not a real MCP server in V1.
-    # We inject it as a tool via the system prompt and handle it
-    # through the SDK's tool_use mechanism. For now, we simulate
-    # by using Variant B with the certify prompt — true MCP integration
-    # requires SDK support for custom tool handlers.
-    #
-    # V1 approximation: use Variant B but with Variant A's prompt.
-    # The agent believes it has certify() but the orchestrator intercepts
-    # session completion as the "certify" signal.
 
+async def resume_agent_driven(
+    checkpoint_path: Path,
+    project_dir: Path,
+    config: dict[str, Any],
+    *,
+    on_human_feedback: Any = None,
+) -> BuildResult:
+    """Resume an agent-driven Variant B build from a saved checkpoint."""
+    from otto.agent import ClaudeAgentOptions, _subprocess_env
+    from otto.certifier.isolated import certify_with_retry
+    from otto.certifier.report import CertificationOutcome
+    from otto.feedback import finding_fingerprints
+    from otto.git_ops import _snapshot_untracked, check_clean_tree
+    from otto.session import AgentSession, SessionCheckpoint
+
+    checkpoint_path = Path(checkpoint_path)
     options = ClaudeAgentOptions(
         permission_mode="bypassPermissions",
         cwd=str(project_dir),
-        system_prompt=VARIANT_A_SYSTEM_PROMPT,
+        system_prompt=VARIANT_B_SYSTEM_PROMPT,
         env=_subprocess_env(),
         setting_sources=["project"],
     )
@@ -492,89 +564,328 @@ async def _build_variant_a(
     if model:
         options.model = str(model)
 
-    # For true Variant A, we'd need MCP tool handler support in the SDK.
-    # V1: fall back to Variant B with Variant A's prompt.
-    from otto.feedback import format_certifier_as_feedback, finding_fingerprints
-    from otto.certifier.isolated import certify_with_retry
-    from otto.certifier.report import CertificationOutcome
-    from otto.session import AgentSession
-
-    max_rounds = int(config.get("max_verification_rounds", 3))
-
     session = AgentSession(
-        intent=intent, options=options, project_dir=project_dir,
-        config=config, checkpoint_dir=build_dir,
+        intent="",
+        options=options,
+        project_dir=project_dir,
+        config=config,
+        checkpoint_dir=checkpoint_path.parent,
+    )
+    cp = session.load_checkpoint() if checkpoint_path.name == "checkpoint.json" else SessionCheckpoint.load(checkpoint_path)
+    if cp is None:
+        raise FileNotFoundError(f"No valid checkpoint found at {checkpoint_path}")
+
+    session.intent = cp.intent
+    session.session_id = cp.session_id
+    session.base_sha = cp.base_sha
+    session.round = int(cp.round or 0)
+    session.last_summary = cp.last_summary
+    session.total_cost = float(
+        cp.agent_cost_so_far or max(float(cp.cost_so_far or 0.0) - float(cp.certifier_cost_so_far or 0.0), 0.0)
     )
 
-    prompt = f"Build this product:\n\n{intent}\n\nWhen done, say 'ready for review'."
-    result = await session.start(prompt)
+    build_id = checkpoint_path.parent.name
+    pre_existing_untracked = _snapshot_untracked(project_dir)
 
+    # Same clean-start enforcement as fresh builds
+    if not check_clean_tree(project_dir):
+        raise RuntimeError(
+            "Resumed agent-driven build requires a clean working tree. "
+            "Commit or stash your changes before resuming."
+        )
+    from otto.git_ops import _should_stage_untracked
+    eligible_untracked = {f for f in pre_existing_untracked if _should_stage_untracked(f)}
+    if eligible_untracked:
+        raise RuntimeError(
+            f"Resumed agent-driven build requires no pre-existing untracked source files. "
+            f"Found: {', '.join(sorted(eligible_untracked)[:5])}. "
+            f"Add them to .gitignore or commit them first."
+        )
+
+    certifier_total_cost = float(
+        cp.certifier_cost_so_far or max(float(cp.cost_so_far or 0.0) - session.total_cost, 0.0)
+    )
+    checkpoint_findings = cp.findings
+    prev_fingerprints = _checkpoint_fingerprints(cp.findings)
+    last_journeys = list(cp.journeys or [])
+    last_break_findings = list(cp.break_findings or [])
+    current_status = cp.last_status or "ready_for_review"
+    round_num = int(cp.verification_round or 1)
     report = None
-    prev_fps: set[str] = set()
-    last_journeys: list[dict[str, Any]] = []
-    last_break: list[dict[str, Any]] = []
 
-    for round_num in range(1, max_rounds + 1):
-        candidate_sha = _snapshot_candidate(project_dir, round_num, session.base_sha)
-        session.checkpoint(candidate_sha, state="certifying")
+    if cp.state == "certified":
+        if cp.certifier_outcome == CertificationOutcome.PASSED.value:
+            return BuildResult(
+                passed=True,
+                build_id=build_id,
+                rounds=round_num,
+                total_cost=session.total_cost + certifier_total_cost,
+                journeys=last_journeys,
+                break_findings=last_break_findings,
+            )
+        if cp.certifier_outcome in (
+            CertificationOutcome.BLOCKED.value,
+            CertificationOutcome.INFRA_ERROR.value,
+        ):
+            return BuildResult(
+                passed=False,
+                build_id=build_id,
+                rounds=round_num,
+                total_cost=session.total_cost + certifier_total_cost,
+                journeys=last_journeys,
+                break_findings=last_break_findings,
+            )
+        feedback = _format_checkpoint_feedback(cp.findings)
+        if feedback:
+            result = await session.resume(VARIANT_B_FIX_PROMPT.format(feedback=feedback))
+            round_num += 1
+            current_status = result.end_status
+            session.checkpoint(
+                cp.candidate_sha,
+                findings=checkpoint_findings,
+                state="fixing",
+                verification_round=round_num,
+                last_status=current_status,
+                certifier_cost_so_far=certifier_total_cost,
+                journeys=last_journeys,
+                break_findings=last_break_findings,
+            )
+        else:
+            return BuildResult(
+                passed=False,
+                build_id=build_id,
+                rounds=round_num,
+                total_cost=session.total_cost + certifier_total_cost,
+                journeys=last_journeys,
+                break_findings=last_break_findings,
+            )
+
+    max_rounds = int(config.get("max_verification_rounds", 3))
+    while round_num <= max_rounds:
+        if current_status == "blocked":
+            break
+        if current_status == "needs_human_input":
+            if on_human_feedback:
+                human = await on_human_feedback(None)
+                if human:
+                    result = await session.resume(human)
+                    current_status = result.end_status
+                    session.checkpoint(
+                        cp.candidate_sha,
+                        findings=checkpoint_findings,
+                        state="fixing" if cp.state == "fixing" else "building",
+                        verification_round=round_num,
+                        last_status=current_status,
+                        certifier_cost_so_far=certifier_total_cost,
+                        journeys=last_journeys,
+                        break_findings=last_break_findings,
+                    )
+                    continue
+            break
+
+        if cp.state == "certifying" and round_num == int(cp.verification_round or 1):
+            candidate_sha = cp.candidate_sha
+        else:
+            candidate_sha = _snapshot_candidate(
+                project_dir,
+                round_num,
+                session.base_sha,
+                pre_existing_untracked=pre_existing_untracked,
+            )
+            session.checkpoint(
+                candidate_sha,
+                findings=checkpoint_findings,
+                state="certifying",
+                verification_round=round_num,
+                last_status=current_status,
+                certifier_cost_so_far=certifier_total_cost,
+                journeys=last_journeys,
+                break_findings=last_break_findings,
+            )
+
+        if not candidate_sha:
+            break
 
         report = certify_with_retry(
-            intent=intent, candidate_sha=candidate_sha,
-            project_dir=project_dir, config=config,
+            intent=session.intent,
+            candidate_sha=candidate_sha,
+            project_dir=project_dir,
+            config=config,
             port_override=config.get("port_override"),
+            skip_story_ids=None,
         )
-        session.checkpoint(
-            candidate_sha, state="certified",
-            certifier_outcome=report.outcome.value,
-            findings=[{"description": f.description} for f in report.findings] if report.findings else None,
-        )
+        certifier_total_cost += float(report.cost_usd or 0.0)
+        checkpoint_findings = _report_findings_payload(report)
 
         tier4 = next((t for t in report.tiers if t.tier == 4), None)
         if tier4 and hasattr(tier4, "_stories_output"):
             last_journeys = tier4._stories_output
-        last_break = [
+        last_break_findings = [
             {"severity": f.severity, "description": f.description,
-             "diagnosis": f.diagnosis, "fix_suggestion": f.fix_suggestion}
+             "diagnosis": f.diagnosis, "fix_suggestion": f.fix_suggestion,
+             "story_id": f.story_id}
             for f in report.break_findings()
         ]
+        session.checkpoint(
+            candidate_sha,
+            findings=checkpoint_findings,
+            state="certified",
+            certifier_outcome=report.outcome.value,
+            verification_round=round_num,
+            last_status=current_status,
+            certifier_cost_so_far=certifier_total_cost,
+            journeys=last_journeys,
+            break_findings=last_break_findings,
+        )
 
         if report.outcome == CertificationOutcome.PASSED:
             break
-        if report.outcome == CertificationOutcome.BLOCKED:
-            break
-        if hasattr(CertificationOutcome, "INFRA_ERROR") and report.outcome == CertificationOutcome.INFRA_ERROR:
+        if report.outcome in (CertificationOutcome.BLOCKED, CertificationOutcome.INFRA_ERROR):
             break
 
-        feedback = format_certifier_as_feedback(report)
+        feedback = _format_checkpoint_feedback(checkpoint_findings)
         if not feedback:
             break
 
         current_fps = finding_fingerprints(report.critical_findings())
-        if round_num > 1 and current_fps == prev_fps:
+        if round_num > 1 and current_fps == prev_fingerprints:
             break
-        prev_fps = current_fps
+        prev_fingerprints = current_fps
 
-        session.checkpoint(candidate_sha, state="fixing")
-        result = await session.resume(
-            f"certify() returned:\n\n{feedback}\n\nFix these issues and say 'ready for review' when done."
+        if on_human_feedback:
+            human = await on_human_feedback(report)
+            if human:
+                feedback += f"\n\nAdditional feedback from the user:\n{human}"
+
+        result = await session.resume(VARIANT_B_FIX_PROMPT.format(feedback=feedback))
+        round_num += 1
+        current_status = result.end_status
+        session.checkpoint(
+            candidate_sha,
+            findings=checkpoint_findings,
+            state="fixing",
+            verification_round=round_num,
+            last_status=current_status,
+            certifier_cost_so_far=certifier_total_cost,
+            journeys=last_journeys,
+            break_findings=last_break_findings,
+        )
+        cp = SessionCheckpoint(
+            session_id=session.session_id,
+            base_sha=session.base_sha,
+            round=session.round,
+            verification_round=round_num,
+            state="fixing",
+            certifier_outcome=report.outcome.value,
+            candidate_sha=candidate_sha,
+            intent=session.intent,
+            last_status=current_status,
+            last_summary=session.last_summary,
+            findings=checkpoint_findings,
+            cost_so_far=session.total_cost + certifier_total_cost,
+            agent_cost_so_far=session.total_cost,
+            certifier_cost_so_far=certifier_total_cost,
+            journeys=last_journeys,
+            break_findings=last_break_findings,
         )
 
-    passed = report.passed if report else False
     return BuildResult(
-        passed=passed, build_id=build_id,
-        rounds=round_num if report else 0,
-        total_cost=session.total_cost + (report.cost_usd if report else 0),
-        journeys=last_journeys, break_findings=last_break,
+        passed=report.passed if report else False,
+        build_id=build_id,
+        rounds=round_num if report else int(cp.verification_round or 0),
+        total_cost=session.total_cost + certifier_total_cost,
+        journeys=last_journeys,
+        break_findings=last_break_findings,
     )
 
 
-def _snapshot_candidate(project_dir: Path, round_num: int, base_sha: str) -> str:
+def _snapshot_candidate(
+    project_dir: Path,
+    round_num: int,
+    base_sha: str,
+    *,
+    pre_existing_untracked: set[str] | None = None,
+) -> str:
     """Create an immutable candidate ref from the agent's current work."""
+    from otto.git_ops import _anchor_candidate_ref, _should_stage_untracked, build_candidate_commit
+
+    eligible_pre_existing = sorted(
+        rel_path
+        for rel_path in (pre_existing_untracked or set())
+        if _should_stage_untracked(rel_path)
+    )
+    if eligible_pre_existing:
+        preview = ", ".join(repr(path) for path in eligible_pre_existing[:5])
+        if len(eligible_pre_existing) > 5:
+            preview += f", ... (+{len(eligible_pre_existing) - 5} more)"
+        raise RuntimeError(
+            "Agent-driven candidate snapshot refused because the repo already had eligible "
+            f"untracked files before the agent run: {preview}"
+        )
+
     # Stage all changes (excluding otto-owned files)
-    from otto.git_ops import build_candidate_commit, _anchor_candidate_ref
-    candidate_sha = build_candidate_commit(project_dir, base_sha, pre_existing_untracked=set())
+    candidate_sha = build_candidate_commit(
+        project_dir,
+        base_sha,
+        pre_existing_untracked=pre_existing_untracked,
+    )
     _anchor_candidate_ref(project_dir, f"build-round-{round_num}", round_num, candidate_sha)
     return candidate_sha
+
+
+def _report_findings_payload(report: Any) -> list[dict[str, Any]] | None:
+    if not getattr(report, "findings", None):
+        return None
+    return [
+        {
+            "severity": f.severity,
+            "category": f.category,
+            "description": f.description,
+            "diagnosis": f.diagnosis,
+            "fix_suggestion": f.fix_suggestion,
+            "story_id": f.story_id,
+        }
+        for f in report.findings
+    ]
+
+
+def _checkpoint_fingerprints(findings: list[dict[str, Any]] | None) -> set[str]:
+    return {
+        f"{item.get('category', '')}:{str(item.get('description', ''))[:50]}:{item.get('story_id') or ''}"
+        for item in (findings or [])
+        if str(item.get("severity", "")) in ("critical", "important")
+    }
+
+
+def _format_checkpoint_feedback(findings: list[dict[str, Any]] | None) -> str | None:
+    if not findings:
+        return None
+
+    critical = [
+        item for item in findings
+        if str(item.get("severity", "")) in ("critical", "important")
+    ]
+    if not critical:
+        return None
+
+    lines = ["A user tested your product and found these issues:\n"]
+    for i, item in enumerate(critical, 1):
+        lines.append(f"{i}. {item.get('description', '')}")
+        if item.get("diagnosis"):
+            lines.append(f"   What happened: {item['diagnosis']}")
+        if item.get("fix_suggestion"):
+            lines.append(f"   Suggested fix: {item['fix_suggestion']}")
+        lines.append("")
+
+    warnings = [item for item in findings if item.get("category") == "edge-case"]
+    if warnings:
+        lines.append("Quality warnings (edge cases found during testing):")
+        for item in warnings:
+            lines.append(f"- [{item.get('severity', 'warning')}] {item.get('description', '')}")
+        lines.append("")
+
+    lines.append("Please fix these issues and let me know when you're done.")
+    return "\n".join(lines)
 
 
 def _commit_artifacts(project_dir: Path) -> None:

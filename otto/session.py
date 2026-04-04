@@ -30,9 +30,15 @@ class SessionCheckpoint:
     certifier_outcome: str | None  # "passed" | "failed" | "blocked" | "infra_error" | None
     candidate_sha: str | None
     intent: str
+    verification_round: int = 0
+    last_status: str = "ready_for_review"
     last_summary: str = ""
     findings: list[dict[str, Any]] | None = None
     cost_so_far: float = 0.0
+    agent_cost_so_far: float = 0.0
+    certifier_cost_so_far: float = 0.0
+    journeys: list[dict[str, Any]] | None = None
+    break_findings: list[dict[str, Any]] | None = None
     created_at: str = ""
 
     def save(self, path: Path) -> None:
@@ -110,7 +116,7 @@ class AgentSession:
         self.last_summary: str = ""
         self._checkpoint_dir = checkpoint_dir or project_dir / "otto_logs" / "session"
         self._provider = agent_provider(self.config)
-        self._supports_resume = self._provider != "codex"
+        self._supports_resume = self._provider in {"claude", "codex"}
 
     async def start(self, prompt: str) -> SessionResult:
         """Start a new agent session."""
@@ -121,6 +127,7 @@ class AgentSession:
                      self._provider, self._supports_resume)
 
         text, cost, result_msg = await run_agent_query(prompt, self.options)
+        self._validate_turn_result(result_msg, operation="session start")
         self.session_id = getattr(result_msg, "session_id", None)
         self.total_cost += cost
 
@@ -163,6 +170,7 @@ class AgentSession:
         )
 
         text, cost, result_msg = await run_agent_query(feedback, opts)
+        self._validate_turn_result(result_msg, operation="session resume")
         new_session_id = getattr(result_msg, "session_id", None)
         if new_session_id:
             self.session_id = new_session_id
@@ -183,6 +191,7 @@ class AgentSession:
 
         logger.info("Resuming with state package (session continuity lost)")
         text, cost, result_msg = await run_agent_query(state_prompt, self.options)
+        self._validate_turn_result(result_msg, operation="state package resume")
         self.session_id = getattr(result_msg, "session_id", None)
         self.total_cost += cost
 
@@ -194,6 +203,20 @@ class AgentSession:
         logger.info("State package session: session_id=%s, cost=$%.2f, total=$%.2f",
                      self.session_id, cost, self.total_cost)
         return result
+
+    def _validate_turn_result(self, result_msg: Any, *, operation: str) -> None:
+        """Reject missing or explicit error results from the agent provider."""
+        if result_msg is None:
+            raise RuntimeError(f"{operation} returned no result message")
+
+        is_error = bool(getattr(result_msg, "is_error", False))
+        subtype = getattr(result_msg, "subtype", None)
+        if is_error or str(subtype or "") == "error":
+            session_id = getattr(result_msg, "session_id", None)
+            raise RuntimeError(
+                f"{operation} returned invalid result "
+                f"(session_id={session_id!r}, is_error={is_error}, subtype={subtype!r})"
+            )
 
     def _build_state_package(self, feedback: str) -> str:
         """Build compressed context for a fresh session when resume fails."""
@@ -217,11 +240,16 @@ class AgentSession:
 
     def checkpoint(
         self,
-        candidate_sha: str,
+        candidate_sha: str | None,
         *,
         findings: list[dict[str, Any]] | None = None,
         state: str = "building",
         certifier_outcome: str | None = None,
+        verification_round: int = 0,
+        last_status: str = "ready_for_review",
+        certifier_cost_so_far: float = 0.0,
+        journeys: list[dict[str, Any]] | None = None,
+        break_findings: list[dict[str, Any]] | None = None,
     ) -> None:
         """Write durable checkpoint for crash recovery."""
         cp = SessionCheckpoint(
@@ -232,9 +260,15 @@ class AgentSession:
             certifier_outcome=certifier_outcome,
             candidate_sha=candidate_sha,
             intent=self.intent,
+            verification_round=verification_round,
+            last_status=last_status,
             last_summary=self.last_summary,
             findings=findings,
-            cost_so_far=self.total_cost,
+            cost_so_far=self.total_cost + float(certifier_cost_so_far),
+            agent_cost_so_far=self.total_cost,
+            certifier_cost_so_far=float(certifier_cost_so_far),
+            journeys=journeys,
+            break_findings=break_findings,
         )
         cp.save(self._checkpoint_dir / "checkpoint.json")
         logger.debug("Checkpoint saved: round=%d, state=%s, sha=%s",
