@@ -2,8 +2,8 @@
 
 This module has been replaced by the certifier (otto/certifier/) which uses
 compile-then-execute: test matrices are compiled once via LLM, then executed
-as deterministic HTTP probes in seconds for $0. The outer loop now calls
-otto.certifier.run_certifier_for_outer_loop() instead of run_product_qa().
+as deterministic HTTP probes in seconds for $0. Verification now calls
+otto.certifier.run_certifier_v2() instead of run_product_qa().
 
 This file is kept for reference only and will be removed in a future version.
 """
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import warnings
 warnings.warn(
-    "otto.product_qa is deprecated. Use otto.certifier.run_certifier_for_outer_loop instead.",
+    "otto.product_qa is deprecated. Use otto.certifier.run_certifier_v2 instead.",
     DeprecationWarning,
     stacklevel=2,
 )

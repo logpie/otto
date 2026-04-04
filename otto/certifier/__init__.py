@@ -25,17 +25,17 @@ from typing import Any
 logger = logging.getLogger("otto.certifier")
 
 
-def run_certifier_for_outer_loop(
+def run_certifier_for_verification(
     intent: str,
     project_dir: Path,
     config: dict[str, Any] | None = None,
     *,
     port_override: int | None = None,
 ) -> dict[str, Any]:
-    """Run the full certifier pipeline and return outer-loop-compatible results.
+    """Run the full certifier pipeline and return verification-compatible results.
 
     Runs Tier 1 (endpoint probes) + Tier 2 (user journeys) and returns a dict
-    matching the interface the outer loop expects from product QA.
+    matching the interface verification expects from product QA.
 
     Returns dict with:
         product_passed (bool), journeys (list with step-level proof),
@@ -125,7 +125,7 @@ def run_certifier_for_outer_loop(
     except Exception as exc:
         logger.warning("Failed to generate PoW report: %s", exc)
 
-    # 7. Translate to outer loop format
+    # 7. Translate to verification format
     journeys = []
     for j in tier2_result.journeys:
         failed_steps = [s for s in j.steps if not s.passed]
@@ -188,7 +188,7 @@ def run_certifier_v2(
 
     Compiles user stories from intent, builds a product manifest from code analysis,
     runs a journey agent per story to simulate real users. Produces actionable
-    fix tasks for the outer loop.
+    fix tasks for the verification loop.
 
     Returns dict with:
         product_passed, stories (list with step-level evidence + diagnosis),
@@ -293,7 +293,7 @@ def run_certifier_v2(
 
     total_duration = round(time.monotonic() - start_time, 1)
 
-    # 7. Format for outer loop
+    # 7. Format for verification
     stories_output = []
     for r in cert_result.results:
         failed_steps = [s for s in r.steps if s.outcome == "fail"]
@@ -354,7 +354,7 @@ def run_certifier_v2(
         "cost_usd": compile_cost + cert_result.total_cost_usd,
         "duration_s": total_duration,
         "certification_result": cert_result,
-        # Backward compat: outer loop checks "journeys" key
+        # Backward compat: verification checks "journeys" key
         "journeys": stories_output,
     }
 

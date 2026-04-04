@@ -1,10 +1,10 @@
-"""Otto product verification loop.
+"""Otto product verification — verify the product works for real users.
 
-After a successful build, verify the product works for real users.
+After a successful build, run certifier journeys against the product.
 If verification fails, generate targeted fix tasks and re-run.
 
 Everything is "add tasks and run" — fix tasks go through the same
-inner loop as the initial build. The certifier is just a task generator.
+pipeline as the initial build. The certifier is just a task generator.
 """
 
 from __future__ import annotations
@@ -16,11 +16,11 @@ from typing import Any
 
 from otto.observability import append_text_log
 
-logger = logging.getLogger("otto.outer_loop")
+logger = logging.getLogger("otto.verification")
 
 
-def _outer_log(project_dir: Path, *lines: str) -> None:
-    append_text_log(project_dir / "otto_logs" / "outer-loop.log", lines)
+def _verification_log(project_dir: Path, *lines: str) -> None:
+    append_text_log(project_dir / "otto_logs" / "verification.log", lines)
 
 
 def _specs_from_journeys(failed_journeys: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -126,8 +126,8 @@ async def run_product_verification(
 ) -> dict[str, Any]:
     """Verify product → if fails → add fix tasks → re-run → re-verify.
 
-    The inner loop (run_per) is the only execution engine. This function
-    just decides what to verify and what fix tasks to create.
+    run_per is the only execution engine. This function just decides
+    what to verify and what fix tasks to create.
 
     Returns dict with:
         product_passed, rounds, total_cost, journeys, fix_tasks_created.
@@ -146,34 +146,34 @@ async def run_product_verification(
     port_override = config.get("port_override")
 
     for round_num in range(1, max_rounds + 1):
-        _outer_log(
+        _verification_log(
             project_dir,
             f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] verification round {round_num}/{max_rounds}",
         )
 
-        # Run any pending fix tasks through the inner loop (same pipeline as build)
+        # Run any pending fix tasks through the same pipeline as build
         pending = [t for t in load_tasks(tasks_path) if t.get("status") == "pending"]
         if pending:
-            _outer_log(project_dir, f"running {len(pending)} fix task(s)")
+            _verification_log(project_dir, f"running {len(pending)} fix task(s)")
             exit_code = await run_per(config, tasks_path, project_dir)
             if exit_code != 0:
-                _outer_log(project_dir, f"fix tasks failed (exit {exit_code})")
+                _verification_log(project_dir, f"fix tasks failed (exit {exit_code})")
                 return {
                     "product_passed": False,
                     "rounds": round_num,
                     "total_cost": total_cost,
                     "journeys": last_result.get("journeys", []),
                     "fix_tasks_created": fix_tasks_created,
-                    "inner_loop_failed": True,
+                    "build_failed": True,
                 }
 
         # Certify: run journey agents against the product
         # On re-verify (round 2+), only test stories that failed — skip passed ones
         focus = passed_story_ids if round_num > 1 else None
         if focus:
-            _outer_log(project_dir, f"targeted re-verify: skipping {len(focus)} passed stories")
+            _verification_log(project_dir, f"targeted re-verify: skipping {len(focus)} passed stories")
         else:
-            _outer_log(project_dir, "running certifier (all stories)")
+            _verification_log(project_dir, "running certifier (all stories)")
         loop = asyncio.get_event_loop()
         _focus = focus  # capture for lambda
         result = await loop.run_in_executor(
@@ -189,7 +189,7 @@ async def run_product_verification(
         total_cost += result.get("cost_usd", 0.0)
         last_result = result
 
-        _outer_log(
+        _verification_log(
             project_dir,
             f"certifier: {result.get('duration_s', 0):.0f}s, "
             f"${result.get('cost_usd', 0):.2f}",
@@ -202,7 +202,7 @@ async def run_product_verification(
 
         # Passed — done
         if result.get("product_passed"):
-            _outer_log(project_dir, f"PASSED (round {round_num})")
+            _verification_log(project_dir, f"PASSED (round {round_num})")
             return {
                 "product_passed": True,
                 "rounds": round_num,
@@ -214,7 +214,7 @@ async def run_product_verification(
         # Infrastructure error (app didn't start, story compilation failed, etc.)
         # — not a product bug, don't create fix tasks
         if result.get("error"):
-            _outer_log(
+            _verification_log(
                 project_dir,
                 f"INFRA ERROR (round {round_num}): {result['error'][:200]}",
             )
@@ -227,7 +227,7 @@ async def run_product_verification(
         ]
         failure_count = len(failed_journeys)
 
-        _outer_log(
+        _verification_log(
             project_dir,
             f"FAILED (round {round_num}): {failure_count} journey(s) failed",
             f"  stories: {[j.get('name') for j in failed_journeys]}",
@@ -235,16 +235,16 @@ async def run_product_verification(
 
         # No journey failures (all passed but product_passed is False?) — stop
         if failure_count == 0:
-            _outer_log(project_dir, "no journey failures to fix — stopping")
+            _verification_log(project_dir, "no journey failures to fix — stopping")
             break
 
         # Stop conditions
         if round_num >= max_rounds:
-            _outer_log(project_dir, f"max rounds ({max_rounds}) reached")
+            _verification_log(project_dir, f"max rounds ({max_rounds}) reached")
             break
 
         if round_num > 1 and failure_count >= prev_failure_count > 0:
-            _outer_log(
+            _verification_log(
                 project_dir,
                 f"no progress ({prev_failure_count} → {failure_count} failures)",
             )
@@ -257,7 +257,7 @@ async def run_product_verification(
         fix_prompt, fix_specs = _bundle_fix_tasks(failed_journeys)
         add_task(tasks_path, fix_prompt, spec=fix_specs)
         fix_tasks_created += 1
-        _outer_log(
+        _verification_log(
             project_dir,
             f"  fix task created ({len(failed_journeys)} failure(s) bundled)",
         )

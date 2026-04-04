@@ -25,7 +25,7 @@ from otto.orchestrator import (
     merge_batch_results,
     run_per,
 )
-from otto.outer_loop import run_product_verification
+from otto.verification import run_product_verification
 from otto.planner import Batch, BatchUnit, ExecutionPlan, TaskPlan
 from otto.tasks import load_tasks, update_task
 from otto.telemetry import Telemetry
@@ -1291,7 +1291,7 @@ class TestOuterLoop:
                 )
 
         assert result["product_passed"] is False
-        assert result["inner_loop_failed"] is True
+        assert result["build_failed"] is True
 
     @pytest.mark.asyncio
     async def test_stops_when_certifier_makes_no_progress(self, tmp_git_repo):

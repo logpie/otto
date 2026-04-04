@@ -1,6 +1,6 @@
 """Otto product planner — decomposes user intent into product spec + tasks.
 
-The product planner is the first step of the i2p outer loop. It takes a
+The product planner is the first step of the i2p pipeline. It takes a
 user's product intent ("build a bookmark manager with tags and search")
 and produces:
 - product-spec.md at project root (features, scope, non-goals, user journeys)

@@ -596,7 +596,7 @@ def build(intent, no_review, no_qa):
         cwd=project_dir, capture_output=True,
     )
 
-    # Step 4: Execute via inner loop
+    # Step 4: Execute via task runner
     console.print()
     from otto.orchestrator import run_per
     exit_code = asyncio.run(run_per(config, tasks_path, project_dir))
@@ -608,9 +608,9 @@ def build(intent, no_review, no_qa):
             console.print()
             console.print("  [bold]Product Verification[/bold] — user journey testing...")
             try:
-                # PoW on by default for outer loop — fix tasks need auditable proofs
+                # PoW on by default for verification — fix tasks need auditable proofs
                 config.setdefault("proof_of_work", True)
-                from otto.outer_loop import run_product_verification
+                from otto.verification import run_product_verification
                 outer_result = asyncio.run(run_product_verification(
                     product_spec_path=plan.product_spec_path,
                     project_dir=project_dir,
@@ -631,7 +631,7 @@ def build(intent, no_review, no_qa):
                         if not j.get("passed") and j.get("error"):
                             console.print(f"      {rich_escape(j['error'][:100])}")
 
-                    if outer_result.get("inner_loop_failed"):
+                    if outer_result.get("build_failed"):
                         _print_failed_tasks(outer_result.get("failed_tasks", []))
 
                 if outer_result.get("fix_tasks_created", 0) > 0:
