@@ -1686,7 +1686,11 @@ async def run_per(
                                     qa_mode=qa_mode,
                                 )
                             retry_map = {result.task_key: result for result in retry_results}
-                            batch_results = [retry_map.get(result.task_key, result) for result in batch_results]
+                            batch_results = [
+                                _combine_task_results(result, retry_map[result.task_key])
+                                if result.task_key in retry_map else result
+                                for result in batch_results
+                            ]
                         else:
                             retry_result = await _run_task_in_worktree(
                                 tp, context, config, project_dir,
@@ -1699,6 +1703,11 @@ async def run_per(
                                     qa_mode=qa_mode,
                                 )
                                 retry_result = rerun_merged[0]
+                            previous_result = next(
+                                (r for r in batch_results if r.task_key == fkey), None,
+                            )
+                            if previous_result:
+                                retry_result = _combine_task_results(previous_result, retry_result)
                             batch_results = [
                                 retry_result if r.task_key == fkey else r
                                 for r in batch_results
@@ -2091,22 +2100,6 @@ async def run_per(
                                 project_dir,
                                 f"rollback: main reset to pre-batch SHA because {final_failure_summary or 'batch QA failed'}",
                             )
-                            for task_key in rollback_pending_keys:
-                                try:
-                                    update_task(
-                                        tasks_file,
-                                        task_key,
-                                        status="verified" if task_key in reusable_verified_keys else "pending",
-                                        attempts=None,
-                                        error=None,
-                                        error_code=None,
-                                        feedback=None,
-                                        session_id=None,
-                                        review_ref=None,
-                                        completed_at=None,
-                                    )
-                                except Exception:
-                                    pass
                             # Don't abort — continue with remaining batches (best effort).
                             # Replan will account for failed tasks when scheduling later batches.
                             console.print(
@@ -2155,7 +2148,7 @@ async def run_per(
                                     update_task(
                                         tasks_file,
                                         task_key,
-                                        status="pending",
+                                        status="verified" if task_key in reusable_verified_keys else "pending",
                                         attempts=None,
                                         error=None,
                                         error_code=None,
@@ -2910,6 +2903,23 @@ async def _run_integrated_unit_in_worktree(
         except Exception as install_exc:
             install_elapsed = time.monotonic() - install_start
             _orchestrator_log(project_dir, f"  integrated unit: {synthetic_key[:8]} deps install FAILED ({install_elapsed:.1f}s): {install_exc}")
+
+        # Bug #9 fix: Reload member tasks from tasks.yaml so that retry
+        # feedback and spec updates written by update_task() are visible.
+        # Without this, the stale pending_by_key snapshot from the caller
+        # means retried integrated units never see their feedback/spec.
+        if tasks_file and tasks_file.exists():
+            try:
+                fresh_tasks = load_tasks(tasks_file)
+                fresh_by_key = {
+                    str(t.get("key", "") or ""): t
+                    for t in fresh_tasks
+                    if str(t.get("key", "") or "") in member_keys
+                }
+                if fresh_by_key:
+                    pending_by_key = {**pending_by_key, **fresh_by_key}
+            except Exception:
+                pass  # fall back to original snapshot on read errors
 
         member_attempts = [
             int((pending_by_key.get(task_key, {}) or {}).get("attempts", 0) or 0)

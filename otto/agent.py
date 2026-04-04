@@ -240,7 +240,7 @@ def _normalize_block(block: Any) -> Any | None:
             input=dict(getattr(block, "input", None) or {}),
             id=getattr(block, "id", None),
         )
-    if hasattr(block, "content"):
+    if hasattr(block, "content") and hasattr(block, "tool_use_id"):
         return ToolResultBlock(
             content=str(getattr(block, "content", "") or ""),
             tool_use_id=getattr(block, "tool_use_id", None),
@@ -253,15 +253,6 @@ def _normalize_message(message: Any) -> Any | None:
     if isinstance(message, ResultMessage):
         return message
     if _SDKResultMessage and isinstance(message, _SDKResultMessage):
-        return ResultMessage(
-            subtype=str(getattr(message, "subtype", "success") or "success"),
-            is_error=bool(getattr(message, "is_error", False)),
-            session_id=str(getattr(message, "session_id", "") or ""),
-            result=getattr(message, "result", None),
-            total_cost_usd=getattr(message, "total_cost_usd", None),
-            usage=getattr(message, "usage", None),
-        )
-    if hasattr(message, "session_id") and hasattr(message, "is_error"):
         return ResultMessage(
             subtype=str(getattr(message, "subtype", "success") or "success"),
             is_error=bool(getattr(message, "is_error", False)),
@@ -343,67 +334,72 @@ async def _query_codex(*, prompt: str, options: AgentOptions | None = None):
     saw_result = False
     raw_lines: list[str] = []
 
-    while True:
-        raw_line = await stdout.readline()
-        if not raw_line:
-            break
-        line = raw_line.decode("utf-8", errors="replace").strip()
-        if not line:
-            continue
-        raw_lines.append(line)
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-
-        event_type = event.get("type")
-        if event_type == "thread.started":
-            session_id = str(event.get("thread_id", "") or "")
-            continue
-
-        item = event.get("item") or {}
-        item_type = item.get("type")
-        if item_type == "agent_message" and event_type == "item.completed":
-            text = str(item.get("text", "") or "")
-            if text:
-                last_text = text
-                yield AssistantMessage(content=[TextBlock(text=text)])
-            continue
-
-        if item_type == "command_execution":
-            item_id = str(item.get("id", "") or "") or None
-            command = str(item.get("command", "") or "")
-            if event_type == "item.started":
-                yield AssistantMessage(content=[ToolUseBlock(name="Bash", input={"command": command}, id=item_id)])
+    try:
+        while True:
+            raw_line = await stdout.readline()
+            if not raw_line:
+                break
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            if not line:
                 continue
-            if event_type == "item.completed":
-                output = str(item.get("aggregated_output", "") or "")
-                yield AssistantMessage(content=[ToolResultBlock(content=output, tool_use_id=item_id)])
+            raw_lines.append(line)
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
                 continue
 
-        if event_type == "turn.completed":
-            saw_result = True
+            event_type = event.get("type")
+            if event_type == "thread.started":
+                session_id = str(event.get("thread_id", "") or "")
+                continue
+
+            item = event.get("item") or {}
+            item_type = item.get("type")
+            if item_type == "agent_message" and event_type == "item.completed":
+                text = str(item.get("text", "") or "")
+                if text:
+                    last_text = text
+                    yield AssistantMessage(content=[TextBlock(text=text)])
+                continue
+
+            if item_type == "command_execution":
+                item_id = str(item.get("id", "") or "") or None
+                command = str(item.get("command", "") or "")
+                if event_type == "item.started":
+                    yield AssistantMessage(content=[ToolUseBlock(name="Bash", input={"command": command}, id=item_id)])
+                    continue
+                if event_type == "item.completed":
+                    output = str(item.get("aggregated_output", "") or "")
+                    yield AssistantMessage(content=[ToolResultBlock(content=output, tool_use_id=item_id)])
+                    continue
+
+            if event_type == "turn.completed":
+                saw_result = True
+                yield ResultMessage(
+                    subtype="success",
+                    is_error=False,
+                    session_id=session_id,
+                    result=last_text or None,
+                    total_cost_usd=0.0,
+                    usage=event.get("usage"),
+                )
+
+        return_code = await process.wait()
+        if not saw_result or return_code != 0:
+            error_lines = raw_lines[-20:]
+            error_text = "\n".join(error_lines) or f"codex exited with code {return_code}"
             yield ResultMessage(
-                subtype="success",
-                is_error=False,
+                subtype="error",
+                is_error=True,
                 session_id=session_id,
-                result=last_text or None,
+                result=error_text,
                 total_cost_usd=0.0,
-                usage=event.get("usage"),
+                usage=None,
             )
-
-    return_code = await process.wait()
-    if not saw_result or return_code != 0:
-        error_lines = raw_lines[-20:]
-        error_text = "\n".join(error_lines) or f"codex exited with code {return_code}"
-        yield ResultMessage(
-            subtype="error",
-            is_error=True,
-            session_id=session_id,
-            result=error_text,
-            total_cost_usd=0.0,
-            usage=None,
-        )
+    finally:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
 
 
 async def query(*, prompt: str, options: AgentOptions | None = None):

@@ -81,13 +81,13 @@ class PipelineContext:
         """Record a successful task result."""
         self.results[result.task_key] = result
         if result.cost_usd > 0:
-            self.costs[result.task_key] = result.cost_usd
+            self.costs[result.task_key] = self.costs.get(result.task_key, 0.0) + result.cost_usd
 
     def add_failure(self, result: TaskResult) -> None:
         """Record a failed task result."""
         self.results[result.task_key] = result
         if result.cost_usd > 0:
-            self.costs[result.task_key] = result.cost_usd
+            self.costs[result.task_key] = self.costs.get(result.task_key, 0.0) + result.cost_usd
 
     @property
     def total_cost(self) -> float:

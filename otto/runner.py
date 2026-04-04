@@ -801,11 +801,9 @@ async def _run_coding_agent(
         async for message in query(prompt=coding_prompt, options=agent_opts):
             if isinstance(message, ResultMessage):
                 result_msg = message
-            elif hasattr(message, "session_id") and hasattr(message, "is_error"):
-                result_msg = message
-            elif AssistantMessage and isinstance(message, AssistantMessage):
+            elif isinstance(message, AssistantMessage):
                 for block in message.content:
-                    if ToolResultBlock and isinstance(block, ToolResultBlock):
+                    if isinstance(block, ToolResultBlock):
                         content = str(getattr(block, "content", ""))
                         if content and _last_block_name == "Bash":
                             result_line = ""
@@ -823,9 +821,9 @@ async def _run_coding_agent(
                         continue
                     _elapsed = round(time.monotonic() - _agent_start, 1)
                     _ts_prefix = f"[{_elapsed:6.1f}s] "
-                    if TextBlock and isinstance(block, TextBlock) and block.text:
+                    if isinstance(block, TextBlock) and block.text:
                         agent_log_lines.append(f"{_ts_prefix}{block.text}")
-                    elif ToolUseBlock and isinstance(block, ToolUseBlock):
+                    elif isinstance(block, ToolUseBlock):
                         _last_block_name = block.name
                         agent_log_lines.append(f"{_ts_prefix}● {block.name}  {_tool_use_summary(block)}")
                         event = _build_agent_tool_event(block)

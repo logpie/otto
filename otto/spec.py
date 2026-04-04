@@ -308,23 +308,17 @@ Write only [must]/[should] criteria lines to the file — no headings, notes, or
                 if isinstance(raw_cost, (int, float)):
                     spec_cost = float(raw_cost)
                 spec_usage = normalize_usage(getattr(result_msg, "usage", None))
-            elif hasattr(message, "session_id") and hasattr(message, "is_error"):
-                result_msg = message
-                raw_cost = getattr(message, "total_cost_usd", None)
-                if isinstance(raw_cost, (int, float)):
-                    spec_cost = float(raw_cost)
-                spec_usage = normalize_usage(getattr(result_msg, "usage", None))
-            elif AssistantMessage and isinstance(message, AssistantMessage):
+            elif isinstance(message, AssistantMessage):
                 num_turns += 1
                 for block in message.content:
-                    if ThinkingBlock and isinstance(block, ThinkingBlock):
+                    if isinstance(block, ThinkingBlock):
                         thinking = getattr(block, "thinking", "")
                         if thinking:
                             log_lines.append(f"[thinking] {thinking}")
-                    elif TextBlock and isinstance(block, TextBlock) and block.text:
+                    elif isinstance(block, TextBlock) and block.text:
                         # Don't print spec agent narration — log only
                         log_lines.append(block.text)
-                    elif ToolUseBlock and isinstance(block, ToolUseBlock):
+                    elif isinstance(block, ToolUseBlock):
                         print_agent_tool(block, quiet=True)
                         log_lines.append(f"● {block.name}  {_tool_use_summary(block)}")
 
@@ -442,13 +436,11 @@ Example: [{{"prompt": "Add search", "spec": ["search works", "case-insensitive"]
         async for message in query(prompt=agent_prompt, options=agent_opts):
             if isinstance(message, ResultMessage):
                 result_msg = message
-            elif hasattr(message, "session_id") and hasattr(message, "is_error"):
-                result_msg = message
-            elif AssistantMessage and isinstance(message, AssistantMessage):
+            elif isinstance(message, AssistantMessage):
                 for block in message.content:
-                    if TextBlock and isinstance(block, TextBlock) and block.text:
+                    if isinstance(block, TextBlock) and block.text:
                         log_lines.append(block.text)
-                    elif ToolUseBlock and isinstance(block, ToolUseBlock):
+                    elif isinstance(block, ToolUseBlock):
                         print_agent_tool(block, quiet=True)
                         log_lines.append(f"\u25cf {block.name}  {_tool_use_summary(block)}")
         if result_msg and getattr(result_msg, "is_error", False):

@@ -20,6 +20,7 @@ from otto.qa import (
     _is_verdict_complete,
     _parse_qa_verdict_json,
     _salvage_single_task_verdict_from_actions,
+    _salvage_single_task_verdict_from_proof_coverage,
     determine_qa_tier,
     format_batch_spec,
 )
@@ -897,3 +898,155 @@ class TestDetermineQaTier:
         content = log_file.read_text()
         assert "logged" in content
         assert "tier: 1" in content
+
+
+# ── _salvage_single_task_verdict_from_proof_coverage (Bug #10) ──────────
+
+
+class TestSalvageFromProofCoverageBug10:
+    """Bug #10: salvage must not override infrastructure_error, regressions,
+    or test_suite_passed=False."""
+
+    def _make_task(self):
+        return {
+            "key": "task-1",
+            "spec": [
+                {"text": "first", "binding": "must"},
+                {"text": "second", "binding": "must"},
+            ],
+        }
+
+    def _salvage(self, final_result=None, log_dir=None):
+        return _salvage_single_task_verdict_from_proof_coverage(
+            [self._make_task()],
+            proof_coverage="2/2",
+            raw_report="Acceptance criteria passed.",
+            log_dir=log_dir,
+            final_result=final_result,
+        )
+
+    def test_salvages_when_failure_is_format_issue(self):
+        """Normal salvage path: no infra error, no regressions, tests passed."""
+        final_result = {
+            "must_passed": False,
+            "infrastructure_error": False,
+            "test_suite_passed": True,
+            "verdict": {"regressions": []},
+        }
+        result = self._salvage(final_result=final_result)
+        assert result is not None
+        assert result["must_passed"] is True
+
+    def test_rejects_when_infrastructure_error(self):
+        final_result = {
+            "must_passed": False,
+            "infrastructure_error": True,
+            "test_suite_passed": True,
+            "verdict": {"regressions": []},
+        }
+        assert self._salvage(final_result=final_result) is None
+
+    def test_rejects_when_test_suite_failed(self):
+        final_result = {
+            "must_passed": False,
+            "infrastructure_error": False,
+            "test_suite_passed": False,
+            "verdict": {"regressions": []},
+        }
+        assert self._salvage(final_result=final_result) is None
+
+    def test_rejects_when_regressions_present(self):
+        final_result = {
+            "must_passed": False,
+            "infrastructure_error": False,
+            "test_suite_passed": True,
+            "verdict": {"regressions": ["existing behavior broke"]},
+        }
+        assert self._salvage(final_result=final_result) is None
+
+    def test_backwards_compat_no_final_result(self):
+        """When final_result is not passed (None), salvage proceeds (old behavior)."""
+        result = self._salvage(final_result=None)
+        assert result is not None
+        assert result["must_passed"] is True
+
+
+# ── _salvage_single_task_verdict_from_actions scoping (Bug #14) ─────────
+
+
+class TestSalvageFromActionsScopesBug14:
+    """Bug #14: salvage from actions must only read qa-agent.log lines from
+    the current attempt (after the last QA RUN header), not earlier retries."""
+
+    def test_ignores_spec_markers_from_earlier_attempt(self, tmp_path):
+        """If attempt-1 had SPEC 1: PASS but attempt-2 only has SPEC 1: FAIL,
+        the salvage must see FAIL, not the stale PASS."""
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        qa_log = log_dir / "qa-agent.log"
+        qa_log.write_text(
+            "============================================================\n"
+            "QA RUN  must_count=1  session_id=0  2026-01-01 00:00:00\n"
+            "============================================================\n"
+            "[  1.0s] ● Bash  echo test\n"
+            "         → SPEC 1: PASS\n"
+            "\n"
+            "============================================================\n"
+            "QA RUN  must_count=1  session_id=0  2026-01-01 00:01:00\n"
+            "============================================================\n"
+            "[  1.0s] ● Bash  echo test\n"
+            "         → SPEC 1: FAIL\n"
+        )
+
+        qa_result = {"qa_actions": [], "raw_report": ""}
+        tasks = [{"key": "task-1", "spec": [{"text": "first", "binding": "must"}]}]
+
+        verdict = _salvage_single_task_verdict_from_actions(qa_result, tasks, log_dir=log_dir)
+        assert verdict is not None
+        assert verdict["must_passed"] is False
+        assert verdict["must_items"][0]["status"] == "fail"
+
+    def test_uses_full_log_when_no_qa_run_header(self, tmp_path):
+        """If qa-agent.log has no QA RUN header, use the full log (fallback)."""
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        qa_log = log_dir / "qa-agent.log"
+        qa_log.write_text("SPEC 1: PASS\n")
+
+        qa_result = {"qa_actions": [], "raw_report": ""}
+        tasks = [{"key": "task-1", "spec": [{"text": "first", "binding": "must"}]}]
+
+        verdict = _salvage_single_task_verdict_from_actions(qa_result, tasks, log_dir=log_dir)
+        assert verdict is not None
+        assert verdict["must_passed"] is True
+
+    def test_stale_pass_from_attempt1_not_picked_up(self, tmp_path):
+        """Attempt-1 had all specs PASS, attempt-2 has no markers at all.
+        Salvage should return None (missing coverage), not a false positive."""
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        qa_log = log_dir / "qa-agent.log"
+        qa_log.write_text(
+            "============================================================\n"
+            "QA RUN  must_count=2  session_id=0  2026-01-01 00:00:00\n"
+            "============================================================\n"
+            "         → SPEC 1: PASS\n"
+            "         → SPEC 2: PASS\n"
+            "\n"
+            "============================================================\n"
+            "QA RUN  must_count=2  session_id=0  2026-01-01 00:01:00\n"
+            "============================================================\n"
+            "[  1.0s] ● Bash  echo no markers here\n"
+        )
+
+        qa_result = {"qa_actions": [], "raw_report": ""}
+        tasks = [{
+            "key": "task-1",
+            "spec": [
+                {"text": "first", "binding": "must"},
+                {"text": "second", "binding": "must"},
+            ],
+        }]
+
+        verdict = _salvage_single_task_verdict_from_actions(qa_result, tasks, log_dir=log_dir)
+        assert verdict is None

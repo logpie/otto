@@ -902,11 +902,9 @@ async def _run_qa_prompt(
                     state.first_message_time = time.monotonic()
                 if isinstance(message, ResultMessage):
                     result_msg = message
-                elif hasattr(message, "session_id") and hasattr(message, "is_error"):
-                    result_msg = message
-                elif AssistantMessage and isinstance(message, AssistantMessage):
+                elif isinstance(message, AssistantMessage):
                     for block in message.content:
-                        if TextBlock and isinstance(block, TextBlock) and block.text:
+                        if isinstance(block, TextBlock) and block.text:
                             report_lines.append(block.text)
                             if on_progress:
                                 for line in block.text.splitlines():
@@ -924,7 +922,7 @@ async def _run_qa_prompt(
                                         )
                                     except Exception:
                                         pass
-                        elif ToolUseBlock and isinstance(block, ToolUseBlock):
+                        elif isinstance(block, ToolUseBlock):
                             tool_id = getattr(block, "id", None)
                             inp = block.input or {}
                             _tool_ts = round(time.monotonic() - _qa_start_time, 1)
@@ -1007,7 +1005,7 @@ async def _run_qa_prompt(
                                         on_progress("agent_tool", event)
                                 except Exception:
                                     pass
-                        elif ToolResultBlock and isinstance(block, ToolResultBlock):
+                        elif isinstance(block, ToolResultBlock):
                             tid = getattr(block, "tool_use_id", None)
                             if tid and tid in pending_tool_uses:
                                 pending_tool_uses[tid]["output"] = _unwrap_tool_result_content(
@@ -1016,7 +1014,7 @@ async def _run_qa_prompt(
                                 pending_tool_uses[tid]["is_error"] = bool(getattr(block, "is_error", False))
                 elif UserMessage and isinstance(message, UserMessage):
                     for block in getattr(message, "content", []):
-                        if ToolResultBlock and isinstance(block, ToolResultBlock):
+                        if isinstance(block, ToolResultBlock):
                             tid = getattr(block, "tool_use_id", None)
                             if tid and tid in pending_tool_uses:
                                 pending_tool_uses[tid]["output"] = _unwrap_tool_result_content(
@@ -1649,7 +1647,15 @@ def _salvage_single_task_verdict_from_actions(
         qa_log_path = log_dir / "qa-agent.log"
         if qa_log_path.exists():
             try:
-                text_blobs.append(qa_log_path.read_text())
+                full_log = qa_log_path.read_text()
+                # Bug #14: qa-agent.log is append-only across retries.
+                # Only use lines after the last "QA RUN" header to avoid
+                # picking up SPEC PASS markers from earlier failed attempts.
+                last_header_idx = full_log.rfind("QA RUN")
+                if last_header_idx >= 0:
+                    text_blobs.append(full_log[last_header_idx:])
+                else:
+                    text_blobs.append(full_log)
             except OSError:
                 pass
 
@@ -1704,9 +1710,22 @@ def _salvage_single_task_verdict_from_proof_coverage(
     proof_coverage: str,
     raw_report: str,
     log_dir: Path | None,
+    final_result: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if len(tasks) != 1:
         return None
+
+    # Bug #10: Only salvage verdict parse/format issues.  Don't override when
+    # the failure has a concrete reason that salvage should not mask.
+    if final_result is not None:
+        if final_result.get("infrastructure_error"):
+            return None
+        if final_result.get("test_suite_passed") is False:
+            return None
+        fr_verdict = final_result.get("verdict")
+        if isinstance(fr_verdict, dict) and fr_verdict.get("regressions"):
+            return None
+
     task = tasks[0]
     must_items = [
         (idx, item) for idx, item in enumerate(task.get("spec") or [], start=1)
@@ -1985,6 +2004,7 @@ async def run_qa(
             proof_coverage=proof_coverage,
             raw_report=str(final_result.get("raw_report", "") or ""),
             log_dir=log_dir,
+            final_result=final_result,
         )
         if salvaged is not None:
             final_result["must_passed"] = True

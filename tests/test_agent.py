@@ -45,9 +45,14 @@ class _FakeProcess:
         self.stdin = _FakeStdin()
         self.stdout = _FakeStdout(lines)
         self._return_code = return_code
+        self.returncode: int | None = None
 
     async def wait(self) -> int:
+        self.returncode = self._return_code
         return self._return_code
+
+    def kill(self) -> None:
+        pass
 
 
 @pytest.mark.asyncio

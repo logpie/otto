@@ -7,6 +7,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
+from otto.agent import ResultMessage
 from otto.runner import (
     _audit_proof_sufficiency,
     _build_coding_prompt,
@@ -191,12 +192,14 @@ class TestCodingAgentProviderBehavior:
 
         async def fake_query(*, prompt, options=None):
             seen["resume"] = options.resume
-            result = MagicMock()
-            result.session_id = "thread-new"
-            result.is_error = False
-            result.result = "done"
-            result.total_cost_usd = 0.0
-            yield result
+            yield ResultMessage(
+                subtype="success",
+                is_error=False,
+                session_id="thread-new",
+                result="done",
+                total_cost_usd=0.0,
+                usage=None,
+            )
 
         with patch("otto.runner.query", side_effect=fake_query):
             session_id, _result_msg, _log_lines = await _run_coding_agent(
