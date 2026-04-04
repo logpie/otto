@@ -1,0 +1,81 @@
+{
+  "story_passed": true,
+  "blocked_at": null,
+  "summary": "All 6 steps of the ratings and favorites journey passed. Alice logged in successfully, rated a recipe 5 stars, updated the rating to 3 (correctly upserted, not duplicated), added two recipes to favorites, and removed one. The favorite toggle endpoint works correctly, and ratings use upsert logic. Session cookies expire between slow sequential requests but work fine for normal usage patterns. The API properly validates rating values 1-5 but returns a 500 error for non-integer values instead of a 400 validation error. Concurrent favorite toggling produces unpredictable final state but no data corruption.",
+  "diagnosis": null,
+  "fix_suggestion": null,
+  "steps": [
+    {
+      "action": "Login as alice@example.com via NextAuth CSRF + credentials flow",
+      "outcome": "pass",
+      "verification": "Session endpoint returns user with name 'Alice Johnson', email 'alice@example.com', id 'cmnedefsy0000zlfic33odijg'",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "Rate Spaghetti Bolognese (cmnfd8mn5001jr2w02vvrlza4) with value 5",
+      "outcome": "pass",
+      "verification": "POST /api/recipes/:id/rate returned 200 with rating id and value 5. GET recipe shows ratings array with one entry: value=5 for our userId",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "Update rating on same recipe from 5 to 3",
+      "outcome": "pass",
+      "verification": "POST /api/recipes/:id/rate returned 200 with same rating id and value 3. Recipe shows exactly 1 rating with value=3 (upsert, not duplicate)",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "Add rated recipe (Spaghetti Bolognese) to favorites",
+      "outcome": "pass",
+      "verification": "POST /api/recipes/:id/favorite returned {favorited: true}. Recipe's favorites array includes our userId",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "Add second recipe (Coconut Rice Pudding) to favorites",
+      "outcome": "pass",
+      "verification": "POST returned {favorited: true}. Both recipes show our userId in their favorites arrays",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "Remove first recipe from favorites by toggling favorite again",
+      "outcome": "pass",
+      "verification": "POST returned {favorited: false}. Spaghetti Bolognese: favorited=False, Coconut Rice Pudding: favorited=True",
+      "diagnosis": null,
+      "fix_suggestion": null
+    }
+  ],
+  "break_findings": [
+    {
+      "technique": "double_submit",
+      "description": "Sent two concurrent favorite toggle requests for the same recipe",
+      "result": "Both requests succeed — one returns {favorited:true}, the other {favorited:false}. Final state is unpredictable but no duplicate favorites are created in the database. The toggle design means concurrent requests can cancel each other out.",
+      "severity": "low",
+      "fix_suggestion": "Consider using explicit favorite/unfavorite actions instead of a toggle, or add optimistic locking to prevent race conditions on toggle"
+    },
+    {
+      "technique": "concurrent_modify",
+      "description": "Sent two concurrent rating requests with different values (4 and 2) for the same recipe",
+      "result": "Both succeed with the same rating ID. Final value is last-write-wins (value=2). Only 1 rating entry exists — no duplicates. Upsert logic is race-safe.",
+      "severity": "low",
+      "fix_suggestion": "Last-write-wins is acceptable for ratings. No fix needed."
+    },
+    {
+      "technique": "invalid_input",
+      "description": "Submitted rating with non-integer value ('five' as string)",
+      "result": "Server returns HTTP 500 instead of a proper 400 validation error",
+      "severity": "moderate",
+      "fix_suggestion": "Add type validation in the rate endpoint to check that value is a number before processing, returning 400 with a descriptive error message"
+    },
+    {
+      "technique": "double_submit",
+      "description": "Triple rapid favorite toggle on same recipe",
+      "result": "Three requests return alternating true/false/true. Final state has exactly 1 favorite entry. No data corruption but final state depends on request ordering.",
+      "severity": "low",
+      "fix_suggestion": "Use explicit add/remove favorite endpoints or add request deduplication"
+    }
+  ]
+}

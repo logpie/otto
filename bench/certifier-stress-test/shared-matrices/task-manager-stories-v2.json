@@ -1,0 +1,475 @@
+{
+  "intent": "Build a task manager web app with Next.js. Features: user registration and login (use NextAuth with credentials provider + Prisma + SQLite), create/read/update/delete tasks with title, description, status (TODO/IN_PROGRESS/DONE), due date. Tasks belong to a user (user isolation). Filter tasks by status. Sort by due date. Simple clean UI. Include seed data with at least 2 users and 5 tasks. Use App Router.",
+  "stories": [
+    {
+      "id": "new-user-first-task",
+      "persona": "new_user",
+      "title": "New User Registers and Creates Their First Task",
+      "narrative": "Alice has never used the app before. She registers an account, creates her first task with a due date, and verifies it appears in her task list with the correct details.",
+      "steps": [
+        {
+          "action": "Register a new account with email 'alice@example.com' and a password",
+          "verify": "Registration succeeds and the user is either automatically logged in or can log in with the new credentials",
+          "verify_in_browser": "Registration form submits without errors, user sees the main app page (not the login page)",
+          "entity": "user",
+          "operation": "auth",
+          "mode": "both",
+          "uses_output_from": null
+        },
+        {
+          "action": "Create a task with title 'Buy groceries', description 'Milk, eggs, bread', status TODO, and due date tomorrow",
+          "verify": "Task is created successfully and has an assigned ID, correct title, description, status, and due date",
+          "verify_in_browser": "A task creation form or modal is accessible, submits without errors, and the new task appears on the page",
+          "entity": "task",
+          "operation": "create",
+          "mode": "both",
+          "uses_output_from": 0
+        },
+        {
+          "action": "View the task list",
+          "verify": "The list contains exactly the newly created task with title 'Buy groceries', status TODO, and the correct due date",
+          "verify_in_browser": "The task list page displays the task with its title, description, status badge, and due date clearly visible",
+          "entity": "task",
+          "operation": "list",
+          "mode": "both",
+          "uses_output_from": 1
+        }
+      ],
+      "critical": true,
+      "tests_integration": [
+        "auth-register",
+        "task-crud",
+        "task-list"
+      ],
+      "break_strategies": [
+        "double_submit",
+        "long_input",
+        "special_chars"
+      ]
+    },
+    {
+      "id": "task-full-lifecycle",
+      "persona": "returning_user",
+      "title": "Task Lifecycle: Create, Update Status, Edit, Delete",
+      "narrative": "Bob is a returning user who logs in with seed data credentials. He creates a new task, progresses it through statuses (TODO \u2192 IN_PROGRESS \u2192 DONE), edits its title and description, then deletes it and confirms it's gone.",
+      "steps": [
+        {
+          "action": "Log in as an existing seed user (one of the pre-seeded accounts)",
+          "verify": "Login succeeds and the user sees their existing tasks from seed data",
+          "verify_in_browser": "Login form accepts credentials, redirects to main page showing the user's seeded tasks",
+          "entity": "user",
+          "operation": "auth",
+          "mode": "both",
+          "uses_output_from": null
+        },
+        {
+          "action": "Create a task with title 'Prepare presentation', description 'Q1 review slides', status TODO, due date 3 days from now",
+          "verify": "Task is created with status TODO and correct fields",
+          "verify_in_browser": "New task appears in the list with a TODO status indicator",
+          "entity": "task",
+          "operation": "create",
+          "mode": "both",
+          "uses_output_from": 0
+        },
+        {
+          "action": "Update the task created in step 2 \u2014 change its status to IN_PROGRESS",
+          "verify": "Task now has status IN_PROGRESS, all other fields unchanged",
+          "verify_in_browser": "The task's status badge updates to show IN_PROGRESS",
+          "entity": "task",
+          "operation": "update",
+          "mode": "both",
+          "uses_output_from": 1
+        },
+        {
+          "action": "Update the same task \u2014 change its title to 'Prepare Q1 presentation' and description to 'Include revenue charts'",
+          "verify": "Task title and description are updated, status remains IN_PROGRESS",
+          "verify_in_browser": "The task list reflects the updated title and description",
+          "entity": "task",
+          "operation": "update",
+          "mode": "both",
+          "uses_output_from": 2
+        },
+        {
+          "action": "Update the same task \u2014 change status to DONE",
+          "verify": "Task status is now DONE",
+          "verify_in_browser": "Status badge shows DONE",
+          "entity": "task",
+          "operation": "update",
+          "mode": "both",
+          "uses_output_from": 3
+        },
+        {
+          "action": "Delete the task created in step 2",
+          "verify": "Task no longer exists \u2014 attempting to fetch it returns nothing or an error",
+          "verify_in_browser": "Task disappears from the list immediately after deletion",
+          "entity": "task",
+          "operation": "delete",
+          "mode": "both",
+          "uses_output_from": 4
+        },
+        {
+          "action": "View the task list again",
+          "verify": "The deleted task is not present; the original seed tasks are still there",
+          "verify_in_browser": "Task list shows seed data tasks but not the deleted one",
+          "entity": "task",
+          "operation": "list",
+          "mode": "both",
+          "uses_output_from": 5
+        }
+      ],
+      "critical": true,
+      "tests_integration": [
+        "auth-login",
+        "task-crud",
+        "task-status",
+        "task-list"
+      ],
+      "break_strategies": [
+        "double_submit",
+        "back_after_submit",
+        "concurrent_modify"
+      ]
+    },
+    {
+      "id": "data-isolation",
+      "persona": "returning_user",
+      "title": "Data Isolation Between Two Users",
+      "narrative": "Two different users each create tasks. Each user should only see their own tasks and never see the other user's data. This verifies user isolation is enforced at the data layer.",
+      "steps": [
+        {
+          "action": "Log in as the first seed user",
+          "verify": "Login succeeds",
+          "verify_in_browser": "User sees the main app page",
+          "entity": "user",
+          "operation": "auth",
+          "mode": "both",
+          "uses_output_from": null
+        },
+        {
+          "action": "Note all existing tasks visible to this user, then create a task with title 'User1 Secret Project' and description 'Confidential data for user 1 only'",
+          "verify": "Task is created and visible in user 1's task list",
+          "verify_in_browser": "Task appears in the list",
+          "entity": "task",
+          "operation": "create",
+          "mode": "both",
+          "uses_output_from": 0
+        },
+        {
+          "action": "Log out of the first user's account",
+          "verify": "Session is ended, user is no longer authenticated",
+          "verify_in_browser": "User is redirected to login page or sees logged-out state",
+          "entity": "user",
+          "operation": "auth",
+          "mode": "both",
+          "uses_output_from": null
+        },
+        {
+          "action": "Log in as the second seed user",
+          "verify": "Login succeeds with different user credentials",
+          "verify_in_browser": "User sees the main app page",
+          "entity": "user",
+          "operation": "auth",
+          "mode": "both",
+          "uses_output_from": null
+        },
+        {
+          "action": "View the task list for the second user",
+          "verify": "The list does NOT contain 'User1 Secret Project' \u2014 only the second user's own tasks are visible",
+          "verify_in_browser": "Task list shows only tasks belonging to this user, no trace of user 1's tasks",
+          "entity": "task",
+          "operation": "list",
+          "mode": "both",
+          "uses_output_from": 3
+        },
+        {
+          "action": "While logged in as user 2, attempt to access the task created by user 1 (using the task ID from step 2) \u2014 try to read it, update it, or delete it",
+          "verify": "All attempts are rejected \u2014 user 2 cannot read, modify, or delete user 1's task",
+          "verify_in_browser": "Any direct navigation to user 1's task shows an error or redirects away",
+          "entity": "task",
+          "operation": "read",
+          "mode": "both",
+          "uses_output_from": 1
+        }
+      ],
+      "critical": true,
+      "tests_integration": [
+        "auth-login",
+        "task-crud",
+        "task-list",
+        "user-isolation"
+      ],
+      "break_strategies": [
+        "id_guessing",
+        "direct_url"
+      ]
+    },
+    {
+      "id": "persistence-across-sessions",
+      "persona": "returning_user",
+      "title": "Data Persists Across Logout and Login",
+      "narrative": "A user creates a task, logs out completely, logs back in, and verifies the task is still there with all its details intact. This ensures data is stored in the database, not just in session/memory.",
+      "steps": [
+        {
+          "action": "Log in as a seed user",
+          "verify": "Login succeeds",
+          "verify_in_browser": "User is on the main page",
+          "entity": "user",
+          "operation": "auth",
+          "mode": "both",
+          "uses_output_from": null
+        },
+        {
+          "action": "Create a task with title 'Persistence Test Task', description 'This should survive logout', status IN_PROGRESS, due date 7 days from now",
+          "verify": "Task is created with all specified fields and an ID is returned",
+          "verify_in_browser": "Task appears in the list with correct details",
+          "entity": "task",
+          "operation": "create",
+          "mode": "both",
+          "uses_output_from": 0
+        },
+        {
+          "action": "Log out of the account completely",
+          "verify": "Session is terminated, authentication token/cookie is cleared",
+          "verify_in_browser": "User is on the login/home page, no longer sees protected content",
+          "entity": "user",
+          "operation": "auth",
+          "mode": "both",
+          "uses_output_from": null
+        },
+        {
+          "action": "Log back in with the same user credentials",
+          "verify": "Login succeeds and a new session is established",
+          "verify_in_browser": "User is back on the main page",
+          "entity": "user",
+          "operation": "auth",
+          "mode": "both",
+          "uses_output_from": null
+        },
+        {
+          "action": "View the task list",
+          "verify": "'Persistence Test Task' is present with title, description 'This should survive logout', status IN_PROGRESS, and the correct due date \u2014 all fields match exactly what was created",
+          "verify_in_browser": "The task is visible in the list with all its original details intact",
+          "entity": "task",
+          "operation": "list",
+          "mode": "both",
+          "uses_output_from": 1
+        }
+      ],
+      "critical": true,
+      "tests_integration": [
+        "auth-login",
+        "auth-logout",
+        "task-crud",
+        "task-list",
+        "data-persistence"
+      ],
+      "break_strategies": [
+        "back_after_submit"
+      ]
+    },
+    {
+      "id": "unauthenticated-access-control",
+      "persona": "visitor",
+      "title": "Unauthenticated Visitor Cannot Access Tasks",
+      "narrative": "A visitor who is not logged in attempts to view tasks, create a task, and access the task management pages directly via URL. All attempts should be blocked with appropriate redirects or error messages.",
+      "steps": [
+        {
+          "action": "Without logging in, try to access the main tasks page directly",
+          "verify": "Access is denied \u2014 the visitor is redirected to a login page or sees an unauthorized message",
+          "verify_in_browser": "The browser shows a login page or an access denied message, not the task list",
+          "entity": "task",
+          "operation": "list",
+          "mode": "both",
+          "uses_output_from": null
+        },
+        {
+          "action": "Without logging in, try to create a new task",
+          "verify": "The request is rejected \u2014 no task is created",
+          "verify_in_browser": "The task creation page or form is not accessible, or submission is blocked",
+          "entity": "task",
+          "operation": "create",
+          "mode": "both",
+          "uses_output_from": null
+        },
+        {
+          "action": "Without logging in, try to access a specific task by guessing a task ID in the URL",
+          "verify": "Access is denied \u2014 the task details are not exposed",
+          "verify_in_browser": "The visitor is redirected to login or sees an error, not the task content",
+          "entity": "task",
+          "operation": "read",
+          "mode": "both",
+          "uses_output_from": null
+        },
+        {
+          "action": "Without logging in, try to delete or update an existing task by its ID",
+          "verify": "The request is rejected \u2014 the task is not modified or deleted",
+          "verify_in_browser": "No changes are reflected even if the visitor crafts a direct request",
+          "entity": "task",
+          "operation": "delete",
+          "mode": "api",
+          "uses_output_from": null
+        }
+      ],
+      "critical": true,
+      "tests_integration": [
+        "auth-guard",
+        "task-list",
+        "task-crud"
+      ],
+      "break_strategies": [
+        "direct_url",
+        "id_guessing"
+      ]
+    },
+    {
+      "id": "filter-and-sort-tasks",
+      "persona": "returning_user",
+      "title": "Filter Tasks by Status and Sort by Due Date",
+      "narrative": "A returning user with multiple tasks in different statuses and due dates uses the filter and sort features. They verify that filtering by each status shows the correct subset, and sorting by due date orders tasks correctly.",
+      "steps": [
+        {
+          "action": "Log in as a seed user",
+          "verify": "Login succeeds",
+          "verify_in_browser": "User is on the main page",
+          "entity": "user",
+          "operation": "auth",
+          "mode": "both",
+          "uses_output_from": null
+        },
+        {
+          "action": "Create three tasks: (1) 'Task A' with status TODO and due date 5 days from now, (2) 'Task B' with status IN_PROGRESS and due date 2 days from now, (3) 'Task C' with status DONE and due date 10 days from now",
+          "verify": "All three tasks are created with distinct statuses and due dates",
+          "verify_in_browser": "All three tasks appear in the task list",
+          "entity": "task",
+          "operation": "create",
+          "mode": "both",
+          "uses_output_from": 0
+        },
+        {
+          "action": "Filter the task list to show only TODO tasks",
+          "verify": "Only tasks with status TODO appear (including 'Task A' and any seed TODO tasks), tasks with IN_PROGRESS or DONE are hidden",
+          "verify_in_browser": "The filter control is visible and functional, list updates to show only TODO tasks",
+          "entity": "task",
+          "operation": "list",
+          "mode": "both",
+          "uses_output_from": 1
+        },
+        {
+          "action": "Filter the task list to show only IN_PROGRESS tasks",
+          "verify": "Only IN_PROGRESS tasks appear (including 'Task B'), TODO and DONE tasks are hidden",
+          "verify_in_browser": "List updates correctly when switching the filter",
+          "entity": "task",
+          "operation": "list",
+          "mode": "both",
+          "uses_output_from": 1
+        },
+        {
+          "action": "Filter the task list to show only DONE tasks",
+          "verify": "Only DONE tasks appear (including 'Task C')",
+          "verify_in_browser": "List shows only completed tasks",
+          "entity": "task",
+          "operation": "list",
+          "mode": "both",
+          "uses_output_from": 1
+        },
+        {
+          "action": "Clear the filter to show all tasks, then sort by due date ascending",
+          "verify": "Tasks are ordered by due date from earliest to latest \u2014 'Task B' (2 days) appears before 'Task A' (5 days) which appears before 'Task C' (10 days)",
+          "verify_in_browser": "The sort control is visible and functional, task order updates to reflect due date ordering",
+          "entity": "task",
+          "operation": "list",
+          "mode": "both",
+          "uses_output_from": 1
+        }
+      ],
+      "critical": true,
+      "tests_integration": [
+        "auth-login",
+        "task-crud",
+        "task-filter",
+        "task-sort"
+      ],
+      "break_strategies": [
+        "empty_required",
+        "special_chars"
+      ]
+    },
+    {
+      "id": "edge-cases-and-validation",
+      "persona": "returning_user",
+      "title": "Edge Cases: Empty Fields, Long Strings, Special Characters",
+      "narrative": "A returning user tests the boundaries of the app by trying to create tasks with empty titles, extremely long descriptions, special characters and emoji in titles, and HTML tags in descriptions. The app should handle all cases gracefully.",
+      "steps": [
+        {
+          "action": "Log in as a seed user",
+          "verify": "Login succeeds",
+          "verify_in_browser": "User is on the main page",
+          "entity": "user",
+          "operation": "auth",
+          "mode": "both",
+          "uses_output_from": null
+        },
+        {
+          "action": "Try to create a task with an empty title (no title at all) but a valid description",
+          "verify": "The task is either rejected with a validation error, or if accepted, the task list handles it gracefully without breaking",
+          "verify_in_browser": "A validation message appears, or the form prevents submission of an empty title",
+          "entity": "task",
+          "operation": "create",
+          "mode": "both",
+          "uses_output_from": 0
+        },
+        {
+          "action": "Create a task with a title containing emoji and unicode: '\ud83d\udccb T\u00e2che sp\u00e9ciale \u2014 \u4efb\u52a1 #1' and description '\u00d1o\u00f1o \u2192 r\u00e9sum\u00e9'",
+          "verify": "Task is created and all special characters are preserved exactly in the stored data",
+          "verify_in_browser": "The task displays with all emoji and unicode characters rendered correctly, no mojibake or encoding errors",
+          "entity": "task",
+          "operation": "create",
+          "mode": "both",
+          "uses_output_from": 0
+        },
+        {
+          "action": "Create a task with a very long description (over 1000 characters of text)",
+          "verify": "Task is either created successfully with the full description preserved, or rejected with a clear length validation error",
+          "verify_in_browser": "If accepted, the long description is displayed without breaking the layout. If rejected, a clear error message is shown",
+          "entity": "task",
+          "operation": "create",
+          "mode": "both",
+          "uses_output_from": 0
+        },
+        {
+          "action": "Create a task with HTML tags in the title: '<script>alert(1)</script> My Task' and description '<img src=x onerror=alert(1)> Description'",
+          "verify": "Task is created but HTML tags are escaped or stripped \u2014 no raw HTML is rendered or executed",
+          "verify_in_browser": "The title displays the literal text of the HTML tags (escaped), no script execution or image loading occurs \u2014 check browser console for XSS",
+          "entity": "task",
+          "operation": "create",
+          "mode": "both",
+          "uses_output_from": 0
+        },
+        {
+          "action": "Rapidly submit the same task creation form twice (double-click submit)",
+          "verify": "Either only one task is created (idempotent), or two tasks are created but the app doesn't crash or show errors",
+          "verify_in_browser": "The UI handles the double submission gracefully \u2014 no error modals, no blank screens",
+          "entity": "task",
+          "operation": "create",
+          "mode": "both",
+          "uses_output_from": 0
+        }
+      ],
+      "critical": false,
+      "tests_integration": [
+        "auth-login",
+        "task-crud",
+        "input-validation",
+        "xss-prevention"
+      ],
+      "break_strategies": [
+        "empty_required",
+        "long_input",
+        "special_chars",
+        "double_submit"
+      ]
+    }
+  ],
+  "compiled_at": "2026-03-31 18:59:38",
+  "cost_usd": 0.20507824999999996
+}

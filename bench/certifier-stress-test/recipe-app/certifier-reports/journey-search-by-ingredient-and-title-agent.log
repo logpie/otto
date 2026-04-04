@@ -1,0 +1,50 @@
+I'll execute this user story step by step, starting with authentication and then creating recipes and testing search/filter functionality.
+
+**Step 1: Log in as an existing user**
+
+Now let me start by getting the CSRF token and logging in.It redirected to `csrf=true`, meaning the CSRF token didn't match. I need to use the cookie-based CSRF flow properly.Login successful - got a session token. Let me verify the session works:Session confirmed: authenticated as Alice Johnson. Now let me create the three recipes.
+
+**Step 2: Create Recipe 1 - Thai Green Curry**Recipe 1 created. ID: `cmnfd8gb5001fr2w0plx52qoy`. Now recipes 2 and 3:
+
+**Steps 3 & 4: Create Recipes 2 and 3**All three recipes created:
+- Recipe 1: Thai Green Curry (ID: `cmnfd8gb5001fr2w0plx52qoy`, category: Thai)
+- Recipe 2: Coconut Rice Pudding (ID: `cmnfd8kfv001hr2w0wasflocy`, category: Desserts)
+- Recipe 3: Spaghetti Bolognese (ID: `cmnfd8mn5001jr2w02vvrlza4`, category: Italian)
+
+**Step 5: Search for recipes containing 'coconut milk'**All three queries (`search=`, `ingredient=`, `q=`) returned ALL recipes including Spaghetti Bolognese. The search parameter is not filtering. Let me check the actual API route to understand what params it supports:
+
+The GET `/api/recipes` route **does not support any search or filter parameters** — it returns all recipes. This is a critical missing feature. Let me still try category filtering and title search to confirm:
+
+**Step 6: Search by title keyword 'curry'**Confirmed: the search parameter is completely ignored. All 37 recipes are returned regardless. 
+
+**Step 7: Filter by category 'Desserts'**Also returns all 37 recipes — category filtering doesn't work either. The API simply has no filtering implementation.
+
+Now let me also check if the UI provides client-side search/filtering:Interesting! The UI has a search input and category filter buttons. Let me check if filtering works client-side:Hmm, the dessert filter button is highlighted but "Coconut Rice Pudding" doesn't appear. The issue might be that the predefined categories don't include "Desserts" (they use "dessert" lowercase). Let me check more carefully:The category filter works on the UI page but only matches exact lowercase categories (the predefined "dessert" ones). Our recipe was created with category "Desserts" (capital D, plural) which doesn't match the filter "dessert". The filter links use lowercase singular: `/?category=dessert`.
+
+Let me check if searching works on the UI:The `?search=curry` URL param doesn't filter on the server-side rendered HTML either — all 37 recipes are returned. The search input exists in the UI but likely only does client-side JS filtering which wouldn't show in the SSR HTML. The category filter at `/?category=dessert` **does** work for the predefined seeded categories but our recipe used "Desserts" (capital, plural) which doesn't match the filter "dessert".
+
+Now let me run the **BREAK phase**:All break tests reveal issues:
+1. **Special chars**: XSS script tag stored raw in DB (the HTML page escapes it via React, so rendering is safe, but storing raw `<script>` tags is still poor practice)
+2. **Empty required fields**: Recipe created with completely empty title, description, ingredients, etc. — no server-side validation at all
+3. **Long input**: 10,000 character title accepted without any length limit
+
+Now let me write the verdict:## Summary
+
+**Story: FAILED** — Blocked at search/filter steps (Steps 5-7).
+
+### What worked:
+- ✅ **Step 1**: Authentication via NextAuth CSRF flow works correctly
+- ✅ **Steps 2-4**: Recipe creation works — all three recipes created with correct data
+
+### What failed:
+- ❌ **Step 5**: Ingredient search returns ALL recipes — the API has no search implementation
+- ❌ **Step 6**: Title keyword search returns ALL recipes — same root cause
+- ❌ **Step 7**: Category filtering doesn't work via API; UI filter uses case-sensitive matching that excludes user-created categories with different casing
+
+### Root cause:
+The `GET /api/recipes` route handler is `async function GET()` — it takes no request parameter and performs an unfiltered `prisma.recipe.findMany()`. All search/filter query parameters are completely ignored.
+
+### Break findings:
+- **Empty fields**: No server-side validation — recipes can be created with all empty fields
+- **Long input**: No length limits — 10,000 character titles accepted
+- **Special chars**: HTML/script tags stored raw (rendering is safe via React escaping)

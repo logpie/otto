@@ -1,0 +1,67 @@
+{
+  "story_passed": true,
+  "blocked_at": null,
+  "summary": "All unauthenticated access attempts were properly rejected with 401 Unauthorized responses and a consistent {\"error\":\"Unauthorized\"} JSON body. Listing tasks, creating tasks, reading a specific task, and deleting a task all returned 401 without auth. The 'Sneaky task' creation attempt was confirmed to have no side effects — no such task exists when querying as an authenticated user. Break-phase testing with forged tokens, ID guessing, and direct URL access all properly denied access.",
+  "diagnosis": null,
+  "fix_suggestion": null,
+  "steps": [
+    {
+      "action": "GET /api/tasks without authentication to list all tasks",
+      "outcome": "pass",
+      "verification": "Received HTTP 401 with body {\"error\":\"Unauthorized\"}. No task data leaked.",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "POST /api/tasks with title 'Sneaky task' without authentication",
+      "outcome": "pass",
+      "verification": "Received HTTP 401 with body {\"error\":\"Unauthorized\"}. Logged in as Alice and confirmed 0 tasks with 'Sneaky' in the title exist — no task was created.",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "GET /api/tasks/some-fake-id-12345 without authentication to read a specific task",
+      "outcome": "pass",
+      "verification": "Received HTTP 401 with body {\"error\":\"Unauthorized\"}. No task data leaked.",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "DELETE /api/tasks/some-fake-id-12345 without authentication to delete a task",
+      "outcome": "pass",
+      "verification": "Received HTTP 401 with body {\"error\":\"Unauthorized\"}. Operation was rejected.",
+      "diagnosis": null,
+      "fix_suggestion": null
+    }
+  ],
+  "break_findings": [
+    {
+      "technique": "direct_url",
+      "description": "Accessed /tasks page directly without authentication via curl -L",
+      "result": "Returned HTTP 404. No task data was exposed. The page either doesn't exist as a standalone route or is handled client-side.",
+      "severity": "none",
+      "fix_suggestion": null
+    },
+    {
+      "technique": "id_guessing",
+      "description": "Tried various ID formats (1, 2, 3, 1234, 'admin', CUID-like string) against /api/tasks/:id without auth",
+      "result": "All returned 401 Unauthorized consistently. Auth check happens before ID validation, which is correct — no information leakage about which IDs exist.",
+      "severity": "none",
+      "fix_suggestion": null
+    },
+    {
+      "technique": "forged_tokens",
+      "description": "Sent requests with fake Bearer token and fake session cookie",
+      "result": "Both returned 401 Unauthorized. Forged credentials are properly rejected.",
+      "severity": "none",
+      "fix_suggestion": null
+    },
+    {
+      "technique": "unauthenticated_put",
+      "description": "Attempted PUT /api/tasks/some-fake-id-12345 with updated title without auth",
+      "result": "Returned 401 Unauthorized. Update operation properly protected.",
+      "severity": "none",
+      "fix_suggestion": null
+    }
+  ]
+}

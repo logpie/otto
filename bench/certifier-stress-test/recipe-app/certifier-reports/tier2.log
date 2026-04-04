@@ -1,0 +1,12 @@
+[2026-03-31 01:46:34] Tier 2 from compiled journeys
+base_url: http://localhost:4003
+journeys: 9
+Tier 2 done: Journeys: 2/9 (22%), Steps: 23/30 (77%), 1.3s
+[2026-03-31 02:19:01] Tier 2 from compiled journeys
+base_url: http://localhost:4003
+journeys: 10
+Tier 2 done: Journeys: 3/10 (30%), Steps: 21/28 (75%), 0.9s
+[2026-03-31 15:24:27] Tier 2 from bound plan
+base_url: http://localhost:4003
+journeys: 10
+Tier 2 done: Journeys: 2/10 (20%), Steps: 19/28 (68%), 1.0s

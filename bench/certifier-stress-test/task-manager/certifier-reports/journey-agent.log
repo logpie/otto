@@ -1,0 +1,132 @@
+[2026-03-31 17:32:56] Verifying story: New User Creates Their First Task
+persona: new_user
+steps: 4
+break_strategies: ['empty_required']
+[2026-03-31 17:35:43] Story completed: New User Creates Their First Task
+cost: $0.673, duration: 167.2s
+[2026-03-31 17:46:55] Verifying story: New User Registers and Creates Their First Task
+persona: new_user
+steps: 3
+break_strategies: ['double_submit', 'long_input', 'special_chars']
+[2026-03-31 17:51:06] Story completed: New User Registers and Creates Their First Task
+cost: $1.227, duration: 251.1s
+[2026-03-31 17:51:06] Verifying story: Full Task Lifecycle: Create, Edit, Complete, Delete
+persona: returning_user
+steps: 6
+break_strategies: ['double_submit', 'back_after_submit', 'concurrent_modify']
+[2026-03-31 17:54:00] Story completed: Full Task Lifecycle: Create, Edit, Complete, Delete
+cost: $0.486, duration: 173.8s
+[2026-03-31 17:54:00] Verifying story: Two Users' Tasks Are Completely Isolated
+persona: returning_user
+steps: 8
+break_strategies: ['id_guessing', 'direct_url']
+[2026-03-31 17:56:15] Story completed: Two Users' Tasks Are Completely Isolated
+cost: $0.392, duration: 135.0s
+[2026-03-31 17:56:15] Verifying story: Tasks Persist Across Logout and Login
+persona: returning_user
+steps: 6
+break_strategies: ['back_after_submit']
+[2026-03-31 17:58:05] Story completed: Tasks Persist Across Logout and Login
+cost: $0.456, duration: 110.1s
+[2026-03-31 17:58:05] Verifying story: Unauthenticated Visitor Cannot Access Tasks
+persona: visitor
+steps: 4
+break_strategies: ['direct_url', 'id_guessing']
+[2026-03-31 17:59:13] Story completed: Unauthenticated Visitor Cannot Access Tasks
+cost: $0.200, duration: 67.6s
+[2026-03-31 17:59:13] Verifying story: Filter Tasks by Status and Sort by Due Date
+persona: returning_user
+steps: 8
+break_strategies: ['empty_required', 'special_chars']
+[2026-03-31 18:01:32] Story completed: Filter Tasks by Status and Sort by Due Date
+cost: $0.429, duration: 139.9s
+[2026-03-31 18:01:32] Verifying story: Edge Cases: Special Characters, Long Inputs, Empty Fields
+persona: returning_user
+steps: 6
+break_strategies: ['long_input', 'empty_required', 'special_chars', 'double_submit']
+[2026-03-31 18:07:26] Story completed: Edge Cases: Special Characters, Long Inputs, Empty Fields
+cost: $0.572, duration: 353.7s
+[2026-03-31 18:18:19] Verifying story: New User Registers and Creates Their First Task
+persona: new_user
+steps: 3
+break_strategies: ['double_submit', 'long_input', 'special_chars']
+[2026-03-31 18:23:05] Story completed: New User Registers and Creates Their First Task
+cost: $0.650, duration: 286.1s
+[2026-03-31 18:23:05] Verifying story: Full Task Lifecycle: Create, Update, Complete, Delete
+persona: returning_user
+steps: 6
+break_strategies: ['double_submit', 'back_after_submit', 'concurrent_modify']
+[2026-03-31 18:24:59] Story completed: Full Task Lifecycle: Create, Update, Complete, Delete
+cost: $0.479, duration: 113.9s
+[2026-03-31 18:24:59] Verifying story: Two Users Cannot See Each Other's Tasks
+persona: returning_user
+steps: 8
+break_strategies: ['id_guessing', 'direct_url']
+[2026-03-31 18:27:14] Story completed: Two Users Cannot See Each Other's Tasks
+cost: $0.453, duration: 134.4s
+[2026-03-31 18:27:14] Verifying story: Tasks Persist After Logout and Login
+persona: returning_user
+steps: 6
+break_strategies: ['back_after_submit']
+[2026-03-31 18:28:47] Story completed: Tasks Persist After Logout and Login
+cost: $0.359, duration: 93.5s
+[2026-03-31 18:28:47] Verifying story: Unauthenticated Visitor Cannot Access Tasks
+persona: visitor
+steps: 4
+break_strategies: ['direct_url', 'id_guessing']
+[2026-03-31 18:30:00] Story completed: Unauthenticated Visitor Cannot Access Tasks
+cost: $0.281, duration: 73.1s
+[2026-03-31 18:30:00] Verifying story: Filter Tasks by Status and Sort by Due Date
+persona: returning_user
+steps: 8
+break_strategies: ['empty_required', 'special_chars']
+[2026-03-31 18:34:22] Story completed: Filter Tasks by Status and Sort by Due Date
+cost: $0.941, duration: 261.3s
+[2026-03-31 18:34:22] Verifying story: Edge Cases: Empty Fields, Long Strings, Special Characters
+persona: returning_user
+steps: 5
+break_strategies: ['empty_required', 'long_input', 'special_chars', 'double_submit']
+[2026-03-31 18:36:33] Story completed: Edge Cases: Empty Fields, Long Strings, Special Characters
+cost: $0.557, duration: 131.7s
+[2026-03-31 19:58:12] Verifying story: New User Registers and Creates Their First Task
+persona: new_user
+steps: 3
+break_strategies: ['double_submit', 'long_input', 'special_chars']
+[2026-03-31 20:03:09] Story completed: New User Registers and Creates Their First Task
+cost: $0.443, duration: 296.7s
+[2026-03-31 20:03:09] Verifying story: Task Lifecycle: Create, Update Status, Edit, Delete
+persona: returning_user
+steps: 7
+break_strategies: ['double_submit', 'back_after_submit', 'concurrent_modify']
+[2026-03-31 20:04:59] Story completed: Task Lifecycle: Create, Update Status, Edit, Delete
+cost: $0.508, duration: 110.5s
+[2026-03-31 20:04:59] Verifying story: Data Isolation Between Two Users
+persona: returning_user
+steps: 6
+break_strategies: ['id_guessing', 'direct_url']
+[2026-03-31 20:06:58] Story completed: Data Isolation Between Two Users
+cost: $0.499, duration: 118.4s
+[2026-03-31 20:06:58] Verifying story: Data Persists Across Logout and Login
+persona: returning_user
+steps: 5
+break_strategies: ['back_after_submit']
+[2026-03-31 20:08:26] Story completed: Data Persists Across Logout and Login
+cost: $0.422, duration: 88.6s
+[2026-03-31 20:08:26] Verifying story: Unauthenticated Visitor Cannot Access Tasks
+persona: visitor
+steps: 4
+break_strategies: ['direct_url', 'id_guessing']
+[2026-03-31 20:10:10] Story completed: Unauthenticated Visitor Cannot Access Tasks
+cost: $0.475, duration: 103.9s
+[2026-03-31 20:10:10] Verifying story: Filter Tasks by Status and Sort by Due Date
+persona: returning_user
+steps: 6
+break_strategies: ['empty_required', 'special_chars']
+[2026-03-31 20:15:02] Story completed: Filter Tasks by Status and Sort by Due Date
+cost: $0.906, duration: 292.1s
+[2026-03-31 20:15:02] Verifying story: Edge Cases: Empty Fields, Long Strings, Special Characters
+persona: returning_user
+steps: 6
+break_strategies: ['empty_required', 'long_input', 'special_chars', 'double_submit']
+[2026-03-31 20:17:12] Story completed: Edge Cases: Empty Fields, Long Strings, Special Characters
+cost: $0.465, duration: 129.7s

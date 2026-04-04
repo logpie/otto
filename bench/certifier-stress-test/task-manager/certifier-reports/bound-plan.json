@@ -1,0 +1,1602 @@
+{
+  "intent": "task manager with user auth CRUD tasks status due date",
+  "claims": [
+    {
+      "id": "auth-register",
+      "description": "A new user can register with email, name, and password and receive a success response",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/auth/register",
+            "candidate_paths": [
+              "/api/auth/register",
+              "/api/register",
+              "/auth/register",
+              "/api/users/register"
+            ],
+            "body": {
+              "email": "alice@example.com",
+              "name": "Alice",
+              "password": "SecurePass123!"
+            },
+            "expect_status": [
+              200,
+              201
+            ],
+            "expect_body_contains": [
+              "alice@example.com"
+            ],
+            "expect_json_keys": [
+              "id",
+              "email"
+            ]
+          },
+          "resolved_route": "/api/auth/register",
+          "fallback_routes": [
+            "/register",
+            "/signup",
+            "/auth/register"
+          ],
+          "resolved_body": {
+            "email": "alice@example.com",
+            "name": "Alice",
+            "password": "SecurePass123!"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "bound-6257745443@eval.local",
+            "password": "BoundTest123!",
+            "name": "Bound Test User",
+            "role": "user",
+            "source": "generated",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/auth/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": false,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "bound registration step to adapter-discovered register routes",
+            "bound auth to generated user credentials"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "bound registration step to adapter-discovered register routes",
+        "bound auth to generated user credentials"
+      ]
+    },
+    {
+      "id": "auth-register-duplicate",
+      "description": "Registering with an already-used email returns an error",
+      "priority": "important",
+      "category": "error-handling",
+      "test_approach": "api",
+      "hard_fail": false,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/auth/register",
+            "candidate_paths": [
+              "/api/auth/register",
+              "/api/register",
+              "/auth/register"
+            ],
+            "body": {
+              "email": "alice@example.com",
+              "name": "Alice Duplicate",
+              "password": "AnotherPass456!"
+            },
+            "expect_status": [
+              400,
+              409,
+              422
+            ]
+          },
+          "resolved_route": "/api/auth/register",
+          "fallback_routes": [
+            "/register",
+            "/signup",
+            "/auth/register"
+          ],
+          "resolved_body": {
+            "email": "alice@example.com",
+            "name": "Alice Duplicate",
+            "password": "AnotherPass456!"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "bound-0db25fe90a@eval.local",
+            "password": "BoundTest123!",
+            "name": "Bound Test User",
+            "role": "user",
+            "source": "generated",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/auth/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": false,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "bound registration step to adapter-discovered register routes",
+            "negative test step \u2014 body preserved as-is (intentionally invalid)",
+            "bound auth to generated user credentials"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "bound registration step to adapter-discovered register routes",
+        "negative test step \u2014 body preserved as-is (intentionally invalid)",
+        "bound auth to generated user credentials"
+      ]
+    },
+    {
+      "id": "auth-login",
+      "description": "A registered user can log in with email and password and receive an auth token or session",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/auth/login",
+            "candidate_paths": [
+              "/api/auth/login",
+              "/api/login",
+              "/auth/login"
+            ],
+            "body": {
+              "email": "alice@example.com",
+              "password": "SecurePass123!"
+            },
+            "expect_status": [
+              200
+            ],
+            "expect_json_keys": [
+              "token"
+            ]
+          },
+          "resolved_route": "/api/auth/callback/credentials",
+          "fallback_routes": [
+            "/login",
+            "/signin",
+            "/auth/login"
+          ],
+          "resolved_body": {
+            "email": "alice@example.com",
+            "password": "SecurePass123!",
+            "name": "Bound Test User"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/auth/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": false,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "bound login step to adapter-discovered login routes",
+            "added missing creatable field: name",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "bound login step to adapter-discovered login routes",
+        "added missing creatable field: name",
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "auth-login-invalid",
+      "description": "Logging in with wrong credentials returns an error, not a token",
+      "priority": "important",
+      "category": "security",
+      "test_approach": "api",
+      "hard_fail": false,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/auth/login",
+            "candidate_paths": [
+              "/api/auth/login",
+              "/api/login",
+              "/auth/login"
+            ],
+            "body": {
+              "email": "alice@example.com",
+              "password": "WrongPassword999"
+            },
+            "expect_status": [
+              400,
+              401,
+              403
+            ]
+          },
+          "resolved_route": "/api/auth/callback/credentials",
+          "fallback_routes": [
+            "/login",
+            "/signin",
+            "/auth/login"
+          ],
+          "resolved_body": {
+            "email": "alice@example.com",
+            "password": "WrongPassword999"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "WRONG_PASSWORD_FOR_NEGATIVE_TEST",
+            "name": "",
+            "role": "user",
+            "source": "",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": false,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "bound login step to adapter-discovered login routes",
+            "negative test step \u2014 body preserved as-is (intentionally invalid)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "bound login step to adapter-discovered login routes",
+        "negative test step \u2014 body preserved as-is (intentionally invalid)"
+      ]
+    },
+    {
+      "id": "task-create",
+      "description": "An authenticated user can create a task with title, description, status, and dueDate",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/tasks",
+            "candidate_paths": [
+              "/api/tasks",
+              "/api/task",
+              "/tasks"
+            ],
+            "body": {
+              "title": "Buy groceries",
+              "description": "Milk, eggs, bread",
+              "status": "TODO",
+              "dueDate": "2026-04-15T00:00:00.000Z"
+            },
+            "expect_status": [
+              200,
+              201
+            ],
+            "expect_body_contains": [
+              "Buy groceries"
+            ],
+            "expect_json_keys": [
+              "id",
+              "title",
+              "status",
+              "dueDate"
+            ]
+          },
+          "resolved_route": "/api/tasks",
+          "fallback_routes": [
+            "/tasks"
+          ],
+          "resolved_body": {
+            "title": "Buy groceries",
+            "description": "Milk, eggs, bread",
+            "status": "TODO",
+            "dueDate": "2026-04-15T00:00:00.000Z"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/auth/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "task-list",
+      "description": "An authenticated user can retrieve a list of their tasks",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "GET",
+          "step": {
+            "action": "http",
+            "method": "GET",
+            "path": "/api/tasks",
+            "candidate_paths": [
+              "/api/tasks",
+              "/api/task",
+              "/tasks"
+            ],
+            "expect_status": [
+              200
+            ],
+            "expect_body_contains": [
+              "Buy groceries"
+            ],
+            "expect_json_keys": [
+              "id",
+              "title"
+            ]
+          },
+          "resolved_route": "/api/tasks",
+          "fallback_routes": [
+            "/tasks",
+            "/api/tasks/{{task_id}}"
+          ],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/auth/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/tasks",
+            "/api/task"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added adapter-discovered route matches by keyword",
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "task-read-single",
+      "description": "An authenticated user can retrieve a single task by its ID",
+      "priority": "important",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": false,
+      "steps": [
+        {
+          "action": "http",
+          "method": "GET",
+          "step": {
+            "action": "http",
+            "method": "GET",
+            "path": "/api/tasks/:id",
+            "candidate_paths": [
+              "/api/tasks/:id",
+              "/api/task/:id",
+              "/tasks/:id"
+            ],
+            "expect_status": [
+              200
+            ],
+            "expect_body_contains": [
+              "Buy groceries"
+            ],
+            "expect_json_keys": [
+              "id",
+              "title",
+              "description",
+              "status",
+              "dueDate"
+            ]
+          },
+          "resolved_route": "/api/tasks/:id",
+          "fallback_routes": [
+            "/tasks/:id",
+            "/api/tasks",
+            "/api/tasks/{{task_id}}"
+          ],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/auth/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/tasks",
+            "/api/task"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added adapter-discovered route matches by keyword",
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "task-update-status",
+      "description": "An authenticated user can update a task's status (e.g., TODO to IN_PROGRESS)",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "PUT",
+          "step": {
+            "action": "http",
+            "method": "PUT",
+            "path": "/api/tasks/:id",
+            "candidate_paths": [
+              "/api/tasks/:id",
+              "/api/task/:id",
+              "/tasks/:id"
+            ],
+            "body": {
+              "status": "IN_PROGRESS"
+            },
+            "body_variants": [
+              {
+                "status": "IN_PROGRESS"
+              },
+              {
+                "status": "in_progress"
+              },
+              {
+                "status": "in-progress"
+              }
+            ],
+            "expect_status": [
+              200
+            ],
+            "expect_body_contains": [
+              "IN_PROGRESS"
+            ]
+          },
+          "resolved_route": "/api/tasks/:id",
+          "fallback_routes": [
+            "/tasks/:id",
+            "/api/tasks/{{task_id}}"
+          ],
+          "resolved_body": {
+            "status": "IN_PROGRESS",
+            "title": "Bound Test Item",
+            "description": "Generated by certifier binder",
+            "dueDate": "2026-01-01T00:00:00Z"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/auth/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/tasks",
+            "/api/task"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "added missing creatable field: title",
+            "added missing creatable field: description",
+            "added missing creatable field: dueDate",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "GET",
+          "step": {
+            "action": "http",
+            "method": "GET",
+            "path": "/api/tasks/:id",
+            "candidate_paths": [
+              "/api/tasks/:id",
+              "/api/task/:id",
+              "/tasks/:id"
+            ],
+            "expect_status": [
+              200
+            ],
+            "expect_body_contains": [
+              "IN_PROGRESS"
+            ]
+          },
+          "resolved_route": "/api/tasks/:id",
+          "fallback_routes": [
+            "/tasks/:id",
+            "/api/tasks",
+            "/api/tasks/{{task_id}}"
+          ],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/auth/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/tasks",
+            "/api/task"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added adapter-discovered route matches by keyword",
+        "added missing creatable field: title",
+        "added missing creatable field: description",
+        "added missing creatable field: dueDate",
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "task-update-fields",
+      "description": "An authenticated user can update a task's title, description, and dueDate",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "PUT",
+          "step": {
+            "action": "http",
+            "method": "PUT",
+            "path": "/api/tasks/:id",
+            "candidate_paths": [
+              "/api/tasks/:id",
+              "/api/task/:id",
+              "/tasks/:id"
+            ],
+            "body": {
+              "title": "Buy organic groceries",
+              "description": "Organic milk, free-range eggs",
+              "dueDate": "2026-04-20T00:00:00.000Z"
+            },
+            "expect_status": [
+              200
+            ],
+            "expect_body_contains": [
+              "Buy organic groceries"
+            ],
+            "expect_json_keys": [
+              "id",
+              "title",
+              "description",
+              "dueDate"
+            ]
+          },
+          "resolved_route": "/api/tasks/:id",
+          "fallback_routes": [
+            "/tasks/:id",
+            "/api/tasks/{{task_id}}"
+          ],
+          "resolved_body": {
+            "title": "Buy organic groceries",
+            "description": "Organic milk, free-range eggs",
+            "dueDate": "2026-04-20T00:00:00.000Z",
+            "status": "TODO"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/auth/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/tasks",
+            "/api/task"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "added missing creatable field: status",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added adapter-discovered route matches by keyword",
+        "added missing creatable field: status",
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "task-delete",
+      "description": "An authenticated user can delete a task they own",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "DELETE",
+          "step": {
+            "action": "http",
+            "method": "DELETE",
+            "path": "/api/tasks/:id",
+            "candidate_paths": [
+              "/api/tasks/:id",
+              "/api/task/:id",
+              "/tasks/:id"
+            ],
+            "expect_status": [
+              200,
+              204
+            ]
+          },
+          "resolved_route": "/api/tasks/:id",
+          "fallback_routes": [
+            "/tasks/:id",
+            "/api/tasks/{{task_id}}"
+          ],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/auth/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/tasks",
+            "/api/task"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "GET",
+          "step": {
+            "action": "http",
+            "method": "GET",
+            "path": "/api/tasks/:id",
+            "candidate_paths": [
+              "/api/tasks/:id",
+              "/api/task/:id",
+              "/tasks/:id"
+            ],
+            "expect_status": [
+              404
+            ]
+          },
+          "resolved_route": "/api/tasks/:id",
+          "fallback_routes": [
+            "/tasks/:id",
+            "/api/tasks",
+            "/api/tasks/{{task_id}}"
+          ],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/auth/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/tasks",
+            "/api/task"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added adapter-discovered route matches by keyword",
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "task-status-values",
+      "description": "Tasks support the status values TODO, IN_PROGRESS, and DONE",
+      "priority": "important",
+      "category": "data",
+      "test_approach": "api",
+      "hard_fail": false,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/tasks",
+            "candidate_paths": [
+              "/api/tasks",
+              "/api/task",
+              "/tasks"
+            ],
+            "body": {
+              "title": "Status test DONE",
+              "description": "Testing DONE status",
+              "status": "DONE",
+              "dueDate": "2026-05-01T00:00:00.000Z"
+            },
+            "expect_status": [
+              200,
+              201
+            ],
+            "expect_body_contains": [
+              "DONE"
+            ]
+          },
+          "resolved_route": "/api/tasks",
+          "fallback_routes": [
+            "/tasks"
+          ],
+          "resolved_body": {
+            "title": "Status test DONE",
+            "description": "Testing DONE status",
+            "status": "DONE",
+            "dueDate": "2026-05-01T00:00:00.000Z"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/auth/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "task-due-date-stored",
+      "description": "The dueDate field is persisted and returned when retrieving a task",
+      "priority": "critical",
+      "category": "data",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/tasks",
+            "candidate_paths": [
+              "/api/tasks",
+              "/api/task",
+              "/tasks"
+            ],
+            "body": {
+              "title": "Deadline task",
+              "description": "Has a due date",
+              "status": "TODO",
+              "dueDate": "2026-06-15T00:00:00.000Z"
+            },
+            "expect_status": [
+              200,
+              201
+            ],
+            "expect_body_contains": [
+              "2026-06-15"
+            ],
+            "expect_json_keys": [
+              "dueDate"
+            ]
+          },
+          "resolved_route": "/api/tasks",
+          "fallback_routes": [
+            "/tasks"
+          ],
+          "resolved_body": {
+            "title": "Deadline task",
+            "description": "Has a due date",
+            "status": "TODO",
+            "dueDate": "2026-06-15T00:00:00.000Z"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/auth/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "task-ownership-isolation",
+      "description": "A user cannot see or modify tasks belonging to another user",
+      "priority": "critical",
+      "category": "security",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/auth/register",
+            "candidate_paths": [
+              "/api/auth/register",
+              "/api/register",
+              "/auth/register"
+            ],
+            "body": {
+              "email": "bob@example.com",
+              "name": "Bob",
+              "password": "BobSecure789!"
+            },
+            "expect_status": [
+              200,
+              201
+            ]
+          },
+          "resolved_route": "/api/auth/register",
+          "fallback_routes": [
+            "/register",
+            "/signup",
+            "/auth/register",
+            "/api/tasks"
+          ],
+          "resolved_body": {
+            "email": "bob@example.com",
+            "name": "Bob",
+            "password": "BobSecure789!"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "bound-64eefc469f@eval.local",
+            "password": "BoundTest123!",
+            "name": "Bound Test User",
+            "role": "user",
+            "source": "generated",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/auth/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": false,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "bound registration step to adapter-discovered register routes",
+            "added adapter-discovered route matches by keyword",
+            "bound auth to generated user credentials"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/auth/login",
+            "candidate_paths": [
+              "/api/auth/login",
+              "/api/login",
+              "/auth/login"
+            ],
+            "body": {
+              "email": "bob@example.com",
+              "password": "BobSecure789!"
+            },
+            "expect_status": [
+              200
+            ]
+          },
+          "resolved_route": "/api/auth/callback/credentials",
+          "fallback_routes": [
+            "/login",
+            "/signin",
+            "/auth/login",
+            "/api/tasks"
+          ],
+          "resolved_body": {
+            "email": "bob@example.com",
+            "password": "BobSecure789!",
+            "name": "Bound Test User"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/auth/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": false,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "bound login step to adapter-discovered login routes",
+            "added adapter-discovered route matches by keyword",
+            "added missing creatable field: name",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "GET",
+          "step": {
+            "action": "http",
+            "method": "GET",
+            "path": "/api/tasks",
+            "candidate_paths": [
+              "/api/tasks",
+              "/api/task",
+              "/tasks"
+            ],
+            "expect_status": [
+              200
+            ],
+            "expect_body_contains": []
+          },
+          "resolved_route": "/api/tasks",
+          "fallback_routes": [
+            "/tasks",
+            "/api/tasks/{{task_id}}"
+          ],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/auth/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/tasks",
+            "/api/task"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "bound registration step to adapter-discovered register routes",
+        "added adapter-discovered route matches by keyword",
+        "bound auth to generated user credentials",
+        "bound login step to adapter-discovered login routes",
+        "added missing creatable field: name",
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "auth-protected-routes",
+      "description": "Accessing task endpoints without authentication returns 401",
+      "priority": "critical",
+      "category": "security",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "GET",
+          "step": {
+            "action": "http",
+            "method": "GET",
+            "path": "/api/tasks",
+            "candidate_paths": [
+              "/api/tasks",
+              "/api/task",
+              "/tasks"
+            ],
+            "expect_status": [
+              401,
+              403
+            ]
+          },
+          "resolved_route": "/api/tasks",
+          "fallback_routes": [
+            "/api/tasks/:id",
+            "/tasks",
+            "/api/tasks/{{task_id}}"
+          ],
+          "resolved_body": null,
+          "auth": null,
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/tasks",
+            "/api/task"
+          ],
+          "binding_notes": [
+            "preferring adapter-protected routes for protected-route claim",
+            "added adapter-discovered route matches by keyword"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "preferring adapter-protected routes for protected-route claim",
+        "added adapter-discovered route matches by keyword"
+      ]
+    },
+    {
+      "id": "task-create-validation",
+      "description": "Creating a task without a title returns a validation error",
+      "priority": "important",
+      "category": "error-handling",
+      "test_approach": "api",
+      "hard_fail": false,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/tasks",
+            "candidate_paths": [
+              "/api/tasks",
+              "/api/task",
+              "/tasks"
+            ],
+            "body": {
+              "description": "No title provided",
+              "status": "TODO"
+            },
+            "expect_status": [
+              400,
+              422
+            ]
+          },
+          "resolved_route": "/api/tasks",
+          "fallback_routes": [
+            "/tasks"
+          ],
+          "resolved_body": {
+            "description": "No title provided",
+            "status": "TODO"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/auth/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "negative test step \u2014 body preserved as-is (intentionally invalid)",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "negative test step \u2014 body preserved as-is (intentionally invalid)",
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "task-not-found",
+      "description": "Requesting a non-existent task by ID returns 404",
+      "priority": "important",
+      "category": "error-handling",
+      "test_approach": "api",
+      "hard_fail": false,
+      "steps": [
+        {
+          "action": "http",
+          "method": "GET",
+          "step": {
+            "action": "http",
+            "method": "GET",
+            "path": "/api/tasks/nonexistent-id-999",
+            "candidate_paths": [
+              "/api/tasks/nonexistent-id-999",
+              "/api/task/nonexistent-id-999",
+              "/tasks/nonexistent-id-999"
+            ],
+            "expect_status": [
+              404
+            ]
+          },
+          "resolved_route": "/api/tasks/nonexistent-id-999",
+          "fallback_routes": [
+            "/tasks/nonexistent-id-999",
+            "/api/tasks",
+            "/api/tasks/{{task_id}}"
+          ],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/auth/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/tasks",
+            "/api/task"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "negative test step \u2014 body preserved as-is (intentionally invalid)",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added adapter-discovered route matches by keyword",
+        "negative test step \u2014 body preserved as-is (intentionally invalid)",
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "task-persistence",
+      "description": "Tasks persist across separate API calls \u2014 a created task appears in subsequent list requests",
+      "priority": "critical",
+      "category": "data",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/tasks",
+            "candidate_paths": [
+              "/api/tasks",
+              "/api/task",
+              "/tasks"
+            ],
+            "body": {
+              "title": "Persistent task",
+              "description": "Should survive across requests",
+              "status": "TODO",
+              "dueDate": "2026-07-01T00:00:00.000Z"
+            },
+            "expect_status": [
+              200,
+              201
+            ]
+          },
+          "resolved_route": "/api/tasks",
+          "fallback_routes": [
+            "/tasks"
+          ],
+          "resolved_body": {
+            "title": "Persistent task",
+            "description": "Should survive across requests",
+            "status": "TODO",
+            "dueDate": "2026-07-01T00:00:00.000Z"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/auth/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "GET",
+          "step": {
+            "action": "http",
+            "method": "GET",
+            "path": "/api/tasks",
+            "candidate_paths": [
+              "/api/tasks",
+              "/api/task",
+              "/tasks"
+            ],
+            "expect_status": [
+              200
+            ],
+            "expect_body_contains": [
+              "Persistent task"
+            ]
+          },
+          "resolved_route": "/api/tasks",
+          "fallback_routes": [
+            "/tasks",
+            "/api/tasks/{{task_id}}"
+          ],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/auth/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/tasks",
+            "/api/task"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "bound auth to seeded user credentials (alice@example.com)",
+        "added adapter-discovered route matches by keyword"
+      ]
+    },
+    {
+      "id": "task-timestamps",
+      "description": "Tasks include createdAt and updatedAt timestamps in responses",
+      "priority": "nice",
+      "category": "data",
+      "test_approach": "api",
+      "hard_fail": false,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/tasks",
+            "candidate_paths": [
+              "/api/tasks",
+              "/api/task",
+              "/tasks"
+            ],
+            "body": {
+              "title": "Timestamp check",
+              "description": "Check auto timestamps",
+              "status": "TODO",
+              "dueDate": "2026-08-01T00:00:00.000Z"
+            },
+            "expect_status": [
+              200,
+              201
+            ],
+            "expect_json_keys": [
+              "createdAt",
+              "updatedAt"
+            ]
+          },
+          "resolved_route": "/api/tasks",
+          "fallback_routes": [
+            "/tasks"
+          ],
+          "resolved_body": {
+            "title": "Timestamp check",
+            "description": "Check auto timestamps",
+            "status": "TODO",
+            "dueDate": "2026-08-01T00:00:00.000Z"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/auth/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "auth-password-not-exposed",
+      "description": "User password is never returned in API responses",
+      "priority": "important",
+      "category": "security",
+      "test_approach": "api",
+      "hard_fail": false,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/auth/register",
+            "candidate_paths": [
+              "/api/auth/register",
+              "/api/register",
+              "/auth/register"
+            ],
+            "body": {
+              "email": "charlie@example.com",
+              "name": "Charlie",
+              "password": "CharliePass321!"
+            },
+            "expect_status": [
+              200,
+              201
+            ],
+            "expect_body_contains": [
+              "charlie@example.com"
+            ]
+          },
+          "resolved_route": "/api/auth/register",
+          "fallback_routes": [
+            "/register",
+            "/signup",
+            "/auth/register"
+          ],
+          "resolved_body": {
+            "email": "charlie@example.com",
+            "name": "Charlie",
+            "password": "CharliePass321!"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "bound-5cd31fe8a8@eval.local",
+            "password": "BoundTest123!",
+            "name": "Bound Test User",
+            "role": "user",
+            "source": "generated",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/auth/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": false,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "bound registration step to adapter-discovered register routes",
+            "bound auth to generated user credentials"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "bound registration step to adapter-discovered register routes",
+        "bound auth to generated user credentials"
+      ]
+    }
+  ],
+  "journeys": [],
+  "product_type_hint": "web",
+  "compiled_at": "2026-03-31 15:51:50",
+  "journeys_compiled_at": "",
+  "cost_usd": 0.18479625,
+  "metadata": {
+    "auth_type": "nextauth",
+    "route_count": 3,
+    "seeded_user_count": 2
+  }
+}

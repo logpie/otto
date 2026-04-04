@@ -1,0 +1,36 @@
+I'll execute this user story step by step. Let me start by authenticating and then testing edge cases.
+
+Now let me start with Step 1 - authenticating as an existing user.The CSRF token from the GET was stale/mismatched. I need to use the CSRF token from the cookie flow properly.Got a session token. Now let me verify the session works:Step 1 passes - authenticated as Alice Johnson. Now Step 2 - try creating a recipe with empty fields:Empty body returns a 500 with no response body. That's a validation failure but returns a server error instead of a proper 400 with field-level messages. Let me try with explicit empty strings:Step 2 finding: The API accepts a recipe with all empty strings - no validation. The empty `{}` body returns 500 (server error, not validation). This is a **fail** - no validation errors are returned.
+
+Now Step 3 - create a recipe with long title, emoji/unicode description, and special characters:The recipe was created successfully. Let me note:
+- 1001-char title: accepted (no length validation)
+- Emoji/unicode: preserved correctly ✓
+- `<script>` tag: stored as-is (not sanitized server-side, but returned as JSON string, not HTML)
+- `½` and `⅓`: preserved ✓
+- Ingredients field has extra quotes wrapping it: `"\"<script>..."` — that's a bug in how the API handles the ingredients field
+
+Let me save the recipe ID and verify retrieval:Step 3 passes - the recipe is created and data is preserved. The script tag is stored as text (not sanitized/stripped, but in a JSON API context that's acceptable as long as the frontend escapes it). Let me check browser rendering:The recipe detail page renders (status 200). The data is passed as JSON props to a React component — the `<script>` tag in ingredients is escaped as `\u003cscript\u003e` in the RSC payload, which means React will render it as text, not execute it. Good — XSS is handled by React's default escaping.
+
+Now Step 4 - search with special characters:Search with emoji returned results (200), search with `<script>` also returned 200. The searches work without crashing. The emoji search seems to return all recipes (not filtering specifically), but that's a search quality issue, not a crash.
+
+Now Step 5 - create recipe with boundary values (0 prep, 0 cook, 1 serving):Step 5 passes. Boundary values preserved. Note: ingredients has extra quotes wrapping (`"Water"` instead of `Water`) — a consistent bug in how the API handles the ingredients field.
+
+Now let me run the BREAK phase:Session expired. Let me re-authenticate:Good findings. Let me verify the double submit created duplicates:Both double-submit requests succeeded (200 200), creating duplicate entries. The search returns all recipes (not filtered), but the duplicates are confirmed.
+
+Now let me write the verdict:## Summary
+
+**Story: FAILED** — blocked at Step 2 (empty field validation).
+
+### Step Results:
+1. **✅ Login** — Authenticated as alice@example.com successfully
+2. **❌ Empty fields** — No validation exists. Empty body → 500 (no error message). Empty strings → 200 (recipe created with blanks)
+3. **✅ Long title + emoji + special chars** — 1001-char title accepted, emoji/unicode preserved, `<script>` tags safely escaped by React
+4. **✅ Search with special characters** — No crashes, returns 200 for emoji and HTML tag queries
+5. **✅ Boundary values** — prepTime=0, cookTime=0, servings=1 all stored correctly
+
+### Key BREAK Findings:
+- **No input validation at all** — empty strings, negative numbers, 10K-char fields all accepted
+- **500 errors with no body** for type mismatches (string→int) and null values
+- **Ingredients double-quoting bug** — every ingredients value gets wrapped in extra quotes
+- **Duplicate creation** possible with simultaneous requests
+- **SQL injection search** handled safely (Prisma parameterizes queries)

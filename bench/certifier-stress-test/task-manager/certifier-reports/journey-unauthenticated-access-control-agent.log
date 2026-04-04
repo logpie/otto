@@ -1,0 +1,12 @@
+I'll test the unauthenticated access control story step by step. Let me start by making requests in parallel for the API and page access.
+
+Now let me run all the initial tests in parallel - API calls for steps 1-4 and page fetches.The API endpoints all return 401 correctly. Let me check the browser-facing pages:The `/tasks` pages return 404, suggesting Next.js pages might be at different paths. Let me explore what pages exist:The root page is public (landing page with Login/Register). Let me find the actual protected task pages:There are no `/tasks` pages — only root, login, and register. The app likely shows tasks on the root page when authenticated. Let me check:Good. Now I have a complete picture. Let me also first create a real task as an authenticated user so I can test accessing it unauthenticated:Now let me test accessing this real task ID without auth:All API endpoints properly return 401. Let me verify the task still exists unmodified:Task is unchanged. Now let me run the BREAK phase tests:All access control holds. Now let me write the verdict:## Verdict: ✅ PASS
+
+All 4 steps passed. The task manager properly blocks unauthenticated access:
+
+1. **Task list (GET /api/tasks)** → 401 Unauthorized. Root page client-side redirects to `/login`.
+2. **Task creation (POST /api/tasks)** → 401 Unauthorized. No task created.
+3. **Task read by ID (GET /api/tasks/:id)** → 401 Unauthorized. Real task data not exposed.
+4. **Task delete/update (DELETE/PUT /api/tasks/:id)** → 401 Unauthorized. Task verified unchanged after attempts.
+
+**Break phase**: No vulnerabilities found. Query parameter variations, ID guessing, null byte injection, and path traversal all properly blocked by the auth middleware.

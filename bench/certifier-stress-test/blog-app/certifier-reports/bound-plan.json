@@ -1,0 +1,1762 @@
+{
+  "intent": "blog platform with user auth CRUD posts comments likes tags",
+  "claims": [
+    {
+      "id": "auth-register",
+      "description": "Users can register with email, name, and password",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/register",
+            "candidate_paths": [
+              "/api/register",
+              "/api/auth/register",
+              "/api/users/register",
+              "/api/signup",
+              "/api/auth/signup"
+            ],
+            "body": {
+              "email": "alice@example.com",
+              "name": "Alice",
+              "password": "SecurePass123!"
+            },
+            "expect_status": [
+              200,
+              201
+            ],
+            "expect_body_contains": [
+              "alice@example.com"
+            ],
+            "expect_json_keys": [
+              "id",
+              "email"
+            ]
+          },
+          "resolved_route": "/api/register",
+          "fallback_routes": [
+            "/register",
+            "/signup"
+          ],
+          "resolved_body": {
+            "email": "alice@example.com",
+            "name": "Alice",
+            "password": "SecurePass123!"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "bound-6257745443@eval.local",
+            "password": "BoundTest123!",
+            "name": "Bound Test User",
+            "role": "user",
+            "source": "generated",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": false,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "bound registration step to adapter-discovered register routes",
+            "bound auth to generated user credentials"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "bound registration step to adapter-discovered register routes",
+        "bound auth to generated user credentials"
+      ]
+    },
+    {
+      "id": "auth-register-duplicate",
+      "description": "Registering with an existing email returns an error",
+      "priority": "important",
+      "category": "error-handling",
+      "test_approach": "api",
+      "hard_fail": false,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/register",
+            "candidate_paths": [
+              "/api/register",
+              "/api/auth/register",
+              "/api/users/register",
+              "/api/signup",
+              "/api/auth/signup"
+            ],
+            "body": {
+              "email": "alice@example.com",
+              "name": "Alice Dup",
+              "password": "SecurePass123!"
+            },
+            "expect_status": [
+              400,
+              409,
+              422
+            ]
+          },
+          "resolved_route": "/api/register",
+          "fallback_routes": [
+            "/register",
+            "/signup"
+          ],
+          "resolved_body": {
+            "email": "alice@example.com",
+            "name": "Alice Dup",
+            "password": "SecurePass123!"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "bound-0db25fe90a@eval.local",
+            "password": "BoundTest123!",
+            "name": "Bound Test User",
+            "role": "user",
+            "source": "generated",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": false,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "bound registration step to adapter-discovered register routes",
+            "negative test step \u2014 body preserved as-is (intentionally invalid)",
+            "bound auth to generated user credentials"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "bound registration step to adapter-discovered register routes",
+        "negative test step \u2014 body preserved as-is (intentionally invalid)",
+        "bound auth to generated user credentials"
+      ]
+    },
+    {
+      "id": "auth-login",
+      "description": "Registered users can log in with email and password",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/login",
+            "candidate_paths": [
+              "/api/login",
+              "/api/auth/login",
+              "/api/auth/signin",
+              "/api/signin"
+            ],
+            "body": {
+              "email": "alice@example.com",
+              "password": "SecurePass123!"
+            },
+            "expect_status": [
+              200
+            ],
+            "expect_json_keys": [
+              "token"
+            ]
+          },
+          "resolved_route": "/api/auth/callback/credentials",
+          "fallback_routes": [
+            "/login",
+            "/signin"
+          ],
+          "resolved_body": {
+            "email": "alice@example.com",
+            "password": "SecurePass123!",
+            "name": "Bound Test User"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": false,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "bound login step to adapter-discovered login routes",
+            "added missing creatable field: name",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "bound login step to adapter-discovered login routes",
+        "added missing creatable field: name",
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "auth-login-invalid",
+      "description": "Login with wrong credentials returns an error",
+      "priority": "important",
+      "category": "error-handling",
+      "test_approach": "api",
+      "hard_fail": false,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/login",
+            "candidate_paths": [
+              "/api/login",
+              "/api/auth/login",
+              "/api/auth/signin",
+              "/api/signin"
+            ],
+            "body": {
+              "email": "alice@example.com",
+              "password": "WrongPassword"
+            },
+            "expect_status": [
+              400,
+              401,
+              403
+            ]
+          },
+          "resolved_route": "/api/auth/callback/credentials",
+          "fallback_routes": [
+            "/login",
+            "/signin"
+          ],
+          "resolved_body": {
+            "email": "alice@example.com",
+            "password": "WrongPassword"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "WRONG_PASSWORD_FOR_NEGATIVE_TEST",
+            "name": "",
+            "role": "user",
+            "source": "",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": false,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "bound login step to adapter-discovered login routes",
+            "negative test step \u2014 body preserved as-is (intentionally invalid)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "bound login step to adapter-discovered login routes",
+        "negative test step \u2014 body preserved as-is (intentionally invalid)"
+      ]
+    },
+    {
+      "id": "post-create",
+      "description": "Authenticated users can create a blog post with title and content",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/posts",
+            "candidate_paths": [
+              "/api/posts",
+              "/api/post",
+              "/posts"
+            ],
+            "body": {
+              "title": "My First Post",
+              "content": "Hello world, this is my blog post."
+            },
+            "expect_status": [
+              200,
+              201
+            ],
+            "expect_body_contains": [
+              "My First Post"
+            ],
+            "expect_json_keys": [
+              "id",
+              "title",
+              "content"
+            ]
+          },
+          "resolved_route": "/api/posts",
+          "fallback_routes": [
+            "/posts",
+            "/api/posts/{{comment_id}}/comments",
+            "/api/posts/{{like_id}}/like"
+          ],
+          "resolved_body": {
+            "title": "My First Post",
+            "content": "Hello world, this is my blog post.",
+            "published": false
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/comments",
+            "/api/comment",
+            "/api/likes",
+            "/api/like"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "added missing creatable field: published",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added adapter-discovered route matches by keyword",
+        "added missing creatable field: published",
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "post-list",
+      "description": "Users can retrieve a list of blog posts",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "GET",
+          "step": {
+            "action": "http",
+            "method": "GET",
+            "path": "/api/posts",
+            "candidate_paths": [
+              "/api/posts",
+              "/api/post",
+              "/posts"
+            ],
+            "expect_status": [
+              200
+            ],
+            "expect_body_contains": [
+              "My First Post"
+            ]
+          },
+          "resolved_route": "/api/posts",
+          "fallback_routes": [
+            "/posts",
+            "/api/posts/{{post_id}}"
+          ],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/posts",
+            "/api/post"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added adapter-discovered route matches by keyword",
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "post-read",
+      "description": "Users can read a single post by ID",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "GET",
+          "step": {
+            "action": "http",
+            "method": "GET",
+            "path": "/api/posts/:id",
+            "candidate_paths": [
+              "/api/posts/:id",
+              "/api/post/:id",
+              "/posts/:id"
+            ],
+            "expect_status": [
+              200
+            ],
+            "expect_body_contains": [
+              "My First Post"
+            ],
+            "expect_json_keys": [
+              "id",
+              "title",
+              "content",
+              "authorId"
+            ]
+          },
+          "resolved_route": "/api/posts/:id",
+          "fallback_routes": [
+            "/posts/:id",
+            "/api/posts",
+            "/api/posts/{{post_id}}"
+          ],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/posts",
+            "/api/post"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added adapter-discovered route matches by keyword",
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "post-update",
+      "description": "Post author can update their post's title and content",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "PUT",
+          "step": {
+            "action": "http",
+            "method": "PUT",
+            "path": "/api/posts/:id",
+            "candidate_paths": [
+              "/api/posts/:id",
+              "/api/post/:id",
+              "/posts/:id"
+            ],
+            "body": {
+              "title": "Updated Post Title",
+              "content": "Updated content."
+            },
+            "body_variants": [
+              {
+                "title": "Updated Post Title",
+                "content": "Updated content."
+              },
+              {
+                "title": "Updated Post Title"
+              }
+            ],
+            "expect_status": [
+              200
+            ],
+            "expect_body_contains": [
+              "Updated Post Title"
+            ]
+          },
+          "resolved_route": "/api/posts/:id",
+          "fallback_routes": [
+            "/posts/:id",
+            "/api/posts/{{post_id}}"
+          ],
+          "resolved_body": {
+            "title": "Updated Post Title",
+            "content": "Updated content.",
+            "published": false
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/posts",
+            "/api/post"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "added missing creatable field: published",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "GET",
+          "step": {
+            "action": "http",
+            "method": "GET",
+            "path": "/api/posts/:id",
+            "candidate_paths": [
+              "/api/posts/:id",
+              "/api/post/:id",
+              "/posts/:id"
+            ],
+            "expect_status": [
+              200
+            ],
+            "expect_body_contains": [
+              "Updated Post Title"
+            ]
+          },
+          "resolved_route": "/api/posts/:id",
+          "fallback_routes": [
+            "/posts/:id",
+            "/api/posts",
+            "/api/posts/{{post_id}}"
+          ],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/posts",
+            "/api/post"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added adapter-discovered route matches by keyword",
+        "added missing creatable field: published",
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "post-delete",
+      "description": "Post author can delete their post",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "DELETE",
+          "step": {
+            "action": "http",
+            "method": "DELETE",
+            "path": "/api/posts/:id",
+            "candidate_paths": [
+              "/api/posts/:id",
+              "/api/post/:id",
+              "/posts/:id"
+            ],
+            "expect_status": [
+              200,
+              204
+            ]
+          },
+          "resolved_route": "/api/posts/:id",
+          "fallback_routes": [
+            "/posts/:id",
+            "/api/posts/{{post_id}}"
+          ],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/posts",
+            "/api/post"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "GET",
+          "step": {
+            "action": "http",
+            "method": "GET",
+            "path": "/api/posts/:id",
+            "candidate_paths": [
+              "/api/posts/:id",
+              "/api/post/:id",
+              "/posts/:id"
+            ],
+            "expect_status": [
+              404
+            ]
+          },
+          "resolved_route": "/api/posts/:id",
+          "fallback_routes": [
+            "/posts/:id",
+            "/api/posts",
+            "/api/posts/{{post_id}}"
+          ],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/posts",
+            "/api/post"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added adapter-discovered route matches by keyword",
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "post-create-unauth",
+      "description": "Unauthenticated users cannot create posts",
+      "priority": "important",
+      "category": "security",
+      "test_approach": "api",
+      "hard_fail": false,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/posts",
+            "candidate_paths": [
+              "/api/posts",
+              "/api/post",
+              "/posts"
+            ],
+            "body": {
+              "title": "Unauthorized Post",
+              "content": "Should fail."
+            },
+            "expect_status": [
+              401,
+              403
+            ]
+          },
+          "resolved_route": "/api/posts",
+          "fallback_routes": [
+            "/posts",
+            "/api/posts/{{comment_id}}/comments",
+            "/api/posts/{{like_id}}/like"
+          ],
+          "resolved_body": {
+            "title": "Unauthorized Post",
+            "content": "Should fail.",
+            "published": false
+          },
+          "auth": null,
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/comments",
+            "/api/comment",
+            "/api/likes",
+            "/api/like"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "added missing creatable field: published"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added adapter-discovered route matches by keyword",
+        "added missing creatable field: published"
+      ]
+    },
+    {
+      "id": "comment-create",
+      "description": "Authenticated users can comment on a post",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/posts/:id/comments",
+            "candidate_paths": [
+              "/api/posts/:id/comments",
+              "/api/comments",
+              "/api/post/:id/comments"
+            ],
+            "body": {
+              "content": "Great post!"
+            },
+            "body_variants": [
+              {
+                "content": "Great post!"
+              },
+              {
+                "content": "Great post!",
+                "postId": ":id"
+              }
+            ],
+            "expect_status": [
+              200,
+              201
+            ],
+            "expect_body_contains": [
+              "Great post!"
+            ],
+            "expect_json_keys": [
+              "id",
+              "content"
+            ]
+          },
+          "resolved_route": "/api/posts/:id/comments",
+          "fallback_routes": [
+            "/api/posts",
+            "/api/posts/{{comment_id}}/comments",
+            "/api/posts/{{like_id}}/like"
+          ],
+          "resolved_body": {
+            "content": "Great post!"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/comments",
+            "/api/comment",
+            "/api/likes",
+            "/api/like"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added adapter-discovered route matches by keyword",
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "comment-list",
+      "description": "Users can retrieve comments for a post",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "GET",
+          "step": {
+            "action": "http",
+            "method": "GET",
+            "path": "/api/posts/:id/comments",
+            "candidate_paths": [
+              "/api/posts/:id/comments",
+              "/api/comments?postId=:id",
+              "/api/post/:id/comments"
+            ],
+            "expect_status": [
+              200
+            ],
+            "expect_body_contains": [
+              "Great post!"
+            ]
+          },
+          "resolved_route": "/api/posts",
+          "fallback_routes": [
+            "/api/posts/{{post_id}}"
+          ],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/posts",
+            "/api/post"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added adapter-discovered route matches by keyword",
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "comment-delete",
+      "description": "Comment author can delete their comment",
+      "priority": "important",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": false,
+      "steps": [
+        {
+          "action": "http",
+          "method": "DELETE",
+          "step": {
+            "action": "http",
+            "method": "DELETE",
+            "path": "/api/comments/:id",
+            "candidate_paths": [
+              "/api/comments/:id",
+              "/api/posts/:postId/comments/:id"
+            ],
+            "expect_status": [
+              200,
+              204
+            ]
+          },
+          "resolved_route": "/api/posts/{{post_id}}",
+          "fallback_routes": [],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/posts",
+            "/api/post"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added adapter-discovered route matches by keyword",
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "like-create",
+      "description": "Authenticated users can like a post",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/posts/:id/like",
+            "candidate_paths": [
+              "/api/posts/:id/like",
+              "/api/posts/:id/likes",
+              "/api/likes",
+              "/api/post/:id/like"
+            ],
+            "body_variants": [
+              {},
+              {
+                "postId": ":id"
+              }
+            ],
+            "expect_status": [
+              200,
+              201
+            ]
+          },
+          "resolved_route": "/api/posts/:id/like",
+          "fallback_routes": [
+            "/api/posts",
+            "/api/posts/{{comment_id}}/comments",
+            "/api/posts/{{like_id}}/like"
+          ],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/comments",
+            "/api/comment",
+            "/api/likes",
+            "/api/like"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added adapter-discovered route matches by keyword",
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "like-no-duplicate",
+      "description": "A user cannot like the same post twice",
+      "priority": "important",
+      "category": "data",
+      "test_approach": "api",
+      "hard_fail": false,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/posts/:id/like",
+            "candidate_paths": [
+              "/api/posts/:id/like",
+              "/api/posts/:id/likes",
+              "/api/likes",
+              "/api/post/:id/like"
+            ],
+            "body_variants": [
+              {},
+              {
+                "postId": ":id"
+              }
+            ],
+            "expect_status": [
+              400,
+              409,
+              422
+            ]
+          },
+          "resolved_route": "/api/posts/:id/like",
+          "fallback_routes": [
+            "/api/posts",
+            "/api/posts/{{comment_id}}/comments",
+            "/api/posts/{{like_id}}/like"
+          ],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/comments",
+            "/api/comment",
+            "/api/likes",
+            "/api/like"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "negative test step \u2014 body preserved as-is (intentionally invalid)",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added adapter-discovered route matches by keyword",
+        "negative test step \u2014 body preserved as-is (intentionally invalid)",
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "like-remove",
+      "description": "Users can unlike a previously liked post",
+      "priority": "important",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": false,
+      "steps": [
+        {
+          "action": "http",
+          "method": "DELETE",
+          "step": {
+            "action": "http",
+            "method": "DELETE",
+            "path": "/api/posts/:id/like",
+            "candidate_paths": [
+              "/api/posts/:id/like",
+              "/api/posts/:id/likes",
+              "/api/likes/:id",
+              "/api/post/:id/like"
+            ],
+            "expect_status": [
+              200,
+              204
+            ]
+          },
+          "resolved_route": "/api/posts/{{post_id}}",
+          "fallback_routes": [],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/posts",
+            "/api/post"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added adapter-discovered route matches by keyword",
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "tag-create",
+      "description": "Tags can be created or assigned to posts",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/tags",
+            "candidate_paths": [
+              "/api/tags",
+              "/api/tag"
+            ],
+            "body": {
+              "name": "javascript"
+            },
+            "expect_status": [
+              200,
+              201
+            ],
+            "expect_body_contains": [
+              "javascript"
+            ],
+            "expect_json_keys": [
+              "id",
+              "name"
+            ]
+          },
+          "resolved_route": "/api/posts",
+          "fallback_routes": [],
+          "resolved_body": {
+            "name": "javascript",
+            "title": "Bound Test Item",
+            "published": false
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "added missing creatable field: title",
+            "added missing creatable field: published",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added adapter-discovered route matches by keyword",
+        "added missing creatable field: title",
+        "added missing creatable field: published",
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "tag-list",
+      "description": "Users can list all available tags",
+      "priority": "important",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": false,
+      "steps": [
+        {
+          "action": "http",
+          "method": "GET",
+          "step": {
+            "action": "http",
+            "method": "GET",
+            "path": "/api/tags",
+            "candidate_paths": [
+              "/api/tags",
+              "/api/tag"
+            ],
+            "expect_status": [
+              200
+            ],
+            "expect_body_contains": [
+              "javascript"
+            ]
+          },
+          "resolved_route": "/api/tags",
+          "fallback_routes": [
+            "/api/tag"
+          ],
+          "resolved_body": null,
+          "auth": null,
+          "requires_auth": false,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "no adapter route match; keeping compiled candidate path as fallback"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "no adapter route match; keeping compiled candidate path as fallback"
+      ]
+    },
+    {
+      "id": "tag-assign-post",
+      "description": "Tags can be associated with a post",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/posts/:id/tags",
+            "candidate_paths": [
+              "/api/posts/:id/tags",
+              "/api/post/:id/tags",
+              "/api/posts/:id/tag"
+            ],
+            "body": {
+              "tagId": ":tagId"
+            },
+            "body_variants": [
+              {
+                "tagId": ":tagId"
+              },
+              {
+                "tags": [
+                  ":tagId"
+                ]
+              },
+              {
+                "name": "javascript"
+              }
+            ],
+            "expect_status": [
+              200,
+              201
+            ]
+          },
+          "resolved_route": "/api/posts",
+          "fallback_routes": [
+            "/api/posts/{{comment_id}}/comments",
+            "/api/posts/{{like_id}}/like"
+          ],
+          "resolved_body": {
+            "tagId": ":tagId",
+            "title": "Bound Test Item",
+            "published": false
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/comments",
+            "/api/comment",
+            "/api/likes",
+            "/api/like"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "added missing creatable field: title",
+            "added missing creatable field: published",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "GET",
+          "step": {
+            "action": "http",
+            "method": "GET",
+            "path": "/api/posts/:id",
+            "candidate_paths": [
+              "/api/posts/:id",
+              "/api/post/:id",
+              "/posts/:id"
+            ],
+            "expect_status": [
+              200
+            ],
+            "expect_body_contains": [
+              "javascript"
+            ]
+          },
+          "resolved_route": "/api/posts/:id",
+          "fallback_routes": [
+            "/posts/:id",
+            "/api/posts",
+            "/api/posts/{{post_id}}"
+          ],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/posts",
+            "/api/post"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added adapter-discovered route matches by keyword",
+        "added missing creatable field: title",
+        "added missing creatable field: published",
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "post-publish-toggle",
+      "description": "Post author can toggle the published status of a post",
+      "priority": "important",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": false,
+      "steps": [
+        {
+          "action": "http",
+          "method": "PUT",
+          "step": {
+            "action": "http",
+            "method": "PUT",
+            "path": "/api/posts/:id",
+            "candidate_paths": [
+              "/api/posts/:id",
+              "/api/post/:id",
+              "/posts/:id"
+            ],
+            "body": {
+              "published": true
+            },
+            "expect_status": [
+              200
+            ],
+            "expect_body_contains": [
+              "true"
+            ]
+          },
+          "resolved_route": "/api/posts/:id",
+          "fallback_routes": [
+            "/posts/:id",
+            "/api/posts/{{post_id}}"
+          ],
+          "resolved_body": {
+            "published": true,
+            "title": "Bound Test Item"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/posts",
+            "/api/post"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "added missing creatable field: title",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added adapter-discovered route matches by keyword",
+        "added missing creatable field: title",
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "post-author-association",
+      "description": "Created posts are associated with the authenticated user as author",
+      "priority": "important",
+      "category": "data",
+      "test_approach": "api",
+      "hard_fail": false,
+      "steps": [
+        {
+          "action": "http",
+          "method": "GET",
+          "step": {
+            "action": "http",
+            "method": "GET",
+            "path": "/api/posts/:id",
+            "candidate_paths": [
+              "/api/posts/:id",
+              "/api/post/:id",
+              "/posts/:id"
+            ],
+            "expect_status": [
+              200
+            ],
+            "expect_json_keys": [
+              "authorId"
+            ]
+          },
+          "resolved_route": "/api/posts/:id",
+          "fallback_routes": [
+            "/posts/:id",
+            "/api/posts",
+            "/api/posts/{{post_id}}"
+          ],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/posts",
+            "/api/post"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added adapter-discovered route matches by keyword",
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "post-update-other-user",
+      "description": "Users cannot update posts authored by another user",
+      "priority": "important",
+      "category": "security",
+      "test_approach": "api",
+      "hard_fail": false,
+      "steps": [
+        {
+          "action": "http",
+          "method": "PUT",
+          "step": {
+            "action": "http",
+            "method": "PUT",
+            "path": "/api/posts/:id",
+            "candidate_paths": [
+              "/api/posts/:id",
+              "/api/post/:id",
+              "/posts/:id"
+            ],
+            "body": {
+              "title": "Hacked Title"
+            },
+            "expect_status": [
+              401,
+              403
+            ]
+          },
+          "resolved_route": "/api/posts/:id",
+          "fallback_routes": [
+            "/posts/:id",
+            "/api/posts/{{post_id}}"
+          ],
+          "resolved_body": {
+            "title": "Hacked Title",
+            "published": false
+          },
+          "auth": null,
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/posts",
+            "/api/post"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "added missing creatable field: published"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added adapter-discovered route matches by keyword",
+        "added missing creatable field: published"
+      ]
+    },
+    {
+      "id": "password-not-exposed",
+      "description": "User password is never returned in API responses",
+      "priority": "important",
+      "category": "security",
+      "test_approach": "api",
+      "hard_fail": false,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/register",
+            "candidate_paths": [
+              "/api/register",
+              "/api/auth/register",
+              "/api/users/register",
+              "/api/signup",
+              "/api/auth/signup"
+            ],
+            "body": {
+              "email": "bob@example.com",
+              "name": "Bob",
+              "password": "BobSecure123!"
+            },
+            "expect_status": [
+              200,
+              201
+            ],
+            "expect_body_contains": [
+              "bob@example.com"
+            ]
+          },
+          "resolved_route": "/api/register",
+          "fallback_routes": [
+            "/register",
+            "/signup"
+          ],
+          "resolved_body": {
+            "email": "bob@example.com",
+            "name": "Bob",
+            "password": "BobSecure123!"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "bound-a0ba750a8d@eval.local",
+            "password": "BoundTest123!",
+            "name": "Bound Test User",
+            "role": "user",
+            "source": "generated",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": false,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "bound registration step to adapter-discovered register routes",
+            "bound auth to generated user credentials"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "bound registration step to adapter-discovered register routes",
+        "bound auth to generated user credentials"
+      ]
+    }
+  ],
+  "journeys": [],
+  "product_type_hint": "web",
+  "compiled_at": "2026-03-31 15:52:39",
+  "journeys_compiled_at": "",
+  "cost_usd": 0.18945250000000002,
+  "metadata": {
+    "auth_type": "nextauth",
+    "route_count": 5,
+    "seeded_user_count": 2
+  }
+}

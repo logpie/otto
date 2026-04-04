@@ -1,0 +1,14 @@
+I'll test all 4 steps in parallel since they're all independent unauthenticated requests.
+
+Now let me run all 4 steps in parallel via curl commands:All 4 API steps return 401 Unauthorized. Now let me check browser behavior and run the BREAK phase:All endpoints are properly protected. Let me write the verdict:**Verdict: PASS ✅**
+
+All 4 steps passed. The task management API correctly enforces authentication on every endpoint:
+
+| Step | Action | Result |
+|------|--------|--------|
+| 1 | List tasks (GET /api/tasks) | 401 Unauthorized ✅ |
+| 2 | Create task (POST /api/tasks) | 401 Unauthorized ✅ |
+| 3 | Read task by ID (GET /api/tasks/:id) | 401 Unauthorized ✅ |
+| 4 | Delete task by ID (DELETE /api/tasks/:id) | 401 Unauthorized ✅ |
+
+**BREAK phase findings:** No vulnerabilities found. Auth is consistently enforced across all HTTP methods (GET, POST, PUT, DELETE), all ID formats (numeric, string, common names), and with query parameters. The error response is uniform (`{"error":"Unauthorized"}`) which avoids leaking information about resource existence.

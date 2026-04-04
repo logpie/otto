@@ -1,0 +1,53 @@
+{
+  "story_passed": true,
+  "blocked_at": null,
+  "summary": "All steps passed. Logged in as Alice, created a task with title 'Persistence Test Task', description 'This should survive logout', status IN_PROGRESS, and due date 7 days out. Logged out completely (session token cleared, API returns 401). Logged back in with fresh session. Retrieved task list and confirmed the exact task persists with all fields intact — title, description, status, dueDate all match. Data is properly stored in the database and survives full logout/login cycles.",
+  "diagnosis": null,
+  "fix_suggestion": null,
+  "steps": [
+    {
+      "action": "Log in as alice@example.com via NextAuth CSRF flow",
+      "outcome": "pass",
+      "verification": "Got session-token cookie, /api/auth/session returns user with name 'Alice Johnson' and correct email/id",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "Create task with title 'Persistence Test Task', description 'This should survive logout', status IN_PROGRESS, dueDate 2026-04-08",
+      "outcome": "pass",
+      "verification": "POST /api/tasks returned 200 with id 'cmnfgtiuo000koopgm4dokerp' and all fields matching input exactly",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "Log out via POST /api/auth/signout",
+      "outcome": "pass",
+      "verification": "Session token cookie set to Max-Age=0, /api/auth/session returns empty {}, /api/tasks returns 401 Unauthorized",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "Log back in as alice@example.com with fresh cookies",
+      "outcome": "pass",
+      "verification": "New session-token cookie issued, /api/auth/session returns same user (Alice Johnson, same user ID)",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "Fetch task list and verify 'Persistence Test Task' is present with all original fields",
+      "outcome": "pass",
+      "verification": "GET /api/tasks returns task with id 'cmnfgtiuo000koopgm4dokerp', title 'Persistence Test Task', description 'This should survive logout', status 'IN_PROGRESS', dueDate '2026-04-08T03:07:24.000Z' — all fields match exactly",
+      "diagnosis": null,
+      "fix_suggestion": null
+    }
+  ],
+  "break_findings": [
+    {
+      "technique": "back_after_submit",
+      "description": "Rapidly submitted two identical POST /api/tasks requests with the same title, description, status, and dueDate",
+      "result": "Both requests succeeded, creating two duplicate tasks with different IDs but identical content",
+      "severity": "low",
+      "fix_suggestion": "Add client-side debouncing on the submit button and optionally server-side idempotency keys to prevent duplicate task creation from rapid re-submissions"
+    }
+  ]
+}

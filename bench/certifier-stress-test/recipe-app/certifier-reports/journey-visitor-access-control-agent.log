@@ -1,0 +1,17 @@
+I'll execute this user story to verify that unauthenticated visitors are properly denied access to protected actions. Let me start by testing all the steps.
+
+Now let me run the tests. First, let me try to create a recipe without auth (API), and also check if there are existing recipes and what the app looks like.Good. Step 1 confirmed: POST to create recipe returns 401. GET recipes list is publicly accessible. Now let me pick a recipe ID and test steps 2-4.All four API calls return 401. Now let me also check the browser-side behavior for the UI check.WebFetch doesn't work with localhost. Let me try curl to check the HTML responses.Now let me do the BREAK phase tests:All tests complete. Let me write the verdict.**Verdict: PASS** ✅
+
+All 4 steps passed. The recipe app correctly enforces authentication on all protected endpoints:
+
+| Step | Action | Result |
+|------|--------|--------|
+| 1 | Create recipe (POST /api/recipes) | 401 Unauthorized ✅ |
+| 2 | Rate recipe (POST /api/recipes/:id/rate) | 401 Unauthorized ✅ |
+| 3 | Favorite recipe (POST /api/recipes/:id/favorite) | 401 Unauthorized ✅ |
+| 4 | Edit/Delete recipe (PUT/DELETE /api/recipes/:id) | 401 Unauthorized ✅ |
+
+**Break phase findings:**
+- **Direct URL access**: `/recipes/new` and `/recipes/[id]/edit` return 200 (client-side auth), but API blocks all writes — low severity
+- **ID guessing**: Public recipe detail API exposes `userId` in ratings/favorites — low severity info disclosure
+- **Forged cookies**: Properly rejected — no issue

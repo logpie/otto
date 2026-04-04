@@ -1,0 +1,2044 @@
+{
+  "intent": "recipe sharing app with user auth CRUD recipes ratings favorites search",
+  "claims": [
+    {
+      "id": "auth-register",
+      "description": "Users can register with name, email, and password",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/register",
+            "candidate_paths": [
+              "/api/register",
+              "/api/auth/register",
+              "/api/users/register",
+              "/api/signup",
+              "/api/auth/signup"
+            ],
+            "body": {
+              "name": "Alice Chef",
+              "email": "alice@example.com",
+              "password": "SecurePass123"
+            },
+            "expect_status": [
+              200,
+              201
+            ],
+            "expect_body_contains": [
+              "alice@example.com"
+            ]
+          },
+          "resolved_route": "/api/register",
+          "fallback_routes": [
+            "/register",
+            "/signup"
+          ],
+          "resolved_body": {
+            "name": "Alice Chef",
+            "email": "alice@example.com",
+            "password": "SecurePass123"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "bound-6257745443@eval.local",
+            "password": "BoundTest123!",
+            "name": "Bound Test User",
+            "role": "user",
+            "source": "generated",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": false,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "bound registration step to adapter-discovered register routes",
+            "bound auth to generated user credentials"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "bound registration step to adapter-discovered register routes",
+        "bound auth to generated user credentials"
+      ]
+    },
+    {
+      "id": "auth-login",
+      "description": "Registered users can log in and receive a session or token",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/register",
+            "candidate_paths": [
+              "/api/register",
+              "/api/auth/register",
+              "/api/signup",
+              "/api/auth/signup"
+            ],
+            "body": {
+              "name": "Bob Baker",
+              "email": "bob@example.com",
+              "password": "SecurePass123"
+            },
+            "expect_status": [
+              200,
+              201
+            ]
+          },
+          "resolved_route": "/api/register",
+          "fallback_routes": [
+            "/register",
+            "/signup"
+          ],
+          "resolved_body": {
+            "name": "Bob Baker",
+            "email": "bob@example.com",
+            "password": "SecurePass123"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "bound-37ef87212b@eval.local",
+            "password": "BoundTest123!",
+            "name": "Bound Test User",
+            "role": "user",
+            "source": "generated",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": false,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "bound registration step to adapter-discovered register routes",
+            "bound auth to generated user credentials"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/login",
+            "candidate_paths": [
+              "/api/login",
+              "/api/auth/login",
+              "/api/auth/signin",
+              "/api/signin"
+            ],
+            "body": {
+              "email": "bob@example.com",
+              "password": "SecurePass123"
+            },
+            "expect_status": [
+              200
+            ],
+            "expect_body_contains": [
+              "bob@example.com"
+            ]
+          },
+          "resolved_route": "/api/auth/callback/credentials",
+          "fallback_routes": [
+            "/login",
+            "/signin"
+          ],
+          "resolved_body": {
+            "email": "bob@example.com",
+            "password": "SecurePass123",
+            "name": "Bound Test User"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": false,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "bound login step to adapter-discovered login routes",
+            "added missing creatable field: name",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "bound registration step to adapter-discovered register routes",
+        "bound auth to generated user credentials",
+        "bound login step to adapter-discovered login routes",
+        "added missing creatable field: name",
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "auth-login-invalid",
+      "description": "Login with wrong credentials returns an error, not a session",
+      "priority": "important",
+      "category": "security",
+      "test_approach": "api",
+      "hard_fail": false,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/login",
+            "candidate_paths": [
+              "/api/login",
+              "/api/auth/login",
+              "/api/auth/signin",
+              "/api/signin"
+            ],
+            "body": {
+              "email": "nonexistent@example.com",
+              "password": "WrongPass999"
+            },
+            "expect_status": [
+              400,
+              401,
+              403,
+              404,
+              422
+            ]
+          },
+          "resolved_route": "/api/auth/callback/credentials",
+          "fallback_routes": [
+            "/login",
+            "/signin"
+          ],
+          "resolved_body": {
+            "email": "nonexistent@example.com",
+            "password": "WrongPass999"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "WRONG_PASSWORD_FOR_NEGATIVE_TEST",
+            "name": "",
+            "role": "user",
+            "source": "",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": false,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "bound login step to adapter-discovered login routes",
+            "negative test step \u2014 body preserved as-is (intentionally invalid)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "bound login step to adapter-discovered login routes",
+        "negative test step \u2014 body preserved as-is (intentionally invalid)"
+      ]
+    },
+    {
+      "id": "recipe-create",
+      "description": "Authenticated users can create a recipe with title, description, ingredients, instructions, and metadata",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/recipes",
+            "candidate_paths": [
+              "/api/recipes",
+              "/api/recipe"
+            ],
+            "body": {
+              "title": "Classic Pancakes",
+              "description": "Fluffy breakfast pancakes",
+              "ingredients": "2 cups flour, 2 eggs, 1 cup milk, 2 tbsp sugar, 1 tsp baking powder",
+              "instructions": "Mix dry ingredients. Add wet ingredients. Cook on griddle until golden.",
+              "prepTime": 10,
+              "cookTime": 15,
+              "servings": 4,
+              "category": "breakfast"
+            },
+            "expect_status": [
+              200,
+              201
+            ],
+            "expect_body_contains": [
+              "Classic Pancakes"
+            ],
+            "expect_json_keys": [
+              "id",
+              "title"
+            ]
+          },
+          "resolved_route": "/api/recipes",
+          "fallback_routes": [
+            "/api/recipes/{{rate_id}}/rate",
+            "/api/recipes/{{favorite_id}}/favorite"
+          ],
+          "resolved_body": {
+            "title": "Classic Pancakes",
+            "description": "Fluffy breakfast pancakes",
+            "ingredients": "2 cups flour, 2 eggs, 1 cup milk, 2 tbsp sugar, 1 tsp baking powder",
+            "instructions": "Mix dry ingredients. Add wet ingredients. Cook on griddle until golden.",
+            "prepTime": 10,
+            "cookTime": 15,
+            "servings": 4,
+            "category": "breakfast"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/favorites",
+            "/api/favorite",
+            "/api/rates",
+            "/api/rate"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added adapter-discovered route matches by keyword",
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "recipe-read",
+      "description": "Users can view a single recipe by its ID",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/recipes",
+            "candidate_paths": [
+              "/api/recipes",
+              "/api/recipe"
+            ],
+            "body": {
+              "title": "Tomato Soup",
+              "description": "Classic comfort soup",
+              "ingredients": "6 tomatoes, 1 onion, 2 cloves garlic, salt, pepper, basil",
+              "instructions": "Roast tomatoes and onion. Blend with garlic and basil. Season to taste.",
+              "prepTime": 15,
+              "cookTime": 30,
+              "servings": 4,
+              "category": "soup"
+            },
+            "expect_status": [
+              200,
+              201
+            ],
+            "expect_json_keys": [
+              "id"
+            ]
+          },
+          "resolved_route": "/api/recipes",
+          "fallback_routes": [
+            "/api/recipes/{{rate_id}}/rate",
+            "/api/recipes/{{favorite_id}}/favorite"
+          ],
+          "resolved_body": {
+            "title": "Tomato Soup",
+            "description": "Classic comfort soup",
+            "ingredients": "6 tomatoes, 1 onion, 2 cloves garlic, salt, pepper, basil",
+            "instructions": "Roast tomatoes and onion. Blend with garlic and basil. Season to taste.",
+            "prepTime": 15,
+            "cookTime": 30,
+            "servings": 4,
+            "category": "soup"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/favorites",
+            "/api/favorite",
+            "/api/rates",
+            "/api/rate"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "GET",
+          "step": {
+            "action": "http",
+            "method": "GET",
+            "path": "/api/recipes/{id}",
+            "candidate_paths": [
+              "/api/recipes/{id}",
+              "/api/recipe/{id}"
+            ],
+            "expect_status": [
+              200
+            ],
+            "expect_body_contains": [
+              "Tomato Soup"
+            ],
+            "expect_json_keys": [
+              "id",
+              "title",
+              "ingredients",
+              "instructions"
+            ]
+          },
+          "resolved_route": "/api/recipes/{id}",
+          "fallback_routes": [
+            "/api/recipes",
+            "/api/recipes/{{recipe_id}}"
+          ],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/recipes",
+            "/api/recipe"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added adapter-discovered route matches by keyword",
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "recipe-list",
+      "description": "Users can list all recipes",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "GET",
+          "step": {
+            "action": "http",
+            "method": "GET",
+            "path": "/api/recipes",
+            "candidate_paths": [
+              "/api/recipes",
+              "/api/recipe"
+            ],
+            "expect_status": [
+              200
+            ]
+          },
+          "resolved_route": "/api/recipes",
+          "fallback_routes": [
+            "/api/recipes/{{recipe_id}}"
+          ],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/recipes",
+            "/api/recipe"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added adapter-discovered route matches by keyword",
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "recipe-update",
+      "description": "Recipe author can update their own recipe",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/recipes",
+            "candidate_paths": [
+              "/api/recipes",
+              "/api/recipe"
+            ],
+            "body": {
+              "title": "Grilled Cheese Original",
+              "description": "Simple grilled cheese sandwich",
+              "ingredients": "2 slices bread, 2 slices cheese, 1 tbsp butter",
+              "instructions": "Butter bread, add cheese, grill until golden.",
+              "prepTime": 5,
+              "cookTime": 10,
+              "servings": 1,
+              "category": "lunch"
+            },
+            "expect_status": [
+              200,
+              201
+            ],
+            "expect_json_keys": [
+              "id"
+            ]
+          },
+          "resolved_route": "/api/recipes",
+          "fallback_routes": [
+            "/api/recipes/{{rate_id}}/rate",
+            "/api/recipes/{{favorite_id}}/favorite"
+          ],
+          "resolved_body": {
+            "title": "Grilled Cheese Original",
+            "description": "Simple grilled cheese sandwich",
+            "ingredients": "2 slices bread, 2 slices cheese, 1 tbsp butter",
+            "instructions": "Butter bread, add cheese, grill until golden.",
+            "prepTime": 5,
+            "cookTime": 10,
+            "servings": 1,
+            "category": "lunch"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/favorites",
+            "/api/favorite",
+            "/api/rates",
+            "/api/rate"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "PUT",
+          "step": {
+            "action": "http",
+            "method": "PUT",
+            "path": "/api/recipes/{id}",
+            "candidate_paths": [
+              "/api/recipes/{id}",
+              "/api/recipe/{id}"
+            ],
+            "body": {
+              "title": "Grilled Cheese Deluxe",
+              "servings": 2
+            },
+            "body_variants": [
+              {
+                "title": "Grilled Cheese Deluxe",
+                "servings": 2
+              },
+              {
+                "title": "Grilled Cheese Deluxe",
+                "description": "Simple grilled cheese sandwich",
+                "ingredients": "2 slices bread, 2 slices cheese, 1 tbsp butter",
+                "instructions": "Butter bread, add cheese, grill until golden.",
+                "prepTime": 5,
+                "cookTime": 10,
+                "servings": 2,
+                "category": "lunch"
+              }
+            ],
+            "expect_status": [
+              200
+            ],
+            "expect_body_contains": [
+              "Grilled Cheese Deluxe"
+            ]
+          },
+          "resolved_route": "/api/recipes/{id}",
+          "fallback_routes": [
+            "/api/recipes/{{recipe_id}}"
+          ],
+          "resolved_body": {
+            "title": "Grilled Cheese Deluxe",
+            "servings": 2,
+            "description": "Generated by certifier binder",
+            "prepTime": 1,
+            "cookTime": 1,
+            "category": "General"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/recipes",
+            "/api/recipe"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "added missing creatable field: description",
+            "added missing creatable field: prepTime",
+            "added missing creatable field: cookTime",
+            "added missing creatable field: category",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added adapter-discovered route matches by keyword",
+        "bound auth to seeded user credentials (alice@example.com)",
+        "added missing creatable field: description",
+        "added missing creatable field: prepTime",
+        "added missing creatable field: cookTime",
+        "added missing creatable field: category"
+      ]
+    },
+    {
+      "id": "recipe-delete",
+      "description": "Recipe author can delete their own recipe",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/recipes",
+            "candidate_paths": [
+              "/api/recipes",
+              "/api/recipe"
+            ],
+            "body": {
+              "title": "Temp Recipe To Delete",
+              "description": "Will be deleted",
+              "ingredients": "nothing",
+              "instructions": "delete me",
+              "prepTime": 1,
+              "cookTime": 1,
+              "servings": 1,
+              "category": "test"
+            },
+            "expect_status": [
+              200,
+              201
+            ],
+            "expect_json_keys": [
+              "id"
+            ]
+          },
+          "resolved_route": "/api/recipes",
+          "fallback_routes": [
+            "/api/recipes/{{rate_id}}/rate",
+            "/api/recipes/{{favorite_id}}/favorite"
+          ],
+          "resolved_body": {
+            "title": "Temp Recipe To Delete",
+            "description": "Will be deleted",
+            "ingredients": "nothing",
+            "instructions": "delete me",
+            "prepTime": 1,
+            "cookTime": 1,
+            "servings": 1,
+            "category": "test"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/favorites",
+            "/api/favorite",
+            "/api/rates",
+            "/api/rate"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "DELETE",
+          "step": {
+            "action": "http",
+            "method": "DELETE",
+            "path": "/api/recipes/{id}",
+            "candidate_paths": [
+              "/api/recipes/{id}",
+              "/api/recipe/{id}"
+            ],
+            "expect_status": [
+              200,
+              204
+            ]
+          },
+          "resolved_route": "/api/recipes/{id}",
+          "fallback_routes": [
+            "/api/recipes/{{recipe_id}}"
+          ],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/recipes",
+            "/api/recipe"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "GET",
+          "step": {
+            "action": "http",
+            "method": "GET",
+            "path": "/api/recipes/{id}",
+            "candidate_paths": [
+              "/api/recipes/{id}",
+              "/api/recipe/{id}"
+            ],
+            "expect_status": [
+              404
+            ]
+          },
+          "resolved_route": "/api/recipes/{id}",
+          "fallback_routes": [
+            "/api/recipes",
+            "/api/recipes/{{recipe_id}}"
+          ],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/recipes",
+            "/api/recipe"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added adapter-discovered route matches by keyword",
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "rating-create",
+      "description": "Authenticated users can rate a recipe with an integer value",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/recipes",
+            "candidate_paths": [
+              "/api/recipes",
+              "/api/recipe"
+            ],
+            "body": {
+              "title": "Ratable Pasta",
+              "description": "Pasta for rating test",
+              "ingredients": "pasta, sauce",
+              "instructions": "Cook pasta, add sauce",
+              "prepTime": 5,
+              "cookTime": 10,
+              "servings": 2,
+              "category": "dinner"
+            },
+            "expect_status": [
+              200,
+              201
+            ],
+            "expect_json_keys": [
+              "id"
+            ]
+          },
+          "resolved_route": "/api/recipes",
+          "fallback_routes": [
+            "/api/recipes/{{rate_id}}/rate",
+            "/api/recipes/{{favorite_id}}/favorite"
+          ],
+          "resolved_body": {
+            "title": "Ratable Pasta",
+            "description": "Pasta for rating test",
+            "ingredients": "pasta, sauce",
+            "instructions": "Cook pasta, add sauce",
+            "prepTime": 5,
+            "cookTime": 10,
+            "servings": 2,
+            "category": "dinner"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/favorites",
+            "/api/favorite",
+            "/api/rates",
+            "/api/rate"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/recipes/{id}/ratings",
+            "candidate_paths": [
+              "/api/recipes/{id}/ratings",
+              "/api/recipes/{id}/rating",
+              "/api/recipes/{id}/rate",
+              "/api/ratings"
+            ],
+            "body": {
+              "value": 5
+            },
+            "body_variants": [
+              {
+                "value": 5
+              },
+              {
+                "value": 5,
+                "recipeId": "{id}"
+              }
+            ],
+            "expect_status": [
+              200,
+              201
+            ]
+          },
+          "resolved_route": "/api/recipes/{id}/rate",
+          "fallback_routes": [
+            "/api/recipes",
+            "/api/recipes/{{rate_id}}/rate",
+            "/api/recipes/{{favorite_id}}/favorite"
+          ],
+          "resolved_body": {
+            "value": 5,
+            "name": "Bound Test User",
+            "email": "bound-user@eval.local",
+            "password": "BoundTest123!"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/favorites",
+            "/api/favorite",
+            "/api/rates",
+            "/api/rate"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "added missing creatable field: name",
+            "added missing creatable field: email",
+            "added missing creatable field: password",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added adapter-discovered route matches by keyword",
+        "bound auth to seeded user credentials (alice@example.com)",
+        "added missing creatable field: name",
+        "added missing creatable field: email",
+        "added missing creatable field: password"
+      ]
+    },
+    {
+      "id": "rating-read",
+      "description": "Users can view ratings for a recipe",
+      "priority": "important",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": false,
+      "steps": [
+        {
+          "action": "http",
+          "method": "GET",
+          "step": {
+            "action": "http",
+            "method": "GET",
+            "path": "/api/recipes/{id}/ratings",
+            "candidate_paths": [
+              "/api/recipes/{id}/ratings",
+              "/api/recipes/{id}/rating",
+              "/api/recipes/{id}"
+            ],
+            "expect_status": [
+              200
+            ]
+          },
+          "resolved_route": "/api/recipes/{id}",
+          "fallback_routes": [
+            "/api/recipes",
+            "/api/recipes/{{recipe_id}}"
+          ],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/recipes",
+            "/api/recipe"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added adapter-discovered route matches by keyword",
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "favorite-add",
+      "description": "Authenticated users can add a recipe to their favorites",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/recipes",
+            "candidate_paths": [
+              "/api/recipes",
+              "/api/recipe"
+            ],
+            "body": {
+              "title": "Favoritable Salad",
+              "description": "Salad for favorites test",
+              "ingredients": "lettuce, tomato, cucumber",
+              "instructions": "Chop and mix",
+              "prepTime": 10,
+              "cookTime": 0,
+              "servings": 2,
+              "category": "salad"
+            },
+            "expect_status": [
+              200,
+              201
+            ],
+            "expect_json_keys": [
+              "id"
+            ]
+          },
+          "resolved_route": "/api/recipes",
+          "fallback_routes": [
+            "/api/recipes/{{rate_id}}/rate",
+            "/api/recipes/{{favorite_id}}/favorite"
+          ],
+          "resolved_body": {
+            "title": "Favoritable Salad",
+            "description": "Salad for favorites test",
+            "ingredients": "lettuce, tomato, cucumber",
+            "instructions": "Chop and mix",
+            "prepTime": 10,
+            "cookTime": 0,
+            "servings": 2,
+            "category": "salad"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/favorites",
+            "/api/favorite",
+            "/api/rates",
+            "/api/rate"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/favorites",
+            "candidate_paths": [
+              "/api/favorites",
+              "/api/favourite",
+              "/api/favorites/add",
+              "/api/recipes/{id}/favorite",
+              "/api/recipes/{id}/favourite"
+            ],
+            "body": {
+              "recipeId": "{id}"
+            },
+            "expect_status": [
+              200,
+              201
+            ]
+          },
+          "resolved_route": "/api/recipes/{id}/favorite",
+          "fallback_routes": [
+            "/api/recipes",
+            "/api/recipes/{{rate_id}}/rate",
+            "/api/recipes/{{favorite_id}}/favorite"
+          ],
+          "resolved_body": {
+            "recipeId": "{id}"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/favorites",
+            "/api/favorite",
+            "/api/rates",
+            "/api/rate"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added adapter-discovered route matches by keyword",
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "favorite-list",
+      "description": "Authenticated users can view their list of favorite recipes",
+      "priority": "important",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": false,
+      "steps": [
+        {
+          "action": "http",
+          "method": "GET",
+          "step": {
+            "action": "http",
+            "method": "GET",
+            "path": "/api/favorites",
+            "candidate_paths": [
+              "/api/favorites",
+              "/api/favourites",
+              "/api/users/me/favorites",
+              "/api/user/favorites"
+            ],
+            "expect_status": [
+              200
+            ]
+          },
+          "resolved_route": "/api/recipes",
+          "fallback_routes": [
+            "/api/recipes/{{recipe_id}}"
+          ],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/recipes",
+            "/api/recipe"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added adapter-discovered route matches by keyword",
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "favorite-remove",
+      "description": "Authenticated users can remove a recipe from their favorites",
+      "priority": "important",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": false,
+      "steps": [
+        {
+          "action": "http",
+          "method": "DELETE",
+          "step": {
+            "action": "http",
+            "method": "DELETE",
+            "path": "/api/favorites/{id}",
+            "candidate_paths": [
+              "/api/favorites/{id}",
+              "/api/favorites",
+              "/api/recipes/{recipeId}/favorite",
+              "/api/recipes/{recipeId}/favourite"
+            ],
+            "expect_status": [
+              200,
+              204
+            ]
+          },
+          "resolved_route": "/api/recipes/{{recipe_id}}",
+          "fallback_routes": [],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/recipes",
+            "/api/recipe"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added adapter-discovered route matches by keyword",
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "recipe-search",
+      "description": "Users can search recipes by keyword and get matching results",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/recipes",
+            "candidate_paths": [
+              "/api/recipes",
+              "/api/recipe"
+            ],
+            "body": {
+              "title": "Unique Quinoa Bowl",
+              "description": "Healthy grain bowl with vegetables",
+              "ingredients": "quinoa, avocado, chickpeas, lemon",
+              "instructions": "Cook quinoa, top with ingredients, drizzle lemon",
+              "prepTime": 10,
+              "cookTime": 20,
+              "servings": 2,
+              "category": "healthy"
+            },
+            "expect_status": [
+              200,
+              201
+            ]
+          },
+          "resolved_route": "/api/recipes",
+          "fallback_routes": [
+            "/api/recipes/{{rate_id}}/rate",
+            "/api/recipes/{{favorite_id}}/favorite"
+          ],
+          "resolved_body": {
+            "title": "Unique Quinoa Bowl",
+            "description": "Healthy grain bowl with vegetables",
+            "ingredients": "quinoa, avocado, chickpeas, lemon",
+            "instructions": "Cook quinoa, top with ingredients, drizzle lemon",
+            "prepTime": 10,
+            "cookTime": 20,
+            "servings": 2,
+            "category": "healthy"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/favorites",
+            "/api/favorite",
+            "/api/rates",
+            "/api/rate"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "GET",
+          "step": {
+            "action": "http",
+            "method": "GET",
+            "path": "/api/recipes/search?q=Quinoa",
+            "candidate_paths": [
+              "/api/recipes/search?q=Quinoa",
+              "/api/recipes?search=Quinoa",
+              "/api/recipes?q=Quinoa",
+              "/api/search?q=Quinoa",
+              "/api/recipes?query=Quinoa"
+            ],
+            "expect_status": [
+              200
+            ],
+            "expect_body_contains": [
+              "Quinoa"
+            ]
+          },
+          "resolved_route": "/api/recipes/search?q=Quinoa",
+          "fallback_routes": [
+            "/api/recipes?search=Quinoa",
+            "/api/recipes?q=Quinoa",
+            "/api/recipes?query=Quinoa",
+            "/api/recipes/{{recipe_id}}"
+          ],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/recipes",
+            "/api/recipe"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added adapter-discovered route matches by keyword",
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "recipe-search-no-results",
+      "description": "Searching for a non-existent term returns empty results, not an error",
+      "priority": "nice",
+      "category": "error-handling",
+      "test_approach": "api",
+      "hard_fail": false,
+      "steps": [
+        {
+          "action": "http",
+          "method": "GET",
+          "step": {
+            "action": "http",
+            "method": "GET",
+            "path": "/api/recipes/search?q=zzzznonexistentzzzz",
+            "candidate_paths": [
+              "/api/recipes/search?q=zzzznonexistentzzzz",
+              "/api/recipes?search=zzzznonexistentzzzz",
+              "/api/recipes?q=zzzznonexistentzzzz",
+              "/api/search?q=zzzznonexistentzzzz"
+            ],
+            "expect_status": [
+              200
+            ]
+          },
+          "resolved_route": "/api/recipes/search?q=zzzznonexistentzzzz",
+          "fallback_routes": [
+            "/api/recipes?search=zzzznonexistentzzzz",
+            "/api/recipes?q=zzzznonexistentzzzz",
+            "/api/recipes/{{recipe_id}}"
+          ],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/recipes",
+            "/api/recipe"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added adapter-discovered route matches by keyword",
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "auth-protected-create",
+      "description": "Unauthenticated requests to create a recipe are rejected",
+      "priority": "important",
+      "category": "security",
+      "test_approach": "api",
+      "hard_fail": false,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/recipes",
+            "candidate_paths": [
+              "/api/recipes",
+              "/api/recipe"
+            ],
+            "body": {
+              "title": "Unauthorized Recipe",
+              "description": "Should fail",
+              "ingredients": "none",
+              "instructions": "none",
+              "prepTime": 1,
+              "cookTime": 1,
+              "servings": 1,
+              "category": "test"
+            },
+            "expect_status": [
+              401,
+              403
+            ]
+          },
+          "resolved_route": "/api/recipes",
+          "fallback_routes": [
+            "/api/recipes/{{rate_id}}/rate",
+            "/api/recipes/{{favorite_id}}/favorite"
+          ],
+          "resolved_body": {
+            "title": "Unauthorized Recipe",
+            "description": "Should fail",
+            "ingredients": "none",
+            "instructions": "none",
+            "prepTime": 1,
+            "cookTime": 1,
+            "servings": 1,
+            "category": "test"
+          },
+          "auth": null,
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/favorites",
+            "/api/favorite",
+            "/api/rates",
+            "/api/rate"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added adapter-discovered route matches by keyword"
+      ]
+    },
+    {
+      "id": "recipe-persistence",
+      "description": "Created recipes persist and are retrievable after creation",
+      "priority": "critical",
+      "category": "data",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/recipes",
+            "candidate_paths": [
+              "/api/recipes",
+              "/api/recipe"
+            ],
+            "body": {
+              "title": "Persistent Stew",
+              "description": "A hearty stew that should persist",
+              "ingredients": "beef, potatoes, carrots, onion, broth",
+              "instructions": "Brown beef, add vegetables and broth, simmer 2 hours",
+              "prepTime": 20,
+              "cookTime": 120,
+              "servings": 6,
+              "category": "dinner"
+            },
+            "expect_status": [
+              200,
+              201
+            ],
+            "expect_json_keys": [
+              "id"
+            ]
+          },
+          "resolved_route": "/api/recipes",
+          "fallback_routes": [
+            "/api/recipes/{{rate_id}}/rate",
+            "/api/recipes/{{favorite_id}}/favorite"
+          ],
+          "resolved_body": {
+            "title": "Persistent Stew",
+            "description": "A hearty stew that should persist",
+            "ingredients": "beef, potatoes, carrots, onion, broth",
+            "instructions": "Brown beef, add vegetables and broth, simmer 2 hours",
+            "prepTime": 20,
+            "cookTime": 120,
+            "servings": 6,
+            "category": "dinner"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/favorites",
+            "/api/favorite",
+            "/api/rates",
+            "/api/rate"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "GET",
+          "step": {
+            "action": "http",
+            "method": "GET",
+            "path": "/api/recipes/{id}",
+            "candidate_paths": [
+              "/api/recipes/{id}",
+              "/api/recipe/{id}"
+            ],
+            "expect_status": [
+              200
+            ],
+            "expect_body_contains": [
+              "Persistent Stew"
+            ],
+            "expect_json_keys": [
+              "id",
+              "title",
+              "description",
+              "ingredients",
+              "instructions"
+            ]
+          },
+          "resolved_route": "/api/recipes/{id}",
+          "fallback_routes": [
+            "/api/recipes",
+            "/api/recipes/{{recipe_id}}"
+          ],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/recipes",
+            "/api/recipe"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added adapter-discovered route matches by keyword",
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    },
+    {
+      "id": "auth-register-duplicate",
+      "description": "Registering with an already-used email returns an error",
+      "priority": "important",
+      "category": "error-handling",
+      "test_approach": "api",
+      "hard_fail": false,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/register",
+            "candidate_paths": [
+              "/api/register",
+              "/api/auth/register",
+              "/api/signup",
+              "/api/auth/signup"
+            ],
+            "body": {
+              "name": "Duplicate User",
+              "email": "duplicate@example.com",
+              "password": "SecurePass123"
+            },
+            "expect_status": [
+              200,
+              201
+            ]
+          },
+          "resolved_route": "/api/register",
+          "fallback_routes": [
+            "/register",
+            "/signup"
+          ],
+          "resolved_body": {
+            "name": "Duplicate User",
+            "email": "duplicate@example.com",
+            "password": "SecurePass123"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "bound-0db25fe90a@eval.local",
+            "password": "BoundTest123!",
+            "name": "Bound Test User",
+            "role": "user",
+            "source": "generated",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": false,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "bound registration step to adapter-discovered register routes",
+            "negative test step \u2014 body preserved as-is (intentionally invalid)",
+            "bound auth to generated user credentials"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/register",
+            "candidate_paths": [
+              "/api/register",
+              "/api/auth/register",
+              "/api/signup",
+              "/api/auth/signup"
+            ],
+            "body": {
+              "name": "Duplicate User Again",
+              "email": "duplicate@example.com",
+              "password": "AnotherPass456"
+            },
+            "expect_status": [
+              400,
+              409,
+              422
+            ]
+          },
+          "resolved_route": "/api/register",
+          "fallback_routes": [
+            "/register",
+            "/signup"
+          ],
+          "resolved_body": {
+            "name": "Duplicate User Again",
+            "email": "duplicate@example.com",
+            "password": "AnotherPass456"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "bound-0db25fe90a@eval.local",
+            "password": "BoundTest123!",
+            "name": "Bound Test User",
+            "role": "user",
+            "source": "generated",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": false,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "bound registration step to adapter-discovered register routes",
+            "negative test step \u2014 body preserved as-is (intentionally invalid)",
+            "bound auth to generated user credentials"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "bound registration step to adapter-discovered register routes",
+        "negative test step \u2014 body preserved as-is (intentionally invalid)",
+        "bound auth to generated user credentials"
+      ]
+    },
+    {
+      "id": "recipe-author-association",
+      "description": "Created recipes are associated with the authenticated user as author",
+      "priority": "important",
+      "category": "data",
+      "test_approach": "api",
+      "hard_fail": false,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/recipes",
+            "candidate_paths": [
+              "/api/recipes",
+              "/api/recipe"
+            ],
+            "body": {
+              "title": "Authored Cookies",
+              "description": "Cookies with author tracking",
+              "ingredients": "flour, sugar, butter, chocolate chips",
+              "instructions": "Mix, scoop, bake at 350F for 12 minutes",
+              "prepTime": 15,
+              "cookTime": 12,
+              "servings": 24,
+              "category": "dessert"
+            },
+            "expect_status": [
+              200,
+              201
+            ],
+            "expect_json_keys": [
+              "id"
+            ]
+          },
+          "resolved_route": "/api/recipes",
+          "fallback_routes": [
+            "/api/recipes/{{rate_id}}/rate",
+            "/api/recipes/{{favorite_id}}/favorite"
+          ],
+          "resolved_body": {
+            "title": "Authored Cookies",
+            "description": "Cookies with author tracking",
+            "ingredients": "flour, sugar, butter, chocolate chips",
+            "instructions": "Mix, scoop, bake at 350F for 12 minutes",
+            "prepTime": 15,
+            "cookTime": 12,
+            "servings": 24,
+            "category": "dessert"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/favorites",
+            "/api/favorite",
+            "/api/rates",
+            "/api/rate"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "GET",
+          "step": {
+            "action": "http",
+            "method": "GET",
+            "path": "/api/recipes/{id}",
+            "candidate_paths": [
+              "/api/recipes/{id}",
+              "/api/recipe/{id}"
+            ],
+            "expect_status": [
+              200
+            ],
+            "expect_json_keys": [
+              "authorId"
+            ]
+          },
+          "resolved_route": "/api/recipes/{id}",
+          "fallback_routes": [
+            "/api/recipes",
+            "/api/recipes/{{recipe_id}}"
+          ],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "alice@example.com",
+            "password": "password123",
+            "name": "alice",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/recipes",
+            "/api/recipe"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (alice@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added adapter-discovered route matches by keyword",
+        "bound auth to seeded user credentials (alice@example.com)"
+      ]
+    }
+  ],
+  "journeys": [],
+  "product_type_hint": "web",
+  "compiled_at": "2026-03-31 15:53:43",
+  "journeys_compiled_at": "",
+  "cost_usd": 0.21445875000000003,
+  "metadata": {
+    "auth_type": "nextauth",
+    "route_count": 5,
+    "seeded_user_count": 2
+  }
+}

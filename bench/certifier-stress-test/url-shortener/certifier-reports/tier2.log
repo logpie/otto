@@ -1,0 +1,8 @@
+[2026-03-31 01:48:22] Tier 2 from compiled journeys
+base_url: http://localhost:4004
+journeys: 10
+Tier 2 done: Journeys: 1/10 (10%), Steps: 19/28 (68%), 1.7s
+[2026-03-31 02:20:50] Tier 2 from compiled journeys
+base_url: http://localhost:4004
+journeys: 10
+Tier 2 done: Journeys: 1/10 (10%), Steps: 11/20 (55%), 1.6s

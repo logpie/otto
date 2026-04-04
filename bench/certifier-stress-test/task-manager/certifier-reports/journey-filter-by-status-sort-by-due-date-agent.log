@@ -1,0 +1,42 @@
+I'll execute this user story step by step. Let me start by authenticating and then creating tasks.
+
+Now let me start executing the steps. First, let me get the CSRF token and log in.
+
+**Step 1: Log in with existing credentials**It redirected to signin with `csrf=true`, which means the CSRF token from the GET didn't match the POST. I need to use the cookie-based flow properly.Got a session token and redirected to `/` — login successful. Let me verify the session:Login verified. Now let me create the 4 tasks. I need to compute dates and map status values to what the API expects (TODO, IN_PROGRESS, DONE per the manifest).
+
+**Steps 2-5: Create tasks**Task A succeeded but B, C, D got "Unauthorized". The parallel requests may have had a cookie race. Let me re-read cookies and create them sequentially:The cookies are fine. The parallel writes to the cookie file likely caused corruption. Let me create the remaining tasks sequentially:Still unauthorized. The session token in the cookie file seems to have changed from the parallel writes. Let me re-authenticate:Good, session is active. Now create the remaining tasks:Something is wrong. Let me check the cookies more carefully and try with explicit session token header:The cookies look correct but the session returns 401. I notice the `callback-url` cookie says `localhost:4003` instead of `localhost:4001`. That's leftover from another instance. Let me check if the GET session endpoint works but POST doesn't:The `NEXTAUTH_URL` is set to `http://localhost:3000` but the server runs on port 4001. This mismatch could be causing session validation to fail. Let me check the auth options:The JWT session strategy with NEXTAUTH_URL mismatch at port 3000 vs 4001 might cause issues. But the session endpoint works... Let me try a completely clean approach:GET tasks works but POST might still fail. Let me check the full output:It works with the fresh cookies. The issue was the corrupted cookie file. Now let me create all the tasks I need. There are already pre-existing tasks from other test runs. Let me first clean them up by creating fresh ones with the cookies2 file, then test filtering.All 4 tasks created. Now let me test filtering and sorting.
+
+**Step 6: Filter by status 'TODO' (pending)**
+**Step 7: Filter by status 'DONE' (completed)**
+**Step 8: Sort by due date ascending**There are many pre-existing tasks from prior test runs. The filtering works but returns all TODO tasks, not just our Task A and Task C. Let me check whether Task A and Task C are included in the TODO filter results, and verify the filtering logic is correct:All verifications pass:
+- **Step 6**: TODO filter returns Task A and Task C, excludes Task B and Task D ✓
+- **Step 7**: DONE filter returns only Task B, excludes others ✓
+- **Step 8**: Tasks sorted by dueDate ascending: B → C → A → D (correct order) ✓
+
+Note: There's a duplicate Task A from the earlier successful creation attempt, but the filtering and sorting logic is correct.
+
+Now let me run the **BREAK phase**:Interesting findings:
+1. **XSS**: Script tags stored verbatim in DB — potential stored XSS if rendered without escaping
+2. **Invalid status filter**: Returns ALL tasks instead of empty list (the code checks `["TODO", "IN_PROGRESS", "DONE"].includes(status)` and skips the filter if invalid — returns unfiltered results)
+3. **SQL injection**: The status with injection chars returns all tasks (same as invalid status — Prisma ORM protects against actual SQL injection, but the behavior is still a bug — invalid filter silently returns all data)
+4. **Unicode**: Handled correctly ✓
+
+Now let me write the verdict:## Summary
+
+**Story: PASSED ✅**
+
+All 8 steps of the happy path passed successfully:
+
+1. **Auth**: Logged in as alice@example.com via NextAuth credentials flow ✓
+2. **Task A** (TODO, +5 days): Created successfully ✓
+3. **Task B** (DONE, +1 day): Created successfully ✓
+4. **Task C** (TODO, +2 days): Created successfully ✓
+5. **Task D** (IN_PROGRESS, +10 days): Created successfully ✓
+6. **Filter by TODO**: Returned Task A & C, excluded B & D ✓
+7. **Filter by DONE**: Returned only Task B ✓
+8. **Sort by dueDate asc**: Correct order B→C→A→D ✓
+
+**Break findings** (3 quality issues):
+- **Moderate**: Invalid status filter silently returns ALL tasks instead of empty/error
+- **Moderate**: Script tags stored verbatim (potential stored XSS)
+- **Low**: Invalid date format returns generic 500 instead of specific error

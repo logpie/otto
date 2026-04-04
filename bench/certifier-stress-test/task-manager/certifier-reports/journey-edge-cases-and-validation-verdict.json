@@ -1,0 +1,88 @@
+{
+  "story_passed": true,
+  "blocked_at": null,
+  "summary": "All edge case steps passed. The app properly rejects empty titles (including whitespace-only and null) with clear 400 errors. Emoji and unicode characters are preserved perfectly in both storage and retrieval. Long descriptions (2200+ chars) are accepted and stored in full. HTML/XSS payloads are stored as-is in the database but React's default escaping prevents script execution on the frontend — no dangerouslySetInnerHTML usage was found. Double submit creates two tasks (no idempotency), but the app handles it gracefully without crashes. The API is well-validated for the core cases.",
+  "diagnosis": null,
+  "fix_suggestion": null,
+  "steps": [
+    {
+      "action": "Log in as alice@example.com using NextAuth CSRF flow",
+      "outcome": "pass",
+      "verification": "Got 302 redirect to / with session-token cookie. Session API confirmed user as Alice Johnson with correct email and ID.",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "Create task with empty title (empty string and missing field)",
+      "outcome": "pass",
+      "verification": "Both empty string title and omitted title field returned HTTP 400 with error 'Title is required'. Validation works correctly.",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "Create task with emoji and unicode title '📋 Tâche spéciale — 任务 #1' and description 'Ñoño → résumé'",
+      "outcome": "pass",
+      "verification": "Task created with HTTP 201. Retrieved task by ID confirmed exact character preservation: emoji 📋, French accents (â, é), em dash —, Chinese characters 任务, Spanish ñ, and arrow →. No mojibake or encoding issues.",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "Create task with 2200+ character description",
+      "outcome": "pass",
+      "verification": "Task created with HTTP 201. Full description preserved in the response without truncation. 50 repetitions of test string all present.",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "Create task with XSS payloads: <script>alert(1)</script> in title and <img src=x onerror=alert(1)> in description",
+      "outcome": "pass",
+      "verification": "Task created with HTTP 201. HTML tags stored as literal text in database. Verified no dangerouslySetInnerHTML usage in source code — React's default JSX escaping will render tags as visible text, not executable HTML. XSS safe.",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "Rapid double submit of identical task creation",
+      "outcome": "pass",
+      "verification": "Both requests succeeded with HTTP 201, creating two separate tasks with different IDs (1ms apart). No crashes, no errors. App handles gracefully though no idempotency protection exists.",
+      "diagnosis": null,
+      "fix_suggestion": null
+    }
+  ],
+  "break_findings": [
+    {
+      "technique": "empty_required",
+      "description": "Submitted whitespace-only title ('   ') and null title",
+      "result": "Both correctly rejected with 400 'Title is required' — whitespace trimming validation works",
+      "severity": "none",
+      "fix_suggestion": "No fix needed — validation is thorough"
+    },
+    {
+      "technique": "long_input",
+      "description": "Submitted a 10,000 character title",
+      "result": "Accepted without any length limit — task created successfully with the full 10K char title",
+      "severity": "low",
+      "fix_suggestion": "Add a max length validation on title (e.g., 500 chars) and description (e.g., 10000 chars) to prevent abuse and potential rendering issues"
+    },
+    {
+      "technique": "special_chars",
+      "description": "Submitted SQL injection payload (Robert'); DROP TABLE tasks;--) in title",
+      "result": "Safely handled — Prisma ORM uses parameterized queries so the payload was stored as literal text, no SQL injection occurred",
+      "severity": "none",
+      "fix_suggestion": "No fix needed — ORM provides protection"
+    },
+    {
+      "technique": "special_chars",
+      "description": "Submitted invalid date format 'not-a-date' in dueDate field",
+      "result": "Server returned HTTP 500 'Failed to create task' instead of a 400 validation error",
+      "severity": "moderate",
+      "fix_suggestion": "Validate dueDate format before passing to Prisma — return 400 with a clear message like 'Invalid date format' instead of letting the database error bubble up as 500"
+    },
+    {
+      "technique": "double_submit",
+      "description": "Sent two identical POST /api/tasks requests simultaneously",
+      "result": "Both succeeded, creating duplicate tasks. No idempotency protection but no crashes either.",
+      "severity": "low",
+      "fix_suggestion": "Consider adding client-side debounce on the submit button, or server-side idempotency keys to prevent accidental duplicates"
+    }
+  ]
+}

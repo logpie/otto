@@ -1,0 +1,48 @@
+[2026-03-31 18:11:54] Verifying story: New User Registers and Shares Their First Recipe
+persona: new_user
+steps: 3
+break_strategies: ['double_submit', 'long_input', 'special_chars']
+[2026-03-31 18:17:40] Story completed: New User Registers and Shares Their First Recipe
+cost: $1.263, duration: 346.0s
+[2026-03-31 18:17:40] Verifying story: Full Recipe Lifecycle — Create, Edit, Verify, Delete
+persona: returning_user
+steps: 6
+break_strategies: ['double_submit', 'back_after_submit', 'concurrent_modify']
+[2026-03-31 18:19:44] Story completed: Full Recipe Lifecycle — Create, Edit, Verify, Delete
+cost: $0.522, duration: 124.2s
+[2026-03-31 18:19:44] Verifying story: Two Users' Recipes and Favorites Are Isolated
+persona: returning_user
+steps: 7
+break_strategies: ['id_guessing', 'direct_url']
+[2026-03-31 18:23:02] Story completed: Two Users' Recipes and Favorites Are Isolated
+cost: $0.603, duration: 197.8s
+[2026-03-31 18:23:02] Verifying story: Recipes, Ratings, and Favorites Persist Across Logout
+persona: returning_user
+steps: 8
+break_strategies: ['back_after_submit']
+[2026-03-31 18:25:06] Story completed: Recipes, Ratings, and Favorites Persist Across Logout
+cost: $0.621, duration: 124.5s
+[2026-03-31 18:25:06] Verifying story: Unauthenticated Visitor Cannot Create, Rate, or Favorite
+persona: visitor
+steps: 4
+break_strategies: ['direct_url', 'id_guessing']
+[2026-03-31 18:26:25] Story completed: Unauthenticated Visitor Cannot Create, Rate, or Favorite
+cost: $0.396, duration: 79.4s
+[2026-03-31 18:26:25] Verifying story: Search Recipes by Ingredient and Title with Category Filtering
+persona: returning_user
+steps: 7
+break_strategies: ['special_chars', 'empty_required', 'long_input']
+[2026-03-31 18:29:44] Story completed: Search Recipes by Ingredient and Title with Category Filtering
+cost: $0.857, duration: 198.5s
+[2026-03-31 18:29:44] Verifying story: Rate Recipes, Update Ratings, and Manage Favorites
+persona: returning_user
+steps: 6
+break_strategies: ['double_submit', 'concurrent_modify']
+[2026-03-31 18:32:51] Story completed: Rate Recipes, Update Ratings, and Manage Favorites
+cost: $0.801, duration: 186.7s
+[2026-03-31 18:32:51] Verifying story: Edge Cases in Recipe Creation and Search
+persona: returning_user
+steps: 5
+break_strategies: ['long_input', 'special_chars', 'empty_required']
+[2026-03-31 18:36:00] Story completed: Edge Cases in Recipe Creation and Search
+cost: $0.748, duration: 189.5s

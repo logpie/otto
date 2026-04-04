@@ -1,0 +1,130 @@
+{
+  "story_passed": true,
+  "blocked_at": null,
+  "summary": "All 8 steps of the filter-and-sort user story passed. Authentication worked via NextAuth CSRF flow. Four tasks were created with different statuses (TODO, DONE, IN_PROGRESS) and due dates (yesterday, tomorrow, 3 days, 1 week). Filtering by status=TODO correctly returned only TODO tasks, excluding DONE and IN_PROGRESS. Sorting by dueDate ascending returned all tasks in chronological order (Team lunch → Urgent report → Fix bug #42 → Quarterly review). Combined filter+sort (TODO + dueDate asc) correctly returned only the two TODO tasks in the right order (Urgent report before Quarterly review). Note: the database contained many pre-existing tasks from prior test runs, but filtering and sorting still worked correctly across all of them.",
+  "diagnosis": null,
+  "fix_suggestion": null,
+  "steps": [
+    {
+      "action": "GET /api/auth/csrf then POST /api/auth/callback/credentials with alice@example.com",
+      "outcome": "pass",
+      "verification": "Session endpoint returned user with email alice@example.com and valid expiry",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "POST /api/tasks with title 'Urgent report', status 'TODO', dueDate tomorrow",
+      "outcome": "pass",
+      "verification": "Response returned task with correct title, status TODO, dueDate 2026-04-02, and auto-generated id",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "POST /api/tasks with title 'Team lunch', status 'DONE', dueDate yesterday",
+      "outcome": "pass",
+      "verification": "Response returned task with correct title, status DONE, dueDate 2026-03-31",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "POST /api/tasks with title 'Quarterly review', status 'TODO', dueDate one week from now",
+      "outcome": "pass",
+      "verification": "Response returned task with correct title, status TODO, dueDate 2026-04-08",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "POST /api/tasks with title 'Fix bug #42', status 'IN_PROGRESS', dueDate 3 days from now",
+      "outcome": "pass",
+      "verification": "Response returned task with correct title, status IN_PROGRESS, dueDate 2026-04-04",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "GET /api/tasks?status=TODO to filter pending tasks only",
+      "outcome": "pass",
+      "verification": "All returned tasks have status TODO. 'Urgent report' and 'Quarterly review' present. 'Team lunch' (DONE) and 'Fix bug #42' (IN_PROGRESS) correctly excluded.",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "GET /api/tasks?sortBy=dueDate&sortOrder=asc to sort all tasks by due date",
+      "outcome": "pass",
+      "verification": "All tasks sorted by dueDate ascending. Our 4 tasks appear in correct order: Team lunch (Mar 31) → Urgent report (Apr 2) → Fix bug #42 (Apr 4) → Quarterly review (Apr 8).",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "GET /api/tasks?status=TODO&sortBy=dueDate&sortOrder=asc for combined filter+sort",
+      "outcome": "pass",
+      "verification": "Only TODO tasks returned, sorted by dueDate asc. Urgent report (Apr 2) appears before Quarterly review (Apr 8). No DONE or IN_PROGRESS tasks present.",
+      "diagnosis": null,
+      "fix_suggestion": null
+    }
+  ],
+  "break_findings": [
+    {
+      "technique": "empty_required",
+      "description": "Submitted task with empty string title",
+      "result": "Correctly rejected with error 'Title is required'",
+      "severity": "none",
+      "fix_suggestion": null
+    },
+    {
+      "technique": "empty_required",
+      "description": "Submitted task with missing title field entirely",
+      "result": "Correctly rejected with error 'Title is required'",
+      "severity": "none",
+      "fix_suggestion": null
+    },
+    {
+      "technique": "empty_required",
+      "description": "Submitted task with empty status string",
+      "result": "Task created successfully with status defaulting to TODO instead of rejecting. The empty status was silently replaced.",
+      "severity": "low",
+      "fix_suggestion": "Consider returning a validation error for empty status rather than silently defaulting, or document the default behavior explicitly"
+    },
+    {
+      "technique": "empty_required",
+      "description": "Submitted empty JSON body {}",
+      "result": "Correctly rejected with error 'Title is required'",
+      "severity": "none",
+      "fix_suggestion": null
+    },
+    {
+      "technique": "special_chars",
+      "description": "Submitted XSS payload <script>alert(1)</script> as task title",
+      "result": "Task created and stored with raw script tag in title. No server-side sanitization.",
+      "severity": "moderate",
+      "fix_suggestion": "Sanitize or escape HTML in user inputs server-side to prevent stored XSS. Even if the frontend escapes on render, defense-in-depth requires server-side sanitization."
+    },
+    {
+      "technique": "special_chars",
+      "description": "Submitted SQL injection payload in title",
+      "result": "Task created safely — Prisma ORM parameterizes queries, preventing SQL injection. No vulnerability.",
+      "severity": "none",
+      "fix_suggestion": null
+    },
+    {
+      "technique": "special_chars",
+      "description": "Submitted unicode/emoji characters in title",
+      "result": "Task created successfully with unicode preserved. Good internationalization support.",
+      "severity": "none",
+      "fix_suggestion": null
+    },
+    {
+      "technique": "special_chars",
+      "description": "Submitted invalid status value 'INVALID_STATUS'",
+      "result": "Correctly rejected with error 'Invalid status'",
+      "severity": "none",
+      "fix_suggestion": null
+    },
+    {
+      "technique": "special_chars",
+      "description": "Submitted invalid date string 'not-a-date' as dueDate",
+      "result": "Correctly rejected with error 'Failed to create task'",
+      "severity": "low",
+      "fix_suggestion": "Return a more specific error message like 'Invalid date format' instead of generic 'Failed to create task'"
+    }
+  ]
+}

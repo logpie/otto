@@ -1,0 +1,40 @@
+I'll execute this user story step by step. Let me start with authentication and then proceed through the task creation and filtering steps.
+
+Now let me start the testing. First, get the CSRF token and log in.
+
+**Step 1: Log in as a seed user**The CSRF token needs to come from the same session. Let me get cookies first, then login.Login succeeded — got a session token. Let me verify the session and then create the tasks.Session confirmed for Alice. Now let me create the three tasks.
+
+**Step 2: Create three tasks with different statuses and due dates**All three tasks created. Let me store the IDs and verify by listing all tasks.There are many existing tasks. Let me check specifically for our three tasks and test the filter functionality.
+
+**Step 3: Filter by TODO status**Filter by TODO works — all 265 returned tasks have TODO status. Now test IN_PROGRESS and DONE filters.
+
+**Step 4: Filter by IN_PROGRESS status****Step 5: Filter by DONE status****Step 6: Sort by due date ascending**Sort by due date ascending works correctly. Our three tasks appear in the right order: Task B (Apr 3) → Task A (Apr 6) → Task C (Apr 11). Now let me verify tasks with null due dates are handled.Null dates go first, then ascending order — reasonable behavior. Now let me check the browser UI.The page is SSR with client-side rendering. Let me check the page component to see if filter/sort UI exists.
+
+The UI has a proper FilterBar with status filter buttons (All, To Do, In Progress, Done) and a due date sort toggle (Earliest first / Latest first). The API supports `?status=` and `?sort=dueDate&order=asc/desc` query params.
+
+All happy path steps pass. Now let me run the **BREAK phase**.
+
+**BREAK: empty_required — Create task with empty title**Good — empty/missing title is rejected. Empty status defaults to TODO (reasonable). Now **special_chars**:Interesting findings:
+1. Special chars/XSS stored as-is — acceptable for API (React will escape on render)
+2. SQL injection properly handled (Prisma ORM)
+3. Invalid status on **create** is properly rejected
+4. Invalid status on **filter** returns ALL tasks instead of an error — minor issue
+
+Now let me write the verdict.## Summary
+
+**Story: PASSED ✅** — All 6 steps completed successfully.
+
+| Step | Result |
+|------|--------|
+| 1. Login as seed user | ✅ Pass |
+| 2. Create 3 tasks (TODO/IN_PROGRESS/DONE) | ✅ Pass |
+| 3. Filter by TODO | ✅ Pass — 265 TODO tasks, all correct status |
+| 4. Filter by IN_PROGRESS | ✅ Pass — 57 tasks, includes Task B |
+| 5. Filter by DONE | ✅ Pass — 55 tasks, includes Task C |
+| 6. Sort by due date ascending | ✅ Pass — Task B → Task A → Task C in correct order |
+
+**Break findings:**
+- **Empty title** properly rejected (good validation)
+- **Invalid status on create** properly rejected
+- **Invalid status on filter** (low severity): `?status=INVALID` silently returns all tasks instead of an error — should validate the query param
+- **XSS/SQL injection** properly handled by framework (React + Prisma)

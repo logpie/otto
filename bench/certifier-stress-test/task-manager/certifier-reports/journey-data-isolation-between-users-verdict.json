@@ -1,0 +1,88 @@
+{
+  "story_passed": true,
+  "blocked_at": null,
+  "summary": "Data isolation between users works correctly. Two users were registered, each created a task, and neither could see the other's tasks via the list endpoint. Direct access to another user's task by ID returned 403 Forbidden for GET, PUT, and DELETE. Unauthenticated access returned 401 Unauthorized. All eight happy-path steps passed. Break-phase testing confirmed that write operations (update, delete) are also properly isolated, and unauthenticated requests are rejected.",
+  "diagnosis": null,
+  "fix_suggestion": null,
+  "steps": [
+    {
+      "action": "Register User A with email userA_isolation@test.com",
+      "outcome": "pass",
+      "verification": "201 Created response with user ID cmnfd6bkl000hoo2ro0xhbju5 and correct email/name",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "As User A, create task 'Alice private task'",
+      "outcome": "pass",
+      "verification": "Task created with ID cmnfd6mm8000joo2rp4c1nda9, correct title/description, userId matches User A",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "Log out User A",
+      "outcome": "pass",
+      "verification": "302 redirect on signout, subsequent session check returns empty object {}",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "Register User B with email userB_isolation@test.com",
+      "outcome": "pass",
+      "verification": "201 Created with user ID cmnfd7276000koo2ryyrqxihr, login successful with valid session",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "As User B, create task 'Bob private task'",
+      "outcome": "pass",
+      "verification": "Task created with ID cmnfd762o000moo2rj4y45r4t, correct title/description, userId matches User B",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "As User B, list all tasks",
+      "outcome": "pass",
+      "verification": "Response contains exactly 1 task: 'Bob private task'. 'Alice private task' does NOT appear in the list.",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "As User B, access User A's task directly by ID (GET /api/tasks/cmnfd6mm8000joo2rp4c1nda9)",
+      "outcome": "pass",
+      "verification": "403 Forbidden returned with {\"error\":\"Forbidden\"} — User B cannot read User A's task",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "Log out User B, log in as User A, list all tasks",
+      "outcome": "pass",
+      "verification": "Session confirmed as User A. Task list contains exactly 1 task: 'Alice private task'. 'Bob private task' does NOT appear.",
+      "diagnosis": null,
+      "fix_suggestion": null
+    }
+  ],
+  "break_findings": [
+    {
+      "technique": "id_guessing",
+      "description": "Authenticated User B attempted PUT /api/tasks/{userA_task_id} to modify User A's task title and status",
+      "result": "403 Forbidden — modification blocked, User A's task unchanged",
+      "severity": "none",
+      "fix_suggestion": null
+    },
+    {
+      "technique": "id_guessing",
+      "description": "Authenticated User B attempted DELETE /api/tasks/{userA_task_id} to delete User A's task",
+      "result": "403 Forbidden — deletion blocked, User A's task still intact",
+      "severity": "none",
+      "fix_suggestion": null
+    },
+    {
+      "technique": "direct_url",
+      "description": "Unauthenticated request to GET /api/tasks/{task_id} and GET /api/tasks",
+      "result": "401 Unauthorized for both — no data leaked without authentication",
+      "severity": "none",
+      "fix_suggestion": null
+    }
+  ]
+}

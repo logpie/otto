@@ -1,0 +1,1347 @@
+{
+  "generated": "2026-03-31T02:20:52Z",
+  "product_dir": "/Users/yuxuan/work/cc-autonomous/.claude/worktrees/i2p/bench/certifier-stress-test/url-shortener",
+  "intent": "URL shortener with user auth, create short URLs, redirect, click tracking, dashboard with stats, custom short codes, QR codes",
+  "scores": {
+    "tier1": "5/20",
+    "tier2_journeys": "1/10 (10%)",
+    "tier2_steps": "11/20 (55%)"
+  },
+  "tier1_claims": [
+    {
+      "id": "auth-register",
+      "description": "A new user can register with email, name, and password",
+      "outcome": "pass",
+      "proof": [
+        {
+          "command": "POST http://localhost:4004/api/register body={\"email\": \"testuser@example.com\", \"name\": \"Test User\", \"password\": \"SecurePass123!\"}",
+          "expected": "status in [200, 201], JSON has keys ['id', 'email']",
+          "actual": "HTTP 201: {\"id\":\"cmneepsho0000ooruslrwizag\",\"email\":\"testuser@example.com\",\"name\":\"Test User\"}",
+          "timestamp": "02:20:47",
+          "proof": {
+            "timestamp": "2026-03-31T09:20:48Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4004/api/register",
+              "body": {
+                "email": "testuser@example.com",
+                "name": "Test User",
+                "password": "SecurePass123!"
+              }
+            },
+            "response": {
+              "status": 201,
+              "body": {
+                "id": "cmneepsho0000ooruslrwizag",
+                "email": "testuser@example.com",
+                "name": "Test User"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "auth-login",
+      "description": "A registered user can log in and receive an auth token or session",
+      "outcome": "blocked_by_harness",
+      "proof": [
+        {
+          "command": "POST http://localhost:4004/api/register body={\"email\": \"loginuser@example.com\", \"name\": \"Login User\", \"password\": \"SecurePass123!\"}",
+          "expected": "status in [200, 201]",
+          "actual": "HTTP 201: {\"id\":\"cmneepsjf0001ooruz2bvq8uq\",\"email\":\"loginuser@example.com\",\"name\":\"Login User\"}",
+          "timestamp": "02:20:48",
+          "proof": {
+            "timestamp": "2026-03-31T09:20:48Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4004/api/register",
+              "body": {
+                "email": "loginuser@example.com",
+                "name": "Login User",
+                "password": "SecurePass123!"
+              }
+            },
+            "response": {
+              "status": 201,
+              "body": {
+                "id": "cmneepsjf0001ooruz2bvq8uq",
+                "email": "loginuser@example.com",
+                "name": "Login User"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "auth-protected-route",
+      "description": "Unauthenticated requests to protected endpoints are rejected",
+      "outcome": "pass",
+      "proof": [
+        {
+          "command": "GET http://localhost:4004/api/links",
+          "expected": "status in [401, 403]",
+          "actual": "HTTP 401: {\"error\":\"Unauthorized\"}",
+          "timestamp": "02:20:48",
+          "proof": {
+            "timestamp": "2026-03-31T09:20:49Z",
+            "request": {
+              "method": "GET",
+              "url": "http://localhost:4004/api/links",
+              "body": null
+            },
+            "response": {
+              "status": 401,
+              "body": {
+                "error": "Unauthorized"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "link-create",
+      "description": "An authenticated user can create a short URL by providing a destination URL",
+      "outcome": "fail",
+      "proof": [
+        {
+          "command": "POST http://localhost:4004/api/links body={\"url\": \"https://www.example.com/very/long/path/to/resource\"}",
+          "expected": "status in [200, 201], body contains ['example.com'], JSON has keys ['id', 'code', 'url']",
+          "actual": "HTTP 401: {\"error\":\"Unauthorized\"}",
+          "timestamp": "02:20:49",
+          "proof": {
+            "timestamp": "2026-03-31T09:20:49Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4004/api/links",
+              "body": {
+                "url": "https://www.example.com/very/long/path/to/resource"
+              }
+            },
+            "response": {
+              "status": 401,
+              "body": {
+                "error": "Unauthorized"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "link-create-custom-code",
+      "description": "An authenticated user can create a short URL with a custom short code",
+      "outcome": "fail",
+      "proof": [
+        {
+          "command": "POST http://localhost:4004/api/links body={\"code\": \"mycode42\", \"url\": \"https://www.example.com/custom-destination\"}",
+          "expected": "status in [200, 201], body contains ['mycode42']",
+          "actual": "HTTP 401: {\"error\":\"Unauthorized\"}",
+          "timestamp": "02:20:49",
+          "proof": {
+            "timestamp": "2026-03-31T09:20:49Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4004/api/links",
+              "body": {
+                "url": "https://www.example.com/custom-destination",
+                "code": "mycode42"
+              }
+            },
+            "response": {
+              "status": 401,
+              "body": {
+                "error": "Unauthorized"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "link-custom-code-unique",
+      "description": "Creating a short URL with a duplicate custom code is rejected",
+      "outcome": "fail",
+      "proof": [
+        {
+          "command": "POST http://localhost:4004/api/links body={\"code\": \"dupetest\", \"url\": \"https://www.example.com/first\"}",
+          "expected": "status in [200, 201]",
+          "actual": "HTTP 401: {\"error\":\"Unauthorized\"}",
+          "timestamp": "02:20:49",
+          "proof": {
+            "timestamp": "2026-03-31T09:20:49Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4004/api/links",
+              "body": {
+                "url": "https://www.example.com/first",
+                "code": "dupetest"
+              }
+            },
+            "response": {
+              "status": 401,
+              "body": {
+                "error": "Unauthorized"
+              }
+            }
+          }
+        },
+        {
+          "command": "POST http://localhost:4004/api/links body={\"code\": \"dupetest\", \"url\": \"https://www.example.com/second\"}",
+          "expected": "status in [400, 409], body contains ['already']",
+          "actual": "HTTP 401: {\"error\":\"Unauthorized\"}",
+          "timestamp": "02:20:49",
+          "proof": {
+            "timestamp": "2026-03-31T09:20:49Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4004/api/links",
+              "body": {
+                "url": "https://www.example.com/second",
+                "code": "dupetest"
+              }
+            },
+            "response": {
+              "status": 401,
+              "body": {
+                "error": "Unauthorized"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "link-redirect",
+      "description": "Visiting a short code URL redirects to the original destination URL",
+      "outcome": "fail",
+      "proof": [
+        {
+          "command": "POST http://localhost:4004/api/links body={\"code\": \"redir01\", \"url\": \"https://www.example.com/redirect-target\"}",
+          "expected": "status in [200, 201]",
+          "actual": "HTTP 401: {\"error\":\"Unauthorized\"}",
+          "timestamp": "02:20:49",
+          "proof": {
+            "timestamp": "2026-03-31T09:20:49Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4004/api/links",
+              "body": {
+                "url": "https://www.example.com/redirect-target",
+                "code": "redir01"
+              }
+            },
+            "response": {
+              "status": 401,
+              "body": {
+                "error": "Unauthorized"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "click-tracking",
+      "description": "Each redirect increments the click count for the link",
+      "outcome": "fail",
+      "proof": [
+        {
+          "command": "POST http://localhost:4004/api/links body={\"code\": \"track01\", \"url\": \"https://www.example.com/track-me\"}",
+          "expected": "status in [200, 201]",
+          "actual": "HTTP 401: {\"error\":\"Unauthorized\"}",
+          "timestamp": "02:20:49",
+          "proof": {
+            "timestamp": "2026-03-31T09:20:49Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4004/api/links",
+              "body": {
+                "url": "https://www.example.com/track-me",
+                "code": "track01"
+              }
+            },
+            "response": {
+              "status": 401,
+              "body": {
+                "error": "Unauthorized"
+              }
+            }
+          }
+        },
+        {
+          "command": "GET http://localhost:4004/api/links",
+          "expected": "status in [200, 301, 302, 307, 308]",
+          "actual": "HTTP 401: {\"error\":\"Unauthorized\"}",
+          "timestamp": "02:20:49",
+          "proof": {
+            "timestamp": "2026-03-31T09:20:49Z",
+            "request": {
+              "method": "GET",
+              "url": "http://localhost:4004/api/links",
+              "body": null
+            },
+            "response": {
+              "status": 401,
+              "body": {
+                "error": "Unauthorized"
+              }
+            },
+            "retries": [
+              {
+                "request": {
+                  "method": "GET",
+                  "url": "http://localhost:4004/track01",
+                  "body": null
+                },
+                "response": {
+                  "status": 404,
+                  "body": {
+                    "error": "Not found"
+                  }
+                }
+              },
+              {
+                "request": {
+                  "method": "GET",
+                  "url": "http://localhost:4004/r/track01",
+                  "body": null
+                },
+                "response": {
+                  "status": 404,
+                  "body": "<!DOCTYPE html><html lang=\"en\" class=\"geist_a71539c9-module__T19VSG__variable geist_mono_8d43a2aa-module__8Li5zG__variable h-full antialiased\"><head><meta charSet=\"utf-8\"/><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/><link rel=\"stylesheet\" href=\"/_next/static/chunks/%5Broot-of-the-server%5D__0dj.8y3._.css\" data-precedence=\"next_static/chunks/[root-of-the-server]__0dj.8y3._.css\"/><link rel=\"preload\" as=\"script\" fetchPriority=\"low\" href=\"/_next/static/chunks/%5Bturbopack%5D_browser_dev_hmr-client_hmr-client_ts_0ehu4e4._.js\"/><script src=\"/_next/static/chunks/064i_next_dist_compiled_next-devtools_index_12du15s.js\" async=\"\"></script><script src=\"/_next/static/chunks/064i_next_dist_compiled_react-dom_02m8~f3._.js\" async=\"\"></script><script src=\"/_next/static/chunks/064i_next_dist_compiled_react-server-dom-turbopack_11wwxpg._.js\" async=\"\"></script><script src=\"/_next/static/chunks/064i_next_dist_compiled_0uj2_iw._.js\" async=\"\"></script><script src=\"/_next/static/chunk"
+                }
+              },
+              {
+                "request": {
+                  "method": "GET",
+                  "url": "http://localhost:4004/go/track01",
+                  "body": null
+                },
+                "response": {
+                  "status": 404,
+                  "body": "<!DOCTYPE html><html lang=\"en\" class=\"geist_a71539c9-module__T19VSG__variable geist_mono_8d43a2aa-module__8Li5zG__variable h-full antialiased\"><head><meta charSet=\"utf-8\"/><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/><link rel=\"stylesheet\" href=\"/_next/static/chunks/%5Broot-of-the-server%5D__0dj.8y3._.css\" data-precedence=\"next_static/chunks/[root-of-the-server]__0dj.8y3._.css\"/><link rel=\"preload\" as=\"script\" fetchPriority=\"low\" href=\"/_next/static/chunks/%5Bturbopack%5D_browser_dev_hmr-client_hmr-client_ts_0ehu4e4._.js\"/><script src=\"/_next/static/chunks/064i_next_dist_compiled_next-devtools_index_12du15s.js\" async=\"\"></script><script src=\"/_next/static/chunks/064i_next_dist_compiled_react-dom_02m8~f3._.js\" async=\"\"></script><script src=\"/_next/static/chunks/064i_next_dist_compiled_react-server-dom-turbopack_11wwxpg._.js\" async=\"\"></script><script src=\"/_next/static/chunks/064i_next_dist_compiled_0uj2_iw._.js\" async=\"\"></script><script src=\"/_next/static/chunk"
+                }
+              },
+              {
+                "request": {
+                  "method": "GET",
+                  "url": "http://localhost:4004/s/track01",
+                  "body": null
+                },
+                "response": {
+                  "status": 404,
+                  "body": "<!DOCTYPE html><html lang=\"en\" class=\"geist_a71539c9-module__T19VSG__variable geist_mono_8d43a2aa-module__8Li5zG__variable h-full antialiased\"><head><meta charSet=\"utf-8\"/><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/><link rel=\"stylesheet\" href=\"/_next/static/chunks/%5Broot-of-the-server%5D__0dj.8y3._.css\" data-precedence=\"next_static/chunks/[root-of-the-server]__0dj.8y3._.css\"/><link rel=\"preload\" as=\"script\" fetchPriority=\"low\" href=\"/_next/static/chunks/%5Bturbopack%5D_browser_dev_hmr-client_hmr-client_ts_0ehu4e4._.js\"/><script src=\"/_next/static/chunks/064i_next_dist_compiled_next-devtools_index_12du15s.js\" async=\"\"></script><script src=\"/_next/static/chunks/064i_next_dist_compiled_react-dom_02m8~f3._.js\" async=\"\"></script><script src=\"/_next/static/chunks/064i_next_dist_compiled_react-server-dom-turbopack_11wwxpg._.js\" async=\"\"></script><script src=\"/_next/static/chunks/064i_next_dist_compiled_0uj2_iw._.js\" async=\"\"></script><script src=\"/_next/static/chunk"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "command": "GET http://localhost:4004/api/links",
+          "expected": "status in [200, 301, 302, 307, 308]",
+          "actual": "HTTP 401: {\"error\":\"Unauthorized\"}",
+          "timestamp": "02:20:49",
+          "proof": {
+            "timestamp": "2026-03-31T09:20:49Z",
+            "request": {
+              "method": "GET",
+              "url": "http://localhost:4004/api/links",
+              "body": null
+            },
+            "response": {
+              "status": 401,
+              "body": {
+                "error": "Unauthorized"
+              }
+            },
+            "retries": [
+              {
+                "request": {
+                  "method": "GET",
+                  "url": "http://localhost:4004/track01",
+                  "body": null
+                },
+                "response": {
+                  "status": 404,
+                  "body": {
+                    "error": "Not found"
+                  }
+                }
+              },
+              {
+                "request": {
+                  "method": "GET",
+                  "url": "http://localhost:4004/r/track01",
+                  "body": null
+                },
+                "response": {
+                  "status": 404,
+                  "body": "<!DOCTYPE html><html lang=\"en\" class=\"geist_a71539c9-module__T19VSG__variable geist_mono_8d43a2aa-module__8Li5zG__variable h-full antialiased\"><head><meta charSet=\"utf-8\"/><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/><link rel=\"stylesheet\" href=\"/_next/static/chunks/%5Broot-of-the-server%5D__0dj.8y3._.css\" data-precedence=\"next_static/chunks/[root-of-the-server]__0dj.8y3._.css\"/><link rel=\"preload\" as=\"script\" fetchPriority=\"low\" href=\"/_next/static/chunks/%5Bturbopack%5D_browser_dev_hmr-client_hmr-client_ts_0ehu4e4._.js\"/><script src=\"/_next/static/chunks/064i_next_dist_compiled_next-devtools_index_12du15s.js\" async=\"\"></script><script src=\"/_next/static/chunks/064i_next_dist_compiled_react-dom_02m8~f3._.js\" async=\"\"></script><script src=\"/_next/static/chunks/064i_next_dist_compiled_react-server-dom-turbopack_11wwxpg._.js\" async=\"\"></script><script src=\"/_next/static/chunks/064i_next_dist_compiled_0uj2_iw._.js\" async=\"\"></script><script src=\"/_next/static/chunk"
+                }
+              },
+              {
+                "request": {
+                  "method": "GET",
+                  "url": "http://localhost:4004/go/track01",
+                  "body": null
+                },
+                "response": {
+                  "status": 404,
+                  "body": "<!DOCTYPE html><html lang=\"en\" class=\"geist_a71539c9-module__T19VSG__variable geist_mono_8d43a2aa-module__8Li5zG__variable h-full antialiased\"><head><meta charSet=\"utf-8\"/><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/><link rel=\"stylesheet\" href=\"/_next/static/chunks/%5Broot-of-the-server%5D__0dj.8y3._.css\" data-precedence=\"next_static/chunks/[root-of-the-server]__0dj.8y3._.css\"/><link rel=\"preload\" as=\"script\" fetchPriority=\"low\" href=\"/_next/static/chunks/%5Bturbopack%5D_browser_dev_hmr-client_hmr-client_ts_0ehu4e4._.js\"/><script src=\"/_next/static/chunks/064i_next_dist_compiled_next-devtools_index_12du15s.js\" async=\"\"></script><script src=\"/_next/static/chunks/064i_next_dist_compiled_react-dom_02m8~f3._.js\" async=\"\"></script><script src=\"/_next/static/chunks/064i_next_dist_compiled_react-server-dom-turbopack_11wwxpg._.js\" async=\"\"></script><script src=\"/_next/static/chunks/064i_next_dist_compiled_0uj2_iw._.js\" async=\"\"></script><script src=\"/_next/static/chunk"
+                }
+              },
+              {
+                "request": {
+                  "method": "GET",
+                  "url": "http://localhost:4004/s/track01",
+                  "body": null
+                },
+                "response": {
+                  "status": 404,
+                  "body": "<!DOCTYPE html><html lang=\"en\" class=\"geist_a71539c9-module__T19VSG__variable geist_mono_8d43a2aa-module__8Li5zG__variable h-full antialiased\"><head><meta charSet=\"utf-8\"/><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/><link rel=\"stylesheet\" href=\"/_next/static/chunks/%5Broot-of-the-server%5D__0dj.8y3._.css\" data-precedence=\"next_static/chunks/[root-of-the-server]__0dj.8y3._.css\"/><link rel=\"preload\" as=\"script\" fetchPriority=\"low\" href=\"/_next/static/chunks/%5Bturbopack%5D_browser_dev_hmr-client_hmr-client_ts_0ehu4e4._.js\"/><script src=\"/_next/static/chunks/064i_next_dist_compiled_next-devtools_index_12du15s.js\" async=\"\"></script><script src=\"/_next/static/chunks/064i_next_dist_compiled_react-dom_02m8~f3._.js\" async=\"\"></script><script src=\"/_next/static/chunks/064i_next_dist_compiled_react-server-dom-turbopack_11wwxpg._.js\" async=\"\"></script><script src=\"/_next/static/chunks/064i_next_dist_compiled_0uj2_iw._.js\" async=\"\"></script><script src=\"/_next/static/chunk"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "click-details-stored",
+      "description": "Click events record referrer and user agent metadata",
+      "outcome": "fail",
+      "proof": [
+        {
+          "command": "POST http://localhost:4004/api/links body={\"code\": \"cdet01\", \"url\": \"https://www.example.com/click-detail\"}",
+          "expected": "status in [200, 201]",
+          "actual": "HTTP 401: {\"error\":\"Unauthorized\"}",
+          "timestamp": "02:20:49",
+          "proof": {
+            "timestamp": "2026-03-31T09:20:49Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4004/api/links",
+              "body": {
+                "url": "https://www.example.com/click-detail",
+                "code": "cdet01"
+              }
+            },
+            "response": {
+              "status": 401,
+              "body": {
+                "error": "Unauthorized"
+              }
+            }
+          }
+        },
+        {
+          "command": "GET http://localhost:4004/api/links",
+          "expected": "status in [200, 301, 302, 307, 308]",
+          "actual": "HTTP 401: {\"error\":\"Unauthorized\"}",
+          "timestamp": "02:20:49",
+          "proof": {
+            "timestamp": "2026-03-31T09:20:49Z",
+            "request": {
+              "method": "GET",
+              "url": "http://localhost:4004/api/links",
+              "body": null
+            },
+            "response": {
+              "status": 401,
+              "body": {
+                "error": "Unauthorized"
+              }
+            },
+            "retries": [
+              {
+                "request": {
+                  "method": "GET",
+                  "url": "http://localhost:4004/cdet01",
+                  "body": null
+                },
+                "response": {
+                  "status": 404,
+                  "body": {
+                    "error": "Not found"
+                  }
+                }
+              },
+              {
+                "request": {
+                  "method": "GET",
+                  "url": "http://localhost:4004/r/cdet01",
+                  "body": null
+                },
+                "response": {
+                  "status": 404,
+                  "body": "<!DOCTYPE html><html lang=\"en\" class=\"geist_a71539c9-module__T19VSG__variable geist_mono_8d43a2aa-module__8Li5zG__variable h-full antialiased\"><head><meta charSet=\"utf-8\"/><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/><link rel=\"stylesheet\" href=\"/_next/static/chunks/%5Broot-of-the-server%5D__0dj.8y3._.css\" data-precedence=\"next_static/chunks/[root-of-the-server]__0dj.8y3._.css\"/><link rel=\"preload\" as=\"script\" fetchPriority=\"low\" href=\"/_next/static/chunks/%5Bturbopack%5D_browser_dev_hmr-client_hmr-client_ts_0ehu4e4._.js\"/><script src=\"/_next/static/chunks/064i_next_dist_compiled_next-devtools_index_12du15s.js\" async=\"\"></script><script src=\"/_next/static/chunks/064i_next_dist_compiled_react-dom_02m8~f3._.js\" async=\"\"></script><script src=\"/_next/static/chunks/064i_next_dist_compiled_react-server-dom-turbopack_11wwxpg._.js\" async=\"\"></script><script src=\"/_next/static/chunks/064i_next_dist_compiled_0uj2_iw._.js\" async=\"\"></script><script src=\"/_next/static/chunk"
+                }
+              },
+              {
+                "request": {
+                  "method": "GET",
+                  "url": "http://localhost:4004/go/cdet01",
+                  "body": null
+                },
+                "response": {
+                  "status": 404,
+                  "body": "<!DOCTYPE html><html lang=\"en\" class=\"geist_a71539c9-module__T19VSG__variable geist_mono_8d43a2aa-module__8Li5zG__variable h-full antialiased\"><head><meta charSet=\"utf-8\"/><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/><link rel=\"stylesheet\" href=\"/_next/static/chunks/%5Broot-of-the-server%5D__0dj.8y3._.css\" data-precedence=\"next_static/chunks/[root-of-the-server]__0dj.8y3._.css\"/><link rel=\"preload\" as=\"script\" fetchPriority=\"low\" href=\"/_next/static/chunks/%5Bturbopack%5D_browser_dev_hmr-client_hmr-client_ts_0ehu4e4._.js\"/><script src=\"/_next/static/chunks/064i_next_dist_compiled_next-devtools_index_12du15s.js\" async=\"\"></script><script src=\"/_next/static/chunks/064i_next_dist_compiled_react-dom_02m8~f3._.js\" async=\"\"></script><script src=\"/_next/static/chunks/064i_next_dist_compiled_react-server-dom-turbopack_11wwxpg._.js\" async=\"\"></script><script src=\"/_next/static/chunks/064i_next_dist_compiled_0uj2_iw._.js\" async=\"\"></script><script src=\"/_next/static/chunk"
+                }
+              },
+              {
+                "request": {
+                  "method": "GET",
+                  "url": "http://localhost:4004/s/cdet01",
+                  "body": null
+                },
+                "response": {
+                  "status": 404,
+                  "body": "<!DOCTYPE html><html lang=\"en\" class=\"geist_a71539c9-module__T19VSG__variable geist_mono_8d43a2aa-module__8Li5zG__variable h-full antialiased\"><head><meta charSet=\"utf-8\"/><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/><link rel=\"stylesheet\" href=\"/_next/static/chunks/%5Broot-of-the-server%5D__0dj.8y3._.css\" data-precedence=\"next_static/chunks/[root-of-the-server]__0dj.8y3._.css\"/><link rel=\"preload\" as=\"script\" fetchPriority=\"low\" href=\"/_next/static/chunks/%5Bturbopack%5D_browser_dev_hmr-client_hmr-client_ts_0ehu4e4._.js\"/><script src=\"/_next/static/chunks/064i_next_dist_compiled_next-devtools_index_12du15s.js\" async=\"\"></script><script src=\"/_next/static/chunks/064i_next_dist_compiled_react-dom_02m8~f3._.js\" async=\"\"></script><script src=\"/_next/static/chunks/064i_next_dist_compiled_react-server-dom-turbopack_11wwxpg._.js\" async=\"\"></script><script src=\"/_next/static/chunks/064i_next_dist_compiled_0uj2_iw._.js\" async=\"\"></script><script src=\"/_next/static/chunk"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "command": "GET http://localhost:4004/api/links",
+          "expected": "status in [200], JSON has keys ['clickedAt']",
+          "actual": "HTTP 401: {\"error\":\"Unauthorized\"}",
+          "timestamp": "02:20:49",
+          "proof": {
+            "timestamp": "2026-03-31T09:20:49Z",
+            "request": {
+              "method": "GET",
+              "url": "http://localhost:4004/api/links",
+              "body": null
+            },
+            "response": {
+              "status": 401,
+              "body": {
+                "error": "Unauthorized"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "link-list",
+      "description": "An authenticated user can list all their created short URLs",
+      "outcome": "fail",
+      "proof": [
+        {
+          "command": "POST http://localhost:4004/api/links body={\"code\": \"list01\", \"url\": \"https://www.example.com/listable\"}",
+          "expected": "status in [200, 201]",
+          "actual": "HTTP 401: {\"error\":\"Unauthorized\"}",
+          "timestamp": "02:20:49",
+          "proof": {
+            "timestamp": "2026-03-31T09:20:49Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4004/api/links",
+              "body": {
+                "url": "https://www.example.com/listable",
+                "code": "list01"
+              }
+            },
+            "response": {
+              "status": 401,
+              "body": {
+                "error": "Unauthorized"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "link-delete",
+      "description": "An authenticated user can delete their own short URL",
+      "outcome": "fail",
+      "proof": [
+        {
+          "command": "POST http://localhost:4004/api/links body={\"code\": \"del01\", \"url\": \"https://www.example.com/deletable\"}",
+          "expected": "status in [200, 201], JSON has keys ['id']",
+          "actual": "HTTP 401: {\"error\":\"Unauthorized\"}",
+          "timestamp": "02:20:49",
+          "proof": {
+            "timestamp": "2026-03-31T09:20:49Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4004/api/links",
+              "body": {
+                "url": "https://www.example.com/deletable",
+                "code": "del01"
+              }
+            },
+            "response": {
+              "status": 401,
+              "body": {
+                "error": "Unauthorized"
+              }
+            }
+          }
+        },
+        {
+          "command": "DELETE http://localhost:4004/api/links/del01",
+          "expected": "status in [200, 204]",
+          "actual": "HTTP 401: {\"error\":\"Unauthorized\"}",
+          "timestamp": "02:20:49",
+          "proof": {
+            "timestamp": "2026-03-31T09:20:50Z",
+            "request": {
+              "method": "DELETE",
+              "url": "http://localhost:4004/api/links/del01",
+              "body": null
+            },
+            "response": {
+              "status": 401,
+              "body": {
+                "error": "Unauthorized"
+              }
+            },
+            "retries": [
+              {
+                "request": {
+                  "method": "DELETE",
+                  "url": "http://localhost:4004/api/links/{id}",
+                  "body": null
+                },
+                "response": {
+                  "status": 401,
+                  "body": {
+                    "error": "Unauthorized"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "dashboard-view",
+      "description": "An authenticated user can view a dashboard showing their links and click stats",
+      "outcome": "pass",
+      "proof": [
+        {
+          "command": "GET http://localhost:4004/dashboard",
+          "expected": "status in [200], body contains ['dashboard']",
+          "actual": "HTTP 200: <!DOCTYPE html><html lang=\"en\" class=\"geist_a71539c9-module__T19VSG__variable geist_mono_8d43a2aa-module__8Li5zG__variable h-full antialiased\"><head><meta charSet=\"utf-8\"/><meta name=\"viewpo",
+          "timestamp": "02:20:50",
+          "proof": {
+            "timestamp": "2026-03-31T09:20:50Z",
+            "request": {
+              "method": "GET",
+              "url": "http://localhost:4004/dashboard",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": "<!DOCTYPE html><html lang=\"en\" class=\"geist_a71539c9-module__T19VSG__variable geist_mono_8d43a2aa-module__8Li5zG__variable h-full antialiased\"><head><meta charSet=\"utf-8\"/><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/><link rel=\"stylesheet\" href=\"/_next/static/chunks/%5Broot-of-the-server%5D__0dj.8y3._.css\" data-precedence=\"next_static/chunks/[root-of-the-server]__0dj.8y3._.css\"/><link rel=\"preload\" as=\"script\" fetchPriority=\"low\" href=\"/_next/static/chunks/%5Bturbopack%5D_browser_dev_hmr-client_hmr-client_ts_0ehu4e4._.js\"/><script src=\"/_next/static/chunks/064i_next_dist_compiled_next-devtools_index_12du15s.js\" async=\"\"></script><script src=\"/_next/static/chunks/064i_next_dist_compiled_react-dom_02m8~f3._.js\" async=\"\"></script><script src=\"/_next/static/chunks/064i_next_dist_compiled_react-server-dom-turbopack_11wwxpg._.js\" async=\"\"></script><script src=\"/_next/static/chunks/064i_next_dist_compiled_0uj2_iw._.js\" async=\"\"></script><script src=\"/_next/static/chunk"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "dashboard-shows-stats",
+      "description": "The dashboard displays click count and link details for each short URL",
+      "outcome": "fail",
+      "proof": [
+        {
+          "command": "POST http://localhost:4004/api/links body={\"code\": \"dash01\", \"url\": \"https://www.example.com/dashstats\"}",
+          "expected": "status in [200, 201]",
+          "actual": "HTTP 401: {\"error\":\"Unauthorized\"}",
+          "timestamp": "02:20:50",
+          "proof": {
+            "timestamp": "2026-03-31T09:20:50Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4004/api/links",
+              "body": {
+                "url": "https://www.example.com/dashstats",
+                "code": "dash01"
+              }
+            },
+            "response": {
+              "status": 401,
+              "body": {
+                "error": "Unauthorized"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "qr-code-generation",
+      "description": "A QR code can be generated for a short URL",
+      "outcome": "fail",
+      "proof": [
+        {
+          "command": "POST http://localhost:4004/api/links body={\"code\": \"qr01\", \"url\": \"https://www.example.com/qr-target\"}",
+          "expected": "status in [200, 201], JSON has keys ['id']",
+          "actual": "HTTP 401: {\"error\":\"Unauthorized\"}",
+          "timestamp": "02:20:50",
+          "proof": {
+            "timestamp": "2026-03-31T09:20:50Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4004/api/links",
+              "body": {
+                "url": "https://www.example.com/qr-target",
+                "code": "qr01"
+              }
+            },
+            "response": {
+              "status": 401,
+              "body": {
+                "error": "Unauthorized"
+              }
+            }
+          }
+        },
+        {
+          "command": "GET http://localhost:4004/api/links",
+          "expected": "status in [200]",
+          "actual": "HTTP 401: {\"error\":\"Unauthorized\"}",
+          "timestamp": "02:20:50",
+          "proof": {
+            "timestamp": "2026-03-31T09:20:50Z",
+            "request": {
+              "method": "GET",
+              "url": "http://localhost:4004/api/links",
+              "body": null
+            },
+            "response": {
+              "status": 401,
+              "body": {
+                "error": "Unauthorized"
+              }
+            },
+            "retries": [
+              {
+                "request": {
+                  "method": "GET",
+                  "url": "http://localhost:4004/api/links/qr01/qr",
+                  "body": null
+                },
+                "response": {
+                  "status": 404,
+                  "body": {
+                    "error": "Not found"
+                  }
+                }
+              },
+              {
+                "request": {
+                  "method": "GET",
+                  "url": "http://localhost:4004/api/links/{id}/qr",
+                  "body": null
+                },
+                "response": {
+                  "status": 404,
+                  "body": {
+                    "error": "Not found"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "redirect-nonexistent",
+      "description": "Visiting a non-existent short code returns 404",
+      "outcome": "pass",
+      "proof": [
+        {
+          "command": "GET http://localhost:4004/nonexistent999",
+          "expected": "status in [404]",
+          "actual": "HTTP 404: {\"error\":\"Not found\"}",
+          "timestamp": "02:20:50",
+          "proof": {
+            "timestamp": "2026-03-31T09:20:50Z",
+            "request": {
+              "method": "GET",
+              "url": "http://localhost:4004/nonexistent999",
+              "body": null
+            },
+            "response": {
+              "status": 404,
+              "body": {
+                "error": "Not found"
+              }
+            },
+            "retries": [
+              {
+                "request": {
+                  "method": "GET",
+                  "url": "http://localhost:4004/api/links",
+                  "body": null
+                },
+                "response": {
+                  "status": 401,
+                  "body": {
+                    "error": "Unauthorized"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "link-create-invalid-url",
+      "description": "Creating a short URL with an invalid destination URL is rejected",
+      "outcome": "fail",
+      "proof": [
+        {
+          "command": "POST http://localhost:4004/api/links body={\"url\": \"not-a-valid-url\"}",
+          "expected": "status in [400, 422]",
+          "actual": "HTTP 401: {\"error\":\"Unauthorized\"}",
+          "timestamp": "02:20:50",
+          "proof": {
+            "timestamp": "2026-03-31T09:20:50Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4004/api/links",
+              "body": {
+                "url": "not-a-valid-url"
+              }
+            },
+            "response": {
+              "status": 401,
+              "body": {
+                "error": "Unauthorized"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "auth-register-duplicate",
+      "description": "Registering with an already-used email is rejected",
+      "outcome": "pass",
+      "proof": [
+        {
+          "command": "POST http://localhost:4004/api/register body={\"email\": \"dupe@example.com\", \"name\": \"First User\", \"password\": \"SecurePass123!\"}",
+          "expected": "status in [200, 201]",
+          "actual": "HTTP 201: {\"id\":\"cmneepudm0002oorupzy5ir6d\",\"email\":\"dupe@example.com\",\"name\":\"First User\"}",
+          "timestamp": "02:20:50",
+          "proof": {
+            "timestamp": "2026-03-31T09:20:50Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4004/api/register",
+              "body": {
+                "email": "dupe@example.com",
+                "name": "First User",
+                "password": "SecurePass123!"
+              }
+            },
+            "response": {
+              "status": 201,
+              "body": {
+                "id": "cmneepudm0002oorupzy5ir6d",
+                "email": "dupe@example.com",
+                "name": "First User"
+              }
+            }
+          }
+        },
+        {
+          "command": "POST http://localhost:4004/api/register body={\"email\": \"dupe@example.com\", \"name\": \"Second User\", \"password\": \"AnotherPass456!\"}",
+          "expected": "status in [400, 409]",
+          "actual": "HTTP 409: {\"error\":\"User already exists\"}",
+          "timestamp": "02:20:50",
+          "proof": {
+            "timestamp": "2026-03-31T09:20:50Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4004/api/register",
+              "body": {
+                "email": "dupe@example.com",
+                "name": "Second User",
+                "password": "AnotherPass456!"
+              }
+            },
+            "response": {
+              "status": 409,
+              "body": {
+                "error": "User already exists"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "link-ownership-isolation",
+      "description": "A user cannot see or manage links created by another user",
+      "outcome": "fail",
+      "proof": [
+        {
+          "command": "POST http://localhost:4004/api/links body={\"code\": \"priv01\", \"url\": \"https://www.example.com/private-link\"}",
+          "expected": "status in [200, 201]",
+          "actual": "HTTP 401: {\"error\":\"Unauthorized\"}",
+          "timestamp": "02:20:50",
+          "proof": {
+            "timestamp": "2026-03-31T09:20:50Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4004/api/links",
+              "body": {
+                "url": "https://www.example.com/private-link",
+                "code": "priv01"
+              }
+            },
+            "response": {
+              "status": 401,
+              "body": {
+                "error": "Unauthorized"
+              }
+            }
+          }
+        },
+        {
+          "command": "GET http://localhost:4004/api/links",
+          "expected": "status in [200]",
+          "actual": "HTTP 401: {\"error\":\"Unauthorized\"}",
+          "timestamp": "02:20:50",
+          "proof": {
+            "timestamp": "2026-03-31T09:20:50Z",
+            "request": {
+              "method": "GET",
+              "url": "http://localhost:4004/api/links",
+              "body": null
+            },
+            "response": {
+              "status": 401,
+              "body": {
+                "error": "Unauthorized"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "link-persistence",
+      "description": "Created short URLs persist and are retrievable after creation",
+      "outcome": "fail",
+      "proof": [
+        {
+          "command": "POST http://localhost:4004/api/links body={\"code\": \"persist1\", \"url\": \"https://www.example.com/persistent\"}",
+          "expected": "status in [200, 201]",
+          "actual": "HTTP 401: {\"error\":\"Unauthorized\"}",
+          "timestamp": "02:20:50",
+          "proof": {
+            "timestamp": "2026-03-31T09:20:50Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4004/api/links",
+              "body": {
+                "url": "https://www.example.com/persistent",
+                "code": "persist1"
+              }
+            },
+            "response": {
+              "status": 401,
+              "body": {
+                "error": "Unauthorized"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "password-not-exposed",
+      "description": "User password is never returned in API responses",
+      "outcome": "blocked_by_harness",
+      "proof": [
+        {
+          "command": "POST http://localhost:4004/api/register body={\"email\": \"sectest@example.com\", \"name\": \"Sec Tester\", \"password\": \"MySecret999!\"}",
+          "expected": "status in [200, 201]",
+          "actual": "HTTP 201: {\"id\":\"cmneepugt0003oorutloqn805\",\"email\":\"sectest@example.com\",\"name\":\"Sec Tester\"}",
+          "timestamp": "02:20:50",
+          "proof": {
+            "timestamp": "2026-03-31T09:20:50Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4004/api/register",
+              "body": {
+                "email": "sectest@example.com",
+                "name": "Sec Tester",
+                "password": "MySecret999!"
+              }
+            },
+            "response": {
+              "status": 201,
+              "body": {
+                "id": "cmneepugt0003oorutloqn805",
+                "email": "sectest@example.com",
+                "name": "Sec Tester"
+              }
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "tier2_journeys": [
+    {
+      "name": "Unauthenticated Visitor Follows Short URL",
+      "passed": false,
+      "steps": [
+        {
+          "action": "fresh_session",
+          "passed": true,
+          "proof": null,
+          "error": ""
+        },
+        {
+          "action": "register",
+          "passed": true,
+          "proof": {
+            "timestamp": "2026-03-31T02:20:50Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4004/api/register",
+              "body": {
+                "email": "setup-redirect@test.com",
+                "password": "***",
+                "name": "Setup User"
+              }
+            },
+            "response": {
+              "status": 201,
+              "body": {
+                "id": "cmneepuij0004ooruwp0jbel1",
+                "email": "setup-redirect@test.com",
+                "name": "Setup User"
+              }
+            }
+          },
+          "error": ""
+        },
+        {
+          "action": "login",
+          "passed": false,
+          "proof": null,
+          "error": "could not authenticate"
+        }
+      ]
+    },
+    {
+      "name": "New User Creates Short URL And Views Dashboard",
+      "passed": false,
+      "steps": [
+        {
+          "action": "register",
+          "passed": true,
+          "proof": {
+            "timestamp": "2026-03-31T02:20:51Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4004/api/register",
+              "body": {
+                "email": "newuser@test.com",
+                "password": "***",
+                "name": "Test User"
+              }
+            },
+            "response": {
+              "status": 201,
+              "body": {
+                "id": "cmneepuzd0005ooru6jxhxaut",
+                "email": "newuser@test.com",
+                "name": "Test User"
+              }
+            }
+          },
+          "error": ""
+        },
+        {
+          "action": "login",
+          "passed": false,
+          "proof": null,
+          "error": "could not authenticate"
+        }
+      ]
+    },
+    {
+      "name": "New User Creates Custom Short Code",
+      "passed": false,
+      "steps": [
+        {
+          "action": "register",
+          "passed": true,
+          "proof": {
+            "timestamp": "2026-03-31T02:20:51Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4004/api/register",
+              "body": {
+                "email": "customcode@test.com",
+                "password": "***",
+                "name": "Custom User"
+              }
+            },
+            "response": {
+              "status": 201,
+              "body": {
+                "id": "cmneepv3b0006ooru2btjdgrq",
+                "email": "customcode@test.com",
+                "name": "Custom User"
+              }
+            }
+          },
+          "error": ""
+        },
+        {
+          "action": "login",
+          "passed": false,
+          "proof": null,
+          "error": "could not authenticate"
+        }
+      ]
+    },
+    {
+      "name": "New User Generates QR Code For Short URL",
+      "passed": false,
+      "steps": [
+        {
+          "action": "register",
+          "passed": true,
+          "proof": {
+            "timestamp": "2026-03-31T02:20:51Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4004/api/register",
+              "body": {
+                "email": "qruser@test.com",
+                "password": "***",
+                "name": "QR User"
+              }
+            },
+            "response": {
+              "status": 201,
+              "body": {
+                "id": "cmneepv770007ooru4yfwvyc4",
+                "email": "qruser@test.com",
+                "name": "QR User"
+              }
+            }
+          },
+          "error": ""
+        },
+        {
+          "action": "login",
+          "passed": false,
+          "proof": null,
+          "error": "could not authenticate"
+        }
+      ]
+    },
+    {
+      "name": "Returning User Checks Click Analytics",
+      "passed": false,
+      "steps": [
+        {
+          "action": "register",
+          "passed": true,
+          "proof": {
+            "timestamp": "2026-03-31T02:20:51Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4004/api/register",
+              "body": {
+                "email": "analytics@test.com",
+                "password": "***",
+                "name": "Analytics User"
+              }
+            },
+            "response": {
+              "status": 201,
+              "body": {
+                "id": "cmneepvb50008ooru4rfu1fhv",
+                "email": "analytics@test.com",
+                "name": "Analytics User"
+              }
+            }
+          },
+          "error": ""
+        },
+        {
+          "action": "login",
+          "passed": false,
+          "proof": null,
+          "error": "could not authenticate"
+        }
+      ]
+    },
+    {
+      "name": "Returning User Updates And Deletes Short URL",
+      "passed": false,
+      "steps": [
+        {
+          "action": "register",
+          "passed": true,
+          "proof": {
+            "timestamp": "2026-03-31T02:20:52Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4004/api/register",
+              "body": {
+                "email": "manage@test.com",
+                "password": "***",
+                "name": "Manager User"
+              }
+            },
+            "response": {
+              "status": 201,
+              "body": {
+                "id": "cmneepvf10009oorug475ejxz",
+                "email": "manage@test.com",
+                "name": "Manager User"
+              }
+            }
+          },
+          "error": ""
+        },
+        {
+          "action": "login",
+          "passed": false,
+          "proof": null,
+          "error": "could not authenticate"
+        }
+      ]
+    },
+    {
+      "name": "Admin Views All Users And URLs",
+      "passed": false,
+      "steps": [
+        {
+          "action": "login_admin",
+          "passed": false,
+          "proof": null,
+          "error": "adapter found no admin user"
+        }
+      ]
+    },
+    {
+      "name": "Duplicate Custom Code Rejected",
+      "passed": false,
+      "steps": [
+        {
+          "action": "register",
+          "passed": true,
+          "proof": {
+            "timestamp": "2026-03-31T02:20:52Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4004/api/register",
+              "body": {
+                "email": "dupetest@test.com",
+                "password": "***",
+                "name": "Dupe Tester"
+              }
+            },
+            "response": {
+              "status": 201,
+              "body": {
+                "id": "cmneepviy000aoorueq7kwnyn",
+                "email": "dupetest@test.com",
+                "name": "Dupe Tester"
+              }
+            }
+          },
+          "error": ""
+        },
+        {
+          "action": "login",
+          "passed": false,
+          "proof": null,
+          "error": "could not authenticate"
+        }
+      ]
+    },
+    {
+      "name": "Nonexistent Short Code Returns 404",
+      "passed": true,
+      "steps": [
+        {
+          "action": "fresh_session",
+          "passed": true,
+          "proof": null,
+          "error": ""
+        },
+        {
+          "action": "GET /api/urls/nonexistent999/redirect",
+          "passed": true,
+          "proof": {
+            "timestamp": "2026-03-31T02:20:52Z",
+            "request": {
+              "method": "GET",
+              "url": "http://localhost:4004/api/urls/nonexistent999/redirect",
+              "body": null
+            },
+            "response": {
+              "status": 404,
+              "body": {
+                "text": "<!DOCTYPE html><html lang=\"en\" class=\"geist_a71539c9-module__T19VSG__variable geist_mono_8d43a2aa-module__8Li5zG__variable h-full antialiased\"><head><meta charSet=\"utf-8\"/><meta name=\"viewport\" conten"
+              }
+            }
+          },
+          "error": ""
+        }
+      ]
+    },
+    {
+      "name": "URLs Persist Across Sessions",
+      "passed": false,
+      "steps": [
+        {
+          "action": "register",
+          "passed": true,
+          "proof": {
+            "timestamp": "2026-03-31T02:20:52Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4004/api/register",
+              "body": {
+                "email": "persist@test.com",
+                "password": "***",
+                "name": "Persist User"
+              }
+            },
+            "response": {
+              "status": 201,
+              "body": {
+                "id": "cmneepvno000boorum2vtdh7h",
+                "email": "persist@test.com",
+                "name": "Persist User"
+              }
+            }
+          },
+          "error": ""
+        },
+        {
+          "action": "login",
+          "passed": false,
+          "proof": null,
+          "error": "could not authenticate"
+        }
+      ]
+    }
+  ]
+}

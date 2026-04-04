@@ -1,0 +1,962 @@
+{
+  "intent": "recipe sharing app with user auth, CRUD recipes with title/description/ingredients/instructions/prep time/cook time/servings, ratings 1-5, favorites, search by ingredient or title, categories",
+  "claims": [
+    {
+      "id": "auth-register",
+      "description": "A new user can register an account with credentials",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "candidate_paths": [
+            "/api/auth/register",
+            "/api/register",
+            "/api/users",
+            "/auth/register",
+            "/register",
+            "/api/signup",
+            "/auth/signup"
+          ],
+          "body": {
+            "username": "cheftest",
+            "email": "chef@example.com",
+            "password": "SecurePass123!"
+          },
+          "body_variants": [
+            {
+              "username": "cheftest",
+              "email": "chef@example.com",
+              "password": "SecurePass123!"
+            },
+            {
+              "name": "cheftest",
+              "email": "chef@example.com",
+              "password": "SecurePass123!"
+            }
+          ],
+          "expect_status": [
+            200,
+            201
+          ],
+          "expect_body_contains": [
+            "cheftest"
+          ]
+        }
+      ],
+      "hard_fail": true
+    },
+    {
+      "id": "auth-login",
+      "description": "A registered user can log in and receive an authentication token or session",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "candidate_paths": [
+            "/api/auth/login",
+            "/api/login",
+            "/auth/login",
+            "/login",
+            "/api/auth/signin",
+            "/auth/signin"
+          ],
+          "body": {
+            "email": "chef@example.com",
+            "password": "SecurePass123!"
+          },
+          "body_variants": [
+            {
+              "email": "chef@example.com",
+              "password": "SecurePass123!"
+            },
+            {
+              "username": "cheftest",
+              "password": "SecurePass123!"
+            }
+          ],
+          "expect_status": [
+            200
+          ],
+          "expect_json_keys": [
+            "token"
+          ]
+        }
+      ],
+      "hard_fail": true
+    },
+    {
+      "id": "auth-protected-route",
+      "description": "Unauthenticated requests to protected endpoints are rejected",
+      "priority": "critical",
+      "category": "security",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "candidate_paths": [
+            "/api/recipes",
+            "/api/recipe",
+            "/recipes"
+          ],
+          "body": {
+            "title": "Unauthorized Recipe"
+          },
+          "expect_status": [
+            401,
+            403
+          ]
+        }
+      ],
+      "hard_fail": true
+    },
+    {
+      "id": "recipe-create",
+      "description": "An authenticated user can create a recipe with title, description, ingredients, instructions, prep time, cook time, and servings",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "candidate_paths": [
+            "/api/recipes",
+            "/api/recipe",
+            "/recipes"
+          ],
+          "body": {
+            "title": "Classic Pancakes",
+            "description": "Fluffy homemade pancakes perfect for breakfast",
+            "ingredients": [
+              "2 cups flour",
+              "2 eggs",
+              "1.5 cups milk",
+              "2 tbsp sugar",
+              "1 tsp baking powder"
+            ],
+            "instructions": "Mix dry ingredients. Whisk eggs and milk. Combine wet and dry. Cook on griddle until golden.",
+            "prep_time": 10,
+            "cook_time": 15,
+            "servings": 4
+          },
+          "body_variants": [
+            {
+              "title": "Classic Pancakes",
+              "description": "Fluffy homemade pancakes perfect for breakfast",
+              "ingredients": [
+                "2 cups flour",
+                "2 eggs",
+                "1.5 cups milk",
+                "2 tbsp sugar",
+                "1 tsp baking powder"
+              ],
+              "instructions": "Mix dry ingredients. Whisk eggs and milk. Combine wet and dry. Cook on griddle until golden.",
+              "prep_time": 10,
+              "cook_time": 15,
+              "servings": 4
+            },
+            {
+              "title": "Classic Pancakes",
+              "description": "Fluffy homemade pancakes perfect for breakfast",
+              "ingredients": "2 cups flour, 2 eggs, 1.5 cups milk, 2 tbsp sugar, 1 tsp baking powder",
+              "instructions": "Mix dry ingredients. Whisk eggs and milk. Combine wet and dry. Cook on griddle until golden.",
+              "prepTime": 10,
+              "cookTime": 15,
+              "servings": 4
+            }
+          ],
+          "expect_status": [
+            200,
+            201
+          ],
+          "expect_body_contains": [
+            "Classic Pancakes"
+          ],
+          "expect_json_keys": [
+            "id",
+            "title"
+          ]
+        }
+      ],
+      "hard_fail": true
+    },
+    {
+      "id": "recipe-read",
+      "description": "A user can view a single recipe with all its fields",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "GET",
+          "candidate_paths": [
+            "/api/recipes/{id}",
+            "/api/recipe/{id}",
+            "/recipes/{id}"
+          ],
+          "expect_status": [
+            200
+          ],
+          "expect_body_contains": [
+            "Classic Pancakes",
+            "flour"
+          ],
+          "expect_json_keys": [
+            "title",
+            "description",
+            "ingredients",
+            "instructions"
+          ]
+        }
+      ],
+      "hard_fail": true
+    },
+    {
+      "id": "recipe-list",
+      "description": "A user can list all recipes",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "GET",
+          "candidate_paths": [
+            "/api/recipes",
+            "/api/recipe",
+            "/recipes"
+          ],
+          "expect_status": [
+            200
+          ],
+          "expect_body_contains": [
+            "Classic Pancakes"
+          ]
+        }
+      ],
+      "hard_fail": true
+    },
+    {
+      "id": "recipe-update",
+      "description": "A recipe owner can update their recipe's fields",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "PUT",
+          "candidate_paths": [
+            "/api/recipes/{id}",
+            "/api/recipe/{id}",
+            "/recipes/{id}"
+          ],
+          "body": {
+            "title": "Classic Fluffy Pancakes",
+            "servings": 6
+          },
+          "expect_status": [
+            200
+          ],
+          "expect_body_contains": [
+            "Classic Fluffy Pancakes"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "GET",
+          "candidate_paths": [
+            "/api/recipes/{id}",
+            "/api/recipe/{id}",
+            "/recipes/{id}"
+          ],
+          "expect_status": [
+            200
+          ],
+          "expect_body_contains": [
+            "Classic Fluffy Pancakes"
+          ]
+        }
+      ],
+      "hard_fail": true
+    },
+    {
+      "id": "recipe-delete",
+      "description": "A recipe owner can delete their recipe",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "candidate_paths": [
+            "/api/recipes",
+            "/api/recipe",
+            "/recipes"
+          ],
+          "body": {
+            "title": "Temp Recipe To Delete",
+            "description": "Will be deleted",
+            "ingredients": [
+              "1 cup water"
+            ],
+            "instructions": "Boil water.",
+            "prep_time": 1,
+            "cook_time": 1,
+            "servings": 1
+          },
+          "expect_status": [
+            200,
+            201
+          ]
+        },
+        {
+          "action": "http",
+          "method": "DELETE",
+          "candidate_paths": [
+            "/api/recipes/{id}",
+            "/api/recipe/{id}",
+            "/recipes/{id}"
+          ],
+          "expect_status": [
+            200,
+            204
+          ]
+        },
+        {
+          "action": "http",
+          "method": "GET",
+          "candidate_paths": [
+            "/api/recipes/{id}",
+            "/api/recipe/{id}",
+            "/recipes/{id}"
+          ],
+          "expect_status": [
+            404
+          ]
+        }
+      ],
+      "hard_fail": true
+    },
+    {
+      "id": "recipe-ownership",
+      "description": "A user cannot update or delete another user's recipe",
+      "priority": "critical",
+      "category": "security",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "PUT",
+          "candidate_paths": [
+            "/api/recipes/{id}",
+            "/api/recipe/{id}",
+            "/recipes/{id}"
+          ],
+          "body": {
+            "title": "Hijacked Recipe"
+          },
+          "expect_status": [
+            401,
+            403
+          ]
+        },
+        {
+          "action": "http",
+          "method": "DELETE",
+          "candidate_paths": [
+            "/api/recipes/{id}",
+            "/api/recipe/{id}",
+            "/recipes/{id}"
+          ],
+          "expect_status": [
+            401,
+            403
+          ]
+        }
+      ],
+      "hard_fail": true
+    },
+    {
+      "id": "rating-create",
+      "description": "An authenticated user can rate a recipe from 1 to 5",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "candidate_paths": [
+            "/api/recipes/{id}/ratings",
+            "/api/recipes/{id}/rate",
+            "/api/ratings",
+            "/api/recipes/{id}/rating"
+          ],
+          "body": {
+            "rating": 4
+          },
+          "body_variants": [
+            {
+              "rating": 4
+            },
+            {
+              "score": 4
+            },
+            {
+              "value": 4
+            },
+            {
+              "stars": 4
+            }
+          ],
+          "expect_status": [
+            200,
+            201
+          ]
+        },
+        {
+          "action": "http",
+          "method": "GET",
+          "candidate_paths": [
+            "/api/recipes/{id}",
+            "/api/recipe/{id}",
+            "/recipes/{id}"
+          ],
+          "expect_status": [
+            200
+          ],
+          "expect_body_contains": [
+            "4"
+          ]
+        }
+      ],
+      "hard_fail": true
+    },
+    {
+      "id": "rating-validation",
+      "description": "Rating values outside 1-5 range are rejected",
+      "priority": "important",
+      "category": "error-handling",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "candidate_paths": [
+            "/api/recipes/{id}/ratings",
+            "/api/recipes/{id}/rate",
+            "/api/ratings",
+            "/api/recipes/{id}/rating"
+          ],
+          "body": {
+            "rating": 0
+          },
+          "expect_status": [
+            400,
+            422
+          ]
+        },
+        {
+          "action": "http",
+          "method": "POST",
+          "candidate_paths": [
+            "/api/recipes/{id}/ratings",
+            "/api/recipes/{id}/rate",
+            "/api/ratings",
+            "/api/recipes/{id}/rating"
+          ],
+          "body": {
+            "rating": 6
+          },
+          "expect_status": [
+            400,
+            422
+          ]
+        }
+      ],
+      "hard_fail": false
+    },
+    {
+      "id": "favorite-add",
+      "description": "An authenticated user can add a recipe to their favorites",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "candidate_paths": [
+            "/api/recipes/{id}/favorite",
+            "/api/favorites",
+            "/api/recipes/{id}/favorites",
+            "/api/users/favorites",
+            "/api/favorites/{id}"
+          ],
+          "body": {},
+          "body_variants": [
+            {},
+            {
+              "recipe_id": "{id}"
+            },
+            {
+              "recipeId": "{id}"
+            }
+          ],
+          "expect_status": [
+            200,
+            201
+          ]
+        }
+      ],
+      "hard_fail": true
+    },
+    {
+      "id": "favorite-list",
+      "description": "A user can view their list of favorited recipes",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "GET",
+          "candidate_paths": [
+            "/api/favorites",
+            "/api/users/favorites",
+            "/api/me/favorites",
+            "/api/user/favorites",
+            "/api/recipes/favorites"
+          ],
+          "expect_status": [
+            200
+          ],
+          "expect_body_contains": [
+            "Classic Pancakes"
+          ]
+        }
+      ],
+      "hard_fail": true
+    },
+    {
+      "id": "favorite-remove",
+      "description": "A user can remove a recipe from their favorites",
+      "priority": "important",
+      "category": "feature",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "DELETE",
+          "candidate_paths": [
+            "/api/recipes/{id}/favorite",
+            "/api/favorites/{id}",
+            "/api/recipes/{id}/favorites",
+            "/api/users/favorites/{id}"
+          ],
+          "expect_status": [
+            200,
+            204
+          ]
+        },
+        {
+          "action": "http",
+          "method": "GET",
+          "candidate_paths": [
+            "/api/favorites",
+            "/api/users/favorites",
+            "/api/me/favorites"
+          ],
+          "expect_status": [
+            200
+          ]
+        }
+      ],
+      "hard_fail": false
+    },
+    {
+      "id": "search-by-title",
+      "description": "A user can search recipes by title and get matching results",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "GET",
+          "candidate_paths": [
+            "/api/recipes?search=Pancakes",
+            "/api/recipes?q=Pancakes",
+            "/api/recipes?title=Pancakes",
+            "/api/recipes/search?q=Pancakes",
+            "/api/search?q=Pancakes",
+            "/api/recipes?query=Pancakes"
+          ],
+          "expect_status": [
+            200
+          ],
+          "expect_body_contains": [
+            "Classic Pancakes"
+          ]
+        }
+      ],
+      "hard_fail": true
+    },
+    {
+      "id": "search-by-ingredient",
+      "description": "A user can search recipes by ingredient and get matching results",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "GET",
+          "candidate_paths": [
+            "/api/recipes?search=flour",
+            "/api/recipes?q=flour",
+            "/api/recipes?ingredient=flour",
+            "/api/recipes/search?q=flour",
+            "/api/recipes?ingredients=flour",
+            "/api/search?q=flour"
+          ],
+          "expect_status": [
+            200
+          ],
+          "expect_body_contains": [
+            "Classic Pancakes"
+          ]
+        }
+      ],
+      "hard_fail": true
+    },
+    {
+      "id": "search-no-results",
+      "description": "Searching for a non-existent term returns an empty result set, not an error",
+      "priority": "important",
+      "category": "error-handling",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "GET",
+          "candidate_paths": [
+            "/api/recipes?search=zzzznonexistent",
+            "/api/recipes?q=zzzznonexistent",
+            "/api/recipes/search?q=zzzznonexistent"
+          ],
+          "expect_status": [
+            200
+          ]
+        }
+      ],
+      "hard_fail": false
+    },
+    {
+      "id": "category-assign",
+      "description": "Recipes can be assigned to categories",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "candidate_paths": [
+            "/api/recipes",
+            "/api/recipe",
+            "/recipes"
+          ],
+          "body": {
+            "title": "Grilled Salmon",
+            "description": "Simple grilled salmon with lemon",
+            "ingredients": [
+              "1 salmon fillet",
+              "1 lemon",
+              "salt",
+              "pepper",
+              "olive oil"
+            ],
+            "instructions": "Season salmon. Grill 4 min per side. Squeeze lemon.",
+            "prep_time": 5,
+            "cook_time": 8,
+            "servings": 2,
+            "category": "Seafood"
+          },
+          "body_variants": [
+            {
+              "title": "Grilled Salmon",
+              "description": "Simple grilled salmon with lemon",
+              "ingredients": [
+                "1 salmon fillet",
+                "1 lemon",
+                "salt",
+                "pepper",
+                "olive oil"
+              ],
+              "instructions": "Season salmon. Grill 4 min per side. Squeeze lemon.",
+              "prep_time": 5,
+              "cook_time": 8,
+              "servings": 2,
+              "category": "Seafood"
+            },
+            {
+              "title": "Grilled Salmon",
+              "description": "Simple grilled salmon with lemon",
+              "ingredients": [
+                "1 salmon fillet",
+                "1 lemon",
+                "salt",
+                "pepper",
+                "olive oil"
+              ],
+              "instructions": "Season salmon. Grill 4 min per side. Squeeze lemon.",
+              "prep_time": 5,
+              "cook_time": 8,
+              "servings": 2,
+              "categories": [
+                "Seafood"
+              ]
+            },
+            {
+              "title": "Grilled Salmon",
+              "description": "Simple grilled salmon with lemon",
+              "ingredients": [
+                "1 salmon fillet",
+                "1 lemon",
+                "salt",
+                "pepper",
+                "olive oil"
+              ],
+              "instructions": "Season salmon. Grill 4 min per side. Squeeze lemon.",
+              "prep_time": 5,
+              "cook_time": 8,
+              "servings": 2,
+              "category_id": 1
+            }
+          ],
+          "expect_status": [
+            200,
+            201
+          ],
+          "expect_body_contains": [
+            "Grilled Salmon"
+          ]
+        }
+      ],
+      "hard_fail": true
+    },
+    {
+      "id": "category-filter",
+      "description": "Recipes can be filtered by category",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "GET",
+          "candidate_paths": [
+            "/api/recipes?category=Seafood",
+            "/api/recipes?category_id=1",
+            "/api/categories/Seafood/recipes",
+            "/api/recipes?categories=Seafood"
+          ],
+          "expect_status": [
+            200
+          ],
+          "expect_body_contains": [
+            "Grilled Salmon"
+          ]
+        }
+      ],
+      "hard_fail": true
+    },
+    {
+      "id": "category-list",
+      "description": "Available categories can be listed",
+      "priority": "important",
+      "category": "feature",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "GET",
+          "candidate_paths": [
+            "/api/categories",
+            "/api/category",
+            "/categories"
+          ],
+          "expect_status": [
+            200
+          ]
+        }
+      ],
+      "hard_fail": false
+    },
+    {
+      "id": "recipe-required-fields",
+      "description": "Creating a recipe without required fields is rejected",
+      "priority": "important",
+      "category": "error-handling",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "candidate_paths": [
+            "/api/recipes",
+            "/api/recipe",
+            "/recipes"
+          ],
+          "body": {
+            "description": "Missing title and other fields"
+          },
+          "expect_status": [
+            400,
+            422
+          ]
+        }
+      ],
+      "hard_fail": false
+    },
+    {
+      "id": "recipe-persistence",
+      "description": "Created recipes persist and are retrievable after creation",
+      "priority": "critical",
+      "category": "data",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "candidate_paths": [
+            "/api/recipes",
+            "/api/recipe",
+            "/recipes"
+          ],
+          "body": {
+            "title": "Persistence Test Soup",
+            "description": "Testing data persistence",
+            "ingredients": [
+              "1 can broth",
+              "vegetables"
+            ],
+            "instructions": "Combine and simmer for 20 minutes.",
+            "prep_time": 5,
+            "cook_time": 20,
+            "servings": 3
+          },
+          "expect_status": [
+            200,
+            201
+          ]
+        },
+        {
+          "action": "http",
+          "method": "GET",
+          "candidate_paths": [
+            "/api/recipes",
+            "/api/recipe",
+            "/recipes"
+          ],
+          "expect_status": [
+            200
+          ],
+          "expect_body_contains": [
+            "Persistence Test Soup"
+          ]
+        }
+      ],
+      "hard_fail": true
+    },
+    {
+      "id": "auth-invalid-login",
+      "description": "Login with wrong credentials is rejected with appropriate error",
+      "priority": "important",
+      "category": "security",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "candidate_paths": [
+            "/api/auth/login",
+            "/api/login",
+            "/auth/login",
+            "/login"
+          ],
+          "body": {
+            "email": "chef@example.com",
+            "password": "WrongPassword999"
+          },
+          "expect_status": [
+            400,
+            401,
+            403
+          ]
+        }
+      ],
+      "hard_fail": false
+    },
+    {
+      "id": "recipe-time-fields",
+      "description": "Recipe displays prep time, cook time, and servings correctly",
+      "priority": "important",
+      "category": "data",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "GET",
+          "candidate_paths": [
+            "/api/recipes/{id}",
+            "/api/recipe/{id}",
+            "/recipes/{id}"
+          ],
+          "expect_status": [
+            200
+          ],
+          "expect_json_keys": [
+            "prep_time",
+            "cook_time",
+            "servings"
+          ]
+        }
+      ],
+      "hard_fail": false
+    }
+  ],
+  "non_goals": [
+    "social features (following users, activity feed)",
+    "recipe image/photo upload",
+    "meal planning or grocery lists",
+    "nutritional information or calorie tracking",
+    "recipe import from external URLs",
+    "commenting or reviews beyond ratings",
+    "admin panel or moderation tools",
+    "recipe sharing via link or social media",
+    "print-friendly recipe view",
+    "unit conversion for ingredients"
+  ],
+  "ambiguities": [
+    "unclear whether ratings are per-user (each user rates once) or aggregate-only",
+    "unclear whether categories are predefined or user-created",
+    "unclear whether users can only favorite/rate others' recipes or also their own",
+    "unclear whether search should support partial/fuzzy matching or exact only",
+    "unclear whether recipe creator can edit/delete others' ratings on their recipe"
+  ],
+  "product_type_hint": "web",
+  "compiled_at": "2026-03-31 10:09:49",
+  "cost_usd": 0.22275150000000002
+}

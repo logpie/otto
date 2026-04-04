@@ -1,0 +1,53 @@
+{
+  "story_passed": true,
+  "blocked_at": null,
+  "summary": "All unauthenticated access control checks pass. The API consistently returns 401 Unauthorized for all task endpoints (GET list, POST create, GET by ID, PUT update, DELETE) when no session cookie is present. The frontend root page uses client-side auth checking via useSession() and redirects unauthenticated visitors to /login. There are no dedicated /tasks pages — the app is a single-page design where the root page conditionally renders tasks or redirects. Break-phase testing with ID guessing, path traversal, null bytes, and direct URL variations all correctly returned 401.",
+  "diagnosis": null,
+  "fix_suggestion": null,
+  "steps": [
+    {
+      "action": "GET /api/tasks without authentication and check root page behavior",
+      "outcome": "pass",
+      "verification": "API returned 401 with {\"error\":\"Unauthorized\"}. The root page (/) returns 200 but uses client-side useSession() to detect unauthenticated state and redirect to /login. No task data is exposed since the API call from the page also returns 401.",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "POST /api/tasks without authentication to attempt task creation",
+      "outcome": "pass",
+      "verification": "API returned 401 with {\"error\":\"Unauthorized\"}. No task was created. The request body containing title, description, and status was rejected before processing.",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "GET /api/tasks/:id with a real task ID (cmnfgvzvi000qoopgkgszk7cy) without authentication",
+      "outcome": "pass",
+      "verification": "API returned 401 with {\"error\":\"Unauthorized\"}. The task details (title, description, status) were not exposed. Verified the task still exists and is unchanged by re-fetching with alice's authenticated session.",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "DELETE and PUT /api/tasks/:id with a real task ID without authentication",
+      "outcome": "pass",
+      "verification": "Both DELETE and PUT returned 401 with {\"error\":\"Unauthorized\"}. Verified the task was not modified or deleted by re-fetching with alice's session — title still 'Alice Secret Task', status still 'TODO', updatedAt unchanged.",
+      "diagnosis": null,
+      "fix_suggestion": null
+    }
+  ],
+  "break_findings": [
+    {
+      "technique": "direct_url",
+      "description": "Tried accessing /api/tasks with various query parameters (?status=TODO, trailing slash) without authentication",
+      "result": "All returned 401 Unauthorized. Query parameter variations do not bypass auth.",
+      "severity": "none",
+      "fix_suggestion": null
+    },
+    {
+      "technique": "id_guessing",
+      "description": "Tried common ID values (1, 0, admin, null, undefined), null byte injection (%00), and path traversal (../../auth/session) on /api/tasks/:id without auth",
+      "result": "All ID guessing attempts returned 401. Path traversal (../../auth/session) resolved to the /api/auth/session endpoint which returned an empty session {} — this is expected Next.js routing behavior, not a vulnerability. No task data was exposed.",
+      "severity": "none",
+      "fix_suggestion": null
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+I'll execute this user story step by step. Let me start by authenticating and then working through the rating and favorites flow.
+
+Now let me start executing the steps. First, let me get the CSRF token and log in.
+
+**Step 1: Log in as an existing user**The CSRF token was stale. Let me get a fresh one with the cookie jar and retry.Login successful — redirects to `/` (home page) with a session token. Let me verify the session works.Step 1 passed. Alice is authenticated. Now let me get recipes to find ones to rate.
+
+**Step 2: Find a recipe and rate it 5 out of 5**Session expired or was replaced. Let me re-login properly.Rating created. Let me verify the recipe now reflects the rating.Step 2 passed. The rating with value 5 is recorded. There's no computed `averageRating` field — the ratings array contains the raw data. The recipe shows our rating of 5.
+
+**Step 3: Change the rating from 5 to 3**Step 3 passed. Rating updated from 5 to 3 (same ID returned), only 1 rating exists (not duplicated).
+
+**Step 4: Add the rated recipe to favorites**Session keeps getting invalidated. Let me re-login and do everything in quick succession.Step 4 passed. Recipe favorited successfully. Let me verify it appears on the recipe.**Step 5: Add a second different recipe to favorites**Let me verify both recipes are in favorites by checking each recipe's favorites field.Step 5 passed. Both recipes are favorited.
+
+**Step 6: Remove the first recipe from favorites (unfavorite)**Now verify the first recipe is unfavorited and the second remains.Step 6 passed. First recipe unfavorited, second remains.
+
+Now let me run the **BREAK phase**.Found an issue: string rating value causes a 500 error instead of a proper validation error. Let me also check the session instability issue more carefully.Good — no duplicate favorites created. The toggle behavior with concurrent requests leads to unpredictable final state, but no data corruption.
+
+Now let me write the verdict.## Summary
+
+**All 6 steps passed.** The ratings and favorites journey works correctly:
+
+1. ✅ **Login** — NextAuth credentials flow works with CSRF token
+2. ✅ **Rate recipe 5 stars** — Rating created successfully, visible on recipe
+3. ✅ **Update rating to 3** — Upsert logic correctly updates (not duplicates), same rating ID returned
+4. ✅ **Favorite recipe** — Toggle endpoint returns `{favorited: true}`
+5. ✅ **Favorite second recipe** — Both recipes show as favorited
+6. ✅ **Unfavorite first recipe** — Toggle returns `{favorited: false}`, only second remains
+
+**Break findings:**
+- **Moderate**: Non-integer rating values (e.g., `"five"`) cause HTTP 500 instead of a proper 400 validation error
+- **Low**: Concurrent favorite toggles produce unpredictable final state (but no data corruption)
+- **Low**: Concurrent rating updates are last-write-wins (acceptable behavior)

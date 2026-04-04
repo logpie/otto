@@ -1,0 +1,398 @@
+{
+  "product_dir": "/Users/yuxuan/work/cc-autonomous/.claude/worktrees/i2p/bench/certifier-stress-test/url-shortener",
+  "intent": "URL shortener with user auth, create short URLs, redirect, click tracking, dashboard with stats, custom short codes, QR codes",
+  "base_url": "http://localhost:4004",
+  "mode": "compiled",
+  "score": "Journeys: 1/10 (10%), Steps: 11/20 (55%)",
+  "journeys_tested": 10,
+  "journeys_passed": 1,
+  "journeys_failed": 9,
+  "duration_s": 1.6,
+  "journeys": [
+    {
+      "name": "Unauthenticated Visitor Follows Short URL",
+      "description": "A visitor clicks a short URL and gets redirected to the original destination without needing an account",
+      "passed": false,
+      "stopped_at": "login",
+      "steps": [
+        {
+          "action": "fresh_session",
+          "detail": "new unauthenticated session",
+          "passed": true,
+          "error": "",
+          "proof": null
+        },
+        {
+          "action": "register",
+          "detail": "POST /api/register \u2192 201",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T02:20:50Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4004/api/register",
+              "body": {
+                "email": "setup-redirect@test.com",
+                "password": "***",
+                "name": "Setup User"
+              }
+            },
+            "response": {
+              "status": 201,
+              "body": {
+                "id": "cmneepuij0004ooruwp0jbel1",
+                "email": "setup-redirect@test.com",
+                "name": "Setup User"
+              }
+            }
+          }
+        },
+        {
+          "action": "login",
+          "detail": "login failed for setup-redirect@test.com",
+          "passed": false,
+          "error": "could not authenticate",
+          "proof": null
+        }
+      ]
+    },
+    {
+      "name": "New User Creates Short URL And Views Dashboard",
+      "description": "A new user registers, creates a short URL, and views their dashboard to see the link with click stats",
+      "passed": false,
+      "stopped_at": "login",
+      "steps": [
+        {
+          "action": "register",
+          "detail": "POST /api/register \u2192 201",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T02:20:51Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4004/api/register",
+              "body": {
+                "email": "newuser@test.com",
+                "password": "***",
+                "name": "Test User"
+              }
+            },
+            "response": {
+              "status": 201,
+              "body": {
+                "id": "cmneepuzd0005ooru6jxhxaut",
+                "email": "newuser@test.com",
+                "name": "Test User"
+              }
+            }
+          }
+        },
+        {
+          "action": "login",
+          "detail": "login failed for newuser@test.com",
+          "passed": false,
+          "error": "could not authenticate",
+          "proof": null
+        }
+      ]
+    },
+    {
+      "name": "New User Creates Custom Short Code",
+      "description": "A new user registers and creates a short URL with a custom vanity code, then verifies it works",
+      "passed": false,
+      "stopped_at": "login",
+      "steps": [
+        {
+          "action": "register",
+          "detail": "POST /api/register \u2192 201",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T02:20:51Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4004/api/register",
+              "body": {
+                "email": "customcode@test.com",
+                "password": "***",
+                "name": "Custom User"
+              }
+            },
+            "response": {
+              "status": 201,
+              "body": {
+                "id": "cmneepv3b0006ooru2btjdgrq",
+                "email": "customcode@test.com",
+                "name": "Custom User"
+              }
+            }
+          }
+        },
+        {
+          "action": "login",
+          "detail": "login failed for customcode@test.com",
+          "passed": false,
+          "error": "could not authenticate",
+          "proof": null
+        }
+      ]
+    },
+    {
+      "name": "New User Generates QR Code For Short URL",
+      "description": "A new user creates a short URL and generates a QR code for it to share offline",
+      "passed": false,
+      "stopped_at": "login",
+      "steps": [
+        {
+          "action": "register",
+          "detail": "POST /api/register \u2192 201",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T02:20:51Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4004/api/register",
+              "body": {
+                "email": "qruser@test.com",
+                "password": "***",
+                "name": "QR User"
+              }
+            },
+            "response": {
+              "status": 201,
+              "body": {
+                "id": "cmneepv770007ooru4yfwvyc4",
+                "email": "qruser@test.com",
+                "name": "QR User"
+              }
+            }
+          }
+        },
+        {
+          "action": "login",
+          "detail": "login failed for qruser@test.com",
+          "passed": false,
+          "error": "could not authenticate",
+          "proof": null
+        }
+      ]
+    },
+    {
+      "name": "Returning User Checks Click Analytics",
+      "description": "A returning user logs in to check click statistics on their previously created short URLs",
+      "passed": false,
+      "stopped_at": "login",
+      "steps": [
+        {
+          "action": "register",
+          "detail": "POST /api/register \u2192 201",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T02:20:51Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4004/api/register",
+              "body": {
+                "email": "analytics@test.com",
+                "password": "***",
+                "name": "Analytics User"
+              }
+            },
+            "response": {
+              "status": 201,
+              "body": {
+                "id": "cmneepvb50008ooru4rfu1fhv",
+                "email": "analytics@test.com",
+                "name": "Analytics User"
+              }
+            }
+          }
+        },
+        {
+          "action": "login",
+          "detail": "login failed for analytics@test.com",
+          "passed": false,
+          "error": "could not authenticate",
+          "proof": null
+        }
+      ]
+    },
+    {
+      "name": "Returning User Updates And Deletes Short URL",
+      "description": "A returning user logs in, updates the destination of an existing short URL, then deletes another one",
+      "passed": false,
+      "stopped_at": "login",
+      "steps": [
+        {
+          "action": "register",
+          "detail": "POST /api/register \u2192 201",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T02:20:52Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4004/api/register",
+              "body": {
+                "email": "manage@test.com",
+                "password": "***",
+                "name": "Manager User"
+              }
+            },
+            "response": {
+              "status": 201,
+              "body": {
+                "id": "cmneepvf10009oorug475ejxz",
+                "email": "manage@test.com",
+                "name": "Manager User"
+              }
+            }
+          }
+        },
+        {
+          "action": "login",
+          "detail": "login failed for manage@test.com",
+          "passed": false,
+          "error": "could not authenticate",
+          "proof": null
+        }
+      ]
+    },
+    {
+      "name": "Admin Views All Users And URLs",
+      "description": "An admin logs in and views all users' URLs and system-wide statistics",
+      "passed": false,
+      "stopped_at": "login_admin",
+      "steps": [
+        {
+          "action": "login_admin",
+          "detail": "no admin credentials",
+          "passed": false,
+          "error": "adapter found no admin user",
+          "proof": null
+        }
+      ]
+    },
+    {
+      "name": "Duplicate Custom Code Rejected",
+      "description": "A user tries to create a short URL with a custom code that already exists and gets an appropriate error",
+      "passed": false,
+      "stopped_at": "login",
+      "steps": [
+        {
+          "action": "register",
+          "detail": "POST /api/register \u2192 201",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T02:20:52Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4004/api/register",
+              "body": {
+                "email": "dupetest@test.com",
+                "password": "***",
+                "name": "Dupe Tester"
+              }
+            },
+            "response": {
+              "status": 201,
+              "body": {
+                "id": "cmneepviy000aoorueq7kwnyn",
+                "email": "dupetest@test.com",
+                "name": "Dupe Tester"
+              }
+            }
+          }
+        },
+        {
+          "action": "login",
+          "detail": "login failed for dupetest@test.com",
+          "passed": false,
+          "error": "could not authenticate",
+          "proof": null
+        }
+      ]
+    },
+    {
+      "name": "Nonexistent Short Code Returns 404",
+      "description": "A visitor tries to access a short code that doesn't exist and receives a proper error",
+      "passed": true,
+      "stopped_at": "",
+      "steps": [
+        {
+          "action": "fresh_session",
+          "detail": "new unauthenticated session",
+          "passed": true,
+          "error": "",
+          "proof": null
+        },
+        {
+          "action": "GET /api/urls/nonexistent999/redirect",
+          "detail": "404",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T02:20:52Z",
+            "request": {
+              "method": "GET",
+              "url": "http://localhost:4004/api/urls/nonexistent999/redirect",
+              "body": null
+            },
+            "response": {
+              "status": 404,
+              "body": {
+                "text": "<!DOCTYPE html><html lang=\"en\" class=\"geist_a71539c9-module__T19VSG__variable geist_mono_8d43a2aa-module__8Li5zG__variable h-full antialiased\"><head><meta charSet=\"utf-8\"/><meta name=\"viewport\" conten"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "URLs Persist Across Sessions",
+      "description": "A user creates a short URL, logs out and back in, and confirms the URL still exists with its stats intact",
+      "passed": false,
+      "stopped_at": "login",
+      "steps": [
+        {
+          "action": "register",
+          "detail": "POST /api/register \u2192 201",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T02:20:52Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4004/api/register",
+              "body": {
+                "email": "persist@test.com",
+                "password": "***",
+                "name": "Persist User"
+              }
+            },
+            "response": {
+              "status": 201,
+              "body": {
+                "id": "cmneepvno000boorum2vtdh7h",
+                "email": "persist@test.com",
+                "name": "Persist User"
+              }
+            }
+          }
+        },
+        {
+          "action": "login",
+          "detail": "login failed for persist@test.com",
+          "passed": false,
+          "error": "could not authenticate",
+          "proof": null
+        }
+      ]
+    }
+  ]
+}

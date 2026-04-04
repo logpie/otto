@@ -1,0 +1,39 @@
+I'll execute this data isolation test step by step. Let me start by logging in as the first user.
+
+Now let me start the test. First, get the CSRF token and log in as Alice (user 1).
+
+**Step 1: Log in as the first seed user (Alice)**✅ Step 1 passed — Alice is logged in successfully.
+
+**Step 2: Note existing tasks, then create a task for Alice**Now create the new task:Alice's task ID: `cmnfgqyf7000ioopgwjg4xwxi`, userId: `cmned6oh30000oo22njf5zl60`.✅ Step 2 passed — Task created and visible to Alice.
+
+**Step 3: Log out of Alice's account**✅ Step 3 passed — Alice is logged out (empty session).
+
+**Step 4: Log in as Bob (user 2)**✅ Step 4 passed — Bob is logged in. Bob's userId: `cmned6oip0001oo227s8huwpg`.
+
+**Step 5: View Bob's task list — verify Alice's task is NOT visible**✅ Step 5 passed — Bob sees only 2 tasks (his own), zero of Alice's tasks, and "User1 Secret Project" is not present.
+
+**Step 6: As Bob, attempt to read/update/delete Alice's task**✅ Step 6 passed — All three operations (read, update, delete) return 403 Forbidden. Data isolation is enforced.
+
+Now let me verify Alice's task still exists unmodified by logging back in as Alice:Alice's task is completely intact. Now the **BREAK phase**:
+
+**BREAK: ID Guessing — Try sequential/predictable IDs**Good — returns 404 (not found), not leaking information about whether a task exists.
+
+**BREAK: Direct URL manipulation**All break attempts handled correctly:
+- `/api/users` doesn't exist (404)
+- Unauthenticated `/api/tasks` returns 401
+- userId filter in query params doesn't leak data
+
+Now let me write the verdict:## Summary
+
+**✅ Story PASSED — All 6 steps passed. Data isolation is fully enforced.**
+
+| Step | Result |
+|------|--------|
+| 1. Login as Alice | ✅ Pass |
+| 2. Create "User1 Secret Project" task | ✅ Pass |
+| 3. Logout Alice | ✅ Pass |
+| 4. Login as Bob | ✅ Pass |
+| 5. Verify Bob can't see Alice's tasks | ✅ Pass (0 of 370 Alice tasks visible) |
+| 6. Bob tries to read/update/delete Alice's task | ✅ Pass (all return 403 Forbidden) |
+
+**Break phase findings:** No vulnerabilities found. ID guessing returns 404 (no info leakage), query parameter userId filtering is ignored server-side, unauthenticated access returns 401, and no user enumeration endpoint exists.

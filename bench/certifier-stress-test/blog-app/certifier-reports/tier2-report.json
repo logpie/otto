@@ -1,0 +1,2185 @@
+{
+  "product_dir": "/Users/yuxuan/work/cc-autonomous/.claude/worktrees/i2p/bench/certifier-stress-test/blog-app",
+  "intent": "blog platform with user auth CRUD blog posts comments likes tags",
+  "base_url": "http://localhost:4002",
+  "mode": "bound",
+  "score": "Journeys: 4/8 (50%), Steps: 25/30 (83%)",
+  "journeys_tested": 8,
+  "journeys_passed": 4,
+  "journeys_failed": 4,
+  "duration_s": 1.1,
+  "journeys": [
+    {
+      "name": "Unauthenticated Visitor Browses Public Content",
+      "description": "A visitor lands on the site and browses any publicly available content without logging in",
+      "passed": true,
+      "stopped_at": "",
+      "steps": [
+        {
+          "action": "fresh_session",
+          "detail": "new unauthenticated session",
+          "passed": true,
+          "error": "",
+          "proof": null
+        },
+        {
+          "action": "GET /",
+          "detail": "200",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T15:48:01Z",
+            "request": {
+              "method": "GET",
+              "url": "http://localhost:4002/",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "text": "<!DOCTYPE html><html lang=\"en\"><head><meta charSet=\"utf-8\"/><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/><link rel=\"stylesheet\" href=\"/_next/static/css/app/layout.css?v=1774997"
+              }
+            }
+          }
+        },
+        {
+          "action": "GET /api/posts",
+          "detail": "200",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T15:48:01Z",
+            "request": {
+              "method": "GET",
+              "url": "http://localhost:4002/api/posts",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": [
+                {
+                  "id": "cmneekypq001kp04onnjenvcd",
+                  "title": "Public Author Article",
+                  "content": "This should be visible on my profile",
+                  "published": true,
+                  "authorId": "cmneekynw001ip04o39ncpf19",
+                  "createdAt": "2026-03-31T09:17:03.039Z",
+                  "updatedAt": "2026-03-31T09:17:03.039Z",
+                  "author": {
+                    "id": "cmneekynw001ip04o39ncpf19",
+                    "name": "Public Author"
+                  },
+                  "tags": [],
+                  "_count": {
+                    "likes": 1,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmneekyll001hp04ounq130dv",
+                  "title": "User Post For Admin Test",
+                  "content": "Admin should be able to manage this",
+                  "published": true,
+                  "authorId": "cmneekyj7001fp04o3yn7k9xw",
+                  "createdAt": "2026-03-31T09:17:02.890Z",
+                  "updatedAt": "2026-03-31T09:17:02.890Z",
+                  "author": {
+                    "id": "cmneekyj7001fp04o3yn7k9xw",
+                    "name": "Regular User"
+                  },
+                  "tags": [],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmneekybf001dp04of5zf92la",
+                  "title": "Persistence Check",
+                  "content": "This post should survive a logout and login",
+                  "published": true,
+                  "authorId": "cmneeky9h001bp04oxf5pmvwe",
+                  "createdAt": "2026-03-31T09:17:02.524Z",
+                  "updatedAt": "2026-03-31T09:17:02.524Z",
+                  "author": {
+                    "id": "cmneeky9h001bp04oxf5pmvwe",
+                    "name": "Persistent User"
+                  },
+                  "tags": [
+                    {
+                      "id": "cmnede8eq001zxupaadbvckk5",
+                      "name": "persistence"
+                    }
+                  ],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmneekxxs0019p04o4sh575tk",
+                  "title": "Persistent Post XYZ",
+                  "content": "Should persist.",
+                  "published": true,
+                  "authorId": "cmnedb8ri00002t5a44o8dgly",
+                  "createdAt": "2026-03-31T09:17:02.033Z",
+                  "updatedAt": "2026-03-31T09:17:02.033Z",
+                  "author": {
+                    "id": "cmnedb8ri00002t5a44o8dgly",
+                    "name": "Alice Johnson"
+                  },
+                  "tags": [],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmneekxtp0012p04orlxkfrr8",
+                  "title": "Unauthorized Post",
+                  "content": "Should fail.",
+                  "published": true,
+                  "authorId": "cmnedb8ri00002t5a44o8dgly",
+                  "createdAt": "2026-03-31T09:17:01.885Z",
+                  "updatedAt": "2026-03-31T09:17:01.885Z",
+                  "author": {
+                    "id": "cmnedb8ri00002t5a44o8dgly",
+                    "name": "Alice Johnson"
+                  },
+                  "tags": [],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmneekxso000zp04oarzqdvpq",
+                  "title": "Tagged Post",
+                  "content": "Post with tags.",
+                  "published": true,
+                  "authorId": "cmnedb8ri00002t5a44o8dgly",
+                  "createdAt": "2026-03-31T09:17:01.849Z",
+                  "updatedAt": "2026-03-31T09:17:01.849Z",
+                  "author": {
+                    "id": "cmnedb8ri00002t5a44o8dgly",
+                    "name": "Alice Johnson"
+                  },
+                  "tags": [
+                    {
+                      "id": "cmnede7tw001kxupa5b23c6xx",
+                      "name": "javascript"
+                    }
+                  ],
+                  "_count": {
+                    "likes": 1,
+                    "comments": 1
+                  }
+                },
+                {
+                  "id": "cmneekxco000bp04ouy9bdpbt",
+                  "title": "Commentable Post",
+                  "content": "Leave a comment.",
+                  "published": true,
+                  "authorId": "cmnedb8ri00002t5a44o8dgly",
+                  "createdAt": "2026-03-31T09:17:01.273Z",
+                  "updatedAt": "2026-03-31T09:17:01.273Z",
+                  "author": {
+                    "id": "cmnedb8ri00002t5a44o8dgly",
+                    "name": "Alice Johnson"
+                  },
+                  "tags": [],
+                  "_count": {
+                    "likes": 1,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmneekx7s0001p04owode2llt",
+                  "title": "My First Post",
+                  "content": "Hello world content here.",
+                  "published": true,
+                  "authorId": "cmnedb8ri00002t5a44o8dgly",
+                  "createdAt": "2026-03-31T09:17:01.096Z",
+                  "updatedAt": "2026-03-31T09:17:01.096Z",
+                  "author": {
+                    "id": "cmnedb8ri00002t5a44o8dgly",
+                    "name": "Alice Johnson"
+                  },
+                  "tags": [],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmnede8eq001yxupa7oirdta4",
+                  "title": "Persistent Post",
+                  "content": "This post should survive session changes.",
+                  "published": true,
+                  "authorId": "cmnede8cu001wxupaesg42r1n",
+                  "createdAt": "2026-03-31T08:43:49.394Z",
+                  "updatedAt": "2026-03-31T08:43:49.394Z",
+                  "author": {
+                    "id": "cmnede8cu001wxupaesg42r1n",
+                    "name": "Persistent User"
+                  },
+                  "tags": [
+                    {
+                      "id": "cmnede8eq001zxupaadbvckk5",
+                      "name": "persistence"
+                    }
+                  ],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmnede8b3001vxupaalrac4dc",
+                  "title": "Owner's Protected Post",
+                  "content": "Only the owner should edit this.",
+                  "published": true,
+                  "authorId": "cmnede88u001txupahyruc4g6",
+                  "createdAt": "2026-03-31T08:43:49.263Z",
+                  "updatedAt": "2026-03-31T08:43:49.263Z",
+                  "author": {
+                    "id": "cmnede88u001txupahyruc4g6",
+                    "name": "Post Owner"
+                  },
+                  "tags": [],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmnede82t001pxupa62e6ayem",
+                  "title": "Inappropriate Content",
+                  "content": "This post violates community guidelines.",
+                  "published": true,
+                  "authorId": "cmnede80w001nxupaduxohlxx",
+                  "createdAt": "2026-03-31T08:43:48.966Z",
+                  "updatedAt": "2026-03-31T08:43:48.966Z",
+                  "author": {
+                    "id": "cmnede80w001nxupaduxohlxx",
+                    "name": "Bad Actor"
+                  },
+                  "tags": [],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmnede7tw001jxupa73xys873",
+                  "title": "JavaScript Guide",
+                  "content": "Modern JS patterns.",
+                  "published": true,
+                  "authorId": "cmnede7r4001dxupaontr6hrh",
+                  "createdAt": "2026-03-31T08:43:48.644Z",
+                  "updatedAt": "2026-03-31T08:43:48.644Z",
+                  "author": {
+                    "id": "cmnede7r4001dxupaontr6hrh",
+                    "name": "Tag Author"
+                  },
+                  "tags": [
+                    {
+                      "id": "cmnedb8tb00062t5av1hyrm7y",
+                      "name": "tutorial"
+                    },
+                    {
+                      "id": "cmnede7tw001kxupa5b23c6xx",
+                      "name": "javascript"
+                    }
+                  ],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmnede7to001fxupawtqmydqk",
+                  "title": "Python Tips",
+                  "content": "Learn Python the easy way.",
+                  "published": true,
+                  "authorId": "cmnede7r4001dxupaontr6hrh",
+                  "createdAt": "2026-03-31T08:43:48.637Z",
+                  "updatedAt": "2026-03-31T08:43:48.637Z",
+                  "author": {
+                    "id": "cmnede7r4001dxupaontr6hrh",
+                    "name": "Tag Author"
+                  },
+                  "tags": [
+                    {
+                      "id": "cmnedb8tb00062t5av1hyrm7y",
+                      "name": "tutorial"
+                    },
+                    {
+                      "id": "cmnede7to001gxupaylkw04zn",
+                      "name": "python"
+                    }
+                  ],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmnede7kx0014xupa6c4otrrz",
+                  "title": "Interesting Article",
+                  "content": "This is a thought-provoking article about software.",
+                  "published": true,
+                  "authorId": "cmnede7iu0012xupam99hmzba",
+                  "createdAt": "2026-03-31T08:43:48.321Z",
+                  "updatedAt": "2026-03-31T08:43:48.321Z",
+                  "author": {
+                    "id": "cmnede7iu0012xupam99hmzba",
+                    "name": "Author One"
+                  },
+                  "tags": [
+                    {
+                      "id": "cmnede7kx0015xupa2a6rd9ph",
+                      "name": "software"
+                    }
+                  ],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmnede7c60011xupah4hmsmp1",
+                  "title": "Post To Delete",
+                  "content": "This will be removed.",
+                  "published": true,
+                  "authorId": "cmnede79z000wxupa5b25cglk",
+                  "createdAt": "2026-03-31T08:43:48.006Z",
+                  "updatedAt": "2026-03-31T08:43:48.006Z",
+                  "author": {
+                    "id": "cmnede79z000wxupa5b25cglk",
+                    "name": "Bob Writer"
+                  },
+                  "tags": [],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmnede7c0000yxupapsd1cucx",
+                  "title": "Post To Edit",
+                  "content": "Original content here.",
+                  "published": true,
+                  "authorId": "cmnede79z000wxupa5b25cglk",
+                  "createdAt": "2026-03-31T08:43:48.001Z",
+                  "updatedAt": "2026-03-31T08:43:48.001Z",
+                  "author": {
+                    "id": "cmnede79z000wxupa5b25cglk",
+                    "name": "Bob Writer"
+                  },
+                  "tags": [
+                    {
+                      "id": "cmnede7c0000zxupatj9mcbej",
+                      "name": "draft"
+                    }
+                  ],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmnede77h000rxupa8z24crqw",
+                  "title": "My First Post",
+                  "content": "Hello world! This is my first blog post about testing.",
+                  "published": true,
+                  "authorId": "cmnede75e000pxupavg1u1oh2",
+                  "createdAt": "2026-03-31T08:43:47.837Z",
+                  "updatedAt": "2026-03-31T08:43:47.854Z",
+                  "author": {
+                    "id": "cmnede75e000pxupavg1u1oh2",
+                    "name": "Jane Blogger"
+                  },
+                  "tags": [
+                    {
+                      "id": "cmnede77h000sxupa16wb0gbe",
+                      "name": "intro"
+                    },
+                    {
+                      "id": "cmnede77h000txupaoph5eygw",
+                      "name": "testing"
+                    }
+                  ],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmnede702000oxupa08e6gdqn",
+                  "title": "Persistence Test Post",
+                  "content": "This post should persist.",
+                  "published": true,
+                  "authorId": "cmnedb8ri00002t5a44o8dgly",
+                  "createdAt": "2026-03-31T08:43:47.571Z",
+                  "updatedAt": "2026-03-31T08:43:47.571Z",
+                  "author": {
+                    "id": "cmnedb8ri00002t5a44o8dgly",
+                    "name": "Alice Johnson"
+                  },
+                  "tags": [],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmnedb8td000e2t5a3jrlhrb1",
+                  "title": "React Server Components Explained",
+                  "content": "React Server Components (RSC) represent a fundamental shift in how we build React applications. They allow components to render on the server, reducing the JavaScript sent to the client.\n\nWith RSC, you can directly access your database, file system, or other server-side resources from your components \u2014 no API layer needed. This simplifies your architecture and improves performance.\n\nThe key distinction is between Server Components (the default in Next.js App Router) and Client Components (marked with 'use client'). Server Components can't use hooks or browser APIs, while Client Components can't directly access server resources.",
+                  "published": true,
+                  "authorId": "cmnedb8t700012t5ad6d6l4oj",
+                  "createdAt": "2026-03-31T08:41:29.954Z",
+                  "updatedAt": "2026-03-31T08:41:29.954Z",
+                  "author": {
+                    "id": "cmnedb8t700012t5ad6d6l4oj",
+                    "name": "Bob Smith"
+                  },
+                  "tags": [
+                    {
+                      "id": "cmnedb8t800022t5a3us62hdf",
+                      "name": "nextjs"
+                    },
+                    {
+                      "id": "cmnedb8t900032t5asz1yhy3r",
+                      "name": "react"
+                    },
+                    {
+                      "id": "cmnedb8tb00052t5ax8oknxyy",
+                      "name": "webdev"
+                    }
+                  ],
+                  "_count": {
+                    "likes": 1,
+                    "comments": 4
+                  }
+                },
+                {
+                  "id": "cmnedb8tc000a2t5auvykyvyl",
+                  "title": "TypeScript Best Practices for 2024",
+                  "content": "TypeScript has become the standard for modern web development. Here are some best practices to follow when writing TypeScript code.\n\nFirst, always enable strict mode in your tsconfig.json. This catches many common errors at compile time rather than runtime. Second, prefer interfaces over type aliases for object shapes \u2014 they provide better error messages and are more extensible.\n\nThird, use discriminated unions for state management. They make it impossible to access properties that don't exist in a given state. Finally, leverage the utility types like Partial, Required, Pick, and Omit to avoid repeating yourself.",
+                  "published": true,
+                  "authorId": "cmnedb8ri00002t5a44o8dgly",
+                  "createdAt": "2026-03-31T08:41:29.953Z",
+                  "updatedAt": "2026-03-31T08:41:29.953Z",
+                  "author": {
+                    "id": "cmnedb8ri00002t5a44o8dgly",
+                    "name": "Alice Johnson"
+                  },
+                  "tags": [
+                    {
+                      "id": "cmnedb8ta00042t5a51l5e1d3",
+                      "name": "typescript"
+                    },
+                    {
+                      "id": "cmnedb8tb00052t5ax8oknxyy",
+                      "name": "webdev"
+                    }
+                  ],
+                  "_count": {
+                    "likes": 1,
+                    "comments": 2
+                  }
+                },
+                {
+                  "id": "cmnedb8td000c2t5an7r9hsmq",
+                  "title": "Building a Blog with Prisma and SQLite",
+                  "content": "Prisma is an excellent ORM for Node.js and TypeScript. Combined with SQLite, it provides a zero-configuration database solution that's perfect for prototyping and small to medium applications.\n\nPrisma's schema-first approach means you define your data model in a .prisma file, and Prisma generates a type-safe client for you. Migrations are handled automatically, and the Prisma Studio gives you a visual editor for your data.\n\nSQLite is an embedded database that stores data in a single file. It requires no server setup and is surprisingly capable \u2014 it handles concurrent reads well and is used by many production applications.",
+                  "published": true,
+                  "authorId": "cmnedb8t700012t5ad6d6l4oj",
+                  "createdAt": "2026-03-31T08:41:29.953Z",
+                  "updatedAt": "2026-03-31T08:41:29.953Z",
+                  "author": {
+                    "id": "cmnedb8t700012t5ad6d6l4oj",
+                    "name": "Bob Smith"
+                  },
+                  "tags": [
+                    {
+                      "id": "cmnedb8t800022t5a3us62hdf",
+                      "name": "nextjs"
+                    },
+                    {
+                      "id": "cmnedb8tb00062t5av1hyrm7y",
+                      "name": "tutorial"
+                    }
+                  ],
+                  "_count": {
+                    "likes": 1,
+                    "comments": 2
+                  }
+                },
+                {
+                  "id": "cmnedb8tc00082t5a0wmiobwg",
+                  "title": "Getting Started with Next.js",
+                  "content": "Next.js is a powerful React framework that makes building web applications a breeze. In this post, we'll explore the basics of Next.js and how to get your first application up and running.\n\nNext.js provides features like server-side rendering, static site generation, and API routes out of the box. The App Router, introduced in Next.js 13, brings a new paradigm for building applications with React Server Components.\n\nTo get started, simply run npx create-next-app@latest and follow the prompts. You'll have a fully configured project with TypeScript, Tailwind CSS, and ESLint ready to go.",
+                  "published": true,
+                  "authorId": "cmnedb8ri00002t5a44o8dgly",
+                  "createdAt": "2026-03-31T08:41:29.952Z",
+                  "updatedAt": "2026-03-31T08:41:29.952Z",
+                  "author": {
+                    "id": "cmnedb8ri00002t5a44o8dgly",
+                    "name": "Alice Johnson"
+                  },
+                  "tags": [
+                    {
+                      "id": "cmnedb8t800022t5a3us62hdf",
+                      "name": "nextjs"
+                    },
+                    {
+                      "id": "cmnedb8t900032t5asz1yhy3r",
+                      "name": "react"
+                    },
+                    {
+                      "id": "cmnedb8tb00062t5av1hyrm7y",
+                      "name": "tutorial"
+                    }
+                  ],
+                  "_count": {
+                    "likes": 1,
+                    "comments": 3
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "New User Registration And First Action",
+      "description": "A new user registers an account and performs their first meaningful action in the app",
+      "passed": false,
+      "stopped_at": "login",
+      "steps": [
+        {
+          "action": "register",
+          "detail": "POST /register \u2192 200",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T15:48:01Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4002/register",
+              "body": {
+                "email": "bound-8fa4112941@eval.local",
+                "password": "***",
+                "name": "Bound Test User"
+              }
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "text": "<!DOCTYPE html><html lang=\"en\"><head><meta charSet=\"utf-8\"/><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/><link rel=\"stylesheet\" href=\"/_next/static/css/app/layout.css?v=1774997"
+              }
+            }
+          }
+        },
+        {
+          "action": "login",
+          "detail": "NextAuth login failed with HTTP 401",
+          "passed": false,
+          "error": "NextAuth login failed with HTTP 401",
+          "proof": {
+            "timestamp": "2026-03-31T15:48:01Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4002/api/auth/callback/credentials",
+              "body": {
+                "email": "bound-8fa4112941@eval.local",
+                "password": "***",
+                "csrfToken": "52b41737ba077634fe1f4fb7dc006a52d7002da01b2159a06cd771876e808369",
+                "redirect": "false",
+                "json": "true"
+              }
+            },
+            "response": {
+              "status": 401,
+              "body": {
+                "url": "http://localhost:4002/api/auth/error?error=CredentialsSignin&provider=credentials"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Returning User Manages Their Content",
+      "description": "A returning user logs in, views their existing content, updates an item, and verifies changes persist",
+      "passed": true,
+      "stopped_at": "",
+      "steps": [
+        {
+          "action": "register",
+          "detail": "POST /register \u2192 200",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T15:48:01Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4002/register",
+              "body": {
+                "email": "bound-db58cea899@eval.local",
+                "password": "***",
+                "name": "Bound Test User"
+              }
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "text": "<!DOCTYPE html><html lang=\"en\"><head><meta charSet=\"utf-8\"/><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/><link rel=\"stylesheet\" href=\"/_next/static/css/app/layout.css?v=1774997"
+              }
+            }
+          }
+        },
+        {
+          "action": "login",
+          "detail": "NextAuth session active for alice@example.com",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T15:48:01Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4002/api/auth/callback/credentials",
+              "body": {
+                "email": "alice@example.com",
+                "password": "***",
+                "csrfToken": "672e8162585b781b0da724a496cbc38e3bf7f1b34c968486d491d63f8027fc17",
+                "redirect": "false",
+                "json": "true"
+              }
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "url": "http://localhost:4002"
+              }
+            }
+          }
+        },
+        {
+          "action": "POST /api/posts",
+          "detail": "200",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T15:48:01Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4002/api/posts",
+              "body": {
+                "title": "Original Title",
+                "content": "Original content here.",
+                "published": false
+              }
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "id": "cmnf7jw35003wa9isqkogp2eh",
+                "title": "Original Title",
+                "content": "Original content here.",
+                "published": false,
+                "authorId": "cmnedb8ri00002t5a44o8dgly",
+                "createdAt": "2026-03-31T22:48:01.841Z",
+                "updatedAt": "2026-03-31T22:48:01.841Z",
+                "tags": []
+              }
+            }
+          }
+        },
+        {
+          "action": "PUT /api/posts/cmnf7jw35003wa9isqkogp2eh",
+          "detail": "200",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T15:48:01Z",
+            "request": {
+              "method": "PUT",
+              "url": "http://localhost:4002/api/posts/cmnf7jw35003wa9isqkogp2eh",
+              "body": {
+                "title": "Updated Title",
+                "content": "Updated content here.",
+                "published": false
+              }
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "id": "cmnf7jw35003wa9isqkogp2eh",
+                "title": "Updated Title",
+                "content": "Updated content here.",
+                "published": false,
+                "authorId": "cmnedb8ri00002t5a44o8dgly",
+                "createdAt": "2026-03-31T22:48:01.841Z",
+                "updatedAt": "2026-03-31T22:48:01.915Z",
+                "tags": []
+              }
+            }
+          }
+        },
+        {
+          "action": "GET /api/posts/cmnf7jw35003wa9isqkogp2eh",
+          "detail": "200",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T15:48:02Z",
+            "request": {
+              "method": "GET",
+              "url": "http://localhost:4002/api/posts/cmnf7jw35003wa9isqkogp2eh",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "id": "cmnf7jw35003wa9isqkogp2eh",
+                "title": "Updated Title",
+                "content": "Updated content here.",
+                "published": false,
+                "authorId": "cmnedb8ri00002t5a44o8dgly",
+                "createdAt": "2026-03-31T22:48:01.841Z",
+                "updatedAt": "2026-03-31T22:48:01.915Z",
+                "author": {
+                  "id": "cmnedb8ri00002t5a44o8dgly",
+                  "name": "Alice Johnson"
+                },
+                "tags": [],
+                "comments": [],
+                "likes": [],
+                "_count": {
+                  "likes": 0
+                }
+              }
+            }
+          }
+        },
+        {
+          "action": "verify 'Updated Title' in updated_post",
+          "detail": "found",
+          "passed": true,
+          "error": "",
+          "proof": null
+        }
+      ]
+    },
+    {
+      "name": "Full CRUD Lifecycle",
+      "description": "A user creates, reads, updates, and deletes content to verify the complete data lifecycle",
+      "passed": false,
+      "stopped_at": "login",
+      "steps": [
+        {
+          "action": "register",
+          "detail": "POST /register \u2192 200",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T15:48:02Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4002/register",
+              "body": {
+                "email": "bound-f92c4b4156@eval.local",
+                "password": "***",
+                "name": "Bound Test User"
+              }
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "text": "<!DOCTYPE html><html lang=\"en\"><head><meta charSet=\"utf-8\"/><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/><link rel=\"stylesheet\" href=\"/_next/static/css/app/layout.css?v=1774997"
+              }
+            }
+          }
+        },
+        {
+          "action": "login",
+          "detail": "NextAuth login failed with HTTP 401",
+          "passed": false,
+          "error": "NextAuth login failed with HTTP 401",
+          "proof": {
+            "timestamp": "2026-03-31T15:48:02Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4002/api/auth/callback/credentials",
+              "body": {
+                "email": "bound-f92c4b4156@eval.local",
+                "password": "***",
+                "csrfToken": "440d26f90d76aad2677773888eef91e4a0b5833aef38b728df48ee9a08e26908",
+                "redirect": "false",
+                "json": "true"
+              }
+            },
+            "response": {
+              "status": 401,
+              "body": {
+                "url": "http://localhost:4002/api/auth/error?error=CredentialsSignin&provider=credentials"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Data Persistence Across Sessions",
+      "description": "A user creates content, logs out, logs back in, and verifies their data is still there",
+      "passed": false,
+      "stopped_at": "6/7 steps passed",
+      "steps": [
+        {
+          "action": "register",
+          "detail": "POST /register \u2192 200",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T15:48:02Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4002/register",
+              "body": {
+                "email": "bound-e5643a7d02@eval.local",
+                "password": "***",
+                "name": "Bound Test User"
+              }
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "text": "<!DOCTYPE html><html lang=\"en\"><head><meta charSet=\"utf-8\"/><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/><link rel=\"stylesheet\" href=\"/_next/static/css/app/layout.css?v=1774997"
+              }
+            }
+          }
+        },
+        {
+          "action": "login",
+          "detail": "NextAuth session active for alice@example.com",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T15:48:02Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4002/api/auth/callback/credentials",
+              "body": {
+                "email": "alice@example.com",
+                "password": "***",
+                "csrfToken": "a708f179ce16e309234ebcfde6c0152df15b920e54ab33019d55b69dcfb90c37",
+                "redirect": "false",
+                "json": "true"
+              }
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "url": "http://localhost:4002"
+              }
+            }
+          }
+        },
+        {
+          "action": "POST /api/posts",
+          "detail": "200",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T15:48:02Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4002/api/posts",
+              "body": {
+                "title": "Persistent Data",
+                "content": "This should survive logout.",
+                "published": false
+              }
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "id": "cmnf7jwdx003ya9ise5rxna6q",
+                "title": "Persistent Data",
+                "content": "This should survive logout.",
+                "published": false,
+                "authorId": "cmnedb8ri00002t5a44o8dgly",
+                "createdAt": "2026-03-31T22:48:02.229Z",
+                "updatedAt": "2026-03-31T22:48:02.229Z",
+                "tags": []
+              }
+            }
+          }
+        },
+        {
+          "action": "fresh_session",
+          "detail": "new unauthenticated session",
+          "passed": true,
+          "error": "",
+          "proof": null
+        },
+        {
+          "action": "login",
+          "detail": "NextAuth session active for alice@example.com",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T15:48:02Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4002/api/auth/callback/credentials",
+              "body": {
+                "email": "alice@example.com",
+                "password": "***",
+                "csrfToken": "f555d9c0bf8c5f0112b4bc9042c9ad95b07fbc16009f8c5b7d6498914488abb1",
+                "redirect": "false",
+                "json": "true"
+              }
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "url": "http://localhost:4002"
+              }
+            }
+          }
+        },
+        {
+          "action": "GET /api/posts",
+          "detail": "200",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T15:48:02Z",
+            "request": {
+              "method": "GET",
+              "url": "http://localhost:4002/api/posts",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": [
+                {
+                  "id": "cmneekypq001kp04onnjenvcd",
+                  "title": "Public Author Article",
+                  "content": "This should be visible on my profile",
+                  "published": true,
+                  "authorId": "cmneekynw001ip04o39ncpf19",
+                  "createdAt": "2026-03-31T09:17:03.039Z",
+                  "updatedAt": "2026-03-31T09:17:03.039Z",
+                  "author": {
+                    "id": "cmneekynw001ip04o39ncpf19",
+                    "name": "Public Author"
+                  },
+                  "tags": [],
+                  "_count": {
+                    "likes": 1,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmneekyll001hp04ounq130dv",
+                  "title": "User Post For Admin Test",
+                  "content": "Admin should be able to manage this",
+                  "published": true,
+                  "authorId": "cmneekyj7001fp04o3yn7k9xw",
+                  "createdAt": "2026-03-31T09:17:02.890Z",
+                  "updatedAt": "2026-03-31T09:17:02.890Z",
+                  "author": {
+                    "id": "cmneekyj7001fp04o3yn7k9xw",
+                    "name": "Regular User"
+                  },
+                  "tags": [],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmneekybf001dp04of5zf92la",
+                  "title": "Persistence Check",
+                  "content": "This post should survive a logout and login",
+                  "published": true,
+                  "authorId": "cmneeky9h001bp04oxf5pmvwe",
+                  "createdAt": "2026-03-31T09:17:02.524Z",
+                  "updatedAt": "2026-03-31T09:17:02.524Z",
+                  "author": {
+                    "id": "cmneeky9h001bp04oxf5pmvwe",
+                    "name": "Persistent User"
+                  },
+                  "tags": [
+                    {
+                      "id": "cmnede8eq001zxupaadbvckk5",
+                      "name": "persistence"
+                    }
+                  ],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmneekxxs0019p04o4sh575tk",
+                  "title": "Persistent Post XYZ",
+                  "content": "Should persist.",
+                  "published": true,
+                  "authorId": "cmnedb8ri00002t5a44o8dgly",
+                  "createdAt": "2026-03-31T09:17:02.033Z",
+                  "updatedAt": "2026-03-31T09:17:02.033Z",
+                  "author": {
+                    "id": "cmnedb8ri00002t5a44o8dgly",
+                    "name": "Alice Johnson"
+                  },
+                  "tags": [],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmneekxtp0012p04orlxkfrr8",
+                  "title": "Unauthorized Post",
+                  "content": "Should fail.",
+                  "published": true,
+                  "authorId": "cmnedb8ri00002t5a44o8dgly",
+                  "createdAt": "2026-03-31T09:17:01.885Z",
+                  "updatedAt": "2026-03-31T09:17:01.885Z",
+                  "author": {
+                    "id": "cmnedb8ri00002t5a44o8dgly",
+                    "name": "Alice Johnson"
+                  },
+                  "tags": [],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmneekxso000zp04oarzqdvpq",
+                  "title": "Tagged Post",
+                  "content": "Post with tags.",
+                  "published": true,
+                  "authorId": "cmnedb8ri00002t5a44o8dgly",
+                  "createdAt": "2026-03-31T09:17:01.849Z",
+                  "updatedAt": "2026-03-31T09:17:01.849Z",
+                  "author": {
+                    "id": "cmnedb8ri00002t5a44o8dgly",
+                    "name": "Alice Johnson"
+                  },
+                  "tags": [
+                    {
+                      "id": "cmnede7tw001kxupa5b23c6xx",
+                      "name": "javascript"
+                    }
+                  ],
+                  "_count": {
+                    "likes": 1,
+                    "comments": 1
+                  }
+                },
+                {
+                  "id": "cmneekxco000bp04ouy9bdpbt",
+                  "title": "Commentable Post",
+                  "content": "Leave a comment.",
+                  "published": true,
+                  "authorId": "cmnedb8ri00002t5a44o8dgly",
+                  "createdAt": "2026-03-31T09:17:01.273Z",
+                  "updatedAt": "2026-03-31T09:17:01.273Z",
+                  "author": {
+                    "id": "cmnedb8ri00002t5a44o8dgly",
+                    "name": "Alice Johnson"
+                  },
+                  "tags": [],
+                  "_count": {
+                    "likes": 1,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmneekx7s0001p04owode2llt",
+                  "title": "My First Post",
+                  "content": "Hello world content here.",
+                  "published": true,
+                  "authorId": "cmnedb8ri00002t5a44o8dgly",
+                  "createdAt": "2026-03-31T09:17:01.096Z",
+                  "updatedAt": "2026-03-31T09:17:01.096Z",
+                  "author": {
+                    "id": "cmnedb8ri00002t5a44o8dgly",
+                    "name": "Alice Johnson"
+                  },
+                  "tags": [],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmnede8eq001yxupa7oirdta4",
+                  "title": "Persistent Post",
+                  "content": "This post should survive session changes.",
+                  "published": true,
+                  "authorId": "cmnede8cu001wxupaesg42r1n",
+                  "createdAt": "2026-03-31T08:43:49.394Z",
+                  "updatedAt": "2026-03-31T08:43:49.394Z",
+                  "author": {
+                    "id": "cmnede8cu001wxupaesg42r1n",
+                    "name": "Persistent User"
+                  },
+                  "tags": [
+                    {
+                      "id": "cmnede8eq001zxupaadbvckk5",
+                      "name": "persistence"
+                    }
+                  ],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmnede8b3001vxupaalrac4dc",
+                  "title": "Owner's Protected Post",
+                  "content": "Only the owner should edit this.",
+                  "published": true,
+                  "authorId": "cmnede88u001txupahyruc4g6",
+                  "createdAt": "2026-03-31T08:43:49.263Z",
+                  "updatedAt": "2026-03-31T08:43:49.263Z",
+                  "author": {
+                    "id": "cmnede88u001txupahyruc4g6",
+                    "name": "Post Owner"
+                  },
+                  "tags": [],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmnede82t001pxupa62e6ayem",
+                  "title": "Inappropriate Content",
+                  "content": "This post violates community guidelines.",
+                  "published": true,
+                  "authorId": "cmnede80w001nxupaduxohlxx",
+                  "createdAt": "2026-03-31T08:43:48.966Z",
+                  "updatedAt": "2026-03-31T08:43:48.966Z",
+                  "author": {
+                    "id": "cmnede80w001nxupaduxohlxx",
+                    "name": "Bad Actor"
+                  },
+                  "tags": [],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmnede7tw001jxupa73xys873",
+                  "title": "JavaScript Guide",
+                  "content": "Modern JS patterns.",
+                  "published": true,
+                  "authorId": "cmnede7r4001dxupaontr6hrh",
+                  "createdAt": "2026-03-31T08:43:48.644Z",
+                  "updatedAt": "2026-03-31T08:43:48.644Z",
+                  "author": {
+                    "id": "cmnede7r4001dxupaontr6hrh",
+                    "name": "Tag Author"
+                  },
+                  "tags": [
+                    {
+                      "id": "cmnedb8tb00062t5av1hyrm7y",
+                      "name": "tutorial"
+                    },
+                    {
+                      "id": "cmnede7tw001kxupa5b23c6xx",
+                      "name": "javascript"
+                    }
+                  ],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmnede7to001fxupawtqmydqk",
+                  "title": "Python Tips",
+                  "content": "Learn Python the easy way.",
+                  "published": true,
+                  "authorId": "cmnede7r4001dxupaontr6hrh",
+                  "createdAt": "2026-03-31T08:43:48.637Z",
+                  "updatedAt": "2026-03-31T08:43:48.637Z",
+                  "author": {
+                    "id": "cmnede7r4001dxupaontr6hrh",
+                    "name": "Tag Author"
+                  },
+                  "tags": [
+                    {
+                      "id": "cmnedb8tb00062t5av1hyrm7y",
+                      "name": "tutorial"
+                    },
+                    {
+                      "id": "cmnede7to001gxupaylkw04zn",
+                      "name": "python"
+                    }
+                  ],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmnede7kx0014xupa6c4otrrz",
+                  "title": "Interesting Article",
+                  "content": "This is a thought-provoking article about software.",
+                  "published": true,
+                  "authorId": "cmnede7iu0012xupam99hmzba",
+                  "createdAt": "2026-03-31T08:43:48.321Z",
+                  "updatedAt": "2026-03-31T08:43:48.321Z",
+                  "author": {
+                    "id": "cmnede7iu0012xupam99hmzba",
+                    "name": "Author One"
+                  },
+                  "tags": [
+                    {
+                      "id": "cmnede7kx0015xupa2a6rd9ph",
+                      "name": "software"
+                    }
+                  ],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmnede7c60011xupah4hmsmp1",
+                  "title": "Post To Delete",
+                  "content": "This will be removed.",
+                  "published": true,
+                  "authorId": "cmnede79z000wxupa5b25cglk",
+                  "createdAt": "2026-03-31T08:43:48.006Z",
+                  "updatedAt": "2026-03-31T08:43:48.006Z",
+                  "author": {
+                    "id": "cmnede79z000wxupa5b25cglk",
+                    "name": "Bob Writer"
+                  },
+                  "tags": [],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmnede7c0000yxupapsd1cucx",
+                  "title": "Post To Edit",
+                  "content": "Original content here.",
+                  "published": true,
+                  "authorId": "cmnede79z000wxupa5b25cglk",
+                  "createdAt": "2026-03-31T08:43:48.001Z",
+                  "updatedAt": "2026-03-31T08:43:48.001Z",
+                  "author": {
+                    "id": "cmnede79z000wxupa5b25cglk",
+                    "name": "Bob Writer"
+                  },
+                  "tags": [
+                    {
+                      "id": "cmnede7c0000zxupatj9mcbej",
+                      "name": "draft"
+                    }
+                  ],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmnede77h000rxupa8z24crqw",
+                  "title": "My First Post",
+                  "content": "Hello world! This is my first blog post about testing.",
+                  "published": true,
+                  "authorId": "cmnede75e000pxupavg1u1oh2",
+                  "createdAt": "2026-03-31T08:43:47.837Z",
+                  "updatedAt": "2026-03-31T08:43:47.854Z",
+                  "author": {
+                    "id": "cmnede75e000pxupavg1u1oh2",
+                    "name": "Jane Blogger"
+                  },
+                  "tags": [
+                    {
+                      "id": "cmnede77h000sxupa16wb0gbe",
+                      "name": "intro"
+                    },
+                    {
+                      "id": "cmnede77h000txupaoph5eygw",
+                      "name": "testing"
+                    }
+                  ],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmnede702000oxupa08e6gdqn",
+                  "title": "Persistence Test Post",
+                  "content": "This post should persist.",
+                  "published": true,
+                  "authorId": "cmnedb8ri00002t5a44o8dgly",
+                  "createdAt": "2026-03-31T08:43:47.571Z",
+                  "updatedAt": "2026-03-31T08:43:47.571Z",
+                  "author": {
+                    "id": "cmnedb8ri00002t5a44o8dgly",
+                    "name": "Alice Johnson"
+                  },
+                  "tags": [],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmnedb8td000e2t5a3jrlhrb1",
+                  "title": "React Server Components Explained",
+                  "content": "React Server Components (RSC) represent a fundamental shift in how we build React applications. They allow components to render on the server, reducing the JavaScript sent to the client.\n\nWith RSC, you can directly access your database, file system, or other server-side resources from your components \u2014 no API layer needed. This simplifies your architecture and improves performance.\n\nThe key distinction is between Server Components (the default in Next.js App Router) and Client Components (marked with 'use client'). Server Components can't use hooks or browser APIs, while Client Components can't directly access server resources.",
+                  "published": true,
+                  "authorId": "cmnedb8t700012t5ad6d6l4oj",
+                  "createdAt": "2026-03-31T08:41:29.954Z",
+                  "updatedAt": "2026-03-31T08:41:29.954Z",
+                  "author": {
+                    "id": "cmnedb8t700012t5ad6d6l4oj",
+                    "name": "Bob Smith"
+                  },
+                  "tags": [
+                    {
+                      "id": "cmnedb8t800022t5a3us62hdf",
+                      "name": "nextjs"
+                    },
+                    {
+                      "id": "cmnedb8t900032t5asz1yhy3r",
+                      "name": "react"
+                    },
+                    {
+                      "id": "cmnedb8tb00052t5ax8oknxyy",
+                      "name": "webdev"
+                    }
+                  ],
+                  "_count": {
+                    "likes": 1,
+                    "comments": 4
+                  }
+                },
+                {
+                  "id": "cmnedb8tc000a2t5auvykyvyl",
+                  "title": "TypeScript Best Practices for 2024",
+                  "content": "TypeScript has become the standard for modern web development. Here are some best practices to follow when writing TypeScript code.\n\nFirst, always enable strict mode in your tsconfig.json. This catches many common errors at compile time rather than runtime. Second, prefer interfaces over type aliases for object shapes \u2014 they provide better error messages and are more extensible.\n\nThird, use discriminated unions for state management. They make it impossible to access properties that don't exist in a given state. Finally, leverage the utility types like Partial, Required, Pick, and Omit to avoid repeating yourself.",
+                  "published": true,
+                  "authorId": "cmnedb8ri00002t5a44o8dgly",
+                  "createdAt": "2026-03-31T08:41:29.953Z",
+                  "updatedAt": "2026-03-31T08:41:29.953Z",
+                  "author": {
+                    "id": "cmnedb8ri00002t5a44o8dgly",
+                    "name": "Alice Johnson"
+                  },
+                  "tags": [
+                    {
+                      "id": "cmnedb8ta00042t5a51l5e1d3",
+                      "name": "typescript"
+                    },
+                    {
+                      "id": "cmnedb8tb00052t5ax8oknxyy",
+                      "name": "webdev"
+                    }
+                  ],
+                  "_count": {
+                    "likes": 1,
+                    "comments": 2
+                  }
+                },
+                {
+                  "id": "cmnedb8td000c2t5an7r9hsmq",
+                  "title": "Building a Blog with Prisma and SQLite",
+                  "content": "Prisma is an excellent ORM for Node.js and TypeScript. Combined with SQLite, it provides a zero-configuration database solution that's perfect for prototyping and small to medium applications.\n\nPrisma's schema-first approach means you define your data model in a .prisma file, and Prisma generates a type-safe client for you. Migrations are handled automatically, and the Prisma Studio gives you a visual editor for your data.\n\nSQLite is an embedded database that stores data in a single file. It requires no server setup and is surprisingly capable \u2014 it handles concurrent reads well and is used by many production applications.",
+                  "published": true,
+                  "authorId": "cmnedb8t700012t5ad6d6l4oj",
+                  "createdAt": "2026-03-31T08:41:29.953Z",
+                  "updatedAt": "2026-03-31T08:41:29.953Z",
+                  "author": {
+                    "id": "cmnedb8t700012t5ad6d6l4oj",
+                    "name": "Bob Smith"
+                  },
+                  "tags": [
+                    {
+                      "id": "cmnedb8t800022t5a3us62hdf",
+                      "name": "nextjs"
+                    },
+                    {
+                      "id": "cmnedb8tb00062t5av1hyrm7y",
+                      "name": "tutorial"
+                    }
+                  ],
+                  "_count": {
+                    "likes": 1,
+                    "comments": 2
+                  }
+                },
+                {
+                  "id": "cmnedb8tc00082t5a0wmiobwg",
+                  "title": "Getting Started with Next.js",
+                  "content": "Next.js is a powerful React framework that makes building web applications a breeze. In this post, we'll explore the basics of Next.js and how to get your first application up and running.\n\nNext.js provides features like server-side rendering, static site generation, and API routes out of the box. The App Router, introduced in Next.js 13, brings a new paradigm for building applications with React Server Components.\n\nTo get started, simply run npx create-next-app@latest and follow the prompts. You'll have a fully configured project with TypeScript, Tailwind CSS, and ESLint ready to go.",
+                  "published": true,
+                  "authorId": "cmnedb8ri00002t5a44o8dgly",
+                  "createdAt": "2026-03-31T08:41:29.952Z",
+                  "updatedAt": "2026-03-31T08:41:29.952Z",
+                  "author": {
+                    "id": "cmnedb8ri00002t5a44o8dgly",
+                    "name": "Alice Johnson"
+                  },
+                  "tags": [
+                    {
+                      "id": "cmnedb8t800022t5a3us62hdf",
+                      "name": "nextjs"
+                    },
+                    {
+                      "id": "cmnedb8t900032t5asz1yhy3r",
+                      "name": "react"
+                    },
+                    {
+                      "id": "cmnedb8tb00062t5av1hyrm7y",
+                      "name": "tutorial"
+                    }
+                  ],
+                  "_count": {
+                    "likes": 1,
+                    "comments": 3
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "action": "verify 'Persistent Data' in after_relogin",
+          "detail": "NOT found",
+          "passed": false,
+          "error": "'Persistent Data' not in after_relogin",
+          "proof": null
+        }
+      ]
+    },
+    {
+      "name": "Admin Management Operations",
+      "description": "An admin user logs in and performs management actions like viewing all users or all content",
+      "passed": false,
+      "stopped_at": "2/4 steps passed",
+      "steps": [
+        {
+          "action": "login_admin",
+          "detail": "NextAuth session active for alice@example.com",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T15:48:02Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4002/api/auth/callback/credentials",
+              "body": {
+                "email": "alice@example.com",
+                "password": "***",
+                "csrfToken": "e4f5f710c42bc876dc24ed0a86e9dda62d5886252e4dc6da3452ef9c07f8d89c",
+                "redirect": "false",
+                "json": "true"
+              }
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "url": "http://localhost:4002"
+              }
+            }
+          }
+        },
+        {
+          "action": "GET /admin/users",
+          "detail": "HTTP 404",
+          "passed": false,
+          "error": "expected [200], got 404",
+          "proof": {
+            "timestamp": "2026-03-31T15:48:02Z",
+            "request": {
+              "method": "GET",
+              "url": "http://localhost:4002/admin/users",
+              "body": null
+            },
+            "response": {
+              "status": 404,
+              "body": {
+                "text": "<!DOCTYPE html><html lang=\"en\"><head><meta charSet=\"utf-8\"/><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/><link rel=\"stylesheet\" href=\"/_next/static/css/app/layout.css?v=1774997"
+              }
+            }
+          }
+        },
+        {
+          "action": "verify all_users has \u22651 items",
+          "detail": "count=0",
+          "passed": false,
+          "error": "expected \u22651, got 0",
+          "proof": null
+        },
+        {
+          "action": "GET /api/posts",
+          "detail": "200",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T15:48:02Z",
+            "request": {
+              "method": "GET",
+              "url": "http://localhost:4002/api/posts",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": [
+                {
+                  "id": "cmneekypq001kp04onnjenvcd",
+                  "title": "Public Author Article",
+                  "content": "This should be visible on my profile",
+                  "published": true,
+                  "authorId": "cmneekynw001ip04o39ncpf19",
+                  "createdAt": "2026-03-31T09:17:03.039Z",
+                  "updatedAt": "2026-03-31T09:17:03.039Z",
+                  "author": {
+                    "id": "cmneekynw001ip04o39ncpf19",
+                    "name": "Public Author"
+                  },
+                  "tags": [],
+                  "_count": {
+                    "likes": 1,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmneekyll001hp04ounq130dv",
+                  "title": "User Post For Admin Test",
+                  "content": "Admin should be able to manage this",
+                  "published": true,
+                  "authorId": "cmneekyj7001fp04o3yn7k9xw",
+                  "createdAt": "2026-03-31T09:17:02.890Z",
+                  "updatedAt": "2026-03-31T09:17:02.890Z",
+                  "author": {
+                    "id": "cmneekyj7001fp04o3yn7k9xw",
+                    "name": "Regular User"
+                  },
+                  "tags": [],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmneekybf001dp04of5zf92la",
+                  "title": "Persistence Check",
+                  "content": "This post should survive a logout and login",
+                  "published": true,
+                  "authorId": "cmneeky9h001bp04oxf5pmvwe",
+                  "createdAt": "2026-03-31T09:17:02.524Z",
+                  "updatedAt": "2026-03-31T09:17:02.524Z",
+                  "author": {
+                    "id": "cmneeky9h001bp04oxf5pmvwe",
+                    "name": "Persistent User"
+                  },
+                  "tags": [
+                    {
+                      "id": "cmnede8eq001zxupaadbvckk5",
+                      "name": "persistence"
+                    }
+                  ],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmneekxxs0019p04o4sh575tk",
+                  "title": "Persistent Post XYZ",
+                  "content": "Should persist.",
+                  "published": true,
+                  "authorId": "cmnedb8ri00002t5a44o8dgly",
+                  "createdAt": "2026-03-31T09:17:02.033Z",
+                  "updatedAt": "2026-03-31T09:17:02.033Z",
+                  "author": {
+                    "id": "cmnedb8ri00002t5a44o8dgly",
+                    "name": "Alice Johnson"
+                  },
+                  "tags": [],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmneekxtp0012p04orlxkfrr8",
+                  "title": "Unauthorized Post",
+                  "content": "Should fail.",
+                  "published": true,
+                  "authorId": "cmnedb8ri00002t5a44o8dgly",
+                  "createdAt": "2026-03-31T09:17:01.885Z",
+                  "updatedAt": "2026-03-31T09:17:01.885Z",
+                  "author": {
+                    "id": "cmnedb8ri00002t5a44o8dgly",
+                    "name": "Alice Johnson"
+                  },
+                  "tags": [],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmneekxso000zp04oarzqdvpq",
+                  "title": "Tagged Post",
+                  "content": "Post with tags.",
+                  "published": true,
+                  "authorId": "cmnedb8ri00002t5a44o8dgly",
+                  "createdAt": "2026-03-31T09:17:01.849Z",
+                  "updatedAt": "2026-03-31T09:17:01.849Z",
+                  "author": {
+                    "id": "cmnedb8ri00002t5a44o8dgly",
+                    "name": "Alice Johnson"
+                  },
+                  "tags": [
+                    {
+                      "id": "cmnede7tw001kxupa5b23c6xx",
+                      "name": "javascript"
+                    }
+                  ],
+                  "_count": {
+                    "likes": 1,
+                    "comments": 1
+                  }
+                },
+                {
+                  "id": "cmneekxco000bp04ouy9bdpbt",
+                  "title": "Commentable Post",
+                  "content": "Leave a comment.",
+                  "published": true,
+                  "authorId": "cmnedb8ri00002t5a44o8dgly",
+                  "createdAt": "2026-03-31T09:17:01.273Z",
+                  "updatedAt": "2026-03-31T09:17:01.273Z",
+                  "author": {
+                    "id": "cmnedb8ri00002t5a44o8dgly",
+                    "name": "Alice Johnson"
+                  },
+                  "tags": [],
+                  "_count": {
+                    "likes": 1,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmneekx7s0001p04owode2llt",
+                  "title": "My First Post",
+                  "content": "Hello world content here.",
+                  "published": true,
+                  "authorId": "cmnedb8ri00002t5a44o8dgly",
+                  "createdAt": "2026-03-31T09:17:01.096Z",
+                  "updatedAt": "2026-03-31T09:17:01.096Z",
+                  "author": {
+                    "id": "cmnedb8ri00002t5a44o8dgly",
+                    "name": "Alice Johnson"
+                  },
+                  "tags": [],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmnede8eq001yxupa7oirdta4",
+                  "title": "Persistent Post",
+                  "content": "This post should survive session changes.",
+                  "published": true,
+                  "authorId": "cmnede8cu001wxupaesg42r1n",
+                  "createdAt": "2026-03-31T08:43:49.394Z",
+                  "updatedAt": "2026-03-31T08:43:49.394Z",
+                  "author": {
+                    "id": "cmnede8cu001wxupaesg42r1n",
+                    "name": "Persistent User"
+                  },
+                  "tags": [
+                    {
+                      "id": "cmnede8eq001zxupaadbvckk5",
+                      "name": "persistence"
+                    }
+                  ],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmnede8b3001vxupaalrac4dc",
+                  "title": "Owner's Protected Post",
+                  "content": "Only the owner should edit this.",
+                  "published": true,
+                  "authorId": "cmnede88u001txupahyruc4g6",
+                  "createdAt": "2026-03-31T08:43:49.263Z",
+                  "updatedAt": "2026-03-31T08:43:49.263Z",
+                  "author": {
+                    "id": "cmnede88u001txupahyruc4g6",
+                    "name": "Post Owner"
+                  },
+                  "tags": [],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmnede82t001pxupa62e6ayem",
+                  "title": "Inappropriate Content",
+                  "content": "This post violates community guidelines.",
+                  "published": true,
+                  "authorId": "cmnede80w001nxupaduxohlxx",
+                  "createdAt": "2026-03-31T08:43:48.966Z",
+                  "updatedAt": "2026-03-31T08:43:48.966Z",
+                  "author": {
+                    "id": "cmnede80w001nxupaduxohlxx",
+                    "name": "Bad Actor"
+                  },
+                  "tags": [],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmnede7tw001jxupa73xys873",
+                  "title": "JavaScript Guide",
+                  "content": "Modern JS patterns.",
+                  "published": true,
+                  "authorId": "cmnede7r4001dxupaontr6hrh",
+                  "createdAt": "2026-03-31T08:43:48.644Z",
+                  "updatedAt": "2026-03-31T08:43:48.644Z",
+                  "author": {
+                    "id": "cmnede7r4001dxupaontr6hrh",
+                    "name": "Tag Author"
+                  },
+                  "tags": [
+                    {
+                      "id": "cmnedb8tb00062t5av1hyrm7y",
+                      "name": "tutorial"
+                    },
+                    {
+                      "id": "cmnede7tw001kxupa5b23c6xx",
+                      "name": "javascript"
+                    }
+                  ],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmnede7to001fxupawtqmydqk",
+                  "title": "Python Tips",
+                  "content": "Learn Python the easy way.",
+                  "published": true,
+                  "authorId": "cmnede7r4001dxupaontr6hrh",
+                  "createdAt": "2026-03-31T08:43:48.637Z",
+                  "updatedAt": "2026-03-31T08:43:48.637Z",
+                  "author": {
+                    "id": "cmnede7r4001dxupaontr6hrh",
+                    "name": "Tag Author"
+                  },
+                  "tags": [
+                    {
+                      "id": "cmnedb8tb00062t5av1hyrm7y",
+                      "name": "tutorial"
+                    },
+                    {
+                      "id": "cmnede7to001gxupaylkw04zn",
+                      "name": "python"
+                    }
+                  ],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmnede7kx0014xupa6c4otrrz",
+                  "title": "Interesting Article",
+                  "content": "This is a thought-provoking article about software.",
+                  "published": true,
+                  "authorId": "cmnede7iu0012xupam99hmzba",
+                  "createdAt": "2026-03-31T08:43:48.321Z",
+                  "updatedAt": "2026-03-31T08:43:48.321Z",
+                  "author": {
+                    "id": "cmnede7iu0012xupam99hmzba",
+                    "name": "Author One"
+                  },
+                  "tags": [
+                    {
+                      "id": "cmnede7kx0015xupa2a6rd9ph",
+                      "name": "software"
+                    }
+                  ],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmnede7c60011xupah4hmsmp1",
+                  "title": "Post To Delete",
+                  "content": "This will be removed.",
+                  "published": true,
+                  "authorId": "cmnede79z000wxupa5b25cglk",
+                  "createdAt": "2026-03-31T08:43:48.006Z",
+                  "updatedAt": "2026-03-31T08:43:48.006Z",
+                  "author": {
+                    "id": "cmnede79z000wxupa5b25cglk",
+                    "name": "Bob Writer"
+                  },
+                  "tags": [],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmnede7c0000yxupapsd1cucx",
+                  "title": "Post To Edit",
+                  "content": "Original content here.",
+                  "published": true,
+                  "authorId": "cmnede79z000wxupa5b25cglk",
+                  "createdAt": "2026-03-31T08:43:48.001Z",
+                  "updatedAt": "2026-03-31T08:43:48.001Z",
+                  "author": {
+                    "id": "cmnede79z000wxupa5b25cglk",
+                    "name": "Bob Writer"
+                  },
+                  "tags": [
+                    {
+                      "id": "cmnede7c0000zxupatj9mcbej",
+                      "name": "draft"
+                    }
+                  ],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmnede77h000rxupa8z24crqw",
+                  "title": "My First Post",
+                  "content": "Hello world! This is my first blog post about testing.",
+                  "published": true,
+                  "authorId": "cmnede75e000pxupavg1u1oh2",
+                  "createdAt": "2026-03-31T08:43:47.837Z",
+                  "updatedAt": "2026-03-31T08:43:47.854Z",
+                  "author": {
+                    "id": "cmnede75e000pxupavg1u1oh2",
+                    "name": "Jane Blogger"
+                  },
+                  "tags": [
+                    {
+                      "id": "cmnede77h000sxupa16wb0gbe",
+                      "name": "intro"
+                    },
+                    {
+                      "id": "cmnede77h000txupaoph5eygw",
+                      "name": "testing"
+                    }
+                  ],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmnede702000oxupa08e6gdqn",
+                  "title": "Persistence Test Post",
+                  "content": "This post should persist.",
+                  "published": true,
+                  "authorId": "cmnedb8ri00002t5a44o8dgly",
+                  "createdAt": "2026-03-31T08:43:47.571Z",
+                  "updatedAt": "2026-03-31T08:43:47.571Z",
+                  "author": {
+                    "id": "cmnedb8ri00002t5a44o8dgly",
+                    "name": "Alice Johnson"
+                  },
+                  "tags": [],
+                  "_count": {
+                    "likes": 0,
+                    "comments": 0
+                  }
+                },
+                {
+                  "id": "cmnedb8td000e2t5a3jrlhrb1",
+                  "title": "React Server Components Explained",
+                  "content": "React Server Components (RSC) represent a fundamental shift in how we build React applications. They allow components to render on the server, reducing the JavaScript sent to the client.\n\nWith RSC, you can directly access your database, file system, or other server-side resources from your components \u2014 no API layer needed. This simplifies your architecture and improves performance.\n\nThe key distinction is between Server Components (the default in Next.js App Router) and Client Components (marked with 'use client'). Server Components can't use hooks or browser APIs, while Client Components can't directly access server resources.",
+                  "published": true,
+                  "authorId": "cmnedb8t700012t5ad6d6l4oj",
+                  "createdAt": "2026-03-31T08:41:29.954Z",
+                  "updatedAt": "2026-03-31T08:41:29.954Z",
+                  "author": {
+                    "id": "cmnedb8t700012t5ad6d6l4oj",
+                    "name": "Bob Smith"
+                  },
+                  "tags": [
+                    {
+                      "id": "cmnedb8t800022t5a3us62hdf",
+                      "name": "nextjs"
+                    },
+                    {
+                      "id": "cmnedb8t900032t5asz1yhy3r",
+                      "name": "react"
+                    },
+                    {
+                      "id": "cmnedb8tb00052t5ax8oknxyy",
+                      "name": "webdev"
+                    }
+                  ],
+                  "_count": {
+                    "likes": 1,
+                    "comments": 4
+                  }
+                },
+                {
+                  "id": "cmnedb8tc000a2t5auvykyvyl",
+                  "title": "TypeScript Best Practices for 2024",
+                  "content": "TypeScript has become the standard for modern web development. Here are some best practices to follow when writing TypeScript code.\n\nFirst, always enable strict mode in your tsconfig.json. This catches many common errors at compile time rather than runtime. Second, prefer interfaces over type aliases for object shapes \u2014 they provide better error messages and are more extensible.\n\nThird, use discriminated unions for state management. They make it impossible to access properties that don't exist in a given state. Finally, leverage the utility types like Partial, Required, Pick, and Omit to avoid repeating yourself.",
+                  "published": true,
+                  "authorId": "cmnedb8ri00002t5a44o8dgly",
+                  "createdAt": "2026-03-31T08:41:29.953Z",
+                  "updatedAt": "2026-03-31T08:41:29.953Z",
+                  "author": {
+                    "id": "cmnedb8ri00002t5a44o8dgly",
+                    "name": "Alice Johnson"
+                  },
+                  "tags": [
+                    {
+                      "id": "cmnedb8ta00042t5a51l5e1d3",
+                      "name": "typescript"
+                    },
+                    {
+                      "id": "cmnedb8tb00052t5ax8oknxyy",
+                      "name": "webdev"
+                    }
+                  ],
+                  "_count": {
+                    "likes": 1,
+                    "comments": 2
+                  }
+                },
+                {
+                  "id": "cmnedb8td000c2t5an7r9hsmq",
+                  "title": "Building a Blog with Prisma and SQLite",
+                  "content": "Prisma is an excellent ORM for Node.js and TypeScript. Combined with SQLite, it provides a zero-configuration database solution that's perfect for prototyping and small to medium applications.\n\nPrisma's schema-first approach means you define your data model in a .prisma file, and Prisma generates a type-safe client for you. Migrations are handled automatically, and the Prisma Studio gives you a visual editor for your data.\n\nSQLite is an embedded database that stores data in a single file. It requires no server setup and is surprisingly capable \u2014 it handles concurrent reads well and is used by many production applications.",
+                  "published": true,
+                  "authorId": "cmnedb8t700012t5ad6d6l4oj",
+                  "createdAt": "2026-03-31T08:41:29.953Z",
+                  "updatedAt": "2026-03-31T08:41:29.953Z",
+                  "author": {
+                    "id": "cmnedb8t700012t5ad6d6l4oj",
+                    "name": "Bob Smith"
+                  },
+                  "tags": [
+                    {
+                      "id": "cmnedb8t800022t5a3us62hdf",
+                      "name": "nextjs"
+                    },
+                    {
+                      "id": "cmnedb8tb00062t5av1hyrm7y",
+                      "name": "tutorial"
+                    }
+                  ],
+                  "_count": {
+                    "likes": 1,
+                    "comments": 2
+                  }
+                },
+                {
+                  "id": "cmnedb8tc00082t5a0wmiobwg",
+                  "title": "Getting Started with Next.js",
+                  "content": "Next.js is a powerful React framework that makes building web applications a breeze. In this post, we'll explore the basics of Next.js and how to get your first application up and running.\n\nNext.js provides features like server-side rendering, static site generation, and API routes out of the box. The App Router, introduced in Next.js 13, brings a new paradigm for building applications with React Server Components.\n\nTo get started, simply run npx create-next-app@latest and follow the prompts. You'll have a fully configured project with TypeScript, Tailwind CSS, and ESLint ready to go.",
+                  "published": true,
+                  "authorId": "cmnedb8ri00002t5a44o8dgly",
+                  "createdAt": "2026-03-31T08:41:29.952Z",
+                  "updatedAt": "2026-03-31T08:41:29.952Z",
+                  "author": {
+                    "id": "cmnedb8ri00002t5a44o8dgly",
+                    "name": "Alice Johnson"
+                  },
+                  "tags": [
+                    {
+                      "id": "cmnedb8t800022t5a3us62hdf",
+                      "name": "nextjs"
+                    },
+                    {
+                      "id": "cmnedb8t900032t5asz1yhy3r",
+                      "name": "react"
+                    },
+                    {
+                      "id": "cmnedb8tb00062t5av1hyrm7y",
+                      "name": "tutorial"
+                    }
+                  ],
+                  "_count": {
+                    "likes": 1,
+                    "comments": 3
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Unauthorized Access Denied",
+      "description": "An unauthenticated user tries to access protected endpoints and is rejected",
+      "passed": true,
+      "stopped_at": "",
+      "steps": [
+        {
+          "action": "fresh_session",
+          "detail": "new unauthenticated session",
+          "passed": true,
+          "error": "",
+          "proof": null
+        },
+        {
+          "action": "POST /api/posts",
+          "detail": "401",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T15:48:02Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4002/api/posts",
+              "body": {
+                "title": "Sneaky Post",
+                "content": "Should be rejected.",
+                "published": false
+              }
+            },
+            "response": {
+              "status": 401,
+              "body": {
+                "error": "Unauthorized"
+              }
+            }
+          }
+        },
+        {
+          "action": "DELETE /api/posts/1",
+          "detail": "401",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T15:48:02Z",
+            "request": {
+              "method": "DELETE",
+              "url": "http://localhost:4002/api/posts/1",
+              "body": null
+            },
+            "response": {
+              "status": 401,
+              "body": {
+                "error": "Unauthorized"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Duplicate Registration Rejected",
+      "description": "A user tries to register with an email that already exists and gets an appropriate error",
+      "passed": true,
+      "stopped_at": "",
+      "steps": [
+        {
+          "action": "register",
+          "detail": "POST /register \u2192 200",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T15:48:02Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4002/register",
+              "body": {
+                "email": "bound-54974292c5@eval.local",
+                "password": "***",
+                "name": "Bound Test User"
+              }
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "text": "<!DOCTYPE html><html lang=\"en\"><head><meta charSet=\"utf-8\"/><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/><link rel=\"stylesheet\" href=\"/_next/static/css/app/layout.css?v=1774997"
+              }
+            }
+          }
+        },
+        {
+          "action": "register",
+          "detail": "POST /register \u2192 200",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T15:48:02Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4002/register",
+              "body": {
+                "email": "bound-54974292c5@eval.local",
+                "password": "***",
+                "name": "Bound Test User"
+              }
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "text": "<!DOCTYPE html><html lang=\"en\"><head><meta charSet=\"utf-8\"/><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/><link rel=\"stylesheet\" href=\"/_next/static/css/app/layout.css?v=1774997"
+              }
+            }
+          }
+        },
+        {
+          "action": "GET /",
+          "detail": "200",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T15:48:02Z",
+            "request": {
+              "method": "GET",
+              "url": "http://localhost:4002/",
+              "body": null
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "text": "<!DOCTYPE html><html lang=\"en\"><head><meta charSet=\"utf-8\"/><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/><link rel=\"stylesheet\" href=\"/_next/static/css/app/layout.css?v=1774997"
+              }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

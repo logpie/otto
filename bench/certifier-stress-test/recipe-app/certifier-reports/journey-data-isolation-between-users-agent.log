@@ -1,0 +1,45 @@
+
+
+I'll execute this user story step by step with real HTTP requests.
+
+## Step 1: Log in as User A (alice@example.com)The CSRF token mismatch caused a redirect. Let me use a fresh cookie jar and proper flow:Login successful — got a session token. Let me verify the session:✅ **Step 1 PASS**: User A (Alice) is authenticated. ID: `cmnedefsy0000zlfic33odijg`
+
+## Step 2: As User A, create a recipe✅ **Step 2 PASS**: Recipe created with ID `cmnfczsjc000xr2w01y5onwqb`, authorId matches Alice's ID.
+
+## Step 3: As User A, add recipe to favoritesNow verify the favorite is reflected:✅ **Step 3 PASS**: Recipe is favorited by Alice. The `favorites` array contains Alice's userId.
+
+## Step 4: Log out as User A, log in as User B✅ **Step 4 PASS**: Bob is authenticated with a separate session. Alice's cookies are in a different jar (isolated).
+
+## Step 5: As User B, try to edit User A's recipe✅ **Step 5 PASS**: Edit rejected with "Forbidden" — Bob cannot modify Alice's recipe.
+
+## Step 6: As User B, check favorites list✅ **Step 6 PASS**: Bob has no favorites — his favorites list is empty. Alice's favorite on "Secret Family Chili" does not appear in Bob's context.
+
+## Step 7: As User B, try to delete User A's recipe✅ **Step 7 PASS**: Delete rejected with "Forbidden" — Bob cannot delete Alice's recipe.
+
+Let me verify the recipe still exists:Recipe is still intact.
+
+## BREAK PHASE: Testing edge cases
+
+### Break 1: ID Guessing — Try accessing recipe with manipulated IDsGood — returns "Not found" for invalid IDs, no information leakage.
+
+### Break 2: Direct URL — Access recipe details without auth / as wrong userInteresting — GET on recipe details works without auth (recipes are publicly readable, which is reasonable for a recipe app). But write operations properly require auth.
+
+### Break 3: Check if favorites leak user infoMinor observation: favorites with user IDs are visible to unauthenticated users. Not a security issue but a minor info leak.
+
+Now let me write the verdict:## Summary
+
+**All 7 steps passed.** The recipe app properly implements data isolation between users:
+
+| Step | Result |
+|------|--------|
+| 1. Login as User A | ✅ Pass |
+| 2. Create recipe | ✅ Pass |
+| 3. Favorite recipe | ✅ Pass |
+| 4. Login as User B | ✅ Pass |
+| 5. Bob edits Alice's recipe | ✅ Pass (Forbidden) |
+| 6. Bob's favorites empty | ✅ Pass |
+| 7. Bob deletes Alice's recipe | ✅ Pass (Forbidden) |
+
+**Break findings:**
+- **ID guessing**: No issues — invalid IDs return "Not found" without leaking info
+- **Direct URL (no auth)**: Write operations properly require auth (401). Reads are public (reasonable for a recipe app). Minor note: favorites array exposes internal userIds to unauthenticated users.

@@ -1,0 +1,81 @@
+{
+  "story_passed": false,
+  "blocked_at": "Search for recipes containing the ingredient 'coconut milk'",
+  "summary": "Authentication and recipe creation work correctly. However, the core search and filter functionality is completely broken. The GET /api/recipes endpoint accepts no query parameters — it always returns all recipes unfiltered. Searching by ingredient, searching by title keyword, and filtering by category via the API all fail because the route handler ignores all query parameters. The UI has a search input and category filter buttons, but the server-side rendering returns all recipes regardless of parameters. Category filtering partially works for seeded data using predefined lowercase categories, but user-created categories with different casing (e.g., 'Desserts' vs 'dessert') are not matched. The search/filter feature is fundamentally unimplemented at the API level.",
+  "diagnosis": "The GET /api/recipes route handler is defined as `async function GET()` with no request parameter. It calls `prisma.recipe.findMany()` with no where clause, always returning all recipes. There is no code to parse search, category, ingredient, or any other query parameters.",
+  "fix_suggestion": "Modify the GET handler in src/app/api/recipes/route.ts to: (1) Accept the request parameter: `async function GET(request: Request)`, (2) Extract query params: `const { searchParams } = new URL(request.url)`, (3) Build Prisma where clauses for search (matching against title, description, ingredients), category filtering (case-insensitive), and any other filter parameters. Also normalize category values to ensure consistent casing.",
+  "steps": [
+    {
+      "action": "Log in as alice@example.com using NextAuth CSRF flow",
+      "outcome": "pass",
+      "verification": "Session endpoint returned user object with name 'Alice Johnson', email 'alice@example.com', and valid session expiry",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "Create recipe 'Thai Green Curry' in category 'Thai' with coconut milk, green curry paste, chicken, bamboo shoots, basil",
+      "outcome": "pass",
+      "verification": "API returned 200 with recipe ID cmnfd8gb5001fr2w0plx52qoy, correct title, category 'Thai', and all ingredients present",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "Create recipe 'Coconut Rice Pudding' in category 'Desserts' with coconut milk, rice, sugar, vanilla",
+      "outcome": "pass",
+      "verification": "API returned 200 with recipe ID cmnfd8kfv001hr2w0wasflocy, correct title, category 'Desserts', and all ingredients present",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "Create recipe 'Spaghetti Bolognese' in category 'Italian' with ground beef, tomato sauce, pasta, onion, garlic",
+      "outcome": "pass",
+      "verification": "API returned 200 with recipe ID cmnfd8mn5001jr2w02vvrlza4, correct title, category 'Italian', and all ingredients present",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "Search for recipes containing ingredient 'coconut milk' via API query params (tried search=, ingredient=, q=)",
+      "outcome": "fail",
+      "verification": "All three query parameter variants returned all 37 recipes in the database. Expected only 'Thai Green Curry' and 'Coconut Rice Pudding'. The API ignores all query parameters.",
+      "diagnosis": "The GET /api/recipes route handler is defined as `async function GET()` with no request parameter. It performs `prisma.recipe.findMany()` with no where clause, returning all recipes unconditionally.",
+      "fix_suggestion": "Add request parameter to GET handler, parse 'search' or 'ingredient' query params, and add Prisma where clause filtering on the ingredients field using contains/search."
+    },
+    {
+      "action": "Search for recipes by title keyword 'curry' via API query param search=curry",
+      "outcome": "fail",
+      "verification": "Returned all 37 recipes instead of just 'Thai Green Curry'. The search parameter is completely ignored.",
+      "diagnosis": "Same root cause as step 5 — the GET route handler has no query parameter parsing or filtering logic.",
+      "fix_suggestion": "Add title search filtering using Prisma contains with case-insensitive mode on the title field."
+    },
+    {
+      "action": "Filter recipes by category 'Desserts' via API query param category=Desserts and UI URL /?category=dessert",
+      "outcome": "fail",
+      "verification": "API returned all 37 recipes ignoring the category param. The UI page at /?category=dessert showed only seeded dessert recipes (Tiramisu, Chocolate Lava Cake) but NOT our 'Coconut Rice Pudding' because it was created with category 'Desserts' (capital, plural) while the UI filter uses 'dessert' (lowercase, singular). Case-insensitive matching is not implemented.",
+      "diagnosis": "API has no filtering. UI category filter does server-side filtering but uses exact case-sensitive matching against predefined lowercase category values, so user-created recipes with different casing are excluded.",
+      "fix_suggestion": "Implement API-level category filtering with case-insensitive comparison. Normalize category values on creation or use case-insensitive queries."
+    }
+  ],
+  "break_findings": [
+    {
+      "technique": "special_chars",
+      "description": "Created a recipe with HTML script tags in the title: '<script>alert(\"xss\")</script>'",
+      "result": "The script tag was stored raw in the database. React's rendering does escape it on output (preventing XSS), but storing unsanitized HTML is poor practice. The title also accepted Unicode characters (é, ñ, ü, 日本語, 🍰) correctly.",
+      "severity": "low",
+      "fix_suggestion": "Sanitize or strip HTML tags from user input on the server side before storing in the database."
+    },
+    {
+      "technique": "empty_required",
+      "description": "Created a recipe with all fields empty (empty string title, description, ingredients, instructions; zero for numeric fields)",
+      "result": "Recipe was created successfully with completely empty values. No server-side validation exists for required fields.",
+      "severity": "moderate",
+      "fix_suggestion": "Add server-side validation requiring non-empty title, ingredients, and instructions. Validate that servings, prepTime, and cookTime are positive integers."
+    },
+    {
+      "technique": "long_input",
+      "description": "Created a recipe with a 10,000 character title",
+      "result": "Recipe was created and stored with the full 10,000 character title. No length validation exists.",
+      "severity": "moderate",
+      "fix_suggestion": "Add maximum length validation for all text fields (e.g., title max 200 chars, description max 2000 chars)."
+    }
+  ]
+}

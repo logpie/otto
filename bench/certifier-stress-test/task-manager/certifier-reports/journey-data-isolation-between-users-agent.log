@@ -1,0 +1,19 @@
+I'll execute this user story testing data isolation between two users. Let me start by getting the CSRF token and registering User A.
+
+Now let me start testing. I'll use `curl` via Bash for precise control over cookies and headers.
+
+**Step 1: Register User A**User A registered successfully (201). Now let me log in as User A:User A logged in successfully (302 redirect, session cookie set). Let me verify the session:User A session confirmed. Now **Step 2: Create task for User A**:Task created. Saving IDs:
+- User A ID: `cmnfd6bkl000hoo2ro0xhbju5`
+- Task A ID: `cmnfd6mm8000joo2rp4c1nda9`
+
+**Step 3: Log out User A**User A logged out (empty session). **Step 4: Register User B**User B registered and logged in. User B ID: `cmnfd7276000koo2ryyrqxihr`
+
+**Step 5: Create task for User B**Task B ID: `cmnfd762o000moo2rj4y45r4t`
+
+**Step 6: As User B, list all tasks — verify isolation**Only Bob's task appears. Alice's task is NOT visible. **Step 7: User B tries to access User A's task directly**Excellent — 403 Forbidden. User B cannot access User A's task. **Step 8: Log out User B, log in as User A, list tasks**User A only sees their own task. All happy path steps pass. Now **BREAK PHASE**:User B's session expired after logout. Let me re-login User B to properly test id_guessing on write operations:All break attempts properly blocked. Now let me write the verdict:**Verdict: ✅ PASS — All 8 steps passed.**
+
+The task manager correctly enforces data isolation between users:
+- **List isolation**: Each user only sees their own tasks
+- **Direct access isolation**: 403 Forbidden when accessing another user's task by ID (GET, PUT, DELETE)
+- **Auth enforcement**: 401 Unauthorized for all unauthenticated requests
+- **Break-phase**: No vulnerabilities found — id guessing and direct URL access are both properly blocked

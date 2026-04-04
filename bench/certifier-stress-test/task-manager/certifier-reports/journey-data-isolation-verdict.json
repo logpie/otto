@@ -1,0 +1,67 @@
+{
+  "story_passed": true,
+  "blocked_at": null,
+  "summary": "Data isolation between two users is fully enforced. Alice created a task ('User1 Secret Project') that was invisible to Bob when he logged in. Bob's task list showed only his own 2 tasks with zero leakage of Alice's 370 tasks. Direct access attempts by Bob to read, update, or delete Alice's task all returned 403 Forbidden. The task remained intact after all attack attempts. Break-phase testing confirmed that ID guessing returns 404 (no information leakage), userId query parameter filtering is ignored server-side, unauthenticated access returns 401, and no /api/users endpoint exists.",
+  "diagnosis": null,
+  "fix_suggestion": null,
+  "steps": [
+    {
+      "action": "Logged in as Alice (alice@example.com) via CSRF token + credentials POST",
+      "outcome": "pass",
+      "verification": "Session endpoint returned user name 'Alice Johnson', email 'alice@example.com', valid session expiry",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "Listed Alice's existing tasks (369 found), then created task 'User1 Secret Project' with description 'Confidential data for user 1 only'",
+      "outcome": "pass",
+      "verification": "POST returned 200 with task ID cmnfgqyf7000ioopgwjg4xwxi, correct title/description/status/userId. GET by ID confirmed task exists.",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "Logged out of Alice's account via POST /api/auth/signout",
+      "outcome": "pass",
+      "verification": "Signout returned 302 redirect. Subsequent session check returned empty object {}.",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "Logged in as Bob (bob@example.com) via CSRF token + credentials POST",
+      "outcome": "pass",
+      "verification": "Session endpoint returned user name 'Bob Smith', email 'bob@example.com', different userId (cmned6oip0001oo227s8huwpg)",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "Listed Bob's tasks and checked for Alice's data",
+      "outcome": "pass",
+      "verification": "Bob has exactly 2 tasks. Zero tasks match 'User1 Secret Project'. Zero tasks have Alice's userId. Complete data isolation confirmed.",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "As Bob, attempted to GET, PUT, and DELETE Alice's task by ID (cmnfgqyf7000ioopgwjg4xwxi)",
+      "outcome": "pass",
+      "verification": "All three operations returned HTTP 403 with {\"error\":\"Forbidden\"}. Re-logged as Alice and confirmed task is untouched with original title/description/timestamps.",
+      "diagnosis": null,
+      "fix_suggestion": null
+    }
+  ],
+  "break_findings": [
+    {
+      "technique": "id_guessing",
+      "description": "Attempted to access tasks with variations of Alice's task ID (incremented last char, made-up ID, Alice's user ID as task ID)",
+      "result": "All returned 404 'Task not found' — no information leakage about whether tasks exist for other users",
+      "severity": "none",
+      "fix_suggestion": null
+    },
+    {
+      "technique": "direct_url",
+      "description": "Attempted to filter tasks by Alice's userId via query parameter (?userId=...), access /api/users endpoint, and access /api/tasks without authentication",
+      "result": "userId filter was ignored server-side (returned only Bob's tasks), /api/users returns 404, unauthenticated /api/tasks returns 401. No data leaked.",
+      "severity": "none",
+      "fix_suggestion": null
+    }
+  ]
+}

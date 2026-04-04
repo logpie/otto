@@ -1,0 +1,88 @@
+{
+  "story_passed": true,
+  "blocked_at": null,
+  "summary": "The filter-by-status and sort-by-due-date features work correctly. Authentication via NextAuth credentials flow succeeded. All four tasks (Task A/TODO, Task B/DONE, Task C/TODO, Task D/IN_PROGRESS) were created with correct statuses and due dates. Filtering by status=TODO correctly returned only Task A and Task C, filtering by status=DONE returned only Task B, and sorting by dueDate ascending returned tasks in the correct order: Task B (1 day), Task C (2 days), Task A (5 days), Task D (10 days). The API uses Prisma ORM with proper query parameter support for status filtering and dueDate/createdAt sorting. Break testing revealed that invalid status filter values silently return all tasks instead of an empty list, and script tags are stored verbatim (potential stored XSS). Browser verification was skipped (API-only testing).",
+  "diagnosis": null,
+  "fix_suggestion": null,
+  "steps": [
+    {
+      "action": "Log in as alice@example.com via NextAuth CSRF + credentials flow",
+      "outcome": "pass",
+      "verification": "GET /api/auth/session returned user object with name='Alice Johnson', email='alice@example.com', valid session expiry",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "Create Task A with title 'Task A', status TODO, due date 5 days from now",
+      "outcome": "pass",
+      "verification": "POST /api/tasks returned 201 with id='cmnfdfnun0011oo2rqx9mj8s8', correct title/status/dueDate (2026-04-06)",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "Create Task B with title 'Task B', status DONE, due date 1 day from now",
+      "outcome": "pass",
+      "verification": "POST /api/tasks returned 201 with id='cmnfdfnv00013oo2r96eeevxz', status=DONE, dueDate=2026-04-02",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "Create Task C with title 'Task C', status TODO, due date 2 days from now",
+      "outcome": "pass",
+      "verification": "POST /api/tasks returned 201 with id='cmnfdfnvf0015oo2rcw5dl67j', status=TODO, dueDate=2026-04-03",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "Create Task D with title 'Task D', status IN_PROGRESS, due date 10 days from now",
+      "outcome": "pass",
+      "verification": "POST /api/tasks returned 201 with id='cmnfdfnvu0017oo2rqu1qab1z', status=IN_PROGRESS, dueDate=2026-04-11",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "Filter tasks by status=TODO",
+      "outcome": "pass",
+      "verification": "GET /api/tasks?status=TODO returned Task A and Task C with status=TODO. Task B (DONE) and Task D (IN_PROGRESS) correctly excluded.",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "Filter tasks by status=DONE",
+      "outcome": "pass",
+      "verification": "GET /api/tasks?status=DONE returned Task B with status=DONE. Tasks A, C, D correctly excluded.",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "View all tasks sorted by dueDate ascending",
+      "outcome": "pass",
+      "verification": "GET /api/tasks?sort=dueDate&order=asc returned our tasks in order: Task B (04-02) → Task C (04-03) → Task A (04-06) → Task D (04-11). Dates are correctly sorted ascending.",
+      "diagnosis": null,
+      "fix_suggestion": null
+    }
+  ],
+  "break_findings": [
+    {
+      "technique": "empty_required",
+      "description": "Submitted empty string, null, and whitespace-only titles to POST /api/tasks",
+      "result": "All correctly rejected with 400 'Title is required'. Empty status defaults to TODO. Invalid status rejected. Invalid date format returns 500 'Failed to create task'.",
+      "severity": "low",
+      "fix_suggestion": "Return a more specific error for invalid date format (e.g., 'Invalid date format') instead of generic 500 error"
+    },
+    {
+      "technique": "special_chars",
+      "description": "Submitted <script>alert('xss')</script> as task title",
+      "result": "Script tag stored verbatim in database and returned in API response. Potential stored XSS if rendered in browser without proper escaping.",
+      "severity": "moderate",
+      "fix_suggestion": "Sanitize or escape HTML in task titles on input, or ensure React's default JSX escaping handles it on render (React does escape by default, but any dangerouslySetInnerHTML usage would be vulnerable)"
+    },
+    {
+      "technique": "special_chars",
+      "description": "Passed invalid status value in filter query parameter (e.g., status=INVALID_STATUS or SQL injection attempt)",
+      "result": "Invalid status filter silently returns ALL tasks instead of empty list. The code checks if status is in the allowed list and simply skips the filter if not, returning unfiltered results.",
+      "severity": "moderate",
+      "fix_suggestion": "Return 400 error for invalid status values in filter, or return empty array. Silently ignoring the filter and returning all data is unexpected behavior that could confuse users or mask bugs."
+    }
+  ]
+}

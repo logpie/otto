@@ -1,0 +1,19 @@
+I'll execute this user story step by step, testing data isolation between two users.
+
+Now let me start executing the steps. First, let me verify the app is running and get the CSRF token for auth.
+
+**Step 1: Register User A**Good, the app is running. Let me register User A.User A registered. Now log in as User A to get a session cookie.User A is authenticated. Now **Step 2: Create a task as User A**.Task created with ID `cmnfc2pc3000qooghbmxbdfrs`, associated with User A's userId. Let me save this for later.
+
+**Step 3: Log out User A**User A is logged out (empty session). **Step 4: Register User B**User B registered and authenticated. **Step 5: Create task as User B**Task created for User B. **Step 6: List tasks as User B — verify isolation**Only Bob's task appears. Alice's task is NOT visible. **Step 7: User B tries to access User A's task by ID**Access denied with 403 Forbidden. **Step 8: Log out User B, log back in as User A, list tasks**User A sees only their own task. All happy path steps pass. Now let me run the **BREAK phase**.Excellent — all break attempts properly blocked. Let me verify Alice's task is still intact after the attack attempts.Alice's task is completely unchanged. Now let me write the verdict.## Summary
+
+**All 8 steps passed. Story: PASSED ✅**
+
+The task manager correctly implements data isolation between users:
+
+1. **User A** registered, created "Alice private task" — task properly associated with User A
+2. **User B** registered, created "Bob private task" — task properly associated with User B
+3. **List isolation**: Each user only sees their own tasks when listing
+4. **Direct access isolation**: User B gets 403 Forbidden when trying to access User A's task by ID
+5. **Auth protection**: Unauthenticated requests get 401 Unauthorized
+
+**Break phase findings**: No vulnerabilities found. PUT, DELETE, and GET attempts on cross-user resources all properly blocked with 403. Unauthenticated access blocked with 401. Data integrity verified — Alice's task was unchanged after all attack attempts.

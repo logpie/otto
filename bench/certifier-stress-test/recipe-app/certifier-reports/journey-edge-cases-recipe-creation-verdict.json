@@ -1,0 +1,102 @@
+{
+  "story_passed": false,
+  "blocked_at": "Step 2: Try to create a recipe with all required fields left empty",
+  "summary": "The recipe app fails edge case testing primarily due to complete absence of input validation. Creating a recipe with all empty fields succeeds (200) instead of returning validation errors. The API accepts empty strings for title/ingredients/instructions, negative numbers for prepTime/cookTime/servings, and 10,000+ character strings in every field. Special characters (emoji, unicode, HTML tags) are stored and rendered safely thanks to React's default escaping, and boundary values (0 prep/cook time, 1 serving) work correctly. The ingredients field has a persistent bug where values are double-quoted on storage (e.g., 'Water' becomes '\"Water\"'). Search with special characters works without crashing but appears to return all recipes rather than filtering.",
+  "diagnosis": "No server-side validation exists on the recipe creation endpoint. The API passes all input directly to the database without checking for required fields, field lengths, value ranges, or data types (string for numeric fields returns 500).",
+  "fix_suggestion": "Add comprehensive server-side validation on POST /api/recipes: require non-empty title/ingredients/instructions, enforce max length on string fields (e.g., 255 for title, 5000 for description), validate numeric fields are non-negative integers, and return 400 with field-level error messages. Fix the ingredients double-quoting bug. Return proper JSON error bodies on all error paths instead of empty 500 responses.",
+  "steps": [
+    {
+      "action": "Logged in as alice@example.com using NextAuth CSRF flow",
+      "outcome": "pass",
+      "verification": "GET /api/auth/session returned user with email alice@example.com and valid session expiry",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "Attempted to create a recipe with empty body {} and with all fields as empty strings",
+      "outcome": "fail",
+      "verification": "Empty body {} returned 500 with no response body (should be 400 with validation errors). Empty strings returned 200 and created a recipe with blank title/ingredients/instructions — no validation whatsoever.",
+      "diagnosis": "No input validation on the recipe creation endpoint. Missing fields cause an unhandled database error (500). Empty strings are accepted without any required-field checks.",
+      "fix_suggestion": "Add server-side validation requiring non-empty title, ingredients, and instructions. Return 400 with a JSON body containing field-level error messages (e.g., {\"errors\": {\"title\": \"Title is required\"}})."
+    },
+    {
+      "action": "Created a recipe with 1001-char title, emoji/unicode description ('Grandma's 🍪 Cookie Recipe — café style «delicious»'), and special chars in ingredients ('<script>alert(1)</script>', '½ cup flour')",
+      "outcome": "pass",
+      "verification": "Recipe created (200). Title stored at full 1001 chars. Emoji (🍪) and unicode (café, «», —) preserved in description. Script tag stored as text. React RSC payload escapes <script> as \\u003cscript\\u003e preventing XSS. Unicode fractions (½, ⅓) preserved. Recipe detail page renders without errors.",
+      "diagnosis": null,
+      "fix_suggestion": "Consider adding max length validation on title (e.g., 255 chars) to prevent UI layout issues with extremely long titles."
+    },
+    {
+      "action": "Searched for recipes using emoji (🍪) and special characters (<script>)",
+      "outcome": "pass",
+      "verification": "Both searches returned 200 without server errors. Emoji search returned results. Script tag search returned 200. No crashes or 500 errors from special character queries.",
+      "diagnosis": null,
+      "fix_suggestion": "Search appears to return all recipes regardless of query — verify search filtering logic actually matches against the query parameter."
+    },
+    {
+      "action": "Created a recipe with prepTime=0, cookTime=0, servings=1",
+      "outcome": "pass",
+      "verification": "Recipe created (200). GET /api/recipes/{id} confirmed prepTime=0, cookTime=0, servings=1 — boundary values preserved correctly.",
+      "diagnosis": null,
+      "fix_suggestion": null
+    }
+  ],
+  "break_findings": [
+    {
+      "technique": "empty_required",
+      "description": "Submitted recipe with all fields as empty strings",
+      "result": "Recipe created successfully with blank title, ingredients, instructions. No validation errors returned.",
+      "severity": "high",
+      "fix_suggestion": "Add required field validation on POST /api/recipes for title, ingredients, and instructions. Return 400 with field-level errors."
+    },
+    {
+      "technique": "empty_required",
+      "description": "Submitted recipe with empty body {}",
+      "result": "Server returned 500 with no response body instead of a 400 validation error",
+      "severity": "high",
+      "fix_suggestion": "Handle missing fields gracefully — return 400 with descriptive error message instead of letting the database error propagate as 500."
+    },
+    {
+      "technique": "special_chars",
+      "description": "Submitted negative values for prepTime (-100), cookTime (-50), servings (-5)",
+      "result": "Recipe created successfully with negative values stored in database",
+      "severity": "moderate",
+      "fix_suggestion": "Validate that prepTime, cookTime >= 0 and servings >= 1"
+    },
+    {
+      "technique": "long_input",
+      "description": "Submitted 10,000 characters in every field (title, description, ingredients, instructions, category)",
+      "result": "Recipe created successfully with no length limits enforced",
+      "severity": "moderate",
+      "fix_suggestion": "Add maximum length constraints on all string fields (e.g., title: 255, description: 5000, etc.)"
+    },
+    {
+      "technique": "special_chars",
+      "description": "Submitted string values ('not_a_number') for numeric fields prepTime, cookTime, servings",
+      "result": "Server returned 500 with no error message — type coercion fails silently",
+      "severity": "moderate",
+      "fix_suggestion": "Validate field types before database insertion. Return 400 with clear message about expected types."
+    },
+    {
+      "technique": "empty_required",
+      "description": "Submitted null values for all fields",
+      "result": "Server returned 500 — null handling not implemented",
+      "severity": "moderate",
+      "fix_suggestion": "Handle null values in request body gracefully with proper validation"
+    },
+    {
+      "technique": "double_submit",
+      "description": "Sent two identical POST /api/recipes requests simultaneously",
+      "result": "Both requests succeeded (200), creating duplicate recipes with identical content",
+      "severity": "low",
+      "fix_suggestion": "Consider adding idempotency keys or duplicate detection for recipe creation"
+    },
+    {
+      "technique": "special_chars",
+      "description": "Ingredients field values are double-quoted on storage ('Water' becomes '\"Water\"', '<script>...' becomes '\"<script>...\"')",
+      "result": "Persistent data corruption — all ingredients have extra wrapping quotes",
+      "severity": "moderate",
+      "fix_suggestion": "Fix the ingredients field serialization in the API — likely JSON.stringify is being applied twice or the field is being quoted before database insertion"
+    }
+  ]
+}

@@ -1,0 +1,74 @@
+{
+  "story_passed": true,
+  "blocked_at": null,
+  "summary": "All edge case tests passed. The task manager properly validates empty/null/whitespace-only titles with clear error messages. Long titles (1500 chars) are preserved without truncation. Special characters including emoji, unicode, and HTML script tags are stored correctly. The API uses Prisma ORM which prevents SQL injection. React's JSX auto-escaping prevents XSS from stored HTML tags. Double-submit creates duplicate entries (expected without idempotency), but both are valid. No server errors or data corruption observed in any scenario.",
+  "diagnosis": null,
+  "fix_suggestion": null,
+  "steps": [
+    {
+      "action": "Logged in as alice@example.com via NextAuth CSRF + credentials flow",
+      "outcome": "pass",
+      "verification": "Session endpoint returned user with name 'Alice Johnson', email 'alice@example.com', valid expiry date",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "Attempted to create task with empty title ('') and no description",
+      "outcome": "pass",
+      "verification": "API returned {\"error\": \"Title is required\"} for both empty string and missing title field",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "Created task with 1500-character title (repeated 'A's) and normal description",
+      "outcome": "pass",
+      "verification": "Task created successfully with id cmnfdirlj001foo2rgqjvosyv, returned title length was exactly 1500 characters - no truncation",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "Created task with emoji (🎯📋), unicode (cafe, naive), and HTML script tags in title",
+      "outcome": "pass",
+      "verification": "Task created with id cmnfdiwmf001hoo2r6bckgzu0. GET request confirmed emoji, unicode, and <script> tag all preserved in storage. React auto-escapes JSX preventing XSS execution.",
+      "diagnosis": null,
+      "fix_suggestion": null
+    },
+    {
+      "action": "Sent two concurrent POST requests to create identical tasks (double submit)",
+      "outcome": "pass",
+      "verification": "Both requests succeeded, creating two separate tasks with distinct IDs (cmnfdjck0001poo2rtkyr8i3c and cmnfdjcjz001noo2rpk3l2ltz). Both are valid and retrievable. No server errors or data corruption.",
+      "diagnosis": null,
+      "fix_suggestion": null
+    }
+  ],
+  "break_findings": [
+    {
+      "technique": "empty_required",
+      "description": "Tested whitespace-only title ('   ') and null title value",
+      "result": "Both correctly rejected with 'Title is required' error. Validation trims whitespace before checking.",
+      "severity": "none",
+      "fix_suggestion": "None needed - validation handles these cases properly"
+    },
+    {
+      "technique": "long_input",
+      "description": "Submitted a task with a 100KB (100,000 character) description",
+      "result": "Task was created and stored successfully with no size limit enforcement",
+      "severity": "low",
+      "fix_suggestion": "Consider adding a max length validation on description (e.g., 10,000 chars) to prevent abuse and database bloat"
+    },
+    {
+      "technique": "special_chars",
+      "description": "Tested SQL injection ('; DROP TABLE Task; --) and zero-width/RTL override unicode characters",
+      "result": "SQL injection safely stored as literal text (Prisma ORM uses parameterized queries). Zero-width and RTL override characters accepted without sanitization.",
+      "severity": "low",
+      "fix_suggestion": "Consider sanitizing invisible unicode characters (zero-width joiners, RTL overrides) that could cause display confusion"
+    },
+    {
+      "technique": "double_submit",
+      "description": "Sent two concurrent identical task creation requests",
+      "result": "Both requests succeeded, creating duplicate entries with the same title/description but different IDs",
+      "severity": "low",
+      "fix_suggestion": "Consider adding client-side debounce on submit button to prevent accidental duplicates. Server-side idempotency keys could be added for API consumers."
+    }
+  ]
+}

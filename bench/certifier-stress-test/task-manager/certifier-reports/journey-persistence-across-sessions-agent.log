@@ -1,0 +1,36 @@
+I'll execute this user story step by step, verifying data persistence across logout and login.
+
+Now let me start executing the story. First, let me get a CSRF token and log in.
+
+## Step 1: Log in as a seed userThe redirect to `signin?csrf=true` suggests the CSRF token needs to match. Let me get a fresh CSRF token and use it properly with cookies.Login succeeded — got a `session-token` cookie. Let me verify the session:Session confirmed for Alice Johnson. ✅
+
+## Step 2: Create a taskTask created successfully with ID `cmnfgtiuo000koopgm4dokerp`. All fields match. ✅
+
+## Step 3: Log out completelySession token cleared (`Max-Age=0`). Let me verify the session is gone:Empty session — logged out confirmed. ✅ Let me also verify the tasks API is no longer accessible:Good — 401 Unauthorized after logout. ✅
+
+## Step 4: Log back in with the same credentialsNew session token received. Let me verify:Re-login successful with new session. ✅
+
+## Step 5: View the task list and verify persistenceLarge output — let me search for our specific task:All fields match exactly:
+- ✅ title: "Persistence Test Task"
+- ✅ description: "This should survive logout"
+- ✅ status: "IN_PROGRESS"
+- ✅ dueDate: "2026-04-08T03:07:24.000Z"
+- ✅ Same user ID
+
+## BREAK PHASE: back_after_submit
+
+Let me try the browser back button scenario via API — create a task, then try to re-submit it (simulating double/back-after-submit):Both duplicate tasks were created — no idempotency protection. This is a minor quality issue (common for task apps, but worth noting).
+
+Now let me write the verdict:## Summary
+
+**Story: PASSED ✅**
+
+All 5 steps completed successfully:
+
+1. **Login** — Alice authenticated via NextAuth credentials flow
+2. **Create task** — Task created with all specified fields (title, description, IN_PROGRESS status, due date)
+3. **Logout** — Session fully terminated (cookie cleared, API returns 401)
+4. **Re-login** — New session established for same user
+5. **Verify persistence** — Task found with all fields intact — title, description, status, and due date all match exactly
+
+**Break finding:** Double-submit creates duplicate tasks (low severity — no idempotency protection). This is expected behavior for a basic task manager but worth noting.

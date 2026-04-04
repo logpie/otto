@@ -1,0 +1,866 @@
+{
+  "intent": "task manager with user auth, CRUD tasks with title/description/status/due date, user isolation, filter by status, sort by due date",
+  "claims": [
+    {
+      "id": "auth-register",
+      "description": "A new user can register an account with credentials",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "candidate_paths": [
+            "/api/register",
+            "/api/auth/register",
+            "/api/users",
+            "/register",
+            "/api/signup",
+            "/api/auth/signup"
+          ],
+          "body": {
+            "username": "alice",
+            "email": "alice@example.com",
+            "password": "SecurePass123!"
+          },
+          "body_variants": [
+            {
+              "username": "alice",
+              "password": "SecurePass123!"
+            },
+            {
+              "email": "alice@example.com",
+              "password": "SecurePass123!"
+            }
+          ],
+          "expect_status": [
+            200,
+            201
+          ],
+          "expect_body_contains": [
+            "alice"
+          ]
+        }
+      ],
+      "hard_fail": true
+    },
+    {
+      "id": "auth-login",
+      "description": "A registered user can log in and receive an auth token or session",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "candidate_paths": [
+            "/api/login",
+            "/api/auth/login",
+            "/login",
+            "/api/auth/token",
+            "/api/sessions"
+          ],
+          "body": {
+            "username": "alice",
+            "password": "SecurePass123!"
+          },
+          "body_variants": [
+            {
+              "email": "alice@example.com",
+              "password": "SecurePass123!"
+            }
+          ],
+          "expect_status": [
+            200
+          ],
+          "expect_json_keys": [
+            "token"
+          ]
+        }
+      ],
+      "hard_fail": true
+    },
+    {
+      "id": "auth-reject-invalid",
+      "description": "Login with wrong credentials is rejected",
+      "priority": "important",
+      "category": "security",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "candidate_paths": [
+            "/api/login",
+            "/api/auth/login",
+            "/login",
+            "/api/auth/token"
+          ],
+          "body": {
+            "username": "alice",
+            "password": "WrongPassword999"
+          },
+          "body_variants": [
+            {
+              "email": "alice@example.com",
+              "password": "WrongPassword999"
+            }
+          ],
+          "expect_status": [
+            401,
+            403,
+            400
+          ]
+        }
+      ],
+      "hard_fail": false
+    },
+    {
+      "id": "task-create",
+      "description": "An authenticated user can create a task with title, description, status, and due date",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "candidate_paths": [
+            "/api/tasks",
+            "/api/task",
+            "/tasks"
+          ],
+          "body": {
+            "title": "Buy groceries",
+            "description": "Milk, eggs, bread",
+            "status": "open",
+            "due_date": "2026-04-15"
+          },
+          "body_variants": [
+            {
+              "title": "Buy groceries",
+              "description": "Milk, eggs, bread",
+              "status": "open",
+              "dueDate": "2026-04-15"
+            },
+            {
+              "title": "Buy groceries",
+              "description": "Milk, eggs, bread",
+              "status": "pending",
+              "due_date": "2026-04-15"
+            }
+          ],
+          "expect_status": [
+            200,
+            201
+          ],
+          "expect_body_contains": [
+            "Buy groceries"
+          ],
+          "expect_json_keys": [
+            "id",
+            "title"
+          ]
+        }
+      ],
+      "hard_fail": true
+    },
+    {
+      "id": "task-read",
+      "description": "An authenticated user can retrieve a specific task by ID",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "GET",
+          "candidate_paths": [
+            "/api/tasks/{id}",
+            "/api/task/{id}",
+            "/tasks/{id}"
+          ],
+          "expect_status": [
+            200
+          ],
+          "expect_body_contains": [
+            "Buy groceries"
+          ],
+          "expect_json_keys": [
+            "id",
+            "title",
+            "description",
+            "status"
+          ]
+        }
+      ],
+      "hard_fail": true
+    },
+    {
+      "id": "task-list",
+      "description": "An authenticated user can list all their tasks",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "candidate_paths": [
+            "/api/tasks",
+            "/api/task",
+            "/tasks"
+          ],
+          "body": {
+            "title": "Pay rent",
+            "description": "Due on Friday",
+            "status": "open",
+            "due_date": "2026-04-01"
+          },
+          "body_variants": [
+            {
+              "title": "Pay rent",
+              "description": "Due on Friday",
+              "status": "open",
+              "dueDate": "2026-04-01"
+            }
+          ],
+          "expect_status": [
+            200,
+            201
+          ]
+        },
+        {
+          "action": "http",
+          "method": "GET",
+          "candidate_paths": [
+            "/api/tasks",
+            "/api/task",
+            "/tasks"
+          ],
+          "expect_status": [
+            200
+          ],
+          "expect_body_contains": [
+            "Buy groceries",
+            "Pay rent"
+          ]
+        }
+      ],
+      "hard_fail": true
+    },
+    {
+      "id": "task-update",
+      "description": "An authenticated user can update a task's fields",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "PUT",
+          "candidate_paths": [
+            "/api/tasks/{id}",
+            "/api/task/{id}",
+            "/tasks/{id}"
+          ],
+          "body": {
+            "title": "Buy groceries updated",
+            "status": "done"
+          },
+          "body_variants": [
+            {
+              "title": "Buy groceries updated",
+              "status": "completed"
+            },
+            {
+              "title": "Buy groceries updated",
+              "status": "complete"
+            }
+          ],
+          "expect_status": [
+            200
+          ],
+          "expect_body_contains": [
+            "Buy groceries updated"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "GET",
+          "candidate_paths": [
+            "/api/tasks/{id}",
+            "/api/task/{id}",
+            "/tasks/{id}"
+          ],
+          "expect_status": [
+            200
+          ],
+          "expect_body_contains": [
+            "Buy groceries updated"
+          ]
+        }
+      ],
+      "hard_fail": true
+    },
+    {
+      "id": "task-delete",
+      "description": "An authenticated user can delete a task",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "DELETE",
+          "candidate_paths": [
+            "/api/tasks/{id}",
+            "/api/task/{id}",
+            "/tasks/{id}"
+          ],
+          "expect_status": [
+            200,
+            204
+          ]
+        },
+        {
+          "action": "http",
+          "method": "GET",
+          "candidate_paths": [
+            "/api/tasks/{id}",
+            "/api/task/{id}",
+            "/tasks/{id}"
+          ],
+          "expect_status": [
+            404
+          ]
+        }
+      ],
+      "hard_fail": true
+    },
+    {
+      "id": "task-fields-persistence",
+      "description": "All four fields (title, description, status, due date) are persisted and returned",
+      "priority": "critical",
+      "category": "data",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "candidate_paths": [
+            "/api/tasks",
+            "/api/task",
+            "/tasks"
+          ],
+          "body": {
+            "title": "File taxes",
+            "description": "Federal and state",
+            "status": "open",
+            "due_date": "2026-04-15"
+          },
+          "body_variants": [
+            {
+              "title": "File taxes",
+              "description": "Federal and state",
+              "status": "open",
+              "dueDate": "2026-04-15"
+            },
+            {
+              "title": "File taxes",
+              "description": "Federal and state",
+              "status": "pending",
+              "due_date": "2026-04-15"
+            }
+          ],
+          "expect_status": [
+            200,
+            201
+          ],
+          "expect_body_contains": [
+            "File taxes",
+            "Federal and state",
+            "2026-04-15"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "GET",
+          "candidate_paths": [
+            "/api/tasks/{id}",
+            "/api/task/{id}",
+            "/tasks/{id}"
+          ],
+          "expect_status": [
+            200
+          ],
+          "expect_body_contains": [
+            "File taxes",
+            "Federal and state",
+            "2026-04-15"
+          ]
+        }
+      ],
+      "hard_fail": true
+    },
+    {
+      "id": "user-isolation",
+      "description": "A user cannot see or modify another user's tasks",
+      "priority": "critical",
+      "category": "security",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "candidate_paths": [
+            "/api/register",
+            "/api/auth/register",
+            "/api/users",
+            "/register",
+            "/api/signup",
+            "/api/auth/signup"
+          ],
+          "body": {
+            "username": "bob",
+            "email": "bob@example.com",
+            "password": "BobSecure456!"
+          },
+          "body_variants": [
+            {
+              "username": "bob",
+              "password": "BobSecure456!"
+            },
+            {
+              "email": "bob@example.com",
+              "password": "BobSecure456!"
+            }
+          ],
+          "expect_status": [
+            200,
+            201
+          ]
+        },
+        {
+          "action": "http",
+          "method": "POST",
+          "candidate_paths": [
+            "/api/login",
+            "/api/auth/login",
+            "/login",
+            "/api/auth/token"
+          ],
+          "body": {
+            "username": "bob",
+            "password": "BobSecure456!"
+          },
+          "body_variants": [
+            {
+              "email": "bob@example.com",
+              "password": "BobSecure456!"
+            }
+          ],
+          "expect_status": [
+            200
+          ]
+        },
+        {
+          "action": "http",
+          "method": "GET",
+          "candidate_paths": [
+            "/api/tasks",
+            "/api/task",
+            "/tasks"
+          ],
+          "expect_status": [
+            200
+          ],
+          "expect_body_contains": [
+            "[]"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "GET",
+          "candidate_paths": [
+            "/api/tasks/{alice_task_id}",
+            "/api/task/{alice_task_id}",
+            "/tasks/{alice_task_id}"
+          ],
+          "expect_status": [
+            403,
+            404
+          ]
+        }
+      ],
+      "hard_fail": true
+    },
+    {
+      "id": "filter-by-status",
+      "description": "Tasks can be filtered by status via query parameter",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "candidate_paths": [
+            "/api/tasks",
+            "/api/task",
+            "/tasks"
+          ],
+          "body": {
+            "title": "Completed task",
+            "description": "Already done",
+            "status": "done",
+            "due_date": "2026-03-01"
+          },
+          "body_variants": [
+            {
+              "title": "Completed task",
+              "description": "Already done",
+              "status": "completed",
+              "due_date": "2026-03-01"
+            },
+            {
+              "title": "Completed task",
+              "description": "Already done",
+              "status": "complete",
+              "dueDate": "2026-03-01"
+            }
+          ],
+          "expect_status": [
+            200,
+            201
+          ]
+        },
+        {
+          "action": "http",
+          "method": "GET",
+          "candidate_paths": [
+            "/api/tasks?status=open",
+            "/api/tasks?status=pending",
+            "/api/task?status=open",
+            "/tasks?status=open"
+          ],
+          "expect_status": [
+            200
+          ],
+          "expect_body_contains": [
+            "Pay rent"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "GET",
+          "candidate_paths": [
+            "/api/tasks?status=done",
+            "/api/tasks?status=completed",
+            "/api/tasks?status=complete",
+            "/api/task?status=done",
+            "/tasks?status=done"
+          ],
+          "expect_status": [
+            200
+          ],
+          "expect_body_contains": [
+            "Completed task"
+          ]
+        }
+      ],
+      "hard_fail": true
+    },
+    {
+      "id": "sort-by-due-date",
+      "description": "Tasks can be sorted by due date",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "GET",
+          "candidate_paths": [
+            "/api/tasks?sort=due_date",
+            "/api/tasks?sort=dueDate",
+            "/api/tasks?sort_by=due_date",
+            "/api/tasks?sortBy=dueDate",
+            "/api/tasks?order_by=due_date",
+            "/api/tasks?orderBy=dueDate",
+            "/tasks?sort=due_date"
+          ],
+          "expect_status": [
+            200
+          ],
+          "expect_body_contains": [
+            "Pay rent",
+            "File taxes"
+          ]
+        }
+      ],
+      "hard_fail": true
+    },
+    {
+      "id": "auth-protected-routes",
+      "description": "Task endpoints reject unauthenticated requests",
+      "priority": "critical",
+      "category": "security",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "GET",
+          "candidate_paths": [
+            "/api/tasks",
+            "/api/task",
+            "/tasks"
+          ],
+          "expect_status": [
+            401,
+            403
+          ]
+        },
+        {
+          "action": "http",
+          "method": "POST",
+          "candidate_paths": [
+            "/api/tasks",
+            "/api/task",
+            "/tasks"
+          ],
+          "body": {
+            "title": "Sneaky task",
+            "description": "No auth",
+            "status": "open"
+          },
+          "expect_status": [
+            401,
+            403
+          ]
+        }
+      ],
+      "hard_fail": true
+    },
+    {
+      "id": "task-create-validation",
+      "description": "Creating a task without required fields returns an error",
+      "priority": "important",
+      "category": "error-handling",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "candidate_paths": [
+            "/api/tasks",
+            "/api/task",
+            "/tasks"
+          ],
+          "body": {},
+          "expect_status": [
+            400,
+            422
+          ]
+        },
+        {
+          "action": "http",
+          "method": "POST",
+          "candidate_paths": [
+            "/api/tasks",
+            "/api/task",
+            "/tasks"
+          ],
+          "body": {
+            "description": "Missing title"
+          },
+          "expect_status": [
+            400,
+            422
+          ]
+        }
+      ],
+      "hard_fail": false
+    },
+    {
+      "id": "task-not-found",
+      "description": "Requesting a non-existent task returns 404",
+      "priority": "important",
+      "category": "error-handling",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "GET",
+          "candidate_paths": [
+            "/api/tasks/99999",
+            "/api/task/99999",
+            "/tasks/99999",
+            "/api/tasks/nonexistent",
+            "/api/task/nonexistent",
+            "/tasks/nonexistent"
+          ],
+          "expect_status": [
+            404
+          ]
+        }
+      ],
+      "hard_fail": false
+    },
+    {
+      "id": "auth-register-duplicate",
+      "description": "Registering with an already-taken username or email is rejected",
+      "priority": "important",
+      "category": "error-handling",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "candidate_paths": [
+            "/api/register",
+            "/api/auth/register",
+            "/api/users",
+            "/register",
+            "/api/signup",
+            "/api/auth/signup"
+          ],
+          "body": {
+            "username": "alice",
+            "email": "alice@example.com",
+            "password": "SecurePass123!"
+          },
+          "body_variants": [
+            {
+              "username": "alice",
+              "password": "SecurePass123!"
+            },
+            {
+              "email": "alice@example.com",
+              "password": "SecurePass123!"
+            }
+          ],
+          "expect_status": [
+            400,
+            409,
+            422
+          ]
+        }
+      ],
+      "hard_fail": false
+    },
+    {
+      "id": "task-update-partial",
+      "description": "A task can be partially updated without overwriting other fields",
+      "priority": "important",
+      "category": "feature",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "PATCH",
+          "candidate_paths": [
+            "/api/tasks/{id}",
+            "/api/task/{id}",
+            "/tasks/{id}"
+          ],
+          "body": {
+            "status": "in-progress"
+          },
+          "body_variants": [
+            {
+              "status": "in_progress"
+            },
+            {
+              "status": "active"
+            }
+          ],
+          "expect_status": [
+            200
+          ]
+        },
+        {
+          "action": "http",
+          "method": "GET",
+          "candidate_paths": [
+            "/api/tasks/{id}",
+            "/api/task/{id}",
+            "/tasks/{id}"
+          ],
+          "expect_status": [
+            200
+          ],
+          "expect_body_contains": [
+            "File taxes",
+            "Federal and state"
+          ]
+        }
+      ],
+      "hard_fail": false
+    },
+    {
+      "id": "user-isolation-modify",
+      "description": "A user cannot update or delete another user's task",
+      "priority": "critical",
+      "category": "security",
+      "test_approach": "api",
+      "test_steps": [
+        {
+          "action": "http",
+          "method": "PUT",
+          "candidate_paths": [
+            "/api/tasks/{alice_task_id}",
+            "/api/task/{alice_task_id}",
+            "/tasks/{alice_task_id}"
+          ],
+          "body": {
+            "title": "Hacked task",
+            "status": "done"
+          },
+          "expect_status": [
+            403,
+            404
+          ]
+        },
+        {
+          "action": "http",
+          "method": "DELETE",
+          "candidate_paths": [
+            "/api/tasks/{alice_task_id}",
+            "/api/task/{alice_task_id}",
+            "/tasks/{alice_task_id}"
+          ],
+          "expect_status": [
+            403,
+            404
+          ]
+        }
+      ],
+      "hard_fail": true
+    }
+  ],
+  "non_goals": [
+    "team/shared task lists",
+    "real-time collaboration",
+    "notifications or reminders",
+    "recurring tasks",
+    "file attachments",
+    "task comments or notes",
+    "calendar integration",
+    "mobile app",
+    "task priority/tags",
+    "admin panel"
+  ],
+  "ambiguities": [
+    "unclear what valid status values are (e.g., open/in-progress/done vs pending/completed)",
+    "unclear whether due date is required or optional when creating a task",
+    "unclear whether sort by due date is ascending-only or toggleable",
+    "unclear whether auth means session-based or token-based",
+    "unclear whether registration is self-serve or pre-provisioned"
+  ],
+  "product_type_hint": "web",
+  "compiled_at": "2026-03-31 10:08:40",
+  "cost_usd": 0.19919525
+}

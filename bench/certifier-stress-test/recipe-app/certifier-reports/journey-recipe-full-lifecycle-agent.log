@@ -1,0 +1,34 @@
+I'll execute this user story step by step. Let me start by logging in and then working through the full recipe lifecycle.
+
+Now let me execute the steps. First, let me get the CSRF token and log in.
+
+**Step 1: Log in with an existing user account**The redirect to `signin?csrf=true` suggests the CSRF token was wrong. Let me get a fresh token and use the same cookie jar.Login succeeded — redirect to `/` (home page) instead of back to signin. Now let me verify the session is active.Session is active for Alice Johnson. Let me proceed to Step 2.
+
+**Step 2: Create a recipe titled 'Banana Bread'**Recipe created successfully with ID `cmnfcx2lg000nr2w0y4r70k5x`. I notice the ingredients field has extra quotes around it (`"\"bananas, flour, sugar, eggs, butter\""`) — a minor issue but I'll note it. Let me save the recipe ID and proceed.
+
+**Step 3: Edit the recipe — change servings to 12 and add walnuts**Update succeeded — servings is now 12 and ingredients includes walnuts. The `updatedAt` timestamp changed, confirming a real update. Other fields remain unchanged.
+
+**Step 4: View the recipe detail page fresh**Edits persisted — servings is 12, ingredients includes walnuts, all other fields unchanged.
+
+**Step 5: Delete the recipe**Delete succeeded. Let me verify it's gone.
+
+**Step 6: Try to view the deleted recipe**Proper 404 response. Also confirm it's not in the listings:All 6 happy path steps passed. Now let me run the BREAK phase.
+
+**BREAK Phase**Double submit created two duplicate recipes. No idempotency protection.Session may have expired. Let me re-authenticate.No optimistic locking — last write wins silently. Both updates succeeded with no conflict detection.Interesting — updating a deleted recipe returns 403 (Forbidden) instead of 404 (Not Found). This is a minor issue — 404 would be more semantically correct, but the operation is properly rejected.
+
+Now let me write the verdict file.## Summary
+
+**All 6 steps passed.** The full recipe lifecycle works correctly:
+
+1. ✅ **Login** — NextAuth CSRF flow works, session established for Alice Johnson
+2. ✅ **Create** — Banana Bread recipe created with all fields, ID returned
+3. ✅ **Edit** — Servings updated to 12, walnuts added to ingredients, other fields unchanged
+4. ✅ **Verify persistence** — Fresh GET confirmed all edits persisted in database
+5. ✅ **Delete** — Recipe deleted successfully, gone from listings
+6. ✅ **Verify deletion** — Proper 404 Not Found response for deleted recipe
+
+**BREAK findings (4 observations):**
+- **Double submit**: No idempotency — duplicate recipes created (low severity)
+- **Concurrent modify**: No optimistic locking — last write wins silently (low severity)
+- **Back after delete**: Returns 403 instead of 404 for deleted resource updates (low severity)
+- **Data integrity**: Ingredients field gets double-quoted on storage — `"\"value\""` instead of `"value"` (moderate severity)

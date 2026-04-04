@@ -1,0 +1,41 @@
+I'll execute this user story step by step. Let me start by getting the CSRF token and logging in.
+
+Now let me start executing the steps. First, let me get the CSRF token and log in as Alice.
+
+**Step 1: Log in as an existing user (Alice)**The CSRF token needs to come from the same cookie session. Let me redo the flow properly:Login successful - got a session token. Let me verify the session:Alice is authenticated. User ID: `cmnedefsy0000zlfic33odijg`.
+
+**Step 2: Create a recipe "Overnight Oats"**Recipe created with ID `cmnfd3t1m0011r2w04gv6xskh`. I notice the ingredients field has extra quotes around it (`"\"oats, milk, yogurt, honey, berries\""`), but the data is there.
+
+**Step 3: Find a recipe by a different user and rate it 4/5**
+
+First, I need Bob to have a recipe. Let me check existing recipes:Good - there are recipes by another user (`cmnedefuj0001zlfiq8qdrpbn`, which is Bob). Let me rate "Classic Margherita Pizza" by the other test user:Rating recorded. Let me verify by fetching the recipe:Rating is visible. The recipe has `ratings: [{value: 4, userId: "cmnedefsy0000zlfic33odijg"}]`.
+
+**Step 4: Favorite the rated recipe**Favorited. Let me verify:Both favorite and rating are recorded.
+
+**Step 5: Log out completely**Session cookie cleared. Let me verify:Empty session - logged out successfully.
+
+**Step 6: Log back in with the same credentials**Logged back in as Alice with the same user ID.
+
+**Step 7: Check that 'Overnight Oats' still exists**Recipe persists with all original fields: title "Overnight Oats", prepTime 10, cookTime 0, servings 2, correct author.
+
+**Step 8: Check favorites and rating persist**All data persists. Now let me do the **BREAK phase**:
+
+**BREAK: back_after_submit - Browser back button after recipe creation**Both went through - duplicate recipes created. No idempotency protection.Interesting - the favorite endpoint toggles. So pressing "back and submit again" would unfavorite. That's a UX risk with the back_after_submit pattern.Re-rating returns the same rating ID (upsert behavior) — good, no duplicates for ratings.
+
+Now let me write the verdict:## Summary
+
+**All 8 steps passed.** The user story "Recipes, Ratings, and Favorites Persist Across Logout" works correctly:
+
+1. ✅ **Login** — Alice authenticated via NextAuth credentials flow
+2. ✅ **Create recipe** — "Overnight Oats" created with all specified fields
+3. ✅ **Rate another user's recipe** — Rated "Classic Margherita Pizza" 4/5
+4. ✅ **Favorite** — Recipe favorited successfully
+5. ✅ **Logout** — Session fully cleared
+6. ✅ **Re-login** — Same user, same ID
+7. ✅ **Recipe persists** — All fields intact after re-login
+8. ✅ **Favorites & rating persist** — Both survived the logout/login cycle
+
+### Break Findings:
+- **Double submit** (moderate): No idempotency — rapid duplicate POSTs create duplicate recipes
+- **Back after submit on favorites** (low): Favorite endpoint is a toggle, so resubmission unfavorites
+- **Ingredients quoting** (low): String values get double-quoted in storage (`"\"value\""`)

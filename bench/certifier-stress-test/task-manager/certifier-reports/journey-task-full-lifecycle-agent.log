@@ -1,0 +1,46 @@
+I'll execute this user story step by step. Let me start by logging in as Bob.
+
+Now let me start executing the steps. First, I'll get the CSRF token and log in as Bob.
+
+**Step 1: Log in as Bob**The page returned 200 but I see login/register links in the nav, suggesting the session might not be set. Let me verify the session:Session is active. Now let me fetch Bob's existing tasks:Step 1 passes. Bob is logged in and has 2 seed tasks.
+
+**Step 2: Create a task**Task created with ID `cmnfgom2g000coopgd2ucsboj`. All fields correct.
+
+**Step 3: Update status to IN_PROGRESS**Status updated to IN_PROGRESS, other fields unchanged. ✓
+
+**Step 4: Update title and description**Title and description updated, status remains IN_PROGRESS. ✓
+
+**Step 5: Update status to DONE**Status is now DONE. ✓
+
+**Step 6: Delete the task**Now verify it's gone:Task deleted and returns 404 on fetch. ✓
+
+**Step 7: View task list — verify deleted task gone, seed tasks remain**Only the 2 original seed tasks remain. Deleted task is gone. ✓
+
+All happy path steps pass. Now for the **BREAK phase**.
+
+**Break 1: Double Submit — create same task twice rapidly**Both created — duplicate entries. No idempotency protection.
+
+**Break 2: Concurrent modify — update same task simultaneously with conflicting data**Last-write-wins race condition — no optimistic concurrency control. The responses showed different statuses but final state is DONE.
+
+**Break 3: Delete already-deleted task (back_after_submit scenario)**Good — deleting a non-existent task returns 404 properly.
+
+**Break 4: Invalid status value**Good — validates status values properly.
+
+Now let me write the verdict:## Summary
+
+**All 7 steps passed.** The task lifecycle works correctly end-to-end:
+
+| Step | Result |
+|------|--------|
+| 1. Login as Bob | ✅ Session active, 2 seed tasks visible |
+| 2. Create task (TODO) | ✅ Correct fields, ID returned |
+| 3. Update → IN_PROGRESS | ✅ Status changed, other fields preserved |
+| 4. Edit title + description | ✅ Updated, status still IN_PROGRESS |
+| 5. Update → DONE | ✅ Status changed to DONE |
+| 6. Delete task | ✅ Deleted, 404 on re-fetch |
+| 7. List tasks | ✅ Only seed tasks remain |
+
+**Break findings:**
+- **Double submit**: Creates duplicate tasks (low severity — may be intentional for task managers)
+- **Concurrent modify**: Last-write-wins race condition, no conflict detection (low severity)
+- **Back after delete**: Handled correctly with 404 response

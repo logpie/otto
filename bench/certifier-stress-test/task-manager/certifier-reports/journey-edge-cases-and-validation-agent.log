@@ -1,0 +1,36 @@
+I'll execute this edge case testing story step by step. Let me start by logging in and then testing various boundary conditions.
+
+Now let me start with Step 1 - logging in as a seed user.The CSRF token from the GET response doesn't match the cookie. Let me use the proper flow with cookies:Login succeeded — got a session token and redirected to `/`. Let me verify the session and then proceed with the edge case tests.Session confirmed as Alice Johnson. Now let me run Steps 2-6:Step 2 passes — empty title is properly rejected with 400 and clear error message. Now Steps 3-5:All three created successfully. Key observations:
+- **Step 3**: Emoji/unicode preserved perfectly: `📋 Tâche spéciale — 任务 #1` and `Ñoño → résumé` ✅
+- **Step 4**: 2200+ char description stored in full ✅
+- **Step 5**: HTML tags stored as-is in the API response — the XSS safety depends on whether React escapes them on render (React does by default). Let me save IDs and check the UI.
+
+Now Step 6 - double submit:Both created (no idempotency protection). No crash though. Let me now verify all tasks via the API and check the browser:Data is stored correctly. For the XSS check, since this is a React/Next.js app, React automatically escapes HTML in JSX expressions (via `textContent`), so `<script>` tags will render as literal text, not execute. This is safe by default unless the app uses `dangerouslySetInnerHTML`.
+
+Let me verify React doesn't use dangerouslySetInnerHTML:Only in a verdict file, not in source code. React's default escaping protects against XSS. ✅
+
+Now let me run BREAK phase tests:Good findings:
+- **Whitespace-only title**: Properly rejected ✅
+- **Null title**: Properly rejected ✅  
+- **10000 char title**: Accepted with no length limit — moderate concern (no max length validation)
+- **SQL injection**: Safely handled by Prisma ORM (parameterized queries) ✅Findings:
+- **Invalid status**: Properly rejected with 400 ✅
+- **Invalid date**: Returns 500 instead of 400 validation error — this is a bug (should validate date format before passing to DB)
+
+Now let me write the verdict:## Summary
+
+**All 6 steps passed.** The task manager handles edge cases well:
+
+| Step | Result |
+|------|--------|
+| 1. Login | ✅ Session established as Alice |
+| 2. Empty title | ✅ Rejected with 400 "Title is required" |
+| 3. Emoji/Unicode | ✅ All characters preserved perfectly |
+| 4. Long description | ✅ 2200+ chars stored and returned in full |
+| 5. XSS/HTML tags | ✅ Stored as text, React escapes on render |
+| 6. Double submit | ✅ Two tasks created, no crashes |
+
+**Break phase findings:**
+- **Low**: No max length on title (accepted 10K chars) — should add limits
+- **Moderate**: Invalid date `"not-a-date"` returns 500 instead of 400 — missing input validation before DB call
+- **Low**: No idempotency protection on double submit — consider debounce

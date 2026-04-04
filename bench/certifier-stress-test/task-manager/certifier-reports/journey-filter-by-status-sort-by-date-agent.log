@@ -1,0 +1,17 @@
+I'll execute this user story step by step. Let me start by authenticating and then creating tasks.
+
+Now let me start with Step 1: Authentication. I need to get a CSRF token first, then log in.Step 1 passed — authenticated as Alice. Now let me create the 4 tasks. I'll compute the dates and create them.All 4 tasks created successfully. Now let me test filtering and sorting (Steps 6-8).There's a lot of pre-existing data from previous test runs. Let me verify my specific tasks are present and check the ordering more carefully.All happy path steps pass. Now let me run the BREAK phase tests.Good findings. Now let me write the verdict.**Verdict: PASS** ✅
+
+All 8 steps of the filter-and-sort user story passed successfully:
+
+1. **Authentication** — NextAuth CSRF flow worked correctly
+2. **Task creation (×4)** — All tasks created with correct statuses (TODO, DONE, IN_PROGRESS) and due dates
+3. **Filter by status** — `?status=TODO` correctly returned only TODO tasks, excluding DONE and IN_PROGRESS
+4. **Sort by due date** — `?sortBy=dueDate&sortOrder=asc` returned tasks in correct chronological order
+5. **Combined filter+sort** — `?status=TODO&sortBy=dueDate&sortOrder=asc` correctly filtered to 2 TODO tasks in date order
+
+**BREAK findings:**
+- **XSS stored (moderate)**: `<script>alert(1)</script>` accepted as task title without sanitization
+- **Empty status silently defaults (low)**: Empty string status silently defaults to TODO instead of rejecting
+- **Generic error for invalid dates (low)**: Returns "Failed to create task" instead of "Invalid date format"
+- SQL injection properly prevented by Prisma ORM, unicode/emoji handled well, missing/empty title properly rejected

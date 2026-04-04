@@ -1,0 +1,587 @@
+{
+  "product_dir": "/Users/yuxuan/work/cc-autonomous/.claude/worktrees/i2p/bench/certifier-stress-test/task-manager",
+  "intent": "task manager with user auth, CRUD tasks with title/description/status/due date, user isolation, filter by status, sort by due date",
+  "base_url": "http://localhost:4001",
+  "mode": "bound",
+  "score": "Journeys: 1/9 (11%), Steps: 13/21 (62%)",
+  "journeys_tested": 9,
+  "journeys_passed": 1,
+  "journeys_failed": 8,
+  "duration_s": 0.7,
+  "journeys": [
+    {
+      "name": "New User Creates And Manages Tasks",
+      "description": "A new user signs up, creates multiple tasks, verifies they persist, updates status, and deletes one",
+      "passed": false,
+      "stopped_at": "login",
+      "steps": [
+        {
+          "action": "register",
+          "detail": "POST /register \u2192 200",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T15:23:13Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4001/register",
+              "body": {
+                "email": "bound-549975dacb@eval.local",
+                "password": "***",
+                "name": "Bound Test User"
+              }
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "text": "<!DOCTYPE html><html lang=\"en\"><head><meta charSet=\"utf-8\"/><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/><link rel=\"stylesheet\" href=\"/_next/static/css/app/layout.css?v=1774995"
+              }
+            }
+          }
+        },
+        {
+          "action": "login",
+          "detail": "NextAuth login failed with HTTP 401",
+          "passed": false,
+          "error": "NextAuth login failed with HTTP 401",
+          "proof": {
+            "timestamp": "2026-03-31T15:23:13Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4001/api/auth/callback/credentials",
+              "body": {
+                "email": "bound-549975dacb@eval.local",
+                "password": "***",
+                "csrfToken": "8cd19d12228185f5f45e28f1ddd333e0a826086a1981320bced510d8f766e8e4",
+                "redirect": "false",
+                "json": "true"
+              }
+            },
+            "response": {
+              "status": 401,
+              "body": {
+                "url": "http://localhost:4001/api/auth/error?error=CredentialsSignin&provider=credentials"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Returning User Logs In And Sees Existing Tasks",
+      "description": "A returning user logs in and verifies their previously created tasks are still there",
+      "passed": false,
+      "stopped_at": "post",
+      "steps": [
+        {
+          "action": "register",
+          "detail": "POST /register \u2192 200",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T15:23:13Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4001/register",
+              "body": {
+                "email": "bound-d79649902b@eval.local",
+                "password": "***",
+                "name": "Bound Test User"
+              }
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "text": "<!DOCTYPE html><html lang=\"en\"><head><meta charSet=\"utf-8\"/><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/><link rel=\"stylesheet\" href=\"/_next/static/css/app/layout.css?v=1774995"
+              }
+            }
+          }
+        },
+        {
+          "action": "login",
+          "detail": "NextAuth session active for alice@example.com",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T15:23:13Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4001/api/auth/callback/credentials",
+              "body": {
+                "email": "alice@example.com",
+                "password": "***",
+                "csrfToken": "b3f3735ee047052d8b41f410f5c6365b8e85638dea115232afe7740e1206adcb",
+                "redirect": "false",
+                "json": "true"
+              }
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "url": "http://localhost:4001"
+              }
+            }
+          }
+        },
+        {
+          "action": "POST /api/tasks",
+          "detail": "HTTP 400",
+          "passed": false,
+          "error": "expected [200, 201], got 400",
+          "proof": {
+            "timestamp": "2026-03-31T15:23:13Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4001/api/tasks",
+              "body": {
+                "title": "Finish report",
+                "description": "Q1 quarterly report",
+                "status": "pending",
+                "dueDate": "2026-01-01T00:00:00Z"
+              }
+            },
+            "response": {
+              "status": 400,
+              "body": {
+                "error": "Invalid status"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Unauthenticated User Cannot Access Tasks",
+      "description": "A visitor without an account tries to access tasks and is denied",
+      "passed": true,
+      "stopped_at": "",
+      "steps": [
+        {
+          "action": "fresh_session",
+          "detail": "new unauthenticated session",
+          "passed": true,
+          "error": "",
+          "proof": null
+        },
+        {
+          "action": "GET /api/tasks",
+          "detail": "401",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T15:23:13Z",
+            "request": {
+              "method": "GET",
+              "url": "http://localhost:4001/api/tasks",
+              "body": null
+            },
+            "response": {
+              "status": 401,
+              "body": {
+                "error": "Unauthorized"
+              }
+            }
+          }
+        },
+        {
+          "action": "POST /api/tasks",
+          "detail": "401",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T15:23:13Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4001/api/tasks",
+              "body": {
+                "title": "Sneaky task",
+                "description": "Should not work",
+                "status": "TODO",
+                "dueDate": "2026-01-01T00:00:00Z"
+              }
+            },
+            "response": {
+              "status": 401,
+              "body": {
+                "error": "Unauthorized"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Admin Manages All Users Tasks",
+      "description": "An admin logs in and can view or manage tasks across all users",
+      "passed": false,
+      "stopped_at": "post",
+      "steps": [
+        {
+          "action": "register",
+          "detail": "POST /register \u2192 200",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T15:23:13Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4001/register",
+              "body": {
+                "email": "bound-aa1750461f@eval.local",
+                "password": "***",
+                "name": "Bound Test User"
+              }
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "text": "<!DOCTYPE html><html lang=\"en\"><head><meta charSet=\"utf-8\"/><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/><link rel=\"stylesheet\" href=\"/_next/static/css/app/layout.css?v=1774995"
+              }
+            }
+          }
+        },
+        {
+          "action": "login",
+          "detail": "NextAuth session active for alice@example.com",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T15:23:13Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4001/api/auth/callback/credentials",
+              "body": {
+                "email": "alice@example.com",
+                "password": "***",
+                "csrfToken": "0ca986ab127811c166e75aa9f9d0ba78095a9ff9d0d6a1415b50798a4f86d289",
+                "redirect": "false",
+                "json": "true"
+              }
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "url": "http://localhost:4001"
+              }
+            }
+          }
+        },
+        {
+          "action": "POST /api/tasks",
+          "detail": "HTTP 400",
+          "passed": false,
+          "error": "expected [200, 201], got 400",
+          "proof": {
+            "timestamp": "2026-03-31T15:23:13Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4001/api/tasks",
+              "body": {
+                "title": "User task for admin test",
+                "description": "Created by regular user",
+                "status": "pending",
+                "dueDate": "2026-01-01T00:00:00Z"
+              }
+            },
+            "response": {
+              "status": 400,
+              "body": {
+                "error": "Invalid status"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Task CRUD Full Lifecycle",
+      "description": "A user creates a task, reads it, updates every field, and deletes it, verifying each step",
+      "passed": false,
+      "stopped_at": "login",
+      "steps": [
+        {
+          "action": "register",
+          "detail": "POST /register \u2192 200",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T15:23:13Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4001/register",
+              "body": {
+                "email": "bound-45346bfaa9@eval.local",
+                "password": "***",
+                "name": "Bound Test User"
+              }
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "text": "<!DOCTYPE html><html lang=\"en\"><head><meta charSet=\"utf-8\"/><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/><link rel=\"stylesheet\" href=\"/_next/static/css/app/layout.css?v=1774995"
+              }
+            }
+          }
+        },
+        {
+          "action": "login",
+          "detail": "NextAuth login failed with HTTP 401",
+          "passed": false,
+          "error": "NextAuth login failed with HTTP 401",
+          "proof": {
+            "timestamp": "2026-03-31T15:23:13Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4001/api/auth/callback/credentials",
+              "body": {
+                "email": "bound-45346bfaa9@eval.local",
+                "password": "***",
+                "csrfToken": "458a714079d642cd151d7dd686da2bdac9faa9c2062e54d768d1eef2770ef6d5",
+                "redirect": "false",
+                "json": "true"
+              }
+            },
+            "response": {
+              "status": 401,
+              "body": {
+                "url": "http://localhost:4001/api/auth/error?error=CredentialsSignin&provider=credentials"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Empty Task List For New User",
+      "description": "A freshly registered user sees an empty task list",
+      "passed": false,
+      "stopped_at": "login",
+      "steps": [
+        {
+          "action": "register",
+          "detail": "POST /register \u2192 200",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T15:23:13Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4001/register",
+              "body": {
+                "email": "bound-5b256ceb76@eval.local",
+                "password": "***",
+                "name": "Bound Test User"
+              }
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "text": "<!DOCTYPE html><html lang=\"en\"><head><meta charSet=\"utf-8\"/><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/><link rel=\"stylesheet\" href=\"/_next/static/css/app/layout.css?v=1774995"
+              }
+            }
+          }
+        },
+        {
+          "action": "login",
+          "detail": "NextAuth login failed with HTTP 401",
+          "passed": false,
+          "error": "NextAuth login failed with HTTP 401",
+          "proof": {
+            "timestamp": "2026-03-31T15:23:13Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4001/api/auth/callback/credentials",
+              "body": {
+                "email": "bound-5b256ceb76@eval.local",
+                "password": "***",
+                "csrfToken": "0660c3b11c78a925411e29c5da0ca5a0a732424a0403f07549ddba21d6d9c39c",
+                "redirect": "false",
+                "json": "true"
+              }
+            },
+            "response": {
+              "status": 401,
+              "body": {
+                "url": "http://localhost:4001/api/auth/error?error=CredentialsSignin&provider=credentials"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Task With Missing Required Fields",
+      "description": "A user tries to create a task without a title and expects a validation error",
+      "passed": false,
+      "stopped_at": "login",
+      "steps": [
+        {
+          "action": "register",
+          "detail": "POST /register \u2192 200",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T15:23:13Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4001/register",
+              "body": {
+                "email": "bound-4a7e6bc003@eval.local",
+                "password": "***",
+                "name": "Bound Test User"
+              }
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "text": "<!DOCTYPE html><html lang=\"en\"><head><meta charSet=\"utf-8\"/><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/><link rel=\"stylesheet\" href=\"/_next/static/css/app/layout.css?v=1774995"
+              }
+            }
+          }
+        },
+        {
+          "action": "login",
+          "detail": "NextAuth login failed with HTTP 401",
+          "passed": false,
+          "error": "NextAuth login failed with HTTP 401",
+          "proof": {
+            "timestamp": "2026-03-31T15:23:13Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4001/api/auth/callback/credentials",
+              "body": {
+                "email": "bound-4a7e6bc003@eval.local",
+                "password": "***",
+                "csrfToken": "27675e2f52e1a0290c3d9fe99811ea3f2a388b3038c63d6bcbcdd63c1f4abf9d",
+                "redirect": "false",
+                "json": "true"
+              }
+            },
+            "response": {
+              "status": 401,
+              "body": {
+                "url": "http://localhost:4001/api/auth/error?error=CredentialsSignin&provider=credentials"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "User Cannot Access Another Users Tasks",
+      "description": "Two users create tasks and verify they cannot see each others data",
+      "passed": false,
+      "stopped_at": "login",
+      "steps": [
+        {
+          "action": "register",
+          "detail": "POST /register \u2192 200",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T15:23:14Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4001/register",
+              "body": {
+                "email": "bound-54d5b55760@eval.local",
+                "password": "***",
+                "name": "Bound Test User"
+              }
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "text": "<!DOCTYPE html><html lang=\"en\"><head><meta charSet=\"utf-8\"/><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/><link rel=\"stylesheet\" href=\"/_next/static/css/app/layout.css?v=1774995"
+              }
+            }
+          }
+        },
+        {
+          "action": "login",
+          "detail": "NextAuth login failed with HTTP 401",
+          "passed": false,
+          "error": "NextAuth login failed with HTTP 401",
+          "proof": {
+            "timestamp": "2026-03-31T15:23:14Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4001/api/auth/callback/credentials",
+              "body": {
+                "email": "bound-54d5b55760@eval.local",
+                "password": "***",
+                "csrfToken": "13a5ef00e327023a02b590a83d67f013732a1e06859f1b85d461c9dff46871cb",
+                "redirect": "false",
+                "json": "true"
+              }
+            },
+            "response": {
+              "status": 401,
+              "body": {
+                "url": "http://localhost:4001/api/auth/error?error=CredentialsSignin&provider=credentials"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Delete Nonexistent Task Returns Error",
+      "description": "A user tries to delete a task that does not exist and gets a proper error",
+      "passed": false,
+      "stopped_at": "login",
+      "steps": [
+        {
+          "action": "register",
+          "detail": "POST /register \u2192 200",
+          "passed": true,
+          "error": "",
+          "proof": {
+            "timestamp": "2026-03-31T15:23:14Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4001/register",
+              "body": {
+                "email": "bound-cc935380e1@eval.local",
+                "password": "***",
+                "name": "Bound Test User"
+              }
+            },
+            "response": {
+              "status": 200,
+              "body": {
+                "text": "<!DOCTYPE html><html lang=\"en\"><head><meta charSet=\"utf-8\"/><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/><link rel=\"stylesheet\" href=\"/_next/static/css/app/layout.css?v=1774995"
+              }
+            }
+          }
+        },
+        {
+          "action": "login",
+          "detail": "NextAuth login failed with HTTP 401",
+          "passed": false,
+          "error": "NextAuth login failed with HTTP 401",
+          "proof": {
+            "timestamp": "2026-03-31T15:23:14Z",
+            "request": {
+              "method": "POST",
+              "url": "http://localhost:4001/api/auth/callback/credentials",
+              "body": {
+                "email": "bound-cc935380e1@eval.local",
+                "password": "***",
+                "csrfToken": "fd68ef9c905678de3c44bff021909f9460d5f035210bdcafcd56c8196420bbcc",
+                "redirect": "false",
+                "json": "true"
+              }
+            },
+            "response": {
+              "status": 401,
+              "body": {
+                "url": "http://localhost:4001/api/auth/error?error=CredentialsSignin&provider=credentials"
+              }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

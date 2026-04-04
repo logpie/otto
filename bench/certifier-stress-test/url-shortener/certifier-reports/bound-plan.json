@@ -1,0 +1,1918 @@
+{
+  "intent": "URL shortener with user auth short URLs redirect click tracking",
+  "claims": [
+    {
+      "id": "auth-register",
+      "description": "A new user can register with email, name, and password",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/register",
+            "candidate_paths": [
+              "/api/register",
+              "/api/auth/register",
+              "/api/signup",
+              "/api/auth/signup",
+              "/register"
+            ],
+            "body": {
+              "email": "alice@example.com",
+              "name": "Alice",
+              "password": "SecurePass123!"
+            },
+            "expect_status": [
+              200,
+              201
+            ],
+            "expect_body_contains": [
+              "alice@example.com"
+            ]
+          },
+          "resolved_route": "/api/register",
+          "fallback_routes": [
+            "/register",
+            "/signup"
+          ],
+          "resolved_body": {
+            "email": "alice@example.com",
+            "name": "Alice",
+            "password": "SecurePass123!"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "bound-6257745443@eval.local",
+            "password": "BoundTest123!",
+            "name": "Bound Test User",
+            "role": "user",
+            "source": "generated",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": false,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "bound registration step to adapter-discovered register routes",
+            "bound auth to generated user credentials"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "bound registration step to adapter-discovered register routes",
+        "bound auth to generated user credentials"
+      ]
+    },
+    {
+      "id": "auth-login",
+      "description": "A registered user can log in and receive an auth token or session",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/register",
+            "candidate_paths": [
+              "/api/register",
+              "/api/auth/register",
+              "/api/signup",
+              "/api/auth/signup"
+            ],
+            "body": {
+              "email": "bob@example.com",
+              "name": "Bob",
+              "password": "SecurePass123!"
+            },
+            "expect_status": [
+              200,
+              201
+            ]
+          },
+          "resolved_route": "/api/register",
+          "fallback_routes": [
+            "/register",
+            "/signup"
+          ],
+          "resolved_body": {
+            "email": "bob@example.com",
+            "name": "Bob",
+            "password": "SecurePass123!"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "bound-37ef87212b@eval.local",
+            "password": "BoundTest123!",
+            "name": "Bound Test User",
+            "role": "user",
+            "source": "generated",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": false,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "bound registration step to adapter-discovered register routes",
+            "bound auth to generated user credentials"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/login",
+            "candidate_paths": [
+              "/api/login",
+              "/api/auth/login",
+              "/api/signin",
+              "/api/auth/signin",
+              "/login"
+            ],
+            "body": {
+              "email": "bob@example.com",
+              "password": "SecurePass123!"
+            },
+            "expect_status": [
+              200
+            ],
+            "expect_json_keys": [
+              "token"
+            ]
+          },
+          "resolved_route": "/api/auth/callback/credentials",
+          "fallback_routes": [
+            "/login",
+            "/signin"
+          ],
+          "resolved_body": {
+            "email": "bob@example.com",
+            "password": "SecurePass123!",
+            "name": "Bound Test User"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "demo@example.com",
+            "password": "password123",
+            "name": "demo",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": false,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "bound login step to adapter-discovered login routes",
+            "added missing creatable field: name",
+            "bound auth to seeded user credentials (demo@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "bound registration step to adapter-discovered register routes",
+        "bound auth to generated user credentials",
+        "bound login step to adapter-discovered login routes",
+        "added missing creatable field: name",
+        "bound auth to seeded user credentials (demo@example.com)"
+      ]
+    },
+    {
+      "id": "auth-login-invalid",
+      "description": "Login with wrong password returns an error, not a token",
+      "priority": "important",
+      "category": "error-handling",
+      "test_approach": "api",
+      "hard_fail": false,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/login",
+            "candidate_paths": [
+              "/api/login",
+              "/api/auth/login",
+              "/api/signin",
+              "/api/auth/signin"
+            ],
+            "body": {
+              "email": "bob@example.com",
+              "password": "WrongPassword999"
+            },
+            "expect_status": [
+              401,
+              403,
+              400
+            ]
+          },
+          "resolved_route": "/api/auth/callback/credentials",
+          "fallback_routes": [
+            "/login",
+            "/signin"
+          ],
+          "resolved_body": {
+            "email": "bob@example.com",
+            "password": "WrongPassword999"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "demo@example.com",
+            "password": "WRONG_PASSWORD_FOR_NEGATIVE_TEST",
+            "name": "",
+            "role": "user",
+            "source": "",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": false,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "bound login step to adapter-discovered login routes",
+            "negative test step \u2014 body preserved as-is (intentionally invalid)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "bound login step to adapter-discovered login routes",
+        "negative test step \u2014 body preserved as-is (intentionally invalid)"
+      ]
+    },
+    {
+      "id": "link-create",
+      "description": "An authenticated user can create a short link by providing a target URL",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/links",
+            "candidate_paths": [
+              "/api/links",
+              "/api/link",
+              "/api/shorten",
+              "/api/urls",
+              "/api/url"
+            ],
+            "body": {
+              "url": "https://www.example.com/very-long-page-url"
+            },
+            "expect_status": [
+              200,
+              201
+            ],
+            "expect_json_keys": [
+              "id",
+              "code",
+              "url"
+            ]
+          },
+          "resolved_route": "/api/links",
+          "fallback_routes": [],
+          "resolved_body": {
+            "url": "https://www.example.com/very-long-page-url",
+            "clicks": 1,
+            "lastClickedAt": "2026-01-01T00:00:00Z"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "demo@example.com",
+            "password": "password123",
+            "name": "demo",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "added missing creatable field: clicks",
+            "added missing creatable field: lastClickedAt",
+            "bound auth to seeded user credentials (demo@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added missing creatable field: clicks",
+        "added missing creatable field: lastClickedAt",
+        "bound auth to seeded user credentials (demo@example.com)"
+      ]
+    },
+    {
+      "id": "link-create-unauth",
+      "description": "An unauthenticated request to create a link is rejected",
+      "priority": "critical",
+      "category": "security",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/links",
+            "candidate_paths": [
+              "/api/links",
+              "/api/link",
+              "/api/shorten",
+              "/api/urls",
+              "/api/url"
+            ],
+            "body": {
+              "url": "https://www.example.com/should-fail"
+            },
+            "expect_status": [
+              401,
+              403
+            ]
+          },
+          "resolved_route": "/api/links",
+          "fallback_routes": [],
+          "resolved_body": {
+            "url": "https://www.example.com/should-fail",
+            "clicks": 1,
+            "lastClickedAt": "2026-01-01T00:00:00Z"
+          },
+          "auth": null,
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "added missing creatable field: clicks",
+            "added missing creatable field: lastClickedAt"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added missing creatable field: clicks",
+        "added missing creatable field: lastClickedAt"
+      ]
+    },
+    {
+      "id": "link-list",
+      "description": "An authenticated user can list their own short links",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/links",
+            "candidate_paths": [
+              "/api/links",
+              "/api/link",
+              "/api/shorten",
+              "/api/urls",
+              "/api/url"
+            ],
+            "body": {
+              "url": "https://www.example.com/list-test"
+            },
+            "expect_status": [
+              200,
+              201
+            ],
+            "expect_json_keys": [
+              "code"
+            ]
+          },
+          "resolved_route": "/api/links",
+          "fallback_routes": [],
+          "resolved_body": {
+            "url": "https://www.example.com/list-test",
+            "clicks": 1,
+            "lastClickedAt": "2026-01-01T00:00:00Z"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "demo@example.com",
+            "password": "password123",
+            "name": "demo",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "added missing creatable field: clicks",
+            "added missing creatable field: lastClickedAt",
+            "bound auth to seeded user credentials (demo@example.com)"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "GET",
+          "step": {
+            "action": "http",
+            "method": "GET",
+            "path": "/api/links",
+            "candidate_paths": [
+              "/api/links",
+              "/api/link",
+              "/api/urls",
+              "/api/url"
+            ],
+            "expect_status": [
+              200
+            ],
+            "expect_body_contains": [
+              "list-test"
+            ]
+          },
+          "resolved_route": "/api/links",
+          "fallback_routes": [
+            "/api/links/{{qr_id}}/qr"
+          ],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "demo@example.com",
+            "password": "password123",
+            "name": "demo",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/qrs",
+            "/api/qr"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (demo@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added missing creatable field: clicks",
+        "added missing creatable field: lastClickedAt",
+        "bound auth to seeded user credentials (demo@example.com)",
+        "added adapter-discovered route matches by keyword"
+      ]
+    },
+    {
+      "id": "redirect-works",
+      "description": "Visiting a short URL code redirects to the original target URL",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/links",
+            "candidate_paths": [
+              "/api/links",
+              "/api/link",
+              "/api/shorten",
+              "/api/urls"
+            ],
+            "body": {
+              "url": "https://www.example.com/redirect-target"
+            },
+            "expect_status": [
+              200,
+              201
+            ],
+            "expect_json_keys": [
+              "code"
+            ]
+          },
+          "resolved_route": "/api/links",
+          "fallback_routes": [],
+          "resolved_body": {
+            "url": "https://www.example.com/redirect-target",
+            "clicks": 1,
+            "lastClickedAt": "2026-01-01T00:00:00Z"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "demo@example.com",
+            "password": "password123",
+            "name": "demo",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "added missing creatable field: clicks",
+            "added missing creatable field: lastClickedAt",
+            "bound auth to seeded user credentials (demo@example.com)"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "GET",
+          "step": {
+            "action": "http",
+            "method": "GET",
+            "path": "/{code}",
+            "candidate_paths": [
+              "/{code}",
+              "/r/{code}",
+              "/go/{code}",
+              "/l/{code}"
+            ],
+            "expect_status": [
+              301,
+              302,
+              307,
+              308
+            ]
+          },
+          "resolved_route": "/{code}",
+          "fallback_routes": [
+            "/r/{code}",
+            "/go/{code}",
+            "/l/{code}"
+          ],
+          "resolved_body": null,
+          "auth": null,
+          "requires_auth": false,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": []
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added missing creatable field: clicks",
+        "added missing creatable field: lastClickedAt",
+        "bound auth to seeded user credentials (demo@example.com)"
+      ]
+    },
+    {
+      "id": "redirect-invalid-code",
+      "description": "Visiting a nonexistent short code returns 404",
+      "priority": "important",
+      "category": "error-handling",
+      "test_approach": "api",
+      "hard_fail": false,
+      "steps": [
+        {
+          "action": "http",
+          "method": "GET",
+          "step": {
+            "action": "http",
+            "method": "GET",
+            "path": "/nonexistent999xyz",
+            "expect_status": [
+              404
+            ]
+          },
+          "resolved_route": "/nonexistent999xyz",
+          "fallback_routes": [],
+          "resolved_body": null,
+          "auth": null,
+          "requires_auth": false,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "negative test step \u2014 body preserved as-is (intentionally invalid)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "negative test step \u2014 body preserved as-is (intentionally invalid)"
+      ]
+    },
+    {
+      "id": "click-tracking-increments",
+      "description": "Each redirect increments the click count on the link",
+      "priority": "critical",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/links",
+            "candidate_paths": [
+              "/api/links",
+              "/api/link",
+              "/api/shorten",
+              "/api/urls"
+            ],
+            "body": {
+              "url": "https://www.example.com/click-test"
+            },
+            "expect_status": [
+              200,
+              201
+            ],
+            "expect_json_keys": [
+              "code"
+            ]
+          },
+          "resolved_route": "/api/links",
+          "fallback_routes": [],
+          "resolved_body": {
+            "url": "https://www.example.com/click-test",
+            "clicks": 1,
+            "lastClickedAt": "2026-01-01T00:00:00Z"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "demo@example.com",
+            "password": "password123",
+            "name": "demo",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "added missing creatable field: clicks",
+            "added missing creatable field: lastClickedAt",
+            "bound auth to seeded user credentials (demo@example.com)"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "GET",
+          "step": {
+            "action": "http",
+            "method": "GET",
+            "path": "/{code}",
+            "candidate_paths": [
+              "/{code}",
+              "/r/{code}",
+              "/go/{code}"
+            ],
+            "expect_status": [
+              301,
+              302,
+              307,
+              308
+            ]
+          },
+          "resolved_route": "/{code}",
+          "fallback_routes": [
+            "/r/{code}",
+            "/go/{code}",
+            "/api/links",
+            "/api/links/{{qr_id}}/qr"
+          ],
+          "resolved_body": null,
+          "auth": null,
+          "requires_auth": false,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/qrs",
+            "/api/qr"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "GET",
+          "step": {
+            "action": "http",
+            "method": "GET",
+            "path": "/{code}",
+            "candidate_paths": [
+              "/{code}",
+              "/r/{code}",
+              "/go/{code}"
+            ],
+            "expect_status": [
+              301,
+              302,
+              307,
+              308
+            ]
+          },
+          "resolved_route": "/{code}",
+          "fallback_routes": [
+            "/r/{code}",
+            "/go/{code}",
+            "/api/links",
+            "/api/links/{{qr_id}}/qr"
+          ],
+          "resolved_body": null,
+          "auth": null,
+          "requires_auth": false,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/qrs",
+            "/api/qr"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "GET",
+          "step": {
+            "action": "http",
+            "method": "GET",
+            "path": "/api/links/{id}/stats",
+            "candidate_paths": [
+              "/api/links/{id}/stats",
+              "/api/links/{id}",
+              "/api/link/{id}/stats",
+              "/api/links/{id}/clicks",
+              "/api/urls/{id}/stats"
+            ],
+            "expect_status": [
+              200
+            ],
+            "expect_body_contains": [
+              "2"
+            ]
+          },
+          "resolved_route": "/api/links",
+          "fallback_routes": [
+            "/api/links/{{qr_id}}/qr"
+          ],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "demo@example.com",
+            "password": "password123",
+            "name": "demo",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/qrs",
+            "/api/qr"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (demo@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added missing creatable field: clicks",
+        "added missing creatable field: lastClickedAt",
+        "bound auth to seeded user credentials (demo@example.com)",
+        "added adapter-discovered route matches by keyword"
+      ]
+    },
+    {
+      "id": "click-tracking-records",
+      "description": "Click events are recorded with metadata (referrer, user agent, timestamp)",
+      "priority": "important",
+      "category": "data",
+      "test_approach": "api",
+      "hard_fail": false,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/links",
+            "candidate_paths": [
+              "/api/links",
+              "/api/link",
+              "/api/shorten",
+              "/api/urls"
+            ],
+            "body": {
+              "url": "https://www.example.com/click-detail-test"
+            },
+            "expect_status": [
+              200,
+              201
+            ],
+            "expect_json_keys": [
+              "code"
+            ]
+          },
+          "resolved_route": "/api/links",
+          "fallback_routes": [],
+          "resolved_body": {
+            "url": "https://www.example.com/click-detail-test",
+            "clicks": 1,
+            "lastClickedAt": "2026-01-01T00:00:00Z"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "demo@example.com",
+            "password": "password123",
+            "name": "demo",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "added missing creatable field: clicks",
+            "added missing creatable field: lastClickedAt",
+            "bound auth to seeded user credentials (demo@example.com)"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "GET",
+          "step": {
+            "action": "http",
+            "method": "GET",
+            "path": "/{code}",
+            "candidate_paths": [
+              "/{code}",
+              "/r/{code}",
+              "/go/{code}"
+            ],
+            "expect_status": [
+              301,
+              302,
+              307,
+              308
+            ]
+          },
+          "resolved_route": "/{code}",
+          "fallback_routes": [
+            "/r/{code}",
+            "/go/{code}"
+          ],
+          "resolved_body": null,
+          "auth": null,
+          "requires_auth": false,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": []
+        },
+        {
+          "action": "http",
+          "method": "GET",
+          "step": {
+            "action": "http",
+            "method": "GET",
+            "path": "/api/links/{id}/clicks",
+            "candidate_paths": [
+              "/api/links/{id}/clicks",
+              "/api/links/{id}/stats",
+              "/api/link/{id}/clicks",
+              "/api/links/{id}/analytics"
+            ],
+            "expect_status": [
+              200
+            ],
+            "expect_json_keys": [
+              "clickedAt"
+            ]
+          },
+          "resolved_route": "/api/links",
+          "fallback_routes": [
+            "/api/links/{{qr_id}}/qr"
+          ],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "demo@example.com",
+            "password": "password123",
+            "name": "demo",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/qrs",
+            "/api/qr"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (demo@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added missing creatable field: clicks",
+        "added missing creatable field: lastClickedAt",
+        "bound auth to seeded user credentials (demo@example.com)",
+        "added adapter-discovered route matches by keyword"
+      ]
+    },
+    {
+      "id": "link-ownership-isolation",
+      "description": "A user cannot see or access another user's links",
+      "priority": "critical",
+      "category": "security",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/register",
+            "candidate_paths": [
+              "/api/register",
+              "/api/auth/register",
+              "/api/signup"
+            ],
+            "body": {
+              "email": "user1@example.com",
+              "name": "User1",
+              "password": "SecurePass123!"
+            },
+            "expect_status": [
+              200,
+              201
+            ]
+          },
+          "resolved_route": "/api/register",
+          "fallback_routes": [
+            "/register",
+            "/signup",
+            "/api/links"
+          ],
+          "resolved_body": {
+            "email": "user1@example.com",
+            "name": "User1",
+            "password": "SecurePass123!"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "bound-7fb56b9adb@eval.local",
+            "password": "BoundTest123!",
+            "name": "Bound Test User",
+            "role": "user",
+            "source": "generated",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": false,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "bound registration step to adapter-discovered register routes",
+            "added adapter-discovered route matches by keyword",
+            "bound auth to generated user credentials"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/register",
+            "candidate_paths": [
+              "/api/register",
+              "/api/auth/register",
+              "/api/signup"
+            ],
+            "body": {
+              "email": "user2@example.com",
+              "name": "User2",
+              "password": "SecurePass123!"
+            },
+            "expect_status": [
+              200,
+              201
+            ]
+          },
+          "resolved_route": "/api/register",
+          "fallback_routes": [
+            "/register",
+            "/signup",
+            "/api/links"
+          ],
+          "resolved_body": {
+            "email": "user2@example.com",
+            "name": "User2",
+            "password": "SecurePass123!"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "bound-7fb56b9adb@eval.local",
+            "password": "BoundTest123!",
+            "name": "Bound Test User",
+            "role": "user",
+            "source": "generated",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": false,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "bound registration step to adapter-discovered register routes",
+            "added adapter-discovered route matches by keyword",
+            "bound auth to generated user credentials"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "GET",
+          "step": {
+            "action": "http",
+            "method": "GET",
+            "path": "/api/links",
+            "candidate_paths": [
+              "/api/links",
+              "/api/link",
+              "/api/urls"
+            ],
+            "expect_status": [
+              200
+            ]
+          },
+          "resolved_route": "/api/links",
+          "fallback_routes": [
+            "/api/links/{{qr_id}}/qr"
+          ],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "demo@example.com",
+            "password": "password123",
+            "name": "demo",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/qrs",
+            "/api/qr"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (demo@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "bound registration step to adapter-discovered register routes",
+        "added adapter-discovered route matches by keyword",
+        "bound auth to generated user credentials",
+        "bound auth to seeded user credentials (demo@example.com)"
+      ]
+    },
+    {
+      "id": "link-delete",
+      "description": "An authenticated user can delete their own short link",
+      "priority": "important",
+      "category": "feature",
+      "test_approach": "api",
+      "hard_fail": false,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/links",
+            "candidate_paths": [
+              "/api/links",
+              "/api/link",
+              "/api/shorten",
+              "/api/urls"
+            ],
+            "body": {
+              "url": "https://www.example.com/delete-test"
+            },
+            "expect_status": [
+              200,
+              201
+            ],
+            "expect_json_keys": [
+              "id",
+              "code"
+            ]
+          },
+          "resolved_route": "/api/links",
+          "fallback_routes": [],
+          "resolved_body": {
+            "url": "https://www.example.com/delete-test",
+            "clicks": 1,
+            "lastClickedAt": "2026-01-01T00:00:00Z"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "demo@example.com",
+            "password": "password123",
+            "name": "demo",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "added missing creatable field: clicks",
+            "added missing creatable field: lastClickedAt",
+            "bound auth to seeded user credentials (demo@example.com)"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "DELETE",
+          "step": {
+            "action": "http",
+            "method": "DELETE",
+            "path": "/api/links/{id}",
+            "candidate_paths": [
+              "/api/links/{id}",
+              "/api/link/{id}",
+              "/api/urls/{id}"
+            ],
+            "expect_status": [
+              200,
+              204
+            ]
+          },
+          "resolved_route": "/api/links/{id}",
+          "fallback_routes": [
+            "/api/links/{{link_id}}"
+          ],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "demo@example.com",
+            "password": "password123",
+            "name": "demo",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/links",
+            "/api/link"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (demo@example.com)"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "GET",
+          "step": {
+            "action": "http",
+            "method": "GET",
+            "path": "/api/links",
+            "candidate_paths": [
+              "/api/links",
+              "/api/link",
+              "/api/urls"
+            ],
+            "expect_status": [
+              200
+            ]
+          },
+          "resolved_route": "/api/links",
+          "fallback_routes": [
+            "/api/links/{{qr_id}}/qr"
+          ],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "demo@example.com",
+            "password": "password123",
+            "name": "demo",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/qrs",
+            "/api/qr"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (demo@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added missing creatable field: clicks",
+        "added missing creatable field: lastClickedAt",
+        "bound auth to seeded user credentials (demo@example.com)",
+        "added adapter-discovered route matches by keyword"
+      ]
+    },
+    {
+      "id": "link-persistence",
+      "description": "Created links persist and are retrievable after creation",
+      "priority": "critical",
+      "category": "data",
+      "test_approach": "api",
+      "hard_fail": true,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/links",
+            "candidate_paths": [
+              "/api/links",
+              "/api/link",
+              "/api/shorten",
+              "/api/urls"
+            ],
+            "body": {
+              "url": "https://www.example.com/persistence-check"
+            },
+            "expect_status": [
+              200,
+              201
+            ],
+            "expect_json_keys": [
+              "id",
+              "code"
+            ]
+          },
+          "resolved_route": "/api/links",
+          "fallback_routes": [],
+          "resolved_body": {
+            "url": "https://www.example.com/persistence-check",
+            "clicks": 1,
+            "lastClickedAt": "2026-01-01T00:00:00Z"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "demo@example.com",
+            "password": "password123",
+            "name": "demo",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "added missing creatable field: clicks",
+            "added missing creatable field: lastClickedAt",
+            "bound auth to seeded user credentials (demo@example.com)"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "GET",
+          "step": {
+            "action": "http",
+            "method": "GET",
+            "path": "/api/links/{id}",
+            "candidate_paths": [
+              "/api/links/{id}",
+              "/api/link/{id}",
+              "/api/urls/{id}"
+            ],
+            "expect_status": [
+              200
+            ],
+            "expect_body_contains": [
+              "persistence-check"
+            ],
+            "expect_json_keys": [
+              "id",
+              "code",
+              "url"
+            ]
+          },
+          "resolved_route": "/api/links",
+          "fallback_routes": [
+            "/api/links/{{qr_id}}/qr"
+          ],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "demo@example.com",
+            "password": "password123",
+            "name": "demo",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/qrs",
+            "/api/qr"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (demo@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added missing creatable field: clicks",
+        "added missing creatable field: lastClickedAt",
+        "bound auth to seeded user credentials (demo@example.com)",
+        "added adapter-discovered route matches by keyword"
+      ]
+    },
+    {
+      "id": "link-unique-codes",
+      "description": "Each created link gets a unique short code",
+      "priority": "important",
+      "category": "data",
+      "test_approach": "api",
+      "hard_fail": false,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/links",
+            "candidate_paths": [
+              "/api/links",
+              "/api/link",
+              "/api/shorten",
+              "/api/urls"
+            ],
+            "body": {
+              "url": "https://www.example.com/unique-test-1"
+            },
+            "expect_status": [
+              200,
+              201
+            ],
+            "expect_json_keys": [
+              "code"
+            ]
+          },
+          "resolved_route": "/api/links",
+          "fallback_routes": [],
+          "resolved_body": {
+            "url": "https://www.example.com/unique-test-1",
+            "clicks": 1,
+            "lastClickedAt": "2026-01-01T00:00:00Z"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "demo@example.com",
+            "password": "password123",
+            "name": "demo",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "added missing creatable field: clicks",
+            "added missing creatable field: lastClickedAt",
+            "bound auth to seeded user credentials (demo@example.com)"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/links",
+            "candidate_paths": [
+              "/api/links",
+              "/api/link",
+              "/api/shorten",
+              "/api/urls"
+            ],
+            "body": {
+              "url": "https://www.example.com/unique-test-2"
+            },
+            "expect_status": [
+              200,
+              201
+            ],
+            "expect_json_keys": [
+              "code"
+            ]
+          },
+          "resolved_route": "/api/links",
+          "fallback_routes": [],
+          "resolved_body": {
+            "url": "https://www.example.com/unique-test-2",
+            "clicks": 1,
+            "lastClickedAt": "2026-01-01T00:00:00Z"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "demo@example.com",
+            "password": "password123",
+            "name": "demo",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "added missing creatable field: clicks",
+            "added missing creatable field: lastClickedAt",
+            "bound auth to seeded user credentials (demo@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added missing creatable field: clicks",
+        "added missing creatable field: lastClickedAt",
+        "bound auth to seeded user credentials (demo@example.com)"
+      ]
+    },
+    {
+      "id": "auth-register-duplicate",
+      "description": "Registering with an already-used email returns an error",
+      "priority": "important",
+      "category": "error-handling",
+      "test_approach": "api",
+      "hard_fail": false,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/register",
+            "candidate_paths": [
+              "/api/register",
+              "/api/auth/register",
+              "/api/signup"
+            ],
+            "body": {
+              "email": "dupe@example.com",
+              "name": "First",
+              "password": "SecurePass123!"
+            },
+            "expect_status": [
+              200,
+              201
+            ]
+          },
+          "resolved_route": "/api/register",
+          "fallback_routes": [
+            "/register",
+            "/signup"
+          ],
+          "resolved_body": {
+            "email": "dupe@example.com",
+            "name": "First",
+            "password": "SecurePass123!"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "bound-0db25fe90a@eval.local",
+            "password": "BoundTest123!",
+            "name": "Bound Test User",
+            "role": "user",
+            "source": "generated",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": false,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "bound registration step to adapter-discovered register routes",
+            "negative test step \u2014 body preserved as-is (intentionally invalid)",
+            "bound auth to generated user credentials"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/register",
+            "candidate_paths": [
+              "/api/register",
+              "/api/auth/register",
+              "/api/signup"
+            ],
+            "body": {
+              "email": "dupe@example.com",
+              "name": "Second",
+              "password": "SecurePass123!"
+            },
+            "expect_status": [
+              400,
+              409,
+              422
+            ]
+          },
+          "resolved_route": "/api/register",
+          "fallback_routes": [
+            "/register",
+            "/signup"
+          ],
+          "resolved_body": {
+            "email": "dupe@example.com",
+            "name": "Second",
+            "password": "SecurePass123!"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "bound-0db25fe90a@eval.local",
+            "password": "BoundTest123!",
+            "name": "Bound Test User",
+            "role": "user",
+            "source": "generated",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": false,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "bound registration step to adapter-discovered register routes",
+            "negative test step \u2014 body preserved as-is (intentionally invalid)",
+            "bound auth to generated user credentials"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "bound registration step to adapter-discovered register routes",
+        "negative test step \u2014 body preserved as-is (intentionally invalid)",
+        "bound auth to generated user credentials"
+      ]
+    },
+    {
+      "id": "link-create-invalid-url",
+      "description": "Creating a link with an invalid URL returns an error",
+      "priority": "nice",
+      "category": "error-handling",
+      "test_approach": "api",
+      "hard_fail": false,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/links",
+            "candidate_paths": [
+              "/api/links",
+              "/api/link",
+              "/api/shorten",
+              "/api/urls"
+            ],
+            "body": {
+              "url": "not-a-valid-url"
+            },
+            "expect_status": [
+              400,
+              422
+            ]
+          },
+          "resolved_route": "/api/links",
+          "fallback_routes": [],
+          "resolved_body": {
+            "url": "not-a-valid-url"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "demo@example.com",
+            "password": "password123",
+            "name": "demo",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "negative test step \u2014 body preserved as-is (intentionally invalid)",
+            "bound auth to seeded user credentials (demo@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "negative test step \u2014 body preserved as-is (intentionally invalid)",
+        "bound auth to seeded user credentials (demo@example.com)"
+      ]
+    },
+    {
+      "id": "click-tracking-last-clicked",
+      "description": "The lastClickedAt timestamp updates when a link is clicked",
+      "priority": "important",
+      "category": "data",
+      "test_approach": "api",
+      "hard_fail": false,
+      "steps": [
+        {
+          "action": "http",
+          "method": "POST",
+          "step": {
+            "action": "http",
+            "method": "POST",
+            "path": "/api/links",
+            "candidate_paths": [
+              "/api/links",
+              "/api/link",
+              "/api/shorten",
+              "/api/urls"
+            ],
+            "body": {
+              "url": "https://www.example.com/last-click-test"
+            },
+            "expect_status": [
+              200,
+              201
+            ],
+            "expect_json_keys": [
+              "code"
+            ]
+          },
+          "resolved_route": "/api/links",
+          "fallback_routes": [],
+          "resolved_body": {
+            "url": "https://www.example.com/last-click-test",
+            "clicks": 1,
+            "lastClickedAt": "2026-01-01T00:00:00Z"
+          },
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "demo@example.com",
+            "password": "password123",
+            "name": "demo",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [],
+          "binding_notes": [
+            "added missing creatable field: clicks",
+            "added missing creatable field: lastClickedAt",
+            "bound auth to seeded user credentials (demo@example.com)"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "GET",
+          "step": {
+            "action": "http",
+            "method": "GET",
+            "path": "/{code}",
+            "candidate_paths": [
+              "/{code}",
+              "/r/{code}",
+              "/go/{code}"
+            ],
+            "expect_status": [
+              301,
+              302,
+              307,
+              308
+            ]
+          },
+          "resolved_route": "/{code}",
+          "fallback_routes": [
+            "/r/{code}",
+            "/go/{code}",
+            "/api/links",
+            "/api/links/{{qr_id}}/qr"
+          ],
+          "resolved_body": null,
+          "auth": null,
+          "requires_auth": false,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/qrs",
+            "/api/qr"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword"
+          ]
+        },
+        {
+          "action": "http",
+          "method": "GET",
+          "step": {
+            "action": "http",
+            "method": "GET",
+            "path": "/api/links/{id}",
+            "candidate_paths": [
+              "/api/links/{id}",
+              "/api/link/{id}",
+              "/api/urls/{id}",
+              "/api/links/{id}/stats"
+            ],
+            "expect_status": [
+              200
+            ],
+            "expect_json_keys": [
+              "lastClickedAt"
+            ]
+          },
+          "resolved_route": "/api/links",
+          "fallback_routes": [
+            "/api/links/{{qr_id}}/qr"
+          ],
+          "resolved_body": null,
+          "auth": {
+            "mechanism": "nextauth",
+            "email": "demo@example.com",
+            "password": "password123",
+            "name": "demo",
+            "role": "user",
+            "source": "seeded",
+            "login_route": "/api/auth/callback/credentials",
+            "register_route": "/api/register",
+            "csrf_route": "/api/auth/csrf"
+          },
+          "requires_auth": true,
+          "requires_admin": false,
+          "entity_discovery_paths": [
+            "/api/qrs",
+            "/api/qr"
+          ],
+          "binding_notes": [
+            "added adapter-discovered route matches by keyword",
+            "bound auth to seeded user credentials (demo@example.com)"
+          ]
+        }
+      ],
+      "structural_outcome": null,
+      "structural_reason": "",
+      "structural_proof": {},
+      "binding_notes": [
+        "added missing creatable field: clicks",
+        "added missing creatable field: lastClickedAt",
+        "bound auth to seeded user credentials (demo@example.com)",
+        "added adapter-discovered route matches by keyword"
+      ]
+    }
+  ],
+  "journeys": [],
+  "product_type_hint": "web",
+  "compiled_at": "2026-03-31 15:54:39",
+  "journeys_compiled_at": "",
+  "cost_usd": 0.19329,
+  "metadata": {
+    "auth_type": "nextauth",
+    "route_count": 4,
+    "seeded_user_count": 1
+  }
+}
