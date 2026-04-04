@@ -214,7 +214,7 @@ class AppRunner:
 
         cmd = self.profile.start_command
         if self.profile.framework == "nextjs":
-            cmd = f"{cmd} -p {self.port}"
+            cmd = f"{cmd} -- -p {self.port}" if "npm" in cmd else f"{cmd} -p {self.port}"
         elif self.profile.framework in ("flask", "fastapi"):
             cmd = f"{cmd} --port {self.port}"
 
