@@ -6,8 +6,8 @@ from pathlib import Path
 
 import yaml
 
-from otto.certifier.adapter import analyze_project
-from otto.certifier.baseline import run_baseline
+from otto.certifier.adapter import TestConfig, analyze_project
+from otto.certifier.baseline import load_or_compile_matrix, run_baseline
 from otto.certifier.classifier import classify
 from otto.certifier.intent_compiler import compile_intent
 
@@ -179,3 +179,140 @@ def test_certifier_cli_stack(tmp_path: Path, monkeypatch):
     assert result.claims_failed == 0
     assert result.claims_passed == len(matrix.claims)
     assert all(claim.proof for claim in result.results)
+
+
+def test_analyze_project_routes_before_auth_for_express_register(tmp_path: Path):
+    (tmp_path / "app.js").write_text(
+        """\
+const express = require("express");
+const app = express();
+app.post("/api/register", (req, res) => res.status(201).json({ ok: true }));
+"""
+    )
+
+    config = analyze_project(tmp_path)
+
+    assert config.register_endpoint == "/api/register"
+    assert any(route.path == "/api/register" for route in config.routes)
+
+
+def test_analyze_project_collects_resource_models_and_empty_seed_password(tmp_path: Path):
+    prisma_dir = tmp_path / "prisma"
+    prisma_dir.mkdir()
+    (prisma_dir / "schema.prisma").write_text(
+        """\
+model User {
+  id    String @id
+  email String
+}
+
+model Task {
+  id    String @id
+  title String
+}
+
+model Workspace {
+  id   String @id
+  name String
+}
+"""
+    )
+    (prisma_dir / "seed.ts").write_text(
+        """\
+await prisma.user.create({
+  data: {
+    email: "seeded@example.test",
+    role: "user",
+  },
+});
+"""
+    )
+
+    config = analyze_project(tmp_path)
+
+    assert config.resource_models == ["User", "Task", "Workspace"]
+    assert config.seeded_users[0].email == "seeded@example.test"
+    assert config.seeded_users[0].password == ""
+
+
+def test_compile_intent_includes_schema_hint(monkeypatch):
+    seen_prompt: dict[str, str] = {}
+
+    async def fake_run_agent_query(prompt, options):
+        seen_prompt["prompt"] = prompt
+        return (
+            json.dumps(
+                {
+                    "product_type_hint": "web",
+                    "non_goals": [],
+                    "ambiguities": [],
+                    "claims": [],
+                }
+            ),
+            0.0,
+            None,
+        )
+
+    monkeypatch.setattr("otto.certifier.intent_compiler.run_agent_query", fake_run_agent_query)
+
+    asyncio.run(
+        compile_intent(
+            "build a task manager",
+            schema_hint=(
+                "Model Task: title: String, dueDate: DateTime, status: TaskStatus (TODO, IN_PROGRESS, DONE)\n"
+                "Register endpoint /api/register likely body fields: email, password, name"
+            ),
+        )
+    )
+
+    assert "Use these exact field names in test step bodies, not guesses." in seen_prompt["prompt"]
+    assert "dueDate" in seen_prompt["prompt"]
+    assert "TODO, IN_PROGRESS, DONE" in seen_prompt["prompt"]
+
+
+def test_load_or_compile_matrix_cache_varies_with_schema_hint(tmp_path: Path, monkeypatch):
+    calls: list[str] = []
+
+    async def fake_compile_intent(intent, config=None, schema_hint=""):
+        calls.append(schema_hint)
+        return type(
+            "Matrix",
+            (),
+            {
+                "intent": intent,
+                "claims": [],
+                "non_goals": [],
+                "ambiguities": [],
+                "product_type_hint": "web",
+                "compiled_at": "",
+                "cost_usd": 0.0,
+                "to_dict": lambda self: {
+                    "intent": intent,
+                    "claims": [],
+                    "non_goals": [],
+                    "ambiguities": [],
+                    "product_type_hint": "web",
+                    "compiled_at": "",
+                    "cost_usd": 0.0,
+                },
+            },
+        )()
+
+    monkeypatch.setattr("otto.certifier.baseline.compile_intent", fake_compile_intent)
+
+    task_config = TestConfig(
+        models=["Task"],
+        model_fields={"Task": {"title": "String", "dueDate": "DateTime"}},
+    )
+    recipe_config = TestConfig(
+        models=["Recipe"],
+        model_fields={"Recipe": {"title": "String", "cookTime": "Int"}},
+    )
+
+    first = load_or_compile_matrix(tmp_path, "build an app", test_config=task_config)[2]
+    second = load_or_compile_matrix(tmp_path, "build an app", test_config=recipe_config)[2]
+
+    assert first != second
+    assert len(calls) == 2
+    assert "dueDate" in calls[0]
+    assert "cookTime" in calls[1]

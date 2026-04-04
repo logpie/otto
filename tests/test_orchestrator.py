@@ -1281,12 +1281,13 @@ class TestOuterLoop:
             return 1
 
         with patch("otto.orchestrator.run_per", side_effect=fake_run_per):
-            with patch("otto.product_qa.run_product_qa", new=AsyncMock(side_effect=AssertionError("QA should not run"))):
+            with patch("otto.certifier.run_certifier_v2", side_effect=AssertionError("Certifier should not run")):
                 result = await run_outer_loop(
                     product_spec_path=product_spec_path,
                     project_dir=tmp_git_repo,
                     tasks_path=tasks_path,
                     config={},
+                    intent="test product",
                 )
 
         assert result["product_passed"] is False
@@ -1300,7 +1301,7 @@ class TestOuterLoop:
         }]
 
     @pytest.mark.asyncio
-    async def test_stops_when_product_qa_makes_no_progress(self, tmp_git_repo):
+    async def test_stops_when_certifier_makes_no_progress(self, tmp_git_repo):
         tasks_path = tmp_git_repo / "tasks.yaml"
         tasks_path.write_text(yaml.dump({"tasks": []}))
         product_spec_path = tmp_git_repo / "product-spec.md"
@@ -1329,21 +1330,22 @@ class TestOuterLoop:
                     update_task(tasks_path, task["key"], status="passed")
             return 0
 
-        qa_mock = AsyncMock(side_effect=qa_results)
+        certifier_mock = MagicMock(side_effect=qa_results)
         with patch("otto.orchestrator.run_per", side_effect=fake_run_per):
-            with patch("otto.product_qa.run_product_qa", qa_mock):
+            with patch("otto.certifier.run_certifier_v2", certifier_mock):
                 result = await run_outer_loop(
                     product_spec_path=product_spec_path,
                     project_dir=tmp_git_repo,
                     tasks_path=tasks_path,
                     config={},
+                    intent="test product",
                     max_rounds=3,
                 )
 
         assert result["product_passed"] is False
         assert result["rounds"] == 2
         assert result["fix_tasks_created"] == 1
-        assert qa_mock.await_count == 2
+        assert certifier_mock.call_count == 2
 
 
 class TestOrchestrationLogic:

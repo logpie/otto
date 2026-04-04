@@ -47,19 +47,22 @@ user journeys that test the product end-to-end.
 
 Intent: {intent}
 
-Each journey is a sequence of API calls where each step's output feeds the next.
-Think like a real user — what would they ACTUALLY DO with this product?
+Each journey is a sequence of executable steps where each step can depend on
+previous outputs. Think like a real user of THIS product, not a generic store
+template. Derive journeys from the ACTUAL intent.
 
 Generate journeys for EVERY persona that would use this product:
-- Unauthenticated visitors (browsing, searching — NO registration needed)
-- New users (registration + first purchase/action)
+- Unauthenticated visitors (public browsing or public read-only actions — NO
+  registration needed)
+- New users (registration + first meaningful action)
 - Returning users (login, repeat actions)
 - Admin users (management, configuration)
 - Edge cases (empty states, errors, boundary conditions)
 
 IMPORTANT: Unauthenticated journeys must NOT start with registration or login.
-They test what a visitor can do WITHOUT an account. These journeys should use
-fresh_session and only GET/browse actions.
+They test what a visitor can do WITHOUT an account. These journeys should
+usually use fresh_session and read-only actions unless the intent explicitly
+supports anonymous writes.
 
 For each journey, provide:
 - name: short descriptive name
@@ -83,34 +86,38 @@ Step types:
 Variables: steps can reference previous outputs via {{{{var_name}}}}
 
 RULES:
+- Use generic reasoning: primary entity, core user action, CRUD flow,
+  persistence, permissions, and recovery/error states.
 - Generate 5-10 journeys covering ALL major product features
 - Each journey should test a REALISTIC user flow, not just one endpoint
 - Critical journeys must cover: the primary user value proposition
 - Include at least one error/edge case journey
 - Include at least one "state persistence" journey (data survives across sessions)
 - Steps must be specific: include real field names, realistic test data
-- Use common API path patterns (/api/products, /api/cart, /api/orders, /api/auth/register)
-- Include candidate_paths for endpoints that may vary: ["/api/products", "/api/catalog"]
+- Include candidate_paths when route shape may vary across implementations
+- Keep auth journeys when the intent implies accounts, admin roles, or protected
+  functionality
+- Do not invent commerce flows like catalog, cart, checkout, or orders unless
+  the intent actually describes them
 
 Output JSON only:
 {{
   "journeys": [
     {{
-      "name": "New Customer First Purchase",
-      "description": "A new user registers, browses products, adds to cart, and completes their first purchase",
+      "name": "New User Creates And Manages A Task",
+      "description": "A new user signs up, creates a task, confirms it appears in their list, updates it, and deletes it",
       "persona": "new_customer",
       "critical": true,
       "steps": [
         {{"action": "register", "email": "newuser@test.com", "password": "Test123!", "name": "Test User"}},
         {{"action": "login", "email": "newuser@test.com", "password": "Test123!"}},
-        {{"action": "get", "path": "/api/products", "candidate_paths": ["/api/products", "/api/catalog"], "expect_status": 200, "save_as": "products"}},
-        {{"action": "verify_count", "source": "products", "min": 1}},
-        {{"action": "post", "path": "/api/cart", "body": {{"productId": "{{{{first_product_id}}}}", "quantity": 1}}, "expect_status": [200, 201]}},
-        {{"action": "get", "path": "/api/cart", "expect_status": 200, "save_as": "cart"}},
-        {{"action": "verify_contains", "source": "cart", "contains": "{{{{first_product_name}}}}"}},
-        {{"action": "post", "path": "/api/checkout", "candidate_paths": ["/api/checkout", "/api/orders"], "body": {{"shippingAddress": {{"name": "Test", "address": "123 Main St", "city": "NYC", "state": "NY", "zip": "10001", "country": "US"}}}}, "expect_status": [200, 201]}},
-        {{"action": "get", "path": "/api/orders", "expect_status": 200, "save_as": "orders"}},
-        {{"action": "verify_count", "source": "orders", "min": 1}}
+        {{"action": "post", "path": "/api/tasks", "candidate_paths": ["/api/tasks", "/api/task"], "body": {{"title": "Pay rent", "description": "Due Friday", "status": "open"}}, "expect_status": [200, 201], "save_as": "created_task"}},
+        {{"action": "get", "path": "/api/tasks", "candidate_paths": ["/api/tasks", "/tasks"], "expect_status": 200, "save_as": "tasks"}},
+        {{"action": "verify_contains", "source": "tasks", "contains": "Pay rent"}},
+        {{"action": "put", "path": "/api/tasks/{{{{last_created_id}}}}", "candidate_paths": ["/api/tasks/{{{{last_created_id}}}}", "/api/task/{{{{last_created_id}}}}"], "body": {{"title": "Pay rent", "description": "Paid", "status": "done"}}, "expect_status": [200, 204]}},
+        {{"action": "get", "path": "/api/tasks", "candidate_paths": ["/api/tasks", "/tasks"], "expect_status": 200, "save_as": "updated_tasks"}},
+        {{"action": "verify_contains", "source": "updated_tasks", "contains": "done"}},
+        {{"action": "delete", "path": "/api/tasks/{{{{last_created_id}}}}", "candidate_paths": ["/api/tasks/{{{{last_created_id}}}}", "/api/task/{{{{last_created_id}}}}"], "expect_status": [200, 204]}}
       ]
     }}
   ]

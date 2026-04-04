@@ -13,7 +13,10 @@ from click.testing import CliRunner
 from otto.cli import main
 from otto.config import create_config, load_config
 from otto.product_planner import PlannedTask, ProductPlan, _parse_planner_output
-from otto.product_qa import _parse_qa_output, _qa_model, _qa_settings
+import warnings
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", DeprecationWarning)
+    from otto.product_qa import _parse_qa_output, _qa_model, _qa_settings
 from otto.runner import run_task_v45
 from otto.tasks import add_task, load_tasks
 

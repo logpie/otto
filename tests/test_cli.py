@@ -9,6 +9,7 @@ from click.testing import CliRunner
 
 from otto.cli import main
 from otto.certifier.adapter import TestConfig as AdapterTestConfig
+from otto.certifier.binder import BoundPlan
 from otto.certifier.baseline import BaselineResult
 from otto.certifier.classifier import ProductProfile
 from otto.certifier.intent_compiler import RequirementMatrix
@@ -233,10 +234,14 @@ class TestCertify:
             results=[],
         )
 
+        bound_plan = BoundPlan(intent="shop", claims=[], journeys=[])
+
         with patch("otto.certifier.baseline.load_or_compile_matrix", return_value=(matrix, "cache", project_dir / "otto_logs" / "certifier" / "matrix.json", 0.0)), \
              patch("otto.certifier.classifier.classify", return_value=profile), \
              patch("otto.certifier.adapter.analyze_project", return_value=test_config), \
-             patch("otto.certifier.baseline.certify", return_value=baseline_result) as mock_certify, \
+             patch("otto.certifier.binder.bind", return_value=bound_plan) as mock_bind, \
+             patch("otto.certifier.binder.save_bound_plan") as mock_save_bound_plan, \
+             patch("otto.certifier.baseline.run_baseline_from_bound_plan", return_value=baseline_result) as mock_run_bound, \
              patch("otto.certifier.baseline.print_report") as mock_print_report, \
              patch("otto.certifier.baseline.save_report") as mock_save_report:
             result = runner.invoke(
@@ -245,20 +250,25 @@ class TestCertify:
             )
 
         assert result.exit_code == 0
-        mock_certify.assert_called_once()
+        mock_bind.assert_called_once()
+        assert mock_bind.call_args.args[0] == matrix
+        assert mock_bind.call_args.args[2] == test_config
+        assert mock_bind.call_args.args[3] == profile
+        mock_run_bound.assert_called_once_with(bound_plan, project_dir, profile)
+        mock_save_bound_plan.assert_called_once()
         mock_print_report.assert_called_once_with(baseline_result)
         mock_save_report.assert_called_once_with(baseline_result, str(output_path))
         assert baseline_result.matrix_source == "cache"
         assert baseline_result.matrix_path.endswith("matrix.json")
 
-    def test_certify_tier_2_is_not_implemented(self, runner, tmp_path):
+    def test_certify_tier_2_fails_gracefully_without_app(self, runner, tmp_path):
         project_dir = tmp_path / "project"
         project_dir.mkdir()
 
         result = runner.invoke(main, ["certify", str(project_dir), "shop", "--tier", "2"])
 
         assert result.exit_code != 0
-        assert "not implemented" in result.output.lower()
+        assert "app failed to start" in result.output.lower()
 
 
 class TestStatus:

@@ -53,7 +53,7 @@ class TestConfig:
 
     # Data model
     models: list[str] = field(default_factory=list)  # e.g. ["User", "Product", "Order"]
-    has_cart_model: bool = False
+    resource_models: list[str] = field(default_factory=list)
     schema_source_file: str = ""
     model_fields: dict[str, dict[str, str]] = field(default_factory=dict)
     creatable_fields: dict[str, list[str]] = field(default_factory=dict)
@@ -79,8 +79,8 @@ def analyze_project(project_dir: Path) -> TestConfig:
     """Analyze a project's code to produce a TestConfig."""
     config = TestConfig()
 
-    _analyze_auth(project_dir, config)
     _analyze_routes(project_dir, config)
+    _analyze_auth(project_dir, config)
     _analyze_schema(project_dir, config)
     _analyze_cli(project_dir, config)
     _analyze_seeds(project_dir, config)
@@ -261,13 +261,19 @@ def _analyze_schema(project_dir: Path, config: TestConfig) -> None:
         for match in re.finditer(r'model\s+(\w+)\s*\{', content):
             model = match.group(1)
             config.models.append(model)
-            if model.lower() in ("cartitem", "cart_item", "cart"):
-                config.has_cart_model = True
+            config.resource_models.append(model)
+        config.models = _dedupe_preserving_order(config.models)
+        config.resource_models = _dedupe_preserving_order(config.resource_models)
         config.model_fields, config.creatable_fields = _parse_prisma_models(
             content,
             model_names=model_names,
             enum_names=set(config.enum_values),
+            config_enum_values=config.enum_values,
         )
+
+        # Scan route handlers for inline validation arrays
+        # e.g., ["TODO", "IN_PROGRESS", "DONE"].includes(status)
+        _discover_inline_enums(project_dir, config)
     except OSError:
         pass
 
@@ -320,11 +326,11 @@ def _analyze_seeds(project_dir: Path, config: TestConfig) -> None:
         # Find email/password pairs
         # Pattern: email: "...", password or passwordHash with hash("...")
         emails = re.findall(r'email:\s*["\']([^"\']+)["\']', content)
-        passwords = re.findall(r'(?:hash|bcrypt\.hash)\s*\(\s*["\']([^"\']+)["\']', content)
+        passwords = re.findall(r'(?:hash|hashSync|bcrypt\.hash|bcrypt\.hashSync)\s*\(\s*["\']([^"\']+)["\']', content)
         roles = re.findall(r'role:\s*["\'](\w+)["\']', content)
 
         for i, email in enumerate(emails):
-            password = passwords[i] if i < len(passwords) else "password123"
+            password = passwords[i] if i < len(passwords) else ""
             role = roles[i] if i < len(roles) else "user"
             config.seeded_users.append(SeededUser(
                 email=email, password=password, role=role,
@@ -400,11 +406,14 @@ def _parse_prisma_models(
     *,
     model_names: list[str],
     enum_names: set[str],
+    config_enum_values: dict[str, list[str]] | None = None,
 ) -> tuple[dict[str, dict[str, str]], dict[str, list[str]]]:
     scalar_types = {"String", "Int", "Float", "Boolean", "DateTime", "Json", "Decimal", "BigInt", "Bytes"}
     known_model_names = set(model_names)
     model_fields: dict[str, dict[str, str]] = {}
     creatable_fields: dict[str, list[str]] = {}
+    if config_enum_values is None:
+        config_enum_values = {}
 
     for match in re.finditer(r'model\s+(\w+)\s*\{([^}]*)\}', content, re.DOTALL):
         model_name = match.group(1)
@@ -429,6 +438,15 @@ def _parse_prisma_models(
 
             fields[field_name] = base_type
 
+            # Extract @default("VALUE") as enum hint for String fields
+            default_match = re.search(r'@default\("([^"]+)"\)', line)
+            if default_match and base_type == "String":
+                default_val = default_match.group(1)
+                # Record as a pseudo-enum: "field_name_values"
+                pseudo_enum_key = f"{model_name}.{field_name}"
+                if pseudo_enum_key not in config_enum_values:
+                    config_enum_values[pseudo_enum_key] = [default_val]
+
             if field_name in {"id", "createdAt", "updatedAt"}:
                 continue
             if field_type.endswith("[]"):
@@ -441,6 +459,44 @@ def _parse_prisma_models(
         creatable_fields[model_name] = writable_fields
 
     return model_fields, creatable_fields
+
+
+def _discover_inline_enums(project_dir: Path, config: TestConfig) -> None:
+    """Scan route handlers for inline validation arrays like ["TODO", "IN_PROGRESS", "DONE"].includes()."""
+    route_dirs = [
+        project_dir / "src" / "app" / "api",
+        project_dir / "app" / "api",
+        project_dir / "pages" / "api",
+    ]
+    for route_dir in route_dirs:
+        if not route_dir.is_dir():
+            continue
+        for ts_file in route_dir.rglob("*.ts"):
+            if "node_modules" in str(ts_file):
+                continue
+            try:
+                content = ts_file.read_text()
+            except OSError:
+                continue
+            # Match patterns like: ["TODO", "IN_PROGRESS", "DONE"].includes(status)
+            # or: !["TODO", "IN_PROGRESS", "DONE"].includes(status)
+            for m in re.finditer(
+                r'\[(["\'][A-Z_]+["\'](?:\s*,\s*["\'][A-Z_]+["\'])+)\]\.includes\((\w+)\)',
+                content,
+            ):
+                values_str = m.group(1)
+                field_name = m.group(2)
+                values = [v.strip().strip("'\"") for v in values_str.split(",")]
+                if values:
+                    # Find which model this field belongs to
+                    for model_name, fields in config.model_fields.items():
+                        if field_name in fields:
+                            key = f"{model_name}.{field_name}"
+                            config.enum_values[key] = values
+                            break
+                    else:
+                        # No model match — store under generic key
+                        config.enum_values[field_name] = values
 
 
 def _dedupe_preserving_order(items: list[str]) -> list[str]:
@@ -470,7 +526,7 @@ def print_config(config: TestConfig) -> None:
     else:
         print(f"  Seeded users: NONE")
     print(f"  Models: {config.models}")
-    print(f"  Cart model: {'yes' if config.has_cart_model else 'NO'}")
+    print(f"  Resource models: {config.resource_models}")
     print(f"  Routes: {len(config.routes)}")
     for r in config.routes[:10]:
         auth = " [auth]" if r.requires_auth else ""

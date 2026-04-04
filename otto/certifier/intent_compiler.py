@@ -30,7 +30,7 @@ TestStep = dict[str, Any]
 class Claim:
     """A single testable claim derived from the intent."""
 
-    id: str                    # e.g., "auth-register"
+    id: str                    # e.g., "task-create"
     description: str           # "Users can register with email and password"
     priority: str              # "critical" | "important" | "nice"
     category: str              # "feature" | "ux" | "data" | "error-handling" | "security"
@@ -66,9 +66,11 @@ You are a requirements analyst. Given a product intent (what someone asked
 to be built), produce a requirement matrix of TESTABLE CLAIMS.
 
 Intent: {intent}
+{schema_hint_block}
 
 For each claim:
-- id: short kebab-case identifier (e.g., "auth-register", "cart-add-item")
+- id: short kebab-case identifier derived from the actual feature (e.g.,
+  "auth-register", "task-create", "note-share", "admin-manage-users")
 - description: one sentence describing the observable behavior
 - priority: "critical" (product is broken without it), "important" (significant
   gap), or "nice" (polish/enhancement)
@@ -84,16 +86,21 @@ Also identify:
 - product_type_hint: "web", "cli", "api", "desktop", or "unknown"
 
 RULES:
+- Derive claims from the ACTUAL intent, not from a generic product template.
 - Only include claims the intent actually asks for. Don't invent features.
 - Each claim must be independently testable with concrete structured steps.
 - Critical claims should cover: can a user do the core thing the product promises?
-- Mark registration, login, core CRUD, and primary user flow as critical.
+- Mark registration, login, admin access, core CRUD flows, and the primary user
+  flow as critical when the intent calls for them.
 - Mark error handling, edge cases, UI polish as important or nice.
 - Every test step must be a dict with an "action" key.
-- For CRUD request bodies, include ALL plausible required fields, not just the obvious ones.
-- For update/delete claims on a single record, include API candidate paths with an explicit resource ID variant.
-- For access-control claims, prefer genuinely protected or admin-only endpoints over public catalog routes.
-- For checkout/payment claims, include a realistic shipping or billing payload when the API would need one.
+- Use generic language and generic reasoning: primary entities, core user
+  actions, CRUD flows, access control, persistence, and error handling.
+- If a claim operates on a primary entity, include candidate paths that match
+  plausible route shapes for that entity.
+- For create/update actions, include all plausibly required fields based on the
+  actual intent, not on a store-specific schema.
+- For access-control claims, prefer protected or admin-only endpoints and views.
 - Allowed actions:
   - "http": may include "method", "path", "candidate_paths", "body",
     "body_variants", "expect_status", "expect_body_contains", "expect_json_keys"
@@ -106,15 +113,21 @@ RULES:
 - Prefer candidate_paths when route shape may vary across implementations.
 - 10-25 claims for a typical product. Don't over-decompose.
 
+Example framing for a task manager:
+- Good claim IDs: "auth-register", "task-create", "task-list", "task-update",
+  "task-delete", "task-persistence", "admin-manage-users"
+- Bad claim IDs: "catalog-list", "cart-add-item", "checkout-complete" unless
+  the intent is actually an e-commerce product.
+
 Output JSON only:
 {{
   "product_type_hint": "web",
-  "non_goals": ["mobile app", "multi-language"],
-  "ambiguities": ["unclear if admin needs separate login"],
+  "non_goals": ["calendar sync", "mobile app"],
+  "ambiguities": ["unclear whether collaborators can edit shared tasks"],
   "claims": [
     {{
-      "id": "auth-register",
-      "description": "Users can register with email and password",
+      "id": "task-create",
+      "description": "Users can create a task with the required fields",
       "priority": "critical",
       "category": "feature",
       "test_approach": "api",
@@ -122,26 +135,28 @@ Output JSON only:
         {{
           "action": "http",
           "method": "POST",
-          "path": "/api/auth/register",
+          "path": "/api/tasks",
           "candidate_paths": [
-            "/api/auth/register",
-            "/api/register",
-            "/api/signup"
+            "/api/tasks",
+            "/api/task",
+            "/tasks"
           ],
           "body": {{
-            "email": "test@eval.com",
-            "password": "test12345",
-            "name": "Test User"
+            "title": "Pay rent",
+            "description": "Due on Friday",
+            "status": "open"
           }},
           "expect_status": [200, 201],
-          "expect_body_contains": ["email"],
-          "expect_json_keys": ["id", "email"]
+          "expect_body_contains": ["Pay rent"],
+          "expect_json_keys": ["id", "title"]
         }},
         {{
-          "action": "navigate",
-          "path": "/account",
-          "candidate_paths": ["/account", "/dashboard"],
-          "expect_status": [200, 302]
+          "action": "http",
+          "method": "GET",
+          "path": "/api/tasks",
+          "candidate_paths": ["/api/tasks", "/tasks"],
+          "expect_status": [200],
+          "expect_body_contains": ["Pay rent"]
         }}
       ],
       "hard_fail": true
@@ -154,6 +169,7 @@ Output JSON only:
 async def compile_intent(
     intent: str,
     config: dict[str, Any] | None = None,
+    schema_hint: str = "",
 ) -> RequirementMatrix:
     """Compile a natural language intent into a testable requirement matrix.
 
@@ -162,7 +178,18 @@ async def compile_intent(
 
     config = config or {}
 
-    prompt = INTENT_COMPILER_PROMPT.format(intent=intent)
+    schema_hint_block = ""
+    if schema_hint.strip():
+        schema_hint_block = (
+            "\nThe application uses these data models and field names:\n"
+            f"{schema_hint.strip()}\n"
+            "Use these exact field names in test step bodies, not guesses.\n"
+        )
+
+    prompt = INTENT_COMPILER_PROMPT.format(
+        intent=intent,
+        schema_hint_block=schema_hint_block,
+    )
 
     options = ClaudeAgentOptions(
         permission_mode="bypassPermissions",
@@ -276,15 +303,8 @@ def _normalize_claim_steps(claim: dict[str, Any]) -> list[TestStep]:
 
     raw_steps = claim.get("test_steps", [])
     if all(isinstance(step, dict) for step in raw_steps):
-        steps = [_normalize_structured_step(step) for step in raw_steps]
-    else:
-        steps = _normalize_legacy_steps(
-        claim_id=claim.get("id", ""),
-        description=claim.get("description", ""),
-        test_approach=claim.get("test_approach", "api"),
-        raw_steps=raw_steps,
-        )
-    return _enrich_claim_steps(claim.get("id", ""), steps)
+        return [_normalize_structured_step(step) for step in raw_steps]
+    return [_generic_fallback_step(claim, raw_steps)]
 
 
 def _normalize_structured_step(step: dict[str, Any]) -> TestStep:
@@ -302,501 +322,28 @@ def _normalize_structured_step(step: dict[str, Any]) -> TestStep:
     return normalized
 
 
-def _enrich_claim_steps(claim_id: str, steps: list[TestStep]) -> list[TestStep]:
-    claim_key = claim_id.lower()
-    enriched = [dict(step) for step in steps]
-
-    for step in enriched:
-        if str(step.get("action", "")).lower() != "http":
-            continue
-
-        method = str(step.get("method", "GET")).upper()
-        candidate_paths = _step_candidate_paths(step)
-        body = step.get("body")
-        body_variants = step.get("body_variants")
-
-        if claim_key == "checkout-stripe-integration" and method == "POST":
-            if body in (None, {}):
-                step["body"] = _default_checkout_body()
-
-        if claim_key == "admin-create-product" and method == "POST":
-            step["body"] = _ensure_product_fields(body)
-            if isinstance(body_variants, list):
-                step["body_variants"] = [_ensure_product_fields(variant) for variant in body_variants]
-
-        if claim_key in {"admin-edit-product", "admin-delete-product"} and method in {"PUT", "PATCH", "DELETE"}:
-            step["candidate_paths"] = _merge_candidate_paths(
-                candidate_paths,
-                [
-                    "/api/products/{{product_id}}",
-                    "/api/admin/products/{{product_id}}",
-                    "/admin/api/products/{{product_id}}",
-                ],
-            )
-
-        if claim_key in {"admin-manage-order-status", "admin-update-order-status"} and method in {"PUT", "PATCH"}:
-            step["candidate_paths"] = _merge_candidate_paths(
-                candidate_paths,
-                [
-                    "/api/orders/{{order_id}}",
-                    "/api/admin/orders/{{order_id}}",
-                    "/api/admin/orders/{{order_id}}/status",
-                ],
-            )
-            step["body_variants"] = _merge_body_variants(
-                step.get("body"),
-                step.get("body_variants"),
-                [{"status": "SHIPPED"}],
-            )
-
-        if claim_key in {"admin-no-public-access", "admin-authorization"} and method == "GET":
-            step["candidate_paths"] = _merge_candidate_paths(
-                candidate_paths,
-                [
-                    "/api/admin/stats",
-                    "/api/admin/orders",
-                    "/api/admin/products",
-                ],
-            )
-
-    return enriched
-
-
-def _default_checkout_body() -> dict[str, Any]:
-    return {
-        "shippingAddress": {
-            "name": "Baseline Test User",
-            "address": "123 Market Street",
-            "city": "San Francisco",
-            "state": "CA",
-            "zip": "94103",
-            "country": "US",
-        }
+def _generic_fallback_step(claim: dict[str, Any], raw_steps: list[Any]) -> TestStep:
+    candidate_paths = _claim_candidate_paths(claim)
+    step: TestStep = {
+        "action": "check_exists",
+        "target": "http" if candidate_paths else "note",
+        "existence_statuses": [200, 201, 204, 302, 401, 403],
+        "reason": (
+            f"Missing structured test_steps for claim {claim.get('id') or claim.get('description') or 'unknown'}"
+        ),
     }
+    if candidate_paths:
+        step["candidate_paths"] = candidate_paths
+        step["path"] = candidate_paths[0]
+    if raw_steps:
+        step["raw_steps"] = raw_steps
+    return step
 
 
-def _ensure_product_fields(body: Any) -> Any:
-    if not isinstance(body, dict):
-        return body
-    enriched = dict(body)
-    enriched.setdefault("category", "General")
-    enriched.setdefault("stock", 100)
-    enriched.setdefault("imageUrl", "https://placehold.co/400x300")
-    return enriched
-
-
-def _merge_candidate_paths(existing: list[str], additions: list[str]) -> list[str]:
-    seen: set[str] = set()
-    merged: list[str] = []
-    for path in [*existing, *additions]:
-        path_str = str(path)
-        if path_str in seen:
-            continue
-        seen.add(path_str)
-        merged.append(path_str)
-    return merged
-
-
-def _merge_body_variants(
-    body: Any,
-    body_variants: Any,
-    additions: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    merged: list[dict[str, Any]] = []
-    for variant in ([body] if isinstance(body, dict) else []) + (body_variants or []) + additions:
-        if not isinstance(variant, dict):
-            continue
-        if variant not in merged:
-            merged.append(dict(variant))
-    return merged
-
-
-def _step_candidate_paths(step: dict[str, Any]) -> list[str]:
-    candidate_paths = step.get("candidate_paths")
+def _claim_candidate_paths(claim: dict[str, Any]) -> list[str]:
+    candidate_paths = claim.get("candidate_paths")
     if isinstance(candidate_paths, list) and candidate_paths:
         return [str(path) for path in candidate_paths]
-    if step.get("path"):
-        return [str(step["path"])]
+    if claim.get("path"):
+        return [str(claim["path"])]
     return []
-
-
-def _normalize_legacy_steps(
-    claim_id: str,
-    description: str,
-    test_approach: str,
-    raw_steps: list[Any],
-) -> list[TestStep]:
-    claim_key = claim_id.lower()
-
-    if claim_key == "auth-register":
-        return [
-            _step_navigate(
-                ["/register", "/signup", "/auth/register", "/auth/signup"],
-                body_contains=["register", "sign up", "email"],
-            ),
-            _step_http(
-                "POST",
-                ["/api/auth/register", "/api/register", "/api/signup", "/api/auth/signup"],
-                body={"email": "{{email}}", "password": "{{password}}", "name": "{{name}}"},
-                expect_status=[200, 201],
-                expect_body_contains=["email"],
-                expect_json_keys=["id", "email"],
-                capture_auth=True,
-            ),
-        ]
-
-    if claim_key == "auth-login":
-        return [
-            _seed_register_step(),
-            _seed_login_step(),
-            _step_check_exists(
-                ["/account", "/dashboard", "/checkout", "/cart"],
-                existence_statuses=[200, 302, 401, 403],
-            ),
-        ]
-
-    if claim_key == "auth-logout":
-        return [
-            _seed_register_step(),
-            _seed_login_step(),
-            _step_http(
-                "POST",
-                ["/api/auth/logout", "/api/logout", "/logout"],
-                expect_status=[200, 204, 302],
-            ),
-            _step_check_exists(
-                ["/checkout", "/admin", "/cart"],
-                existence_statuses=[302, 401, 403],
-            ),
-        ]
-
-    if claim_key == "auth-protected-routes":
-        return [
-            _step_check_exists(
-                ["/checkout", "/cart", "/admin", "/admin/orders"],
-                existence_statuses=[302, 401, 403],
-            ),
-        ]
-
-    if claim_key == "catalog-list":
-        return [
-            _step_navigate(
-                ["/products", "/shop", "/catalog", "/"],
-                body_contains=["product", "price"],
-            ),
-            _step_http(
-                "GET",
-                ["/api/products", "/api/product", "/api/catalog/products", "/products"],
-                expect_status=[200],
-                expect_body_contains=["price"],
-                extract={"type": "first_product"},
-            ),
-        ]
-
-    if claim_key == "catalog-detail":
-        return [
-            _discover_product_step(),
-            _step_http(
-                "GET",
-                [
-                    "/api/products/{{product_id}}",
-                    "/api/product/{{product_id}}",
-                    "/products/{{product_id}}",
-                    "/product/{{product_id}}",
-                    "/products/{{product_slug}}",
-                ],
-                expect_status=[200],
-                expect_body_contains=["{{product_name}}", "price", "description"],
-            ),
-            _step_check_exists(
-                ["/cart", "/api/cart", "/api/cart/add", "/api/cart/items"],
-                existence_statuses=[200, 201, 302, 401, 403],
-            ),
-        ]
-
-    if claim_key == "cart-add-item":
-        return [
-            _seed_register_step(),
-            _seed_login_step(),
-            _discover_product_step(),
-            _step_http(
-                "POST",
-                ["/api/cart", "/api/cart/add", "/api/cart/items", "/api/users/me/cart"],
-                body_variants=[
-                    {"productId": "{{product_id}}", "quantity": 1},
-                    {"product_id": "{{product_id}}", "quantity": 1},
-                    {"id": "{{product_id}}", "quantity": 1},
-                ],
-                expect_status=[200, 201],
-            ),
-            _step_http(
-                "GET",
-                ["/api/cart", "/cart"],
-                expect_status=[200],
-                expect_body_contains=["{{product_name}}"],
-            ),
-        ]
-
-    if claim_key == "cart-update-quantity":
-        return [
-            _seed_register_step(),
-            _seed_login_step(),
-            _discover_product_step(),
-            _step_http(
-                "POST",
-                ["/api/cart", "/api/cart/add", "/api/cart/items"],
-                body_variants=[
-                    {"productId": "{{product_id}}", "quantity": 1},
-                    {"product_id": "{{product_id}}", "quantity": 1},
-                ],
-                expect_status=[200, 201],
-            ),
-            _step_http(
-                "PATCH",
-                ["/api/cart", "/api/cart/items", "/api/cart/update"],
-                body_variants=[
-                    {"productId": "{{product_id}}", "quantity": 3},
-                    {"product_id": "{{product_id}}", "quantity": 3},
-                ],
-                expect_status=[200],
-            ),
-            _step_http(
-                "GET",
-                ["/api/cart", "/cart"],
-                expect_status=[200],
-                expect_body_contains=["3"],
-            ),
-        ]
-
-    if claim_key == "cart-remove-item":
-        return [
-            _seed_register_step(),
-            _seed_login_step(),
-            _discover_product_step(),
-            _step_http(
-                "POST",
-                ["/api/cart", "/api/cart/add", "/api/cart/items"],
-                body_variants=[
-                    {"productId": "{{product_id}}", "quantity": 1},
-                    {"product_id": "{{product_id}}", "quantity": 1},
-                ],
-                expect_status=[200, 201],
-            ),
-            _step_http(
-                "DELETE",
-                ["/api/cart", "/api/cart/items/{{product_id}}", "/api/cart/remove"],
-                body_variants=[
-                    {"productId": "{{product_id}}"},
-                    {"product_id": "{{product_id}}"},
-                ],
-                expect_status=[200, 204],
-            ),
-        ]
-
-    if claim_key == "cart-total":
-        return [
-            _seed_register_step(),
-            _seed_login_step(),
-            _step_http(
-                "GET",
-                ["/api/products", "/api/product", "/api/catalog/products"],
-                expect_status=[200],
-                expect_body_contains=["price"],
-                extract={"type": "first_two_products"},
-            ),
-            _step_http(
-                "POST",
-                ["/api/cart", "/api/cart/add", "/api/cart/items"],
-                body_variants=[
-                    {"productId": "{{product_id}}", "quantity": 1},
-                    {"product_id": "{{product_id}}", "quantity": 1},
-                ],
-                expect_status=[200, 201],
-            ),
-            _step_http(
-                "POST",
-                ["/api/cart", "/api/cart/add", "/api/cart/items"],
-                body_variants=[
-                    {"productId": "{{second_product_id}}", "quantity": 1},
-                    {"product_id": "{{second_product_id}}", "quantity": 1},
-                ],
-                expect_status=[200, 201],
-            ),
-            _step_http(
-                "GET",
-                ["/api/cart", "/cart"],
-                expect_status=[200],
-                expect_body_contains=["total"],
-            ),
-        ]
-
-    if claim_key in {"checkout-stripe-payment", "checkout-stripe-decline"}:
-        return [
-            _step_navigate(
-                ["/checkout", "/cart/checkout"],
-                body_contains=["checkout", "payment", "stripe"],
-            ),
-            _step_check_exists(
-                ["/api/checkout", "/api/orders", "/api/payments/stripe", "/api/stripe/checkout"],
-                existence_statuses=[200, 201, 302, 401, 403],
-            ),
-        ]
-
-    if claim_key == "admin-auth":
-        return [
-            _seed_register_step(),
-            _seed_login_step(),
-            _step_check_exists(
-                ["/admin", "/admin/orders", "/api/admin/orders", "/api/orders"],
-                existence_statuses=[302, 401, 403],
-            ),
-        ]
-
-    if claim_key in {"admin-product-create", "admin-product-edit", "admin-product-delete"}:
-        return [
-            _step_check_exists(
-                ["/admin/products", "/admin", "/api/admin/products", "/api/products"],
-                existence_statuses=[200, 201, 302, 401, 403],
-            ),
-        ]
-
-    if claim_key in {"admin-orders-list", "admin-order-detail", "data-order-persists"}:
-        return [
-            _step_check_exists(
-                ["/admin/orders", "/api/admin/orders", "/api/orders", "/orders"],
-                existence_statuses=[200, 302, 401, 403],
-            ),
-        ]
-
-    if claim_key == "ux-empty-cart":
-        return [
-            _step_navigate(
-                ["/cart"],
-                body_contains=["cart", "empty", "browse", "shop"],
-                expect_status=[200, 302, 401, 403],
-            ),
-        ]
-
-    if test_approach == "cli":
-        for raw_step in raw_steps:
-            if isinstance(raw_step, str) and raw_step.strip():
-                return [
-                    {
-                        "action": "cli",
-                        "command": raw_step.strip(),
-                        "expect_exit_code": 0,
-                    }
-                ]
-
-    if test_approach == "code-review":
-        return [
-            {
-                "action": "check_exists",
-                "target": "note",
-                "reason": description or "code review required",
-            }
-        ]
-
-    return [
-        {
-            "action": "check_exists",
-            "target": "note",
-            "reason": f"legacy steps could not be normalized for {claim_id or description}",
-            "raw_steps": raw_steps,
-        }
-    ]
-
-
-def _step_http(
-    method: str,
-    candidate_paths: list[str],
-    *,
-    body: dict[str, Any] | None = None,
-    body_variants: list[dict[str, Any]] | None = None,
-    expect_status: list[int] | None = None,
-    expect_body_contains: list[str] | None = None,
-    expect_json_keys: list[str] | None = None,
-    extract: dict[str, Any] | None = None,
-    capture_auth: bool = False,
-) -> TestStep:
-    step: TestStep = {
-        "action": "http",
-        "method": method,
-        "candidate_paths": candidate_paths,
-        "expect_status": expect_status or ([200] if method == "GET" else [200, 201]),
-    }
-    if body is not None:
-        step["body"] = body
-    if body_variants is not None:
-        step["body_variants"] = body_variants
-    if expect_body_contains is not None:
-        step["expect_body_contains"] = expect_body_contains
-    if expect_json_keys is not None:
-        step["expect_json_keys"] = expect_json_keys
-    if extract is not None:
-        step["extract"] = extract
-    if capture_auth:
-        step["capture_auth"] = True
-    return step
-
-
-def _step_navigate(
-    candidate_paths: list[str],
-    *,
-    body_contains: list[str] | None = None,
-    expect_status: list[int] | None = None,
-) -> TestStep:
-    step: TestStep = {
-        "action": "navigate",
-        "candidate_paths": candidate_paths,
-        "expect_status": expect_status or [200],
-    }
-    if body_contains is not None:
-        step["expect_body_contains"] = body_contains
-    return step
-
-
-def _step_check_exists(
-    candidate_paths: list[str],
-    *,
-    existence_statuses: list[int],
-) -> TestStep:
-    return {
-        "action": "check_exists",
-        "target": "http",
-        "candidate_paths": candidate_paths,
-        "existence_statuses": existence_statuses,
-    }
-
-
-def _seed_register_step() -> TestStep:
-    return _step_http(
-        "POST",
-        ["/api/auth/register", "/api/register", "/api/signup", "/api/auth/signup"],
-        body={"email": "{{email}}", "password": "{{password}}", "name": "{{name}}"},
-        expect_status=[200, 201],
-        capture_auth=True,
-    )
-
-
-def _seed_login_step() -> TestStep:
-    return _step_http(
-        "POST",
-        ["/api/auth/login", "/api/login", "/api/signin", "/api/auth/signin"],
-        body_variants=[
-            {"email": "{{email}}", "password": "{{password}}"},
-            {"username": "{{email}}", "password": "{{password}}"},
-        ],
-        expect_status=[200, 201],
-        capture_auth=True,
-    )
-
-
-def _discover_product_step() -> TestStep:
-    return _step_http(
-        "GET",
-        ["/api/products", "/api/product", "/api/catalog/products", "/products"],
-        expect_status=[200],
-        expect_body_contains=["price"],
-        extract={"type": "first_product"},
-    )

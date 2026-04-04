@@ -34,6 +34,7 @@ from typing import Any
 import requests
 
 from otto.certifier.adapter import SeededUser, TestConfig, analyze_project
+from otto.certifier.binder import BoundAuth, BoundClaim, BoundPlan, BoundStep
 from otto.certifier.classifier import ProductProfile, classify
 from otto.certifier.intent_compiler import Claim, RequirementMatrix, compile_intent, load_matrix, save_matrix
 
@@ -217,7 +218,14 @@ class AppRunner:
         elif self.profile.framework in ("flask", "fastapi"):
             cmd = f"{cmd} --port {self.port}"
 
-        env = {**os.environ, "PORT": str(self.port), "NODE_ENV": "development"}
+        env = {
+            **os.environ,
+            "PORT": str(self.port),
+            "NODE_ENV": "development",
+            # NextAuth requires NEXTAUTH_URL to match the actual listening port
+            # for session cookies to work. Override whatever .env says.
+            "NEXTAUTH_URL": f"http://localhost:{self.port}",
+        }
 
         try:
             self.process = subprocess.Popen(
@@ -295,49 +303,57 @@ def run_baseline(
     matrix: RequirementMatrix,
     profile: ProductProfile,
     test_config: TestConfig | None = None,
+    app_runner: AppRunner | None = None,
 ) -> BaselineResult:
-    """Run deterministic baseline tests against critical and important claims."""
+    """Run deterministic baseline tests against critical and important claims.
+
+    Args:
+        app_runner: If provided, reuse this AppRunner (caller manages lifecycle).
+                    If None, create and manage an AppRunner internally.
+    """
 
     start_time = time.time()
     results: list[ClaimResult] = []
     run_state = BaselineRunState()
 
-    runner = None
+    owns_runner = app_runner is None
+    runner = app_runner
     app_evidence = None
     if profile.interaction in ("browser", "http"):
-        runner = AppRunner(project_dir, profile)
-        app_evidence = runner.start()
-        if not app_evidence.passed:
-            for claim in matrix.claims:
-                results.append(
-                    ClaimResult(
-                        claim_id=claim.id,
-                        claim_description=claim.description,
-                        priority=claim.priority,
-                        hard_fail=claim.hard_fail,
-                        passed=False,
-                        outcome="fail",
-                        evidence=[],
-                        error="app failed to start",
+        if runner is None:
+            runner = AppRunner(project_dir, profile)
+            app_evidence = runner.start()
+            if not app_evidence.passed:
+                for claim in matrix.claims:
+                    results.append(
+                        ClaimResult(
+                            claim_id=claim.id,
+                            claim_description=claim.description,
+                            priority=claim.priority,
+                            hard_fail=claim.hard_fail,
+                            passed=False,
+                            outcome="fail",
+                            evidence=[],
+                            error="app failed to start",
+                        )
                     )
+                return BaselineResult(
+                    product_dir=str(project_dir),
+                    intent=matrix.intent,
+                    product_type=profile.product_type,
+                    started=False,
+                    claims_tested=0,
+                    claims_passed=0,
+                    claims_failed=len(matrix.claims),
+                    claims_not_implemented=0,
+                    claims_blocked=0,
+                    claims_not_applicable=0,
+                    hard_fails=len([claim for claim in matrix.claims if claim.hard_fail]),
+                    certified=False,
+                    results=results,
+                    app_start_evidence=app_evidence,
+                    duration_s=round(time.time() - start_time, 1),
                 )
-            return BaselineResult(
-                product_dir=str(project_dir),
-                intent=matrix.intent,
-                product_type=profile.product_type,
-                started=False,
-                claims_tested=0,
-                claims_passed=0,
-                claims_failed=len(matrix.claims),
-                claims_not_implemented=0,
-                claims_blocked=0,
-                claims_not_applicable=0,
-                hard_fails=len([claim for claim in matrix.claims if claim.hard_fail]),
-                certified=False,
-                results=results,
-                app_start_evidence=app_evidence,
-                duration_s=round(time.time() - start_time, 1),
-            )
 
     try:
         base_url = runner.base_url if runner else ""
@@ -346,7 +362,7 @@ def run_baseline(
                 continue
             results.append(_test_claim(claim, base_url, project_dir, profile, test_config, run_state))
     finally:
-        if runner:
+        if runner and owns_runner:
             runner.stop()
 
     passed = sum(1 for result in results if result.outcome == "pass")
@@ -357,7 +373,7 @@ def run_baseline(
     hard_fails = sum(
         1
         for result in results
-        if result.hard_fail and result.outcome in {"fail", "not_implemented"}
+        if result.hard_fail and result.outcome in {"fail", "not_implemented", "blocked_by_harness"}
     )
     baseline_result = BaselineResult(
         product_dir=str(project_dir),
@@ -379,6 +395,654 @@ def run_baseline(
     baseline_result.verdict = judge(baseline_result)
     baseline_result.certified = baseline_result.verdict.certified
     return baseline_result
+
+
+def run_baseline_from_bound_plan(
+    bound_plan: BoundPlan,
+    project_dir: Path,
+    profile: ProductProfile,
+    app_runner: AppRunner | None = None,
+) -> BaselineResult:
+    """Run deterministic baseline tests from a pre-bound execution plan."""
+
+    start_time = time.time()
+    results: list[ClaimResult] = []
+    run_state = BaselineRunState()
+
+    owns_runner = app_runner is None
+    runner = app_runner
+    app_evidence = None
+    if profile.interaction in ("browser", "http"):
+        if runner is None:
+            runner = AppRunner(project_dir, profile)
+            app_evidence = runner.start()
+            if not app_evidence.passed:
+                for claim in bound_plan.claims:
+                    results.append(
+                        ClaimResult(
+                            claim_id=claim.id,
+                            claim_description=claim.description,
+                            priority=claim.priority,
+                            hard_fail=claim.hard_fail,
+                            passed=False,
+                            outcome="fail",
+                            evidence=[],
+                            error="app failed to start",
+                        )
+                    )
+                return BaselineResult(
+                    product_dir=str(project_dir),
+                    intent=bound_plan.intent,
+                    product_type=profile.product_type,
+                    started=False,
+                    claims_tested=0,
+                    claims_passed=0,
+                    claims_failed=len(bound_plan.claims),
+                    claims_not_implemented=0,
+                    claims_blocked=0,
+                    claims_not_applicable=0,
+                    hard_fails=len([claim for claim in bound_plan.claims if claim.hard_fail]),
+                    certified=False,
+                    results=results,
+                    app_start_evidence=app_evidence,
+                    duration_s=round(time.time() - start_time, 1),
+                )
+
+    try:
+        base_url = runner.base_url if runner else ""
+
+        # Pre-authenticate once: find the first auth binding and establish a session.
+        # This avoids per-claim re-authentication which causes cookie state issues.
+        _pre_authenticate_bound_session(bound_plan, base_url, run_state)
+
+        for claim in bound_plan.claims:
+            if claim.priority == "nice" and claim.test_approach == "code-review":
+                continue
+            results.append(_test_bound_claim(claim, base_url, project_dir, profile, run_state))
+    finally:
+        if runner and owns_runner:
+            runner.stop()
+
+    passed = sum(1 for result in results if result.outcome == "pass")
+    failed = sum(1 for result in results if result.outcome == "fail")
+    not_implemented = sum(1 for result in results if result.outcome == "not_implemented")
+    blocked = sum(1 for result in results if result.outcome == "blocked_by_harness")
+    not_applicable = sum(1 for result in results if result.outcome == "not_applicable")
+    hard_fails = sum(
+        1
+        for result in results
+        if result.hard_fail and result.outcome in {"fail", "not_implemented", "blocked_by_harness"}
+    )
+    baseline_result = BaselineResult(
+        product_dir=str(project_dir),
+        intent=bound_plan.intent,
+        product_type=profile.product_type,
+        started=True,
+        claims_tested=len(results),
+        claims_passed=passed,
+        claims_failed=failed,
+        claims_not_implemented=not_implemented,
+        claims_blocked=blocked,
+        claims_not_applicable=not_applicable,
+        hard_fails=hard_fails,
+        certified=(hard_fails == 0),
+        results=results,
+        app_start_evidence=app_evidence,
+        duration_s=round(time.time() - start_time, 1),
+    )
+    baseline_result.verdict = judge(baseline_result)
+    baseline_result.certified = baseline_result.verdict.certified
+    return baseline_result
+
+
+def _test_bound_claim(
+    claim: BoundClaim,
+    base_url: str,
+    project_dir: Path,
+    profile: ProductProfile,
+    run_state: BaselineRunState | None = None,
+) -> ClaimResult:
+    if claim.structural_outcome is not None:
+        return ClaimResult(
+            claim_id=claim.id,
+            claim_description=claim.description,
+            priority=claim.priority,
+            hard_fail=claim.hard_fail,
+            passed=(claim.structural_outcome == "pass"),
+            outcome=claim.structural_outcome,
+            evidence=[
+                Evidence(
+                    step="claim precheck",
+                    command="bound structural analysis",
+                    expected="claim is testable",
+                    actual=claim.structural_reason,
+                    passed=False,
+                    outcome=claim.structural_outcome,
+                    skipped=True,
+                    timestamp=time.strftime("%H:%M:%S"),
+                    proof=claim.structural_proof,
+                )
+            ],
+            error=claim.structural_reason,
+            proof=claim.structural_proof,
+        )
+
+    runtime_claim = Claim(
+        id=claim.id,
+        description=claim.description,
+        priority=claim.priority,
+        category=claim.category,
+        test_approach=claim.test_approach,
+        test_steps=[bound_step.step for bound_step in claim.steps],
+        hard_fail=claim.hard_fail,
+    )
+
+    # Claims testing unauthenticated access need a fresh session (no pre-auth cookies)
+    tests_unauth = any(
+        not bs.requires_auth and not bs.requires_admin and bs.auth is None
+        for bs in claim.steps
+    )
+    effective_run_state = run_state
+    if tests_unauth:
+        effective_run_state = BaselineRunState()  # fresh session, no pre-auth
+
+    context = _build_execution_context(runtime_claim, base_url, project_dir, profile, None, effective_run_state)
+    evidence: list[Evidence] = []
+    failed_create_evidence: Evidence | None = None
+
+    for bound_step in claim.steps:
+        if _is_blocked_by_create_failure_step(bound_step.step, failed_create_evidence):
+            evidence.append(_blocked_by_create_failure_evidence(bound_step.step, failed_create_evidence))
+            continue
+
+        step_evidence = _execute_bound_step(bound_step, context)
+        evidence.append(step_evidence)
+
+        if _is_create_http_step(bound_step.step):
+            failed_create_evidence = None if step_evidence.passed else step_evidence
+
+    outcome = _claim_outcome_from_evidence(evidence)
+    error = _claim_error_from_evidence(evidence, outcome)
+    if run_state is not None:
+        run_state.authenticated_user = context.authenticated_user
+        if claim.id.lower() == "auth-login":
+            run_state.auth_login_claim_ran = True
+
+    return ClaimResult(
+        claim_id=claim.id,
+        claim_description=claim.description,
+        priority=claim.priority,
+        hard_fail=claim.hard_fail,
+        passed=(outcome == "pass"),
+        outcome=outcome,
+        evidence=evidence,
+        error=error,
+        proof=_claim_proof_from_evidence(evidence, outcome),
+    )
+
+
+def _execute_bound_step(bound_step: BoundStep, context: ExecutionContext) -> Evidence:
+    timestamp = time.strftime("%H:%M:%S")
+    step = dict(bound_step.step)
+    if not isinstance(step, dict):
+        return Evidence(
+            step=str(step),
+            command="(unstructured step)",
+            expected="structured machine-executable step",
+            actual="step was not a dict",
+            passed=False,
+            outcome="blocked_by_harness",
+            skipped=True,
+            timestamp=timestamp,
+        )
+
+    action = str(step.get("action", "")).lower()
+    active_context = _prepare_step_context(step, context)
+    _prime_context_from_bound_auth(active_context, bound_step.auth)
+
+    if action in {"login", "login_admin"} or _is_login_step(step):
+        return _execute_bound_login_step(bound_step, active_context, timestamp)
+    if action == "register":
+        return _execute_bound_http_step(bound_step, active_context, timestamp)
+    if action == "http":
+        return _execute_bound_http_step(bound_step, active_context, timestamp)
+    if action == "navigate":
+        nav_step = BoundStep(
+            action="navigate",
+            method="GET",
+            step={**step, "method": "GET", "expect_status": step.get("expect_status", [200])},
+            resolved_route=bound_step.resolved_route,
+            fallback_routes=list(bound_step.fallback_routes),
+            resolved_body=bound_step.resolved_body,
+            auth=bound_step.auth,
+            requires_auth=bound_step.requires_auth,
+            requires_admin=bound_step.requires_admin,
+            entity_discovery_paths=list(bound_step.entity_discovery_paths),
+            binding_notes=list(bound_step.binding_notes),
+        )
+        return _execute_bound_http_step(nav_step, active_context, timestamp)
+    if action == "cli":
+        return _execute_cli_step(step, context.project_dir, timestamp)
+    if action == "check_exists":
+        step_copy = dict(step)
+        if bound_step.resolved_route:
+            step_copy["candidate_paths"] = [bound_step.resolved_route, *bound_step.fallback_routes]
+            step_copy.setdefault("path", bound_step.resolved_route)
+        return _execute_check_exists_step(step_copy, active_context, timestamp)
+
+    return Evidence(
+        step=json.dumps(step, sort_keys=True),
+        command="(unsupported action)",
+        expected="action in {http,navigate,cli,check_exists}",
+        actual=f"unsupported action: {action or '(missing)'}",
+        passed=False,
+        outcome="blocked_by_harness",
+        skipped=True,
+        timestamp=timestamp,
+    )
+
+
+def _execute_bound_login_step(bound_step: BoundStep, context: ExecutionContext, timestamp: str) -> Evidence:
+    auth = bound_step.auth
+    if auth is None:
+        return Evidence(
+            step=json.dumps(bound_step.step, sort_keys=True),
+            command="bound login",
+            expected="authenticated session established",
+            actual="bound step missing auth binding",
+            passed=False,
+            outcome="blocked_by_harness",
+            skipped=True,
+            timestamp=timestamp,
+        )
+    ok, detail = _authenticate_bound_user(context, bound_step, auth)
+    return Evidence(
+        step=json.dumps(bound_step.step, sort_keys=True),
+        command=f"login as {auth.email or auth.role}",
+        expected="authenticated session established",
+        actual=detail,
+        passed=ok,
+        outcome="pass" if ok else "fail",
+        timestamp=timestamp,
+    )
+
+
+def _execute_bound_http_step(bound_step: BoundStep, context: ExecutionContext, timestamp: str) -> Evidence:
+    step = bound_step.step
+    method = bound_step.method or str(step.get("method", "GET")).upper()
+    candidate_paths = [
+        path
+        for path in [bound_step.resolved_route, *bound_step.fallback_routes]
+        if path
+    ] or _get_candidate_paths(step)
+    _ensure_bound_entity_discoveries(bound_step, context)
+
+    auth = bound_step.auth
+    if auth and (bound_step.requires_auth or bound_step.requires_admin):
+        ok, detail = _authenticate_bound_user(context, bound_step, auth)
+        if not ok:
+            return Evidence(
+                step=json.dumps(step, sort_keys=True),
+                command=f"login as {auth.email or auth.role}",
+                expected="authenticated session established before protected request",
+                actual=detail,
+                passed=False,
+                outcome="fail",
+                timestamp=timestamp,
+            )
+
+    expect_status = [int(x) for x in step.get("expect_status", ([200] if method == "GET" else [200, 201]))]
+    timeout = int(step.get("timeout", 10))
+    allow_redirects = bool(step.get("allow_redirects", False))
+    attempts: list[dict[str, Any]] = []
+    missing_reasons: list[str] = []
+
+    for raw_path in candidate_paths:
+        rendered_path = _render_value(raw_path, context.variables)
+        if rendered_path in (_MISSING, None):
+            missing_reasons.append(f"path template unresolved: {raw_path}")
+            continue
+        url = _build_url(context.base_url, str(rendered_path))
+        rendered_body = _render_value(bound_step.resolved_body, context.variables)
+        if rendered_body is _MISSING:
+            missing_reasons.append(f"body template unresolved for {url}")
+            continue
+
+        request_kwargs: dict[str, Any] = {
+            "timeout": timeout,
+            "allow_redirects": allow_redirects,
+        }
+        headers = _render_value(step.get("headers"), context.variables)
+        if headers not in (_MISSING, None):
+            request_kwargs["headers"] = headers
+        if rendered_body is not None:
+            if method in {"GET", "HEAD"} and isinstance(rendered_body, dict):
+                request_kwargs["params"] = rendered_body
+            else:
+                request_kwargs["json"] = rendered_body
+
+        try:
+            response = context.session.request(method, url, **request_kwargs)
+        except Exception as exc:
+            attempts.append(
+                {
+                    "request": {"method": method, "url": url, "body": rendered_body},
+                    "error": str(exc),
+                }
+            )
+            continue
+
+        passed, detail = _check_http_expectations(step, response, context)
+        status_match = response.status_code in expect_status
+        if not status_match and response.status_code == 409 and any(
+            kw in (str(rendered_path) + context.claim.id).lower()
+            for kw in ("register", "signup")
+        ):
+            status_match = True
+            passed = True
+            detail = "409 Conflict (email already registered — endpoint works)"
+
+        attempt_record = {
+            "request": {"method": method, "url": url, "body": rendered_body},
+            "response": {
+                "status": response.status_code,
+                "body": _response_body_for_proof(response),
+            },
+            "detail": detail,
+            "passed": passed and status_match,
+        }
+        attempts.append(attempt_record)
+        if passed and status_match:
+            context.discoveries[_step_discovery_key(step)] = str(rendered_path)
+            _capture_response_state(step, response, context)
+            return Evidence(
+                step=json.dumps(step, sort_keys=True),
+                command=_format_http_command(method, url, rendered_body),
+                expected=_http_expectation_text(step),
+                actual=f"HTTP {response.status_code}: {detail}",
+                passed=True,
+                outcome="pass",
+                timestamp=timestamp,
+                proof=_finalize_http_proof(attempts),
+            )
+
+    if not attempts:
+        return Evidence(
+            step=json.dumps(step, sort_keys=True),
+            command=f"{method} {_first_path_label(candidate_paths)}",
+            expected=_http_expectation_text(step),
+            actual="; ".join(missing_reasons) or "bound plan did not resolve an executable endpoint",
+            passed=False,
+            outcome="blocked_by_harness",
+            skipped=True,
+            timestamp=timestamp,
+            proof={
+                "timestamp": _iso_timestamp(),
+                "missing_reasons": missing_reasons,
+            },
+        )
+
+    verdict_attempt = _select_http_verdict_attempt(attempts)
+    if "error" in verdict_attempt:
+        actual = f"request error: {verdict_attempt['error']}"
+        command = _format_http_command(method, verdict_attempt["request"]["url"], verdict_attempt["request"].get("body"))
+    else:
+        actual = f"HTTP {verdict_attempt['response']['status']}: {verdict_attempt['detail']}"
+        command = _format_http_command(method, verdict_attempt["request"]["url"], verdict_attempt["request"].get("body"))
+
+    return Evidence(
+        step=json.dumps(step, sort_keys=True),
+        command=command,
+        expected=_http_expectation_text(step),
+        actual=actual,
+        passed=False,
+        outcome="fail",
+        timestamp=timestamp,
+        proof=_finalize_http_proof(attempts),
+    )
+
+
+def _ensure_bound_entity_discoveries(bound_step: BoundStep, context: ExecutionContext) -> None:
+    if not bound_step.entity_discovery_paths:
+        return
+
+    unresolved_entities: set[str] = set()
+    for variable_name in _template_variables_in_value(
+        {
+            "route": bound_step.resolved_route,
+            "fallback_routes": bound_step.fallback_routes,
+            "body": bound_step.resolved_body,
+        }
+    ):
+        entity_name = _entity_name_from_template_var(variable_name)
+        if entity_name and not _entity_id_present(context.variables, entity_name):
+            unresolved_entities.add(entity_name)
+
+    for discovery_path in bound_step.entity_discovery_paths:
+        entity_name = _entity_name_from_api_path(discovery_path)
+        if entity_name and entity_name in unresolved_entities:
+            try:
+                response = context.session.get(_build_url(context.base_url, discovery_path), timeout=10)
+            except Exception:
+                continue
+            if response.status_code != 200:
+                continue
+            _store_entity_records(
+                context.variables,
+                _response_body_for_proof(response),
+                entity_name=entity_name,
+                limit=2,
+            )
+
+
+def _prime_context_from_bound_auth(context: ExecutionContext, auth: BoundAuth | None) -> None:
+    if auth is None:
+        return
+    if auth.email:
+        context.variables["email"] = auth.email
+        context.variables["current_user_email"] = auth.email
+    if auth.password:
+        context.variables["password"] = auth.password
+    if auth.name:
+        context.variables.setdefault("name", auth.name)
+    if auth.role.lower() in {"admin", "administrator"}:
+        if auth.email:
+            context.variables["admin_email"] = auth.email
+        if auth.password:
+            context.variables["admin_password"] = auth.password
+
+
+def _pre_authenticate_bound_session(
+    bound_plan: BoundPlan,
+    base_url: str,
+    run_state: BaselineRunState,
+) -> None:
+    """Authenticate once before running claims, sharing the session across all claims.
+
+    This avoids per-claim re-authentication which causes cookie state issues,
+    especially with NextAuth where session tokens need to persist across requests.
+    """
+    # Find a seeded user auth binding (user must already exist in DB).
+    # Skip generated users (bound-xxx@eval.local) — they haven't been registered yet.
+    auth = None
+    for claim in bound_plan.claims:
+        for step in claim.steps:
+            if step.auth and step.auth.email and step.auth.password:
+                # Skip generated/test users — they don't exist in DB yet
+                if "@eval.local" in step.auth.email or "WRONG_PASSWORD" in step.auth.password:
+                    continue
+                if not step.requires_admin:
+                    auth = step.auth
+                    break
+                elif auth is None:
+                    auth = step.auth
+        if auth and auth.role != "admin":
+            break
+
+    if not auth or not auth.password:
+        return
+
+    # Build a minimal context for authentication
+    context = ExecutionContext(
+        claim=None,  # type: ignore
+        base_url=base_url.rstrip("/"),
+        project_dir=Path("."),
+        profile=ProductProfile(
+            product_type="web", framework="unknown", language="unknown",
+            start_command="", port=None, test_command="", interaction="http",
+        ),
+        test_config=None,
+        session=run_state.session,
+        variables={},
+        discoveries=run_state.discoveries,
+    )
+
+    # Create a minimal BoundStep for the auth call
+    dummy_step = BoundStep(
+        action="login", method="POST", step={},
+        resolved_route=auth.login_route or "/api/auth/callback/credentials",
+        fallback_routes=[], resolved_body=None, auth=auth,
+        requires_auth=False, requires_admin=False,
+        entity_discovery_paths=[], binding_notes=[],
+    )
+
+    ok, detail = _authenticate_bound_user(context, dummy_step, auth)
+    if ok:
+        run_state.authenticated_user = SeededUser(
+            email=auth.email, password=auth.password, role=auth.role or "user",
+        )
+
+
+def _authenticate_bound_user(
+    context: ExecutionContext,
+    bound_step: BoundStep,
+    auth: BoundAuth,
+) -> tuple[bool, str]:
+    if context.authenticated_user and context.authenticated_user.email == auth.email:
+        return True, f"already authenticated as {auth.email}"
+    if not auth.password:
+        return False, "bound auth resolved a user but no password was recovered"
+
+    if auth.mechanism == "nextauth":
+        ok, detail = _authenticate_bound_nextauth_user(context, bound_step, auth)
+    else:
+        ok, detail = _authenticate_bound_generic_user(context, bound_step, auth)
+
+    if ok:
+        context.authenticated_user = SeededUser(email=auth.email, password=auth.password, role=auth.role or "user")
+    return ok, detail
+
+
+def _authenticate_bound_nextauth_user(
+    context: ExecutionContext,
+    bound_step: BoundStep,
+    auth: BoundAuth,
+) -> tuple[bool, str]:
+    csrf_route = auth.csrf_route or "/api/auth/csrf"
+    login_route = auth.login_route or bound_step.resolved_route or "/api/auth/callback/credentials"
+
+    try:
+        csrf_response = context.session.get(
+            _build_url(context.base_url, csrf_route),
+            timeout=10,
+            headers={"Accept": "application/json"},
+        )
+    except Exception as exc:
+        return False, f"failed CSRF request: {exc}"
+
+    if csrf_response.status_code != 200:
+        return False, f"CSRF endpoint returned HTTP {csrf_response.status_code}: {_preview_response(csrf_response)}"
+
+    try:
+        csrf_payload = csrf_response.json()
+    except ValueError:
+        return False, f"CSRF endpoint returned non-JSON body: {_preview_response(csrf_response)}"
+
+    csrf_token = csrf_payload.get("csrfToken")
+    if not csrf_token:
+        return False, f"CSRF token missing in {json.dumps(csrf_payload)[:200]}"
+
+    try:
+        response = context.session.post(
+            _build_url(context.base_url, login_route),
+            data={
+                "email": auth.email,
+                "password": auth.password,
+                "csrfToken": csrf_token,
+                "redirect": "false",
+                "json": "true",
+            },
+            timeout=10,
+            allow_redirects=False,
+        )
+    except Exception as exc:
+        return False, f"credentials callback failed: {exc}"
+
+    _capture_response_state({"capture_auth": True}, response, context)
+
+    session_url = _build_url(context.base_url, "/api/auth/session")
+    try:
+        session_response = context.session.get(
+            session_url,
+            timeout=10,
+            headers={"Accept": "application/json"},
+        )
+    except Exception as exc:
+        session_response = None
+        session_error = str(exc)
+    else:
+        session_error = ""
+
+    if session_response is not None and session_response.status_code == 200:
+        try:
+            session_payload = session_response.json()
+        except ValueError:
+            session_payload = None
+        if isinstance(session_payload, dict) and session_payload.get("user"):
+            session_user = session_payload["user"]
+            context.variables["current_user_email"] = session_user.get("email", auth.email)
+            return True, f"NextAuth session established for {session_user.get('email', auth.email)}"
+
+    if _has_auth_session_cookie(context.session):
+        return True, f"NextAuth session cookie stored after HTTP {response.status_code}"
+
+    detail = _preview_response(response)
+    if session_error:
+        detail = f"{detail}; session check error: {session_error}"
+    return False, f"NextAuth login failed with HTTP {response.status_code}: {detail}"
+
+
+def _authenticate_bound_generic_user(
+    context: ExecutionContext,
+    bound_step: BoundStep,
+    auth: BoundAuth,
+) -> tuple[bool, str]:
+    login_route = auth.login_route or bound_step.resolved_route
+    if not login_route:
+        return False, "bound auth did not include a login endpoint"
+
+    attempts: list[str] = []
+    for request_style in ("json", "data"):
+        request_kwargs: dict[str, Any] = {"timeout": 10, "allow_redirects": False}
+        payload = {"email": auth.email, "password": auth.password}
+        if request_style == "json":
+            request_kwargs["json"] = payload
+        else:
+            request_kwargs["data"] = payload
+        try:
+            response = context.session.post(
+                _build_url(context.base_url, login_route),
+                **request_kwargs,
+            )
+        except Exception as exc:
+            attempts.append(f"{request_style}: {exc}")
+            continue
+
+        _capture_response_state({"capture_auth": True}, response, context)
+        if _generic_auth_succeeded(response, context):
+            return True, f"{login_route} accepted bound credentials with HTTP {response.status_code}"
+        attempts.append(f"{request_style}: HTTP {response.status_code} {_preview_response(response)}")
+    return False, "; ".join(attempts[:4]) or "all login attempts failed"
 
 
 def _test_claim(
@@ -420,18 +1084,21 @@ def _test_claim(
 
     context = _build_execution_context(claim, base_url, project_dir, profile, test_config, run_state)
     evidence: list[Evidence] = []
+    failed_create_evidence: Evidence | None = None
 
     for step in claim.test_steps:
-        evidence.append(_execute_step(step, context))
+        if _is_blocked_by_create_failure_step(step, failed_create_evidence):
+            evidence.append(_blocked_by_create_failure_evidence(step, failed_create_evidence))
+            continue
 
-    passed = any(item.outcome == "pass" for item in evidence) and not any(item.outcome == "fail" for item in evidence)
+        step_evidence = _execute_step(step, context)
+        evidence.append(step_evidence)
+
+        if _is_create_http_step(step):
+            failed_create_evidence = None if step_evidence.passed else step_evidence
+
     outcome = _claim_outcome_from_evidence(evidence)
     error = _claim_error_from_evidence(evidence, outcome)
-    if run_state is not None and _should_reclassify_as_auth_blocked(claim, evidence, run_state):
-        _mark_evidence_as_auth_blocked(evidence)
-        passed = False
-        outcome = "blocked_by_harness"
-        error = "auth session not established — harness limitation"
     if run_state is not None:
         run_state.authenticated_user = context.authenticated_user
         if _is_auth_login_claim(claim):
@@ -442,7 +1109,7 @@ def _test_claim(
         claim_description=claim.description,
         priority=claim.priority,
         hard_fail=claim.hard_fail,
-        passed=passed,
+        passed=(outcome == "pass"),
         outcome=outcome,
         evidence=evidence,
         error=error,
@@ -570,6 +1237,45 @@ def _execute_step(step: dict[str, Any] | Any, context: ExecutionContext) -> Evid
     )
 
 
+def _is_create_http_step(step: dict[str, Any] | Any) -> bool:
+    if not isinstance(step, dict):
+        return False
+    if str(step.get("action", "")).lower() != "http":
+        return False
+    return str(step.get("method", "GET")).upper() == "POST"
+
+
+def _is_blocked_by_create_failure_step(step: dict[str, Any] | Any, failed_create_evidence: Evidence | None) -> bool:
+    if failed_create_evidence is None or not isinstance(step, dict):
+        return False
+    action = str(step.get("action", "")).lower()
+    method = str(step.get("method", "GET")).upper()
+    has_body_check = bool(step.get("expect_body_contains"))
+    return action in {"http", "navigate"} and method == "GET" and has_body_check
+
+
+def _blocked_by_create_failure_evidence(step: dict[str, Any], failed_create_evidence: Evidence) -> Evidence:
+    return Evidence(
+        step=json.dumps(step, sort_keys=True),
+        command=f"{str(step.get('method', 'GET')).upper()} {_first_path_label(_get_candidate_paths(step))}",
+        expected=_http_expectation_text(step),
+        actual=f"blocked_by_create_failure: earlier create step failed ({failed_create_evidence.actual})",
+        passed=False,
+        outcome="blocked_by_create_failure",
+        skipped=True,
+        timestamp=time.strftime("%H:%M:%S"),
+        proof={
+            "timestamp": _iso_timestamp(),
+            "blocked_by": {
+                "step": failed_create_evidence.step,
+                "command": failed_create_evidence.command,
+                "actual": failed_create_evidence.actual,
+                "proof": failed_create_evidence.proof,
+            },
+        },
+    )
+
+
 def _execute_http_step(step: dict[str, Any], context: ExecutionContext, timestamp: str) -> Evidence:
     method = str(step.get("method", "GET")).upper()
     raw_paths = _candidate_paths_for_step(step, context, method)
@@ -667,17 +1373,19 @@ def _execute_http_step(step: dict[str, Any], context: ExecutionContext, timestam
                 "body": _response_body_for_proof(response),
             },
             "detail": detail,
+            "passed": passed and status_match,
             "retry_reason": retry_reason,
         }
         attempts.append(attempt_record)
         if passed and status_match:
             context.discoveries[_step_discovery_key(step)] = str(rendered_path)
             _capture_response_state(step, response, context)
+            actual_detail = detail if not retry_reason else f"{detail} ({retry_reason})"
             return Evidence(
                 step=json.dumps(step, sort_keys=True),
                 command=_format_http_command(method, url, rendered_body),
                 expected=_http_expectation_text(step),
-                actual=f"HTTP {response.status_code}: {detail}",
+                actual=f"HTTP {response.status_code}: {actual_detail}",
                 passed=True,
                 outcome="pass",
                 timestamp=timestamp,
@@ -711,13 +1419,13 @@ def _execute_http_step(step: dict[str, Any], context: ExecutionContext, timestam
             },
         )
 
-    final_attempt = attempts[-1]
-    if "error" in final_attempt:
-        actual = f"request error: {final_attempt['error']}"
-        command = _format_http_command(method, final_attempt["request"]["url"], final_attempt["request"].get("body"))
+    verdict_attempt = _select_http_verdict_attempt(attempts)
+    if "error" in verdict_attempt:
+        actual = f"request error: {verdict_attempt['error']}"
+        command = _format_http_command(method, verdict_attempt["request"]["url"], verdict_attempt["request"].get("body"))
     else:
-        actual = f"HTTP {final_attempt['response']['status']}: {final_attempt['detail']}"
-        command = _format_http_command(method, final_attempt["request"]["url"], final_attempt["request"].get("body"))
+        actual = f"HTTP {verdict_attempt['response']['status']}: {verdict_attempt['detail']}"
+        command = _format_http_command(method, verdict_attempt["request"]["url"], verdict_attempt["request"].get("body"))
 
     return Evidence(
         step=json.dumps(step, sort_keys=True),
@@ -1017,11 +1725,33 @@ def _response_body_for_proof(response: requests.Response) -> Any:
         return (response.text or "")[:1000]
 
 
+def _http_attempt_score(attempt: dict[str, Any]) -> tuple[int, int, int]:
+    if "error" in attempt:
+        return (0, 0, 0)
+
+    response = attempt.get("response", {})
+    status = int(response.get("status", 0))
+    exists_score = 2 if status not in {0, 404, 405, 501} else 0
+    healthy_score = 1 if 0 < status < 500 else 0
+    body_score = len(str(response.get("body", "")))
+    return (exists_score + healthy_score, status, body_score)
+
+
+def _select_http_verdict_attempt(attempts: list[dict[str, Any]]) -> dict[str, Any]:
+    successful_attempts = [attempt for attempt in attempts if attempt.get("passed")]
+    if successful_attempts:
+        return max(successful_attempts, key=_http_attempt_score)
+    primary_attempts = [attempt for attempt in attempts if not attempt.get("retry_reason")]
+    if not primary_attempts:
+        primary_attempts = attempts
+    return max(primary_attempts, key=_http_attempt_score)
+
+
 def _finalize_http_proof(attempts: list[dict[str, Any]]) -> dict[str, Any]:
     if not attempts:
         return {"timestamp": _iso_timestamp()}
 
-    final_attempt = attempts[-1]
+    final_attempt = _select_http_verdict_attempt(attempts)
     proof: dict[str, Any] = {
         "timestamp": _iso_timestamp(),
         "request": final_attempt.get("request", {}),
@@ -1031,8 +1761,27 @@ def _finalize_http_proof(attempts: list[dict[str, Any]]) -> dict[str, Any]:
     if "error" in final_attempt:
         proof["response"] = {"error": final_attempt["error"]}
 
+    corrected_attempts = [attempt for attempt in attempts if attempt.get("retry_reason")]
+    if corrected_attempts:
+        original_attempt = next((attempt for attempt in attempts if not attempt.get("retry_reason")), None)
+        corrected_attempt = corrected_attempts[-1]
+        if original_attempt:
+            proof["original_attempt"] = {
+                "request": original_attempt.get("request", {}),
+                "response": original_attempt.get("response", {"error": original_attempt.get("error", "")}),
+            }
+        proof["corrected_attempt"] = {
+            "request": corrected_attempt.get("request", {}),
+            "response": corrected_attempt.get("response", {"error": corrected_attempt.get("error", "")}),
+        }
+        notes = [attempt["retry_reason"] for attempt in corrected_attempts if attempt.get("retry_reason")]
+        if notes:
+            proof["note"] = notes[-1] if len(notes) == 1 else notes
+
     retries = []
-    for attempt in attempts[:-1]:
+    for attempt in attempts:
+        if attempt is final_attempt:
+            continue
         retry_entry = {
             "request": attempt.get("request", {}),
             "response": attempt.get("response", {"error": attempt.get("error", "")}),
@@ -1066,9 +1815,9 @@ def _structural_claim_proof(
         claim_key = claim.id.lower()
         if "cart" in claim_key:
             return {
-                "adapter_check": "searched for CartItem model in prisma/schema.prisma",
-                "models_found": test_config.models,
-                "missing": "CartItem",
+                "adapter_check": "searched adapter resource inventory for a cart model",
+                "models_found": test_config.resource_models,
+                "missing": "cart-related resource model",
                 "source_file": test_config.schema_source_file or "prisma/schema.prisma",
             }
         if claim_key == "auth-register":
@@ -1083,6 +1832,11 @@ def _structural_claim_proof(
     }
 
 
+def _config_has_resource_model(test_config: TestConfig, resource_name: str) -> bool:
+    token = resource_name.lower()
+    return any(token in model.lower() for model in test_config.resource_models)
+
+
 def _candidate_paths_for_step(step: dict[str, Any], context: ExecutionContext, method: str) -> list[str]:
     paths = list(_get_candidate_paths(step))
     claim_key = context.claim.id.lower()
@@ -1093,10 +1847,7 @@ def _candidate_paths_for_step(step: dict[str, Any], context: ExecutionContext, m
         kw in claim_key for kw in ("public", "authorization", "access", "login")
     ):
         paths = _admin_only_paths(context, method) + paths
-    if _step_targets_resource(step, paths, context.claim, "product"):
-        paths.extend(_paths_from_routes(context, "product", method))
-    if _step_targets_resource(step, paths, context.claim, "order"):
-        paths.extend(_paths_from_routes(context, "order", method))
+    paths.extend(_adapter_candidate_paths(step, context, method, paths))
 
     return _dedupe_preserving_order(paths)
 
@@ -1125,56 +1876,132 @@ def _admin_only_paths(context: ExecutionContext, method: str) -> list[str]:
     return _dedupe_preserving_order(preferred + discovered)
 
 
-def _paths_from_routes(context: ExecutionContext, resource: str, method: str) -> list[str]:
+def _adapter_candidate_paths(
+    step: dict[str, Any],
+    context: ExecutionContext,
+    method: str,
+    primary_paths: list[str],
+) -> list[str]:
     config = context.test_config
     if not config:
         return []
 
-    resource_token = f"/{resource}"
-    plural_token = f"/{resource}s"
-    template_name = f"{resource}_id"
+    keywords = {
+        _normalize_entity_name(keyword)
+        for keyword in _extract_claim_keywords(context.claim, primary_paths)
+        if _normalize_entity_name(keyword)
+    }
+    keywords.update(_entities_from_paths(primary_paths))
+    keywords.update(_entity_name_from_template_var(var) for var in _template_variables_in_value(step))
+    keywords.discard("")
+
+    if not keywords:
+        return []
+
     paths: list[str] = []
 
     for route in config.routes:
-        if method not in route.methods:
+        if method.upper() not in route.methods:
             continue
-        lower = route.path.lower()
-        if resource_token not in lower and plural_token not in lower:
+        route_keywords = _route_keywords(route.path)
+        if not route_keywords.intersection(keywords):
             continue
-        paths.append(_path_to_template(route.path, template_name))
+        paths.append(_route_path_to_candidate(route.path))
     return paths
 
 
-def _path_to_template(path: str, template_name: str) -> str:
-    return re.sub(r":[^/]+", f"{{{{{template_name}}}}}", path)
-
-
-def _step_targets_resource(step: dict[str, Any], paths: list[str], claim: Claim, resource: str) -> bool:
-    haystacks = [claim.id.lower(), claim.description.lower(), json.dumps(step, sort_keys=True).lower(), *[path.lower() for path in paths]]
-    if resource == "product":
-        return any("product" in item for item in haystacks)
-    if resource == "order":
-        return any("order" in item for item in haystacks)
-    return False
-
-
 def _ensure_resource_discoveries(step: dict[str, Any], context: ExecutionContext, method: str, paths: list[str]) -> None:
-    combined = " ".join([context.claim.id.lower(), context.claim.description.lower(), *[path.lower() for path in paths]])
-    if ("product" in combined or "{{product_id}}" in combined or "/1" in combined) and method in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
-        _discover_products(context)
-    if ("order" in combined or "{{order_id}}" in combined or "/1" in combined) and method in {"GET", "PUT", "PATCH", "DELETE"}:
-        _discover_orders(context)
+    for entity_name, entity_paths in _entity_discovery_targets(step, context, method, paths).items():
+        if _entity_id_present(context.variables, entity_name):
+            continue
+        for entity_path in entity_paths:
+            _discover_entities(context, entity_name, entity_path)
+            if _entity_id_present(context.variables, entity_name):
+                break
 
 
-def _discover_products(context: ExecutionContext) -> None:
-    if context.variables.get("product_id"):
+def _entity_discovery_targets(
+    step: dict[str, Any],
+    context: ExecutionContext,
+    method: str,
+    paths: list[str],
+) -> dict[str, list[str]]:
+    targets: dict[str, list[str]] = {}
+
+    for variable_name in _template_variables_in_value(
+        {
+            "paths": paths,
+            "body": step.get("body"),
+            "body_variants": step.get("body_variants"),
+        }
+    ):
+        entity_name = _entity_name_from_template_var(variable_name)
+        if not entity_name or _entity_id_present(context.variables, entity_name):
+            continue
+        targets.setdefault(entity_name, []).extend(
+            _candidate_entity_collection_paths(context, entity_name, paths)
+        )
+
+    if method.upper() in {"GET", "PUT", "PATCH", "DELETE"}:
+        for path in paths:
+            entity_name = _entity_name_from_api_path(path)
+            collection_path = _collection_path_from_api_path(path)
+            if not entity_name or not collection_path:
+                continue
+            if _normalize_path(path) == collection_path:
+                continue
+            if _entity_id_present(context.variables, entity_name):
+                continue
+            targets.setdefault(entity_name, []).extend(
+                _candidate_entity_collection_paths(context, entity_name, [path])
+            )
+
+    return {
+        entity_name: _dedupe_preserving_order(entity_paths)
+        for entity_name, entity_paths in targets.items()
+        if entity_paths
+    }
+
+
+def _candidate_entity_collection_paths(
+    context: ExecutionContext,
+    entity_name: str,
+    seed_paths: list[str],
+) -> list[str]:
+    candidates: list[str] = []
+
+    for seed_path in seed_paths:
+        collection_path = _collection_path_from_api_path(seed_path)
+        if collection_path and _entity_name_from_api_path(collection_path) == entity_name:
+            candidates.append(collection_path)
+
+    plural_name = _pluralize_entity_name(entity_name)
+    candidates.extend([f"/api/{plural_name}", f"/api/{entity_name}"])
+
+    config = context.test_config
+    if config:
+        for route in config.routes:
+            if "GET" not in route.methods:
+                continue
+            collection_path = _collection_path_from_api_path(route.path)
+            if not collection_path:
+                continue
+            if _entity_name_from_api_path(collection_path) == entity_name:
+                candidates.append(collection_path)
+
+    return _dedupe_preserving_order(candidates)
+
+
+def _discover_entities(context: ExecutionContext, entity_name: str, entity_path: str) -> None:
+    if _entity_id_present(context.variables, entity_name):
         return
 
-    for path in _filter_candidate_paths(
-        ["/api/products", "/api/product", "/api/catalog/products"],
+    candidate_paths = _filter_candidate_paths(
+        _candidate_entity_collection_paths(context, entity_name, [entity_path]),
         "GET",
         context,
-    ):
+    )
+    for path in candidate_paths:
         url = _build_url(context.base_url, path)
         try:
             response = context.session.get(url, timeout=10)
@@ -1182,60 +2009,162 @@ def _discover_products(context: ExecutionContext) -> None:
             continue
         if response.status_code != 200:
             continue
-        _store_products(context.variables, _response_body_for_proof(response), limit=2)
-        if context.variables.get("product_id"):
+        _store_entity_records(
+            context.variables,
+            _response_body_for_proof(response),
+            entity_name=entity_name,
+            limit=2,
+        )
+        if _entity_id_present(context.variables, entity_name):
             return
 
 
-def _discover_orders(context: ExecutionContext) -> None:
-    if context.variables.get("order_id"):
-        return
-
-    for path in _filter_candidate_paths(
-        ["/api/orders", "/api/admin/orders"],
-        "GET",
-        context,
-    ):
-        url = _build_url(context.base_url, path)
-        try:
-            response = context.session.get(url, timeout=10)
-        except Exception:
-            continue
-        if response.status_code != 200:
-            continue
-        _store_orders(context.variables, _response_body_for_proof(response))
-        if context.variables.get("order_id"):
-            return
+def _entity_id_present(variables: dict[str, Any], entity_name: str) -> bool:
+    return bool(variables.get(f"{entity_name}_id"))
 
 
-def _store_orders(variables: dict[str, Any], payload: Any) -> None:
-    orders = _find_order_list(payload)
-    if not orders:
-        return
-    first = orders[0]
-    variables["order_id"] = first.get("id") or first.get("_id") or first.get("orderId")
-    status = first.get("status")
-    if status:
-        variables["order_status"] = status
-
-
-def _find_order_list(payload: Any) -> list[dict[str, Any]]:
-    if isinstance(payload, list):
-        return [item for item in payload if isinstance(item, dict)]
-    if isinstance(payload, dict):
-        for key in ("orders", "data", "items", "results"):
-            value = payload.get(key)
-            if isinstance(value, list):
-                return [item for item in value if isinstance(item, dict)]
-            if isinstance(value, dict) and "id" in value:
-                return [value]
-        if "id" in payload and any(key in payload for key in ("status", "totalAmount", "shippingAddress")):
-            return [payload]
-        for value in payload.values():
-            nested = _find_order_list(value)
-            if nested:
-                return nested
+def _template_variables_in_value(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [match.group(1) for match in _PARTIAL_TEMPLATE_RE.finditer(value)]
+    if isinstance(value, dict):
+        found: list[str] = []
+        for item in value.values():
+            found.extend(_template_variables_in_value(item))
+        return found
+    if isinstance(value, list):
+        found: list[str] = []
+        for item in value:
+            found.extend(_template_variables_in_value(item))
+        return found
     return []
+
+
+def _entities_from_paths(paths: list[str]) -> set[str]:
+    entities: set[str] = set()
+    for path in paths:
+        entity_name = _entity_name_from_api_path(path)
+        if entity_name:
+            entities.add(entity_name)
+    return entities
+
+
+def _route_keywords(path: str) -> set[str]:
+    keywords: set[str] = set()
+    normalized = _normalize_path(path)
+    for segment in normalized.strip("/").split("/"):
+        clean = _clean_path_segment(segment)
+        if not clean or clean in {"api", "v1", "v2", "admin", "auth", "internal"}:
+            continue
+        keywords.add(_normalize_entity_name(clean))
+    entity_name = _entity_name_from_api_path(path)
+    if entity_name:
+        keywords.add(entity_name)
+        keywords.add(_pluralize_entity_name(entity_name))
+    keywords.discard("")
+    return keywords
+
+
+def _route_path_to_candidate(path: str) -> str:
+    entity_name = _entity_name_from_api_path(path)
+    segments: list[str] = []
+    for segment in _normalize_path(path).strip("/").split("/"):
+        if segment.startswith(":"):
+            param_name = segment[1:]
+            if param_name == "id" and entity_name:
+                param_name = f"{entity_name}_id"
+            segments.append(f"{{{{{_normalize_template_name(param_name)}}}}}")
+            continue
+        segments.append(segment)
+    return "/" + "/".join(segment for segment in segments if segment)
+
+
+def _entity_name_from_template_var(variable_name: str) -> str:
+    token = variable_name.rsplit(".", 1)[-1]
+    if not token.endswith("_id"):
+        return ""
+    entity_name = token[:-3].rstrip("_")
+    if entity_name in {"last", "last_created", "first_item"}:
+        return ""
+    return _normalize_entity_name(entity_name)
+
+
+def _entity_name_from_api_path(path: str) -> str:
+    normalized = _normalize_path(path)
+    segments = [segment for segment in normalized.strip("/").split("/") if segment]
+    if not segments or segments[0] != "api":
+        return ""
+
+    candidates: list[str] = []
+    for segment in segments[1:]:
+        clean = _clean_path_segment(segment)
+        if not clean or clean in {"api", "v1", "v2", "admin", "auth", "internal"}:
+            continue
+        candidates.append(clean)
+    if not candidates:
+        return ""
+    return _normalize_entity_name(candidates[-1])
+
+
+def _collection_path_from_api_path(path: str) -> str:
+    normalized = _normalize_path(path)
+    segments = [segment for segment in normalized.strip("/").split("/") if segment]
+    if not segments or segments[0] != "api":
+        return ""
+
+    last_collection_index: int | None = None
+    for index, segment in enumerate(segments[1:], start=1):
+        if segment.startswith(":") or segment.startswith("{{"):
+            break
+        clean = _clean_path_segment(segment)
+        if not clean or clean in {"api", "v1", "v2", "admin", "auth", "internal"}:
+            continue
+        last_collection_index = index
+
+    if last_collection_index is None:
+        return ""
+    return "/" + "/".join(segments[:last_collection_index + 1])
+
+
+def _clean_path_segment(segment: str) -> str:
+    if segment.startswith("{{") and segment.endswith("}}"):
+        return _entity_name_from_template_var(segment[2:-2])
+    if segment.startswith(":"):
+        param_name = _normalize_template_name(segment[1:])
+        if param_name == "id":
+            return ""
+        return _entity_name_from_template_var(param_name)
+    return _normalize_entity_name(segment)
+
+
+def _normalize_entity_name(value: str) -> str:
+    normalized = _normalize_template_name(value)
+    if normalized.endswith("_id"):
+        normalized = normalized[:-3].rstrip("_")
+    return _singularize_entity_name(normalized)
+
+
+def _normalize_template_name(value: str) -> str:
+    snake = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", value)
+    snake = re.sub(r"[^a-zA-Z0-9_]+", "_", snake)
+    return snake.strip("_").lower()
+
+
+def _singularize_entity_name(entity_name: str) -> str:
+    if entity_name.endswith("ies") and len(entity_name) > 3:
+        return entity_name[:-3] + "y"
+    if entity_name.endswith("s") and not entity_name.endswith(("ss", "us")):
+        return entity_name[:-1]
+    return entity_name
+
+
+def _pluralize_entity_name(entity_name: str) -> str:
+    if entity_name.endswith("y") and len(entity_name) > 1 and entity_name[-2] not in "aeiou":
+        return entity_name[:-1] + "ies"
+    if entity_name.endswith("s"):
+        return entity_name
+    return entity_name + "s"
 
 
 def _select_non_admin_seeded_user(context: ExecutionContext) -> SeededUser | None:
@@ -1273,7 +2202,7 @@ def _self_heal_http_attempt(
                 {
                     "path": request.get("url", ""),
                     "body": augmented,
-                    "retry_reason": f"added missing fields from 400 error: {', '.join(missing_fields)}",
+                    "retry_reason": f"self-healed: added missing fields {', '.join(missing_fields)}",
                 }
             )
 
@@ -1284,17 +2213,27 @@ def _self_heal_http_attempt(
                 {
                     "path": request.get("url", ""),
                     "body": augmented,
-                    "retry_reason": "added realistic shipping address from 400 error",
+                    "retry_reason": "self-healed: added shippingAddress",
                 }
             )
 
-    enum_corrected = _correct_enum_casing(body, error_text)
-    if enum_corrected != body:
+    enum_corrected, enum_note = _correct_enum_casing(body, error_text)
+    if enum_corrected != body and enum_note:
         corrections.append(
             {
                 "path": request.get("url", ""),
                 "body": enum_corrected,
-                "retry_reason": "corrected enum casing from 400 error",
+                "retry_reason": f"self-healed: {enum_note}",
+            }
+        )
+
+    field_casing_corrected, field_casing_note = _correct_field_name_casing(body, error_text, context)
+    if field_casing_corrected != body and field_casing_note:
+        corrections.append(
+            {
+                "path": request.get("url", ""),
+                "body": field_casing_corrected,
+                "retry_reason": f"self-healed: {field_casing_note}",
             }
         )
 
@@ -1306,7 +2245,7 @@ def _self_heal_http_attempt(
                 {
                     "path": request.get("url", ""),
                     "body": augmented,
-                    "retry_reason": "filled plausible CRUD fields from adapter schema knowledge",
+                    "retry_reason": "self-healed: filled plausible CRUD fields from adapter schema knowledge",
                 }
             )
 
@@ -1386,12 +2325,15 @@ def _default_value_for_field(field_name: str, url: str, context: ExecutionContex
     if field_lower in defaults:
         return defaults[field_lower]
     if field_lower.endswith("id"):
-        if field_lower == "productid":
-            return context.variables.get("product_id", _MISSING)
-        if field_lower == "userid":
-            return context.variables.get("user_id", _MISSING)
-        if field_lower == "orderid":
-            return context.variables.get("order_id", _MISSING)
+        entity_name = _normalize_entity_name(field_lower[:-2])
+        for candidate_key in (
+            f"{entity_name}_id",
+            field_lower,
+            "last_created_id",
+            "last_id",
+        ):
+            if candidate_key in context.variables:
+                return context.variables[candidate_key]
     if "checkout" in url.lower() and field_lower in {"address", "city", "state", "zip", "country"}:
         return _default_shipping_address().get(field_name)
     return _MISSING
@@ -1408,22 +2350,73 @@ def _default_shipping_address() -> dict[str, str]:
     }
 
 
-def _correct_enum_casing(body: dict[str, Any], error_text: str) -> dict[str, Any]:
+def _correct_enum_casing(body: dict[str, Any], error_text: str) -> tuple[dict[str, Any], str]:
     match = re.search(r"(?:one of:|must be one of:)\s*([A-Z0-9_,\s-]+)", error_text, re.IGNORECASE)
     if not match:
-        return body
+        return body, ""
     valid_values = [token.strip() for token in match.group(1).split(",") if token.strip()]
     corrected = dict(body)
-    changed = False
     for key, value in corrected.items():
         if not isinstance(value, str):
             continue
         for valid in valid_values:
             if value.lower() == valid.lower() and value != valid:
                 corrected[key] = valid
-                changed = True
-                break
-    return corrected if changed else body
+                return corrected, f"{key} {value} -> {valid}"
+    return body, ""
+
+
+def _correct_field_name_casing(
+    body: dict[str, Any],
+    error_text: str,
+    context: ExecutionContext,
+) -> tuple[dict[str, Any], str]:
+    if not body:
+        return body, ""
+
+    mentioned_fields = _field_names_from_error(error_text)
+    schema_fields = {
+        field_name
+        for fields in (context.test_config.model_fields.values() if context.test_config else [])
+        for field_name in fields
+    }
+    corrected = dict(body)
+    notes: list[str] = []
+    changed = False
+
+    for key in list(body):
+        if key not in corrected:
+            continue
+        candidates = [_snake_to_camel(key), _camel_to_snake(key)]
+        for candidate in candidates:
+            if not candidate or candidate == key or candidate in corrected:
+                continue
+            if candidate not in mentioned_fields and candidate not in schema_fields:
+                continue
+            corrected[candidate] = corrected.pop(key)
+            notes.append(f"{key} -> {candidate}")
+            changed = True
+            break
+
+    return (corrected, ", ".join(notes)) if changed else (body, "")
+
+
+def _field_names_from_error(error_text: str) -> set[str]:
+    matches = re.findall(r"[\"'`]?([A-Za-z][A-Za-z0-9_]*[A-Za-z0-9])[\"'`]?", error_text)
+    return {match for match in matches if "_" in match or re.search(r"[a-z][A-Z]", match)}
+
+
+def _snake_to_camel(value: str) -> str:
+    if "_" not in value:
+        return value
+    parts = value.split("_")
+    return parts[0] + "".join(part[:1].upper() + part[1:] for part in parts[1:] if part)
+
+
+def _camel_to_snake(value: str) -> str:
+    if "_" in value:
+        return value
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", value).lower()
 
 
 def _classify_structural_claim_outcome(
@@ -1439,7 +2432,7 @@ def _classify_structural_claim_outcome(
         return None, ""
 
     claim_key = claim.id.lower()
-    if ("cart" in claim_key or claim_key == "ux-empty-cart") and not test_config.has_cart_model:
+    if ("cart" in claim_key or claim_key == "ux-empty-cart") and not _config_has_resource_model(test_config, "cart"):
         return "not_implemented", "adapter found no cart model in the codebase"
     if claim_key == "auth-register" and not test_config.register_endpoint:
         return "not_implemented", "adapter found no registration endpoint in the codebase"
@@ -1459,38 +2452,15 @@ def _is_auth_login_claim(claim: Claim) -> bool:
     return claim.id.lower() == "auth-login"
 
 
-def _should_reclassify_as_auth_blocked(
-    claim: Claim,
-    evidence: list[Evidence],
-    run_state: BaselineRunState,
-) -> bool:
-    return (
-        run_state.auth_login_claim_ran
-        and run_state.authenticated_user is None
-        and not _is_auth_login_claim(claim)
-        and any(
-            item.outcome == "fail" and re.search(r"\bHTTP 401\b", item.actual)
-            for item in evidence
-        )
-    )
-
-
-def _mark_evidence_as_auth_blocked(evidence: list[Evidence]) -> None:
-    reason = "auth session not established — harness limitation"
-    for item in evidence:
-        if item.outcome == "fail" and re.search(r"\bHTTP 401\b", item.actual):
-            item.outcome = "blocked_by_harness"
-            item.skipped = True
-            item.actual = f"{reason}; observed {item.actual}"
-
-
 def _claim_outcome_from_evidence(evidence: list[Evidence]) -> str:
     if any(item.outcome == "fail" for item in evidence):
         return "fail"
-    if any(item.outcome == "pass" for item in evidence):
-        return "pass"
+    if any(item.outcome == "blocked_by_harness" for item in evidence):
+        return "blocked_by_harness"
     if any(item.outcome == "not_implemented" for item in evidence):
         return "not_implemented"
+    if any(item.outcome == "pass" for item in evidence):
+        return "pass"
     if any(item.outcome == "not_applicable" for item in evidence):
         return "not_applicable"
     return "blocked_by_harness"
@@ -1509,8 +2479,7 @@ def _should_use_seeded_auth(step: dict[str, Any], context: ExecutionContext) -> 
     return bool(
         context.test_config
         and context.test_config.seeded_users
-        and context.claim.id.lower() != "auth-register"
-        and (_is_registration_step(step) or _is_login_step(step))
+        and _is_login_step(step)
     )
 
 
@@ -1527,19 +2496,19 @@ def _execute_seeded_auth_step(step: dict[str, Any], context: ExecutionContext, t
             skipped=True,
             timestamp=timestamp,
         )
-
-    _apply_seeded_user(context, user)
-    if _is_registration_step(step):
+    if not user.password:
         return Evidence(
             step=json.dumps(step, sort_keys=True),
-            command="adapter seeded auth",
-            expected="usable authenticated account fixture",
-            actual=f"using seeded account {user.email} instead of creating a new user",
-            passed=True,
-            outcome="pass",
+            command=f"login as {user.email}",
+            expected="authenticated session established",
+            actual="seeded user found but password not recoverable from code.",
+            passed=False,
+            outcome="blocked_by_harness",
+            skipped=True,
             timestamp=timestamp,
         )
 
+    _apply_seeded_user(context, user)
     ok, detail = _authenticate_seeded_user(context, user)
     return Evidence(
         step=json.dumps(step, sort_keys=True),
@@ -1555,6 +2524,8 @@ def _execute_seeded_auth_step(step: dict[str, Any], context: ExecutionContext, t
 def _authenticate_seeded_user(context: ExecutionContext, user: SeededUser) -> tuple[bool, str]:
     if context.authenticated_user and context.authenticated_user.email == user.email:
         return True, f"already authenticated as {user.email}"
+    if not user.password:
+        return False, "seeded user found but password not recoverable from code."
 
     config = context.test_config
     if not config:
@@ -1695,12 +2666,74 @@ def _authenticate_generic_user(context: ExecutionContext, user: SeededUser) -> t
 def _generic_auth_succeeded(response: requests.Response, context: ExecutionContext) -> bool:
     if response.status_code not in {200, 201, 202, 204, 302, 303}:
         return False
-    if _has_auth_session_cookie(context.session) or "Authorization" in context.session.headers:
-        return True
-    preview = _preview_response(response).lower()
-    if any(token in preview for token in ("invalid", "incorrect", "unauthorized", "forbidden", "error")):
+    if _response_looks_like_auth_failure(response):
         return False
-    return response.status_code in {204, 302, 303} or bool(preview)
+    if _has_auth_session_cookie(context.session):
+        return True
+    if context.variables.get("auth_token") or "Authorization" in context.session.headers:
+        return True
+    if _auth_probe_succeeded(context):
+        return True
+    return response.status_code == 200 and _response_has_user_identity(response)
+
+
+def _response_looks_like_auth_failure(response: requests.Response) -> bool:
+    preview = _preview_response(response).lower()
+    return any(token in preview for token in ("invalid", "incorrect", "unauthorized", "forbidden", "error"))
+
+
+def _response_has_user_identity(response: requests.Response) -> bool:
+    try:
+        payload = response.json()
+    except ValueError:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return any(
+        _lookup_path(payload, path, default=_MISSING) is not _MISSING
+        for path in ("email", "username", "id", "user.email", "user.username", "user.id")
+    )
+
+
+def _auth_probe_succeeded(context: ExecutionContext) -> bool:
+    for probe_path in _discover_auth_probe_paths(context):
+        try:
+            response = context.session.get(
+                _build_url(context.base_url, probe_path),
+                timeout=10,
+                allow_redirects=False,
+                headers={"Accept": "application/json"},
+            )
+        except Exception:
+            continue
+        if response.status_code != 200 or _response_looks_like_auth_failure(response):
+            continue
+        preview = _preview_response(response).strip().lower()
+        if _response_has_user_identity(response):
+            return True
+        if "session" in probe_path.lower() and preview not in {"(empty)", "null", "{}", "[]"}:
+            return True
+    return False
+
+
+def _discover_auth_probe_paths(context: ExecutionContext) -> list[str]:
+    candidates = [
+        "/api/auth/session",
+        "/api/auth/me",
+        "/api/session",
+        "/api/me",
+        "/session",
+        "/me",
+    ]
+    config = context.test_config
+    if config:
+        for route in config.routes:
+            lower = route.path.lower()
+            if "GET" in route.methods and any(
+                token in lower for token in ("session", "/me", "current-user", "current_user")
+            ):
+                candidates.append(route.path)
+    return _dedupe_preserving_order(_filter_candidate_paths(candidates, "GET", context))
 
 
 def _discover_login_paths(context: ExecutionContext) -> list[str]:
@@ -1798,7 +2831,7 @@ def _filter_candidate_paths(
                 continue
             route_lower = route.path.lower()
             if any(kw in route_lower for kw in claim_keywords):
-                filtered.insert(0, route.path)  # prepend — real route goes first
+                filtered.insert(0, _route_path_to_candidate(route.path))  # prepend — real route goes first
 
     return _dedupe_preserving_order(filtered)
 
@@ -1880,33 +2913,6 @@ def _expand_candidate_paths(method: str, raw_paths: list[str]) -> list[str]:
             expanded.extend(["/api/auth/register", "/api/register", "/api/signup", "/api/auth/signup", "/register", "/signup"])
         elif "login" in lower or "signin" in lower:
             expanded.extend(["/api/auth/login", "/api/login", "/api/signin", "/api/auth/signin", "/login", "/signin"])
-        elif "products" in lower or "product" in lower:
-            expanded.extend([
-                "/api/products",
-                "/api/product",
-                "/api/catalog/products",
-                "/api/products/{{product_id}}",
-                "/products",
-                "/catalog",
-                "/shop",
-            ])
-        elif "cart" in lower:
-            expanded.extend(["/api/cart", "/api/cart/add", "/api/cart/items", "/cart"])
-        elif "orders" in lower or "order" in lower:
-            expanded.extend([
-                "/api/admin/orders",
-                "/api/orders",
-                "/api/orders/{{order_id}}",
-                "/admin/orders",
-                "/orders",
-            ])
-        elif "checkout" in lower:
-            expanded.extend(["/api/checkout", "/api/payments", "/api/orders/checkout", "/checkout", "/cart/checkout"])
-        elif "admin" in lower:
-            expanded.extend(["/admin", "/admin/orders", "/admin/products", "/api/admin/orders", "/api/admin/products"])
-
-    if method in {"POST", "PATCH", "PUT", "DELETE"}:
-        return _dedupe_preserving_order(expanded)
     return _dedupe_preserving_order(expanded)
 
 
@@ -1919,6 +2925,7 @@ def _check_http_expectations(
     if response.status_code not in expect_status:
         return False, _preview_response(response)
 
+    payload: Any = _MISSING
     body_text = response.text or ""
     body_text_lower = body_text.lower()
     body_tokens = step.get("expect_body_contains", [])
@@ -1931,45 +2938,36 @@ def _check_http_expectations(
             return False, f"missing context value for token {token}"
         rendered_tokens.append(str(rendered))
     if rendered_tokens:
+        if payload is _MISSING:
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = None
         match_mode = str(step.get("match_body", "all")).lower()
         matches = [token.lower() in body_text_lower for token in rendered_tokens]
-        match_count = sum(matches)
         if match_mode == "any":
             if not any(matches):
+                if _accept_structural_list_match(step, context, payload):
+                    return True, "non-empty list response with valid item shape"
                 return False, _preview_response(response)
         else:
-            # "all" mode: require all tokens, BUT if response is 200 and majority
-            # match (>=60%), accept it — the intent compiler may have over-specified
             if not all(matches):
-                if response.status_code == 200 and match_count >= max(1, len(matches) * 0.6):
-                    pass  # lenient: majority match on 200 is good enough
-                else:
-                    return False, _preview_response(response)
+                if _accept_structural_list_match(step, context, payload):
+                    return True, "non-empty list response with valid item shape"
+                return False, _preview_response(response)
 
     json_keys = step.get("expect_json_keys", [])
     if isinstance(json_keys, str):
         json_keys = [json_keys]
     if json_keys:
-        try:
-            payload = response.json()
-        except ValueError:
+        if payload is _MISSING:
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = None
+        if payload is None:
             return False, f"expected JSON body with keys {json_keys}, got {response.text[:200]}"
-        # Check top-level keys AND common wrapper patterns (data, results, items)
-        missing_keys = [key for key in json_keys if not _json_path_exists(payload, key)]
-        if missing_keys and isinstance(payload, dict):
-            # Try common response wrappers
-            for wrapper in ("data", "results", "items", "records"):
-                if wrapper in payload:
-                    unwrapped = payload[wrapper]
-                    if isinstance(unwrapped, list) and len(unwrapped) > 0:
-                        # The wrapper contains the data — keys refer to item properties
-                        item = unwrapped[0]
-                        if isinstance(item, dict):
-                            missing_keys = [k for k in json_keys if k not in item and k != wrapper]
-                    elif isinstance(unwrapped, dict):
-                        missing_keys = [k for k in json_keys if not _json_path_exists(unwrapped, k)]
-                    if not missing_keys:
-                        break
+        missing_keys = _missing_json_keys(payload, json_keys)
         if missing_keys:
             return False, f"missing JSON keys {missing_keys} in {json.dumps(payload)[:200]}"
 
@@ -1998,9 +2996,9 @@ def _capture_response_state(step: dict[str, Any], response: requests.Response, c
     if isinstance(extract, dict) and payload is not None:
         extract_type = str(extract.get("type", ""))
         if extract_type == "first_product":
-            _store_products(context.variables, payload, limit=1)
+            _store_entity_records(context.variables, payload, entity_name="product", limit=1)
         elif extract_type == "first_two_products":
-            _store_products(context.variables, payload, limit=2)
+            _store_entity_records(context.variables, payload, entity_name="product", limit=2)
 
     for var_name, path in step.get("store_json_fields", {}).items():
         if payload is None:
@@ -2010,34 +3008,78 @@ def _capture_response_state(step: dict[str, Any], response: requests.Response, c
             context.variables[var_name] = value
 
 
-def _store_products(variables: dict[str, Any], payload: Any, *, limit: int) -> None:
-    products = _find_product_list(payload)
-    if not products:
+def _store_entity_records(
+    variables: dict[str, Any],
+    payload: Any,
+    *,
+    entity_name: str,
+    limit: int,
+) -> None:
+    records = _find_entity_records(payload, entity_name=entity_name)
+    if not records:
         return
-    first = products[0]
-    variables["product_id"] = first.get("id") or first.get("_id") or first.get("slug") or first.get("productId")
-    variables["product_name"] = first.get("name") or first.get("title") or first.get("productName")
-    variables["product_slug"] = first.get("slug") or first.get("id") or first.get("_id")
-    variables["product_price"] = first.get("price") or first.get("amount")
-    if limit >= 2 and len(products) > 1:
-        second = products[1]
-        variables["second_product_id"] = second.get("id") or second.get("_id") or second.get("slug") or second.get("productId")
-        variables["second_product_name"] = second.get("name") or second.get("title") or second.get("productName")
-        variables["second_product_price"] = second.get("price") or second.get("amount")
+
+    entity_prefix = _normalize_entity_name(entity_name)
+    first = records[0]
+    variables[f"{entity_prefix}_id"] = (
+        first.get("id")
+        or first.get("_id")
+        or first.get(f"{entity_prefix}Id")
+        or first.get(f"{entity_prefix}_id")
+        or first.get("slug")
+    )
+    display_name = first.get("name") or first.get("title") or first.get(f"{entity_prefix}Name")
+    if display_name is not None:
+        variables[f"{entity_prefix}_name"] = display_name
+    slug = first.get("slug") or first.get("id") or first.get("_id")
+    if slug is not None:
+        variables[f"{entity_prefix}_slug"] = slug
+    price = first.get("price") or first.get("amount")
+    if price is not None:
+        variables[f"{entity_prefix}_price"] = price
+    status = first.get("status")
+    if status is not None:
+        variables[f"{entity_prefix}_status"] = status
+
+    if limit >= 2 and len(records) > 1:
+        second = records[1]
+        variables[f"second_{entity_prefix}_id"] = (
+            second.get("id")
+            or second.get("_id")
+            or second.get(f"{entity_prefix}Id")
+            or second.get(f"{entity_prefix}_id")
+            or second.get("slug")
+        )
+        second_name = second.get("name") or second.get("title") or second.get(f"{entity_prefix}Name")
+        if second_name is not None:
+            variables[f"second_{entity_prefix}_name"] = second_name
+        second_price = second.get("price") or second.get("amount")
+        if second_price is not None:
+            variables[f"second_{entity_prefix}_price"] = second_price
 
 
-def _find_product_list(payload: Any) -> list[dict[str, Any]]:
+def _find_entity_records(payload: Any, *, entity_name: str) -> list[dict[str, Any]]:
     if isinstance(payload, list):
         return [item for item in payload if isinstance(item, dict)]
     if isinstance(payload, dict):
-        for key in ("products", "items", "data", "results"):
+        keys_to_try = [
+            _pluralize_entity_name(entity_name),
+            entity_name,
+            "items",
+            "data",
+            "results",
+            "records",
+        ]
+        for key in keys_to_try:
             value = payload.get(key)
             if isinstance(value, list) and any(isinstance(item, dict) for item in value):
                 return [item for item in value if isinstance(item, dict)]
-        if all(key in payload for key in ("id", "price")):
+            if isinstance(value, dict) and "id" in value:
+                return [value]
+        if "id" in payload:
             return [payload]
         for value in payload.values():
-            nested = _find_product_list(value)
+            nested = _find_entity_records(value, entity_name=entity_name)
             if nested:
                 return nested
     return []
@@ -2053,6 +3095,82 @@ def _find_first_value(payload: Any, paths: list[str]) -> Any:
 
 def _json_path_exists(payload: Any, path: str) -> bool:
     return _lookup_path(payload, path, default=_MISSING) is not _MISSING
+
+
+def _missing_json_keys(payload: Any, json_keys: list[str]) -> list[str]:
+    for target in _json_key_targets(payload):
+        if isinstance(target, list):
+            dict_items = [item for item in target if isinstance(item, dict)]
+            if not dict_items:
+                continue
+            if any(all(_json_path_exists(item, key) for key in json_keys) for item in dict_items):
+                return []
+            continue
+        if all(_json_path_exists(target, key) for key in json_keys):
+            return []
+    return [key for key in json_keys if not _json_path_exists(payload, key)]
+
+
+def _json_key_targets(payload: Any) -> list[Any]:
+    targets: list[Any] = [payload]
+    if isinstance(payload, dict):
+        for wrapper in ("data", "results", "items", "records", "response"):
+            value = payload.get(wrapper)
+            if isinstance(value, (dict, list)):
+                targets.append(value)
+                if isinstance(value, dict):
+                    nested = value.get("data")
+                    if isinstance(nested, (dict, list)):
+                        targets.append(nested)
+    return targets
+
+
+def _accept_structural_list_match(step: dict[str, Any], context: ExecutionContext, payload: Any) -> bool:
+    if not _is_list_validation_step(step, context.claim):
+        return False
+    items = _extract_list_items(payload)
+    if not items:
+        return False
+    json_keys = step.get("expect_json_keys", [])
+    if isinstance(json_keys, str):
+        json_keys = [json_keys]
+    if not json_keys:
+        return True
+    return any(isinstance(item, dict) and all(_json_path_exists(item, key) for key in json_keys) for item in items)
+
+
+def _is_list_validation_step(step: dict[str, Any], claim: Claim) -> bool:
+    if str(step.get("method", "GET")).upper() != "GET":
+        return False
+    claim_text = f"{claim.id} {claim.description}".lower()
+    if any(token in claim_text for token in ("list", "browse", "catalog", "index")):
+        return True
+    return any(_looks_like_collection_path(path) for path in _get_candidate_paths(step))
+
+
+def _looks_like_collection_path(path: str) -> bool:
+    normalized = _normalize_path(path)
+    if "{{" in normalized or ":" in normalized:
+        return False
+    segments = [segment for segment in normalized.strip("/").split("/") if segment]
+    if not segments:
+        return False
+    last = segments[-1].lower()
+    return last not in {"login", "register", "signup", "signin", "me", "session"}
+
+
+def _extract_list_items(payload: Any) -> list[Any]:
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        for wrapper in ("data", "results", "items", "records"):
+            value = payload.get(wrapper)
+            if isinstance(value, list):
+                return value
+        response_value = payload.get("response")
+        if isinstance(response_value, dict):
+            return _extract_list_items(response_value)
+    return []
 
 
 def _lookup_path(payload: Any, path: str, *, default: Any = _MISSING) -> Any:
@@ -2173,8 +3291,50 @@ def _dedupe_preserving_order(items: list[str]) -> list[str]:
     return ordered
 
 
-def matrix_cache_path(project_dir: Path, intent: str) -> Path:
-    digest = hashlib.sha256(intent.encode("utf-8")).hexdigest()[:16]
+def _schema_hint_from_test_config(test_config: TestConfig | None) -> str:
+    if not test_config:
+        return ""
+
+    lines: list[str] = []
+    if test_config.schema_source_file:
+        lines.append(f"Schema source: {test_config.schema_source_file}")
+
+    for model_name in test_config.models:
+        field_descriptions: list[str] = []
+        for field_name, field_type in test_config.model_fields.get(model_name, {}).items():
+            description = f"{field_name}: {field_type}"
+            enum_values = test_config.enum_values.get(field_type)
+            if enum_values:
+                description += f" ({', '.join(enum_values)})"
+            field_descriptions.append(description)
+        if field_descriptions:
+            lines.append(f"Model {model_name}: " + ", ".join(field_descriptions))
+
+    for enum_name, values in test_config.enum_values.items():
+        lines.append(f"Enum {enum_name}: {', '.join(values)}")
+
+    register_fields = _register_endpoint_schema_fields(test_config)
+    if test_config.register_endpoint and register_fields:
+        lines.append(
+            f"Register endpoint {test_config.register_endpoint} likely body fields: {', '.join(register_fields)}"
+        )
+
+    return "\n".join(lines)
+
+
+def _register_endpoint_schema_fields(test_config: TestConfig) -> list[str]:
+    if not test_config.register_endpoint:
+        return []
+
+    user_fields = test_config.model_fields.get("User", {})
+    fields = [field for field in user_fields if field in {"name", "username", "email"}]
+    if any(field in fields for field in {"name", "username", "email"}):
+        fields.append("password")
+    return _dedupe_preserving_order(fields)
+
+
+def matrix_cache_path(project_dir: Path, intent: str, schema_hint: str = "") -> Path:
+    digest = hashlib.sha256(f"{intent}\0{schema_hint}".encode("utf-8")).hexdigest()[:16]
     return project_dir / "otto_logs" / "certifier" / f"matrix-{digest}.json"
 
 
@@ -2182,18 +3342,51 @@ def load_or_compile_matrix(
     project_dir: Path,
     intent: str,
     config: dict[str, Any] | None = None,
+    test_config: TestConfig | None = None,
 ) -> tuple[RequirementMatrix, str, Path, float]:
     """Return a cached requirement matrix when available, otherwise compile it."""
 
-    cache_path = matrix_cache_path(project_dir, intent)
+    schema_hint = _schema_hint_from_test_config(test_config)
+    cache_path = matrix_cache_path(project_dir, intent, schema_hint)
     if cache_path.exists():
         return load_matrix(cache_path), "cache", cache_path, 0.0
 
     started_at = time.monotonic()
-    matrix = asyncio.run(compile_intent(intent, config=config))
+    matrix = asyncio.run(compile_intent(intent, config=config, schema_hint=schema_hint))
     compile_duration_s = round(time.monotonic() - started_at, 1)
     save_matrix(matrix, cache_path)
     return matrix, "compiled", cache_path, compile_duration_s
+
+
+def journey_cache_path(project_dir: Path, intent: str) -> Path:
+    digest = hashlib.sha256(intent.encode("utf-8")).hexdigest()[:16]
+    return project_dir / "otto_logs" / "certifier" / f"journeys-{digest}.json"
+
+
+def load_or_compile_journeys(
+    project_dir: Path,
+    intent: str,
+    config: dict[str, Any] | None = None,
+) -> tuple:
+    """Return a cached journey matrix when available, otherwise compile it.
+
+    Returns (JourneyMatrix, source_str, cache_path, compile_duration_s).
+    """
+    from otto.certifier.journey_compiler import (
+        compile_journeys,
+        load_journey_matrix,
+        save_journey_matrix,
+    )
+
+    cache_path = journey_cache_path(project_dir, intent)
+    if cache_path.exists():
+        return load_journey_matrix(cache_path), "cache", cache_path, 0.0
+
+    started_at = time.monotonic()
+    journey_matrix = asyncio.run(compile_journeys(intent, config=config))
+    compile_duration_s = round(time.monotonic() - started_at, 1)
+    save_journey_matrix(journey_matrix, cache_path)
+    return journey_matrix, "compiled", cache_path, compile_duration_s
 
 
 def certify(
@@ -2215,13 +3408,21 @@ def certify(
     matrix_source = "provided"
     resolved_matrix_path_str = ""
 
+    if test_config is None:
+        test_config = analyze_project(project_dir)
+
     if matrix is None and matrix_path is not None:
         resolved_matrix_path = Path(matrix_path)
         matrix = load_matrix(resolved_matrix_path)
         matrix_source = "file"
         resolved_matrix_path_str = str(resolved_matrix_path)
     elif matrix is None:
-        matrix, matrix_source, resolved_matrix_path, compile_duration_s = load_or_compile_matrix(project_dir, intent, config=config)
+        matrix, matrix_source, resolved_matrix_path, compile_duration_s = load_or_compile_matrix(
+            project_dir,
+            intent,
+            config=config,
+            test_config=test_config,
+        )
         resolved_matrix_path_str = str(resolved_matrix_path)
 
     if profile is None:
@@ -2229,8 +3430,6 @@ def certify(
     if effective_port is not None:
         profile.port = int(effective_port)
         profile.extra["reuse_existing_app"] = True
-    if test_config is None:
-        test_config = analyze_project(project_dir)
 
     result = run_baseline(project_dir, matrix, profile, test_config=test_config)
     result.compile_cost_usd = matrix.cost_usd if matrix_source != "cache" else 0.0
@@ -2335,7 +3534,7 @@ def _tier1_counts(result: BaselineResult) -> tuple[int, int, int, int]:
     passed = sum(1 for claim in result.results if claim.outcome == "pass")
     failed = sum(1 for claim in result.results if claim.outcome == "fail")
     blocked = sum(1 for claim in result.results if claim.outcome == "blocked_by_harness")
-    denominator = passed + failed
+    denominator = passed + failed + blocked
     return passed, denominator, failed, blocked
 
 
@@ -2380,12 +3579,14 @@ def judge(baseline_result: BaselineResult) -> CertificationVerdict:
     tier1_score = (tier1_passed / tier1_total) if tier1_total else 0.0
     overall_score = (tier0_score * 0.3) + (tier1_score * 0.7)
     confidence = ((applicable_claims - blocked) / applicable_claims) if applicable_claims else 0.0
-    certified = baseline_result.hard_fails == 0 and tier1_score >= 0.8
+    certified = baseline_result.hard_fails == 0 and blocked == 0 and tier1_score >= 0.8
 
     if certified:
         summary = f"Certified with {round(overall_score * 100)}% overall score and {round(confidence * 100)}% confidence."
     elif baseline_result.hard_fails > 0:
         summary = f"Not certified: {baseline_result.hard_fails} hard failure(s) remain."
+    elif blocked > 0:
+        summary = f"Not certified: {blocked} claim(s) were blocked by the harness."
     else:
         summary = f"Not certified: runtime pass rate is {round(tier1_score * 100)}%, below the 80% threshold."
 
@@ -2433,7 +3634,7 @@ def _print_group(title: str, claims: list[ClaimResult]) -> None:
 
     print(title)
     for claim in claims:
-        suffix = " [HARD FAIL]" if claim.hard_fail and claim.outcome in {"fail", "not_implemented"} else ""
+        suffix = " [HARD FAIL]" if claim.hard_fail and claim.outcome in {"fail", "not_implemented", "blocked_by_harness"} else ""
         print(f"  {claim.claim_id}: {claim.claim_description}{suffix}")
         if claim.outcome == "blocked_by_harness":
             print(f"    reason:   {claim.error}")

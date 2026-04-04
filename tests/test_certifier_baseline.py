@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from otto.certifier.adapter import SeededUser, TestConfig as AdapterTestConfig
+from otto.certifier.adapter import RouteInfo, SeededUser, TestConfig as AdapterTestConfig
 from otto.certifier.baseline import (
     AppRunner,
     BaselineResult,
@@ -81,7 +81,7 @@ def test_load_matrix_normalizes_legacy_steps(tmp_path: Path):
 
     assert matrix.claims[0].test_steps
     assert all(isinstance(step, dict) for step in matrix.claims[0].test_steps)
-    assert matrix.claims[0].test_steps[0]["action"] == "navigate"
+    assert matrix.claims[0].test_steps[0]["action"] == "check_exists"
 
 
 def test_http_step_discovers_alternate_endpoint(monkeypatch):
@@ -237,7 +237,7 @@ def test_shared_run_state_reuses_authenticated_nextauth_session(monkeypatch):
         auth_csrf_required=True,
         login_endpoint="/api/auth/callback/credentials",
         seeded_users=[user],
-        has_cart_model=True,
+        resource_models=["Cart"],
     )
     run_state = BaselineRunState()
     calls = {"csrf": 0, "post": 0, "session": 0}
@@ -284,13 +284,13 @@ def test_shared_run_state_reuses_authenticated_nextauth_session(monkeypatch):
     assert run_state.session.cookies.get("next-auth.session-token") == "session-1"
 
 
-def test_401_after_failed_auth_login_is_blocked_by_harness(monkeypatch):
+def test_401_after_failed_auth_login_remains_fail(monkeypatch):
     user = SeededUser(email="user@store.com", password="user123", role="user")
     test_config = AdapterTestConfig(
         auth_type="session",
         login_endpoint="/api/login",
         seeded_users=[user],
-        has_cart_model=True,
+        resource_models=["Cart"],
     )
     run_state = BaselineRunState()
 
@@ -342,9 +342,9 @@ def test_401_after_failed_auth_login_is_blocked_by_harness(monkeypatch):
     assert login_result.outcome == "fail"
     assert run_state.auth_login_claim_ran is True
     assert run_state.authenticated_user is None
-    assert cart_result.outcome == "blocked_by_harness"
-    assert cart_result.error == "auth session not established — harness limitation"
-    assert "observed HTTP 401" in cart_result.evidence[0].actual
+    assert cart_result.outcome == "fail"
+    assert cart_result.error == "HTTP 401: unauthorized"
+    assert cart_result.evidence[0].actual == "HTTP 401: unauthorized"
 
 
 def test_auth_protected_route_uses_fresh_session(monkeypatch):
@@ -379,7 +379,7 @@ def test_auth_protected_route_uses_fresh_session(monkeypatch):
         "http://example.test",
         Path("."),
         _profile(),
-        AdapterTestConfig(has_cart_model=True),
+        AdapterTestConfig(resource_models=["Cart"]),
         run_state,
     )
 
@@ -432,10 +432,13 @@ def test_http_step_self_heals_missing_crud_fields(monkeypatch):
     )
 
     assert result.passed is True
-    assert len(attempts) == 2
-    assert attempts[1]["category"] == "General"
-    assert attempts[1]["stock"] == 100
-    assert result.proof["retries"][0]["response"]["status"] == 400
+    assert result.outcome == "pass"
+    assert len(attempts) >= 2
+    assert any(body.get("category") == "General" for body in attempts)
+    assert any(body.get("stock") == 100 for body in attempts)
+    assert result.proof["original_attempt"]["response"]["status"] == 400
+    assert result.proof["corrected_attempt"]["response"]["status"] == 201
+    assert "self-healed" in result.proof["note"]
 
 
 def test_http_step_self_heals_enum_casing(monkeypatch):
@@ -446,7 +449,7 @@ def test_http_step_self_heals_enum_casing(monkeypatch):
             return FakeResponse(200, payload={"data": []})
         body = kwargs.get("json", {})
         attempts.append(body)
-        if len(attempts) == 1:
+        if body.get("status") != "SHIPPED":
             return FakeResponse(400, payload={"error": "Invalid status. Must be one of: PENDING, PAID, SHIPPED, DELIVERED, CANCELLED"})
         return FakeResponse(200, payload={"data": {"id": "order-1", "status": body["status"]}})
 
@@ -474,8 +477,60 @@ def test_http_step_self_heals_enum_casing(monkeypatch):
     result = _test_claim(claim, "http://example.test", Path("."), _profile())
 
     assert result.passed is True
-    assert attempts[1]["status"] == "SHIPPED"
-    assert result.proof["request"]["body"]["status"] == "SHIPPED"
+    assert result.outcome == "pass"
+    assert any(body.get("status") == "SHIPPED" for body in attempts)
+    assert result.proof["original_attempt"]["request"]["body"]["status"] == "shipped"
+    assert result.proof["original_attempt"]["response"]["status"] == 400
+    assert result.proof["corrected_attempt"]["request"]["body"]["status"] == "SHIPPED"
+    assert result.proof["corrected_attempt"]["response"]["status"] == 200
+    assert "status shipped -> SHIPPED" in result.proof["note"]
+
+
+def test_http_step_self_heals_field_name_casing(monkeypatch):
+    attempts: list[dict] = []
+
+    def fake_request(self, method, url, **kwargs):
+        body = kwargs.get("json", {})
+        attempts.append(body)
+        if "cookTime" not in body:
+            return FakeResponse(400, payload={"error": "Unknown field `cook_time`. Did you mean `cookTime`?"})
+        return FakeResponse(201, payload={"id": "recipe-1", "cookTime": body["cookTime"]})
+
+    monkeypatch.setattr("requests.sessions.Session.request", fake_request)
+
+    claim = Claim(
+        id="recipe-create",
+        description="Users can create recipes",
+        priority="critical",
+        category="feature",
+        test_approach="api",
+        test_steps=[
+            {
+                "action": "http",
+                "method": "POST",
+                "candidate_paths": ["/api/recipes"],
+                "body": {"title": "Soup", "cook_time": 15},
+                "expect_status": [201],
+                "expect_json_keys": ["id", "cookTime"],
+            }
+        ],
+        hard_fail=True,
+    )
+
+    result = _test_claim(
+        claim,
+        "http://example.test",
+        Path("."),
+        _profile(),
+        AdapterTestConfig(model_fields={"Recipe": {"title": "String", "cookTime": "Int"}}),
+    )
+
+    assert result.passed is True
+    assert attempts[0]["cook_time"] == 15
+    assert attempts[1]["cookTime"] == 15
+    assert result.proof["original_attempt"]["response"]["status"] == 400
+    assert result.proof["corrected_attempt"]["response"]["status"] == 201
+    assert "cook_time -> cookTime" in result.proof["note"]
 
 
 def test_judge_scores_and_confidence():
@@ -497,16 +552,312 @@ def test_judge_scores_and_confidence():
             ClaimResult("claim-2", "claim 2", "critical", True, True, "pass", []),
             ClaimResult("claim-3", "claim 3", "critical", True, True, "pass", []),
             ClaimResult("claim-4", "claim 4", "critical", True, True, "pass", []),
-            ClaimResult("claim-5", "claim 5", "critical", True, False, "blocked_by_harness", []),
+            ClaimResult("claim-5", "claim 5", "critical", False, False, "blocked_by_harness", []),
         ],
     )
 
     verdict = judge(result)
 
-    assert verdict.certified is True
+    assert verdict.certified is False
     assert verdict.tier0_score == 1.0
-    assert verdict.tier1_score == 1.0
+    assert verdict.tier1_score == 0.8
     assert verdict.confidence == 0.8
+
+
+def test_registration_claim_uses_real_http_even_with_seeded_users(monkeypatch):
+    calls: list[tuple[str, str]] = []
+
+    def fake_request(self, method, url, **kwargs):
+        calls.append((method, url))
+        return FakeResponse(201, payload={"id": "u1", "email": kwargs["json"]["email"]})
+
+    monkeypatch.setattr("requests.sessions.Session.request", fake_request)
+
+    claim = Claim(
+        id="auth-register",
+        description="Users can register",
+        priority="critical",
+        category="feature",
+        test_approach="api",
+        test_steps=[
+            {
+                "action": "http",
+                "method": "POST",
+                "candidate_paths": ["/api/register"],
+                "body": {"email": "{{email}}", "password": "{{password}}"},
+                "expect_status": [201],
+                "expect_json_keys": ["id", "email"],
+            }
+        ],
+        hard_fail=True,
+    )
+
+    result = _test_claim(
+        claim,
+        "http://example.test",
+        Path("."),
+        _profile(),
+        AdapterTestConfig(
+            register_endpoint="/api/register",
+            seeded_users=[SeededUser(email="seeded@example.test", password="seeded123", role="user")],
+        ),
+    )
+
+    assert result.passed is True
+    assert result.evidence[0].command.startswith("POST http://example.test/api/register")
+    assert result.evidence[0].command != "adapter seeded auth"
+    assert calls == [("POST", "http://example.test/api/register")]
+
+
+def test_http_step_discovers_generic_entity_from_adapter_routes(monkeypatch):
+    calls: list[tuple[str, str]] = []
+
+    def fake_get(self, url, **kwargs):
+        calls.append(("GET", url))
+        if url.endswith("/api/tasks"):
+            return FakeResponse(200, payload={"data": [{"id": "task-1", "title": "Existing task"}]})
+        raise AssertionError(f"unexpected GET {url}")
+
+    def fake_request(self, method, url, **kwargs):
+        calls.append((method, url))
+        if method == "PATCH" and url.endswith("/api/tasks/task-1"):
+            return FakeResponse(200, payload={"id": "task-1", "title": kwargs["json"]["title"]})
+        raise AssertionError(f"unexpected {method} {url}")
+
+    monkeypatch.setattr("requests.sessions.Session.get", fake_get)
+    monkeypatch.setattr("requests.sessions.Session.request", fake_request)
+
+    claim = Claim(
+        id="task-update",
+        description="Users can update tasks",
+        priority="critical",
+        category="feature",
+        test_approach="api",
+        test_steps=[
+            {
+                "action": "http",
+                "method": "PATCH",
+                "candidate_paths": ["/api/task/{{task_id}}"],
+                "body": {"title": "Updated task"},
+                "expect_status": [200],
+                "expect_json_keys": ["id", "title"],
+            }
+        ],
+        hard_fail=True,
+    )
+
+    result = _test_claim(
+        claim,
+        "http://example.test",
+        Path("."),
+        _profile(),
+        AdapterTestConfig(
+            routes=[
+                RouteInfo(path="/api/tasks", methods=["GET"]),
+                RouteInfo(path="/api/tasks/:id", methods=["PATCH"]),
+            ],
+        ),
+    )
+
+    assert result.passed is True
+    assert ("GET", "http://example.test/api/tasks") in calls
+    assert ("PATCH", "http://example.test/api/tasks/task-1") in calls
+
+
+def test_claim_with_pass_and_blocked_evidence_is_blocked(monkeypatch):
+    monkeypatch.setattr(
+        "requests.sessions.Session.request",
+        lambda self, method, url, **kwargs: FakeResponse(200, payload={"ok": True}),
+    )
+
+    claim = Claim(
+        id="mixed-evidence",
+        description="Mixed pass and blocked evidence",
+        priority="critical",
+        category="feature",
+        test_approach="api",
+        test_steps=[
+            {"action": "browser-click", "selector": "button"},
+            {"action": "http", "method": "GET", "candidate_paths": ["/api/ok"], "expect_status": [200]},
+        ],
+        hard_fail=True,
+    )
+
+    result = _test_claim(claim, "http://example.test", Path("."), _profile())
+
+    assert result.passed is False
+    assert result.outcome == "blocked_by_harness"
+
+
+def test_list_verification_is_blocked_after_create_failure(monkeypatch):
+    def fake_request(self, method, url, **kwargs):
+        if method == "POST":
+            return FakeResponse(500, payload={"error": "create failed"})
+        raise AssertionError(f"unexpected request {method} {url}")
+
+    monkeypatch.setattr("requests.sessions.Session.request", fake_request)
+
+    claim = Claim(
+        id="blog-list-posts",
+        description="Users can list blog posts",
+        priority="critical",
+        category="feature",
+        test_approach="api",
+        test_steps=[
+            {
+                "action": "http",
+                "method": "POST",
+                "candidate_paths": ["/api/posts"],
+                "body": {"title": "My First Blog Post"},
+                "expect_status": [201],
+            },
+            {
+                "action": "http",
+                "method": "GET",
+                "candidate_paths": ["/api/posts"],
+                "expect_status": [200],
+                "expect_body_contains": ["My First Blog Post"],
+            },
+        ],
+        hard_fail=True,
+    )
+
+    result = _test_claim(claim, "http://example.test", Path("."), _profile())
+
+    assert result.passed is False
+    assert result.outcome == "fail"
+    assert result.evidence[1].outcome == "blocked_by_create_failure"
+    assert result.evidence[1].skipped is True
+
+
+def test_list_claim_accepts_non_empty_array_even_if_content_mismatches(monkeypatch):
+    def fake_request(self, method, url, **kwargs):
+        return FakeResponse(200, payload={"data": [{"id": "post-1", "title": "Seeded Title"}]})
+
+    monkeypatch.setattr("requests.sessions.Session.request", fake_request)
+
+    claim = Claim(
+        id="blog-list-posts",
+        description="Users can list blog posts",
+        priority="critical",
+        category="feature",
+        test_approach="api",
+        test_steps=[
+            {
+                "action": "http",
+                "method": "GET",
+                "candidate_paths": ["/api/posts"],
+                "expect_status": [200],
+                "expect_body_contains": ["My First Blog Post"],
+                "expect_json_keys": ["id", "title"],
+            }
+        ],
+        hard_fail=True,
+    )
+
+    result = _test_claim(claim, "http://example.test", Path("."), _profile())
+
+    assert result.passed is True
+    assert result.outcome == "pass"
+
+
+def test_generic_seeded_auth_requires_more_than_non_empty_200(monkeypatch):
+    user = SeededUser(email="user@store.com", password="user123", role="user")
+    test_config = AdapterTestConfig(
+        auth_type="session",
+        login_endpoint="/api/login",
+        seeded_users=[user],
+        resource_models=["Cart"],
+    )
+
+    def fake_post(self, url, **kwargs):
+        return FakeResponse(200, payload={"ok": True})
+
+    monkeypatch.setattr("requests.sessions.Session.post", fake_post)
+    monkeypatch.setattr("requests.sessions.Session.get", lambda self, url, **kwargs: FakeResponse(404, text="not found"))
+
+    claim = Claim(
+        id="cart-view",
+        description="Users can view cart",
+        priority="critical",
+        category="feature",
+        test_approach="api",
+        test_steps=[
+            {"action": "http", "method": "POST", "candidate_paths": ["/api/login"], "expect_status": [200]},
+        ],
+        hard_fail=True,
+    )
+
+    result = _test_claim(claim, "http://example.test", Path("."), _profile(), test_config)
+
+    assert result.passed is False
+    assert result.outcome == "fail"
+
+
+def test_seeded_auth_blocks_when_password_not_recoverable():
+    claim = Claim(
+        id="auth-login",
+        description="Users can login",
+        priority="critical",
+        category="feature",
+        test_approach="api",
+        test_steps=[
+            {"action": "http", "method": "POST", "candidate_paths": ["/api/login"], "expect_status": [200]},
+        ],
+        hard_fail=True,
+    )
+
+    result = _test_claim(
+        claim,
+        "http://example.test",
+        Path("."),
+        _profile(),
+        AdapterTestConfig(
+            auth_type="session",
+            login_endpoint="/api/login",
+            seeded_users=[SeededUser(email="user@example.test", password="", role="user")],
+        ),
+    )
+
+    assert result.passed is False
+    assert result.outcome == "blocked_by_harness"
+    assert result.evidence[0].actual == "seeded user found but password not recoverable from code."
+
+
+def test_registration_409_conflict_still_counts_as_pass(monkeypatch):
+    monkeypatch.setattr(
+        "requests.sessions.Session.request",
+        lambda self, method, url, **kwargs: FakeResponse(409, payload={"error": "email already registered"}),
+    )
+
+    claim = Claim(
+        id="auth-register",
+        description="Users can register",
+        priority="critical",
+        category="feature",
+        test_approach="api",
+        test_steps=[
+            {
+                "action": "http",
+                "method": "POST",
+                "candidate_paths": ["/api/register"],
+                "body": {"email": "{{email}}", "password": "{{password}}"},
+                "expect_status": [201],
+            }
+        ],
+        hard_fail=True,
+    )
+
+    result = _test_claim(
+        claim,
+        "http://example.test",
+        Path("."),
+        _profile(),
+        AdapterTestConfig(register_endpoint="/api/register"),
+    )
+
+    assert result.passed is True
+    assert result.evidence[0].actual == "HTTP 409: 409 Conflict (email already registered — endpoint works)"
 
 
 def test_print_report_groups_outcomes_and_shows_comparison(capsys):
@@ -591,10 +942,11 @@ def test_print_report_groups_outcomes_and_shows_comparison(capsys):
     output = capsys.readouterr().out
 
     assert "Certification: NOT CERTIFIED" in output
-    assert "Tier 0:        3/4 present (75%)" in output
-    assert "Tier 1:        1/2 passed (50%)" in output
-    assert "1 blocked" in output
+    assert "Structure:   3/4 present (75%)" in output
+    assert "Runtime:     1/3 tested (33%)" in output
+    assert "Blocked:     1 (harness limitation)" in output
     assert output.index("Not Implemented") < output.index("Failures") < output.index("Passes")
+    assert "\nBlocked\n" in output
     assert "reason:   auth session not established — harness limitation" in output
     assert "command:  GET /fail" in output
     assert "expected: 200" in output
@@ -680,7 +1032,7 @@ def test_compare_returns_markdown_table():
     output = compare(result_a, result_b, ("Otto", "Bare CC"))
 
     assert "## Comparison: Otto vs Bare CC" in output
-    assert "| Tier 0 (structure) | 2/2 (100%) | 2/2 (100%) |" in output
+    assert "| Structure | 2/2 (100%) | 2/2 (100%) |" in output
     assert "| `auth-login` | Users can login | blocked_by_harness | fail |" in output
 
 

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -32,6 +33,7 @@ from typing import Any
 import requests
 
 from otto.certifier.adapter import TestConfig
+from otto.certifier.binder import BoundAuth, BoundJourney, BoundPlan, BoundStep
 from otto.certifier.intent_compiler import RequirementMatrix
 from otto.certifier.journey_compiler import JourneyMatrix, JourneySpec
 from otto.observability import append_text_log
@@ -148,6 +150,431 @@ def run_tier2_from_journeys(
     return tier2_result
 
 
+def run_tier2_from_bound_plan(
+    bound_plan: BoundPlan,
+    base_url: str,
+    project_dir: Path,
+) -> Tier2Result:
+    """Run Tier 2 using a pre-bound journey plan."""
+
+    start_time = time.monotonic()
+    _tier2_log(
+        project_dir,
+        f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Tier 2 from bound plan",
+        f"base_url: {base_url}",
+        f"journeys: {len(bound_plan.journeys)}",
+    )
+
+    results = []
+    for journey in bound_plan.journeys:
+        results.append(_execute_bound_journey(journey, base_url))
+
+    duration_s = round(time.monotonic() - start_time, 1)
+    passed = sum(1 for item in results if item.passed)
+    tier2_result = Tier2Result(
+        product_dir=str(project_dir),
+        intent=bound_plan.intent,
+        base_url=base_url,
+        journeys_tested=len(results),
+        journeys_passed=passed,
+        journeys_failed=len(results) - passed,
+        journeys=results,
+        duration_s=duration_s,
+        mode="bound",
+    )
+
+    report_dir = project_dir / "certifier-reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    save_tier2_report(tier2_result, report_dir / "tier2-report.json")
+
+    _tier2_log(project_dir, f"Tier 2 done: {tier2_result.score()}, {duration_s}s")
+    return tier2_result
+
+
+def _execute_bound_journey(journey: BoundJourney, base_url: str) -> JourneyResult:
+    session = requests.Session()
+    steps: list[JourneyStep] = []
+    variables: dict[str, Any] = {}
+    current_auth: BoundAuth | None = None
+
+    for bound_step in journey.steps:
+        action = bound_step.action
+
+        if action == "register":
+            step = _exec_bound_register(session, base_url, bound_step, variables)
+            if step.passed and bound_step.auth:
+                current_auth = bound_step.auth
+        elif action == "login":
+            step = _exec_bound_login(session, base_url, bound_step, variables)
+            if step.passed and bound_step.auth:
+                current_auth = bound_step.auth
+        elif action == "login_admin":
+            step = _exec_bound_login(session, base_url, bound_step, variables)
+            if step.passed and bound_step.auth:
+                current_auth = bound_step.auth
+        elif action in {"get", "post", "put", "patch", "delete"}:
+            step = _exec_bound_http(session, base_url, bound_step, variables, current_auth)
+        elif action in {"verify", "verify_contains"}:
+            step = _exec_verify(bound_step.step, variables)
+        elif action in {"verify_count", "verify_min"}:
+            step = _exec_verify_count(bound_step.step, variables)
+        elif action == "fresh_session":
+            session = requests.Session()
+            current_auth = None
+            step = JourneyStep(action="fresh_session", detail="new unauthenticated session", passed=True)
+        else:
+            step = JourneyStep(
+                action=action,
+                detail=f"unknown action: {action}",
+                passed=False,
+                error=f"unsupported action: {action}",
+            )
+
+        if step.data and step.passed:
+            save_as = bound_step.step.get("save_as")
+            if save_as:
+                variables[save_as] = step.data
+            _extract_ids(step.data, variables)
+
+        steps.append(step)
+        critical_actions = {"register", "login", "login_admin", "post", "put", "patch", "delete"}
+        if not step.passed and action in critical_actions:
+            return JourneyResult(
+                name=journey.name,
+                description=journey.description,
+                passed=False,
+                steps=steps,
+                stopped_at=action,
+            )
+
+    passed_steps = sum(1 for item in steps if item.passed)
+    all_passed = passed_steps == len(steps)
+    return JourneyResult(
+        name=journey.name,
+        description=journey.description,
+        passed=all_passed,
+        steps=steps,
+        stopped_at="" if all_passed else f"{passed_steps}/{len(steps)} steps passed",
+    )
+
+
+def _exec_bound_register(
+    session: requests.Session,
+    base_url: str,
+    bound_step: BoundStep,
+    variables: dict[str, Any],
+) -> JourneyStep:
+    route = bound_step.resolved_route
+    if not route:
+        return JourneyStep(action="register", detail="no bound register route", passed=False, error="route not bound")
+
+    body = _bound_body(bound_step, variables)
+    auth = bound_step.auth
+    if auth:
+        body = dict(body or {})
+        body.setdefault("email", auth.email)
+        body.setdefault("password", auth.password)
+        if auth.name:
+            body.setdefault("name", auth.name)
+
+    url = f"{base_url}{_render_string(route, variables)}"
+    try:
+        response = session.post(url, json=body, timeout=10)
+    except Exception as exc:
+        return JourneyStep(action="register", detail=str(exc), passed=False, error=str(exc))
+
+    payload = _safe_json(response)
+    if response.status_code in (200, 201, 409):
+        return JourneyStep(
+            action="register",
+            detail=f"POST {route} → {response.status_code}",
+            passed=True,
+            data=payload if response.status_code != 409 else {"email": (auth.email if auth else body.get("email"))},
+            proof=StepProof(
+                timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                request={"method": "POST", "url": url, "body": _redact_password(body)},
+                response={"status": response.status_code, "body": payload or {"text": response.text[:200]}},
+            ),
+        )
+    return JourneyStep(
+        action="register",
+        detail=f"POST {route} → {response.status_code}",
+        passed=False,
+        error=f"expected [200, 201, 409], got {response.status_code}",
+        proof=StepProof(
+            timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            request={"method": "POST", "url": url, "body": _redact_password(body)},
+            response={"status": response.status_code, "body": payload or {"text": response.text[:200]}},
+        ),
+    )
+
+
+def _exec_bound_login(
+    session: requests.Session,
+    base_url: str,
+    bound_step: BoundStep,
+    variables: dict[str, Any],
+) -> JourneyStep:
+    auth = bound_step.auth
+    if auth is None:
+        return JourneyStep(action="login", detail="missing bound auth", passed=False, error="bound auth missing")
+
+    ok, detail, proof = _ensure_bound_session(session, base_url, bound_step, variables, auth)
+    return JourneyStep(
+        action=bound_step.action or "login",
+        detail=detail,
+        passed=ok,
+        error="" if ok else detail,
+        proof=proof,
+    )
+
+
+def _exec_bound_http(
+    session: requests.Session,
+    base_url: str,
+    bound_step: BoundStep,
+    variables: dict[str, Any],
+    current_auth: BoundAuth | None,
+) -> JourneyStep:
+    method = bound_step.method or bound_step.action.upper()
+    route = bound_step.resolved_route
+    if not route:
+        return JourneyStep(
+            action=f"{method} ?",
+            detail="no bound route",
+            passed=False,
+            error="route not bound",
+        )
+
+    auth = bound_step.auth or current_auth
+    if auth and (bound_step.requires_auth or bound_step.requires_admin):
+        ok, detail, proof = _ensure_bound_session(session, base_url, bound_step, variables, auth)
+        if not ok:
+            return JourneyStep(
+                action=f"{method} {route}",
+                detail=detail,
+                passed=False,
+                error=detail,
+                proof=proof,
+            )
+
+    rendered_route = _render_string(route, variables)
+    if "{{" in rendered_route:
+        return JourneyStep(
+            action=f"{method} {route}",
+            detail="variable not resolved",
+            passed=False,
+            error=f"unresolved variables in path: {route}",
+        )
+
+    body = _bound_body(bound_step, variables)
+    expect = bound_step.step.get("expect_status", [200] if method == "GET" else [200, 201])
+    if isinstance(expect, int):
+        expect = [expect]
+
+    kwargs: dict[str, Any] = {"timeout": 10}
+    if body and method != "GET":
+        kwargs["json"] = body
+    try:
+        response = session.request(method, f"{base_url}{rendered_route}", **kwargs)
+    except Exception as exc:
+        return JourneyStep(
+            action=f"{method} {rendered_route}",
+            detail=str(exc),
+            passed=False,
+            error=str(exc),
+        )
+
+    payload = _safe_json(response)
+    if response.status_code in expect:
+        response_data = _unwrap_tier2_payload(payload) if payload is not None else {}
+        response_preview = payload if payload is not None else {"text": response.text[:200]}
+        return JourneyStep(
+            action=f"{method} {rendered_route}",
+            detail=str(response.status_code),
+            passed=True,
+            data=response_data,
+            proof=StepProof(
+                timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                request={"method": method, "url": f"{base_url}{rendered_route}", "body": body},
+                response={"status": response.status_code, "body": response_preview},
+            ),
+        )
+
+    return JourneyStep(
+        action=f"{method} {rendered_route}",
+        detail=f"HTTP {response.status_code}",
+        passed=False,
+        error=f"expected {expect}, got {response.status_code}",
+        proof=StepProof(
+            timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            request={"method": method, "url": f"{base_url}{rendered_route}", "body": body},
+            response={"status": response.status_code, "body": payload if payload is not None else {"text": response.text[:200]}},
+        ),
+    )
+
+
+def _ensure_bound_session(
+    session: requests.Session,
+    base_url: str,
+    bound_step: BoundStep,
+    variables: dict[str, Any],
+    auth: BoundAuth,
+) -> tuple[bool, str, StepProof]:
+    if auth.mechanism == "nextauth":
+        return _ensure_bound_nextauth_session(session, base_url, bound_step, auth)
+    return _ensure_bound_generic_session(session, base_url, bound_step, variables, auth)
+
+
+def _ensure_bound_nextauth_session(
+    session: requests.Session,
+    base_url: str,
+    bound_step: BoundStep,
+    auth: BoundAuth,
+) -> tuple[bool, str, StepProof]:
+    csrf_route = auth.csrf_route or "/api/auth/csrf"
+    login_route = auth.login_route or bound_step.resolved_route or "/api/auth/callback/credentials"
+    csrf_url = f"{base_url}{csrf_route}"
+    try:
+        csrf_response = session.get(csrf_url, timeout=10)
+        csrf_payload = csrf_response.json()
+        csrf_token = csrf_payload.get("csrfToken", "")
+    except Exception as exc:
+        proof = StepProof(
+            timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            request={"method": "GET", "url": csrf_url},
+            response={"error": str(exc)},
+        )
+        return False, f"failed CSRF request: {exc}", proof
+
+    callback_url = f"{base_url}{login_route}"
+    request_body = {
+        "email": auth.email,
+        "password": auth.password,
+        "csrfToken": csrf_token,
+        "redirect": "false",
+        "json": "true",
+    }
+    try:
+        response = session.post(callback_url, data=request_body, timeout=10, allow_redirects=False)
+    except Exception as exc:
+        proof = StepProof(
+            timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            request={"method": "POST", "url": callback_url, "body": _redact_password(request_body)},
+            response={"error": str(exc)},
+        )
+        return False, f"credentials callback failed: {exc}", proof
+
+    cookie_names = set(session.cookies.keys())
+    session_cookie = cookie_names & {
+        "next-auth.session-token",
+        "__Secure-next-auth.session-token",
+        "authjs.session-token",
+        "__Secure-authjs.session-token",
+    }
+    if session_cookie:
+        proof = StepProof(
+            timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            request={"method": "POST", "url": callback_url, "body": _redact_password(request_body)},
+            response={"status": response.status_code, "body": _safe_json(response) or {"text": response.text[:200]}},
+        )
+        return True, f"NextAuth session active for {auth.email}", proof
+
+    try:
+        session_response = session.get(f"{base_url}/api/auth/session", timeout=5)
+        session_payload = session_response.json()
+    except Exception:
+        session_payload = None
+    if session_payload and session_payload.get("user"):
+        proof = StepProof(
+            timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            request={"method": "POST", "url": callback_url, "body": _redact_password(request_body)},
+            response={"status": response.status_code, "body": _safe_json(response) or {"text": response.text[:200]}},
+        )
+        return True, f"NextAuth session active for {auth.email}", proof
+
+    proof = StepProof(
+        timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        request={"method": "POST", "url": callback_url, "body": _redact_password(request_body)},
+        response={"status": response.status_code, "body": _safe_json(response) or {"text": response.text[:200]}},
+    )
+    return False, f"NextAuth login failed with HTTP {response.status_code}", proof
+
+
+def _ensure_bound_generic_session(
+    session: requests.Session,
+    base_url: str,
+    bound_step: BoundStep,
+    variables: dict[str, Any],
+    auth: BoundAuth,
+) -> tuple[bool, str, StepProof]:
+    login_route = auth.login_route or bound_step.resolved_route
+    if not login_route:
+        proof = StepProof(timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ"))
+        return False, "bound auth did not include a login route", proof
+
+    request_body = {
+        "email": auth.email,
+        "password": auth.password,
+    }
+    for request_style in ("json", "data"):
+        kwargs: dict[str, Any] = {"timeout": 10, "allow_redirects": False}
+        if request_style == "json":
+            kwargs["json"] = request_body
+        else:
+            kwargs["data"] = request_body
+        try:
+            response = session.post(f"{base_url}{login_route}", **kwargs)
+        except Exception as exc:
+            proof = StepProof(
+                timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                request={"method": "POST", "url": f"{base_url}{login_route}", "body": _redact_password(request_body)},
+                response={"error": str(exc)},
+            )
+            continue
+
+        if response.status_code in (200, 201, 202, 204, 302, 303):
+            payload = _safe_json(response)
+            if isinstance(payload, dict):
+                token = payload.get("token") or payload.get("accessToken") or payload.get("access_token")
+                if token:
+                    variables["auth_token"] = token
+                    session.headers["Authorization"] = f"Bearer {token}"
+            proof = StepProof(
+                timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                request={"method": "POST", "url": f"{base_url}{login_route}", "body": _redact_password(request_body)},
+                response={"status": response.status_code, "body": payload or {"text": response.text[:200]}},
+            )
+            return True, f"{login_route} accepted bound credentials with HTTP {response.status_code}", proof
+
+    proof = StepProof(
+        timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        request={"method": "POST", "url": f"{base_url}{login_route}", "body": _redact_password(request_body)},
+        response={"error": "all login attempts failed"},
+    )
+    return False, "all login attempts failed", proof
+
+
+def _bound_body(bound_step: BoundStep, variables: dict[str, Any]) -> Any:
+    return _render_template(bound_step.resolved_body, variables)
+
+
+def _safe_json(response: requests.Response) -> Any:
+    try:
+        return response.json()
+    except Exception:
+        return None
+
+
+def _redact_password(body: Any) -> Any:
+    if not isinstance(body, dict):
+        return body
+    redacted = dict(body)
+    if "password" in redacted:
+        redacted["password"] = "***"
+    return redacted
+
+
 def _execute_journey_spec(
     spec: JourneySpec,
     config: TestConfig,
@@ -172,13 +599,13 @@ def _execute_journey_spec(
             else:
                 step = JourneyStep(action="login_admin", detail="no admin credentials", passed=False, error="adapter found no admin user")
         elif action == "get":
-            step = _exec_http(session, base_url, "GET", step_spec, variables)
+            step = _exec_http(session, base_url, "GET", step_spec, variables, config)
         elif action == "post":
-            step = _exec_http(session, base_url, "POST", step_spec, variables)
+            step = _exec_http(session, base_url, "POST", step_spec, variables, config)
         elif action == "put":
-            step = _exec_http(session, base_url, "PUT", step_spec, variables)
+            step = _exec_http(session, base_url, "PUT", step_spec, variables, config)
         elif action == "delete":
-            step = _exec_http(session, base_url, "DELETE", step_spec, variables)
+            step = _exec_http(session, base_url, "DELETE", step_spec, variables, config)
         elif action in ("verify", "verify_contains"):
             step = _exec_verify(step_spec, variables)
         elif action in ("verify_count", "verify_min"):
@@ -257,8 +684,25 @@ def _exec_login(session: requests.Session, base_url: str, config: TestConfig, st
                 "email": email, "password": password,
                 "csrfToken": csrf, "redirect": "false", "json": "true",
             }, timeout=10, allow_redirects=False)
-            if "next-auth.session-token" in dict(session.cookies):
+            # Check for session cookie — name varies by NextAuth version and config
+            cookie_names = set(session.cookies.keys())
+            session_cookie = cookie_names & {
+                "next-auth.session-token",
+                "__Secure-next-auth.session-token",
+                "authjs.session-token",
+                "__Secure-authjs.session-token",
+            }
+            if session_cookie:
                 return JourneyStep(action="login", detail=f"NextAuth login as {email}", passed=True)
+            # Fallback: check if /api/auth/session returns a user
+            try:
+                sess_resp = session.get(f"{base_url}/api/auth/session", timeout=5)
+                if sess_resp.status_code == 200:
+                    sess_data = sess_resp.json()
+                    if sess_data and sess_data.get("user"):
+                        return JourneyStep(action="login", detail=f"NextAuth session active for {email}", passed=True)
+            except Exception:
+                pass
         except Exception as e:
             return JourneyStep(action="login", detail=str(e), passed=False, error=str(e))
 
@@ -272,7 +716,7 @@ def _exec_login(session: requests.Session, base_url: str, config: TestConfig, st
     return JourneyStep(action="login", detail=f"login failed for {email}", passed=False, error="could not authenticate")
 
 
-def _exec_http(session: requests.Session, base_url: str, method: str, step: dict[str, Any], variables: dict[str, Any]) -> JourneyStep:
+def _exec_http(session: requests.Session, base_url: str, method: str, step: dict[str, Any], variables: dict[str, Any], test_config: TestConfig | None = None) -> JourneyStep:
     paths = step.get("candidate_paths", [step.get("path", "")])
     body = _render_template(step.get("body"), variables)
     expect = step.get("expect_status", [200] if method == "GET" else [200, 201])
@@ -284,17 +728,9 @@ def _exec_http(session: requests.Session, base_url: str, method: str, step: dict
     if any(p in me_aliases for p in paths):
         paths = list(paths) + ["/api/auth/session"]
 
-    # For admin order/product paths, also try non-admin variants
-    expanded = list(paths)
-    for p in paths:
-        if "/api/admin/orders/" in p:
-            expanded.append(p.replace("/api/admin/orders/", "/api/orders/"))
-        if "/api/admin/products/" in p:
-            expanded.append(p.replace("/api/admin/products/", "/api/products/"))
-    paths = expanded
-
     last_status = None
     last_error_text = ""
+    self_heal_note = ""
     for path in paths:
         if not path:
             continue
@@ -313,9 +749,8 @@ def _exec_http(session: requests.Session, base_url: str, method: str, step: dict
             if r.status_code == 400 and body and method in ("PUT", "POST", "PATCH"):
                 error_text = r.text[:500]
                 last_error_text = error_text
-                import re as _re
                 # Enum case fix: "Must be one of: PENDING, PAID, SHIPPED"
-                enum_match = _re.search(r"[Mm]ust be one of[:\s]+([A-Z_,\s]+)", error_text)
+                enum_match = re.search(r"[Mm]ust be one of[:\s]+([A-Z_,\s]+)", error_text)
                 if enum_match and isinstance(body, dict):
                     valid_values = [v.strip() for v in enum_match.group(1).split(",")]
                     for field, val in body.items():
@@ -327,19 +762,13 @@ def _exec_http(session: requests.Session, base_url: str, method: str, step: dict
                                 if r2.status_code in expect:
                                     r = r2
                                     last_status = r2.status_code
+                                    self_heal_note = " (self-healed: enum case)"
                                     break
             if r.status_code in expect:
-                response_data = {}
+                response_data: Any = {}
                 try:
                     raw = r.json()
-                    if isinstance(raw, dict) and "data" in raw:
-                        response_data = raw["data"] if isinstance(raw["data"], dict) else raw
-                        if isinstance(raw["data"], list):
-                            response_data = {"items": raw["data"], "_raw": raw}
-                    elif isinstance(raw, list):
-                        response_data = {"items": raw}
-                    elif isinstance(raw, dict):
-                        response_data = raw
+                    response_data = _unwrap_tier2_payload(raw)
                 except Exception:
                     pass
                 response_body_preview = {}
@@ -348,12 +777,12 @@ def _exec_http(session: requests.Session, base_url: str, method: str, step: dict
                     if isinstance(response_body_preview, (dict, list)):
                         preview_str = json.dumps(response_body_preview)
                         if len(preview_str) > 500:
-                            response_body_preview = json.loads(preview_str[:500] + "...")
+                            response_body_preview = {"preview": preview_str[:500] + "..."}
                 except Exception:
                     response_body_preview = {"text": r.text[:200]}
 
                 return JourneyStep(
-                    action=f"{method} {rendered_path}", detail=f"{r.status_code}",
+                    action=f"{method} {rendered_path}", detail=f"{r.status_code}{self_heal_note}",
                     passed=True, data=response_data,
                     proof=StepProof(
                         timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -363,6 +792,41 @@ def _exec_http(session: requests.Session, base_url: str, method: str, step: dict
                 )
         except Exception:
             continue
+
+    # Self-heal: inject adapter-discovered routes when all candidates fail with 404.
+    # The journey compiler may guess wrong paths (e.g., /api/admin/products when the
+    # app uses POST /api/products with requireAdmin middleware). The adapter already
+    # scanned the code and knows the real routes.
+    if last_status == 404 and test_config:
+        adapter_paths = _find_adapter_routes(paths, method, test_config)
+        for adapter_path in adapter_paths:
+            rendered = _render_string(adapter_path, variables)
+            if "{{" in rendered:
+                continue
+            url = f"{base_url}{rendered}"
+            try:
+                kwargs_fb: dict[str, Any] = {"timeout": 10}
+                if body and method != "GET":
+                    kwargs_fb["json"] = body
+                r = session.request(method, url, **kwargs_fb)
+                if r.status_code in expect:
+                    response_data = {}
+                    try:
+                        raw = r.json()
+                        response_data = raw if isinstance(raw, dict) else {}
+                    except Exception:
+                        pass
+                    return JourneyStep(
+                        action=f"{method} {rendered}", detail=f"{r.status_code} (adapter route)",
+                        passed=True, data=response_data,
+                        proof=StepProof(
+                            timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                            request={"method": method, "url": url, "body": body},
+                            response={"status": r.status_code, "body": {}},
+                        ),
+                    )
+            except Exception:
+                continue
 
     # Check if ALL paths had unresolved variables
     resolved_paths = [p for p in paths if "{{" not in _render_string(p, variables)]
@@ -381,6 +845,38 @@ def _exec_http(session: requests.Session, base_url: str, method: str, step: dict
         passed=False,
         error=f"expected {expect}, tried {len(resolved_paths)} path(s)",
     )
+
+
+def _find_adapter_routes(
+    tried_paths: list[str],
+    method: str,
+    test_config: TestConfig,
+) -> list[str]:
+    """Find adapter-discovered routes that match the intent of the tried paths.
+
+    Uses keyword extraction from the tried paths to find matching routes in the
+    adapter's route inventory. Same approach as Tier 1's route injection.
+    """
+    # Extract keywords from the paths we tried
+    keywords: set[str] = set()
+    for path in tried_paths:
+        for segment in path.lower().strip("/").split("/"):
+            if segment and segment not in {"api", "v1", "v2", "auth"}:
+                keywords.add(segment)
+
+    # Find adapter routes matching those keywords
+    matches = []
+    already_tried = {p.lower().rstrip("/") for p in tried_paths}
+    for route in test_config.routes:
+        if method.upper() not in route.methods:
+            continue
+        if route.path.lower().rstrip("/") in already_tried:
+            continue
+        route_lower = route.path.lower()
+        if any(kw in route_lower for kw in keywords):
+            matches.append(route.path)
+
+    return matches
 
 
 def _exec_verify(step: dict[str, Any], variables: dict[str, Any]) -> JourneyStep:
@@ -422,73 +918,58 @@ def _exec_verify_count(step: dict[str, Any], variables: dict[str, Any]) -> Journ
     )
 
 
-def _extract_ids(data: dict[str, Any], variables: dict[str, Any]) -> None:
-    """Auto-extract common IDs from response data for variable substitution.
+def _is_ecommerce_app(config: TestConfig) -> bool:
+    """Return True when adapter signals indicate a commerce product."""
+    if any("cart" in model.lower() for model in config.resource_models):
+        return True
 
-    Maps response fields to multiple variable names so compiled journeys
-    can reference them as {{new_product_id}}, {{product_id}}, {{id}}, etc.
-    """
+    ecommerce_keywords = ("cart", "checkout", "product", "products")
+    return any(
+        any(keyword in route.path.lower() for keyword in ecommerce_keywords)
+        for route in config.routes
+    )
+
+
+def _extract_ids(data: Any, variables: dict[str, Any]) -> None:
+    """Extract generic IDs from response data for variable substitution."""
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict) and item.get("id"):
+                variables["first_item_id"] = str(item["id"])
+                return
+        return
+
     if isinstance(data, dict):
-        # Direct ID fields
         if "id" in data and data["id"]:
             the_id = str(data["id"])
-            variables["id"] = the_id
-            # Infer what kind of ID from context
-            if "name" in data and "price" in data:
-                for alias in ("product_id", "new_product_id", "created_product_id"):
-                    variables[alias] = the_id
-            elif "status" in data and ("totalAmount" in data or "total" in data):
-                for alias in ("order_id", "new_order_id", "customer_order_id", "created_order_id"):
-                    variables[alias] = the_id
-            elif "email" in data:
-                variables["user_id"] = the_id
+            variables["last_id"] = the_id
+            variables["last_created_id"] = the_id
 
-        for key in ("productId", "orderId", "userId", "cartItemId"):
-            if key in data and data[key]:
-                variables[key] = str(data[key])
-                snake = key[0].lower() + "".join(f"_{c.lower()}" if c.isupper() else c for c in key[1:])
-                variables[snake] = str(data[key])
-
-        # Cart item IDs
-        if "cartItemId" not in variables:
-            for cart_key in ("id", "cartItemId"):
-                if cart_key in data and "productId" in data:
-                    # This is a cart item response
-                    variables["cart_item_id"] = str(data[cart_key])
-                    variables["first_cart_item_id"] = str(data[cart_key])
-                    break
-
-        # Extract order ID from URL patterns (e.g., sessionUrl with orderId param)
         import re as _re
         for val in data.values():
             if isinstance(val, str) and "orderId=" in val:
-                m = _re.search(r"orderId=([^&\s]+)", val)
+                m = re.search(r"orderId=([^&\s]+)", val)
                 if m:
                     oid = m.group(1)
                     for alias in ("order_id", "customer_order_id", "new_order_id"):
                         if alias not in variables:
                             variables[alias] = oid
 
-        # Also check _raw wrapper (from unwrapped responses)
-        raw = data.get("_raw", {})
-        if isinstance(raw, dict):
-            raw_data = raw.get("data", {})
-            if isinstance(raw_data, dict):
-                for val in raw_data.values():
-                    if isinstance(val, str) and "orderId=" in val:
-                        m = _re.search(r"orderId=([^&\s]+)", val)
-                        if m and "customer_order_id" not in variables:
-                            variables["customer_order_id"] = m.group(1)
-
-        # Extract from lists (first and second items)
         items = data.get("items") or data.get("data") or []
         if isinstance(items, list):
-            for idx, item in enumerate(items[:3]):
-                if isinstance(item, dict) and "id" in item:
-                    prefix = ["first", "second", "third"][idx]
-                    variables[f"{prefix}_product_id"] = str(item["id"])
-                    if "name" in item:
-                        variables[f"{prefix}_product_name"] = str(item["name"])
+            for item in items:
+                if isinstance(item, dict) and item.get("id"):
+                    variables["first_item_id"] = str(item["id"])
+                    break
+
+
+def _unwrap_tier2_payload(payload: Any) -> Any:
+    if isinstance(payload, dict):
+        for wrapper in ("data", "results", "items", "records"):
+            value = payload.get(wrapper)
+            if isinstance(value, (dict, list)):
+                return value
+    return payload
 
 
 def _render_template(obj: Any, variables: dict[str, Any]) -> Any:
@@ -533,12 +1014,13 @@ def run_tier2_sequential(
     )
 
     journeys = []
+    is_ecommerce = _is_ecommerce_app(test_config)
 
     # Core journeys based on adapter-discovered features
-    if test_config.register_endpoint or test_config.has_cart_model:
+    if is_ecommerce and (test_config.register_endpoint or any("cart" in model.lower() for model in test_config.resource_models)):
         journeys.append(_test_shopping_journey(test_config, base_url))
 
-    if test_config.admin_user():
+    if is_ecommerce and test_config.admin_user():
         journeys.append(_test_admin_journey(test_config, base_url))
 
     # Always test error handling
@@ -985,6 +1467,9 @@ def _derive_extra_journeys(
     base_url: str,
 ) -> list[JourneyResult]:
     """Derive additional journeys from uncovered matrix claims."""
+    if not _is_ecommerce_app(config):
+        return []
+
     extra: list[JourneyResult] = []
 
     # Search/filter journey — if catalog claims mention search

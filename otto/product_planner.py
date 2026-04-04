@@ -163,13 +163,14 @@ RULES:
   without reading the product spec. Include relevant API shapes, data model
   details, and conventions in each task prompt.
 
-AFTER writing spec files, write your task plan to a file called
-`otto_plan.json` at the project root using the Write tool. This file
-must contain valid JSON matching the schema above. Do NOT output the
-JSON in your text response — write it to the file.
+AFTER writing spec files, write your task plan using the Write tool.
+The EXACT file path will be specified in the user prompt — use that path.
+The file must contain valid JSON matching the schema above.
+Do NOT output the JSON in your text response — write it to the file.
 
-IMPORTANT: Task prompts may contain markdown with code blocks. Writing
-to a file avoids JSON-in-markdown escaping issues.
+IMPORTANT: Use the ABSOLUTE file path from the user prompt for the Write tool.
+Do NOT guess the path. Task prompts may contain markdown with code blocks.
+Writing to a file avoids JSON-in-markdown escaping issues.
 """
 
 
@@ -190,7 +191,17 @@ async def run_product_planner(
         f"intent: {intent}",
     )
 
-    prompt = f"User intent: {intent}"
+    # Use a temp file with a known absolute path — same pattern as spec agent.
+    # This eliminates LLM path guessing (the root cause of planner failures).
+    import tempfile as _tempfile
+    with _tempfile.NamedTemporaryFile(suffix=".json", prefix="otto_plan_", delete=False) as tf:
+        plan_file = Path(tf.name)
+
+    prompt = (
+        f"User intent: {intent}\n\n"
+        f"Project directory: {project_dir}\n"
+        f"Write your plan JSON to this EXACT path: {plan_file}\n"
+    )
 
     # Full agent session — can explore codebase, research, write files
     options = ClaudeAgentOptions(
@@ -219,7 +230,41 @@ async def run_product_planner(
         "",
     )
 
-    plan = _parse_planner_output(raw_output, project_dir)
+    try:
+        plan = _parse_planner_output(raw_output, project_dir, plan_file=plan_file)
+    except ValueError:
+        # Planner didn't write otto_plan.json and no JSON in output.
+        # Retry with a focused prompt asking just for the JSON file.
+        _planner_log(
+            project_dir,
+            "otto_plan.json not created — retrying with focused prompt",
+        )
+        retry_prompt = (
+            "You described a plan but did not write the otto_plan.json file. "
+            "Write it NOW using the Write tool. The file must be at the project root "
+            f"({project_dir / 'otto_plan.json'}). "
+            "It must be valid JSON matching this schema:\n"
+            '{"mode": "single_task"|"decomposed", "task_prompt": "..." (for single_task), '
+            '"tasks": [{"prompt": "...", "depends_on": []}] (for decomposed), '
+            '"assumptions": ["..."]}\n\n'
+            f"Your earlier plan description:\n{raw_output[:3000]}"
+        )
+        retry_options = ClaudeAgentOptions(
+            permission_mode="bypassPermissions",
+            cwd=str(project_dir),
+            setting_sources=_planner_settings(config),
+            env=_subprocess_env(),
+            system_prompt={"type": "preset", "preset": "claude_code"},
+            max_turns=3,
+        )
+        if model:
+            retry_options.model = model
+        retry_output, retry_cost, _ = await run_agent_query(retry_prompt, retry_options)
+        cost_usd += float(retry_cost or 0.0)
+
+        _planner_log(project_dir, f"retry output: {retry_output[:500]}")
+        plan = _parse_planner_output(retry_output, project_dir)
+
     plan.cost_usd = cost_usd
     plan.duration_s = duration_s
 
@@ -240,7 +285,7 @@ async def run_product_planner(
 # Parsing
 # ---------------------------------------------------------------------------
 
-def _parse_planner_output(raw: str, project_dir: Path) -> ProductPlan:
+def _parse_planner_output(raw: str, project_dir: Path, plan_file: Path | None = None) -> ProductPlan:
     """Parse the product planner's output.
 
     The planner writes otto_plan.json via the Write tool. We read it from disk.
@@ -249,7 +294,8 @@ def _parse_planner_output(raw: str, project_dir: Path) -> ProductPlan:
     data = None
 
     # Primary: read from file (avoids markdown fence escaping issues)
-    plan_file = project_dir / "otto_plan.json"
+    if plan_file is None:
+        plan_file = project_dir / "otto_plan.json"
     if plan_file.exists():
         try:
             data = json.loads(plan_file.read_text())

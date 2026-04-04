@@ -1,20 +1,21 @@
-"""Otto product QA — journey-based verification of the whole product.
+"""DEPRECATED: Use otto.certifier instead.
 
-After all tasks pass individually, product QA tests user journeys from
-product-spec.md. It verifies that features work TOGETHER as a product,
-not just individually. This is the verification step of the i2p outer loop.
+This module has been replaced by the certifier (otto/certifier/) which uses
+compile-then-execute: test matrices are compiled once via LLM, then executed
+as deterministic HTTP probes in seconds for $0. The outer loop now calls
+otto.certifier.run_certifier_for_outer_loop() instead of run_product_qa().
 
-Product QA tests what per-task QA cannot:
-- Features working together (cross-feature flows)
-- Data flowing across surfaces (API → UI → extension)
-- State consistency over time (create → modify → delete → verify)
-
-The QA agent runs real commands (curl, browser automation, file checks)
-and collects evidence. It does NOT judge by reading code. Evidence-based
-verification only.
+This file is kept for reference only and will be removed in a future version.
 """
 
 from __future__ import annotations
+
+import warnings
+warnings.warn(
+    "otto.product_qa is deprecated. Use otto.certifier.run_certifier_for_outer_loop instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 import json
 import logging
