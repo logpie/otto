@@ -4,12 +4,23 @@
 
 Replace PER-driven build with agent-driven build. The coding agent has a continuous session, gets certification feedback (from certifier or human), and fixes in-session with full context.
 
-Two variants to experiment with:
+Two variants to experiment with. They differ significantly — not just in who triggers certification, but in who controls the loop, what the agent knows, and what the orchestrator does.
 
-- **Variant A (agentic):** Agent calls `certify()` as a tool. Fully agentic — agent decides when to request feedback.
-- **Variant B (orchestrated):** Orchestrator runs certifier and injects feedback into agent session. Agent doesn't know certification exists.
+### Variant comparison
 
-Both variants share the same infrastructure: session continuity, candidate snapshots, human feedback injection.
+| | Variant A (agentic) | Variant B (orchestrated) |
+|---|---|---|
+| **Who controls the loop** | Agent | Orchestrator |
+| **Orchestrator role** | Session manager + tool provider | Loop driver + feedback injector |
+| **Agent prompt** | "Build, certify, fix, repeat" | "Build this" → "Fix these issues" → ... |
+| **Tools** | CC tools + certify() MCP | CC tools only |
+| **Agent knows about certification** | Yes — calls it explicitly | No — just receives "user feedback" |
+| **Session lifecycle** | One continuous run, agent decides when to stop | Multiple resume() calls, orchestrator controls turns |
+| **Certification timing** | Agent decides (could certify early, per-feature, etc.) | Orchestrator decides (after session ends) |
+| **Certifier independence** | Weaker — agent knows it exists, could game it | Stronger — agent can't distinguish certifier from human |
+| **Paradigm** | Agent IS the loop | Orchestrator IS the loop (but agent keeps context) |
+
+Variant A is the real paradigm shift — fully agentic. Variant B is an evolution of PER with session continuity.
 
 ## Shared Infrastructure
 
@@ -108,21 +119,53 @@ These are infrastructure concerns. The agent doesn't see them — it just gets t
 
 ## Variant A: Agent Calls certify()
 
-### Design
+### Design philosophy
 
-The agent has `certify()` as a tool. It decides when to call it.
+The agent is a fully autonomous developer. It plans, builds, tests, submits for review, reads feedback, fixes, resubmits. The orchestrator just provides tools and enforces budget limits. This is the closest to "what would a human developer do with Claude Code."
+
+### Orchestrator
+
+Minimal. Starts the session, provides tools (including certify() MCP), enforces guardrails (max cost, max time). Does NOT control the build/certify/fix loop — the agent does.
+
+```python
+# Orchestrator's entire job:
+session = start_session(prompt, tools=[cc_tools, certify_mcp], guardrails=guardrails)
+result = await session.run()  # agent drives everything
+return result
+```
+
+### Prompt
+
+The agent gets one prompt and runs autonomously:
 
 ```
-System prompt:
-  You are building a product. Build it, write tests, make them pass.
-  When ready, call certify() to submit for user testing. You'll receive
-  structured feedback on what works and what doesn't. Fix issues and
-  certify again. Repeat until all issues are resolved.
+You are building a product from the intent below. You are a senior developer
+working autonomously.
 
-Tools:
-  - Standard CC tools (Bash, Read, Write, Edit, etc.)
-  - certify(): Submit current code for product certification.
-    Returns: {passed, findings: [{description, diagnosis, fix_suggestion, severity}]}
+1. Read the intent carefully. Plan your approach.
+2. Build the product — write code, write tests, make tests pass.
+3. When you believe the product is ready, call certify() to submit for
+   user testing. This simulates real users testing your product.
+4. Read the certification feedback carefully. Fix any issues found.
+5. Call certify() again after fixing.
+6. Repeat until certification passes or you've addressed all issues.
+
+You can call certify() strategically — after building a major feature,
+after the full product, or whenever you want user feedback. Each call
+takes a few minutes and costs money, so don't call it frivolously.
+
+certify() returns: {passed, findings: [{description, diagnosis, fix_suggestion, severity}]}
+```
+
+### Tools
+
+```
+Standard CC tools: Bash, Read, Write, Edit, Grep, Glob, etc.
+certify(): Submit current code for product certification.
+  - Commits your current work as a snapshot
+  - Runs automated user testing against the snapshot (takes 5-10 min)
+  - Returns structured findings
+dispatch(): (future) Spawn a subagent for parallel work
 ```
 
 ### certify() implementation
@@ -195,20 +238,66 @@ async def build_variant_a(intent, project_dir, config, guardrails):
 
 ## Variant B: Orchestrator Injects Feedback
 
-### Design
+### Design philosophy
 
-The agent doesn't know about certification. It just builds. The orchestrator decides when to certify and feeds results back as "user feedback."
+The orchestrator controls the loop, but the agent keeps context. The agent is a developer who builds and receives user feedback — it doesn't know how or when testing happens. The certifier is truly blind and independent. This is an evolution of PER: same control flow, but with session continuity instead of kill-and-restart.
+
+### Orchestrator
+
+Active loop driver. Starts the session with a build prompt, waits for the agent to finish, snapshots and certifies, then resumes the session with feedback. Controls the entire build→certify→fix rhythm.
+
+```python
+# Orchestrator drives the loop:
+session_id = None
+for round_num in range(max_rounds):
+    if round_num == 0:
+        prompt = build_prompt(intent)
+    else:
+        prompt = format_feedback(certifier_report, human_feedback)
+    
+    session_id, result = await run_agent_query(prompt, options, session_id=session_id)
+    
+    candidate = snapshot_candidate(project_dir)
+    report = run_certifier(candidate)
+    
+    if report.passed:
+        break
+```
+
+### Prompts
+
+Multiple prompts across rounds — orchestrator crafts each one:
+
+**Round 1 (build):**
+```
+You are building a product. Build it, write tests, make them pass.
+
+Intent:
+{intent}
+```
+
+**Round 2+ (fix):**
+```
+A user tested your product and found these issues:
+
+1. XSS vulnerability in todo creation
+   What happened: HTML tags stored without sanitization in POST /todos
+   Suggested fix: Sanitize HTML entities before storing
+
+2. Missing input validation
+   What happened: Empty title accepted, creates blank todo
+   Suggested fix: Return 400 when title is empty
+
+Please fix these issues. The product spec hasn't changed — see intent.md.
+```
+
+The agent doesn't know this came from an automated certifier. It reads "a user tested your product" — same as human feedback.
+
+### Tools
 
 ```
-System prompt:
-  You are building a product. Build it, write tests, make them pass.
-  When you believe the product is complete, say "The product is ready 
-  for review" and stop making changes. You may receive user feedback
-  with issues to fix — address them and signal ready again.
-
-Tools:
-  - Standard CC tools only (Bash, Read, Write, Edit, etc.)
-  - No certify() tool
+Standard CC tools only: Bash, Read, Write, Edit, Grep, Glob, etc.
+No certify() tool — agent doesn't know certification exists.
 ```
 
 ### Session flow
