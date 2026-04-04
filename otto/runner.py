@@ -1816,7 +1816,7 @@ async def run_task_v45(
         # Fire spec gen in a separate thread for true parallelism.
         # asyncio.create_task shares the event loop and gets starved by coding.
         # to_thread runs generate_spec_sync() with its own event loop.
-        if not spec and not config.get("skip_spec") and not skip_qa_mode:
+        if not spec and not config.get("skip_spec") and not skip_qa_mode and not config.get("skip_qa"):
             from otto.spec import generate_spec_sync
 
             _spec_settings = config.get("spec_agent_settings", "project").split(",")

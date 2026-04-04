@@ -99,7 +99,7 @@ class Tier2Result:
 
 
 def _tier2_log(project_dir: Path, *lines: str) -> None:
-    append_text_log(project_dir / "certifier-reports" / "tier2.log", lines)
+    append_text_log(project_dir / "otto_logs" / "certifier" / "tier2.log", lines)
 
 
 def run_tier2_from_journeys(
@@ -142,7 +142,7 @@ def run_tier2_from_journeys(
         mode="compiled",
     )
 
-    report_dir = project_dir / "certifier-reports"
+    report_dir = project_dir / "otto_logs" / "certifier"
     report_dir.mkdir(parents=True, exist_ok=True)
     save_tier2_report(tier2_result, report_dir / "tier2-report.json")
 
@@ -183,7 +183,7 @@ def run_tier2_from_bound_plan(
         mode="bound",
     )
 
-    report_dir = project_dir / "certifier-reports"
+    report_dir = project_dir / "otto_logs" / "certifier"
     report_dir.mkdir(parents=True, exist_ok=True)
     save_tier2_report(tier2_result, report_dir / "tier2-report.json")
 
@@ -1047,7 +1047,7 @@ def run_tier2_sequential(
     )
 
     # Save reports
-    report_dir = project_dir / "certifier-reports"
+    report_dir = project_dir / "otto_logs" / "certifier"
     report_dir.mkdir(parents=True, exist_ok=True)
     save_tier2_report(result, report_dir / "tier2-report.json")
 

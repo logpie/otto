@@ -4,6 +4,7 @@ import asyncio
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock, AsyncMock
 
 import pytest
@@ -210,6 +211,281 @@ class TestBuildCommand:
         assert "qa boom" in result.output
 
 
+class TestPipelineE2E:
+    """E2E tests for the full pipeline: build → certify → fix → verify.
+
+    Mocks only the external boundaries (orchestrator + certifier).
+    Everything else runs for real: pipeline.py, verification.py, tasks.yaml, git.
+    """
+
+    @pytest.mark.asyncio
+    async def test_monolithic_certify_fix_verify(self, tmp_git_repo):
+        """Full cycle: build → certify (fail) → fix task → re-verify (pass)."""
+        from otto.config import create_config
+        from otto.pipeline import build_product
+        from otto.tasks import load_tasks, update_task
+        from otto.certifier.report import (
+            CertificationOutcome, CertificationReport, Finding, TierResult, TierStatus,
+        )
+
+        create_config(tmp_git_repo)
+        _commit_otto_config(tmp_git_repo)
+
+        certifier_calls = []
+
+        async def fake_run_per(config, tasks_path, project_dir):
+            tasks = load_tasks(tasks_path)
+            for task in tasks:
+                if task.get("status") == "pending":
+                    update_task(tasks_path, task["key"], status="passed")
+            return 0
+
+        def fake_certifier(intent, project_dir, config, *,
+                           port_override=None, stories_path=None,
+                           skip_story_ids=None):
+            certifier_calls.append({"skip": set(skip_story_ids) if skip_story_ids else None})
+            if len(certifier_calls) == 1:
+                # Round 1: one story fails
+                tier4 = TierResult(tier=4, name="journeys", status=TierStatus.FAILED,
+                    findings=[Finding(
+                        tier=4, severity="critical", category="journey",
+                        description="Story failed: counter persists",
+                        diagnosis="Counter resets on refresh",
+                        fix_suggestion="Add localStorage",
+                        story_id="counter-persist",
+                        evidence={"steps": [
+                            {"action": "refresh page", "outcome": "fail",
+                             "diagnosis": "No persistence", "fix_suggestion": "Use localStorage"},
+                        ]},
+                    )],
+                    cost_usd=0.50, duration_s=30.0)
+                # Stash raw results for story tracking
+                _mock_results = MagicMock()
+                _mock_results.results = [
+                    MagicMock(passed=False, story_id="counter-persist", story_title="counter persists",
+                              persona="user", blocked_at=None, summary="", diagnosis="Counter resets",
+                              fix_suggestion="Add localStorage", steps=[], break_findings=[]),
+                    MagicMock(passed=True, story_id="counter-display", story_title="counter displays",
+                              persona="user", blocked_at=None, summary="", diagnosis="",
+                              fix_suggestion="", steps=[], break_findings=[]),
+                ]
+                tier4._cert_result = _mock_results
+                tier4._stories_output = []
+                return CertificationReport(
+                    product_type="web", interaction="http",
+                    tiers=[TierResult(tier=1, name="structural", status=TierStatus.PASSED),
+                           TierResult(tier=2, name="probes", status=TierStatus.PASSED),
+                           tier4],
+                    findings=tier4.findings,
+                    outcome=CertificationOutcome.FAILED,
+                    cost_usd=0.50, duration_s=30.0,
+                )
+            # Round 2: all pass
+            tier4 = TierResult(tier=4, name="journeys", status=TierStatus.PASSED,
+                cost_usd=0.30, duration_s=20.0)
+            _mock_results = MagicMock()
+            _mock_results.results = [
+                MagicMock(passed=True, story_id="counter-persist", story_title="counter persists",
+                          persona="user", blocked_at=None, summary="", diagnosis="",
+                          fix_suggestion="", steps=[], break_findings=[]),
+            ]
+            tier4._cert_result = _mock_results
+            tier4._stories_output = []
+            return CertificationReport(
+                product_type="web", interaction="http",
+                tiers=[TierResult(tier=1, name="structural", status=TierStatus.PASSED),
+                       TierResult(tier=2, name="probes", status=TierStatus.PASSED),
+                       tier4],
+                outcome=CertificationOutcome.PASSED,
+                cost_usd=0.30, duration_s=20.0,
+            )
+
+        with patch("otto.orchestrator.run_per", side_effect=fake_run_per), \
+             patch("otto.certifier.run_unified_certifier", side_effect=fake_certifier):
+            result = await build_product(
+                "Build a counter app",
+                tmp_git_repo,
+                {"test_command": "true", "default_branch": "main"},
+            )
+
+        # Pipeline completed with fix loop
+        assert result.passed is True
+        assert result.rounds == 2
+        assert result.total_cost > 0
+
+        # Certifier was called twice
+        assert len(certifier_calls) == 2
+        # Round 2 should skip the story that passed in round 1
+        assert certifier_calls[1]["skip"] == {"counter-display"}
+
+        # intent.md was created as grounding
+        assert (tmp_git_repo / "intent.md").exists()
+
+        # Fix task was created and executed
+        tasks = load_tasks(tmp_git_repo / "tasks.yaml")
+        fix_tasks = [t for t in tasks if "Fix" in t["prompt"] or "fix" in t["prompt"].lower()]
+        assert len(fix_tasks) >= 1
+        assert fix_tasks[0]["status"] == "passed"
+
+    @pytest.mark.asyncio
+    async def test_monolithic_build_passes_first_try(self, tmp_git_repo):
+        """Happy path: build → certify (pass) → done in 1 round."""
+        from otto.config import create_config
+        from otto.pipeline import build_product
+        from otto.tasks import load_tasks
+        from otto.certifier.report import (
+            CertificationOutcome, CertificationReport, TierResult, TierStatus,
+        )
+
+        create_config(tmp_git_repo)
+        _commit_otto_config(tmp_git_repo)
+
+        async def fake_run_per(config, tasks_path, project_dir):
+            tasks = load_tasks(tasks_path)
+            for task in tasks:
+                if task.get("status") == "pending":
+                    from otto.tasks import update_task
+                    update_task(tasks_path, task["key"], status="passed")
+            return 0
+
+        def fake_certifier(**kwargs):
+            return CertificationReport(
+                product_type="web", interaction="http",
+                tiers=[TierResult(tier=1, name="structural", status=TierStatus.PASSED),
+                       TierResult(tier=4, name="journeys", status=TierStatus.PASSED, cost_usd=0.30)],
+                outcome=CertificationOutcome.PASSED,
+                cost_usd=0.30, duration_s=15.0,
+            )
+
+        with patch("otto.orchestrator.run_per", side_effect=fake_run_per), \
+             patch("otto.certifier.run_unified_certifier", side_effect=fake_certifier):
+            result = await build_product(
+                "Build a hello world app",
+                tmp_git_repo,
+                {"test_command": "true", "default_branch": "main"},
+            )
+
+        assert result.passed is True
+        assert result.rounds == 1
+
+        # Only the build task exists — no fix tasks
+        tasks = load_tasks(tmp_git_repo / "tasks.yaml")
+        build_tasks = [t for t in tasks if t.get("build_id")]
+        assert len(build_tasks) == 1
+        assert "Build the product" in build_tasks[0]["prompt"]
+
+    @pytest.mark.asyncio
+    async def test_infra_error_stops_without_fix_task(self, tmp_git_repo):
+        """Certifier blocked (app won't start) → stop, no fix tasks."""
+        from otto.config import create_config
+        from otto.pipeline import build_product
+        from otto.tasks import load_tasks
+        from otto.certifier.report import (
+            CertificationOutcome, CertificationReport, Finding, TierResult, TierStatus,
+        )
+
+        create_config(tmp_git_repo)
+        _commit_otto_config(tmp_git_repo)
+
+        async def fake_run_per(config, tasks_path, project_dir):
+            tasks = load_tasks(tasks_path)
+            for task in tasks:
+                if task.get("status") == "pending":
+                    from otto.tasks import update_task
+                    update_task(tasks_path, task["key"], status="passed")
+            return 0
+
+        def fake_certifier(**kwargs):
+            return CertificationReport(
+                product_type="web", interaction="http",
+                tiers=[
+                    TierResult(tier=1, name="structural", status=TierStatus.FAILED,
+                        findings=[Finding(tier=1, severity="critical", category="build",
+                            description="App failed to start", diagnosis="port 3000 not responding")]),
+                    TierResult(tier=2, name="probes", status=TierStatus.BLOCKED,
+                        blocked_by="tier_1:app_start"),
+                    TierResult(tier=4, name="journeys", status=TierStatus.BLOCKED,
+                        blocked_by="tier_1:app_start"),
+                ],
+                findings=[Finding(tier=1, severity="critical", category="build",
+                    description="App failed to start", diagnosis="port 3000 not responding")],
+                outcome=CertificationOutcome.FAILED,
+                cost_usd=0.0, duration_s=5.0,
+            )
+
+        with patch("otto.orchestrator.run_per", side_effect=fake_run_per), \
+             patch("otto.certifier.run_unified_certifier", side_effect=fake_certifier):
+            result = await build_product(
+                "Build an app",
+                tmp_git_repo,
+                {"test_command": "true", "default_branch": "main"},
+            )
+
+        assert result.passed is False
+
+        # Fix task IS created (app start failure is a fixable critical finding)
+        # but no infinite loop — stops after no-progress check
+        tasks = load_tasks(tmp_git_repo / "tasks.yaml")
+        fix_tasks = [t for t in tasks if "fix" in t.get("prompt", "").lower() or "Fix" in t.get("prompt", "")]
+        # Should create at most 1 fix task for the app start failure
+        assert len(fix_tasks) <= 1
+
+    @pytest.mark.asyncio
+    async def test_no_progress_stops_early(self, tmp_git_repo):
+        """Same failure count across rounds → stop early, don't loop forever."""
+        from otto.config import create_config
+        from otto.pipeline import build_product
+        from otto.certifier.report import (
+            CertificationOutcome, CertificationReport, Finding, TierResult, TierStatus,
+        )
+
+        create_config(tmp_git_repo)
+        _commit_otto_config(tmp_git_repo)
+
+        call_count = 0
+
+        async def fake_run_per(config, tasks_path, project_dir):
+            from otto.tasks import load_tasks, update_task
+            tasks = load_tasks(tasks_path)
+            for task in tasks:
+                if task.get("status") == "pending":
+                    update_task(tasks_path, task["key"], status="passed")
+            return 0
+
+        def fake_certifier(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            return CertificationReport(
+                product_type="web", interaction="http",
+                tiers=[
+                    TierResult(tier=1, name="structural", status=TierStatus.PASSED),
+                    TierResult(tier=4, name="journeys", status=TierStatus.FAILED,
+                        findings=[Finding(tier=4, severity="critical", category="journey",
+                            description="Story failed: broken story",
+                            diagnosis="Still broken", fix_suggestion="fix it",
+                            story_id="broken")]),
+                ],
+                findings=[Finding(tier=4, severity="critical", category="journey",
+                    description="Story failed: broken story",
+                    diagnosis="Still broken", fix_suggestion="fix it",
+                    story_id="broken")],
+                outcome=CertificationOutcome.FAILED,
+                cost_usd=0.50, duration_s=30.0,
+            )
+
+        with patch("otto.orchestrator.run_per", side_effect=fake_run_per), \
+             patch("otto.certifier.run_unified_certifier", side_effect=fake_certifier):
+            result = await build_product(
+                "Build something",
+                tmp_git_repo,
+                {"test_command": "true", "default_branch": "main"},
+            )
+
+        assert result.passed is False
+        # Should stop after round 2 (no progress: 1 failure → 1 failure)
+        assert call_count == 2
+
+
 class TestPlannerAndQaConfig:
     def test_decomposed_plan_requires_product_spec_file(self, tmp_path):
         raw = json.dumps({
@@ -237,3 +513,255 @@ class TestPlannerAndQaConfig:
 
         assert parsed["product_passed"] is True
         assert parsed["journeys"][0]["name"] == "happy"
+
+
+class TestUnifiedCertifierRegressions:
+    @pytest.mark.asyncio
+    async def test_build_product_forces_skip_qa_and_skip_spec(self, tmp_git_repo):
+        from otto.pipeline import build_product
+
+        seen_config = {}
+        create_config(tmp_git_repo)
+        config = load_config(tmp_git_repo / "otto.yaml")
+        config["unified_certifier"] = True
+
+        async def fake_run_per(config, tasks_path, project_dir):
+            seen_config.update(config)
+            return 0
+
+        with patch("otto.pipeline._commit_artifacts"), \
+             patch("otto.orchestrator.run_per", side_effect=fake_run_per), \
+             patch(
+                 "otto.pipeline._run_verification_sync",
+                 return_value={"product_passed": True, "rounds": 1, "journeys": []},
+             ):
+            result = await build_product(
+                "Build a demo app",
+                tmp_git_repo,
+                config,
+            )
+
+        assert result.passed is True
+        assert seen_config["skip_qa"] is True
+        assert seen_config["skip_spec"] is True
+
+    def test_tier4_fails_on_story_result_count_mismatch(self, tmp_git_repo):
+        from otto.certifier import _run_tier4_journeys
+        from otto.certifier.report import CertificationReport, TierStatus
+        from otto.certifier.stories import StorySet, StoryStep, UserStory
+
+        stories = [
+            UserStory(
+                id="story-1",
+                persona="user",
+                title="Story One",
+                narrative="first flow",
+                steps=[StoryStep(action="do first thing", verify="first thing works")],
+            ),
+            UserStory(
+                id="story-2",
+                persona="user",
+                title="Story Two",
+                narrative="second flow",
+                steps=[StoryStep(action="do second thing", verify="second thing works")],
+            ),
+        ]
+        story_set = StorySet(intent="intent", stories=stories, cost_usd=0.2)
+        cert_result = SimpleNamespace(
+            certified=True,
+            total_cost_usd=0.3,
+            results=[
+                SimpleNamespace(
+                    story_id="story-1",
+                    story_title="Story One",
+                    persona="user",
+                    passed=True,
+                    blocked_at=None,
+                    summary="passed",
+                    diagnosis="",
+                    fix_suggestion="",
+                    steps=[],
+                    break_findings=[],
+                )
+            ],
+        )
+
+        with patch(
+            "otto.certifier.stories.load_or_compile_stories",
+            return_value=(story_set, "cache", None, 0.0),
+        ), patch(
+            "otto.certifier.journey_agent.verify_all_stories",
+            new=AsyncMock(return_value=cert_result),
+        ):
+            result = _run_tier4_journeys(
+                intent="intent",
+                project_dir=tmp_git_repo,
+                config={},
+                runner=SimpleNamespace(base_url="http://localhost:3000"),
+                manifest=SimpleNamespace(),
+                stories_path=None,
+                skip_story_ids=None,
+            )
+
+        assert result.status == TierStatus.FAILED
+        mismatch = next(
+            finding
+            for finding in result.findings
+            if finding.category == "harness" and finding.severity == "warning"
+        )
+        assert mismatch.evidence["stories_requested"] == 2
+        assert mismatch.evidence["results_received"] == 1
+        report = CertificationReport(
+            product_type="web",
+            interaction="http",
+            tiers=[result],
+            findings=result.findings,
+        )
+        assert report.critical_findings() == []
+
+    def test_tier4_uses_story_criticality_and_empty_story_status(self, tmp_git_repo):
+        from otto.certifier import _run_tier4_journeys
+        from otto.certifier.report import TierStatus
+        from otto.certifier.stories import StorySet, StoryStep, UserStory
+
+        story = UserStory(
+            id="noncritical-story",
+            persona="user",
+            title="Noncritical Story",
+            narrative="test flow",
+            steps=[StoryStep(action="do thing", verify="thing works")],
+            critical=False,
+        )
+        story_set = StorySet(intent="intent", stories=[story], cost_usd=0.2)
+        cert_result = SimpleNamespace(
+            certified=False,
+            total_cost_usd=0.3,
+            results=[
+                SimpleNamespace(
+                    story_id=story.id,
+                    story_title=story.title,
+                    persona=story.persona,
+                    passed=False,
+                    blocked_at="step 1",
+                    summary="failed",
+                    diagnosis="broke",
+                    fix_suggestion="fix it",
+                    steps=[
+                        SimpleNamespace(
+                            action="do thing",
+                            outcome="fail",
+                            diagnosis="broke",
+                            fix_suggestion="fix it",
+                            verification="checked",
+                        )
+                    ],
+                    break_findings=[],
+                )
+            ],
+        )
+
+        with patch(
+            "otto.certifier.stories.load_or_compile_stories",
+            return_value=(story_set, "cache", None, 0.0),
+        ), patch(
+            "otto.certifier.journey_agent.verify_all_stories",
+            new=AsyncMock(return_value=cert_result),
+        ):
+            result = _run_tier4_journeys(
+                intent="intent",
+                project_dir=tmp_git_repo,
+                config={},
+                runner=SimpleNamespace(base_url="http://localhost:3000"),
+                manifest=SimpleNamespace(),
+                stories_path=None,
+                skip_story_ids=None,
+            )
+
+        assert result.status == TierStatus.FAILED
+        assert result.findings[0].severity == "important"
+
+        empty_story_set = StorySet(intent="intent", stories=[], cost_usd=0.0)
+        with patch(
+            "otto.certifier.stories.load_or_compile_stories",
+            return_value=(empty_story_set, "cache", None, 0.0),
+        ):
+            empty_result = _run_tier4_journeys(
+                intent="intent",
+                project_dir=tmp_git_repo,
+                config={},
+                runner=SimpleNamespace(base_url="http://localhost:3000"),
+                manifest=SimpleNamespace(),
+                stories_path=None,
+                skip_story_ids=None,
+            )
+
+        assert empty_result.status == TierStatus.SKIPPED
+        assert empty_result.skip_reason == "no stories to test"
+
+        with patch(
+            "otto.certifier.stories.load_or_compile_stories",
+            return_value=(story_set, "cache", None, 0.0),
+        ):
+            skipped_result = _run_tier4_journeys(
+                intent="intent",
+                project_dir=tmp_git_repo,
+                config={},
+                runner=SimpleNamespace(base_url="http://localhost:3000"),
+                manifest=SimpleNamespace(),
+                stories_path=None,
+                skip_story_ids={story.id},
+            )
+
+        assert skipped_result.status == TierStatus.PASSED
+
+    def test_unified_certifier_manifest_failure_returns_blocked_and_stops_runner(self, tmp_git_repo):
+        from otto.certifier import run_unified_certifier
+        from otto.certifier.report import CertificationOutcome, TierResult, TierStatus
+
+        runner = SimpleNamespace(base_url="http://localhost:3000", stop=MagicMock())
+        tier1 = TierResult(tier=1, name="structural", status=TierStatus.PASSED)
+        tier1._app_started = True  # type: ignore[attr-defined]
+
+        with patch("otto.certifier.classifier.classify", return_value=SimpleNamespace(
+            product_type="web",
+            interaction="http",
+            port=3000,
+            extra={},
+        )), patch(
+            "otto.certifier.adapter.analyze_project",
+            return_value=SimpleNamespace(),
+        ), patch(
+            "otto.certifier.baseline.AppRunner",
+            return_value=runner,
+        ), patch(
+            "otto.certifier.tiers.run_tier1_structural",
+            return_value=tier1,
+        ), patch(
+            "otto.certifier.manifest.build_manifest",
+            side_effect=RuntimeError("manifest boom"),
+        ):
+            report = run_unified_certifier("intent", tmp_git_repo, {})
+
+        assert report.outcome == CertificationOutcome.BLOCKED
+        assert runner.stop.call_count == 1
+        assert report.tiers[1].blocked_by == "certifier:manifest_build"
+        assert report.tiers[2].status == TierStatus.SKIPPED
+        assert report.tiers[3].blocked_by == "certifier:manifest_build"
+
+    def test_detect_expected_files_includes_requirements_txt(self, tmp_path):
+        from otto.certifier.tiers import _detect_expected_files
+
+        (tmp_path / "requirements.txt").write_text("pytest\n")
+        expected = _detect_expected_files(tmp_path)
+
+        assert ("requirements.txt", tmp_path / "requirements.txt") in expected
+
+    def test_verification_log_timestamps_every_line(self, tmp_path):
+        from otto.verification import _verification_log
+
+        _verification_log(tmp_path, "line one", "line two")
+
+        log_path = tmp_path / "otto_logs" / "verification.log"
+        lines = log_path.read_text().splitlines()
+        assert len(lines) == 2
+        assert all(line.startswith("[20") and "] " in line for line in lines)

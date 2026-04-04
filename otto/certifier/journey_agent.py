@@ -194,7 +194,7 @@ async def verify_story(
     import requests as _requests
 
     config = config or {}
-    log_dir = project_dir / "certifier-reports"
+    log_dir = project_dir / "otto_logs" / "certifier"
     log_dir.mkdir(parents=True, exist_ok=True)
 
     # Health check: verify app is still alive before each story

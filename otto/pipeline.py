@@ -36,6 +36,7 @@ class BuildResult:
     rounds: int = 1
     total_cost: float = 0.0
     journeys: list[dict[str, Any]] = field(default_factory=list)
+    break_findings: list[dict[str, Any]] = field(default_factory=list)
     error: str = ""
     tasks_passed: int = 0
     tasks_failed: int = 0
@@ -112,9 +113,16 @@ async def build_product(
 
     _commit_artifacts(project_dir)
 
+    # Skip per-task LLM QA when product verification handles product validation.
+    # The coding agent's own tests still run (test_command).
+    if not build_config.get("skip_product_qa"):
+        build_config["skip_qa"] = True
+        build_config["skip_spec"] = True
+
     # Build
     from otto.orchestrator import run_per
     exit_code = await run_per(build_config, tasks_path, project_dir)
+    total_cost += _read_last_run_cost(project_dir)
 
     tasks_passed, tasks_failed = _build_task_counts(tasks_path, build_id)
 
@@ -149,6 +157,7 @@ async def build_product(
             rounds=verify_result.get("rounds", 1),
             total_cost=total_cost,
             journeys=verify_result.get("journeys", []),
+            break_findings=verify_result.get("break_findings", []),
             tasks_passed=tasks_passed,
             tasks_failed=tasks_failed,
         )
@@ -203,6 +212,29 @@ def _plan_fingerprint(plan: Any, project_dir: Path) -> str:
         "arch": ((project_dir / "architecture.md").read_text() if (project_dir / "architecture.md").exists() else ""),
     }, sort_keys=True)
     return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+
+def _read_last_run_cost(project_dir: Path) -> float:
+    """Read the build phase cost from the last run-history.jsonl entry.
+
+    run_per() records cost to run-history.jsonl but only returns an exit code.
+    This reads the last entry to recover the build phase cost.
+    """
+    history_file = project_dir / "otto_logs" / "run-history.jsonl"
+    if not history_file.exists():
+        return 0.0
+    try:
+        last_line = ""
+        with open(history_file) as f:
+            for line in f:
+                if line.strip():
+                    last_line = line.strip()
+        if last_line:
+            entry = json.loads(last_line)
+            return float(entry.get("cost_usd", 0.0))
+    except (json.JSONDecodeError, OSError, ValueError):
+        pass
+    return 0.0
 
 
 def _commit_artifacts(project_dir: Path) -> None:

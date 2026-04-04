@@ -512,6 +512,26 @@ def build(intent, no_review, no_qa, use_planner):
             status_icon = "[success]✓[/success]" if j.get("passed") else "[red]✗[/red]"
             console.print(f"    {status_icon} {rich_escape(j.get('name', ''))}")
 
+    # Break findings — always show loudly, even on pass
+    if result.break_findings:
+        console.print()
+        high_count = sum(1 for b in result.break_findings if b.get("severity") in ("critical", "important"))
+        warn_count = len(result.break_findings) - high_count
+        if high_count:
+            console.print(f"  [red bold]⚠ {high_count} quality issue(s) found (will trigger fix)[/red bold]")
+        if warn_count:
+            console.print(f"  [yellow]⚠ {warn_count} quality warning(s)[/yellow]")
+        for b in result.break_findings:
+            sev = b.get("severity", "?")
+            desc = rich_escape(b.get("description", "")[:100])
+            if sev in ("critical", "important"):
+                console.print(f"    [red]✗ [{sev}] {desc}[/red]")
+            else:
+                console.print(f"    [yellow]! [{sev}] {desc}[/yellow]")
+            fix = b.get("fix_suggestion", "")
+            if fix:
+                console.print(f"      fix: {rich_escape(fix[:120])}")
+
     # Print build summary
     console.print()
     console.print(f"  [bold]Build Summary[/bold]  ({result.build_id})")
@@ -559,7 +579,7 @@ def certify(project_dir, intent, port_override, output, tier, matrix_path_str, j
 
     project_dir = project_dir.resolve()
     config: dict = {}
-    report_dir = project_dir / "certifier-reports"
+    report_dir = project_dir / "otto_logs" / "certifier"
     bound_plan = None
     bound_plan_path: Path | None = None
     matrix = None

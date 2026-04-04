@@ -74,7 +74,7 @@ def run_certifier_for_verification(
         project_dir, intent, config=config,
     )
     bound_plan = bind(matrix, journey_matrix, test_config, profile)
-    report_dir = project_dir / "certifier-reports"
+    report_dir = project_dir / "otto_logs" / "certifier"
     save_bound_plan(bound_plan, report_dir / "bound-plan.json")
 
     # 3. Start app once, share across both tiers
@@ -357,6 +357,462 @@ def run_certifier_v2(
         # Backward compat: verification checks "journeys" key
         "journeys": stories_output,
     }
+
+
+def run_unified_certifier(
+    intent: str,
+    project_dir: Path,
+    config: dict[str, Any] | None = None,
+    *,
+    port_override: int | None = None,
+    stories_path: Path | None = None,
+    skip_story_ids: set[str] | None = None,
+) -> "CertificationReport":
+    """Unified certifier: single source of product truth.
+
+    Runs 4 tiers sequentially:
+      Tier 1 — Structural: files, build, tests, app start (seconds, no LLM)
+      Tier 2 — Probes: HTTP route checks (seconds, no LLM)
+      Tier 3 — Regression: graduated tests from prior runs (seconds, no LLM)
+      Tier 4 — Journeys: agentic story verification (minutes, LLM)
+
+    No early exit — every applicable tier runs. Returns CertificationReport.
+    """
+    from otto.certifier.adapter import analyze_project
+    from otto.certifier.baseline import AppRunner
+    from otto.certifier.classifier import classify
+    from otto.certifier.manifest import build_manifest
+    from otto.certifier.report import (
+        CertificationOutcome,
+        CertificationReport,
+        Finding,
+        TierResult,
+        TierStatus,
+    )
+    from otto.certifier.tiers import run_tier1_structural, run_tier2_probes
+
+    config = dict(config or {})
+    start_time = time.monotonic()
+    all_findings: list[Finding] = []
+    tiers: list[TierResult] = []
+    total_cost = 0.0
+
+    # Classify and analyze
+    profile = classify(project_dir)
+    effective_port = port_override or config.get("port_override")
+    if effective_port is not None:
+        profile.port = int(effective_port)
+        profile.extra["reuse_existing_app"] = True
+
+    interaction = config.get("certifier_interaction") or profile.interaction or "http"
+    test_config = analyze_project(project_dir)
+    test_command = config.get("test_command")
+
+    # For non-HTTP products, we can't run probes or HTTP journeys
+    # Phase 1: only HTTP executor is implemented
+    if interaction not in ("http", "browser"):
+        total_duration = round(time.monotonic() - start_time, 1)
+        report = CertificationReport(
+            product_type=profile.product_type or "unknown",
+            interaction=interaction,
+            outcome=CertificationOutcome.BLOCKED,
+            cost_usd=0.0,
+            duration_s=total_duration,
+        )
+        report.tiers.append(TierResult(
+            tier=1, name="structural", status=TierStatus.SKIPPED,
+            skip_reason=f"Interaction type '{interaction}' not yet supported (Phase 1 = HTTP only)",
+        ))
+        return report
+
+    # Create AppRunner for web apps
+    runner = AppRunner(project_dir, profile)
+
+    try:
+        # ── Tier 1: Structural ──
+        tier1 = run_tier1_structural(
+            project_dir, profile,
+            test_command=test_command,
+            app_runner=runner,
+        )
+        tiers.append(tier1)
+        all_findings.extend(tier1.findings)
+        logger.info("Tier 1 (structural): %s, %.1fs", tier1.status.value, tier1.duration_s)
+
+        # ── Tier 2: Probes ──
+        app_started = getattr(tier1, "_app_started", False)
+        manifest = None
+        if app_started:
+            try:
+                manifest = build_manifest(test_config, profile, runner.base_url)
+            except Exception as exc:
+                logger.exception("Tier 2/4 manifest build failed")
+                tier2 = _blocked_tier_result(
+                    tier=2,
+                    name="probes",
+                    blocked_by="certifier:manifest_build",
+                    description="Certifier manifest build failed",
+                    diagnosis=str(exc),
+                )
+            else:
+                tier2 = run_tier2_probes(project_dir, manifest, runner.base_url, tier1)
+        else:
+            tier2 = TierResult(
+                tier=2, name="probes", status=TierStatus.BLOCKED,
+                blocked_by="tier_1:app_start",
+            )
+        tiers.append(tier2)
+        all_findings.extend(tier2.findings)
+        logger.info("Tier 2 (probes): %s, %.1fs", tier2.status.value, tier2.duration_s)
+
+        # ── Tier 3: Regression (graduated tests from prior runs) ──
+        # Phase 2 — not yet implemented, skip for now
+        tier3 = TierResult(
+            tier=3, name="regression", status=TierStatus.SKIPPED,
+            skip_reason="Regression tests not yet implemented (Phase 2)",
+        )
+        tiers.append(tier3)
+
+        # ── Tier 4: Journeys (agentic story verification) ──
+        if not app_started:
+            tier4 = TierResult(
+                tier=4, name="journeys", status=TierStatus.BLOCKED,
+                blocked_by="tier_1:app_start",
+            )
+        elif manifest is None:
+            tier4 = _blocked_tier_result(
+                tier=4,
+                name="journeys",
+                blocked_by="certifier:manifest_build",
+                description="Journey verification blocked by manifest build failure",
+            )
+        else:
+            tier4 = _run_tier4_journeys(
+                intent=intent,
+                project_dir=project_dir,
+                config=config,
+                runner=runner,
+                manifest=manifest,
+                stories_path=stories_path,
+                skip_story_ids=skip_story_ids,
+            )
+        tiers.append(tier4)
+        all_findings.extend(tier4.findings)
+        total_cost += tier4.cost_usd
+        logger.info("Tier 4 (journeys): %s, %.1fs, $%.3f",
+                    tier4.status.value, tier4.duration_s, tier4.cost_usd)
+    except Exception as exc:
+        logger.exception("Unified certifier failed unexpectedly")
+        blocked = _blocked_tier_result(
+            tier=0,
+            name="certifier",
+            blocked_by="certifier:internal_error",
+            description="Unified certifier failed unexpectedly",
+            diagnosis=str(exc),
+        )
+        tiers.append(blocked)
+        all_findings.extend(blocked.findings)
+    finally:
+        try:
+            runner.stop()
+        except Exception:
+            pass
+
+    # Determine outcome
+    total_duration = round(time.monotonic() - start_time, 1)
+    has_critical = any(f.severity in ("critical", "important") for f in all_findings)
+    any_blocked = any(t.status == TierStatus.BLOCKED for t in tiers)
+
+    if has_critical:
+        outcome = CertificationOutcome.FAILED
+    elif any_blocked:
+        outcome = CertificationOutcome.BLOCKED
+    else:
+        outcome = CertificationOutcome.PASSED
+
+    report = CertificationReport(
+        product_type=profile.product_type or "unknown",
+        interaction=interaction,
+        tiers=tiers,
+        findings=all_findings,
+        outcome=outcome,
+        cost_usd=total_cost,
+        duration_s=total_duration,
+    )
+
+    logger.info(
+        "Unified certifier done: %s, %d findings, %.1fs, $%.3f",
+        outcome.value, len(all_findings), total_duration, total_cost,
+    )
+    return report
+
+
+def _run_tier4_journeys(
+    intent: str,
+    project_dir: Path,
+    config: dict[str, Any],
+    runner: Any,
+    manifest: Any,
+    stories_path: Path | None,
+    skip_story_ids: set[str] | None,
+) -> "TierResult":
+    """Run tier 4 journey verification. Wraps existing run_certifier_v2 logic."""
+    import asyncio
+    from otto.certifier.journey_agent import verify_all_stories
+    from otto.certifier.report import Finding, TierResult, TierStatus
+    from otto.certifier.stories import load_or_compile_stories, load_stories
+
+    start = time.monotonic()
+    compile_cost = 0.0
+
+    # Compile/load stories
+    try:
+        if stories_path:
+            story_set = load_stories(stories_path)
+        else:
+            story_set, _, _, _ = load_or_compile_stories(
+                project_dir, intent, config=config,
+            )
+            compile_cost = story_set.cost_usd
+    except Exception as exc:
+        logger.exception("Tier 4 story loading failed")
+        return _blocked_tier_result(
+            tier=4,
+            name="journeys",
+            blocked_by="certifier:story_loading",
+            description="Journey story loading failed",
+            diagnosis=str(exc),
+            duration_s=round(time.monotonic() - start, 1),
+            cost_usd=compile_cost,
+        )
+
+    # Filter stories for targeted re-verify
+    stories_to_test = story_set.stories
+    skipped_any = False
+    if skip_story_ids:
+        stories_to_test = [s for s in stories_to_test if s.id not in skip_story_ids]
+        skipped_any = len(stories_to_test) < len(story_set.stories)
+        logger.info("Targeted re-verify: testing %d of %d stories",
+                     len(stories_to_test), len(story_set.stories))
+
+    if not stories_to_test:
+        return TierResult(
+            tier=4, name="journeys",
+            status=TierStatus.PASSED if skipped_any else TierStatus.SKIPPED,
+            skip_reason=None if skipped_any else "no stories to test",
+            duration_s=round(time.monotonic() - start, 1),
+            cost_usd=compile_cost,
+        )
+
+    # Run journey agents
+    try:
+        cert_result = asyncio.run(
+            verify_all_stories(
+                stories_to_test, manifest, runner.base_url, project_dir, config,
+            )
+        )
+    except Exception as exc:
+        logger.exception("Tier 4 journey verification failed")
+        return _blocked_tier_result(
+            tier=4,
+            name="journeys",
+            blocked_by="certifier:journey_verification",
+            description="Journey verification failed",
+            diagnosis=str(exc),
+            duration_s=round(time.monotonic() - start, 1),
+            cost_usd=compile_cost,
+        )
+
+    # Convert to findings
+    findings: list[Finding] = []
+    paired_results = list(zip(stories_to_test, cert_result.results))
+    result_count_mismatch = len(cert_result.results) != len(stories_to_test)
+    if result_count_mismatch:
+        logger.warning(
+            "Tier 4 result count mismatch: %d stories, %d results",
+            len(stories_to_test), len(cert_result.results),
+        )
+        findings.append(Finding(
+            tier=4,
+            severity="warning",
+            category="harness",
+            description=(
+                "Journey verification returned a different number of results than "
+                "stories requested; some stories may be unverified"
+            ),
+            diagnosis=(
+                f"Requested {len(stories_to_test)} stories but received "
+                f"{len(cert_result.results)} results"
+            ),
+            fix_suggestion=(
+                "Treat this certification run as invalid and investigate the "
+                "journey verifier before trusting the outcome"
+            ),
+            evidence={
+                "stories_requested": len(stories_to_test),
+                "results_received": len(cert_result.results),
+                "requested_story_ids": [story.id for story in stories_to_test],
+                "result_story_ids": [result.story_id for result in cert_result.results],
+            },
+        ))
+
+    for story, r in paired_results:
+        if not r.passed:
+            findings.append(Finding(
+                tier=4,
+                severity="critical" if story.critical else "important",
+                category="journey",
+                description=f"Story failed: {r.story_title}",
+                diagnosis=r.diagnosis or "",
+                fix_suggestion=r.fix_suggestion or "",
+                story_id=r.story_id,
+                evidence={
+                    "persona": r.persona,
+                    "blocked_at": r.blocked_at,
+                    "summary": r.summary,
+                    "steps": [
+                        {"action": s.action, "outcome": s.outcome,
+                         "diagnosis": s.diagnosis, "fix_suggestion": s.fix_suggestion}
+                        for s in r.steps if s.outcome == "fail"
+                    ],
+                },
+            ))
+        # Break findings
+        for b in r.break_findings:
+            # Map journey agent severity → finding severity:
+            #   critical/high → actionable (fail certification, trigger fix)
+            #   moderate/medium/low → warning (surface loudly, no fix task)
+            if b.severity in ("critical", "high"):
+                finding_severity = "critical" if b.severity == "critical" else "important"
+            elif b.severity in ("moderate", "medium"):
+                finding_severity = "warning"
+            else:
+                finding_severity = "warning"
+            findings.append(Finding(
+                tier=4,
+                severity=finding_severity,
+                category="edge-case",
+                description=f"Break finding ({b.severity}): {b.description}",
+                diagnosis=b.result,
+                fix_suggestion=b.fix_suggestion,
+                story_id=r.story_id,
+            ))
+
+    for r in cert_result.results[len(paired_results):]:
+        if not r.passed:
+            findings.append(Finding(
+                tier=4,
+                severity="important",
+                category="journey",
+                description=f"Story failed: {r.story_title}",
+                diagnosis=r.diagnosis or "",
+                fix_suggestion=r.fix_suggestion or "",
+                story_id=r.story_id,
+                evidence={
+                    "persona": r.persona,
+                    "blocked_at": r.blocked_at,
+                    "summary": r.summary,
+                    "steps": [
+                        {"action": s.action, "outcome": s.outcome,
+                         "diagnosis": s.diagnosis, "fix_suggestion": s.fix_suggestion}
+                        for s in r.steps if s.outcome == "fail"
+                    ],
+                },
+            ))
+        for b in r.break_findings:
+            # Map journey agent severity → finding severity:
+            #   critical/high → actionable (fail certification, trigger fix)
+            #   moderate/medium/low → warning (surface loudly, no fix task)
+            if b.severity in ("critical", "high"):
+                finding_severity = "critical" if b.severity == "critical" else "important"
+            elif b.severity in ("moderate", "medium"):
+                finding_severity = "warning"
+            else:
+                finding_severity = "warning"
+            findings.append(Finding(
+                tier=4,
+                severity=finding_severity,
+                category="edge-case",
+                description=f"Break finding ({b.severity}): {b.description}",
+                diagnosis=b.result,
+                fix_suggestion=b.fix_suggestion,
+                story_id=r.story_id,
+            ))
+
+    duration = round(time.monotonic() - start, 1)
+    total_cost = compile_cost + cert_result.total_cost_usd
+
+    # Tier passes if all tested stories pass (and at least one was tested)
+    status = (
+        TierStatus.PASSED
+        if cert_result.certified and not result_count_mismatch
+        else TierStatus.FAILED
+    )
+
+    result = TierResult(
+        tier=4, name="journeys", status=status,
+        findings=findings, duration_s=duration, cost_usd=total_cost,
+    )
+    # Stash raw certification result for legacy compat
+    result._cert_result = cert_result  # type: ignore[attr-defined]
+    result._stories_output = _format_stories_output(cert_result)  # type: ignore[attr-defined]
+    return result
+
+
+def _blocked_tier_result(
+    *,
+    tier: int,
+    name: str,
+    blocked_by: str,
+    description: str,
+    diagnosis: str = "",
+    duration_s: float = 0.0,
+    cost_usd: float = 0.0,
+) -> "TierResult":
+    """Return a BLOCKED tier result with a non-actionable harness finding."""
+    from otto.certifier.report import Finding, TierResult, TierStatus
+
+    finding = Finding(
+        tier=tier,
+        severity="warning",
+        category="harness",
+        description=description,
+        diagnosis=diagnosis[:500],
+        fix_suggestion="Inspect certifier infrastructure and retry",
+    )
+    return TierResult(
+        tier=tier,
+        name=name,
+        status=TierStatus.BLOCKED,
+        findings=[finding],
+        blocked_by=blocked_by,
+        duration_s=duration_s,
+        cost_usd=cost_usd,
+    )
+
+
+def _format_stories_output(cert_result: Any) -> list[dict[str, Any]]:
+    """Format certification results as legacy journey dicts."""
+    stories = []
+    for r in cert_result.results:
+        stories.append({
+            "name": r.story_title,
+            "story_id": r.story_id,
+            "persona": r.persona,
+            "passed": r.passed,
+            "blocked_at": r.blocked_at,
+            "summary": r.summary,
+            "diagnosis": r.diagnosis,
+            "fix_suggestion": r.fix_suggestion,
+            "steps": [
+                {"action": s.action, "outcome": s.outcome,
+                 "verification": s.verification,
+                 "diagnosis": s.diagnosis,
+                 "fix_suggestion": s.fix_suggestion}
+                for s in r.steps
+            ],
+        })
+    return stories
 
 
 def _format_journey_evidence(j: Any) -> str:
