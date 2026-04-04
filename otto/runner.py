@@ -27,6 +27,7 @@ from otto.agent import (
 
 from otto.config import agent_provider, git_meta_dir, detect_test_command
 from otto.context import QAMode
+from otto.cost_tracker import CostTracker
 from otto.display import _truncate_at_word, console, format_cost, format_duration, rich_escape
 from otto.git_ops import (
     check_clean_tree,
@@ -558,24 +559,43 @@ def _write_task_summary_safe(
     phase_timings: dict[str, float],
     phase_costs: dict[str, float],
     retry_reasons: list[str],
+    tracker: CostTracker | None = None,
 ) -> None:
+    tracker_snapshot = tracker.task_snapshot(task_key) if tracker else None
+    tracker_total = float((tracker_snapshot or {}).get("total_cost_usd", 0.0) or 0.0)
+    tracker_phase_costs = dict((tracker_snapshot or {}).get("phase_costs", {}) or {})
+    effective_total = tracker_total if tracker_phase_costs or tracker_total else total_cost_usd
+    effective_phase_costs = tracker_phase_costs or phase_costs
     write_json_file(
         log_dir / "task-summary.json",
         {
             "task_key": task_key,
             "status": status,
-            "total_cost_usd": round(total_cost_usd, 4),
+            "total_cost_usd": round(effective_total, 4),
             "cost_available": cost_available,
             "token_usage": token_usage or {},
             "total_duration_s": round(total_duration_s, 1),
             "attempts": attempts,
             "phase_timings": {name: round(value, 1) for name, value in phase_timings.items() if value or name in ("prepare", "coding", "test", "qa", "merge")},
-            "phase_costs": {name: round(value, 4) for name, value in phase_costs.items() if value},
+            "phase_costs": {name: round(value, 4) for name, value in effective_phase_costs.items() if value},
             "phase_token_usage": phase_token_usage or {},
             "retry_reasons": retry_reasons,
             "_written_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         },
     )
+
+
+def _split_cost_across_tasks(amount_usd: float, task_keys: list[str]) -> dict[str, float]:
+    if amount_usd <= 0 or not task_keys:
+        return {}
+    share = amount_usd / len(task_keys)
+    allocations: dict[str, float] = {}
+    remaining = amount_usd
+    for index, task_key in enumerate(task_keys):
+        amount = remaining if index == len(task_keys) - 1 else share
+        allocations[str(task_key)] = amount
+        remaining -= amount
+    return allocations
 
 
 def _persist_qa_results(
@@ -799,7 +819,17 @@ async def _run_coding_agent(
     _agent_start = time.monotonic()
     try:
         async for message in query(prompt=coding_prompt, options=agent_opts):
-            if isinstance(message, ResultMessage):
+            is_result_like = (
+                isinstance(message, ResultMessage)
+                or (
+                    not isinstance(message, AssistantMessage)
+                    and any(
+                        hasattr(message, attr)
+                        for attr in ("session_id", "total_cost_usd", "is_error", "result")
+                    )
+                )
+            )
+            if is_result_like:
                 result_msg = message
             elif isinstance(message, AssistantMessage):
                 for block in message.content:
@@ -1379,6 +1409,7 @@ async def run_task_v45(
     key = task["key"]
     task_id = task["id"]
     prompt = task["prompt"]
+    cost_task_keys = [str(item) for item in (task.get("cost_task_keys") or []) if str(item)]
     max_retries = task.get("max_retries", config["max_retries"])
     max_task_time = config.get("max_task_time", 3600)  # 1 hour circuit breaker
     default_branch = config["default_branch"]
@@ -1420,6 +1451,9 @@ async def run_task_v45(
     log_dir = project_dir / "otto_logs" / key
     log_dir.mkdir(parents=True, exist_ok=True)
     cost_available = agent_provider(config) != "codex"
+    tracker = getattr(context, "costs", None) if context is not None else None
+    if tracker is None:
+        tracker = CostTracker()
 
     # Live state for otto status -w — per-task file under otto_logs/{key}/
     _live_state_file = log_dir / "live-state.json"
@@ -1428,6 +1462,23 @@ async def run_task_v45(
         for p in ["prepare", "spec_gen", "coding", "test", "qa", "merge"]
     }
     _live_tools: list[str] = []
+
+    def _record_cost(kind: str, amount_usd: float) -> None:
+        nonlocal total_cost
+        amount = float(amount_usd or 0.0)
+        if amount <= 0:
+            return
+        if cost_task_keys:
+            tracker.record(kind=kind, amount_usd=amount, allocations=_split_cost_across_tasks(amount, cost_task_keys))
+        else:
+            tracker.record(kind=kind, amount_usd=amount, task_key=key)
+        total_cost += amount
+
+    def _tracker_task_total() -> float:
+        snapshot = tracker.task_snapshot(key)
+        if snapshot.get("phase_costs") or snapshot.get("total_cost_usd"):
+            return float(snapshot.get("total_cost_usd", 0.0) or 0.0)
+        return total_cost
 
     def emit(event: str, **data: Any) -> None:
         if on_progress:
@@ -1500,7 +1551,7 @@ async def run_task_v45(
                 "task_key": key, "task_id": task_id,
                 "prompt": prompt[:80],
                 "elapsed_s": round(time.monotonic() - task_start, 1),
-                "cost_usd": total_cost,
+                "cost_usd": _tracker_task_total(),
                 "cost_available": cost_available,
                 "token_usage": total_token_usage,
                 "completed": False,
@@ -1555,7 +1606,7 @@ async def run_task_v45(
             spec_elapsed = round(time.monotonic() - spec_started_at, 1)
         else:
             spec_elapsed = 0.0
-        total_cost += spec_cost
+        _record_cost("spec", spec_cost)
         if spec_usage:
             phase_token_usage["spec_gen"] = merge_usage(phase_token_usage.get("spec_gen"), spec_usage)
             total_token_usage = merge_usage(total_token_usage, spec_usage)
@@ -1605,7 +1656,7 @@ async def run_task_v45(
                 "task_id": task_id,
                 "prompt": prompt[:80],
                 "elapsed_s": round(duration, 1),
-                "cost_usd": total_cost,
+                "cost_usd": _tracker_task_total(),
                 "cost_available": cost_available,
                 "token_usage": total_token_usage,
                 "status": status,
@@ -1630,13 +1681,14 @@ async def run_task_v45(
             phase_timings=summary_phase_timings,
             phase_costs=phase_costs,
             retry_reasons=retry_reasons,
+            tracker=tracker,
         )
         if tasks_file:
             try:
                 from datetime import datetime, timezone
                 updates: dict[str, Any] = {"status": status}
                 if cost_available:
-                    updates["cost_usd"] = total_cost
+                    updates["cost_usd"] = _tracker_task_total()
                 else:
                     updates["cost_usd"] = None
                 updates["token_usage"] = total_token_usage or None
@@ -1670,8 +1722,7 @@ async def run_task_v45(
         }
 
     def _add_cost(amount: float) -> None:
-        nonlocal total_cost
-        total_cost += amount
+        _record_cost("qa", amount)
 
     try:
         # ── Step 1: Prepare ─────────────────────────────────────────────
@@ -1870,7 +1921,7 @@ async def run_task_v45(
                 attempt_cost, _prev_session_id, _prev_session_cost = _extract_attempt_cost(
                     result_msg, _prev_session_id, _prev_session_cost,
                 )
-                total_cost += attempt_cost
+                _record_cost("coding", attempt_cost)
 
                 coding_elapsed = round(time.monotonic() - coding_start, 1)
                 phase_timings["coding"] = phase_timings.get("coding", 0) + coding_elapsed

@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from otto.cost_tracker import CostTracker
+
 
 class QAMode:
     PER_TASK = "per_task"
@@ -56,7 +58,8 @@ class PipelineContext:
         self._research: dict[str, str] = {}
         self.results: dict[str, TaskResult] = {}  # task_key -> TaskResult
         self.session_ids: dict[str, str] = {}     # task_key -> session_id
-        self.costs: dict[str, float] = {}         # task_key -> cost
+        self.costs = CostTracker()
+        self.cost_tracker = self.costs
         self.interrupted: bool = False
         self.pids: set[int] = set()               # tracked subprocess PIDs
 
@@ -80,19 +83,17 @@ class PipelineContext:
     def add_success(self, result: TaskResult) -> None:
         """Record a successful task result."""
         self.results[result.task_key] = result
-        if result.cost_usd > 0:
-            self.costs[result.task_key] = self.costs.get(result.task_key, 0.0) + result.cost_usd
+        self._record_result_cost_delta(result)
 
     def add_failure(self, result: TaskResult) -> None:
         """Record a failed task result."""
         self.results[result.task_key] = result
-        if result.cost_usd > 0:
-            self.costs[result.task_key] = self.costs.get(result.task_key, 0.0) + result.cost_usd
+        self._record_result_cost_delta(result)
 
     @property
     def total_cost(self) -> float:
         """Total cost across all tasks."""
-        return sum(self.costs.values())
+        return self.costs.run_total()
 
     @property
     def total_token_usage(self) -> dict[str, int]:
@@ -109,3 +110,13 @@ class PipelineContext:
     @property
     def failed_count(self) -> int:
         return sum(1 for r in self.results.values() if not r.success)
+
+    def _record_result_cost_delta(self, result: TaskResult) -> None:
+        """Preserve legacy add_success/add_failure cost behavior without double-counting."""
+        result_cost = float(result.cost_usd or 0.0)
+        if result_cost <= 0:
+            return
+        tracked = self.costs.task_total(result.task_key)
+        delta = result_cost - tracked
+        if delta > 1e-9:
+            self.costs.record(kind="result", task_key=result.task_key, amount_usd=delta)

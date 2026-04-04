@@ -22,6 +22,7 @@ from typing import Any
 from otto.agent import merge_usage
 from otto.config import agent_provider, git_meta_dir, planner_provider
 from otto.context import Learning, PipelineContext, QAMode, TaskResult
+from otto.cost_tracker import CostTracker
 from otto.display import console, rich_escape
 from otto.observability import append_text_log, update_json_file
 from otto.planner import (
@@ -181,9 +182,15 @@ def _refresh_task_live_state(
     cost_usd: float | None = None,
     phase_timings: dict[str, float] | None = None,
     attempts: int | None = None,
+    tracker: CostTracker | None = None,
 ) -> None:
     """Update a task's live-state.json after merge/failure transitions."""
     live_state_path = project_dir / "otto_logs" / task_key / "live-state.json"
+    tracker_snapshot = tracker.task_snapshot(task_key) if tracker else None
+    tracker_total = float((tracker_snapshot or {}).get("total_cost_usd", 0.0) or 0.0)
+    effective_cost = tracker_total if tracker_snapshot and (
+        tracker_total or (tracker_snapshot.get("phase_costs") or {})
+    ) else cost_usd
 
     def _mutate(data: dict[str, Any]) -> dict[str, Any]:
         phases = dict(data.get("phases") or {})
@@ -208,8 +215,8 @@ def _refresh_task_live_state(
             data["elapsed_s"] = round(float(elapsed_s), 1)
         if cost_available is not None:
             data["cost_available"] = cost_available
-        if cost_usd is not None:
-            data["cost_usd"] = round(float(cost_usd), 4)
+        if effective_cost is not None:
+            data["cost_usd"] = round(float(effective_cost), 4)
         data["_updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
         return data
 
@@ -218,6 +225,7 @@ def _refresh_task_live_state(
     summary_path = project_dir / "otto_logs" / task_key / "task-summary.json"
 
     def _mutate_summary(data: dict[str, Any]) -> dict[str, Any]:
+        phase_costs = dict((tracker_snapshot or {}).get("phase_costs", {}) or {})
         data["status"] = status
         if token_usage is not None:
             data["token_usage"] = token_usage
@@ -225,12 +233,18 @@ def _refresh_task_live_state(
             data["total_duration_s"] = round(float(elapsed_s), 1)
         if cost_available is not None:
             data["cost_available"] = cost_available
-        if cost_usd is not None:
-            data["total_cost_usd"] = round(float(cost_usd), 4)
+        if effective_cost is not None:
+            data["total_cost_usd"] = round(float(effective_cost), 4)
         if phase_timings:
             data["phase_timings"] = {
                 name: round(float(value), 1)
                 for name, value in phase_timings.items()
+            }
+        if phase_costs:
+            data["phase_costs"] = {
+                name: round(float(value), 4)
+                for name, value in phase_costs.items()
+                if value
             }
         if attempts is not None:
             data["attempts"] = int(attempts)
@@ -281,6 +295,19 @@ def _unit_members(batch: Any, task_key: str) -> list[str]:
 def _unit_key(task_keys: list[str]) -> str:
     payload = ",".join(sorted(task_keys)).encode("utf-8")
     return f"unit-{hashlib.sha256(payload).hexdigest()[:12]}"
+
+
+def _split_cost_across_tasks(amount_usd: float, task_keys: list[str]) -> dict[str, float]:
+    if amount_usd <= 0 or not task_keys:
+        return {}
+    share = amount_usd / len(task_keys)
+    allocations: dict[str, float] = {}
+    remaining = amount_usd
+    for index, task_key in enumerate(task_keys):
+        amount = remaining if index == len(task_keys) - 1 else share
+        allocations[str(task_key)] = amount
+        remaining -= amount
+    return allocations
 
 
 def _unit_prompt(
@@ -382,6 +409,40 @@ def _unit_feedback(member_keys: list[str], pending_by_key: dict[str, dict[str, A
         task = pending_by_key.get(key, {}) or {}
         parts.append(f"Task #{task.get('id', '?')} ({key[:8]}):\n{feedback}")
     return "\n\n".join(parts)
+
+
+def _merge_batch_results_with_tracker(
+    results: list[TaskResult],
+    config: dict[str, Any],
+    project_dir: Path,
+    tasks_file: Path,
+    telemetry: Any,
+    *,
+    qa_mode: str,
+    tracker: CostTracker | None,
+) -> list[TaskResult]:
+    if tracker is not None:
+        try:
+            return merge_batch_results(
+                results,
+                config,
+                project_dir,
+                tasks_file,
+                telemetry,
+                qa_mode=qa_mode,
+                tracker=tracker,
+            )
+        except TypeError as exc:
+            if "tracker" not in str(exc):
+                raise
+    return merge_batch_results(
+        results,
+        config,
+        project_dir,
+        tasks_file,
+        telemetry,
+        qa_mode=qa_mode,
+    )
 
 
 def _unit_spec(task_plans: list[Any], pending_by_key: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
@@ -775,6 +836,8 @@ async def _run_batch_qa(
     spec_cost = 0.0
     spec_errors: list[str] = []
     spec_settings = config.get("spec_agent_settings", "project").split(",")
+    tracker = getattr(context, "costs", None)
+    qa_cost_recorded = False
 
     from otto.spec import async_generate_spec
 
@@ -796,6 +859,8 @@ async def _run_batch_qa(
             config=config,
         )
         spec_cost += cost
+        if tracker and cost > 0:
+            tracker.record(kind="batch_spec", task_key=str(task.get("key", "")), amount_usd=float(cost))
         if spec_items:
             try:
                 update_task(tasks_file, task["key"], spec=spec_items)
@@ -1003,6 +1068,15 @@ async def _run_batch_qa(
         infrastructure_error = False
         for unit_tasks, result in zip(merged_units, per_unit_results):
             total_qa_cost += float(result.get("cost_usd", 0.0) or 0.0)
+            if tracker:
+                unit_cost = float(result.get("cost_usd", 0.0) or 0.0)
+                unit_keys = [str(task.get("key", "")) for task in unit_tasks if task.get("key")]
+                if unit_cost > 0 and unit_keys:
+                    tracker.record(
+                        kind="batch_qa",
+                        amount_usd=unit_cost,
+                        allocations=_split_cost_across_tasks(unit_cost, unit_keys),
+                    )
             verdict = result.get("verdict") or {}
             for item in verdict.get("must_items", []) or []:
                 all_must_items.append(item)
@@ -1046,6 +1120,7 @@ async def _run_batch_qa(
             "test_suite_passed": test_suite_passed,
             "infrastructure_error": infrastructure_error,
         }
+        qa_cost_recorded = True
 
         # Log per-session detail for debugging
         _complete_ts = _ts_mod.strftime("%Y-%m-%d %H:%M:%S")
@@ -1106,7 +1181,19 @@ async def _run_batch_qa(
             require_full_test_suite=require_full_suite,
             proof_of_work=bool(config.get("proof_of_work", False)),
         )
-    total_cost = spec_cost + float(qa_result.get("cost_usd", 0.0) or 0.0)
+    qa_session_cost = float(qa_result.get("cost_usd", 0.0) or 0.0)
+    allocated_keys = [
+        str(task.get("key", ""))
+        for task in tasks_with_specs
+        if task.get("key")
+    ]
+    if tracker and not qa_cost_recorded and qa_session_cost > 0 and allocated_keys:
+        tracker.record(
+            kind="batch_qa",
+            amount_usd=qa_session_cost,
+            allocations=_split_cost_across_tasks(qa_session_cost, allocated_keys),
+        )
+    total_cost = spec_cost + qa_session_cost
     raw_report = qa_result.get("raw_report", "")
     if spec_errors:
         raw_report = (
@@ -1306,6 +1393,20 @@ async def run_per(
     except BlockingIOError:
         console.print("Another otto process is running", style="red")
         return 2
+
+    # Ensure repo has at least one commit (worktrees require HEAD)
+    head_check = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=project_dir, capture_output=True, text=True,
+    )
+    if head_check.returncode != 0:
+        subprocess.run(
+            ["git", "add", "-A"], cwd=project_dir, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "commit", "--allow-empty", "-m", "otto: initial commit"],
+            cwd=project_dir, capture_output=True,
+        )
 
     # Clean up orphaned worktrees from previous crashed runs
     cleanup_orphaned_worktrees(project_dir)
@@ -1560,9 +1661,9 @@ async def run_per(
                 pre_batch_sha = _current_head_sha(project_dir)
 
             if not context.interrupted:
-                batch_results = merge_batch_results(
+                batch_results = _merge_batch_results_with_tracker(
                     batch_results, config, project_dir, tasks_file, telemetry,
-                    qa_mode=qa_mode,
+                    qa_mode=qa_mode, tracker=context.costs,
                 )
 
                 merge_failed = [
@@ -1681,9 +1782,9 @@ async def run_per(
                                 full_project_brief=full_project_brief,
                             )
                             if all(result.success for result in retry_results):
-                                retry_results = merge_batch_results(
+                                retry_results = _merge_batch_results_with_tracker(
                                     retry_results, config, project_dir, tasks_file, telemetry,
-                                    qa_mode=qa_mode,
+                                    qa_mode=qa_mode, tracker=context.costs,
                                 )
                             retry_map = {result.task_key: result for result in retry_results}
                             batch_results = [
@@ -1698,9 +1799,9 @@ async def run_per(
                                 qa_mode=qa_mode,
                             )
                             if retry_result.success:
-                                rerun_merged = merge_batch_results(
+                                rerun_merged = _merge_batch_results_with_tracker(
                                     [retry_result], config, project_dir, tasks_file, telemetry,
-                                    qa_mode=qa_mode,
+                                    qa_mode=qa_mode, tracker=context.costs,
                                 )
                                 retry_result = rerun_merged[0]
                             previous_result = next(
@@ -1768,7 +1869,7 @@ async def run_per(
 
                 if qa_mode == QAMode.BATCH and not context.interrupted:
                     batch_keys = {tp.task_key for tp in batch_task_plans}
-                    batch_qa_costs: dict[str, float] = {}
+                    tracker = context.costs
                     qa_reports_by_task: dict[str, str] = {}
                     # Load current batch's merged tasks for QA verification
                     all_persisted = load_tasks(tasks_file)
@@ -1804,9 +1905,7 @@ async def run_per(
                             prior_tasks=prior_tasks if prior_tasks else None,
                             planner_analysis=execution_plan.analysis,
                         )
-                        initial_share = float(batch_qa.get("cost_usd", 0.0) or 0.0) / max(len(merged_tasks), 1)
                         for key in merged_keys:
-                            batch_qa_costs[key] = batch_qa_costs.get(key, 0.0) + initial_share
                             qa_reports_by_task[key] = batch_qa.get("raw_report", "")
 
                         final_batch_qa = batch_qa
@@ -1903,9 +2002,9 @@ async def run_per(
                                         for result in raw_retry_results
                                     ]
                                     if all(result.success for result in raw_retry_results):
-                                        rerun_merged = merge_batch_results(
+                                        rerun_merged = _merge_batch_results_with_tracker(
                                             raw_retry_results, config, project_dir, tasks_file, telemetry,
-                                            qa_mode=qa_mode,
+                                            qa_mode=qa_mode, tracker=context.costs,
                                         )
                                         made_progress = any(
                                             (
@@ -1963,9 +2062,9 @@ async def run_per(
                                     )
                                     retry_result = _combine_task_results(previous_result, raw_retry_result)
                                     if raw_retry_result.success:
-                                        rerun_merged = merge_batch_results(
+                                        rerun_merged = _merge_batch_results_with_tracker(
                                             [raw_retry_result], config, project_dir, tasks_file, telemetry,
-                                            qa_mode=qa_mode,
+                                            qa_mode=qa_mode, tracker=context.costs,
                                         )
                                         retry_result = _combine_task_results(previous_result, rerun_merged[0])
                                         if (
@@ -2033,9 +2132,7 @@ async def run_per(
                                     focus_task_keys=retried_merged_keys,
                                     planner_analysis=execution_plan.analysis,
                                 )
-                                retry_share = float(final_batch_qa.get("cost_usd", 0.0) or 0.0) / max(len(retried_merged_keys), 1)
                                 for key in retried_merged_keys:
-                                    batch_qa_costs[key] = batch_qa_costs.get(key, 0.0) + retry_share
                                     qa_reports_by_task[key] = final_batch_qa.get("raw_report", "")
 
                         persisted_tasks = {
@@ -2071,6 +2168,7 @@ async def run_per(
                                         session_id=None,
                                         review_ref=None,
                                         completed_at=None,
+                                        cost_usd=tracker.task_total(task_key),
                                     )
                                 except Exception:
                                     pass
@@ -2140,6 +2238,7 @@ async def run_per(
                                             else "batch_qa_failed"
                                         ),
                                         feedback=feedback,
+                                        cost_usd=tracker.task_total(task_key),
                                     )
                                 except Exception:
                                     pass
@@ -2156,6 +2255,7 @@ async def run_per(
                                         session_id=None,
                                         review_ref=None,
                                         completed_at=None,
+                                        cost_usd=tracker.task_total(task_key),
                                     )
                                 except Exception:
                                     pass
@@ -2168,6 +2268,7 @@ async def run_per(
                                         error=None,
                                         error_code=None,
                                         feedback=None,
+                                        cost_usd=tracker.task_total(task_key),
                                     )
                                 except Exception:
                                     pass
@@ -2181,6 +2282,7 @@ async def run_per(
                                         (r.token_usage for r in batch_results if r.task_key == task_key),
                                         {},
                                     ),
+                                    tracker=tracker,
                                 )
                                 # Stamp commit SHA now that batch QA confirmed this task passed
                                 commit_sha = next(
@@ -2200,7 +2302,7 @@ async def run_per(
                                 ),
                                 commit_sha=result.commit_sha,
                                 worktree=result.worktree,
-                                cost_usd=result.cost_usd + batch_qa_costs.get(result.task_key, 0.0),
+                                cost_usd=tracker.task_total(result.task_key),
                                 error=(
                                     "batch QA infrastructure error"
                                     if final_batch_qa.get("infrastructure_error")
@@ -2483,6 +2585,7 @@ async def run_per(
             context.total_cost,
             post_run_suite_failed=post_run_suite_failed,
             post_run_suite_output=post_run_suite_output,
+            tracker=context.costs,
         )
 
         return 1 if (
@@ -2514,6 +2617,7 @@ def merge_batch_results(
     tasks_file: Path,
     telemetry: Any,
     qa_mode: str = QAMode.PER_TASK,
+    tracker: CostTracker | None = None,
 ) -> list[TaskResult]:
     """Serial merge phase: merge verified candidates onto main sequentially.
 
@@ -2581,6 +2685,7 @@ def merge_batch_results(
         task_meta = tasks_by_key.get(task_key, {})
         task_id = task_meta.get("id", 0)
         custom_test_cmd = task_meta.get("verify")
+        tracked_cost = tracker.task_total(task_key) if tracker is not None else result.cost_usd
         _orchestrator_log(
             project_dir,
             f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] merge attempt",
@@ -2597,7 +2702,7 @@ def merge_batch_results(
         if not candidate_ref:
             if qa_mode == QAMode.BATCH and (result.diff_summary or "").startswith("No changes needed"):
                 try:
-                    update_task(tasks_file, task_key, status="merged", error=None, error_code=None, feedback=None)
+                    update_task(tasks_file, task_key, status="merged", error=None, error_code=None, feedback=None, cost_usd=tracked_cost)
                 except Exception:
                     pass
                 _refresh_task_live_state(
@@ -2606,6 +2711,7 @@ def merge_batch_results(
                     status="merged",
                     merge_status="done",
                     completed=False,
+                    tracker=tracker,
                 )
                 merged_results.append(TaskResult(
                     task_key=task_key, success=True,
@@ -2621,7 +2727,7 @@ def merge_batch_results(
             console.print(f"    [red]\u2717[/red] #{task_key[:8]}  no candidate ref found")
             error = "merge_failed: no candidate ref"
             try:
-                update_task(tasks_file, task_key, status="merge_failed", error=error)
+                update_task(tasks_file, task_key, status="merge_failed", error=error, cost_usd=tracked_cost)
             except Exception:
                 pass
             _refresh_task_live_state(
@@ -2631,6 +2737,7 @@ def merge_batch_results(
                 merge_status="fail",
                 completed=True,
                 error=error,
+                tracker=tracker,
             )
             merged_results.append(TaskResult(
                 task_key=task_key, success=False,
@@ -2652,7 +2759,7 @@ def merge_batch_results(
             error = "merge_conflict: will re-apply on updated main"
             try:
                 update_task(tasks_file, task_key, status="merge_failed",
-                            error=error, error_code="merge_conflict")
+                            error=error, error_code="merge_conflict", cost_usd=tracked_cost)
             except Exception:
                 pass
             _refresh_task_live_state(
@@ -2662,6 +2769,7 @@ def merge_batch_results(
                 merge_status="fail",
                 completed=True,
                 error=error,
+                tracker=tracker,
             )
             merged_results.append(TaskResult(
                 task_key=task_key, success=False,
@@ -2695,7 +2803,7 @@ def merge_batch_results(
                 error = f"merge_failed: post-merge tests failed\n{failure_output[:500]}"
                 try:
                     update_task(tasks_file, task_key, status="merge_failed",
-                                error=error, error_code="post_merge_test_fail")
+                                error=error, error_code="post_merge_test_fail", cost_usd=tracked_cost)
                 except Exception:
                     pass
                 _refresh_task_live_state(
@@ -2705,6 +2813,7 @@ def merge_batch_results(
                     merge_status="fail",
                     completed=True,
                     error=error,
+                    tracker=tracker,
                 )
                 telemetry.log(TaskFailed(
                     task_key=task_key, task_id=task_id,
@@ -2732,7 +2841,7 @@ def merge_batch_results(
             error = f"merge_failed: fast-forward failed\n{(ff.stderr or '')[:500]}"
             try:
                 update_task(tasks_file, task_key, status="merge_failed",
-                            error=error, error_code="merge_ff_failed")
+                            error=error, error_code="merge_ff_failed", cost_usd=tracked_cost)
             except Exception:
                 pass
             _refresh_task_live_state(
@@ -2742,6 +2851,7 @@ def merge_batch_results(
                 merge_status="fail",
                 completed=True,
                 error=error,
+                tracker=tracker,
             )
             telemetry.log(TaskFailed(
                 task_key=task_key, task_id=task_id,
@@ -2770,6 +2880,7 @@ def merge_batch_results(
                 error=None,
                 error_code=None,
                 feedback=None,
+                cost_usd=tracked_cost,
             )
         except Exception:
             pass
@@ -2779,6 +2890,7 @@ def merge_batch_results(
             status="merged" if qa_mode == QAMode.BATCH else "passed",
             merge_status="done",
             completed=qa_mode != QAMode.BATCH,
+            tracker=tracker,
         )
 
         telemetry.log(TaskMerged(
@@ -2984,6 +3096,7 @@ async def _run_integrated_unit_in_worktree(
                 else _unit_prompt(unit.tasks, pending_by_key, analysis=planner_analysis)
             ),
             "status": "pending",
+            "cost_task_keys": list(member_keys),
             "attempts": max(member_attempts) if member_attempts else 0,
             "feedback": _unit_feedback(member_keys, pending_by_key),
             "spec": _unit_spec(unit.tasks, pending_by_key),
@@ -2997,6 +3110,7 @@ async def _run_integrated_unit_in_worktree(
             config,
             project_dir,
             tasks_file=None,
+            context=context,
             task_work_dir=worktree_path,
             qa_mode=qa_mode,
             full_project_brief=None if is_monolithic_unit else full_project_brief,
@@ -3051,6 +3165,7 @@ async def _run_integrated_unit_in_worktree(
                 pass
 
         task_count = max(len(member_keys), 1)
+        tracker = getattr(context, "costs", None)
         split_cost = cost_usd / task_count if cost_usd else 0.0
         split_usage = {
             key: value // task_count
@@ -3096,6 +3211,7 @@ async def _run_integrated_unit_in_worktree(
                     task_usage[key] = task_usage.get(key, 0) + 1
             if candidate_sha and tasks_file:
                 try:
+                    member_cost = tracker.task_total(task_key) if tracker else split_cost
                     update_task(
                         tasks_file,
                         task_key,
@@ -3103,7 +3219,7 @@ async def _run_integrated_unit_in_worktree(
                         error=None,
                         error_code=None,
                         token_usage=task_usage or None,
-                        cost_usd=split_cost if split_cost else None,
+                        cost_usd=member_cost if member_cost else None,
                         duration_s=duration_s if duration_s else None,
                     )
                 except Exception:
@@ -3113,13 +3229,15 @@ async def _run_integrated_unit_in_worktree(
             member_log_dir = project_dir / "otto_logs" / task_key
             member_log_dir.mkdir(parents=True, exist_ok=True)
             from otto.observability import write_json_file
+            member_snapshot = tracker.task_snapshot(task_key) if tracker else {}
+            member_cost = float(member_snapshot.get("total_cost_usd", 0.0) or 0.0) if member_snapshot else split_cost
             write_json_file(
                 member_log_dir / "task-summary.json",
                 {
                     "task_key": task_key,
                     "unit_key": synthetic_key,
                     "status": member_status,
-                    "total_cost_usd": round(split_cost, 4),
+                    "total_cost_usd": round(member_cost, 4),
                     "cost_available": cost_available,
                     "token_usage": task_usage or {},
                     "total_duration_s": round(duration_s, 1),
@@ -3128,7 +3246,11 @@ async def _run_integrated_unit_in_worktree(
                         name: round(value, 1)
                         for name, value in (phase_timings or {}).items()
                     },
-                    "phase_costs": {},
+                    "phase_costs": {
+                        name: round(float(value), 4)
+                        for name, value in dict(member_snapshot.get("phase_costs", {}) or {}).items()
+                        if value
+                    },
                     "retry_reasons": [],
                     "_written_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 },
@@ -3142,9 +3264,10 @@ async def _run_integrated_unit_in_worktree(
                 token_usage=task_usage,
                 elapsed_s=duration_s if duration_s else None,
                 cost_available=cost_available,
-                cost_usd=split_cost if split_cost else 0.0,
+                cost_usd=member_cost if member_cost else 0.0,
                 phase_timings=phase_timings or None,
                 attempts=attempts,
+                tracker=tracker,
             )
             expanded.append(TaskResult(
                 task_key=task_key,
@@ -3152,7 +3275,7 @@ async def _run_integrated_unit_in_worktree(
                 unit_key=synthetic_key,
                 unit_task_keys=list(member_keys),
                 commit_sha=candidate_sha,
-                cost_usd=split_cost,
+                cost_usd=member_cost if tracker else split_cost,
                 token_usage=task_usage,
                 duration_s=duration_s,
                 diff_summary=diff_summary,
@@ -3269,6 +3392,7 @@ def _record_run_history(
     total_cost: float,
     post_run_suite_failed: bool = False,
     post_run_suite_output: str = "",
+    tracker: CostTracker | None = None,
 ) -> None:
     """Record run to otto_logs/run-history.jsonl."""
     import json
@@ -3321,7 +3445,7 @@ def _record_run_history(
             "tasks_total": len(results),
             "tasks_passed": tasks_passed,
             "tasks_failed": tasks_failed,
-            "cost_usd": round(total_cost, 4),
+            "cost_usd": round(tracker.run_total() if tracker is not None else total_cost, 4),
             "cost_available": _cost_available(config),
             "token_usage": token_usage,
             "time_s": round(run_duration, 1),
