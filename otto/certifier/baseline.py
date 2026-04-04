@@ -306,7 +306,7 @@ class AppRunner:
             )
 
     def stop(self) -> None:
-        """Stop the app."""
+        """Stop the app and all child processes."""
 
         if self.process is None:
             return
@@ -319,6 +319,20 @@ class AppRunner:
             except ProcessLookupError:
                 pass
         self.process = None
+        # Kill any orphaned processes on the port (Next.js Turbopack spawns
+        # children that may survive process group kill)
+        try:
+            result = subprocess.run(
+                ["lsof", "-t", f"-i:{self.port}"],
+                capture_output=True, text=True, timeout=5,
+            )
+            for pid_str in result.stdout.strip().split():
+                try:
+                    os.kill(int(pid_str), signal.SIGKILL)
+                except (ProcessLookupError, ValueError):
+                    pass
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
 
     def _port_in_use(self) -> bool:
         import socket
