@@ -23,10 +23,35 @@ def _outer_log(project_dir: Path, *lines: str) -> None:
     append_text_log(project_dir / "otto_logs" / "outer-loop.log", lines)
 
 
-def _bundle_fix_tasks(failed_journeys: list[dict[str, Any]]) -> str:
-    """Bundle all failed journeys into a single fix task prompt."""
+def _specs_from_journeys(failed_journeys: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Extract verification specs from failed journey steps.
+
+    Each failed step becomes a [must] spec item — the coding agent's fix
+    will be verified against these specific criteria. Skips spec gen.
+    """
+    specs = []
+    for story in failed_journeys:
+        for step in story.get("steps", []):
+            if step.get("outcome") == "fail":
+                fix = step.get("fix_suggestion") or step.get("diagnosis") or ""
+                specs.append({
+                    "text": f"{step.get('action', 'fix')}: {fix}" if fix else step.get("action", "fix"),
+                    "binding": "must",
+                    "verifiable": True,
+                })
+    return specs
+
+
+def _bundle_fix_tasks(failed_journeys: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
+    """Bundle all failed journeys into a single fix task prompt + specs.
+
+    Returns (prompt, specs). Specs come from the certifier diagnosis —
+    no need for spec gen, the certifier already knows what to verify.
+    """
+    specs = _specs_from_journeys(failed_journeys)
+
     if len(failed_journeys) == 1:
-        return _fix_task_from_journey(failed_journeys[0])
+        return _fix_task_from_journey(failed_journeys[0]), specs
 
     lines = [f"Fix {len(failed_journeys)} product issues found by user journey testing:\n"]
     for i, story in enumerate(failed_journeys, 1):
@@ -48,7 +73,7 @@ def _bundle_fix_tasks(failed_journeys: list[dict[str, Any]]) -> str:
         "Fix all issues above. Do not change the product spec or scope. "
         "See product-spec.md for the full product definition."
     )
-    return "\n".join(lines)
+    return "\n".join(lines), specs
 
 
 def _fix_task_from_journey(story: dict[str, Any]) -> str:
@@ -117,6 +142,7 @@ async def run_product_verification(
     fix_tasks_created = 0
     last_result: dict[str, Any] = {}
     prev_failure_count = 0
+    passed_story_ids: set[str] = set()  # stories that already passed — skip on re-verify
     port_override = config.get("port_override")
 
     for round_num in range(1, max_rounds + 1):
@@ -142,8 +168,14 @@ async def run_product_verification(
                 }
 
         # Certify: run journey agents against the product
-        _outer_log(project_dir, "running certifier (user journey verification)")
+        # On re-verify (round 2+), only test stories that failed — skip passed ones
+        focus = passed_story_ids if round_num > 1 else None
+        if focus:
+            _outer_log(project_dir, f"targeted re-verify: skipping {len(focus)} passed stories")
+        else:
+            _outer_log(project_dir, "running certifier (all stories)")
         loop = asyncio.get_event_loop()
+        _focus = focus  # capture for lambda
         result = await loop.run_in_executor(
             None,
             lambda: run_certifier_v2(
@@ -151,6 +183,7 @@ async def run_product_verification(
                 project_dir=project_dir,
                 config=config,
                 port_override=port_override,
+                skip_story_ids=_focus,
             ),
         )
         total_cost += result.get("cost_usd", 0.0)
@@ -161,6 +194,11 @@ async def run_product_verification(
             f"certifier: {result.get('duration_s', 0):.0f}s, "
             f"${result.get('cost_usd', 0):.2f}",
         )
+
+        # Track which stories passed — don't re-test them
+        for j in result.get("journeys", []):
+            if j.get("passed") and j.get("story_id"):
+                passed_story_ids.add(j["story_id"])
 
         # Passed — done
         if result.get("product_passed"):
@@ -214,9 +252,10 @@ async def run_product_verification(
 
         prev_failure_count = failure_count
 
-        # Bundle all failures into one fix task (one agent, one pass)
-        fix_prompt = _bundle_fix_tasks(failed_journeys)
-        add_task(tasks_path, fix_prompt)
+        # Bundle all failures into one fix task with targeted specs.
+        # Specs come from certifier diagnosis — skip spec gen.
+        fix_prompt, fix_specs = _bundle_fix_tasks(failed_journeys)
+        add_task(tasks_path, fix_prompt, spec=fix_specs)
         fix_tasks_created += 1
         _outer_log(
             project_dir,

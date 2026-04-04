@@ -182,6 +182,7 @@ def run_certifier_v2(
     *,
     port_override: int | None = None,
     stories_path: Path | None = None,
+    skip_story_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     """Certifier v2: agentic journey verification.
 
@@ -276,9 +277,15 @@ def run_certifier_v2(
             }
 
         # 6. Verify stories (THE MAIN EVENT)
+        # On re-verify, skip stories that already passed
+        stories_to_test = story_set.stories
+        if skip_story_ids:
+            stories_to_test = [s for s in stories_to_test if s.id not in skip_story_ids]
+            logger.info("Targeted re-verify: testing %d of %d stories", len(stories_to_test), len(story_set.stories))
+
         cert_result = asyncio.run(
             verify_all_stories(
-                story_set.stories, manifest, runner.base_url, project_dir, config,
+                stories_to_test, manifest, runner.base_url, project_dir, config,
             )
         )
     finally:
