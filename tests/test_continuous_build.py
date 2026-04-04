@@ -312,13 +312,21 @@ class TestContinuousBuild:
         assert result.rounds == 1
 
     @pytest.mark.asyncio
-    async def test_agentic_is_explicitly_unimplemented(self, tmp_git_repo):
+    async def test_agentic_runs_single_session(self, tmp_git_repo):
+        """Agentic mode: one session, agent drives everything."""
         from otto.pipeline import build_agentic
 
-        with pytest.raises(NotImplementedError, match="not yet implemented"):
-            await build_agentic(
+        async def fake_query(prompt, options, **kwargs):
+            # Agent "builds" and "calls certify" — we just return text
+            return '"status": "passed"', 0.5, SimpleNamespace(session_id="s1")
+
+        with patch("otto.agent.run_agent_query", side_effect=fake_query), \
+             patch("otto.pipeline._commit_artifacts"):
+            result = await build_agentic(
                 "Build a todo app", tmp_git_repo, {"default_branch": "main"},
             )
+
+        assert result.passed is True
 
     @pytest.mark.asyncio
     async def test_continuous_fix_loop(self, tmp_git_repo):

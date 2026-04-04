@@ -537,9 +537,7 @@ def build(intent, no_review, no_qa, use_planner, continuous, agentic, interactiv
 
     try:
         if agentic:
-            console.print(
-                "  [yellow]Warning:[/yellow] Agentic mode is not implemented yet and requires MCP/custom tool handlers for certify()."
-            )
+            console.print("  [bold]Agentic mode[/bold] — agent drives the loop")
             result: BuildResult = asyncio.run(
                 build_agentic(intent, project_dir, config)
             )

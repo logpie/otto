@@ -210,22 +210,22 @@ class TestBuildCommand:
         assert result.exit_code == 1
         assert "qa boom" in result.output
 
-    def test_build_warns_when_agentic_requested(self, tmp_git_repo, monkeypatch):
+    def test_build_agentic_mode_runs(self, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
         create_config(tmp_git_repo)
 
+        from otto.pipeline import BuildResult
+        async def fake_agentic(intent, project_dir, config):
+            return BuildResult(passed=True, build_id="test-agentic", total_cost=0.5)
+
         runner = CliRunner()
-        with patch(
-            "otto.pipeline.build_agentic",
-            side_effect=NotImplementedError("Agentic mode is not yet implemented"),
-        ):
+        with patch("otto.pipeline.build_agentic", side_effect=fake_agentic):
             result = runner.invoke(
                 main,
                 ["build", "demo app", "--agentic", "--no-review"],
             )
 
-        assert result.exit_code == 1
-        assert "Agentic mode is not implemented yet" in result.output
+        assert result.exit_code == 0
 
     def test_resume_build_uses_checkpoint(self, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)

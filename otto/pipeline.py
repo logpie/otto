@@ -524,18 +524,70 @@ async def build_agentic(
     project_dir: Path,
     config: dict[str, Any],
 ) -> BuildResult:
-    """Agentic build: agent calls certify() as a tool. Fully agentic."""
-    from otto.certifier.mcp_tool import CertifyTool
+    """Agentic build: agent drives everything. Calls certify via Bash.
 
-    _ = CertifyTool(
-        project_dir=project_dir,
-        intent=intent,
-        config=config,
-        max_calls=int(config.get("max_verification_rounds", 3)),
+    One session. The agent decides when to request certification by running
+    a certify CLI command. The certifier runs in an isolated worktree.
+    The agent reads the JSON output and decides what to fix.
+    """
+    import sys
+    from otto.agent import ClaudeAgentOptions, _subprocess_env, run_agent_query
+
+    build_id = f"build-{int(time.time())}-{os.getpid()}"
+    build_dir = project_dir / "otto_logs" / "builds" / build_id
+    build_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write intent
+    grounding_path = project_dir / "intent.md"
+    if not grounding_path.exists():
+        grounding_path.write_text(intent)
+    _commit_artifacts(project_dir)
+
+    # Build the certify command the agent will call
+    python = sys.executable
+    certify_cmd = (
+        f"{python} -m otto.certifier.certify_cli "
+        f"{project_dir} {project_dir / 'intent.md'}"
     )
-    raise NotImplementedError(
-        "Agentic mode is not yet implemented. It requires MCP/custom tool handler support for certify(). "
-        "The CertifyTool code is preserved for that future integration."
+    if (project_dir / "otto.yaml").exists():
+        certify_cmd += f" --config {project_dir / 'otto.yaml'}"
+
+    prompt = AGENTIC_SYSTEM_PROMPT + f"""
+
+IMPORTANT: To certify your product, run this exact command via Bash:
+  {certify_cmd}
+
+This will test your product as a real user would. It takes several minutes.
+The output is JSON with status/issues/warnings. Read it carefully.
+
+Now build this product:
+
+{intent}
+"""
+
+    options = ClaudeAgentOptions(
+        permission_mode="bypassPermissions",
+        cwd=str(project_dir),
+        system_prompt={"type": "preset", "preset": "claude_code"},
+        env=_subprocess_env(),
+        setting_sources=["project"],
+    )
+    model = config.get("model")
+    if model:
+        options.model = str(model)
+
+    # One session — agent drives everything
+    text, cost, result_msg = await run_agent_query(prompt, options)
+
+    # Parse result — check if certifier was called and what happened
+    # The agent's text output should contain certifier JSON results
+    passed = '"status": "passed"' in text or '"status":"passed"' in text
+
+    return BuildResult(
+        passed=passed,
+        build_id=build_id,
+        rounds=text.count('"status"'),  # rough count of certify calls
+        total_cost=cost,
     )
 
 
