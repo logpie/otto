@@ -180,3 +180,17 @@ async def build_product(intent: str, project_dir: Path, config: dict) -> BuildRe
 
 ### Round 5 — Codex
 - APPROVED. No new design issues.
+
+## Implementation Gate
+
+### Round 1 — Codex
+- [HIGH] Partial build exits 0 with --no-qa — fixed by Codex
+- [HIGH] Build not scoped — stale tasks leak — fixed by Codex (clear_pending_tasks)
+- [MEDIUM] Fix prompts reference nonexistent product-spec.md — fixed by Codex
+
+### Round 2 — Codex
+- [IMPORTANT] clear_pending_tasks destroys user backlog — fixed by Codex (build_id tagging)
+- [NOTE] Fix tasks excluded from build accounting — fixed by Codex (recount after verification)
+
+### Round 3 — Codex
+- APPROVED. No new issues. 715 tests pass.
