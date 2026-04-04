@@ -9,14 +9,17 @@ Covers:
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
 from otto.qa import (
+    _build_qa_prompt,
     _finalize_qa_result,
     _has_explicit_fail_markers,
     _is_verdict_complete,
     _parse_qa_verdict_json,
+    _salvage_single_task_verdict_from_actions,
     determine_qa_tier,
     format_batch_spec,
 )
@@ -571,6 +574,294 @@ class TestFormatBatchSpec:
         result = format_batch_spec(tasks)
         assert "\u25c8" in result  # ◈ marker
 
+
+class TestBuildQaPrompt:
+    def test_test_command_section_mentions_wrapper_fallbacks(self):
+        prompt = _build_qa_prompt(
+            tasks=[{
+                "key": "task-1",
+                "prompt": "Build API",
+                "spec": [{"text": "works", "binding": "must", "verifiable": True}],
+            }],
+            project_dir=Path("/tmp/demo"),
+            verdict_file=Path("/tmp/verdict.json"),
+            screenshot_dir=Path("/tmp/screens"),
+            diff="diff --git a b",
+            test_command="npm test",
+        )
+        assert "PROJECT TEST COMMAND" in prompt
+        assert "npm test" in prompt
+        assert "jest: command not found" in prompt
+        assert "project-local equivalent" in prompt
+
+    def test_focused_prompt_does_not_frame_test_command_as_default_full_suite(self):
+        prompt = _build_qa_prompt(
+            tasks=[{
+                "key": "task-1",
+                "prompt": "Build API",
+                "spec": [{"text": "works", "binding": "must", "verifiable": True}],
+            }],
+            project_dir=Path("/tmp/demo"),
+            verdict_file=Path("/tmp/verdict.json"),
+            screenshot_dir=Path("/tmp/screens"),
+            diff="diff --git a b",
+            test_command="npm test",
+            require_full_test_suite=False,
+        )
+        assert "A broad regression command is available if you truly need it" in prompt
+        assert "Do not treat this as the default action" in prompt
+
+    def test_light_batch_prompt_adds_lightweight_guidance(self):
+        prompt = _build_qa_prompt(
+            tasks=[{
+                "key": "task-1",
+                "prompt": "Build API",
+                "spec": [{"text": "works", "binding": "must", "verifiable": True}],
+            }],
+            project_dir=Path("/tmp/demo"),
+            verdict_file=Path("/tmp/verdict.json"),
+            screenshot_dir=Path("/tmp/screens"),
+            diff="diff --git a b",
+            test_command="npm test",
+            light_batch_qa=True,
+        )
+        assert "LIGHT BATCH QA" in prompt
+        assert "already verified context" in prompt
+        assert "at most 1-2 integration checks" in prompt
+
+    def test_parallel_unit_prompt_avoids_full_suite_rerun(self):
+        prompt = _build_qa_prompt(
+            tasks=[{
+                "key": "task-1",
+                "prompt": "Build API",
+                "spec": [{"text": "works", "binding": "must", "verifiable": True}],
+            }],
+            project_dir=Path("/tmp/demo"),
+            verdict_file=Path("/tmp/verdict.json"),
+            screenshot_dir=Path("/tmp/screens"),
+            diff="diff --git a b",
+            test_command="npm test",
+            require_full_test_suite=False,
+        )
+        assert "REGRESSION SCOPE" in prompt
+        assert "Do NOT rerun the full existing test suite in this session" in prompt
+
+    def test_proof_of_work_flag_does_not_change_prompt_contract(self):
+        prompt_off = _build_qa_prompt(
+            tasks=[{
+                "key": "task-1",
+                "prompt": "Build API",
+                "spec": [{"text": "works", "binding": "must", "verifiable": True}],
+            }],
+            project_dir=Path("/tmp/demo"),
+            verdict_file=Path("/tmp/verdict.json"),
+            screenshot_dir=Path("/tmp/screens"),
+            diff="diff --git a b",
+            test_command="npm test",
+            require_full_test_suite=False,
+            proof_of_work=False,
+        )
+        prompt_on = _build_qa_prompt(
+            tasks=[{
+                "key": "task-1",
+                "prompt": "Build API",
+                "spec": [{"text": "works", "binding": "must", "verifiable": True}],
+            }],
+            project_dir=Path("/tmp/demo"),
+            verdict_file=Path("/tmp/verdict.json"),
+            screenshot_dir=Path("/tmp/screens"),
+            diff="diff --git a b",
+            test_command="npm test",
+            require_full_test_suite=False,
+            proof_of_work=True,
+        )
+        assert "PROOF OF WORK FLAG" in prompt_off
+        assert "audit/reporting metadata only" in prompt_off
+        assert "BREAK exploration is OFF by default in this mode." in prompt_off
+        assert "After running the verification commands and any narrowly justified follow-up checks" in prompt_off
+        assert prompt_on == prompt_off
+
+        batch_prompt = _build_qa_prompt(
+            tasks=[
+                {"key": "task-1", "id": 1, "prompt": "Build API", "spec": [{"text": "works", "binding": "must", "verifiable": True}]},
+                {"key": "task-2", "id": 2, "prompt": "Build UI", "spec": [{"text": "renders", "binding": "must", "verifiable": True}]},
+            ],
+            project_dir=Path("/tmp/demo"),
+            verdict_file=Path("/tmp/verdict.json"),
+            screenshot_dir=Path("/tmp/screens"),
+            diff="diff --git a b",
+            test_command="npm test",
+            require_full_test_suite=False,
+            proof_of_work=False,
+        )
+        assert "Prefer existing repo tests as the first source of evidence" in batch_prompt
+        assert "Only add new probes for uncovered musts or shared-boundary interactions." in batch_prompt
+
+    def test_base_prompt_biases_toward_existing_tests_first(self):
+        prompt = _build_qa_prompt(
+            tasks=[{
+                "key": "task-1",
+                "prompt": "Build API",
+                "spec": [{"text": "works", "binding": "must", "verifiable": True}],
+            }],
+            project_dir=Path("/tmp/demo"),
+            verdict_file=Path("/tmp/verdict.json"),
+            screenshot_dir=Path("/tmp/screens"),
+            diff="diff --git a b",
+            test_command="pytest -q",
+            require_full_test_suite=False,
+        )
+        assert "Prefer reusing existing project tests as primary evidence" in prompt
+        assert "If the repo tests already cover all [must] items clearly enough, stop there and write the verdict" in prompt
+        assert "Only add a new bespoke probe when existing tests" in prompt
+        assert "One executed command may support multiple [must] items" in prompt
+        assert "Keep `evidence` terse" in prompt
+        assert "Keep the JSON compact" in prompt
+        assert "Keep each `evidence` field to one sentence." in prompt
+
+    def test_batch_prompt_prefers_existing_integration_tests(self):
+        prompt = _build_qa_prompt(
+            tasks=[
+                {"key": "task-1", "id": 1, "prompt": "Build data layer", "spec": [{"text": "alpha", "binding": "must", "verifiable": True}]},
+                {"key": "task-2", "id": 2, "prompt": "Build service layer", "spec": [{"text": "beta", "binding": "must", "verifiable": True}]},
+            ],
+            project_dir=Path("/tmp/demo"),
+            verdict_file=Path("/tmp/verdict.json"),
+            screenshot_dir=Path("/tmp/screens"),
+            diff="diff --git a b",
+            test_command="pytest -q",
+            require_full_test_suite=False,
+        )
+        assert "If an existing passing full-stack repo test already covers a shared boundary" in prompt
+        assert "Prefer existing full-stack or shared-boundary repo tests as the first source of integration evidence." in prompt
+        assert "Generate a new targeted integration test only when the shared boundary is not already covered clearly enough" in prompt
+        assert "If nothing remains uncovered, write the verdict immediately." in prompt
+        assert "You may omit `criterion` text in `must_items`" in prompt
+        assert "Prefer this compact shape" in prompt
+
+    def test_default_prompt_requires_full_suite_once(self):
+        prompt = _build_qa_prompt(
+            tasks=[{
+                "key": "task-1",
+                "prompt": "Build API",
+                "spec": [{"text": "works", "binding": "must", "verifiable": True}],
+            }],
+            project_dir=Path("/tmp/demo"),
+            verdict_file=Path("/tmp/verdict.json"),
+            screenshot_dir=Path("/tmp/screens"),
+            diff="diff --git a b",
+            test_command="npm test",
+        )
+        assert "REGRESSION SCOPE" in prompt
+        assert "Run the full existing test suite once for broad regression coverage." in prompt
+
+class TestSalvageVerdictFromActions:
+    def test_salvages_single_task_verdict_from_explicit_spec_markers(self):
+        qa_result = {
+            "qa_actions": [
+                {
+                    "type": "bash",
+                    "output": "SPEC 1: PASS\nspec_2_help_aliases=PASS\nSPEC 3: PASS\n",
+                }
+            ]
+        }
+        tasks = [{
+            "key": "task-1",
+            "spec": [
+                {"text": "first", "binding": "must"},
+                {"text": "second", "binding": "must"},
+                {"text": "third", "binding": "must"},
+            ],
+        }]
+
+        verdict = _salvage_single_task_verdict_from_actions(qa_result, tasks)
+
+        assert verdict is not None
+        assert verdict["must_passed"] is True
+        assert len(verdict["must_items"]) == 3
+        assert verdict["_salvaged_from_actions"] is True
+        assert [item["status"] for item in verdict["must_items"]] == ["pass", "pass", "pass"]
+
+    def test_requires_full_coverage_of_must_items(self):
+        qa_result = {
+            "qa_actions": [{"type": "bash", "output": "SPEC 1: PASS\n"}]
+        }
+        tasks = [{
+            "key": "task-1",
+            "spec": [
+                {"text": "first", "binding": "must"},
+                {"text": "second", "binding": "must"},
+            ],
+        }]
+        assert _salvage_single_task_verdict_from_actions(qa_result, tasks) is None
+
+    def test_preserves_failures_when_any_spec_marker_fails(self):
+        qa_result = {
+            "qa_actions": [{"type": "bash", "output": "SPEC 1: PASS\nSPEC 2: FAIL\n"}]
+        }
+        tasks = [{
+            "key": "task-1",
+            "spec": [
+                {"text": "first", "binding": "must"},
+                {"text": "second", "binding": "must"},
+            ],
+        }]
+        verdict = _salvage_single_task_verdict_from_actions(qa_result, tasks)
+        assert verdict is not None
+        assert verdict["must_passed"] is False
+        assert [item["status"] for item in verdict["must_items"]] == ["pass", "fail"]
+
+
+class TestFinalizeQaResultCompaction:
+    def test_single_task_backfills_missing_criterion_and_trims_proof(self):
+        qa_result = {
+            "must_passed": True,
+            "verdict": {
+                "must_passed": True,
+                "must_items": [
+                    {"spec_id": 1, "status": "pass", "evidence": "works " * 100, "proof": ["a", "b", "c"]},
+                ],
+                "regressions": [],
+                "test_suite_passed": True,
+            },
+        }
+        tasks = [{
+            "key": "task-1",
+            "spec": [{"text": "first must", "binding": "must", "verifiable": True}],
+        }]
+
+        result = _finalize_qa_result(qa_result, tasks)
+        item = result["verdict"]["must_items"][0]
+        assert item["criterion"] == "first must"
+        assert item["proof"] == ["a", "b"]
+        assert len(item["evidence"]) <= 240
+
+    def test_batch_backfills_missing_criterion_and_default_integration_description(self):
+        qa_result = {
+            "must_passed": True,
+            "verdict": {
+                "must_passed": True,
+                "must_items": [
+                    {"task_key": "task-a", "spec_id": 1, "status": "pass", "evidence": "ok", "proof": ["x", "y", "z"]},
+                ],
+                "integration_findings": [
+                    {"status": "pass", "tasks_involved": ["task-a", "task-b"], "test": "pytest -q"}
+                ],
+                "regressions": [],
+                "test_suite_passed": True,
+            },
+        }
+        tasks = [
+            {"key": "task-a", "spec": [{"text": "alpha must", "binding": "must"}]},
+            {"key": "task-b", "spec": [{"text": "beta must", "binding": "must"}]},
+        ]
+
+        result = _finalize_qa_result(qa_result, tasks)
+        item = result["verdict"]["must_items"][0]
+        integ = result["verdict"]["integration_findings"][0]
+        assert item["criterion"] == "alpha must"
+        assert item["proof"] == ["x", "y"]
+        assert integ["description"] == "Integration check"
 
 # ── determine_qa_tier ────────────────────────────────────────────────────
 

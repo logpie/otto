@@ -2,6 +2,9 @@
 
 This document is the source of truth for otto's execution pipeline. Use it for debugging, onboarding, and understanding what happens when you run `otto run`.
 
+Related living notes:
+- Claude/provider-agnostic bugs and findings discovered during Codex hardening: [`docs/claude-impact-findings.md`](claude-impact-findings.md)
+
 ## Overview
 
 ```

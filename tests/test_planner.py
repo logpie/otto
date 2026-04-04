@@ -6,6 +6,7 @@ from unittest.mock import patch, AsyncMock, MagicMock
 import pytest
 
 from otto.planner import (
+    BatchUnit,
     _normalize_plan,
     Batch,
     ExecutionPlan,
@@ -95,6 +96,14 @@ class TestExecutionPlan:
         ])
         remaining = plan.remaining_after({"t1"})
         assert remaining.is_empty
+
+    def test_batch_units_flatten_to_tasks(self):
+        batch = Batch(units=[
+            BatchUnit(tasks=[TaskPlan(task_key="t1")]),
+            BatchUnit(tasks=[TaskPlan(task_key="t2"), TaskPlan(task_key="t3")]),
+        ])
+        assert [tp.task_key for tp in batch.tasks] == ["t1", "t2", "t3"]
+        assert batch.units[1].is_integrated is True
 
 
 class TestParsePlanJson:
@@ -196,6 +205,93 @@ class TestParsePlanJson:
         assert plan.total_tasks == 0
         assert plan.conflicts[0]["tasks"] == ["t1", "t2"]
         assert plan.analysis[0]["relationship"] == "CONTRADICTORY"
+
+    def test_units_schema_parses(self):
+        raw = json.dumps({
+            "batches": [
+                {
+                    "units": [
+                        {"task_keys": ["t1"]},
+                        {"task_keys": ["t2", "t3"]},
+                    ]
+                }
+            ]
+        })
+        plan = parse_plan_json(raw)
+        assert plan is not None
+        assert len(plan.batches) == 1
+        assert len(plan.batches[0].units) == 2
+        assert [tp.task_key for tp in plan.batches[0].tasks] == ["t1", "t2", "t3"]
+        assert plan.batches[0].units[1].task_keys == ["t2", "t3"]
+
+    def test_normalize_plan_preserves_integrated_units(self):
+        tasks = [
+            {"key": "t1", "id": 1, "prompt": "data layer"},
+            {"key": "t2", "id": 2, "prompt": "service layer", "depends_on": [1]},
+        ]
+        plan = ExecutionPlan(
+            batches=[
+                Batch(units=[
+                    BatchUnit(tasks=[TaskPlan(task_key="t1"), TaskPlan(task_key="t2")]),
+                ])
+            ],
+            analysis=[
+                {"task_a": "t1", "task_b": "t2", "relationship": "DEPENDENT", "reason": "layered"},
+            ],
+        )
+        normalized = _normalize_plan(plan, tasks)
+        assert len(normalized.batches) == 1
+        assert len(normalized.batches[0].units) == 1
+        assert normalized.batches[0].units[0].task_keys == ["t1", "t2"]
+
+    def test_normalize_plan_preserves_large_integrated_units(self):
+        tasks = [
+            {"key": "t1", "id": 1, "prompt": "data"},
+            {"key": "t2", "id": 2, "prompt": "service", "depends_on": [1]},
+            {"key": "t3", "id": 3, "prompt": "cli", "depends_on": [2]},
+        ]
+        plan = ExecutionPlan(
+            batches=[
+                Batch(units=[
+                    BatchUnit(tasks=[
+                        TaskPlan(task_key="t1"),
+                        TaskPlan(task_key="t2"),
+                        TaskPlan(task_key="t3"),
+                    ])
+                ])
+            ],
+            analysis=[
+                {"task_a": "t1", "task_b": "t2", "relationship": "DEPENDENT", "reason": "layered"},
+                {"task_a": "t2", "task_b": "t3", "relationship": "DEPENDENT", "reason": "layered"},
+            ],
+        )
+        normalized = _normalize_plan(plan, tasks)
+        assert len(normalized.batches) == 1
+        assert [unit.task_keys for unit in normalized.batches[0].units] == [["t1", "t2", "t3"]]
+
+    def test_normalize_plan_serializes_dependent_sibling_units_into_later_batches(self):
+        tasks = [
+            {"key": "t1", "id": 1, "prompt": "data"},
+            {"key": "t2", "id": 2, "prompt": "analytics", "depends_on": [1]},
+            {"key": "t3", "id": 3, "prompt": "api", "depends_on": [2]},
+        ]
+        plan = ExecutionPlan(
+            batches=[
+                Batch(units=[
+                    BatchUnit(tasks=[TaskPlan(task_key="t1"), TaskPlan(task_key="t2")]),
+                    BatchUnit(tasks=[TaskPlan(task_key="t3")]),
+                ])
+            ],
+            analysis=[
+                {"task_a": "t1", "task_b": "t2", "relationship": "DEPENDENT", "reason": "layered"},
+                {"task_a": "t1", "task_b": "t3", "relationship": "DEPENDENT", "reason": "api needs data"},
+                {"task_a": "t2", "task_b": "t3", "relationship": "DEPENDENT", "reason": "api needs analytics"},
+            ],
+        )
+        normalized = _normalize_plan(plan, tasks)
+        assert len(normalized.batches) == 2
+        assert [unit.task_keys for unit in normalized.batches[0].units] == [["t1", "t2"]]
+        assert [unit.task_keys for unit in normalized.batches[1].units] == [["t3"]]
 
 
 class TestDefaultPlan:

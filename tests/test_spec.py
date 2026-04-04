@@ -175,11 +175,12 @@ class TestGenerateSpec:
 
         mock_query.side_effect = fake_query
 
-        spec, cost, error = asyncio.run(async_generate_spec("Add search", tmp_path))
+        spec, cost, error, usage = asyncio.run(async_generate_spec("Add search", tmp_path))
 
         assert spec == []
         assert cost == 0.0
         assert error == "agent failed"
+        assert usage == {}
 
 
 class TestParseMarkdownTasks:

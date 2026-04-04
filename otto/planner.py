@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from otto.agent import ClaudeAgentOptions, _subprocess_env, run_agent_query
+from otto.config import planner_provider
 from otto.observability import append_text_log
 
 logger = logging.getLogger("otto.planner")
@@ -36,11 +37,18 @@ def _format_batches(plan: ExecutionPlan) -> list[str]:
         return ["- (none)"]
     lines: list[str] = []
     for idx, batch in enumerate(plan.batches, start=1):
-        entries = [
-            f"{task.task_key}[strategy={task.strategy}, effort={task.effort}]"
-            for task in batch.tasks
-        ]
-        lines.append(f"- batch {idx}: {', '.join(entries)}")
+        unit_entries = []
+        for unit in batch.units:
+            entries = [
+                f"{task.task_key}[strategy={task.strategy}, effort={task.effort}]"
+                for task in unit.tasks
+            ]
+            wrapped = ", ".join(entries)
+            if unit.is_integrated:
+                unit_entries.append(f"{{{wrapped}}}")
+            else:
+                unit_entries.append(wrapped)
+        lines.append(f"- batch {idx}: {' | '.join(unit_entries)}")
     return lines
 
 
@@ -85,10 +93,44 @@ class TaskPlan:
 
 
 @dataclass
-class Batch:
-    """A group of tasks that can run in parallel."""
+class BatchUnit:
+    """Execution unit inside a batch.
+
+    A unit with one task preserves current behavior.
+    A unit with multiple tasks is intended for integrated execution.
+    """
 
     tasks: list[TaskPlan] = field(default_factory=list)
+
+    @property
+    def task_keys(self) -> list[str]:
+        return [task.task_key for task in self.tasks]
+
+    @property
+    def is_integrated(self) -> bool:
+        return len(self.tasks) > 1
+
+
+@dataclass
+class Batch:
+    """A group of execution units that can advance in the same stage."""
+
+    tasks: list[TaskPlan] = field(default_factory=list)
+    units: list[BatchUnit] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.units and not self.tasks:
+            self.tasks = [task for unit in self.units for task in unit.tasks]
+        elif self.tasks and not self.units:
+            self.units = [BatchUnit(tasks=[task]) for task in self.tasks]
+        elif self.tasks and self.units:
+            unit_tasks = [task for unit in self.units for task in unit.tasks]
+            if [task.task_key for task in unit_tasks] != [task.task_key for task in self.tasks]:
+                self.tasks = unit_tasks
+
+    @classmethod
+    def from_tasks(cls, tasks: list[TaskPlan]) -> "Batch":
+        return cls(tasks=list(tasks), units=[BatchUnit(tasks=[task]) for task in tasks])
 
 
 @dataclass
@@ -113,10 +155,14 @@ class ExecutionPlan:
         remaining_batches: list[Batch] = []
         unresolved_keys: set[str] = set()
         for batch in self.batches:
-            remaining = [tp for tp in batch.tasks if tp.task_key not in completed_keys]
-            if remaining:
-                remaining_batches.append(Batch(tasks=remaining))
-                unresolved_keys.update(tp.task_key for tp in remaining)
+            remaining_units: list[BatchUnit] = []
+            for unit in batch.units:
+                remaining = [tp for tp in unit.tasks if tp.task_key not in completed_keys]
+                if remaining:
+                    remaining_units.append(BatchUnit(tasks=remaining))
+                    unresolved_keys.update(tp.task_key for tp in remaining)
+            if remaining_units:
+                remaining_batches.append(Batch(units=remaining_units))
 
         remaining_conflicts = [
             conflict
@@ -200,27 +246,48 @@ def parse_plan_json(raw: str) -> ExecutionPlan | None:
     for batch_data in batches_raw:
         if not isinstance(batch_data, dict):
             continue
-        task_plans: list[TaskPlan] = []
-        tasks_raw = batch_data.get("tasks", [])
-        if not isinstance(tasks_raw, list):
-            continue
-        for tp_data in tasks_raw:
-            if not isinstance(tp_data, dict):
+        parsed_units: list[BatchUnit] = []
+        units_raw = batch_data.get("units")
+        if isinstance(units_raw, list):
+            for unit_data in units_raw:
+                if not isinstance(unit_data, dict):
+                    continue
+                task_keys_raw = unit_data.get("task_keys", [])
+                if not isinstance(task_keys_raw, list):
+                    continue
+                unit_tasks: list[TaskPlan] = []
+                for task_key_raw in task_keys_raw:
+                    task_key = str(task_key_raw or "").strip()
+                    if not task_key:
+                        continue
+                    unit_tasks.append(TaskPlan(task_key=task_key))
+                if unit_tasks:
+                    parsed_units.append(BatchUnit(tasks=unit_tasks))
+        else:
+            # Backward compatibility: old planner schema with batch.tasks.
+            task_plans: list[TaskPlan] = []
+            tasks_raw = batch_data.get("tasks", [])
+            if not isinstance(tasks_raw, list):
                 continue
-            task_key = str(tp_data.get("task_key", "") or "").strip()
-            if not task_key:
-                continue
-            task_plans.append(
-                TaskPlan(
-                    task_key=task_key,
-                    strategy=str(tp_data.get("strategy", "direct") or "direct"),
-                    research_query=str(tp_data.get("research_query", "") or ""),
-                    skip_qa=bool(tp_data.get("skip_qa", False)),
-                    effort=str(tp_data.get("effort", "high") or "high"),
+            for tp_data in tasks_raw:
+                if not isinstance(tp_data, dict):
+                    continue
+                task_key = str(tp_data.get("task_key", "") or "").strip()
+                if not task_key:
+                    continue
+                task_plans.append(
+                    TaskPlan(
+                        task_key=task_key,
+                        strategy=str(tp_data.get("strategy", "direct") or "direct"),
+                        research_query=str(tp_data.get("research_query", "") or ""),
+                        skip_qa=bool(tp_data.get("skip_qa", False)),
+                        effort=str(tp_data.get("effort", "high") or "high"),
+                    )
                 )
-            )
-        if task_plans:
-            batches.append(Batch(tasks=task_plans))
+            if task_plans:
+                parsed_units = [BatchUnit(tasks=[task_plan]) for task_plan in task_plans]
+        if parsed_units:
+            batches.append(Batch(units=parsed_units))
 
     conflicts: list[dict[str, Any]] = []
     for conflict in conflicts_raw or []:
@@ -322,7 +389,7 @@ def _topological_layers(tasks: list[dict[str, Any]]) -> list[list[str]]:
 def default_plan(tasks: list[dict[str, Any]]) -> ExecutionPlan:
     """Create a dependency-respecting parallel plan."""
     return ExecutionPlan(
-        batches=[Batch(tasks=[TaskPlan(task_key=key) for key in layer]) for layer in _topological_layers(tasks)],
+        batches=[Batch.from_tasks([TaskPlan(task_key=key) for key in layer]) for layer in _topological_layers(tasks)],
     )
 
 
@@ -331,13 +398,13 @@ def serial_plan(tasks: list[dict[str, Any]]) -> ExecutionPlan:
     batches: list[Batch] = []
     for layer in _topological_layers(tasks):
         for key in layer:
-            batches.append(Batch(tasks=[TaskPlan(task_key=key)]))
+            batches.append(Batch.from_tasks([TaskPlan(task_key=key)]))
     return ExecutionPlan(batches=batches)
 
 
 def _serial_plan_from_remaining(remaining_plan: ExecutionPlan) -> ExecutionPlan:
     batches = [
-        Batch(tasks=[TaskPlan(
+        Batch.from_tasks([TaskPlan(
             task_key=task_plan.task_key,
             strategy=task_plan.strategy,
             research_query=task_plan.research_query,
@@ -440,7 +507,7 @@ def _serialize_analysis_batches(
     if not serialized_pairs and not any(dependency_predecessors.values()):
         return batches
 
-    serialized_batches: list[Batch] = []
+    serialized_task_lists: list[list[TaskPlan]] = []
     task_batch_by_key: dict[str, int] = {}
     pending_keys = sorted(task_plans_by_key, key=original_order_by_key.__getitem__)
     while pending_keys:
@@ -460,11 +527,11 @@ def _serialize_analysis_batches(
                     max(task_batch_by_key[pred] + 1 for pred in predecessors),
                 )
             while True:
-                while len(serialized_batches) <= target_batch:
-                    serialized_batches.append(Batch(tasks=[]))
+                while len(serialized_task_lists) <= target_batch:
+                    serialized_task_lists.append([])
                 existing_keys = {
                     existing.task_key
-                    for existing in serialized_batches[target_batch].tasks
+                    for existing in serialized_task_lists[target_batch]
                 }
                 if any(
                     frozenset((task_key, other_key)) in serialized_pairs
@@ -472,7 +539,7 @@ def _serialize_analysis_batches(
                 ):
                     target_batch += 1
                     continue
-                serialized_batches[target_batch].tasks.append(task_plan)
+                serialized_task_lists[target_batch].append(task_plan)
                 task_batch_by_key[task_key] = target_batch
                 progressed = True
                 break
@@ -484,11 +551,106 @@ def _serialize_analysis_batches(
         # Dependency cycles are invalid, but keep execution deterministic and conservative.
         for task_key in next_pending:
             task_plan = task_plans_by_key[task_key]
-            serialized_batches.append(Batch(tasks=[task_plan]))
-            task_batch_by_key[task_key] = len(serialized_batches) - 1
+            serialized_task_lists.append([task_plan])
+            task_batch_by_key[task_key] = len(serialized_task_lists) - 1
         break
 
-    return [batch for batch in serialized_batches if batch.tasks]
+    return [Batch.from_tasks(tasks) for tasks in serialized_task_lists if tasks]
+
+
+def _serialize_analysis_units(
+    batches: list[Batch],
+    analysis: list[dict[str, Any]],
+) -> list[Batch]:
+    unit_entries: list[tuple[int, int, BatchUnit]] = []
+    task_to_unit: dict[str, int] = {}
+
+    for batch_index, batch in enumerate(batches):
+        for unit_index, unit in enumerate(batch.units):
+            global_index = len(unit_entries)
+            unit_entries.append((batch_index, unit_index, unit))
+            for task in unit.tasks:
+                task_to_unit[task.task_key] = global_index
+
+    if not unit_entries:
+        return []
+
+    invalid_units: set[int] = set()
+    dependency_predecessors: dict[int, set[int]] = {i: set() for i in range(len(unit_entries))}
+    uncertain_pairs: set[frozenset[int]] = set()
+
+    for item in analysis:
+        task_a = str(item.get("task_a", "") or "")
+        task_b = str(item.get("task_b", "") or "")
+        relationship = item.get("relationship")
+        if task_a not in task_to_unit or task_b not in task_to_unit:
+            continue
+        unit_a = task_to_unit[task_a]
+        unit_b = task_to_unit[task_b]
+        if relationship == "DEPENDENT":
+            if unit_a != unit_b:
+                dependency_predecessors[unit_b].add(unit_a)
+        elif relationship == "UNCERTAIN":
+            if unit_a == unit_b:
+                invalid_units.add(unit_a)
+            else:
+                uncertain_pairs.add(frozenset((unit_a, unit_b)))
+        elif relationship == "CONTRADICTORY" and unit_a == unit_b:
+            invalid_units.add(unit_a)
+
+    normalized_units: list[tuple[int, int, BatchUnit]] = []
+    for idx, (batch_index, unit_index, unit) in enumerate(unit_entries):
+        if idx in invalid_units:
+            for offset, task in enumerate(unit.tasks):
+                normalized_units.append((batch_index, unit_index + offset, BatchUnit(tasks=[task])))
+        else:
+            normalized_units.append((batch_index, unit_index, unit))
+
+    serialized_batches: list[list[BatchUnit]] = []
+    unit_batch_by_index: dict[int, int] = {}
+    pending_indices = list(range(len(normalized_units)))
+
+    while pending_indices:
+        next_pending: list[int] = []
+        progressed = False
+        for idx in pending_indices:
+            original_batch, _unit_order, unit = normalized_units[idx]
+            predecessors = dependency_predecessors.get(idx, set())
+            if any(pred not in unit_batch_by_index for pred in predecessors):
+                next_pending.append(idx)
+                continue
+
+            target_batch = original_batch
+            if predecessors:
+                target_batch = max(target_batch, max(unit_batch_by_index[pred] + 1 for pred in predecessors))
+
+            while True:
+                while len(serialized_batches) <= target_batch:
+                    serialized_batches.append([])
+                existing_indices = [
+                    other_idx
+                    for other_idx, batch_idx in unit_batch_by_index.items()
+                    if batch_idx == target_batch
+                ]
+                if any(frozenset((idx, other_idx)) in uncertain_pairs for other_idx in existing_indices):
+                    target_batch += 1
+                    continue
+                serialized_batches[target_batch].append(unit)
+                unit_batch_by_index[idx] = target_batch
+                progressed = True
+                break
+
+        if progressed:
+            pending_indices = next_pending
+            continue
+
+        for idx in next_pending:
+            _batch_index, _unit_order, unit = normalized_units[idx]
+            serialized_batches.append([unit])
+            unit_batch_by_index[idx] = len(serialized_batches) - 1
+        break
+
+    return [Batch(units=units) for units in serialized_batches if units]
 
 
 def _normalize_plan(plan: ExecutionPlan, tasks: list[dict[str, Any]]) -> ExecutionPlan:
@@ -568,25 +730,32 @@ def _normalize_plan(plan: ExecutionPlan, tasks: list[dict[str, Any]]) -> Executi
     seed_batches: list[Batch] = []
     seen_planned: set[str] = set()
     for batch in plan.batches:
-        normalized_tasks: list[TaskPlan] = []
-        for task_plan in batch.tasks:
-            if task_plan.task_key not in valid_keys:
-                continue
-            if task_plan.task_key in seen_planned:
-                continue
-            seen_planned.add(task_plan.task_key)
-            normalized_tasks.append(task_plan)
-        if normalized_tasks:
-            seed_batches.append(Batch(tasks=normalized_tasks))
+        normalized_units: list[BatchUnit] = []
+        for unit in batch.units:
+            normalized_tasks: list[TaskPlan] = []
+            for task_plan in unit.tasks:
+                if task_plan.task_key not in valid_keys:
+                    continue
+                if task_plan.task_key in seen_planned:
+                    continue
+                seen_planned.add(task_plan.task_key)
+                normalized_tasks.append(task_plan)
+            if normalized_tasks:
+                normalized_units.append(BatchUnit(tasks=normalized_tasks))
+        if normalized_units:
+            seed_batches.append(Batch(units=normalized_units))
 
     # Add any tasks missing from the plan (planner dropped them)
     missing_keys = valid_keys - seen_planned
     if missing_keys:
         for key in sorted(missing_keys):
-            seed_batches.append(Batch(tasks=[TaskPlan(task_key=key)]))
+            seed_batches.append(Batch.from_tasks([TaskPlan(task_key=key)]))
         logger.warning("Planner dropped %d task(s): %s — added as serial batches", len(missing_keys), ", ".join(sorted(missing_keys)))
 
-    batches = _serialize_analysis_batches(seed_batches, analysis)
+    # Planner owns unit grouping decisions. Post-processing may serialize units
+    # into later batches to satisfy dependency/uncertainty constraints, but it
+    # must not rewrite the unit boundaries themselves.
+    batches = _serialize_analysis_units(seed_batches, analysis)
 
     return ExecutionPlan(
         batches=batches,
@@ -677,9 +846,10 @@ async def _run_planner_prompt(
         permission_mode="bypassPermissions",
         cwd=str(project_dir),
         setting_sources=_planner_settings(config),
-        env=_subprocess_env(),
+        env=_subprocess_env(project_dir),
         effort=effort,
         system_prompt={"type": "preset", "preset": "claude_code"},
+        provider=planner_provider(config),
     )
     if model:
         options.model = model
@@ -797,10 +967,22 @@ Relationship labels:
 Rules:
 - Respect explicit depends_on constraints.
 - INDEPENDENT and ADDITIVE tasks can run in parallel within a batch.
-- DEPENDENT tasks must be in later batches (after their dependency).
-- CONTRADICTORY tasks go in conflicts AND in separate batches.
-- UNCERTAIN pairs should not run in the same batch.
-- EVERY input task key MUST appear in exactly one batch.
+- DEPENDENT tasks can be handled in either of two ways:
+  1. separate units with later checkpoint(s)
+  2. the same integrated unit in one batch, but only when they are tightly layered parts of one coherent feature slice
+- CONTRADICTORY tasks go in conflicts AND in separate units/batches.
+- UNCERTAIN pairs should not run in the same unit or the same batch.
+- EVERY input task key MUST appear in exactly one batch and exactly one unit.
+- A batch contains one or more execution units.
+- A singleton unit like {{"task_keys": ["a"]}} means task `a` runs normally on its own.
+- A multi-task unit like {{"task_keys": ["a", "b"]}} means tasks `a` and `b` should be executed together as one integrated coding pass because they form one coherent feature slice.
+- Single-batch execution is valid when the tasks together are one coherent feature slice and there is little value in an earlier integration checkpoint.
+- Multiple batches are valid when later work benefits from an earlier merged checkpoint, or when retry/rollback should stay narrower than the whole feature.
+- Use integrated units for tightly layered tasks when preserving whole-system context is likely more valuable than staged checkpoints.
+- Before grouping 3 or more tasks into one integrated unit, ask whether a partial failure would make retry too coarse. If retrying the whole slice would likely be wasteful, prefer smaller units or an earlier checkpoint.
+- A long dependency chain is NOT automatically one unit. Only keep 3+ tasks together when they are truly one inseparable feature slice that should usually be implemented and retried as a whole.
+- Do not treat all DEPENDENT tasks as separate by default, but do not collapse them all into one unit by default either.
+- Do NOT over-group. Keep unrelated, contradictory, or loosely related tasks in separate singleton units.
 
 Return JSON only:
 {{
@@ -811,7 +993,7 @@ Return JSON only:
     {{"tasks": ["a", "b"], "description": "what conflicts", "suggestion": "how to resolve"}}
   ],
   "batches": [
-    {{"tasks": [{{"task_key": "a", "strategy": "direct", "effort": "high"}}]}}
+    {{"units": [{{"task_keys": ["a"]}}, {{"task_keys": ["b", "c"]}}]}}
   ],
   "learnings": []
 }}
@@ -821,6 +1003,11 @@ Tasks:
 
 Project context (git ls-files, capped at 200):
 {_project_context(project_dir)}
+
+Examples:
+- data layer + service layer + CLI for one small feature → usually one integrated unit
+- unrelated bug fixes in different files → separate singleton units
+- conflicting same-file rewrites with different goals → separate singleton units
 """
         raw_output, cost_usd, duration_s = await _run_planner_prompt(
             prompt,
@@ -970,7 +1157,7 @@ REMAINING TASKS:
 Return JSON only:
 {{
   "batches": [
-    {{"tasks": [{{"task_key": "key", "strategy": "direct"}}]}}
+    {{"units": [{{"task_keys": ["key"]}}]}}
   ],
   "learnings": ["any new learnings from the failure pattern"]
 }}

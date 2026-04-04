@@ -1,5 +1,6 @@
 """Tests for otto.runner module."""
 
+import asyncio
 import subprocess
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -8,7 +9,9 @@ import pytest
 
 from otto.runner import (
     _audit_proof_sufficiency,
+    _build_coding_prompt,
     _build_qa_retry_error,
+    _run_coding_agent,
     _restore_workspace_state,
     check_clean_tree,
     build_candidate_commit,
@@ -140,6 +143,96 @@ class TestQaProofHelpers:
         assert "Passed [must ◈] missing screenshot in qa-proofs/: Layout matches mock" in report
         assert mock_warn.call_count == 2
         assert ("qa_finding", {"text": "[warning] Passed [must] missing proof: API returns JSON"}) in emit_events
+
+
+class TestCodingPrompt:
+    def test_retry_prompt_includes_spec_when_prior_attempts_exist(self, tmp_path):
+        prompt = _build_coding_prompt(
+            "Build widget",
+            tmp_path,
+            full_project_brief="1. #1 Build data layer\n2. #2 Build API",
+            use_spec_on_first_attempt=False,
+            attempt=1,
+            last_error=None,
+            last_error_source=None,
+            feedback="Batch QA found issues after your task was merged onto current main.",
+            spec=[{"text": "Widget returns JSON", "binding": "must"}],
+            context=None,
+        )
+
+        assert "FULL PROJECT BRIEF" in prompt
+        assert "CURRENT ASSIGNMENT" in prompt
+        assert "Build data layer" in prompt
+        assert "Acceptance criteria" in prompt
+        assert "[must] Widget returns JSON" in prompt
+
+    def test_first_attempt_can_include_spec_when_enabled(self, tmp_path):
+        prompt = _build_coding_prompt(
+            "Build widget",
+            tmp_path,
+            full_project_brief=None,
+            use_spec_on_first_attempt=True,
+            attempt=0,
+            last_error=None,
+            last_error_source=None,
+            feedback="",
+            spec=[{"text": "Widget returns JSON", "binding": "must"}],
+            context=None,
+        )
+
+        assert "Acceptance criteria" in prompt
+        assert "[must] Widget returns JSON" in prompt
+
+
+class TestCodingAgentProviderBehavior:
+    @pytest.mark.asyncio
+    async def test_codex_does_not_resume_prior_session(self, tmp_path):
+        seen = {}
+
+        async def fake_query(*, prompt, options=None):
+            seen["resume"] = options.resume
+            result = MagicMock()
+            result.session_id = "thread-new"
+            result.is_error = False
+            result.result = "done"
+            result.total_cost_usd = 0.0
+            yield result
+
+        with patch("otto.runner.query", side_effect=fake_query):
+            session_id, _result_msg, _log_lines = await _run_coding_agent(
+                "fix it",
+                {"provider": "codex"},
+                tmp_path,
+                session_id="prior-thread",
+                emit=lambda *args, **kwargs: None,
+                log_dir=tmp_path,
+                attempt_num=1,
+            )
+
+        assert seen["resume"] is None
+        assert session_id == "thread-new"
+
+    @pytest.mark.asyncio
+    async def test_coding_agent_persists_partial_log_on_query_exception(self, tmp_path):
+        async def fake_query(*, prompt, options=None):
+            raise RuntimeError("stream exploded")
+            yield  # pragma: no cover
+
+        with patch("otto.runner.query", side_effect=fake_query):
+            with pytest.raises(RuntimeError, match="stream exploded"):
+                await _run_coding_agent(
+                    "fix it",
+                    {"provider": "codex"},
+                    tmp_path,
+                    session_id=None,
+                    emit=lambda *args, **kwargs: None,
+                    log_dir=tmp_path,
+                    attempt_num=1,
+                )
+
+        log_path = tmp_path / "attempt-1-agent.log"
+        assert log_path.exists()
+        assert "CODING AGENT ERROR: stream exploded" in log_path.read_text()
 
 
 class TestTamperDetection:
