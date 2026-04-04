@@ -44,6 +44,7 @@ def _setup_project(repo):
         "max_parallel": 2,
         "effort": "high",
         "orchestrator": "v4",
+        "execution_mode": "planned",
     }
     (repo / "otto.yaml").write_text(yaml.dump(config))
     return config

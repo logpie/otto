@@ -276,6 +276,7 @@ class TestSerialViaWorktree:
             "max_retries": 1,
             "verify_timeout": 60,
             "max_parallel": 1,
+            "execution_mode": "planned",
         }
 
     @pytest.mark.asyncio

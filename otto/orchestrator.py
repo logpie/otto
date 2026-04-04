@@ -2959,6 +2959,27 @@ async def _run_integrated_unit_in_worktree(
         error = str(result.get("error", "") or "") or None
         error_code = result.get("error_code")
 
+        # Propagate the unit's generated spec to member tasks so batch QA
+        # doesn't re-run spec generation for each member (wastes ~$0.2/task).
+        if tasks_file:
+            try:
+                all_tasks = load_tasks(tasks_file)
+                unit_task = next(
+                    (t for t in all_tasks if t.get("key") == synthetic_key),
+                    None,
+                )
+                unit_spec = (unit_task.get("spec") or []) if unit_task else []
+                if unit_spec:
+                    for task_key in member_keys:
+                        member_task = next(
+                            (t for t in all_tasks if t.get("key") == task_key),
+                            None,
+                        )
+                        if member_task and not member_task.get("spec"):
+                            update_task(tasks_file, task_key, spec=unit_spec)
+            except Exception:
+                pass
+
         task_count = max(len(member_keys), 1)
         split_cost = cost_usd / task_count if cost_usd else 0.0
         split_usage = {
@@ -2994,6 +3015,10 @@ async def _run_integrated_unit_in_worktree(
                     _anchor_candidate_ref(worktree_path, task_key, 1, candidate_sha)
 
         expanded: list[TaskResult] = []
+        member_status = "verified" if qa_mode == QAMode.BATCH else "passed"
+        member_merge = "pending" if qa_mode == QAMode.BATCH else "done"
+        member_completed = qa_mode != QAMode.BATCH
+        cost_available = agent_provider(config) != "codex"
         for index, task_key in enumerate(member_keys):
             task_usage = dict(split_usage)
             for key, remainder in remainders.items():
@@ -3004,28 +3029,53 @@ async def _run_integrated_unit_in_worktree(
                     update_task(
                         tasks_file,
                         task_key,
-                        status="verified" if qa_mode == QAMode.BATCH else "passed",
+                        status=member_status,
                         error=None,
                         error_code=None,
                         token_usage=task_usage or None,
                         cost_usd=split_cost if split_cost else None,
                         duration_s=duration_s if duration_s else None,
                     )
-                    _refresh_task_live_state(
-                        project_dir,
-                        task_key,
-                        status="verified" if qa_mode == QAMode.BATCH else "passed",
-                        merge_status="pending" if qa_mode == QAMode.BATCH else "done",
-                        completed=qa_mode != QAMode.BATCH,
-                        token_usage=task_usage,
-                        elapsed_s=duration_s if duration_s else None,
-                        cost_available=agent_provider(config) != "codex",
-                        cost_usd=split_cost if split_cost else 0.0,
-                        phase_timings=phase_timings or None,
-                        attempts=attempts,
-                    )
                 except Exception:
                     pass
+            # Write a proper task summary for each member task (not just
+            # the sparse stub that _refresh_task_live_state produces).
+            member_log_dir = project_dir / "otto_logs" / task_key
+            member_log_dir.mkdir(parents=True, exist_ok=True)
+            from otto.observability import write_json_file
+            write_json_file(
+                member_log_dir / "task-summary.json",
+                {
+                    "task_key": task_key,
+                    "unit_key": synthetic_key,
+                    "status": member_status,
+                    "total_cost_usd": round(split_cost, 4),
+                    "cost_available": cost_available,
+                    "token_usage": task_usage or {},
+                    "total_duration_s": round(duration_s, 1),
+                    "attempts": attempts,
+                    "phase_timings": {
+                        name: round(value, 1)
+                        for name, value in (phase_timings or {}).items()
+                    },
+                    "phase_costs": {},
+                    "retry_reasons": [],
+                    "_written_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                },
+            )
+            _refresh_task_live_state(
+                project_dir,
+                task_key,
+                status=member_status,
+                merge_status=member_merge,
+                completed=member_completed,
+                token_usage=task_usage,
+                elapsed_s=duration_s if duration_s else None,
+                cost_available=cost_available,
+                cost_usd=split_cost if split_cost else 0.0,
+                phase_timings=phase_timings or None,
+                attempts=attempts,
+            )
             expanded.append(TaskResult(
                 task_key=task_key,
                 success=unit_success,
