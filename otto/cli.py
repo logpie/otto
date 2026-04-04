@@ -454,10 +454,12 @@ def run(prompt, dry_run, no_spec, no_qa, no_test):
 @click.argument("intent")
 @click.option("--no-review", is_flag=True, help="Skip plan review, execute immediately")
 @click.option("--no-qa", is_flag=True, help="Skip product-level QA after execution")
-def build(intent, no_review, no_qa):
+@click.option("--plan/--no-plan", "use_planner", default=None, help="Force planner on/off")
+def build(intent, no_review, no_qa, use_planner):
     """Build a product from a natural language intent.
 
-    Decomposes intent into tasks, executes them, and verifies the product.
+    By default, one agent builds the entire product (monolithic).
+    Use --plan to enable the planner for parallel decomposition.
 
     Examples:
         otto build "bookmark manager with tags and search"
@@ -475,231 +477,53 @@ def build(intent, no_review, no_qa):
 
     if no_qa:
         config["skip_product_qa"] = True
+    if use_planner is not None:
+        config["use_planner"] = use_planner
+    if no_review:
+        config["no_review"] = True
 
-    # Generate build ID and initialize telemetry
-    build_id = f"build-{int(time.time())}-{os.getpid()}"
+    # Run the pipeline
+    from otto.pipeline import build_product, BuildResult
+
     build_start = time.time()
-    from otto.telemetry import (
-        Telemetry, BuildStarted, ProductPlanCompleted, BuildCompleted,
-    )
-    telemetry = Telemetry(project_dir / "otto_logs")
-    telemetry.log(BuildStarted(build_id=build_id, intent=intent))
-
-    # Track costs across all phases
-    cost_planning = 0.0
-    cost_tasks = 0.0
-    cost_qa = 0.0
-    cost_context = 0.0
-
-    # Step 1: Product planning
-    from otto.product_planner import run_product_planner, ProductPlan
-    import threading
-
     console.print()
-    _plan_start = time.time()
-    _plan_done = False
 
-    def _update_timer(status_widget):
-        while not _plan_done:
-            elapsed = int(time.time() - _plan_start)
-            status_widget.update(f"[dim]Planning... {elapsed}s[/dim]")
-            time.sleep(1)
-
-    plan: ProductPlan | None = None
     try:
-        with console.status("[dim]Planning...[/dim]", spinner="dots") as status_widget:
-            timer_thread = threading.Thread(target=_update_timer, args=(status_widget,), daemon=True)
-            timer_thread.start()
-            plan = asyncio.run(run_product_planner(intent, project_dir, config))
-            _plan_done = True
-            cost_planning = plan.cost_usd
-            telemetry.log(ProductPlanCompleted(
-                build_id=build_id, mode=plan.mode,
-                num_tasks=len(plan.tasks), cost_usd=plan.cost_usd,
-                duration_s=plan.duration_s,
-            ))
+        result: BuildResult = asyncio.run(build_product(intent, project_dir, config))
+    except KeyboardInterrupt:
+        console.print("\n  Aborted.")
+        sys.exit(1)
     except Exception as e:
-        _plan_done = True
-        error_console.print(f"[error]Planning failed: {rich_escape(str(e))}[/error]")
+        error_console.print(f"[error]Build failed: {rich_escape(str(e))}[/error]")
         sys.exit(1)
 
-    # Step 2: Show plan and get approval
-    console.print()
-    if plan.mode == "single_task":
-        console.print(f"  [bold]Single task[/bold] (no decomposition needed)")
-        console.print(f"  {rich_escape(plan.tasks[0].prompt[:100])}")
-    else:
-        console.print(f"  [bold]Product Plan[/bold]  ({len(plan.tasks)} tasks)")
-        if plan.product_spec_path:
-            console.print(f"  [dim]Product spec: {plan.product_spec_path.name}[/dim]")
-        if plan.architecture_path:
-            console.print(f"  [dim]Architecture: {plan.architecture_path.name}[/dim]")
-        console.print()
-        for idx, task in enumerate(plan.tasks):
-            deps = ""
-            if task.depends_on:
-                deps = f" [dim](depends: {', '.join(f'#{d+1}' for d in task.depends_on)})[/dim]"
-            console.print(f"  #{idx+1}  {rich_escape(task.prompt[:80])}{deps}")
-
-    if plan.assumptions:
-        console.print()
-        console.print(f"  [yellow]Assumptions:[/yellow]")
-        for a in plan.assumptions:
-            console.print(f"    - {rich_escape(a)}")
-
-    console.print()
-    console.print(f"  [dim]Planning: ${plan.cost_usd:.2f}, {plan.duration_s:.0f}s[/dim]")
-    console.print()
-
-    if not no_review:
-        try:
-            choice = click.prompt(
-                "  [enter] accept  [e] edit  [q] quit",
-                default="", show_default=False, prompt_suffix=" "
-            )
-            if choice.lower() == "q":
-                console.print("  Aborted.")
-                return
-            if choice.lower() == "e":
-                # Open product-spec.md for editing if it exists
-                if plan.product_spec_path and plan.product_spec_path.exists():
-                    click.edit(filename=str(plan.product_spec_path))
-                    console.print(f"  [dim]Edited {plan.product_spec_path.name}. Continuing with current tasks.[/dim]")
-                else:
-                    console.print(f"  [dim]No product-spec.md to edit. Continuing.[/dim]")
-        except (KeyboardInterrupt, EOFError):
-            console.print("\n  Aborted.")
-            return
-
-    # Step 3: Add tasks to tasks.yaml
-    tasks_path = project_dir / "tasks.yaml"
-    task_batch = [
-        {
-            "prompt": t.prompt,
-            "depends_on": t.depends_on if t.depends_on else None,
-        }
-        for t in plan.tasks
-    ]
-    created = add_tasks(tasks_path, task_batch)
-    build_task_keys = {t["key"] for t in created}
-    console.print(f"  [success]Added {len(created)} task(s) to tasks.yaml[/success]")
-
-    # Step 3.5: Commit plan artifacts so worktrees can see them
-    plan_files = [str(tasks_path)]
-    if plan.product_spec_path and plan.product_spec_path.exists():
-        plan_files.append(str(plan.product_spec_path))
-    if plan.architecture_path and plan.architecture_path.exists():
-        plan_files.append(str(plan.architecture_path))
-    subprocess.run(["git", "add"] + plan_files, cwd=project_dir, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "otto: plan artifacts"],
-        cwd=project_dir, capture_output=True,
-    )
-
-    # Step 4: Execute via task runner
-    console.print()
-    from otto.orchestrator import run_per
-    exit_code = asyncio.run(run_per(config, tasks_path, project_dir))
-
-    # Step 5: Product verification — always run after successful build
-    outer_result = None
-    if not config.get("skip_product_qa"):
-        if exit_code == 0 and plan.product_spec_path and plan.product_spec_path.exists():
-            console.print()
-            console.print("  [bold]Product Verification[/bold] — user journey testing...")
-            try:
-                # PoW on by default for verification — fix tasks need auditable proofs
-                config.setdefault("proof_of_work", True)
-                from otto.verification import run_product_verification
-                outer_result = asyncio.run(run_product_verification(
-                    product_spec_path=plan.product_spec_path,
-                    project_dir=project_dir,
-                    tasks_path=tasks_path,
-                    config=config,
-                    intent=intent,
-                ))
-
-                if outer_result.get("product_passed"):
-                    console.print(f"  [success]All journeys passed[/success]"
-                                  f" (round {outer_result.get('rounds', 1)})")
-                else:
-                    console.print(f"  [red]Some journeys failed[/red]"
-                                  f" (after {outer_result.get('rounds', 1)} round(s))")
-                    for j in outer_result.get("journeys", []):
-                        status_icon = "[success]✓[/success]" if j.get("passed") else "[red]✗[/red]"
-                        console.print(f"    {status_icon} {rich_escape(j.get('name', ''))}")
-                        if not j.get("passed") and j.get("error"):
-                            console.print(f"      {rich_escape(j['error'][:100])}")
-
-                    if outer_result.get("build_failed"):
-                        _print_failed_tasks(outer_result.get("failed_tasks", []))
-
-                if outer_result.get("fix_tasks_created", 0) > 0:
-                    console.print(f"  [dim]{outer_result['fix_tasks_created']} fix task(s) created[/dim]")
-                console.print(f"  [dim]Product QA cost: ${outer_result.get('total_cost', 0):.2f}[/dim]")
-
-            except Exception as e:
-                console.print(f"  [yellow]Product QA failed: {rich_escape(str(e))}[/yellow]")
-                exit_code = 1
-        elif exit_code != 0:
-            _print_failed_tasks(_collect_failed_tasks(load_tasks(tasks_path)))
-
-    if outer_result is not None:
-        exit_code = 0 if outer_result.get("product_passed") else 1
-        cost_qa = outer_result.get("total_cost", 0.0)
-
-    # Compute costs scoped to THIS build's tasks only
-    all_tasks = load_tasks(tasks_path) if tasks_path.exists() else []
-    build_tasks = [t for t in all_tasks if t.get("key") in build_task_keys]
-    cost_tasks = sum(t.get("cost_usd", 0) for t in build_tasks)
-
-    # Read context update cost from log
-    context_log = project_dir / "otto_logs" / "product-context.log"
-    if context_log.exists():
-        import re as _re
-        for line in context_log.read_text().splitlines():
-            m = _re.search(r"\$(\d+\.\d+)", line)
-            if m:
-                cost_context += float(m.group(1))
-
-    cost_total = cost_planning + cost_tasks + cost_qa + cost_context
     build_duration = time.time() - build_start
 
-    # Emit build completed event with full cost breakdown
-    FAILED_STATUSES = {"failed", "merge_failed", "blocked", "conflict"}
-    product_passed = outer_result.get("product_passed", True) if outer_result else (exit_code == 0)
-    tasks_passed = sum(1 for t in build_tasks if t.get("status") == "passed")
-    tasks_failed = sum(1 for t in build_tasks if t.get("status") in FAILED_STATUSES)
-
-    telemetry.log(BuildCompleted(
-        build_id=build_id, intent=intent,
-        product_passed=product_passed,
-        total_tasks=len(plan.tasks), tasks_passed=tasks_passed, tasks_failed=tasks_failed,
-        cost_planning=round(cost_planning, 4),
-        cost_tasks=round(cost_tasks, 4),
-        cost_qa=round(cost_qa, 4),
-        cost_context=round(cost_context, 4),
-        cost_total=round(cost_total, 4),
-        duration_s=round(build_duration, 1),
-    ))
+    # Display verification results
+    if result.journeys:
+        console.print()
+        if result.passed:
+            console.print(f"  [success]All journeys passed[/success]"
+                          f" (round {result.rounds})")
+        else:
+            console.print(f"  [red]Some journeys failed[/red]"
+                          f" (after {result.rounds} round(s))")
+        for j in result.journeys:
+            status_icon = "[success]✓[/success]" if j.get("passed") else "[red]✗[/red]"
+            console.print(f"    {status_icon} {rich_escape(j.get('name', ''))}")
 
     # Print build summary
     console.print()
-    console.print(f"  [bold]Build Summary[/bold]  ({build_id})")
+    console.print(f"  [bold]Build Summary[/bold]  ({result.build_id})")
     console.print(f"  Intent: {rich_escape(intent[:80])}")
-    console.print(f"  Tasks: {tasks_passed} passed, {tasks_failed} failed")
-    console.print(f"  Cost breakdown:")
-    console.print(f"    Planning:  ${cost_planning:.2f}")
-    console.print(f"    Tasks:     ${cost_tasks:.2f}")
-    if cost_qa > 0:
-        console.print(f"    Product QA: ${cost_qa:.2f}")
-    if cost_context > 0:
-        console.print(f"    Context:   ${cost_context:.2f}")
-    console.print(f"    [bold]Total:     ${cost_total:.2f}[/bold]")
+    console.print(f"  Tasks: {result.tasks_passed} passed, {result.tasks_failed} failed")
+    console.print(f"  [bold]Total cost: ${result.total_cost:.2f}[/bold]")
     console.print(f"  Duration: {build_duration / 60:.1f} min")
+    if result.error:
+        console.print(f"  [red]Error: {rich_escape(result.error[:100])}[/red]")
     console.print()
 
-    sys.exit(exit_code)
+    sys.exit(0 if result.passed else 1)
 
 
 @main.command(context_settings=CONTEXT_SETTINGS)

@@ -165,65 +165,32 @@ class TestBuildCommand:
             architecture_path=None,
         )
 
-        async def fake_run_product_planner(intent, project_dir, config):
-            return plan
-
-        async def fake_run_per(config, tasks_path, project_dir):
-            persisted = yaml.safe_load(tasks_path.read_text())["tasks"]
-            # Find the new task and fail it
-            new_task = [t for t in persisted if t["prompt"] == "Build the actual product"][0]
-            new_task["status"] = "failed"
-            new_task["error"] = "tests failed"
-            tasks_path.write_text(yaml.dump({"tasks": persisted}))
-            return 1
+        from otto.pipeline import BuildResult
+        async def fake_build(intent, project_dir, config, **kwargs):
+            return BuildResult(passed=False, build_id="test-build", error="build failed",
+                               tasks_passed=0, tasks_failed=1)
 
         runner = CliRunner()
-        with patch("otto.product_planner.run_product_planner", side_effect=fake_run_product_planner):
-            with patch("otto.orchestrator.run_per", side_effect=fake_run_per):
-                with patch("otto.verification.run_product_verification", side_effect=AssertionError("should not run")):
-                    result = runner.invoke(main, ["build", "demo app", "--no-review"])
+        with patch("otto.pipeline.build_product", side_effect=fake_build):
+            result = runner.invoke(main, ["build", "demo app", "--no-review"])
 
         assert result.exit_code == 1
-        assert "Skipping product QA because some tasks failed" in result.output
 
     def test_build_exit_code_tracks_product_qa_result(self, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
         create_config(tmp_git_repo)
 
-        product_spec_path = tmp_git_repo / "product-spec.md"
-        product_spec_path.write_text("# Product Spec\n")
-        plan = ProductPlan(
-            mode="decomposed",
-            tasks=[PlannedTask(prompt="Build the product")],
-            product_spec_path=product_spec_path,
-            architecture_path=None,
-        )
-
-        async def fake_run_product_planner(intent, project_dir, config):
-            return plan
-
-        async def fake_run_per(config, tasks_path, project_dir):
-            persisted = yaml.safe_load(tasks_path.read_text())["tasks"]
-            persisted[0]["status"] = "passed"
-            tasks_path.write_text(yaml.dump({"tasks": persisted}))
-            return 0
-
-        async def fake_run_product_verification(**kwargs):
-            return {
-                "product_passed": False,
-                "rounds": 1,
-                "total_cost": 0.0,
-                "journeys": [
-                    {"name": "happy path", "passed": False, "error": "journey failed"},
-                ],
-                "fix_tasks_created": 0,
-            }
+        from otto.pipeline import BuildResult
+        async def fake_build(intent, project_dir, config, **kwargs):
+            return BuildResult(
+                passed=False, build_id="test-build", rounds=1,
+                journeys=[{"name": "happy path", "passed": False}],
+                tasks_passed=1, tasks_failed=0,
+            )
 
         runner = CliRunner()
-        with patch("otto.product_planner.run_product_planner", side_effect=fake_run_product_planner):
-            with patch("otto.orchestrator.run_per", side_effect=fake_run_per):
-                with patch("otto.verification.run_product_verification", side_effect=fake_run_product_verification):
-                    result = runner.invoke(main, ["build", "demo app", "--no-review"])
+        with patch("otto.pipeline.build_product", side_effect=fake_build):
+            result = runner.invoke(main, ["build", "demo app", "--no-review"])
 
         assert result.exit_code == 1
         assert "Some journeys failed" in result.output
@@ -232,32 +199,15 @@ class TestBuildCommand:
         monkeypatch.chdir(tmp_git_repo)
         create_config(tmp_git_repo)
 
-        product_spec_path = tmp_git_repo / "product-spec.md"
-        product_spec_path.write_text("# Product Spec\n")
-        plan = ProductPlan(
-            mode="decomposed",
-            tasks=[PlannedTask(prompt="Build the product")],
-            product_spec_path=product_spec_path,
-            architecture_path=None,
-        )
-
-        async def fake_run_product_planner(intent, project_dir, config):
-            return plan
-
-        async def fake_run_per(config, tasks_path, project_dir):
-            persisted = yaml.safe_load(tasks_path.read_text())["tasks"]
-            persisted[0]["status"] = "passed"
-            tasks_path.write_text(yaml.dump({"tasks": persisted}))
-            return 0
+        async def fake_build(intent, project_dir, config, **kwargs):
+            raise RuntimeError("qa boom")
 
         runner = CliRunner()
-        with patch("otto.product_planner.run_product_planner", side_effect=fake_run_product_planner):
-            with patch("otto.orchestrator.run_per", side_effect=fake_run_per):
-                with patch("otto.verification.run_product_verification", side_effect=RuntimeError("qa boom")):
-                    result = runner.invoke(main, ["build", "demo app", "--no-review"])
+        with patch("otto.pipeline.build_product", side_effect=fake_build):
+            result = runner.invoke(main, ["build", "demo app", "--no-review"])
 
         assert result.exit_code == 1
-        assert "Product QA failed: qa boom" in result.output
+        assert "qa boom" in result.output
 
 
 class TestPlannerAndQaConfig:
