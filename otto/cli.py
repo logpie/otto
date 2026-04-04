@@ -457,7 +457,8 @@ def run(prompt, dry_run, no_spec, no_qa, no_test):
 @click.option("--plan/--no-plan", "use_planner", default=None, help="Force planner on/off")
 @click.option("--agent-driven", is_flag=True, help="Use agent-driven build (experimental)")
 @click.option("--interactive", is_flag=True, help="Pause for human input after each certification round")
-def build(intent, no_review, no_qa, use_planner, agent_driven, interactive):
+@click.option("--variant", type=click.Choice(["a", "b"]), default="b", help="Agent-driven variant (a=agentic, b=orchestrated)")
+def build(intent, no_review, no_qa, use_planner, agent_driven, interactive, variant):
     """Build a product from a natural language intent.
 
     By default, one agent builds the entire product (monolithic).
@@ -504,7 +505,8 @@ def build(intent, no_review, no_qa, use_planner, agent_driven, interactive):
                         return None
                 on_feedback = _interactive_feedback
             result: BuildResult = asyncio.run(
-                build_agent_driven(intent, project_dir, config, on_human_feedback=on_feedback)
+                build_agent_driven(intent, project_dir, config,
+                                   variant=variant, on_human_feedback=on_feedback)
             )
         else:
             result: BuildResult = asyncio.run(build_product(intent, project_dir, config))
