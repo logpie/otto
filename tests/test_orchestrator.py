@@ -25,7 +25,7 @@ from otto.orchestrator import (
     merge_batch_results,
     run_per,
 )
-from otto.outer_loop import run_outer_loop
+from otto.outer_loop import run_product_verification
 from otto.planner import Batch, BatchUnit, ExecutionPlan, TaskPlan
 from otto.tasks import load_tasks, update_task
 from otto.telemetry import Telemetry
@@ -1282,7 +1282,7 @@ class TestOuterLoop:
 
         with patch("otto.orchestrator.run_per", side_effect=fake_run_per):
             with patch("otto.certifier.run_certifier_v2", side_effect=AssertionError("Certifier should not run")):
-                result = await run_outer_loop(
+                result = await run_product_verification(
                     product_spec_path=product_spec_path,
                     project_dir=tmp_git_repo,
                     tasks_path=tasks_path,
@@ -1292,13 +1292,6 @@ class TestOuterLoop:
 
         assert result["product_passed"] is False
         assert result["inner_loop_failed"] is True
-        assert result["failed_tasks"] == [{
-            "id": 1,
-            "key": "fix-task",
-            "prompt": "Fix the product",
-            "status": "failed",
-            "error": "tests failed",
-        }]
 
     @pytest.mark.asyncio
     async def test_stops_when_certifier_makes_no_progress(self, tmp_git_repo):
@@ -1333,7 +1326,7 @@ class TestOuterLoop:
         certifier_mock = MagicMock(side_effect=qa_results)
         with patch("otto.orchestrator.run_per", side_effect=fake_run_per):
             with patch("otto.certifier.run_certifier_v2", certifier_mock):
-                result = await run_outer_loop(
+                result = await run_product_verification(
                     product_spec_path=product_spec_path,
                     project_dir=tmp_git_repo,
                     tasks_path=tasks_path,

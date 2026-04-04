@@ -589,17 +589,17 @@ def build(intent, no_review, no_qa):
     from otto.orchestrator import run_per
     exit_code = asyncio.run(run_per(config, tasks_path, project_dir))
 
-    # Step 5: Product verification + fix loop (if decomposed and not skipped)
+    # Step 5: Product verification — always run after successful build
     outer_result = None
-    if plan.mode == "decomposed" and not config.get("skip_product_qa"):
+    if not config.get("skip_product_qa"):
         if exit_code == 0 and plan.product_spec_path and plan.product_spec_path.exists():
             console.print()
-            console.print("  [bold]Product Verification[/bold] — certifier (Tier 1 + Tier 2)...")
+            console.print("  [bold]Product Verification[/bold] — user journey testing...")
             try:
                 # PoW on by default for outer loop — fix tasks need auditable proofs
                 config.setdefault("proof_of_work", True)
-                from otto.outer_loop import run_outer_loop
-                outer_result = asyncio.run(run_outer_loop(
+                from otto.outer_loop import run_product_verification
+                outer_result = asyncio.run(run_product_verification(
                     product_spec_path=plan.product_spec_path,
                     project_dir=project_dir,
                     tasks_path=tasks_path,

@@ -180,7 +180,7 @@ class TestBuildCommand:
         runner = CliRunner()
         with patch("otto.product_planner.run_product_planner", side_effect=fake_run_product_planner):
             with patch("otto.orchestrator.run_per", side_effect=fake_run_per):
-                with patch("otto.outer_loop.run_outer_loop", side_effect=AssertionError("outer loop should not run")):
+                with patch("otto.outer_loop.run_product_verification", side_effect=AssertionError("outer loop should not run")):
                     result = runner.invoke(main, ["build", "demo app", "--no-review"])
 
         assert result.exit_code == 1
@@ -208,7 +208,7 @@ class TestBuildCommand:
             tasks_path.write_text(yaml.dump({"tasks": persisted}))
             return 0
 
-        async def fake_run_outer_loop(**kwargs):
+        async def fake_run_product_verification(**kwargs):
             return {
                 "product_passed": False,
                 "rounds": 1,
@@ -222,7 +222,7 @@ class TestBuildCommand:
         runner = CliRunner()
         with patch("otto.product_planner.run_product_planner", side_effect=fake_run_product_planner):
             with patch("otto.orchestrator.run_per", side_effect=fake_run_per):
-                with patch("otto.outer_loop.run_outer_loop", side_effect=fake_run_outer_loop):
+                with patch("otto.outer_loop.run_product_verification", side_effect=fake_run_product_verification):
                     result = runner.invoke(main, ["build", "demo app", "--no-review"])
 
         assert result.exit_code == 1
@@ -253,7 +253,7 @@ class TestBuildCommand:
         runner = CliRunner()
         with patch("otto.product_planner.run_product_planner", side_effect=fake_run_product_planner):
             with patch("otto.orchestrator.run_per", side_effect=fake_run_per):
-                with patch("otto.outer_loop.run_outer_loop", side_effect=RuntimeError("qa boom")):
+                with patch("otto.outer_loop.run_product_verification", side_effect=RuntimeError("qa boom")):
                     result = runner.invoke(main, ["build", "demo app", "--no-review"])
 
         assert result.exit_code == 1

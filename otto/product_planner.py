@@ -85,7 +85,8 @@ DECISION 2: What to produce
 
 For SINGLE TASK:
 - Write a comprehensive task prompt that covers the full product
-- Do NOT create product-spec.md or architecture.md (overkill for one task)
+- ALSO write product-spec.md with features, scope, non-goals, and user journeys
+  (needed for product verification after the build)
 - Output JSON: {"mode": "single_task", "task_prompt": "..."}
 
 For DECOMPOSED:
@@ -342,11 +343,14 @@ def _parse_planner_output(raw: str, project_dir: Path, plan_file: Path | None = 
         task_prompt = data.get("task_prompt", "")
         if not task_prompt:
             raise ValueError("single_task mode but no task_prompt in output")
+        # Planner may still write product-spec.md even for single-task builds
+        product_spec_path = project_dir / "product-spec.md"
+        architecture_path = project_dir / "architecture.md"
         return ProductPlan(
             mode="single_task",
             tasks=[PlannedTask(prompt=task_prompt)],
-            product_spec_path=None,
-            architecture_path=None,
+            product_spec_path=product_spec_path if product_spec_path.exists() else None,
+            architecture_path=architecture_path if architecture_path.exists() else None,
             assumptions=data.get("assumptions", []),
         )
 
