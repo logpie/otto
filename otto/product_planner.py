@@ -110,46 +110,48 @@ For DECOMPOSED:
   When you do write it, include conventions that agents should follow:
   route patterns, directory structure, naming conventions, error formats.
 
-- Produce task decomposition as JSON. Prefer VERTICAL slices:
+- Produce task decomposition as JSON. The ONLY reason to decompose is
+  PARALLELISM — multiple agents working simultaneously to save wall time.
 
-  BAD (horizontal — fragile):
-    Task 1: Build data models
-    Task 2: Build API layer (can't test without task 1)
-    Task 3: Build UI (can't test without task 2)
+  RULE: Every task must be INDEPENDENT — no depends_on between tasks.
+  If tasks can't run in parallel, DON'T decompose — use single_task instead.
 
-  GOOD (vertical — each task delivers a working feature):
-    Task 1: Bookmark CRUD — model + API + basic UI
-    Task 2: Tag system — tag model + tag API + tag filtering UI
-    Task 3: Search — search index + endpoint + search UI
+  Split by SYSTEM BOUNDARY — areas that touch different files:
 
-- Dependencies: ONLY add depends_on when task B needs data, APIs, or
-  code that task A creates. Do NOT add dependencies for conceptual ordering.
+  GOOD (parallel-safe — different files):
+    Task 1: Scaffold + DB schema + seed data + shared types
+    Task 2: Backend API routes + server logic (reads schema from task 1)
+    Task 3: Frontend pages + components (reads types from task 1)
+    → Task 1 runs first (depends_on: []), tasks 2+3 run in parallel (depends_on: [0])
 
-  Ask: "If task A's code didn't exist, would task B fail to build/test?"
-  YES → add dependency. NO → don't.
+  EXCEPTION: A single shared scaffold task (task 0) that sets up the project
+  skeleton, DB schema, and shared types is allowed as a dependency for all
+  other tasks. This is the ONLY valid dependency pattern:
+    Task 0: scaffold (no deps)
+    Task 1..N: parallel groups (each depends_on: [0] only)
 
-  BAD: Cart depends on Catalog "because users browse products first"
-       (conceptual ordering — cart only needs the Product model, not catalog pages)
-  GOOD: Cart depends on Scaffold "because cart needs the Product model and auth"
-       (data dependency — cart literally imports Product model)
+  BAD (serial chain — no parallelism, worse than monolithic):
+    Task 1: Auth → Task 2: CRUD → Task 3: Dashboard → Task 4: Polish
+    (each depends on previous = serial execution with merge overhead)
 
-  BAD: Admin depends on Checkout "because admin manages orders"
-       (admin only needs the Order model, which Scaffold created)
-  GOOD: Checkout depends on Cart "because checkout reads cart items"
-       (API dependency — checkout calls cart API)
+  BAD (overlapping files — merge conflicts):
+    Task 1: User CRUD + user API + user pages
+    Task 2: Project CRUD + project API + project pages
+    (both touch layout.tsx, Prisma schema, middleware — conflict guaranteed)
 
-  Fewer dependencies = more parallelism = faster execution. Over-constraining
-  forces serial execution where parallel would work. When in doubt, DON'T
-  add the dependency — the coding agent can read existing code to adapt.
+  Each task prompt must include the FULL context from product-spec.md and
+  architecture.md that the agent needs. The agent reads existing code but
+  gets its scope from the task prompt.
 
 - Output JSON:
   {"mode": "decomposed", "tasks": [
-    {"prompt": "...", "depends_on": []},
-    {"prompt": "...", "depends_on": [0]},
-    {"prompt": "...", "depends_on": [0]}
+    {"prompt": "Scaffold: set up project, DB schema, shared types...", "depends_on": []},
+    {"prompt": "Backend: API routes, server logic...", "depends_on": [0]},
+    {"prompt": "Frontend: pages, components...", "depends_on": [0]}
   ], "assumptions": ["SQLite chosen for simplicity", ...]}
 
-  depends_on uses 0-based indices into the tasks array.
+  depends_on uses 0-based indices. Only valid pattern: task 0 (scaffold)
+  with no deps, all others depend on [0] only. NO chains.
 
 RULES:
 - Explore the existing codebase FIRST (if code exists). Respect existing

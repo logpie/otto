@@ -884,7 +884,6 @@ async def _run_qa_prompt(
         env=qa_env,
         system_prompt={"type": "preset", "preset": "claude_code"},
         provider=agent_provider(config),
-        disallowed_tools=["Edit", "NotebookEdit"],
     )
     if config.get("model"):
         qa_opts.model = config["model"]
