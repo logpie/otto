@@ -26,7 +26,6 @@ from otto.agent import (
     ResultMessage,
     AssistantMessage,
     TextBlock,
-    ToolUseBlock,
     _subprocess_env,
     query,
 )
@@ -125,42 +124,11 @@ RULES:
 
 WORKFLOW:
 1. Execute all happy path steps, verifying each one
-2. Write the verdict JSON file with happy path results (include empty break_findings)
-3. ONLY THEN, if BREAK strategies are specified, spend a few turns trying to break
+2. If BREAK strategies are specified, spend a few turns trying to break the product
+3. When done, your final response will be collected as the verdict automatically
 
-CRITICAL — WRITE THE VERDICT IMMEDIATELY AFTER STEP 2.
-Do not wait until after BREAK testing. The verdict captures the happy path result.
-Break findings are bonus quality signals — the verdict must exist before you start breaking.
-If you run out of turns during BREAK, the happy path verdict is already saved.
-
-Write the file to the path specified in the prompt. The content must be valid
-JSON (not markdown, not prose) matching this schema:
-
-{
-  "story_passed": true/false,
-  "blocked_at": "step description" or null,
-  "summary": "one paragraph describing the experience",
-  "diagnosis": "root cause if any step failed" or null,
-  "fix_suggestion": "what the developer should change" or null,
-  "steps": [
-    {
-      "action": "what you did",
-      "outcome": "pass" | "fail" | "blocked",
-      "verification": "what you checked and whether it matched",
-      "diagnosis": "root cause if failed" or null,
-      "fix_suggestion": "what to fix" or null
-    }
-  ],
-  "break_findings": [
-    {
-      "technique": "double_submit",
-      "description": "submitted the create form twice rapidly",
-      "result": "created duplicate entries",
-      "severity": "moderate",
-      "fix_suggestion": "add idempotency check on creation endpoint"
-    }
-  ]
-}
+Your final output will be structured as JSON automatically. Include all step
+results and any break findings in your final response.
 """
 
 
@@ -168,7 +136,6 @@ def _build_journey_prompt(
     story: UserStory,
     manifest: ProductManifest,
     base_url: str,
-    verdict_file: Path,
 ) -> str:
     """Build the prompt for the journey verification agent."""
     manifest_text = format_manifest_for_agent(manifest)
@@ -208,9 +175,6 @@ Base URL: {base_url}
 STEPS:
 {steps_text}
 {break_text}
-
-Write your verdict JSON to: {verdict_file}
-Use the Write tool to write the file.
 """
 
 
@@ -251,7 +215,7 @@ async def verify_story(
     verdict_file = log_dir / f"journey-{story.id}-verdict.json"
     verdict_file.unlink(missing_ok=True)
 
-    prompt = _build_journey_prompt(story, manifest, base_url, verdict_file)
+    prompt = _build_journey_prompt(story, manifest, base_url)
 
     # Configure agent with HTTP tools (Bash for curl) + optional browser (chrome-devtools)
     mcp_servers = {}
@@ -259,12 +223,53 @@ async def verify_story(
     if chrome_config:
         mcp_servers["chrome-devtools"] = chrome_config
 
+    # Structured output: SDK enforces verdict JSON as the agent's final response.
+    # Session terminates naturally when the agent produces its output — no hang.
+    verdict_schema: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "story_passed": {"type": "boolean"},
+            "blocked_at": {"type": ["string", "null"]},
+            "summary": {"type": "string"},
+            "diagnosis": {"type": ["string", "null"]},
+            "fix_suggestion": {"type": ["string", "null"]},
+            "steps": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string"},
+                        "outcome": {"type": "string", "enum": ["pass", "fail", "blocked"]},
+                        "verification": {"type": "string"},
+                        "diagnosis": {"type": ["string", "null"]},
+                        "fix_suggestion": {"type": ["string", "null"]},
+                    },
+                },
+            },
+            "break_findings": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "technique": {"type": "string"},
+                        "description": {"type": "string"},
+                        "result": {"type": "string"},
+                        "severity": {"type": "string"},
+                        "fix_suggestion": {"type": "string"},
+                    },
+                },
+            },
+        },
+        "required": ["story_passed", "summary", "steps"],
+    }
+
     options = ClaudeAgentOptions(
         permission_mode="bypassPermissions",
         cwd=str(project_dir),
         setting_sources=["project"],
         env=_subprocess_env(),
         system_prompt=JOURNEY_AGENT_SYSTEM_PROMPT,
+        output_format={"type": "json_schema", "schema": verdict_schema},
     )
     if mcp_servers:
         options.mcp_servers = mcp_servers
@@ -284,35 +289,25 @@ async def verify_story(
         ],
     )
 
-    # Direct query loop — break when agent writes the verdict file.
-    # Verdict interception is the primary termination mechanism.
-    # If the agent never writes (rare), the session ends naturally via ResultMessage.
+    # Session terminates when agent produces structured output (ResultMessage).
     text_parts: list[str] = []
     cost_usd = 0.0
-    verdict_captured: dict[str, Any] | None = None
-    verdict_file_str = str(verdict_file)
+    verdict_data: dict[str, Any] | None = None
 
     async for message in query(prompt=prompt, options=options):
         if isinstance(message, ResultMessage):
             raw_cost = getattr(message, "total_cost_usd", None)
             if isinstance(raw_cost, (int, float)):
                 cost_usd = float(raw_cost)
+            # Structured output is on the ResultMessage
+            structured = getattr(message, "structured_output", None)
+            if isinstance(structured, dict):
+                verdict_data = structured
             break
         elif isinstance(message, AssistantMessage):
             for block in message.content:
                 if isinstance(block, TextBlock) and block.text:
                     text_parts.append(block.text)
-                elif isinstance(block, ToolUseBlock):
-                    if block.name == "Write":
-                        inp = block.input if isinstance(block.input, dict) else {}
-                        file_path = str(inp.get("file_path", ""))
-                        if file_path == verdict_file_str:
-                            try:
-                                verdict_captured = json.loads(inp.get("content", ""))
-                            except (json.JSONDecodeError, TypeError):
-                                pass
-        if verdict_captured is not None:
-            break
 
     duration_s = round(time.monotonic() - started_at, 1)
     raw_output = "".join(text_parts)
@@ -322,13 +317,15 @@ async def verify_story(
         [
             f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Story completed: {story.title}",
             f"cost: ${cost_usd:.3f}, duration: {duration_s}s",
-            f"verdict_source: {'write_intercept' if verdict_captured else 'file_or_prose'}",
+            f"verdict_source: {'structured_output' if verdict_data else 'fallback'}",
         ],
     )
 
-    # Use intercepted verdict (preferred), fall back to file/prose parsing
-    if verdict_captured and isinstance(verdict_captured, dict):
-        result = _verdict_from_dict(verdict_captured, story)
+    # Use structured output (preferred), fall back to file/prose parsing
+    if verdict_data:
+        result = _verdict_from_dict(verdict_data, story)
+        # Also write verdict to file for debugging/auditing
+        verdict_file.write_text(json.dumps(verdict_data, indent=2))
     else:
         result = _parse_verdict(verdict_file, raw_output, story)
     result.cost_usd = cost_usd

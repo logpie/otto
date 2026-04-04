@@ -96,6 +96,7 @@ class AgentOptions:
     max_buffer_size: int | None = None
     provider: str | None = None
     disallowed_tools: list[str] | None = None
+    output_format: dict[str, Any] | None = None
 
 
 # Backward-compatible name used throughout the codebase and tests.
@@ -210,6 +211,7 @@ def _sdk_options(options: AgentOptions | None) -> Any:
         agents=opts.agents,
         max_buffer_size=opts.max_buffer_size,
         disallowed_tools=opts.disallowed_tools or [],
+        output_format=opts.output_format,
     )
 
 
