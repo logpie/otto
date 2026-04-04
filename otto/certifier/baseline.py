@@ -208,6 +208,36 @@ class AppRunner:
                 timestamp=time.strftime("%H:%M:%S"),
             )
 
+        # Install deps if missing (worktree cleanup removes node_modules)
+        pkg_json = self.project_dir / "package.json"
+        node_modules = self.project_dir / "node_modules"
+        if pkg_json.exists() and not node_modules.exists():
+            subprocess.run(
+                ["npm", "install", "--no-audit", "--no-fund"],
+                cwd=str(self.project_dir), capture_output=True, timeout=120,
+            )
+            # Prisma projects need generate + db push after fresh install
+            if (self.project_dir / "prisma" / "schema.prisma").exists():
+                subprocess.run(
+                    ["npx", "prisma", "generate"],
+                    cwd=str(self.project_dir), capture_output=True, timeout=60,
+                )
+                subprocess.run(
+                    ["npx", "prisma", "db", "push", "--accept-data-loss"],
+                    cwd=str(self.project_dir), capture_output=True, timeout=60,
+                )
+
+        requirements = self.project_dir / "requirements.txt"
+        if requirements.exists() and not (self.project_dir / ".venv").exists():
+            subprocess.run(
+                ["python3", "-m", "venv", str(self.project_dir / ".venv")],
+                cwd=str(self.project_dir), capture_output=True, timeout=60,
+            )
+            subprocess.run(
+                [str(self.project_dir / ".venv" / "bin" / "pip"), "install", "-q", "-r", str(requirements)],
+                cwd=str(self.project_dir), capture_output=True, timeout=120,
+            )
+
         while self._port_in_use():
             self.port += 1
             self.base_url = f"http://localhost:{self.port}"
