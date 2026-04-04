@@ -125,13 +125,13 @@ RULES:
 
 WORKFLOW:
 1. Execute all happy path steps, verifying each one
-2. If BREAK strategies are specified, spend a few turns trying to break the product
-3. Write the verdict JSON file (this is your LAST action — stop after writing it)
+2. Write the verdict JSON file with happy path results (include empty break_findings)
+3. ONLY THEN, if BREAK strategies are specified, spend a few turns trying to break
 
-CRITICAL — OUTPUT:
-The verdict file is the ONLY output that matters. Do ALL testing first, then
-write ONE verdict file as your FINAL action. After writing the verdict, STOP.
-Do not write additional analysis, summaries, or commentary after the verdict.
+CRITICAL — WRITE THE VERDICT IMMEDIATELY AFTER STEP 2.
+Do not wait until after BREAK testing. The verdict captures the happy path result.
+Break findings are bonus quality signals — the verdict must exist before you start breaking.
+If you run out of turns during BREAK, the happy path verdict is already saved.
 
 Write the file to the path specified in the prompt. The content must be valid
 JSON (not markdown, not prose) matching this schema:
@@ -284,10 +284,9 @@ async def verify_story(
         ],
     )
 
-    # Direct query loop — break when verdict file is written.
-    # This is the root fix for the agent hang: instead of waiting for
-    # the session to end naturally (agent may keep talking), we intercept
-    # the Write tool call for the verdict file and stop immediately.
+    # Direct query loop — break when agent writes the verdict file.
+    # Verdict interception is the primary termination mechanism.
+    # If the agent never writes (rare), the session ends naturally via ResultMessage.
     text_parts: list[str] = []
     cost_usd = 0.0
     verdict_captured: dict[str, Any] | None = None
@@ -308,13 +307,10 @@ async def verify_story(
                         inp = block.input if isinstance(block.input, dict) else {}
                         file_path = str(inp.get("file_path", ""))
                         if file_path == verdict_file_str:
-                            # Verdict written — capture it and stop
                             try:
                                 verdict_captured = json.loads(inp.get("content", ""))
                             except (json.JSONDecodeError, TypeError):
                                 pass
-                            # Let this turn complete, then break on next iteration
-        # Break after the turn where verdict was written
         if verdict_captured is not None:
             break
 
