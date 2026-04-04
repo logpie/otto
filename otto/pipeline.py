@@ -237,6 +237,198 @@ def _read_last_run_cost(project_dir: Path) -> float:
     return 0.0
 
 
+VARIANT_B_SYSTEM_PROMPT = """\
+You are building a product. Build it, write tests, make them pass.
+When you're done building, provide your final status as structured output.
+
+Rules:
+- Explore any existing codebase first
+- Write comprehensive tests for your code
+- Make all tests pass before finishing
+- Do not invent features not in the intent
+"""
+
+VARIANT_B_BUILD_PROMPT = """\
+Build this product:
+
+{intent}
+"""
+
+VARIANT_B_FIX_PROMPT = """\
+A user tested your product and found these issues:
+
+{feedback}
+"""
+
+
+async def build_agent_driven(
+    intent: str,
+    project_dir: Path,
+    config: dict[str, Any],
+    *,
+    variant: str = "b",
+    on_human_feedback: Any = None,
+) -> BuildResult:
+    """Agent-driven build: continuous session with certifier feedback.
+
+    Variant B (default): orchestrator drives the loop, injects feedback.
+    Variant A: agent calls certify() tool (TODO).
+
+    The coding agent keeps its session across build→certify→fix cycles.
+    No session killing, no fix tasks, no context loss.
+    """
+    from otto.agent import ClaudeAgentOptions, _subprocess_env
+    from otto.certifier.isolated import certify_with_retry
+    from otto.certifier.report import CertificationOutcome
+    from otto.feedback import format_certifier_as_feedback, finding_fingerprints
+    from otto.git_ops import build_candidate_commit
+    from otto.session import AgentSession
+
+    build_id = f"build-{int(time.time())}-{os.getpid()}"
+    build_dir = project_dir / "otto_logs" / "builds" / build_id
+    build_dir.mkdir(parents=True, exist_ok=True)
+
+    # Write intent to project root
+    grounding_path = project_dir / "intent.md"
+    if not grounding_path.exists():
+        grounding_path.write_text(intent)
+    _commit_artifacts(project_dir)
+
+    # Configure agent
+    max_rounds = int(config.get("max_verification_rounds", 3))
+
+    options = ClaudeAgentOptions(
+        permission_mode="bypassPermissions",
+        cwd=str(project_dir),
+        system_prompt=VARIANT_B_SYSTEM_PROMPT,
+        env=_subprocess_env(),
+        setting_sources=["project"],
+    )
+    model = config.get("model")
+    if model:
+        options.model = str(model)
+
+    session = AgentSession(
+        intent=intent,
+        options=options,
+        project_dir=project_dir,
+        config=config,
+        checkpoint_dir=build_dir,
+    )
+
+    # Round 0: Build
+    build_prompt = VARIANT_B_BUILD_PROMPT.format(intent=intent)
+    result = await session.start(build_prompt)
+
+    report = None
+    prev_fingerprints: set[str] = set()
+    last_journeys: list[dict[str, Any]] = []
+    last_break_findings: list[dict[str, Any]] = []
+
+    for round_num in range(1, max_rounds + 1):
+        # Check agent's end state
+        status = result.end_status
+        if status == "blocked":
+            break
+        if status == "needs_human_input":
+            if on_human_feedback:
+                human = await on_human_feedback(None)
+                if human:
+                    result = await session.resume(human)
+                    continue
+            break
+
+        # Snapshot candidate
+        candidate_sha = _snapshot_candidate(project_dir, round_num, session.base_sha)
+        session.checkpoint(candidate_sha, state="certifying")
+
+        # Certify in isolated worktree
+        report = certify_with_retry(
+            intent=intent,
+            candidate_sha=candidate_sha,
+            project_dir=project_dir,
+            config=config,
+            port_override=config.get("port_override"),
+            skip_story_ids=None,  # TODO: targeted re-verify
+        )
+        session.checkpoint(
+            candidate_sha,
+            findings=[{"description": f.description, "severity": f.severity}
+                      for f in report.findings] if report.findings else None,
+            state="certified",
+            certifier_outcome=report.outcome.value,
+        )
+
+        # Extract display data
+        tier4 = next((t for t in report.tiers if t.tier == 4), None)
+        if tier4 and hasattr(tier4, "_stories_output"):
+            last_journeys = tier4._stories_output
+        last_break_findings = [
+            {"severity": f.severity, "description": f.description,
+             "diagnosis": f.diagnosis, "fix_suggestion": f.fix_suggestion,
+             "story_id": f.story_id}
+            for f in report.break_findings()
+        ]
+
+        # Outcome dispatch
+        if report.outcome == CertificationOutcome.PASSED:
+            if on_human_feedback:
+                human = await on_human_feedback(report)
+                if human:
+                    result = await session.resume(
+                        f"Product passed testing. The user has additional feedback:\n{human}"
+                    )
+                    continue
+            break
+
+        if report.outcome in (CertificationOutcome.BLOCKED,):
+            break
+        # INFRA_ERROR already retried by certify_with_retry
+        if hasattr(CertificationOutcome, "INFRA_ERROR") and report.outcome == CertificationOutcome.INFRA_ERROR:
+            break
+
+        # Format actionable findings as feedback
+        feedback = format_certifier_as_feedback(report)
+        if not feedback:
+            break
+
+        # No-progress check
+        current_fps = finding_fingerprints(report.critical_findings())
+        if round_num > 1 and current_fps == prev_fingerprints:
+            break
+        prev_fingerprints = current_fps
+
+        # Human feedback (if interactive)
+        if on_human_feedback:
+            human = await on_human_feedback(report)
+            if human:
+                feedback += f"\n\nAdditional feedback from the user:\n{human}"
+
+        # Resume session with feedback
+        session.checkpoint(candidate_sha, state="fixing")
+        fix_prompt = VARIANT_B_FIX_PROMPT.format(feedback=feedback)
+        result = await session.resume(fix_prompt)
+
+    passed = report.passed if report else False
+    return BuildResult(
+        passed=passed,
+        build_id=build_id,
+        rounds=round_num if report else 0,
+        total_cost=session.total_cost + (report.cost_usd if report else 0),
+        journeys=last_journeys,
+        break_findings=last_break_findings,
+    )
+
+
+def _snapshot_candidate(project_dir: Path, round_num: int, base_sha: str) -> str:
+    """Create an immutable candidate ref from the agent's current work."""
+    # Stage all changes (excluding otto-owned files)
+    from otto.git_ops import build_candidate_commit, _anchor_candidate_ref
+    candidate_sha = build_candidate_commit(project_dir, base_sha, pre_existing_untracked=set())
+    _anchor_candidate_ref(project_dir, f"build-round-{round_num}", round_num, candidate_sha)
+    return candidate_sha
+
+
 def _commit_artifacts(project_dir: Path) -> None:
     """Commit build artifacts so worktrees can see them."""
     files = ["tasks.yaml"]

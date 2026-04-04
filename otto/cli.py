@@ -455,7 +455,9 @@ def run(prompt, dry_run, no_spec, no_qa, no_test):
 @click.option("--no-review", is_flag=True, help="Skip plan review, execute immediately")
 @click.option("--no-qa", is_flag=True, help="Skip product-level QA after execution")
 @click.option("--plan/--no-plan", "use_planner", default=None, help="Force planner on/off")
-def build(intent, no_review, no_qa, use_planner):
+@click.option("--agent-driven", is_flag=True, help="Use agent-driven build (experimental)")
+@click.option("--interactive", is_flag=True, help="Pause for human input after each certification round")
+def build(intent, no_review, no_qa, use_planner, agent_driven, interactive):
     """Build a product from a natural language intent.
 
     By default, one agent builds the entire product (monolithic).
@@ -483,13 +485,29 @@ def build(intent, no_review, no_qa, use_planner):
         config["no_review"] = True
 
     # Run the pipeline
-    from otto.pipeline import build_product, BuildResult
+    from otto.pipeline import build_product, build_agent_driven, BuildResult
 
     build_start = time.time()
     console.print()
 
     try:
-        result: BuildResult = asyncio.run(build_product(intent, project_dir, config))
+        if agent_driven:
+            on_feedback = None
+            if interactive:
+                async def _interactive_feedback(report):
+                    """Pause for human input after each certification round."""
+                    console.print("\n  [bold]Interactive mode:[/bold] Enter feedback (empty to continue):")
+                    try:
+                        user_input = input("  > ").strip()
+                        return user_input if user_input else None
+                    except (EOFError, KeyboardInterrupt):
+                        return None
+                on_feedback = _interactive_feedback
+            result: BuildResult = asyncio.run(
+                build_agent_driven(intent, project_dir, config, on_human_feedback=on_feedback)
+            )
+        else:
+            result: BuildResult = asyncio.run(build_product(intent, project_dir, config))
     except KeyboardInterrupt:
         console.print("\n  Aborted.")
         sys.exit(1)
