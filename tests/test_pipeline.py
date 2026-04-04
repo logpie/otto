@@ -159,7 +159,7 @@ def test_plan_fingerprint_with_architecture(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_build_product_no_qa_fails_on_partial_build_and_clears_stale_pending(tmp_git_repo: Path):
+async def test_build_product_no_qa_fails_on_partial_build_and_preserves_unrelated_pending(tmp_git_repo: Path):
     tasks_path = tmp_git_repo / "tasks.yaml"
     add_task(tasks_path, "stale pending task")
     historical = add_task(tasks_path, "historical completed task")
@@ -182,8 +182,11 @@ async def test_build_product_no_qa_fails_on_partial_build_and_clears_stale_pendi
     async def fake_run_per(config, tasks_path, project_dir):
         tasks = load_tasks(tasks_path)
         prompts = {task["prompt"]: task for task in tasks}
-        assert "stale pending task" not in prompts
+        assert "stale pending task" in prompts
         assert "historical completed task" in prompts
+        assert prompts["stale pending task"].get("build_id") is None
+        assert prompts["Build API"]["build_id"] == config["build_id"]
+        assert prompts["Build UI"]["build_id"] == config["build_id"]
         update_task(tasks_path, prompts["Build API"]["key"], status="passed")
         update_task(tasks_path, prompts["Build UI"]["key"], status="failed")
         return 1
@@ -201,7 +204,7 @@ async def test_build_product_no_qa_fails_on_partial_build_and_clears_stale_pendi
     assert result.tasks_failed == 1
 
     final_prompts = {task["prompt"] for task in load_tasks(tasks_path)}
-    assert "stale pending task" not in final_prompts
+    assert "stale pending task" in final_prompts
     assert "historical completed task" in final_prompts
 
 
@@ -248,3 +251,50 @@ async def test_build_product_verification_can_override_partial_build_failure(tmp
     assert result.tasks_passed == 1
     assert result.tasks_failed == 1
     assert verify_sync.call_args.args[1] == product_spec_path
+
+
+@pytest.mark.asyncio
+async def test_build_product_counts_verification_fix_tasks_for_same_build(tmp_git_repo: Path):
+    product_spec_path = tmp_git_repo / "product-spec.md"
+    product_spec_path.write_text("# Product Spec\n")
+
+    async def fake_plan(intent, project_dir, config):
+        return SimpleNamespace(
+            mode="decomposed",
+            tasks=[SimpleNamespace(prompt="Build backend", depends_on=[])],
+            product_spec_path=product_spec_path,
+            cost_usd=0.0,
+        )
+
+    async def fake_run_per(config, tasks_path, project_dir):
+        tasks = {task["prompt"]: task for task in load_tasks(tasks_path)}
+        update_task(tasks_path, tasks["Build backend"]["key"], status="passed")
+        return 0
+
+    def fake_verify(intent, grounding_path, project_dir, tasks_path, config):
+        fix_task = add_task(
+            tasks_path,
+            "Fix checkout flow",
+            spec=[{"text": "Checkout flow works", "binding": "must"}],
+            build_id=config["build_id"],
+        )
+        update_task(tasks_path, fix_task["key"], status="passed")
+        return {
+            "product_passed": True,
+            "rounds": 2,
+            "total_cost": 0.25,
+            "journeys": [{"name": "happy path", "passed": True}],
+        }
+
+    with patch("otto.product_planner.run_product_planner", side_effect=fake_plan):
+        with patch("otto.orchestrator.run_per", side_effect=fake_run_per):
+            with patch("otto.pipeline._run_verification_sync", side_effect=fake_verify):
+                result = await build_product(
+                    "Build a product",
+                    tmp_git_repo,
+                    {"execution_mode": "planned"},
+                )
+
+    assert result.passed is True
+    assert result.tasks_passed == 2
+    assert result.tasks_failed == 0

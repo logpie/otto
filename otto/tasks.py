@@ -9,7 +9,8 @@ import json
 import os
 import tempfile
 import uuid
-from contextlib import suppress
+from contextlib import contextmanager, suppress
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -30,6 +31,27 @@ VALID_TASK_STATES = {
 }
 
 _PLANNER_DERIVED_STATUSES = {"conflict", "blocked"}
+_ACTIVE_BUILD_ID: ContextVar[str | None] = ContextVar("otto_active_build_id", default=None)
+
+
+@contextmanager
+def task_build_scope(build_id: str | None):
+    """Temporarily tag newly created tasks with the active build id."""
+    token = _ACTIVE_BUILD_ID.set(str(build_id).strip() or None if build_id is not None else None)
+    try:
+        yield
+    finally:
+        _ACTIVE_BUILD_ID.reset(token)
+
+
+def _resolved_build_id(build_id: str | None) -> str | None:
+    explicit = str(build_id).strip() if build_id is not None else ""
+    if explicit:
+        return explicit
+    scoped = _ACTIVE_BUILD_ID.get()
+    return str(scoped).strip() or None if scoped is not None else None
+
+
 def _validate_task_status(status: Any) -> None:
     """Raise when Otto task status is not a recognized pipeline state."""
     if status not in VALID_TASK_STATES:
@@ -275,9 +297,11 @@ def add_task(
     verify: str | None = None,
     max_retries: int | None = None,
     spec: list | None = None,
+    build_id: str | None = None,
 ) -> dict[str, Any]:
     """Add a new task to tasks.yaml. Thread-safe via flock."""
     created: dict[str, Any] = {}
+    resolved_build_id = _resolved_build_id(build_id)
 
     def _add(tasks: list[dict[str, Any]]) -> dict[str, Any]:
         existing_keys = {task["key"] for task in tasks if "key" in task}
@@ -295,6 +319,8 @@ def add_task(
             task["max_retries"] = max_retries
         if spec is not None:
             task["spec"] = spec
+        if resolved_build_id is not None:
+            task["build_id"] = resolved_build_id
         tasks.append(task)
         created.update(task)
         return task
@@ -306,9 +332,11 @@ def add_task(
 def add_tasks(
     tasks_path: Path,
     batch: list[dict[str, Any]],
+    build_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Add multiple tasks atomically. Thread-safe via flock."""
     created_keys: list[str] = []
+    resolved_build_id = _resolved_build_id(build_id)
 
     def _add_batch(tasks: list[dict[str, Any]]) -> None:
         existing_keys = {task["key"] for task in tasks if "key" in task}
@@ -329,6 +357,8 @@ def add_tasks(
             for field in ("verify", "max_retries", "spec"):
                 if field in item and item[field] is not None:
                     task[field] = item[field]
+            if resolved_build_id is not None:
+                task["build_id"] = resolved_build_id
             new_tasks.append((item, task))
 
         for idx, (item, task) in enumerate(new_tasks):

@@ -59,12 +59,14 @@ async def build_product(
 ) -> BuildResult:
     """The entire otto build pipeline: plan -> build -> certify -> fix -> verify."""
     import asyncio
-    from otto.tasks import add_tasks, clear_pending_tasks, load_tasks
+    from otto.tasks import add_tasks
 
     build_id = f"build-{int(time.time())}-{os.getpid()}"
     build_dir = project_dir / "otto_logs" / "builds" / build_id
     build_dir.mkdir(parents=True, exist_ok=True)
     total_cost = 0.0
+    build_config = dict(config)
+    build_config["build_id"] = build_id
 
     mode = resolve_build_mode(config)
     tasks_path = project_dir / "tasks.yaml"
@@ -106,30 +108,25 @@ async def build_product(
         tasks = [{"prompt": f"Build the product described below.\n\n{intent}"}]
 
     # Persist artifacts before worktree creation
-    clear_pending_tasks(tasks_path)
-    created_tasks = add_tasks(tasks_path, tasks)
-    build_task_keys = {str(task.get("key", "") or "") for task in created_tasks}
+    add_tasks(tasks_path, tasks, build_id=build_id)
 
     _commit_artifacts(project_dir)
 
     # Build
     from otto.orchestrator import run_per
-    exit_code = await run_per(config, tasks_path, project_dir)
+    exit_code = await run_per(build_config, tasks_path, project_dir)
 
-    all_tasks = load_tasks(tasks_path) if tasks_path.exists() else []
-    build_tasks = [task for task in all_tasks if str(task.get("key", "") or "") in build_task_keys]
-    tasks_passed = sum(1 for task in build_tasks if task.get("status") in ("passed", "merged", "verified"))
-    tasks_failed = sum(1 for task in build_tasks if task.get("status") in ("failed", "merge_failed"))
+    tasks_passed, tasks_failed = _build_task_counts(tasks_path, build_id)
 
-    if exit_code != 0 and tasks_failed > 0 and config.get("skip_product_qa"):
+    if exit_code != 0 and tasks_failed > 0 and build_config.get("skip_product_qa"):
         return BuildResult(
             passed=False, build_id=build_id, error="build failed",
             total_cost=total_cost, tasks_passed=tasks_passed, tasks_failed=tasks_failed,
         )
 
     # Certify -> Fix -> Verify
-    if not config.get("skip_product_qa"):
-        config.setdefault("proof_of_work", True)
+    if not build_config.get("skip_product_qa"):
+        build_config.setdefault("proof_of_work", True)
 
         loop = asyncio.get_event_loop()
         verify_result = await loop.run_in_executor(
@@ -139,11 +136,12 @@ async def build_product(
                 certifier_grounding_path,
                 project_dir,
                 tasks_path,
-                config,
+                build_config,
             ),
         )
         total_cost += verify_result.get("total_cost", 0.0)
         verification_passed = bool(verify_result.get("product_passed", False))
+        tasks_passed, tasks_failed = _build_task_counts(tasks_path, build_id)
 
         return BuildResult(
             passed=verification_passed,
@@ -171,13 +169,30 @@ def _run_verification_sync(
     """Run verification synchronously (certifier uses asyncio.run internally)."""
     import asyncio
     from otto.verification import run_product_verification
-    return asyncio.run(run_product_verification(
-        product_spec_path=product_spec_path,
-        project_dir=project_dir,
-        tasks_path=tasks_path,
-        config=config,
-        intent=intent,
-    ))
+    from otto.tasks import task_build_scope
+
+    with task_build_scope(config.get("build_id")):
+        return asyncio.run(run_product_verification(
+            product_spec_path=product_spec_path,
+            project_dir=project_dir,
+            tasks_path=tasks_path,
+            config=config,
+            intent=intent,
+        ))
+
+
+def _build_task_counts(tasks_path: Path, build_id: str) -> tuple[int, int]:
+    """Count only tasks created for the current build."""
+    from otto.tasks import load_tasks
+
+    all_tasks = load_tasks(tasks_path) if tasks_path.exists() else []
+    build_tasks = [
+        task for task in all_tasks
+        if str(task.get("build_id", "") or "") == build_id
+    ]
+    tasks_passed = sum(1 for task in build_tasks if task.get("status") in ("passed", "merged", "verified"))
+    tasks_failed = sum(1 for task in build_tasks if task.get("status") in ("failed", "merge_failed"))
+    return tasks_passed, tasks_failed
 
 
 def _plan_fingerprint(plan: Any, project_dir: Path) -> str:

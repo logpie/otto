@@ -1473,6 +1473,16 @@ async def run_per(
         if error_code is not None:
             return error_code
 
+        active_build_id = str(config.get("build_id", "") or "").strip()
+        if active_build_id:
+            pending = [
+                task for task in pending
+                if str(task.get("build_id", "") or "") == active_build_id
+            ]
+            if not pending:
+                console.print("No pending tasks for current build", style="dim")
+                return 0
+
         # Display task summary
         total_specs = sum(len(t.get("spec") or []) for t in pending)
         pending_keys = {t["key"] for t in pending}
