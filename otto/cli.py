@@ -133,7 +133,19 @@ def main():
 
     Run 'otto COMMAND -h' for command-specific options.
     """
-    pass
+    # Fail early if otto is loaded from a different source than expected.
+    # This catches the shared-venv bug where worktree otto runs main repo code.
+    import otto as _otto_pkg
+    _otto_src = str(Path(_otto_pkg.__file__).resolve().parent)
+    _cwd = str(Path.cwd().resolve())
+    if "worktree" in _cwd and "worktree" not in _otto_src:
+        click.echo(
+            f"ERROR: otto loaded from {_otto_src}\n"
+            f"  but cwd is a worktree ({_cwd}).\n"
+            f"  Use the worktree's own venv: .venv/bin/otto",
+            err=True,
+        )
+        sys.exit(1)
 
 
 
