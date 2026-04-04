@@ -23,6 +23,34 @@ def _outer_log(project_dir: Path, *lines: str) -> None:
     append_text_log(project_dir / "otto_logs" / "outer-loop.log", lines)
 
 
+def _bundle_fix_tasks(failed_journeys: list[dict[str, Any]]) -> str:
+    """Bundle all failed journeys into a single fix task prompt."""
+    if len(failed_journeys) == 1:
+        return _fix_task_from_journey(failed_journeys[0])
+
+    lines = [f"Fix {len(failed_journeys)} product issues found by user journey testing:\n"]
+    for i, story in enumerate(failed_journeys, 1):
+        lines.append(f"--- Issue {i}: {story.get('name', 'unknown')} ---")
+        if story.get("diagnosis"):
+            lines.append(f"Diagnosis: {story['diagnosis']}")
+        if story.get("fix_suggestion"):
+            lines.append(f"Suggested fix: {story['fix_suggestion']}")
+        failed_steps = [s for s in story.get("steps", []) if s.get("outcome") == "fail"]
+        if failed_steps:
+            lines.append("Failed steps:")
+            for step in failed_steps:
+                lines.append(f"  - {step.get('action', '?')}")
+                if step.get("diagnosis"):
+                    lines.append(f"    {step['diagnosis']}")
+        lines.append("")
+
+    lines.append(
+        "Fix all issues above. Do not change the product spec or scope. "
+        "See product-spec.md for the full product definition."
+    )
+    return "\n".join(lines)
+
+
 def _fix_task_from_journey(story: dict[str, Any]) -> str:
     """Build a targeted fix task prompt from a failed journey story.
 
@@ -172,12 +200,14 @@ async def run_product_verification(
 
         prev_failure_count = failure_count
 
-        # Create targeted fix tasks from failed journeys
-        for story in failed_journeys:
-            fix_prompt = _fix_task_from_journey(story)
-            add_task(tasks_path, fix_prompt)
-            fix_tasks_created += 1
-            _outer_log(project_dir, f"  fix task: {story.get('name', '?')}")
+        # Bundle all failures into one fix task (one agent, one pass)
+        fix_prompt = _bundle_fix_tasks(failed_journeys)
+        add_task(tasks_path, fix_prompt)
+        fix_tasks_created += 1
+        _outer_log(
+            project_dir,
+            f"  fix task created ({len(failed_journeys)} failure(s) bundled)",
+        )
 
     return {
         "product_passed": False,
