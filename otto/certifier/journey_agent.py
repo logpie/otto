@@ -115,12 +115,15 @@ RULES:
 7. For browser verification: if you have browser tools, use them to check the UI.
    If not, verify via API only and note that browser verification was skipped.
 
-After completing the happy path, if BREAK strategies are specified, spend a few
-turns trying to break the product. Report findings as quality observations.
+WORKFLOW:
+1. Execute all happy path steps, verifying each one
+2. If BREAK strategies are specified, spend a few turns trying to break the product
+3. Write the verdict JSON file (this is your LAST action — stop after writing it)
 
 CRITICAL — OUTPUT:
-You MUST write your verdict as a JSON file using the Write tool BEFORE finishing.
-This is mandatory. If you do not write the file, your work is lost.
+The verdict file is the ONLY output that matters. Do ALL testing first, then
+write ONE verdict file as your FINAL action. After writing the verdict, STOP.
+Do not write additional analysis, summaries, or commentary after the verdict.
 
 Write the file to the path specified in the prompt. The content must be valid
 JSON (not markdown, not prose) matching this schema:
@@ -254,7 +257,7 @@ async def verify_story(
         setting_sources=["project"],
         env=_subprocess_env(),
         system_prompt=JOURNEY_AGENT_SYSTEM_PROMPT,
-        # No max_turns — agent works until done
+        max_turns=40,  # safety cap — 7-8 step story + BREAK should finish in ~30 turns
     )
     if mcp_servers:
         options.mcp_servers = mcp_servers
