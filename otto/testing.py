@@ -137,11 +137,16 @@ def _install_deps(worktree_path: Path, timeout: int) -> str | None:
 
     # Node.js: package.json with node_modules missing
     if (worktree_path / "package.json").exists() and not (worktree_path / "node_modules").exists():
-        subprocess.run(
-            ["npm", "install", "--no-audit", "--no-fund"],
-            cwd=worktree_path, capture_output=True, timeout=timeout,
-            env=env,
-        )
+        # Symlink from main repo's node_modules if available (avoids full reinstall per worktree)
+        main_nm = worktree_path.parent.parent / "node_modules"
+        if main_nm.is_dir():
+            (worktree_path / "node_modules").symlink_to(main_nm)
+        else:
+            subprocess.run(
+                ["npm", "install", "--no-audit", "--no-fund"],
+                cwd=worktree_path, capture_output=True, timeout=timeout,
+                env=env,
+            )
 
     return venv_bin
 

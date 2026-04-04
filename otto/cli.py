@@ -3,9 +3,11 @@
 import asyncio
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
+from dataclasses import asdict
 from pathlib import Path
 
 # Clear CLAUDECODE at startup so otto can run from inside Claude Code sessions.
@@ -570,24 +572,39 @@ def build(intent, no_review, no_qa):
     build_task_keys = {t["key"] for t in created}
     console.print(f"  [success]Added {len(created)} task(s) to tasks.yaml[/success]")
 
+    # Step 3.5: Commit plan artifacts so worktrees can see them
+    plan_files = [str(tasks_path)]
+    if plan.product_spec_path and plan.product_spec_path.exists():
+        plan_files.append(str(plan.product_spec_path))
+    if plan.architecture_path and plan.architecture_path.exists():
+        plan_files.append(str(plan.architecture_path))
+    subprocess.run(["git", "add"] + plan_files, cwd=project_dir, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "otto: plan artifacts"],
+        cwd=project_dir, capture_output=True,
+    )
+
     # Step 4: Execute via inner loop
     console.print()
     from otto.orchestrator import run_per
     exit_code = asyncio.run(run_per(config, tasks_path, project_dir))
 
-    # Step 5: Product QA + fix loop (if decomposed and not skipped)
+    # Step 5: Product verification + fix loop (if decomposed and not skipped)
     outer_result = None
     if plan.mode == "decomposed" and not config.get("skip_product_qa"):
         if exit_code == 0 and plan.product_spec_path and plan.product_spec_path.exists():
             console.print()
-            console.print("  [bold]Product QA[/bold] — verifying user journeys...")
+            console.print("  [bold]Product Verification[/bold] — certifier (Tier 1 + Tier 2)...")
             try:
+                # PoW on by default for outer loop — fix tasks need auditable proofs
+                config.setdefault("proof_of_work", True)
                 from otto.outer_loop import run_outer_loop
                 outer_result = asyncio.run(run_outer_loop(
                     product_spec_path=plan.product_spec_path,
                     project_dir=project_dir,
                     tasks_path=tasks_path,
                     config=config,
+                    intent=intent,
                 ))
 
                 if outer_result.get("product_passed"):
@@ -679,31 +696,230 @@ def build(intent, no_review, no_qa):
 @click.option("--port", "port_override", type=int, default=None, help="Connect to an already-running app on this port")
 @click.option("--output", default="-", help="Path to write the JSON report ('-' for stdout)")
 @click.option("--tier", type=click.IntRange(0, 2), default=1, show_default=True,
-              help="Certification tier: 0=adapter only, 1=baseline, 2=agentic (future)")
-def certify(project_dir, intent, port_override, output, tier):
+              help="Certification tier: 0=adapter only, 1=baseline, 2=full (baseline + journeys + PoW)")
+@click.option("--matrix", "matrix_path_str", default=None, type=click.Path(exists=True),
+              help="Path to a pre-compiled matrix JSON (for fair cross-product comparisons)")
+@click.option("--journeys", "journeys_path_str", default=None, type=click.Path(exists=True),
+              help="Path to a pre-compiled journeys JSON (for fair Tier 2 comparisons)")
+@click.option("--plan", "plan_path_str", default=None, type=click.Path(exists=True),
+              help="Path to a pre-bound certifier plan JSON")
+def certify(project_dir, intent, port_override, output, tier, matrix_path_str, journeys_path_str, plan_path_str):
     """Certify a project against a product intent."""
 
     from otto.certifier.adapter import analyze_project
+    from otto.certifier.binder import bind, load_bound_plan, save_bound_plan
     from otto.certifier.baseline import (
-        certify as run_certify,
+        _report_payload,
+        AppRunner,
+        judge,
+        load_or_compile_journeys,
         load_or_compile_matrix,
         print_report,
+        run_baseline_from_bound_plan,
         save_report,
     )
     from otto.certifier.classifier import classify
+    from otto.certifier.journey_compiler import JourneyMatrix
 
     project_dir = project_dir.resolve()
     config: dict = {}
+    report_dir = project_dir / "certifier-reports"
+    bound_plan = None
+    bound_plan_path: Path | None = None
+    matrix = None
+    matrix_source = "bound_plan" if plan_path_str else "compiled"
+    matrix_path = Path(plan_path_str) if plan_path_str else project_dir / "otto_logs" / "certifier" / "matrix.json"
+    compile_duration_s = 0.0
+    j_source, j_path, j_duration, j_compile_cost = "bound_plan", matrix_path, 0.0, 0.0
 
-    if tier == 2:
-        raise click.ClickException("Tier 2 agentic certification is not implemented yet")
+    if matrix_path_str:
+        click.echo("Warning: --matrix is deprecated; prefer --plan.", err=True)
+    if journeys_path_str:
+        click.echo("Warning: --journeys is deprecated; prefer --plan.", err=True)
+    if plan_path_str and (matrix_path_str or journeys_path_str):
+        click.echo("Warning: ignoring deprecated --matrix/--journeys because --plan was provided.", err=True)
+    if plan_path_str and tier == 0:
+        raise click.ClickException("--plan is only supported for tier 1 and tier 2 execution")
 
-    matrix, matrix_source, matrix_path, compile_duration_s = load_or_compile_matrix(project_dir, intent, config=config)
+    def _tier2_payload(tier2_result):
+        return {
+            "product_dir": tier2_result.product_dir,
+            "intent": tier2_result.intent,
+            "base_url": tier2_result.base_url,
+            "mode": tier2_result.mode,
+            "score": tier2_result.score(),
+            "journeys_tested": tier2_result.journeys_tested,
+            "journeys_passed": tier2_result.journeys_passed,
+            "journeys_failed": tier2_result.journeys_failed,
+            "duration_s": tier2_result.duration_s,
+            "journeys": [
+                {
+                    "name": journey.name,
+                    "description": journey.description,
+                    "passed": journey.passed,
+                    "stopped_at": journey.stopped_at,
+                    "steps": [
+                        {
+                            "action": step.action,
+                            "detail": step.detail,
+                            "passed": step.passed,
+                            "error": step.error,
+                            "proof": {
+                                "timestamp": step.proof.timestamp,
+                                "request": step.proof.request,
+                                "response": step.proof.response,
+                            } if step.proof.timestamp else None,
+                        }
+                        for step in journey.steps
+                    ],
+                }
+                for journey in tier2_result.journeys
+            ],
+        }
+
+    def _combined_tier2_payload(tier1_result, tier2_result, *, report_path, j_source, j_path, j_duration, j_compile_cost):
+        product_passed = (
+            tier1_result.certified
+            and tier2_result.journeys_tested > 0
+            and tier2_result.journeys_failed == 0
+        )
+        return {
+            "summary": {
+                "project_dir": str(project_dir),
+                "intent": intent,
+                "tier": 2,
+                "product_passed": product_passed,
+                "tier1_certified": tier1_result.certified,
+                "tier2_score": tier2_result.score(),
+                "tier2_journeys_tested": tier2_result.journeys_tested,
+                "tier2_journeys_failed": tier2_result.journeys_failed,
+                "matrix_source": matrix_source,
+                "matrix_path": str(matrix_path),
+                "journey_matrix_source": j_source,
+                "journey_matrix_path": str(j_path),
+                "tier1_compile_cost_usd": tier1_result.compile_cost_usd,
+                "tier1_compile_duration_s": tier1_result.compile_duration_s,
+                "tier2_compile_cost_usd": j_compile_cost,
+                "tier2_compile_duration_s": j_duration,
+                "report_path": str(report_path),
+            },
+            "tier1": _report_payload(tier1_result),
+            "tier2": _tier2_payload(tier2_result),
+            "raw": {
+                "tier1_result": asdict(tier1_result),
+                "tier2_result": asdict(tier2_result),
+            },
+        }
+
+    test_config = analyze_project(project_dir)
     profile = classify(project_dir)
     if port_override is not None:
         profile.port = int(port_override)
         profile.extra["reuse_existing_app"] = True
-    test_config = analyze_project(project_dir)
+    runner = None
+
+    if tier == 2:
+        from otto.certifier.pow_report import generate_pow_report
+        from otto.certifier.tier2 import run_tier2_from_bound_plan
+
+        runner = AppRunner(project_dir, profile)
+        app_evidence = runner.start()
+        if not app_evidence.passed:
+            raise click.ClickException(f"App failed to start: {app_evidence.actual}")
+
+    if plan_path_str:
+        bound_plan_path = Path(plan_path_str)
+        bound_plan = load_bound_plan(bound_plan_path)
+        matrix_source = "bound_plan"
+        matrix_path = bound_plan_path
+        j_source, j_path = "bound_plan", bound_plan_path
+    else:
+        if matrix_path_str:
+            # Shared matrix for fair cross-product comparison — no schema adaptation
+            from otto.certifier.intent_compiler import load_matrix
+            matrix = load_matrix(Path(matrix_path_str))
+            matrix_source = "shared"
+            matrix_path = Path(matrix_path_str)
+            compile_duration_s = 0.0
+        else:
+            matrix, matrix_source, matrix_path, compile_duration_s = load_or_compile_matrix(
+                project_dir,
+                intent,
+                config=config,
+                test_config=test_config,
+            )
+
+        if tier == 2:
+            if journeys_path_str:
+                from otto.certifier.journey_compiler import load_journey_matrix
+                journey_matrix = load_journey_matrix(Path(journeys_path_str))
+                j_source, j_path, j_duration = "shared", Path(journeys_path_str), 0.0
+            else:
+                journey_matrix, j_source, j_path, j_duration = load_or_compile_journeys(
+                    project_dir, intent, config=config,
+                )
+            j_compile_cost = journey_matrix.cost_usd if j_source != "cache" else 0.0
+        else:
+            journey_matrix = JourneyMatrix(intent=matrix.intent, journeys=[])
+
+        bound_plan = bind(matrix, journey_matrix, test_config, profile)
+        bound_plan_path = report_dir / "bound-plan.json"
+        save_bound_plan(bound_plan, bound_plan_path)
+
+    if tier == 2:
+        # Shared app lifecycle
+        try:
+            # Tier 1 — endpoint probes
+            tier1_result = run_baseline_from_bound_plan(
+                bound_plan,
+                project_dir,
+                profile,
+                app_runner=runner,
+            )
+            tier1_result.compile_duration_s = compile_duration_s
+            tier1_result.compile_cost_usd = (
+                matrix.cost_usd if matrix is not None and matrix_source != "cache" else 0.0
+            )
+            tier1_result.compiled_at = matrix.compiled_at if matrix is not None else bound_plan.compiled_at
+            tier1_result.matrix_source = matrix_source
+            tier1_result.matrix_path = str(matrix_path)
+            tier1_result.app_start_evidence = app_evidence
+            tier1_result.verdict = judge(tier1_result)
+            tier1_result.certified = tier1_result.verdict.certified
+
+            # Tier 2 — user journeys
+            tier2_result = run_tier2_from_bound_plan(
+                bound_plan, runner.base_url, project_dir,
+            )
+        finally:
+            runner.stop()
+
+        # Proof-of-work report
+        report_path = generate_pow_report(tier1_result, tier2_result, report_dir)
+        combined_payload = _combined_tier2_payload(
+            tier1_result,
+            tier2_result,
+            report_path=report_path,
+            j_source=j_source,
+            j_path=j_path,
+            j_duration=j_duration,
+            j_compile_cost=j_compile_cost,
+        )
+        payload_json = json.dumps(combined_payload, indent=2, default=str)
+
+        if output in {"-", "stdout"}:
+            click.echo(payload_json)
+            return
+
+        # Print summary
+        print_report(tier1_result)
+        click.echo(f"\nTier 2: {tier2_result.score()}")
+        click.echo(f"Report: {report_path}")
+
+        output_path = Path(output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(payload_json)
+        return
 
     if tier == 0:
         payload = {
@@ -768,18 +984,10 @@ def certify(project_dir, intent, port_override, output, tier):
             output_path.write_text(payload_json)
         return
 
-    result = run_certify(
-        project_dir,
-        intent,
-        config=config,
-        port_override=port_override,
-        matrix=matrix,
-        profile=profile,
-        test_config=test_config,
-    )
+    result = run_baseline_from_bound_plan(bound_plan, project_dir, profile)
     result.compile_duration_s = compile_duration_s
-    result.compile_cost_usd = matrix.cost_usd if matrix_source != "cache" else 0.0
-    result.compiled_at = matrix.compiled_at
+    result.compile_cost_usd = matrix.cost_usd if matrix is not None and matrix_source != "cache" else 0.0
+    result.compiled_at = matrix.compiled_at if matrix is not None else bound_plan.compiled_at
     result.matrix_source = matrix_source
     result.matrix_path = str(matrix_path)
 
