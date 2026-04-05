@@ -507,6 +507,7 @@ You are building a product from scratch. You are an autonomous developer.
 3. When ready, use the certify tool to get real user feedback.
    Run `{certify_help}` to see full usage instructions.
    Quick version: `certify start` → poll `certify status` → read results.
+   Poll certify status every 15 seconds (it's instant). Don't sleep for long intervals.
 4. If "failed": read the issues, fix them, certify again.
 5. If "passed": you're done.
 6. If "error": infrastructure problem, NOT your code. Stop and report.

@@ -25,6 +25,39 @@ from otto.agent import ClaudeAgentOptions, _subprocess_env, run_agent_query
 logger = logging.getLogger("otto.certifier.stories")
 
 
+def _fix_json_newlines(s: str) -> str:
+    """Fix literal newlines inside JSON string values.
+
+    LLMs often produce JSON with real line breaks inside quoted strings
+    instead of \\n escape sequences. This scans the string and replaces
+    literal newlines (0x0a) that appear inside quoted values.
+    """
+    result = []
+    in_string = False
+    i = 0
+    while i < len(s):
+        c = s[i]
+        if c == "\\" and in_string and i + 1 < len(s):
+            # Escaped character — pass through both chars
+            result.append(c)
+            result.append(s[i + 1])
+            i += 2
+            continue
+        if c == '"':
+            in_string = not in_string
+            result.append(c)
+        elif c == "\n" and in_string:
+            result.append("\\n")
+        elif c == "\r" and in_string:
+            result.append("\\r")
+        elif c == "\t" and in_string:
+            result.append("\\t")
+        else:
+            result.append(c)
+        i += 1
+    return "".join(result)
+
+
 @dataclass
 class StoryStep:
     """A single step in a user story."""
@@ -209,7 +242,12 @@ def _parse_stories(raw: str, intent: str) -> StorySet:
     if json_str is None:
         raise ValueError(f"No JSON in story compiler output: {text[:300]}")
 
-    data = json.loads(json_str)
+    try:
+        data = json.loads(json_str)
+    except json.JSONDecodeError:
+        # LLMs often produce literal newlines inside JSON string values.
+        # Attempt repair (same fix as product_planner._fix_json_newlines).
+        data = json.loads(_fix_json_newlines(json_str))
     stories = []
     for item in data.get("stories", []):
         steps = []

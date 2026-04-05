@@ -492,6 +492,7 @@ def _run_certifier_child(
         for r in tier4._cert_result.results:
             stories.append({
                 "name": r.story_title,
+                "story_id": r.story_id if hasattr(r, "story_id") else "",
                 "passed": r.passed,
                 "blocked_at": r.blocked_at,
                 "diagnosis": r.diagnosis if not r.passed else None,
@@ -783,6 +784,8 @@ def _passed_story_ids_from_history(history: list[dict[str, object]]) -> set[str]
     """Extract story IDs that passed in the most recent round.
 
     Returns None if no story data is available (don't skip anything).
+    Uses ``story_id`` (slug like "first-todo-experience") which is stable
+    across compilations, falling back to ``name`` for older history entries.
     """
     if not history:
         return None
@@ -793,9 +796,10 @@ def _passed_story_ids_from_history(history: list[dict[str, object]]) -> set[str]
     passed = set()
     for story in stories:
         if isinstance(story, dict) and story.get("passed"):
-            name = story.get("name", "")
-            if name:
-                passed.add(name)
+            # Prefer story_id (stable slug) over name (stochastic title)
+            sid = story.get("story_id") or story.get("name", "")
+            if sid:
+                passed.add(sid)
     return passed if passed else None
 
 
