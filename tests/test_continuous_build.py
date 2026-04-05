@@ -314,11 +314,19 @@ class TestContinuousBuild:
     @pytest.mark.asyncio
     async def test_agentic_runs_single_session(self, tmp_git_repo):
         """Agentic mode: one session, agent drives everything."""
+        import json as _json
         from otto.pipeline import build_agentic
 
         async def fake_query(prompt, options, **kwargs):
-            # Agent "builds" and "calls certify" — we just return text
-            return '"status": "passed"', 0.5, SimpleNamespace(session_id="s1")
+            # Simulate: agent built product and certify passed
+            # Write fake history to simulate certify CLI results
+            job_dir = tmp_git_repo / "otto_logs" / "certify-job"
+            job_dir.mkdir(parents=True, exist_ok=True)
+            (job_dir / "history.json").write_text(_json.dumps([
+                {"status": "passed", "round": 1, "cost_usd": 1.50,
+                 "issues_count": 0, "stories_passed": 7, "stories_total": 7}
+            ]))
+            return "built and certified", 0.5, SimpleNamespace(session_id="s1")
 
         with patch("otto.agent.run_agent_query", side_effect=fake_query), \
              patch("otto.pipeline._commit_artifacts"):
@@ -327,6 +335,8 @@ class TestContinuousBuild:
             )
 
         assert result.passed is True
+        assert result.rounds == 1
+        assert result.total_cost == 2.0  # 0.5 agent + 1.5 certifier
 
     @pytest.mark.asyncio
     async def test_continuous_fix_loop(self, tmp_git_repo):

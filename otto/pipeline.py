@@ -504,18 +504,24 @@ You are building a product from scratch. You are an autonomous developer.
 
 1. Read the intent carefully. Plan your approach.
 2. Build the product — write code, write tests, make tests pass.
-3. When ready, call certify() to get user feedback on your product.
-4. Read the feedback. Fix issues. Call certify() again.
-5. Repeat until it passes or you've addressed all issues.
+3. When ready, use the certify commands to get real user feedback:
+   a. Start: `{certify_start}` — launches certification (returns immediately)
+   b. Poll:  `{certify_status}` — check progress (call every 30-60 seconds)
+   c. When status is "passed", "failed", or "error" — read the results
+4. If "failed": read the issues carefully, fix them, then certify again.
+5. If "passed": you're done.
+6. If "error": infrastructure problem, NOT your code. Stop and report.
 
-certify() submits your current code for user testing and returns feedback.
-Each call takes several minutes. Use it when you believe the product is ready.
+Certification runs real user tests against your product. It takes 5-15 minutes.
+The status command shows progress (e.g. "4/7 stories verified").
 
-certify() returns {status, issues, warnings}:
-- status "passed": product works, you're done.
-- status "failed": issues found, fix them and certify again.
-- status "error": testing infrastructure failed, NOT a code bug. Stop and report.
-  Do NOT attempt code fixes for "error" status.
+The results include:
+- Per-story pass/fail with diagnosis
+- Progress tracking: which issues are new vs persisting vs resolved
+- Cost and budget info
+
+If the progress info says "no progress since last round" — try a different
+approach or stop. Don't repeat the same fix.
 """
 
 
@@ -526,9 +532,9 @@ async def build_agentic(
 ) -> BuildResult:
     """Agentic build: agent drives everything. Calls certify via Bash.
 
-    One session. The agent decides when to request certification by running
-    a certify CLI command. The certifier runs in an isolated worktree.
-    The agent reads the JSON output and decides what to fix.
+    One session. The agent decides when to request certification using
+    a job-based CLI: start (non-blocking) → poll status → read results.
+    The certifier runs in an isolated worktree.
     """
     import sys
     from otto.agent import ClaudeAgentOptions, _subprocess_env, run_agent_query
@@ -543,26 +549,28 @@ async def build_agentic(
         grounding_path.write_text(intent)
     _commit_artifacts(project_dir)
 
-    # Build the certify command the agent will call
+    # Build certify commands
     python = sys.executable
-    certify_cmd = (
-        f"{python} -m otto.certifier.certify_cli "
-        f"{project_dir} {project_dir / 'intent.md'}"
-    )
-    if (project_dir / "otto.yaml").exists():
-        certify_cmd += f" --config {project_dir / 'otto.yaml'}"
+    certify_base = f"{python} -m otto.certifier.certify_cli"
+    config_flag = f" --config {project_dir / 'otto.yaml'}" if (project_dir / "otto.yaml").exists() else ""
 
-    prompt = AGENTIC_SYSTEM_PROMPT + f"""
+    certify_start = f"{certify_base} start {project_dir} {project_dir / 'intent.md'}{config_flag}"
+    certify_status = f"{certify_base} status {project_dir}"
+    certify_results = f"{certify_base} results {project_dir}"
 
-IMPORTANT: To certify your product, run this exact command via Bash:
-  {certify_cmd}
-
-This will test your product as a real user would. It takes several minutes.
-The output is JSON with status/issues/warnings. Read it carefully.
+    prompt = AGENTIC_SYSTEM_PROMPT.format(
+        certify_start=certify_start,
+        certify_status=certify_status,
+    ) + f"""
 
 Now build this product:
 
 {intent}
+
+Certify commands for this project:
+  Start:   {certify_start}
+  Status:  {certify_status}
+  Results: {certify_results}
 """
 
     options = ClaudeAgentOptions(
@@ -579,15 +587,28 @@ Now build this product:
     # One session — agent drives everything
     text, cost, result_msg = await run_agent_query(prompt, options)
 
-    # Parse result — check if certifier was called and what happened
-    # The agent's text output should contain certifier JSON results
-    passed = '"status": "passed"' in text or '"status":"passed"' in text
+    # Parse result from certify job history
+    job_dir = project_dir / "otto_logs" / "certify-job"
+    history_path = job_dir / "history.json"
+    rounds = 0
+    passed = False
+    certifier_cost = 0.0
+
+    if history_path.exists():
+        try:
+            history = json.loads(history_path.read_text())
+            rounds = len(history)
+            certifier_cost = sum(h.get("cost_usd", 0) for h in history)
+            if history:
+                passed = history[-1].get("status") == "passed"
+        except (json.JSONDecodeError, KeyError):
+            pass
 
     return BuildResult(
         passed=passed,
         build_id=build_id,
-        rounds=text.count('"status"'),  # rough count of certify calls
-        total_cost=cost,
+        rounds=rounds,
+        total_cost=cost + certifier_cost,
     )
 
 
