@@ -36,7 +36,7 @@ Certify CLI — submit your product for user testing.
 WORKFLOW:
   1. Build your product. Write tests. Make tests pass.
   2. Run: certify start <project_dir> <intent_file>
-     → Starts certification in the background. Returns immediately.
+     → Starts full certification in the background. Returns immediately.
      → Your tests are checked first — if they fail, certification is refused.
   3. Run: certify status <project_dir>
      → Check progress. Call every 30-60 seconds.
@@ -47,8 +47,9 @@ WORKFLOW:
 
 IF FAILED:
   - Read the issues carefully. Each has a diagnosis and fix suggestion.
-  - Fix your code. Then run certify start again.
-  - Round 2+ automatically skips stories that already passed (faster).
+  - Fix your code. Then certify again.
+  - Use --retest-failed to only re-run failed stories (faster, cheaper).
+  - Use --only "story name" to test a single specific story.
   - Progress tracking tells you if you're making progress or stuck.
 
 IF ERROR:
@@ -56,9 +57,16 @@ IF ERROR:
   - Do NOT attempt code fixes. Report the error.
 
 COMMANDS:
-  certify start <project_dir> <intent_file> [--config <file>]
+  certify start <project_dir> <intent_file> [OPTIONS]
     Start a certification round. Runs tests first as a gate.
     Returns: {"status": "started", "job_id": "...", "round": N}
+
+    Options:
+      --config <file>       Path to otto.yaml config
+      --retest-failed       Only re-run stories that failed last round (skip passed)
+      --only "<story>"      Run only the named story (for quick targeted testing)
+      --skip-tests          Skip the pre-certification test gate
+      --skip-break          Skip break/adversarial testing (faster, less thorough)
 
   certify status <project_dir>
     Check progress of the running certification.
@@ -68,14 +76,19 @@ COMMANDS:
     Get detailed results after certification completes.
     Returns: full JSON with per-story results, issues, warnings, progress.
 
+  certify stories <project_dir> <intent_file> [--config <file>]
+    List compiled stories without running certification.
+    Useful for seeing what will be tested before starting.
+
   certify help
     Show this help text.
 
-NOTES:
-  - Each certification round takes 5-15 minutes (7 user stories tested).
+TIPS:
+  - Full certification: 5-15 min, 7 stories. Use for final validation.
+  - Targeted retest: 1-3 min, only failed stories. Use after fixing specific bugs.
+  - Single story: ~1 min. Use to quickly verify a specific fix.
   - Budget: max 5 rounds by default (configurable in otto.yaml).
-  - Results include progress tracking: new vs persisting vs resolved issues.
-  - Cost and budget info included in results.
+  - Results include cost tracking — be mindful of certification spend.
 """
 
 
@@ -93,6 +106,8 @@ def main():
         _cmd_status()
     elif command == "results":
         _cmd_results()
+    elif command == "stories":
+        _cmd_stories()
     elif command == "_run_child":
         _cmd_run_child()
     else:
@@ -101,19 +116,36 @@ def main():
         sys.exit(1)
 
 
+def _parse_flag(name: str) -> bool:
+    """Check if a flag like --retest-failed is present in argv."""
+    return name in sys.argv
+
+
+def _parse_option(name: str) -> str | None:
+    """Parse a --name value option from argv."""
+    if name in sys.argv:
+        idx = sys.argv.index(name)
+        if idx + 1 < len(sys.argv):
+            return sys.argv[idx + 1]
+    return None
+
+
 def _cmd_start():
     """Start certification in the background. Returns immediately."""
     if len(sys.argv) < 4:
-        print(json.dumps({"error": "Usage: certify start <project_dir> <intent_file> [--config <file>]"}))
+        print(json.dumps({"error": "Usage: certify start <project_dir> <intent_file> [OPTIONS]"}))
         sys.exit(1)
 
     project_dir = Path(sys.argv[2]).resolve()
     intent_file = Path(sys.argv[3]).resolve()
-    config_path = None
-    if "--config" in sys.argv:
-        idx = sys.argv.index("--config")
-        if idx + 1 < len(sys.argv):
-            config_path = Path(sys.argv[idx + 1]).resolve()
+    config_path_str = _parse_option("--config")
+    config_path = Path(config_path_str).resolve() if config_path_str else None
+
+    # Parse options
+    retest_failed = _parse_flag("--retest-failed")
+    only_story = _parse_option("--only")
+    skip_tests = _parse_flag("--skip-tests")
+    skip_break = _parse_flag("--skip-break")
 
     job_root = _job_root(project_dir)
     job_root.mkdir(parents=True, exist_ok=True)
@@ -175,7 +207,7 @@ def _cmd_start():
         return
 
     # Pre-certification test gate: tests must pass before running certifier
-    test_gate_result = _run_test_gate(project_dir)
+    test_gate_result = None if skip_tests else _run_test_gate(project_dir)
     if test_gate_result is not None:
         job_state["status"] = "error"
         job_state["message"] = test_gate_result["message"]
@@ -211,6 +243,12 @@ def _cmd_start():
     ]
     if config_path:
         child_cmd.extend(["--config", str(config_path)])
+    if retest_failed:
+        child_cmd.append("--retest-failed")
+    if only_story:
+        child_cmd.extend(["--only", only_story])
+    if skip_break:
+        child_cmd.append("--skip-break")
 
     # Capture stderr for debugging — if the certifier crashes, we need the traceback
     stderr_path = job_dir / "stderr.log"
@@ -306,6 +344,42 @@ def _cmd_results():
     print(json.dumps(result, indent=2))
 
 
+def _cmd_stories():
+    """List compiled stories without running certification."""
+    if len(sys.argv) < 4:
+        print(json.dumps({"error": "Usage: certify stories <project_dir> <intent_file> [--config <file>]"}))
+        sys.exit(1)
+
+    project_dir = Path(sys.argv[2]).resolve()
+    intent_file = Path(sys.argv[3]).resolve()
+    config_path_str = _parse_option("--config")
+    config = _load_config(Path(config_path_str).resolve() if config_path_str else None)
+
+    intent = intent_file.read_text().strip()
+
+    from otto.certifier.stories import load_or_compile_stories
+    import asyncio
+
+    story_set, source, _, _ = load_or_compile_stories(project_dir, intent, config=config)
+
+    stories_out = []
+    for s in story_set.stories:
+        stories_out.append({
+            "id": s.id,
+            "title": s.title,
+            "persona": s.persona,
+            "critical": s.critical,
+            "steps": len(s.steps),
+            "break_strategies": s.break_strategies if hasattr(s, "break_strategies") else [],
+        })
+
+    print(json.dumps({
+        "stories_count": len(stories_out),
+        "source": source,
+        "stories": stories_out,
+    }, indent=2))
+
+
 def _cmd_run_child():
     """Internal: run certifier in a spawned subprocess. Not for user use."""
     # _run_child <project_dir> <intent_file> <job_dir> <candidate_sha> <round_num> [--config <file>]
@@ -322,8 +396,16 @@ def _cmd_run_child():
         if idx + 1 < len(sys.argv):
             config_path = Path(sys.argv[idx + 1]).resolve()
 
+    # Parse flags forwarded from start
+    retest_failed = _parse_flag("--retest-failed")
+    only_story = _parse_option("--only")
+    skip_break = _parse_flag("--skip-break")
+
     try:
-        _run_certifier_child(project_dir, intent_file, config_path, job_dir, candidate_sha, round_num)
+        _run_certifier_child(
+            project_dir, intent_file, config_path, job_dir, candidate_sha, round_num,
+            retest_failed=retest_failed, only_story=only_story, skip_break=skip_break,
+        )
     except Exception as exc:
         _write_job(job_dir, {
             "job_id": job_dir.name,
@@ -334,7 +416,10 @@ def _cmd_run_child():
         })
 
 
-def _run_certifier_child(project_dir, intent_file, config_path, job_dir, candidate_sha, round_num):
+def _run_certifier_child(
+    project_dir, intent_file, config_path, job_dir, candidate_sha, round_num,
+    *, retest_failed=False, only_story=None, skip_break=False,
+):
     """Run the certifier (in spawned subprocess). Writes results to job_dir."""
 
     intent = intent_file.read_text().strip()
@@ -343,15 +428,27 @@ def _run_certifier_child(project_dir, intent_file, config_path, job_dir, candida
     from otto.certifier.isolated import run_isolated_certifier
     from otto.certifier.report import CertificationOutcome
 
-    # Selective re-verify: skip stories that passed in previous rounds
+    # Selective re-verify: skip stories based on flags
     skip_story_ids: set[str] | None = None
-    if round_num > 1:
+
+    if retest_failed or (round_num > 1):
+        # --retest-failed or auto on round 2+: skip previously passed stories
         history = _load_history(job_dir.parent)
         skip_story_ids = _passed_story_ids_from_history(history)
         skipped = len(skip_story_ids) if skip_story_ids else 0
         if skipped > 0:
-            import sys
-            print(f"Round {round_num}: skipping {skipped} previously-passed stories", file=sys.stderr)
+            import sys as _sys
+            print(f"Round {round_num}: skipping {skipped} previously-passed stories", file=_sys.stderr)
+
+    # --only "story name": test a single specific story (skip all others)
+    # This is handled by compiling stories then filtering — the certifier
+    # needs a story_filter parameter for this. For now, we pass it via config.
+    if only_story:
+        config["certifier_only_story"] = only_story
+
+    # --skip-break: skip adversarial/break testing (faster)
+    if skip_break:
+        config["certifier_skip_break"] = True
 
     report = run_isolated_certifier(
         intent=intent,
