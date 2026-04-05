@@ -560,11 +560,79 @@ def run_unified_certifier(
         duration_s=total_duration,
     )
 
+    # Generate proof-of-work report (includes Tier 4 if available)
+    tier4_obj = next((t for t in tiers if t.tier == 4), None)
+    tier4_results = tier4_obj._cert_result.results if tier4_obj and hasattr(tier4_obj, "_cert_result") else None
+    try:
+        report_dir = project_dir / "otto_logs" / "certifier"
+        _generate_tier4_pow(report_dir, tier4_results, report)
+    except Exception as exc:
+        logger.warning("Failed to generate PoW report: %s", exc)
+
     logger.info(
         "Unified certifier done: %s, %d findings, %.1fs, $%.3f",
         outcome.value, len(all_findings), total_duration, total_cost,
     )
     return report
+
+
+def _generate_tier4_pow(
+    output_dir: Path,
+    tier4_results: list[Any] | None,
+    report: Any,
+) -> None:
+    """Generate a PoW report for the unified certifier (Tier 4 focused).
+
+    Uses shared formatters from pow_report.py for Tier 4 sections.
+    """
+    import json as _json
+    from otto.certifier.pow_report import format_tier4_json, format_tier4_markdown
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    lines = [
+        "# Proof-of-Work Certification Report",
+        "",
+        f"> **Generated:** {time.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"> **Outcome:** {report.outcome.value}",
+        f"> **Duration:** {report.duration_s:.0f}s",
+        f"> **Cost:** ${report.cost_usd:.2f}",
+        "",
+        "## Tier Summary",
+        "",
+        "| Tier | Status | Duration | Cost |",
+        "|------|--------|----------|------|",
+    ]
+    for t in report.tiers:
+        lines.append(f"| {t.tier}. {t.name} | {t.status.value} | {t.duration_s:.1f}s | ${t.cost_usd:.3f} |")
+    lines.append("")
+
+    if tier4_results:
+        lines.extend(format_tier4_markdown(tier4_results))
+
+    # Findings summary
+    if report.findings:
+        lines.extend(["## Findings", ""])
+        for f in report.findings:
+            lines.append(f"- [{f.severity}] {f.description}")
+            if f.diagnosis:
+                lines.append(f"  _{f.diagnosis}_")
+        lines.append("")
+
+    (output_dir / "proof-of-work.md").write_text("\n".join(lines) + "\n")
+
+    # Machine-readable JSON
+    json_data: dict[str, Any] = {
+        "generated": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "outcome": report.outcome.value,
+        "duration_s": report.duration_s,
+        "cost_usd": report.cost_usd,
+    }
+    if tier4_results:
+        json_data["tier4_stories"] = format_tier4_json(tier4_results)
+    (output_dir / "proof-of-work.json").write_text(
+        _json.dumps(json_data, indent=2, default=str)
+    )
 
 
 def _run_tier4_journeys(

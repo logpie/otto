@@ -25,8 +25,13 @@ def generate_pow_report(
     tier2: Tier2Result,
     output_dir: Path,
     label: str = "",
+    *,
+    tier4_results: list[Any] | None = None,
 ) -> Path:
-    """Generate a complete proof-of-work report."""
+    """Generate a complete proof-of-work report.
+
+    tier4_results: optional list of JourneyResult from agentic story verification.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
 
     lines = [
@@ -43,6 +48,10 @@ def generate_pow_report(
         f"| Tier 1 (Endpoints) | {tier1.claims_passed}/{tier1.claims_tested} ({_pct(tier1.claims_passed, tier1.claims_tested)}) | API endpoints exist and respond correctly |",
         f"| Tier 2 (Journeys) | {tier2.journey_score()} | Multi-step user flows complete end-to-end |",
         f"| Tier 2 (Steps) | {tier2.step_score()} | Individual actions within journeys |",
+        *(
+            [f"| Tier 4 (Stories) | {sum(1 for r in tier4_results if r.passed)}/{len(tier4_results)} | Agentic user story verification |"]
+            if tier4_results else []
+        ),
         "",
         f"**Verdict:** {tier1.verdict.summary if tier1.verdict else 'Unknown'}",
         "",
@@ -151,6 +160,10 @@ def generate_pow_report(
                 lines.append(f"> ⚠ {s.error}")
             lines.append("")
 
+    # --- Tier 4 ---
+    if tier4_results:
+        lines.extend(format_tier4_markdown(tier4_results))
+
     # --- Scope ---
     lines.extend([
         "---",
@@ -223,9 +236,76 @@ def generate_pow_report(
             for j in tier2.journeys
         ],
     }
+    if tier4_results:
+        json_data["tier4_stories"] = format_tier4_json(tier4_results)
+
     json_path.write_text(json.dumps(json_data, indent=2, default=str))
 
     return report_path
+
+
+def format_tier4_markdown(tier4_results: list[Any]) -> list[str]:
+    """Format Tier 4 results as markdown lines. Shared by v1 and v2 PoW paths."""
+    passed = sum(1 for r in tier4_results if r.passed)
+    lines = [
+        "---",
+        "",
+        f"## Tier 4 — Agentic Story Verification ({passed}/{len(tier4_results)} passed)",
+        "",
+        "Each story was verified by an AI agent simulating a real user.",
+        "",
+    ]
+    for r in tier4_results:
+        icon = "✓" if r.passed else "✗"
+        lines.append(f"### {icon} {r.story_title} ({r.persona}, {r.duration_s:.0f}s, ${r.cost_usd:.3f})")
+        if r.summary:
+            summary_lines = r.summary.strip().split("\n")
+            tail = summary_lines[-5:] if len(summary_lines) > 5 else summary_lines
+            lines.append("")
+            for sl in tail:
+                lines.append(f"> {sl}")
+        if r.blocked_at:
+            lines.append(f"- **Blocked at:** {r.blocked_at}")
+        if not r.passed and r.diagnosis:
+            lines.append(f"- **Diagnosis:** {r.diagnosis}")
+        if not r.passed and r.fix_suggestion:
+            lines.append(f"- **Suggested fix:** {r.fix_suggestion}")
+        failed = [s for s in r.steps if s.outcome == "fail"]
+        if failed:
+            lines.append("")
+            lines.append("**Failed steps:**")
+            for s in failed:
+                lines.append(f"- ✗ {s.action}")
+                if s.diagnosis:
+                    lines.append(f"  _{s.diagnosis}_")
+        if r.break_findings:
+            lines.append("")
+            lines.append("**Break findings:**")
+            for b in r.break_findings:
+                lines.append(f"- [{b.severity}] {b.technique}: {b.description}")
+        lines.append("")
+    return lines
+
+
+def format_tier4_json(tier4_results: list[Any]) -> list[dict[str, Any]]:
+    """Format Tier 4 results as JSON-serializable dicts. Shared by v1 and v2 PoW paths."""
+    return [
+        {
+            "story_id": r.story_id,
+            "title": r.story_title,
+            "persona": r.persona,
+            "passed": r.passed,
+            "duration_s": r.duration_s,
+            "cost_usd": r.cost_usd,
+            "diagnosis": r.diagnosis if not r.passed else None,
+            "fix_suggestion": r.fix_suggestion if not r.passed else None,
+            "failed_steps": [
+                {"action": s.action, "diagnosis": s.diagnosis}
+                for s in r.steps if s.outcome == "fail"
+            ],
+        }
+        for r in tier4_results
+    ]
 
 
 def _append_tier1_proof(lines: list[str], claim: Any) -> None:
