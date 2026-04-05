@@ -151,6 +151,14 @@ class BaselineRunState:
     auth_login_claim_ran: bool = False
 
 
+def _find_free_port() -> int:
+    """Ask the OS for a free port. Avoids race conditions between concurrent certifiers."""
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
+
+
 class AppRunner:
     """Manages starting and stopping the app under test."""
 
@@ -158,7 +166,7 @@ class AppRunner:
         self.project_dir = project_dir
         self.profile = profile
         self.process: subprocess.Popen | None = None
-        self.port = profile.port or 3000
+        self.port = profile.port or _find_free_port()
         self.base_url = f"http://localhost:{self.port}"
 
     def start(self, timeout: int = 30) -> Evidence:
