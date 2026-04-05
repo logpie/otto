@@ -432,16 +432,24 @@ th {{ background: #f9fafb; }}
 </div>"""]
 
     # Pre-checks section from tiers 1-3
+    _tier_labels = {
+        1: "Tests pass, app starts",
+        2: "API routes respond",
+        3: "Regression tests",
+    }
     html.append('<div class="prechecks"><strong>Pre-checks</strong>')
     for t in report.tiers:
         if t.tier >= 4:
             continue
         icon = "✓" if t.status.value == "passed" else ("⊘" if t.status.value == "skipped" else "✗")
+        label = _tier_labels.get(t.tier, t.name)
         detail = ""
         if t.findings:
             issues = [f.description for f in t.findings[:3]]
             detail = f' — {"; ".join(issues)}'
-        html.append(f'<div class="check">{icon} Tier {t.tier}: {t.name} ({t.duration_s:.1f}s){detail}</div>')
+        elif t.status.value == "skipped":
+            detail = " — not yet implemented"
+        html.append(f'<div class="check">{icon} {label} ({t.duration_s:.1f}s){detail}</div>')
     html.append("</div>")
 
     # Stories
