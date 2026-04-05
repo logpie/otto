@@ -206,6 +206,18 @@ RULES:
 6. For each failure, suggest a concrete fix (what code change would resolve it).
 7. Do NOT use WebFetch for localhost URLs — it cannot reach them. Use curl via Bash.
 8. Be efficient. One curl per verification, check the result, move on.
+
+VERDICT FORMAT — when you finish testing, end with these exact markers:
+
+VERDICT: PASS or VERDICT: FAIL
+BLOCKED_AT: <step description or null>
+DIAGNOSIS: <one-line root cause or null>
+SUGGESTED_FIX: <one-line fix or null>
+FAILED_STEP: <action> | <diagnosis>
+FAILED_STEP: <action> | <diagnosis>
+
+Include one FAILED_STEP line per failed step. Omit if all passed.
+These markers MUST appear in your final message — they are machine-parsed.
 """
 
 
@@ -311,55 +323,14 @@ async def verify_story(
     if chrome_config:
         mcp_servers["chrome-devtools"] = chrome_config
 
-    # Structured output — kept lean but retains fields needed downstream:
-    # - fix_suggestion: flows into fix task generation for coding agent
-    # - blocked_at: used by certify CLI for progress tracking
-    # - break_findings: only when break phase enabled
-    verdict_schema: dict[str, Any] = {
-        "type": "object",
-        "properties": {
-            "story_passed": {"type": "boolean"},
-            "blocked_at": {"type": ["string", "null"]},
-            "summary": {"type": "string"},
-            "diagnosis": {"type": ["string", "null"]},
-            "fix_suggestion": {"type": ["string", "null"]},
-            "steps": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "action": {"type": "string"},
-                        "outcome": {"type": "string", "enum": ["pass", "fail", "blocked"]},
-                        "diagnosis": {"type": ["string", "null"]},
-                        "fix_suggestion": {"type": ["string", "null"]},
-                    },
-                },
-            },
-        },
-        "required": ["story_passed", "summary", "steps"],
-    }
-    # Only include break_findings in schema when break phase is enabled
-    if not skip_break:
-        verdict_schema["properties"]["break_findings"] = {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "technique": {"type": "string"},
-                    "description": {"type": "string"},
-                    "severity": {"type": "string"},
-                    "fix_suggestion": {"type": "string"},
-                },
-            },
-        }
-
+    # No structured output — verdict extracted from tagged text markers
+    # in the agent's natural output. Saves ~22s of model re-reasoning.
     options = ClaudeAgentOptions(
         permission_mode="bypassPermissions",
         cwd=str(project_dir),
         setting_sources=["project"],
         env=_subprocess_env(),
         system_prompt=JOURNEY_AGENT_SYSTEM_PROMPT,
-        output_format={"type": "json_schema", "schema": verdict_schema},
     )
     if mcp_servers:
         options.mcp_servers = mcp_servers
@@ -379,10 +350,10 @@ async def verify_story(
         ],
     )
 
-    # Session terminates when agent produces structured output (ResultMessage).
+    # Session ends naturally when agent stops producing tool calls.
+    # Verdict extracted from tagged text markers in the agent's output.
     text_parts: list[str] = []
     cost_usd = 0.0
-    verdict_data: dict[str, Any] | None = None
 
     stream = query(prompt=prompt, options=options)
     try:
@@ -391,10 +362,6 @@ async def verify_story(
                 raw_cost = getattr(message, "total_cost_usd", None)
                 if isinstance(raw_cost, (int, float)):
                     cost_usd = float(raw_cost)
-                # Structured output is on the ResultMessage
-                structured = getattr(message, "structured_output", None)
-                if isinstance(structured, dict):
-                    verdict_data = structured
                 break
             elif isinstance(message, AssistantMessage):
                 for block in message.content:
@@ -413,19 +380,16 @@ async def verify_story(
         [
             f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Story completed: {story.title}",
             f"cost: ${cost_usd:.3f}, duration: {duration_s}s",
-            f"verdict_source: {'structured_output' if verdict_data else 'fallback'}",
         ],
     )
 
-    # Use structured output (preferred), fall back to file/prose parsing
-    if verdict_data:
-        result = _verdict_from_dict(verdict_data, story)
-        # Also write verdict to file for debugging/auditing
-        verdict_file.write_text(json.dumps(verdict_data, indent=2))
-    else:
-        result = _parse_verdict(verdict_file, raw_output, story)
+    # Parse verdict from tagged text markers in agent output
+    result = _parse_tagged_verdict(raw_output, story)
     result.cost_usd = cost_usd
     result.duration_s = duration_s
+
+    # Write verdict for debugging/auditing
+    verdict_file.write_text(json.dumps(_journey_result_to_dict(result), indent=2))
 
     # Save raw agent output for debugging
     raw_log = log_dir / f"journey-{story.id}-agent.log"
@@ -468,61 +432,89 @@ def _verdict_from_dict(verdict: dict[str, Any], story: UserStory) -> JourneyResu
     )
 
 
-def _parse_verdict(
-    verdict_file: Path,
-    raw_output: str,
-    story: UserStory,
-) -> JourneyResult:
-    """Parse the journey agent's verdict into a JourneyResult."""
-    verdict = None
+def _parse_tagged_verdict(raw_output: str, story: UserStory) -> JourneyResult:
+    """Parse verdict from tagged text markers in agent output.
 
-    # Try reading from verdict file first
-    if verdict_file.exists():
-        try:
-            verdict = json.loads(verdict_file.read_text())
-        except (json.JSONDecodeError, OSError):
-            pass
+    Looks for markers like:
+        VERDICT: PASS
+        DIAGNOSIS: NextAuth CSRF flow broken
+        SUGGESTED_FIX: Fix the authorize() callback
+        FAILED_STEP: create task | 404 on POST /api/tasks
 
-    # Fallback: extract JSON from agent output
-    if verdict is None:
-        text = raw_output.strip()
-        if "```json" in text:
-            parts = text.split("```json")
-            if len(parts) > 1:
-                json_part = parts[-1].split("```")[0].strip()
-                try:
-                    verdict = json.loads(json_part)
-                except json.JSONDecodeError:
-                    pass
-        if verdict is None:
-            start = text.rfind("{")
-            end = text.rfind("}")
-            if start != -1 and end != -1 and end > start:
-                try:
-                    verdict = json.loads(text[start : end + 1])
-                except json.JSONDecodeError:
-                    pass
+    Falls back to prose inference if markers are missing.
+    """
+    import re as _re
 
-    # Parse verdict into JourneyResult
-    if verdict is None:
-        # Last resort: infer pass/fail from prose output
+    lines = raw_output.split("\n")
+
+    # Extract tagged values (search from end — verdict is at the bottom)
+    def _find_tag(tag: str) -> str:
+        for line in reversed(lines):
+            stripped = line.strip()
+            if stripped.upper().startswith(tag.upper() + ":"):
+                return stripped[len(tag) + 1:].strip()
+        return ""
+
+    verdict_str = _find_tag("VERDICT")
+    diagnosis = _find_tag("DIAGNOSIS")
+    fix_suggestion = _find_tag("SUGGESTED_FIX")
+    blocked_at = _find_tag("BLOCKED_AT")
+
+    # Parse FAILED_STEP lines
+    failed_steps: list[StepResult] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.upper().startswith("FAILED_STEP:"):
+            rest = stripped[len("FAILED_STEP:"):].strip()
+            if "|" in rest:
+                action, step_diag = rest.split("|", 1)
+                failed_steps.append(StepResult(
+                    action=action.strip(), outcome="fail",
+                    diagnosis=step_diag.strip()))
+            else:
+                failed_steps.append(StepResult(
+                    action=rest, outcome="fail"))
+
+    # Determine pass/fail
+    if verdict_str.upper() in ("PASS", "PASSED"):
+        passed = True
+    elif verdict_str.upper() in ("FAIL", "FAILED"):
+        passed = False
+    elif verdict_str.upper() in ("BLOCKED",):
+        passed = False
+    else:
+        # No explicit marker — fall back to prose inference
         raw_lower = raw_output.lower()
-        prose_passed = (
-            "all steps passed" in raw_lower
-            or "story: passed" in raw_lower
-            or "verdict: pass" in raw_lower
+        passed = (
+            "verdict: pass" in raw_lower
+            or "all steps passed" in raw_lower
             or ("pass" in raw_lower and "fail" not in raw_lower)
         )
-        return JourneyResult(
-            story_id=story.id,
-            story_title=story.title,
-            persona=story.persona,
-            passed=prose_passed,
-            summary=raw_output[-500:] if raw_output else "Agent did not produce output",
-            diagnosis="" if prose_passed else "Agent did not write verdict file; inferred from prose",
-        )
+        if not passed and not diagnosis:
+            diagnosis = "No VERDICT marker found; inferred from prose"
 
-    return _verdict_from_dict(verdict, story)
+    # Clean up null-like values
+    if diagnosis.lower() in ("null", "none", "n/a", ""):
+        diagnosis = ""
+    if fix_suggestion.lower() in ("null", "none", "n/a", ""):
+        fix_suggestion = ""
+    if blocked_at.lower() in ("null", "none", "n/a", ""):
+        blocked_at = ""
+
+    # Summary from last ~500 chars of output
+    summary = raw_output[-500:].strip() if raw_output else "Agent did not produce output"
+
+    return JourneyResult(
+        story_id=story.id,
+        story_title=story.title,
+        persona=story.persona,
+        passed=passed,
+        steps=failed_steps,
+        summary=summary,
+        blocked_at=blocked_at,
+        diagnosis=diagnosis,
+        fix_suggestion=fix_suggestion,
+    )
 
 
 # ---------------------------------------------------------------------------

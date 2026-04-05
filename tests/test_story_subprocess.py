@@ -21,6 +21,7 @@ from otto.certifier.journey_agent import (
     _atomic_write_json,
     _journey_result_from_dict,
     _journey_result_to_dict,
+    _parse_tagged_verdict,
     _story_from_dict,
 )
 from otto.certifier.manifest import (
@@ -220,8 +221,69 @@ def test_create_worker_copy(tmp_path):
     # Runtime files included (APFS clone gives copy-on-write isolation)
     assert (worker / "dev.db").exists()
 
-    # Cleanup
-    shutil.rmtree(worker, ignore_errors=True)
+
+# ---------------------------------------------------------------------------
+# Tagged verdict parsing
+# ---------------------------------------------------------------------------
+
+
+def test_parse_tagged_verdict_pass():
+    story = UserStory(id="test", persona="user", title="Test", narrative="",
+                      steps=[], critical=False)
+    raw = """
+Step 1: Registered user successfully.
+Step 2: Created item, got ID abc123.
+Step 3: Listed items, found abc123.
+
+VERDICT: PASS
+BLOCKED_AT: null
+DIAGNOSIS: null
+SUGGESTED_FIX: null
+"""
+    result = _parse_tagged_verdict(raw, story)
+    assert result.passed is True
+    assert result.diagnosis == ""
+    assert result.fix_suggestion == ""
+    assert len(result.steps) == 0  # no failed steps
+
+
+def test_parse_tagged_verdict_fail():
+    story = UserStory(id="test", persona="user", title="Test", narrative="",
+                      steps=[], critical=False)
+    raw = """
+Step 1: Registered user.
+Step 2: Create item failed — 404 on POST /api/items.
+
+VERDICT: FAIL
+BLOCKED_AT: Step 2
+DIAGNOSIS: POST /api/items returns 404 — route not implemented
+SUGGESTED_FIX: Add POST handler for /api/items in routes.ts
+FAILED_STEP: create item with title | POST /api/items returns 404
+"""
+    result = _parse_tagged_verdict(raw, story)
+    assert result.passed is False
+    assert "404" in result.diagnosis
+    assert "POST handler" in result.fix_suggestion
+    assert result.blocked_at == "Step 2"
+    assert len(result.steps) == 1
+    assert result.steps[0].outcome == "fail"
+    assert "404" in result.steps[0].diagnosis
+
+
+def test_parse_tagged_verdict_no_markers_fallback():
+    story = UserStory(id="test", persona="user", title="Test", narrative="",
+                      steps=[], critical=False)
+    raw = "All steps passed successfully. The product works great."
+    result = _parse_tagged_verdict(raw, story)
+    assert result.passed is True  # inferred from prose
+
+
+def test_parse_tagged_verdict_no_markers_fail():
+    story = UserStory(id="test", persona="user", title="Test", narrative="",
+                      steps=[], critical=False)
+    raw = "Step 2 failed with a 500 error. The server crashed."
+    result = _parse_tagged_verdict(raw, story)
+    assert result.passed is False  # "fail" in text
 
 
 # ---------------------------------------------------------------------------
