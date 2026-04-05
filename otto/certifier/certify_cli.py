@@ -122,6 +122,22 @@ def _cmd_start():
         }))
         return
 
+    # Pre-certification test gate: tests must pass before running certifier
+    test_gate_result = _run_test_gate(project_dir)
+    if test_gate_result is not None:
+        job_state["status"] = "error"
+        job_state["message"] = test_gate_result["message"]
+        job_state["completed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        _write_job(job_dir, job_state)
+        print(json.dumps({
+            "status": "error",
+            "message": test_gate_result["message"],
+            "test_output": test_gate_result["test_output"],
+            "job_id": job_id,
+            "round": call_count + 1,
+        }))
+        return
+
     # Write job state
     job_state = {
         **job_state,
@@ -275,11 +291,22 @@ def _run_certifier_child(project_dir, intent_file, config_path, job_dir, candida
     from otto.certifier.isolated import run_isolated_certifier
     from otto.certifier.report import CertificationOutcome
 
+    # Selective re-verify: skip stories that passed in previous rounds
+    skip_story_ids: set[str] | None = None
+    if round_num > 1:
+        history = _load_history(job_dir.parent)
+        skip_story_ids = _passed_story_ids_from_history(history)
+        skipped = len(skip_story_ids) if skip_story_ids else 0
+        if skipped > 0:
+            import sys
+            print(f"Round {round_num}: skipping {skipped} previously-passed stories", file=sys.stderr)
+
     report = run_isolated_certifier(
         intent=intent,
         candidate_sha=candidate_sha,
         project_dir=project_dir,
         config=config,
+        skip_story_ids=skip_story_ids,
     )
 
     # Map outcome
@@ -603,6 +630,26 @@ def _issue_fingerprints(issues: list[dict[str, object]]) -> set[str]:
     ])
 
 
+def _passed_story_ids_from_history(history: list[dict[str, object]]) -> set[str] | None:
+    """Extract story IDs that passed in the most recent round.
+
+    Returns None if no story data is available (don't skip anything).
+    """
+    if not history:
+        return None
+    last_round = history[-1]
+    stories = last_round.get("stories")
+    if not stories or not isinstance(stories, list):
+        return None
+    passed = set()
+    for story in stories:
+        if isinstance(story, dict) and story.get("passed"):
+            name = story.get("name", "")
+            if name:
+                passed.add(name)
+    return passed if passed else None
+
+
 def _write_job_error(job_dir: Path, message: str, **extra: object) -> None:
     state = _read_job(job_dir) or {"job_id": job_dir.name}
     state.update({
@@ -612,6 +659,46 @@ def _write_job_error(job_dir: Path, message: str, **extra: object) -> None:
         **extra,
     })
     _write_job(job_dir, state)
+
+
+def _run_test_gate(project_dir: Path) -> dict[str, str] | None:
+    """Run the project's test command as a pre-certification gate.
+
+    Returns None if tests pass or no test command is found (don't block).
+    Returns {"message": ..., "test_output": ...} if tests fail.
+    """
+    from otto.config import detect_test_command
+
+    test_cmd = detect_test_command(project_dir)
+    if not test_cmd:
+        return None  # No test command found — skip the gate
+
+    result = subprocess.run(
+        test_cmd,
+        shell=True,
+        cwd=project_dir,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    if result.returncode == 0:
+        return None  # Tests passed
+
+    # Tests failed — combine stdout/stderr for output
+    output_parts = []
+    if result.stdout.strip():
+        output_parts.append(result.stdout.strip())
+    if result.stderr.strip():
+        output_parts.append(result.stderr.strip())
+    test_output = "\n".join(output_parts)
+    # Truncate to avoid oversized JSON
+    if len(test_output) > 2000:
+        test_output = test_output[-2000:]
+
+    return {
+        "message": "Tests must pass before certification. Fix your tests first.",
+        "test_output": test_output,
+    }
 
 
 if __name__ == "__main__":

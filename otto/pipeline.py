@@ -538,7 +538,7 @@ async def build_agentic(
     """
     import asyncio
     import sys
-    from otto.agent import ClaudeAgentOptions, _subprocess_env, run_agent_query
+    from otto.agent import ClaudeAgentOptions, _subprocess_env, run_agent_query, tool_use_summary
     from otto.certifier.certify_cli import _job_root as _certify_job_root
     from otto.certifier.certify_cli import _latest_job_dir as _latest_certify_job_dir
     from otto.certifier.certify_cli import _read_job as _read_certify_job
@@ -589,8 +589,42 @@ Certify commands for this project:
     if model:
         options.model = str(model)
 
+    # Agent session logging — capture all tool calls and text to a log file
+    agent_log_path = build_dir / "agent-session.log"
+    agent_log_lines: list[str] = []
+    _agent_start = time.monotonic()
+
+    def _on_text(text_chunk: str) -> None:
+        elapsed = round(time.monotonic() - _agent_start, 1)
+        agent_log_lines.append(f"[{elapsed:6.1f}s] {text_chunk}")
+
+    def _on_tool(block) -> None:
+        elapsed = round(time.monotonic() - _agent_start, 1)
+        summary = tool_use_summary(block)
+        agent_log_lines.append(f"[{elapsed:6.1f}s] \u25cf {block.name}  {summary}")
+
+    def _on_tool_result(block) -> None:
+        elapsed = round(time.monotonic() - _agent_start, 1)
+        content = str(getattr(block, "content", ""))
+        truncated = content[:200] + "..." if len(content) > 200 else content
+        agent_log_lines.append(f"[{elapsed:6.1f}s]   \u2192 {truncated}")
+
     # One session — agent drives everything
-    text, cost, result_msg = await run_agent_query(prompt, options)
+    text, cost, result_msg = await run_agent_query(
+        prompt, options,
+        on_text=_on_text,
+        on_tool=_on_tool,
+        on_tool_result=_on_tool_result,
+    )
+
+    # Persist agent session log
+    _elapsed_total = round(time.monotonic() - _agent_start, 1)
+    agent_log_lines.append(f"[{_elapsed_total:6.1f}s] SESSION END  cost=${cost:.2f}")
+    try:
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        agent_log_path.write_text(f"<!-- generated: {ts} -->\n" + "\n".join(agent_log_lines))
+    except OSError:
+        pass
 
     job_root = _certify_job_root(project_dir)
     latest_job_dir = _latest_certify_job_dir(job_root)
