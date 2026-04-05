@@ -244,6 +244,30 @@ def generate_pow_report(
     return report_path
 
 
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI escape codes from text."""
+    import re
+    return re.sub(r"\x1b\[[0-9;]*m", "", text)
+
+
+def _extract_command(input_str: str) -> str:
+    """Extract the shell command from a tool input dict repr string."""
+    # Input is str({"command": "curl ...", "description": "..."})
+    # Extract just the command value
+    import re
+    m = re.search(r"'command':\s*'(.*?)'(?:,\s*'description'|$|\})", input_str, re.DOTALL)
+    if m:
+        cmd = m.group(1)
+        # Unescape
+        cmd = cmd.replace("\\'", "'").replace("\\\\", "\\")
+        # Truncate long commands
+        if len(cmd) > 200:
+            cmd = cmd[:200] + "..."
+        return cmd
+    # Fallback: return cleaned input
+    return input_str[:200]
+
+
 def format_tier4_markdown(tier4_results: list[Any]) -> list[str]:
     """Format Tier 4 results as markdown lines. Shared by v1 and v2 PoW paths."""
     passed = sum(1 for r in tier4_results if r.passed)
@@ -252,24 +276,17 @@ def format_tier4_markdown(tier4_results: list[Any]) -> list[str]:
         "",
         f"## Tier 4 — Agentic Story Verification ({passed}/{len(tier4_results)} passed)",
         "",
-        "Each story was verified by an AI agent simulating a real user.",
-        "",
     ]
     for r in tier4_results:
         icon = "✓" if r.passed else "✗"
         lines.append(f"### {icon} {r.story_title} ({r.persona}, {r.duration_s:.0f}s, ${r.cost_usd:.3f})")
-        if r.summary:
-            summary_lines = r.summary.strip().split("\n")
-            tail = summary_lines[-5:] if len(summary_lines) > 5 else summary_lines
-            lines.append("")
-            for sl in tail:
-                lines.append(f"> {sl}")
+        lines.append("")
         if r.blocked_at:
-            lines.append(f"- **Blocked at:** {r.blocked_at}")
+            lines.append(f"**Blocked at:** {r.blocked_at}")
         if not r.passed and r.diagnosis:
-            lines.append(f"- **Diagnosis:** {r.diagnosis}")
+            lines.append(f"**Diagnosis:** {_strip_ansi(r.diagnosis)}")
         if not r.passed and r.fix_suggestion:
-            lines.append(f"- **Suggested fix:** {r.fix_suggestion}")
+            lines.append(f"**Suggested fix:** {_strip_ansi(r.fix_suggestion)}")
         failed = [s for s in r.steps if s.outcome == "fail"]
         if failed:
             lines.append("")
@@ -277,40 +294,42 @@ def format_tier4_markdown(tier4_results: list[Any]) -> list[str]:
             for s in failed:
                 lines.append(f"- ✗ {s.action}")
                 if s.diagnosis:
-                    lines.append(f"  _{s.diagnosis}_")
+                    lines.append(f"  _{_strip_ansi(s.diagnosis)}_")
         if r.break_findings:
             lines.append("")
             lines.append("**Break findings:**")
             for b in r.break_findings:
-                lines.append(f"- [{b.severity}] {b.technique}: {b.description}")
+                lines.append(f"- [{b.severity}] {b.technique}: {_strip_ansi(b.description)}")
 
-        # Evidence trail — tool calls (curl requests + responses)
+        # Evidence trail — clean formatted tool calls
         evidence = getattr(r, "evidence_chain", None) or []
         if evidence:
             lines.append("")
             lines.append("**Evidence trail:**")
             lines.append("```")
             for e in evidence:
-                tool = e.get("tool", "?")
                 ts = e.get("timestamp", "")
-                inp = e.get("input", "")[:200]
-                out = e.get("output", "")[:200]
+                cmd = _extract_command(e.get("input", ""))
+                out = _strip_ansi(e.get("output", ""))[:300]
                 err = " [ERROR]" if e.get("is_error") else ""
-                lines.append(f"[{ts}] {tool}: {inp}")
+                lines.append(f"[{ts}] {cmd}")
                 if out:
                     lines.append(f"  → {out}{err}")
             lines.append("```")
 
-            # Check for video/screenshot evidence files
-            video_files = [e for e in evidence if "record start" in e.get("input", "")]
-            screenshot_files = [e for e in evidence if "screenshot" in e.get("input", "")]
-            if video_files or screenshot_files:
-                lines.append("")
-                lines.append("**Visual evidence:**")
-                if video_files:
-                    lines.append("- 🎥 Video recording: `evidence/recording.webm`")
-                if screenshot_files:
-                    lines.append(f"- 📸 Screenshots: `evidence/` ({len(screenshot_files)} captures)")
+        # Visual evidence references
+        evidence_dir = f"evidence-{r.story_id}"
+        has_video = any("record start" in str(e.get("input", "")) for e in evidence)
+        screenshot_count = sum(1 for e in evidence
+                               if "screenshot" in str(e.get("input", ""))
+                               and not e.get("is_error"))
+        if has_video or screenshot_count:
+            lines.append("")
+            lines.append("**Visual evidence:**")
+            if has_video:
+                lines.append(f"- 🎥 Video: `{evidence_dir}/recording.webm`")
+            if screenshot_count:
+                lines.append(f"- 📸 Screenshots: `{evidence_dir}/` ({screenshot_count} captures)")
 
         lines.append("")
     return lines
@@ -335,6 +354,125 @@ def format_tier4_json(tier4_results: list[Any]) -> list[dict[str, Any]]:
         }
         for r in tier4_results
     ]
+
+
+def generate_tier4_html(
+    tier4_results: list[Any],
+    report: Any,
+    output_dir: Path,
+) -> Path:
+    """Generate an HTML proof-of-work report with embedded screenshots and video.
+
+    Self-contained HTML file — screenshots embedded as base64, video linked.
+    Opens in any browser. Zero extra cost (pure Python formatting).
+    """
+    import base64
+
+    outcome_color = "#22c55e" if report.outcome.value == "passed" else "#ef4444"
+    passed = sum(1 for r in tier4_results if r.passed) if tier4_results else 0
+    total = len(tier4_results) if tier4_results else 0
+
+    html = [f"""\
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<title>Certification Report</title>
+<style>
+body {{ font-family: -apple-system, system-ui, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; color: #1a1a1a; }}
+h1 {{ border-bottom: 2px solid #e5e7eb; padding-bottom: 0.5em; }}
+.meta {{ color: #6b7280; margin-bottom: 2em; }}
+.outcome {{ color: {outcome_color}; font-weight: bold; font-size: 1.2em; }}
+.story {{ border: 1px solid #e5e7eb; border-radius: 8px; padding: 1.5em; margin: 1em 0; }}
+.story.pass {{ border-left: 4px solid #22c55e; }}
+.story.fail {{ border-left: 4px solid #ef4444; }}
+.evidence {{ background: #f9fafb; border-radius: 4px; padding: 1em; margin: 1em 0; font-family: monospace; font-size: 0.85em; white-space: pre-wrap; overflow-x: auto; }}
+.evidence .cmd {{ color: #2563eb; }}
+.evidence .out {{ color: #374151; }}
+.evidence .err {{ color: #ef4444; }}
+.evidence .ts {{ color: #9ca3af; }}
+.screenshots {{ display: flex; flex-wrap: wrap; gap: 1em; margin: 1em 0; }}
+.screenshots img {{ max-width: 400px; border: 1px solid #e5e7eb; border-radius: 4px; cursor: pointer; }}
+.screenshots img:hover {{ box-shadow: 0 2px 8px rgba(0,0,0,0.15); }}
+table {{ border-collapse: collapse; width: 100%; margin: 1em 0; }}
+th, td {{ border: 1px solid #e5e7eb; padding: 0.5em 1em; text-align: left; }}
+th {{ background: #f9fafb; }}
+video {{ max-width: 100%; border-radius: 4px; margin: 1em 0; }}
+.diagnosis {{ background: #fef2f2; border-left: 3px solid #ef4444; padding: 0.5em 1em; margin: 0.5em 0; }}
+.fix {{ background: #f0fdf4; border-left: 3px solid #22c55e; padding: 0.5em 1em; margin: 0.5em 0; }}
+</style>
+</head><body>
+<h1>Certification Report</h1>
+<div class="meta">
+  <span class="outcome">{report.outcome.value.upper()}</span> &mdash;
+  {report.duration_s:.0f}s &mdash; ${report.cost_usd:.2f} &mdash;
+  {time.strftime('%Y-%m-%d %H:%M:%S')}
+</div>
+
+<table>
+<tr><th>Tier</th><th>Status</th><th>Duration</th><th>Cost</th></tr>"""]
+
+    for t in report.tiers:
+        html.append(f"<tr><td>{t.tier}. {t.name}</td><td>{t.status.value}</td><td>{t.duration_s:.1f}s</td><td>${t.cost_usd:.3f}</td></tr>")
+    html.append("</table>")
+
+    if tier4_results:
+        html.append(f"<h2>Story Verification ({passed}/{total} passed)</h2>")
+        for r in tier4_results:
+            cls = "pass" if r.passed else "fail"
+            icon = "✓" if r.passed else "✗"
+            html.append(f'<div class="story {cls}">')
+            html.append(f"<h3>{icon} {_strip_ansi(r.story_title)} ({r.persona}, {r.duration_s:.0f}s, ${r.cost_usd:.3f})</h3>")
+
+            if not r.passed and r.diagnosis:
+                html.append(f'<div class="diagnosis"><strong>Diagnosis:</strong> {_strip_ansi(r.diagnosis)}</div>')
+            if not r.passed and r.fix_suggestion:
+                html.append(f'<div class="fix"><strong>Fix:</strong> {_strip_ansi(r.fix_suggestion)}</div>')
+
+            # Screenshots — embed as base64
+            evidence_dir = output_dir / f"evidence-{r.story_id}"
+            if evidence_dir.exists():
+                pngs = sorted(evidence_dir.glob("*.png"))
+                if pngs:
+                    html.append('<h4>Screenshots</h4><div class="screenshots">')
+                    for png in pngs:
+                        try:
+                            b64 = base64.b64encode(png.read_bytes()).decode()
+                            html.append(f'<img src="data:image/png;base64,{b64}" title="{png.name}" />')
+                        except OSError:
+                            pass
+                    html.append("</div>")
+
+                # Video — link (not embed base64, too large)
+                video = evidence_dir / "recording.webm"
+                if video.exists():
+                    rel_path = f"evidence-{r.story_id}/recording.webm"
+                    html.append(f'<h4>Video Recording</h4>')
+                    html.append(f'<video controls><source src="{rel_path}" type="video/webm">Video: {rel_path}</video>')
+
+            # Evidence trail
+            evidence = getattr(r, "evidence_chain", None) or []
+            if evidence:
+                html.append('<h4>Evidence Trail</h4><div class="evidence">')
+                for e in evidence:
+                    ts = e.get("timestamp", "")
+                    cmd = _strip_ansi(_extract_command(e.get("input", "")))
+                    out = _strip_ansi(e.get("output", ""))[:500]
+                    err_cls = "err" if e.get("is_error") else "out"
+                    html.append(f'<span class="ts">[{ts}]</span> <span class="cmd">{_html_escape(cmd)}</span>')
+                    if out:
+                        html.append(f'  <span class="{err_cls}">→ {_html_escape(out)}</span>')
+                html.append("</div>")
+
+            html.append("</div>")
+
+    html.append("</body></html>")
+    report_path = output_dir / "proof-of-work.html"
+    report_path.write_text("\n".join(html))
+    return report_path
+
+
+def _html_escape(text: str) -> str:
+    """Escape HTML special characters."""
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
 def _append_tier1_proof(lines: list[str], claim: Any) -> None:

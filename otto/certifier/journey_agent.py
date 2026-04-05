@@ -402,11 +402,11 @@ async def verify_story(
                     elif isinstance(block, ToolUseBlock):
                         _pending_tool = {
                             "tool": block.name,
-                            "input": str(getattr(block, "input", {}))[:500],
+                            "input": str(getattr(block, "input", {}))[:1000],
                             "timestamp": time.strftime("%H:%M:%S"),
                         }
                     elif isinstance(block, ToolResultBlock) and _pending_tool:
-                        _pending_tool["output"] = block.content[:500] if block.content else ""
+                        _pending_tool["output"] = block.content[:1000] if block.content else ""
                         _pending_tool["is_error"] = block.is_error
                         evidence_chain.append(_pending_tool)
                         _pending_tool = None

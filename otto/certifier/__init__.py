@@ -586,7 +586,7 @@ def _generate_tier4_pow(
     Uses shared formatters from pow_report.py for Tier 4 sections.
     """
     import json as _json
-    from otto.certifier.pow_report import format_tier4_json, format_tier4_markdown
+    from otto.certifier.pow_report import format_tier4_json, format_tier4_markdown, generate_tier4_html
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -620,6 +620,10 @@ def _generate_tier4_pow(
         lines.append("")
 
     (output_dir / "proof-of-work.md").write_text("\n".join(lines) + "\n")
+
+    # HTML report — embedded screenshots, linked video, clean formatting
+    if tier4_results:
+        generate_tier4_html(tier4_results, report, output_dir)
 
     # Machine-readable JSON
     json_data: dict[str, Any] = {
