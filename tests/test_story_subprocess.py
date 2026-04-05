@@ -270,20 +270,23 @@ FAILED_STEP: create item with title | POST /api/items returns 404
     assert "404" in result.steps[0].diagnosis
 
 
-def test_parse_tagged_verdict_no_markers_fallback():
+def test_parse_tagged_verdict_no_markers_defaults_to_fail():
+    """Missing VERDICT marker = FAIL (safe default, won't false-pass)."""
     story = UserStory(id="test", persona="user", title="Test", narrative="",
                       steps=[], critical=False)
     raw = "All steps passed successfully. The product works great."
     result = _parse_tagged_verdict(raw, story)
-    assert result.passed is True  # inferred from prose
+    assert result.passed is False  # no VERDICT marker = fail
+    assert "No VERDICT marker" in result.diagnosis
 
 
-def test_parse_tagged_verdict_no_markers_fail():
+def test_parse_tagged_verdict_password_not_false_pass():
+    """Text containing 'password' should not be misclassified as pass."""
     story = UserStory(id="test", persona="user", title="Test", narrative="",
                       steps=[], critical=False)
-    raw = "Step 2 failed with a 500 error. The server crashed."
+    raw = "Tested password reset flow. Everything looks good."
     result = _parse_tagged_verdict(raw, story)
-    assert result.passed is False  # "fail" in text
+    assert result.passed is False  # no VERDICT marker
 
 
 # ---------------------------------------------------------------------------

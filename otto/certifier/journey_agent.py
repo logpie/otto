@@ -235,7 +235,10 @@ def _build_journey_prompt(
     steps_text = ""
     for i, step in enumerate(story.steps):
         dep = f" (uses output from step {step.uses_output_from + 1})" if step.uses_output_from is not None else ""
-        steps_text += f"\n{i + 1}. {step.action}\n   Verify: {step.verify}{dep}"
+        browser_check = ""
+        if has_browser and step.verify_in_browser:
+            browser_check = f"\n   Browser: {step.verify_in_browser}"
+        steps_text += f"\n{i + 1}. {step.action}\n   Verify: {step.verify}{dep}{browser_check}"
 
     break_text = ""
     if story.break_strategies and not skip_break:
@@ -308,8 +311,17 @@ async def verify_story(
     verdict_file = log_dir / f"journey-{story.id}-verdict.json"
     verdict_file.unlink(missing_ok=True)
 
+    import shutil as _shutil
     skip_break = config.get("certifier_skip_break", True)  # default: skip break phase
-    has_browser = bool(config.get("certifier_browser"))  # off unless explicitly enabled
+
+    # Browser testing: determined by product type, not manual config.
+    # Web apps with UI (interaction=browser) need browser verification.
+    # Override with certifier_browser: true/false in config.
+    if "certifier_browser" in config:
+        has_browser = bool(config["certifier_browser"])
+    else:
+        needs_browser = manifest.interaction in ("browser",)
+        has_browser = needs_browser and _shutil.which("agent-browser") is not None
 
     prompt = _build_journey_prompt(
         story, manifest, base_url,
@@ -397,40 +409,6 @@ async def verify_story(
     return result
 
 
-def _verdict_from_dict(verdict: dict[str, Any], story: UserStory) -> JourneyResult:
-    """Convert a verdict dict into a JourneyResult."""
-    steps = []
-    for s in verdict.get("steps", []):
-        steps.append(StepResult(
-            action=s.get("action", ""),
-            outcome=s.get("outcome", "blocked"),
-            verification=s.get("verification", ""),
-            diagnosis=s.get("diagnosis", ""),
-            fix_suggestion=s.get("fix_suggestion", ""),
-        ))
-    break_findings = []
-    for b in verdict.get("break_findings", []):
-        break_findings.append(BreakFinding(
-            technique=b.get("technique", ""),
-            description=b.get("description", ""),
-            result=b.get("result", ""),
-            severity=b.get("severity", "minor"),
-            fix_suggestion=b.get("fix_suggestion", ""),
-        ))
-    return JourneyResult(
-        story_id=story.id,
-        story_title=story.title,
-        persona=story.persona,
-        passed=verdict.get("story_passed", False),
-        steps=steps,
-        break_findings=break_findings,
-        summary=verdict.get("summary", ""),
-        blocked_at=verdict.get("blocked_at", ""),
-        diagnosis=verdict.get("diagnosis", ""),
-        fix_suggestion=verdict.get("fix_suggestion", ""),
-    )
-
-
 def _parse_tagged_verdict(raw_output: str, story: UserStory) -> JourneyResult:
     """Parse verdict from tagged text markers in agent output.
 
@@ -440,9 +418,8 @@ def _parse_tagged_verdict(raw_output: str, story: UserStory) -> JourneyResult:
         SUGGESTED_FIX: Fix the authorize() callback
         FAILED_STEP: create task | 404 on POST /api/tasks
 
-    Falls back to prose inference if markers are missing.
+    Defaults to FAIL if no VERDICT marker found (safe — won't false-pass).
     """
-    import re as _re
 
     lines = raw_output.split("\n")
 
@@ -474,23 +451,19 @@ def _parse_tagged_verdict(raw_output: str, story: UserStory) -> JourneyResult:
                 failed_steps.append(StepResult(
                     action=rest, outcome="fail"))
 
-    # Determine pass/fail
+    # Determine pass/fail — require explicit VERDICT marker.
+    # Do NOT infer from loose prose ("pass"/"fail" in text) — too fragile
+    # (e.g. "password" contains "pass").
     if verdict_str.upper() in ("PASS", "PASSED"):
         passed = True
-    elif verdict_str.upper() in ("FAIL", "FAILED"):
-        passed = False
-    elif verdict_str.upper() in ("BLOCKED",):
+    elif verdict_str.upper() in ("FAIL", "FAILED", "BLOCKED"):
         passed = False
     else:
-        # No explicit marker — fall back to prose inference
-        raw_lower = raw_output.lower()
-        passed = (
-            "verdict: pass" in raw_lower
-            or "all steps passed" in raw_lower
-            or ("pass" in raw_lower and "fail" not in raw_lower)
-        )
-        if not passed and not diagnosis:
-            diagnosis = "No VERDICT marker found; inferred from prose"
+        # No explicit marker — default to FAIL (safe: won't false-pass).
+        # The agent was instructed to produce markers; missing = something wrong.
+        passed = False
+        if not diagnosis:
+            diagnosis = "No VERDICT marker found in agent output"
 
     # Clean up null-like values
     if diagnosis.lower() in ("null", "none", "n/a", ""):
