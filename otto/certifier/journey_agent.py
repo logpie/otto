@@ -629,6 +629,7 @@ async def verify_all_stories(
         logger.info("Running %d stories with max %d parallel (subprocess-isolated)",
                      len(stories), max_parallel)
         _scavenge_stale_workers(project_dir)
+        _scavenge_old_story_runs(project_dir)
         _ensure_deps_installed(project_dir)
 
         run_id = f"{time.strftime('%Y%m%d-%H%M%S')}-{_uuid.uuid4().hex[:8]}"
@@ -781,6 +782,25 @@ def _scavenge_stale_workers(project_dir: Path, max_age_s: float = 3600) -> None:
             shutil.rmtree(d, ignore_errors=True)
 
 
+def _scavenge_old_story_runs(project_dir: Path, keep_latest: int = 5) -> None:
+    """Remove old story run dirs, keeping the N most recent.
+
+    Story run logs persist for debugging but accumulate over time.
+    Keep the latest runs, remove the rest.
+    """
+    import shutil
+    stories_dir = project_dir / "otto_logs" / "certifier" / "stories"
+    if not stories_dir.exists():
+        return
+    runs = sorted(
+        (d for d in stories_dir.iterdir() if d.is_dir()),
+        key=lambda d: d.stat().st_mtime,
+        reverse=True,
+    )
+    for old_run in runs[keep_latest:]:
+        shutil.rmtree(old_run, ignore_errors=True)
+
+
 async def _kill_process_tree(proc: asyncio.subprocess.Process, grace_s: float = 5.0) -> None:
     """Two-phase shutdown: SIGTERM → grace → SIGKILL. Kills entire process group."""
     import os as _os
@@ -815,13 +835,17 @@ def _kill_orphan_app(story_dir: Path) -> None:
 
 
 def _copy_story_logs(worker_dir: Path, story_dir: Path) -> None:
-    """Copy journey agent logs from worker copy to story_dir for observability."""
+    """Copy ALL certifier logs from worker copy to story_dir for observability.
+
+    Worker copies are deleted after each story — these logs are the only
+    surviving record of what the journey agent did.
+    """
     import shutil
     src = worker_dir / "otto_logs" / "certifier"
     if not src.exists():
         return
     for item in src.iterdir():
-        if item.is_file() and (item.name.startswith("journey-") or item.name == "heartbeat.json"):
+        if item.is_file():
             shutil.copy2(item, story_dir / item.name)
 
 
