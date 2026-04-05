@@ -230,6 +230,7 @@ def _build_journey_prompt(
     *,
     skip_break: bool = False,
     has_browser: bool = False,
+    evidence_dir: str = "./evidence",
 ) -> str:
     """Build the prompt for the journey verification agent."""
     manifest_text = format_manifest_for_agent(manifest)
@@ -254,15 +255,15 @@ Report what you find. These do NOT affect the pass/fail verdict.
 
     browser_text = ""
     if has_browser:
-        browser_text = """
+        browser_text = f"""
 BROWSER VERIFICATION:
 At the START of testing, begin video recording:
-  agent-browser record start ./evidence/recording.webm
+  agent-browser record start {evidence_dir}/recording.webm
 
 After each major step, take a screenshot AND verify the UI:
   agent-browser open <url>
   agent-browser snapshot -i             # accessibility tree with @refs
-  agent-browser screenshot ./evidence/  # visual proof per step
+  agent-browser screenshot {evidence_dir}/  # visual proof per step
   agent-browser click @e3               # interact with elements
 
 At the END of testing (before writing VERDICT), stop recording:
@@ -334,9 +335,15 @@ async def verify_story(
         needs_browser = manifest.interaction in ("browser",)
         has_browser = needs_browser and _shutil.which("agent-browser") is not None
 
+    # Evidence dir: absolute path under log_dir so it persists regardless
+    # of execution mode (direct or subprocess worker).
+    evidence_dir = log_dir / f"evidence-{story.id}"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+
     prompt = _build_journey_prompt(
         story, manifest, base_url,
         skip_break=skip_break, has_browser=has_browser,
+        evidence_dir=str(evidence_dir),
     )
 
     # Configure agent with HTTP tools (Bash for curl) + optional browser (chrome-devtools)
@@ -840,20 +847,18 @@ def _copy_story_logs(worker_dir: Path, story_dir: Path) -> None:
     surviving record of what the journey agent did.
     """
     import shutil
-    # Certifier logs
     src = worker_dir / "otto_logs" / "certifier"
-    if src.exists():
-        for item in src.iterdir():
-            if item.is_file():
-                shutil.copy2(item, story_dir / item.name)
-
-    # Evidence directory (screenshots, video recordings)
-    evidence_src = worker_dir / "evidence"
-    if evidence_src.exists():
-        evidence_dst = story_dir / "evidence"
-        if evidence_dst.exists():
-            shutil.rmtree(evidence_dst, ignore_errors=True)
-        shutil.copytree(evidence_src, evidence_dst)
+    if not src.exists():
+        return
+    for item in src.iterdir():
+        dst = story_dir / item.name
+        if item.is_file():
+            shutil.copy2(item, dst)
+        elif item.is_dir():
+            # Evidence directories (evidence-{story-id}/) with screenshots/video
+            if dst.exists():
+                shutil.rmtree(dst, ignore_errors=True)
+            shutil.copytree(item, dst)
 
 
 async def _run_story_in_subprocess(
