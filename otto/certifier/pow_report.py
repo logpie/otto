@@ -283,6 +283,24 @@ def format_tier4_markdown(tier4_results: list[Any]) -> list[str]:
             lines.append("**Break findings:**")
             for b in r.break_findings:
                 lines.append(f"- [{b.severity}] {b.technique}: {b.description}")
+
+        # Evidence trail — tool calls (curl requests + responses)
+        evidence = getattr(r, "evidence_chain", None) or []
+        if evidence:
+            lines.append("")
+            lines.append("**Evidence trail:**")
+            lines.append("```")
+            for e in evidence:
+                tool = e.get("tool", "?")
+                ts = e.get("timestamp", "")
+                inp = e.get("input", "")[:200]
+                out = e.get("output", "")[:200]
+                err = " [ERROR]" if e.get("is_error") else ""
+                lines.append(f"[{ts}] {tool}: {inp}")
+                if out:
+                    lines.append(f"  → {out}{err}")
+            lines.append("```")
+
         lines.append("")
     return lines
 

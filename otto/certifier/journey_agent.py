@@ -28,6 +28,8 @@ from otto.agent import (
     ResultMessage,
     AssistantMessage,
     TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
     _subprocess_env,
     query,
 )
@@ -252,14 +254,17 @@ Report what you find. These do NOT affect the pass/fail verdict.
 
     browser_text = ""
     if has_browser:
-        browser_text = """
+        screenshots_dir = f"{base_url.replace('http://localhost:', 'screenshots-port')}"
+        browser_text = f"""
 BROWSER VERIFICATION (after each API step, verify the UI):
   agent-browser open <url>              # navigate to a page
-  agent-browser snapshot -i             # get accessibility tree with @refs
+  agent-browser snapshot -i             # accessibility tree with @refs
   agent-browser click @e3               # click element by ref
-  agent-browser screenshot <dir>        # capture visual state
+  agent-browser screenshot {screenshots_dir}/   # capture visual proof
   agent-browser close                   # cleanup when done
-Use these to confirm the UI reflects the API state (e.g. created item appears in list).
+
+Take a screenshot after each major step as visual proof.
+Use these to confirm the UI reflects the API state (created items appear, deleted items gone).
 """
 
     return f"""\
@@ -363,8 +368,11 @@ async def verify_story(
 
     # Session ends naturally when agent stops producing tool calls.
     # Verdict extracted from tagged text markers in the agent's output.
+    # Tool calls captured as evidence for PoW audit trail.
     text_parts: list[str] = []
+    evidence_chain: list[dict[str, Any]] = []
     cost_usd = 0.0
+    _pending_tool: dict[str, Any] | None = None
 
     stream = query(prompt=prompt, options=options)
     try:
@@ -378,6 +386,17 @@ async def verify_story(
                 for block in message.content:
                     if isinstance(block, TextBlock) and block.text:
                         text_parts.append(block.text)
+                    elif isinstance(block, ToolUseBlock):
+                        _pending_tool = {
+                            "tool": block.name,
+                            "input": str(getattr(block, "input", {}))[:500],
+                            "timestamp": time.strftime("%H:%M:%S"),
+                        }
+                    elif isinstance(block, ToolResultBlock) and _pending_tool:
+                        _pending_tool["output"] = block.content[:500] if block.content else ""
+                        _pending_tool["is_error"] = block.is_error
+                        evidence_chain.append(_pending_tool)
+                        _pending_tool = None
     finally:
         close_stream = getattr(stream, "aclose", None)
         if callable(close_stream):
@@ -398,9 +417,11 @@ async def verify_story(
     result = _parse_tagged_verdict(raw_output, story)
     result.cost_usd = cost_usd
     result.duration_s = duration_s
+    result.evidence_chain = evidence_chain
 
-    # Write verdict for debugging/auditing
-    verdict_file.write_text(json.dumps(_journey_result_to_dict(result), indent=2))
+    # Write verdict + evidence for debugging/auditing
+    verdict_data = _journey_result_to_dict(result)
+    verdict_file.write_text(json.dumps(verdict_data, indent=2))
 
     # Save raw agent output for debugging
     raw_log = log_dir / f"journey-{story.id}-agent.log"
