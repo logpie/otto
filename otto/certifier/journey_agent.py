@@ -310,7 +310,11 @@ async def verify_story(
 
     import shutil as _shutil
     skip_break = config.get("certifier_skip_break", True)  # default: skip break phase
-    has_browser = _shutil.which("agent-browser") is not None or bool(config.get("chrome_mcp"))
+    # Browser off by default — enable with certifier_browser: true.
+    # agent-browser adds significant time (~60s+) and cost per story.
+    has_browser = config.get("certifier_browser", False) and (
+        _shutil.which("agent-browser") is not None or bool(config.get("chrome_mcp"))
+    )
 
     prompt = _build_journey_prompt(
         story, manifest, base_url,
