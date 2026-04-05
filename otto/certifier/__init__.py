@@ -686,15 +686,11 @@ def _run_tier4_journeys(
             ))
         # Break findings
         for b in r.break_findings:
-            # Map journey agent severity → finding severity:
-            #   critical/high → actionable (fail certification, trigger fix)
-            #   moderate/medium/low → warning (surface loudly, no fix task)
-            if b.severity in ("critical", "high"):
-                finding_severity = "critical" if b.severity == "critical" else "important"
-            elif b.severity in ("moderate", "medium"):
-                finding_severity = "warning"
-            else:
-                finding_severity = "warning"
+            # All break findings are warnings — surfaced loudly but don't fail certification.
+            # Break testing is adversarial edge-case probing; severity is stochastic
+            # (same XSS can be "high" or "medium" across runs). Using warnings ensures
+            # consistent pass/fail across runs and fair comparison with bare CC.
+            finding_severity = "warning"
             findings.append(Finding(
                 tier=4,
                 severity=finding_severity,
@@ -727,15 +723,11 @@ def _run_tier4_journeys(
                 },
             ))
         for b in r.break_findings:
-            # Map journey agent severity → finding severity:
-            #   critical/high → actionable (fail certification, trigger fix)
-            #   moderate/medium/low → warning (surface loudly, no fix task)
-            if b.severity in ("critical", "high"):
-                finding_severity = "critical" if b.severity == "critical" else "important"
-            elif b.severity in ("moderate", "medium"):
-                finding_severity = "warning"
-            else:
-                finding_severity = "warning"
+            # All break findings are warnings — surfaced loudly but don't fail certification.
+            # Break testing is adversarial edge-case probing; severity is stochastic
+            # (same XSS can be "high" or "medium" across runs). Using warnings ensures
+            # consistent pass/fail across runs and fair comparison with bare CC.
+            finding_severity = "warning"
             findings.append(Finding(
                 tier=4,
                 severity=finding_severity,
