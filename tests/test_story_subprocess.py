@@ -222,6 +222,27 @@ def test_create_worker_copy(tmp_path):
     assert (worker / "dev.db").exists()
 
 
+def test_create_worker_copy_symlinks_build_artifacts(tmp_path):
+    from otto.certifier.baseline import AppRunner
+    from otto.certifier.journey_agent import _create_worker_copy
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "package.json").write_text("{}")
+    (project / "node_modules").mkdir()
+    (project / ".next").mkdir()
+    (project / ".next" / "BUILD_ID").write_text("build-1")
+    AppRunner.build_marker_path(project).write_text(
+        json.dumps({"framework": "nextjs", "artifacts": [".next"]})
+    )
+
+    worker = _create_worker_copy(project, "test-worker-built")
+
+    assert (worker / "node_modules").is_symlink()
+    assert (worker / ".next").is_symlink()
+    assert (worker / ".next" / "BUILD_ID").read_text() == "build-1"
+
+
 # ---------------------------------------------------------------------------
 # Tagged verdict parsing
 # ---------------------------------------------------------------------------
@@ -437,3 +458,48 @@ async def test_run_story_in_subprocess_reads_output(tmp_path):
 
     assert result.passed is True
     assert result.cost_usd == 0.5
+
+
+@pytest.mark.asyncio
+async def test_verify_all_stories_parallel_builds_once_and_clears_marker(tmp_path):
+    from otto.certifier.baseline import AppRunner
+    from otto.certifier.journey_agent import verify_all_stories
+
+    story1 = UserStory(id="story-1", persona="user", title="One", narrative="test", steps=[], critical=True)
+    story2 = UserStory(id="story-2", persona="user", title="Two", narrative="test", steps=[], critical=False)
+
+    calls: list[str] = []
+
+    def fake_ensure(project_dir):
+        calls.append("deps")
+
+    def fake_build(project_dir, config):
+        calls.append("build")
+        AppRunner.build_marker_path(project_dir).write_text(json.dumps({"framework": "nextjs", "artifacts": [".next"]}))
+
+    async def fake_run_story(story, project_dir, config, story_dir):
+        calls.append(f"story:{story.id}")
+        return JourneyResult(
+            story_id=story.id,
+            story_title=story.title,
+            persona=story.persona,
+            passed=True,
+        )
+
+    with patch("otto.certifier.journey_agent._ensure_deps_installed", side_effect=fake_ensure), \
+         patch("otto.certifier.journey_agent._build_project", side_effect=fake_build), \
+         patch("otto.certifier.journey_agent._scavenge_stale_workers"), \
+         patch("otto.certifier.journey_agent._scavenge_old_story_runs"), \
+         patch("otto.certifier.journey_agent._run_story_in_subprocess", side_effect=fake_run_story):
+        result = await verify_all_stories(
+            stories=[story1, story2],
+            manifest=MagicMock(),
+            base_url="http://localhost:3000",
+            project_dir=tmp_path,
+            config={"certifier_parallel_stories": 2},
+        )
+
+    assert result.stories_passed == 2
+    assert calls[:2] == ["deps", "build"]
+    assert set(calls[2:]) == {"story:story-1", "story:story-2"}
+    assert not AppRunner.build_marker_path(tmp_path).exists()

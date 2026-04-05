@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -49,6 +50,7 @@ _AUTH_SESSION_COOKIE_NAMES = {
     "authjs.session-token",
     "__Secure-authjs.session-token",
 }
+_APP_BUILD_MARKER = ".otto-certifier-build.json"
 
 
 @dataclass
@@ -169,6 +171,81 @@ class AppRunner:
         self.port = profile.port or _find_free_port()
         self.base_url = f"http://localhost:{self.port}"
 
+    @classmethod
+    def build_marker_path(cls, project_dir: Path) -> Path:
+        """Return the on-disk marker used to advertise a successful shared build."""
+        return project_dir / _APP_BUILD_MARKER
+
+    @classmethod
+    def load_build_metadata(cls, project_dir: Path) -> dict[str, Any] | None:
+        """Load persisted build metadata, if present."""
+        path = cls.build_marker_path(project_dir)
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    @classmethod
+    def clear_build_metadata(cls, project_dir: Path) -> None:
+        """Remove any persisted build marker."""
+        cls.build_marker_path(project_dir).unlink(missing_ok=True)
+
+    def build(self, timeout: int = 120) -> bool:
+        """Build the project once for worker fanout.
+
+        Returns True when the build succeeded, or when no build is needed.
+        Returns False on build failure. Failure is non-fatal; callers may
+        fall back to dev-mode startup.
+        """
+        build_command = self._build_command()
+        if not build_command:
+            self.clear_build_metadata(self.project_dir)
+            self.profile.extra.pop("prefer_built_start", None)
+            return True
+
+        try:
+            completed = subprocess.run(
+                build_command,
+                shell=True,
+                cwd=str(self.project_dir),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=self._runtime_env(use_built_start=True),
+            )
+        except Exception as exc:
+            logger.warning("Project build failed for %s: %s", self.project_dir, exc)
+            self.clear_build_metadata(self.project_dir)
+            self.profile.extra.pop("prefer_built_start", None)
+            return False
+
+        if completed.returncode != 0:
+            logger.warning(
+                "Project build failed for %s with exit code %s: %s",
+                self.project_dir,
+                completed.returncode,
+                (completed.stdout or completed.stderr or "").strip()[-500:],
+            )
+            self.clear_build_metadata(self.project_dir)
+            self.profile.extra.pop("prefer_built_start", None)
+            return False
+
+        artifacts = self._detect_build_artifacts()
+        metadata = {
+            "framework": self.profile.framework,
+            "language": self.profile.language,
+            "product_type": self.profile.product_type,
+            "build_command": build_command,
+            "artifacts": artifacts,
+            "built_at": datetime.now(timezone.utc).isoformat(),
+        }
+        self.build_marker_path(self.project_dir).write_text(json.dumps(metadata, indent=2))
+        self.profile.extra["prefer_built_start"] = True
+        return True
+
     def start(self, timeout: int = 30) -> Evidence:
         """Start the app and wait for it to be ready."""
 
@@ -205,7 +282,17 @@ class AppRunner:
                 timestamp=time.strftime("%H:%M:%S"),
             )
 
-        if not self.profile.start_command:
+        # Install deps if missing (worktree cleanup removes node_modules)
+        self._ensure_runtime_dependencies()
+
+        while self._port_in_use():
+            self.port += 1
+            self.base_url = f"http://localhost:{self.port}"
+
+        use_built_start = self._should_use_built_start()
+        cmd = self._start_command(use_built_start=use_built_start)
+
+        if not cmd:
             return Evidence(
                 step="start app",
                 command="(no start command)",
@@ -216,7 +303,35 @@ class AppRunner:
                 timestamp=time.strftime("%H:%M:%S"),
             )
 
-        # Install deps if missing (worktree cleanup removes node_modules)
+        env = self._runtime_env(use_built_start=use_built_start)
+
+        try:
+            self.process = subprocess.Popen(
+                cmd,
+                shell=True,
+                cwd=str(self.project_dir),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=env,
+                preexec_fn=os.setsid,
+            )
+
+            if self._expects_http_ready_check():
+                return self._wait_for_http_ready(cmd, timeout=timeout)
+            return self._wait_for_process_ready(cmd, timeout=timeout)
+        except Exception as exc:
+            return Evidence(
+                step="start app",
+                command=cmd,
+                expected="app starts",
+                actual=f"error: {exc}",
+                passed=False,
+                outcome="fail",
+                timestamp=time.strftime("%H:%M:%S"),
+            )
+
+    def _ensure_runtime_dependencies(self) -> None:
+        """Install or create runtime dependencies needed before start."""
         pkg_json = self.project_dir / "package.json"
         node_modules = self.project_dir / "node_modules"
         if pkg_json.exists() and not node_modules.exists():
@@ -229,7 +344,6 @@ class AppRunner:
         # node_modules but no dev.db — need generate + db push)
         prisma_schema = self.project_dir / "prisma" / "schema.prisma"
         if prisma_schema.exists():
-            # Check if DB file exists (could be ./dev.db or ./prisma/dev.db)
             has_db = (
                 (self.project_dir / "dev.db").exists()
                 or (self.project_dir / "prisma" / "dev.db").exists()
@@ -255,72 +369,256 @@ class AppRunner:
                 cwd=str(self.project_dir), capture_output=True, timeout=120,
             )
 
-        while self._port_in_use():
-            self.port += 1
-            self.base_url = f"http://localhost:{self.port}"
-
-        cmd = self.profile.start_command
-        if self.profile.framework == "nextjs":
-            cmd = f"{cmd} -- -p {self.port}" if "npm" in cmd else f"{cmd} -p {self.port}"
-        elif self.profile.framework in ("flask", "fastapi"):
-            cmd = f"{cmd} --port {self.port}"
-
-        env = {
+    def _runtime_env(self, *, use_built_start: bool) -> dict[str, str]:
+        """Build the environment for build/start subprocesses."""
+        return {
             **os.environ,
             "PORT": str(self.port),
-            "NODE_ENV": "development",
-            # NextAuth requires NEXTAUTH_URL to match the actual listening port
-            # for session cookies to work. Override whatever .env says.
+            "NODE_ENV": "production" if use_built_start else "development",
             "NEXTAUTH_URL": f"http://localhost:{self.port}",
         }
 
+    def _expects_http_ready_check(self) -> bool:
+        """Return True when the started product should answer HTTP probes."""
+        if self.profile.product_type in {"cli", "desktop", "library"}:
+            return False
+        return self.profile.interaction in ("browser", "http")
+
+    def _wait_for_http_ready(self, cmd: str, *, timeout: int) -> Evidence:
+        """Wait for an HTTP app to respond on its assigned port."""
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            if self.process is not None and self.process.poll() is not None:
+                output = self._process_output_tail()
+                return Evidence(
+                    step="start app",
+                    command=cmd,
+                    expected="app responds on port",
+                    actual=f"process exited with code {self.process.returncode}: {output}",
+                    passed=False,
+                    outcome="fail",
+                    timestamp=time.strftime("%H:%M:%S"),
+                )
+            try:
+                response = requests.get(self.base_url, timeout=10)
+                if response.status_code < 500:
+                    return Evidence(
+                        step="start app",
+                        command=cmd,
+                        expected="app responds on port",
+                        actual=f"HTTP {response.status_code} on {self.base_url}",
+                        passed=True,
+                        outcome="pass",
+                        timestamp=time.strftime("%H:%M:%S"),
+                    )
+            except (requests.ConnectionError, requests.Timeout):
+                time.sleep(1)
+
+        return Evidence(
+            step="start app",
+            command=cmd,
+            expected=f"app responds within {timeout}s",
+            actual=f"timeout after {timeout}s on {self.base_url}",
+            passed=False,
+            outcome="fail",
+            timestamp=time.strftime("%H:%M:%S"),
+        )
+
+    def _wait_for_process_ready(self, cmd: str, *, timeout: int) -> Evidence:
+        """Wait briefly for non-HTTP processes to stay alive or exit cleanly."""
+        deadline = time.time() + max(1, timeout)
+        while time.time() < deadline:
+            if self.process is None:
+                break
+            if self.process.poll() is None:
+                time.sleep(1)
+                continue
+            output = self._process_output_tail()
+            passed = self.process.returncode == 0
+            return Evidence(
+                step="start app",
+                command=cmd,
+                expected="process starts successfully",
+                actual=f"process exited with code {self.process.returncode}: {output}",
+                passed=passed,
+                outcome="pass" if passed else "fail",
+                timestamp=time.strftime("%H:%M:%S"),
+            )
+
+        return Evidence(
+            step="start app",
+            command=cmd,
+            expected="process starts successfully",
+            actual=f"process running (pid {self.process.pid if self.process else 'unknown'})",
+            passed=True,
+            outcome="pass",
+            timestamp=time.strftime("%H:%M:%S"),
+        )
+
+    def _process_output_tail(self, limit: int = 500) -> str:
+        """Read the final chunk of process output after a failed start."""
+        if self.process is None or self.process.stdout is None:
+            return ""
         try:
-            self.process = subprocess.Popen(
-                cmd,
-                shell=True,
-                cwd=str(self.project_dir),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                env=env,
-                preexec_fn=os.setsid,
-            )
+            output = self.process.stdout.read()
+        except Exception:
+            return ""
+        if isinstance(output, bytes):
+            output = output.decode(errors="replace")
+        return (output or "").strip()[-limit:]
 
-            start_time = time.time()
-            while time.time() - start_time < timeout:
-                try:
-                    response = requests.get(self.base_url, timeout=10)
-                    if response.status_code < 500:
-                        return Evidence(
-                            step="start app",
-                            command=cmd,
-                            expected="app responds on port",
-                            actual=f"HTTP {response.status_code} on {self.base_url}",
-                            passed=True,
-                            outcome="pass",
-                            timestamp=time.strftime("%H:%M:%S"),
-                        )
-                except (requests.ConnectionError, requests.Timeout):
-                    time.sleep(1)
+    def _should_use_built_start(self) -> bool:
+        """Decide whether to prefer a built artifact over the dev command."""
+        if self.profile.extra.get("prefer_built_start"):
+            return True
+        metadata = self.load_build_metadata(self.project_dir)
+        return metadata is not None and metadata.get("framework") == self.profile.framework
 
-            return Evidence(
-                step="start app",
-                command=cmd,
-                expected=f"app responds within {timeout}s",
-                actual=f"timeout after {timeout}s on {self.base_url}",
-                passed=False,
-                outcome="fail",
-                timestamp=time.strftime("%H:%M:%S"),
+    def _build_command(self) -> str | None:
+        """Return the build command for known buildable project types."""
+        pkg = self._package_metadata()
+        scripts = pkg.get("scripts", {})
+        deps = pkg.get("deps", {})
+
+        if self.profile.framework == "nextjs":
+            return "npm run build" if "build" in scripts else self._node_tool_command("next", "build")
+        if self.profile.framework in {"flask", "fastapi", "express", "django"}:
+            return None
+        if self.profile.framework == "cargo" or (self.project_dir / "Cargo.toml").exists():
+            return "cargo build"
+        if (self.project_dir / "go.mod").exists():
+            return f"go build -o {shlex.quote(self.project_dir.name)}"
+
+        build_frameworks = {
+            "vite", "nuxt", "nuxt3", "@remix-run/dev", "remix",
+            "astro", "@sveltejs/kit", "gatsby",
+        }
+        if "build" in scripts:
+            if self.profile.product_type in {"web", "desktop"}:
+                return "npm run build"
+            if any(dep in deps for dep in build_frameworks):
+                return "npm run build"
+        return None
+
+    def _start_command(self, *, use_built_start: bool) -> str | None:
+        """Return the command used to start the app or process."""
+        if use_built_start:
+            production_cmd = self._production_start_command()
+            if production_cmd:
+                return production_cmd
+        return self._development_start_command()
+
+    def _development_start_command(self) -> str | None:
+        """Return the existing dev-mode start command."""
+        cmd = self.profile.start_command
+        if not cmd:
+            return None
+        if self.profile.framework == "nextjs":
+            return f"{cmd} -- -p {self.port}" if "npm" in cmd else f"{cmd} -p {self.port}"
+        if self.profile.framework in ("flask", "fastapi"):
+            return f"{cmd} --port {self.port}"
+        return cmd
+
+    def _production_start_command(self) -> str | None:
+        """Return a production-style start command for pre-built artifacts."""
+        artifacts = self._detect_build_artifacts()
+
+        if self.profile.framework == "nextjs" and ".next" in artifacts:
+            return self._node_tool_command("next", f"start -p {self.port}")
+
+        pkg = self._package_metadata()
+        scripts = pkg.get("scripts", {})
+        if ".output" in artifacts and "preview" in scripts:
+            return f"npm run preview -- --port {self.port}"
+        if self.profile.framework == "cargo":
+            binary = self._cargo_binary_path()
+            if binary is not None:
+                return shlex.quote(str(binary))
+        if (self.project_dir / "go.mod").exists():
+            binary = self.project_dir / self.project_dir.name
+            if binary.exists():
+                return shlex.quote(str(binary))
+
+        static_dir = next(
+            (self.project_dir / rel for rel in ("dist", "build", "out") if rel in artifacts),
+            None,
+        )
+        if static_dir is not None:
+            serve_bin = self._node_bin_path("serve")
+            if serve_bin is not None:
+                return f"{shlex.quote(str(serve_bin))} -s {shlex.quote(str(static_dir))} -l {self.port}"
+            return (
+                f"{shlex.quote(sys.executable)} -m http.server {self.port} "
+                f"--directory {shlex.quote(str(static_dir))}"
             )
-        except Exception as exc:
-            return Evidence(
-                step="start app",
-                command=cmd,
-                expected="app starts",
-                actual=f"error: {exc}",
-                passed=False,
-                outcome="fail",
-                timestamp=time.strftime("%H:%M:%S"),
-            )
+        return None
+
+    def _detect_build_artifacts(self) -> list[str]:
+        """Return known build artifacts present in the project root."""
+        candidates = [
+            Path(".next"),
+            Path("dist"),
+            Path("build"),
+            Path(".output"),
+            Path("out"),
+        ]
+        if (self.project_dir / "Cargo.toml").exists():
+            candidates.append(Path("target"))
+        if (self.project_dir / "go.mod").exists():
+            candidates.append(Path(self.project_dir.name))
+        return [str(path) for path in candidates if (self.project_dir / path).exists()]
+
+    def _package_metadata(self) -> dict[str, Any]:
+        """Load Node package metadata used for build/start heuristics."""
+        pkg_json = self.project_dir / "package.json"
+        if not pkg_json.exists():
+            return {"scripts": {}, "deps": {}}
+        try:
+            payload = json.loads(pkg_json.read_text())
+        except (OSError, json.JSONDecodeError):
+            return {"scripts": {}, "deps": {}}
+        return {
+            "scripts": payload.get("scripts", {}) or {},
+            "deps": {
+                **(payload.get("dependencies", {}) or {}),
+                **(payload.get("devDependencies", {}) or {}),
+            },
+        }
+
+    def _node_bin_path(self, name: str) -> Path | None:
+        """Return a local node_modules/.bin tool path when available."""
+        candidate = self.project_dir / "node_modules" / ".bin" / name
+        return candidate if candidate.exists() else None
+
+    def _node_tool_command(self, tool: str, args: str) -> str:
+        """Return a shell command that prefers a local Node tool binary."""
+        binary = self._node_bin_path(tool)
+        if binary is not None:
+            return f"{shlex.quote(str(binary))} {args}"
+        return f"npx --no-install {tool} {args}"
+
+    def _cargo_binary_path(self) -> Path | None:
+        """Return the built Cargo binary path, if detectable."""
+        cargo_toml = self.project_dir / "Cargo.toml"
+        if not cargo_toml.exists():
+            return None
+        package_name = self.project_dir.name
+        try:
+            import tomllib
+
+            data = tomllib.loads(cargo_toml.read_text())
+            package_name = data.get("package", {}).get("name", package_name)
+        except Exception:
+            pass
+
+        for rel in (
+            Path("target") / "debug" / package_name,
+            Path("target") / "release" / package_name,
+        ):
+            candidate = self.project_dir / rel
+            if candidate.exists():
+                return candidate
+        return None
 
     def stop(self) -> None:
         """Stop the app and all child processes."""

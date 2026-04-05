@@ -631,39 +631,44 @@ async def verify_all_stories(
     else:
         # Subprocess-per-story: each story in own process with own app instance
         import uuid as _uuid
+        from otto.certifier.baseline import AppRunner
 
         logger.info("Running %d stories with max %d parallel (subprocess-isolated)",
                      len(stories), max_parallel)
         _scavenge_stale_workers(project_dir)
         _scavenge_old_story_runs(project_dir)
         _ensure_deps_installed(project_dir)
+        _build_project(project_dir, config)
 
-        run_id = f"{time.strftime('%Y%m%d-%H%M%S')}-{_uuid.uuid4().hex[:8]}"
-        stories_dir = project_dir / "otto_logs" / "certifier" / "stories" / run_id
-        stories_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            run_id = f"{time.strftime('%Y%m%d-%H%M%S')}-{_uuid.uuid4().hex[:8]}"
+            stories_dir = project_dir / "otto_logs" / "certifier" / "stories" / run_id
+            stories_dir.mkdir(parents=True, exist_ok=True)
 
-        sem = asyncio.Semaphore(max_parallel)
+            sem = asyncio.Semaphore(max_parallel)
 
-        async def _bounded(i: int, story: UserStory) -> JourneyResult:
-            async with sem:
-                story_dir = stories_dir / f"{i:02d}-{story.id}"
-                story_dir.mkdir(parents=True, exist_ok=True)
-                try:
-                    return await _run_story_in_subprocess(
-                        story, project_dir, config, story_dir)
-                except Exception as exc:
-                    logger.exception("Subprocess failed for %s", story.id)
-                    return JourneyResult(
-                        story_id=story.id, story_title=story.title,
-                        persona=story.persona, passed=False,
-                        diagnosis=f"Subprocess error: {exc}")
+            async def _bounded(i: int, story: UserStory) -> JourneyResult:
+                async with sem:
+                    story_dir = stories_dir / f"{i:02d}-{story.id}"
+                    story_dir.mkdir(parents=True, exist_ok=True)
+                    try:
+                        return await _run_story_in_subprocess(
+                            story, project_dir, config, story_dir)
+                    except Exception as exc:
+                        logger.exception("Subprocess failed for %s", story.id)
+                        return JourneyResult(
+                            story_id=story.id, story_title=story.title,
+                            persona=story.persona, passed=False,
+                            diagnosis=f"Subprocess error: {exc}")
 
-        tasks = [_bounded(i, s) for i, s in enumerate(stories)]
-        results = list(await asyncio.gather(*tasks))
+            tasks = [_bounded(i, s) for i, s in enumerate(stories)]
+            results = list(await asyncio.gather(*tasks))
 
-        for result in results:
-            total_cost += result.cost_usd
-            all_break_findings.extend(result.break_findings)
+            for result in results:
+                total_cost += result.cost_usd
+                all_break_findings.extend(result.break_findings)
+        finally:
+            AppRunner.clear_build_metadata(project_dir)
 
     _write_heartbeat(project_dir, "done", len(stories), len(stories))
 
@@ -715,6 +720,23 @@ WORKER_EXCLUDE_DIRS = {
 WORKER_EXCLUDE_PATTERNS: tuple[str, ...] = ()
 
 
+def _shared_worker_paths(project_dir: Path) -> list[Path]:
+    """Return project-relative paths that should be shared read-only with workers."""
+    from otto.certifier.baseline import AppRunner
+
+    shared: list[Path] = []
+    node_modules = Path("node_modules")
+    if (project_dir / node_modules).exists():
+        shared.append(node_modules)
+
+    metadata = AppRunner.load_build_metadata(project_dir) or {}
+    for rel in metadata.get("artifacts", []):
+        rel_path = Path(rel)
+        if (project_dir / rel_path).exists() and rel_path not in shared:
+            shared.append(rel_path)
+    return shared
+
+
 def _create_worker_copy(project_dir: Path, worker_id: str) -> Path:
     """Create a lightweight isolated copy of the project for one story worker.
 
@@ -733,6 +755,8 @@ def _create_worker_copy(project_dir: Path, worker_id: str) -> Path:
     workers_dir = Path(_tmp.gettempdir()) / "otto-workers" / project_dir.resolve().name
     worker_dir = workers_dir / worker_id
     workers_dir.mkdir(parents=True, exist_ok=True)
+    shared_paths = _shared_worker_paths(project_dir)
+    shared_rel = {str(path) for path in shared_paths}
 
     if _sys.platform == "darwin":
         _sp.run(["cp", "-c", "-r", str(project_dir), str(worker_dir)],
@@ -748,19 +772,34 @@ def _create_worker_copy(project_dir: Path, worker_id: str) -> Path:
                 f.unlink(missing_ok=True)
     else:
         def _ignore(directory: str, contents: list[str]) -> list[str]:
-            return [c for c in contents
-                    if c in WORKER_EXCLUDE_DIRS
-                    or any(fnmatch.fnmatch(c, p) for p in WORKER_EXCLUDE_PATTERNS)]
+            rel_dir = Path(directory).resolve().relative_to(project_dir.resolve())
+            ignored: list[str] = []
+            for c in contents:
+                rel_path = rel_dir / c if str(rel_dir) != "." else Path(c)
+                if c in WORKER_EXCLUDE_DIRS:
+                    ignored.append(c)
+                    continue
+                if str(rel_path) in shared_rel:
+                    ignored.append(c)
+                    continue
+                if any(fnmatch.fnmatch(c, p) for p in WORKER_EXCLUDE_PATTERNS):
+                    ignored.append(c)
+            return ignored
         shutil.copytree(project_dir, worker_dir, ignore=_ignore,
                         symlinks=True, ignore_dangling_symlinks=True)
 
-    # Symlink node_modules back to the original — avoids 30s npm install
-    # per worker. Symlink works because Node.js resolves require() relative
-    # to the symlink target, so .bin/ scripts find their siblings correctly.
-    nm = project_dir / "node_modules"
-    nm_link = worker_dir / "node_modules"
-    if nm.exists() and not nm_link.exists():
-        _os.symlink(str(nm.resolve()), str(nm_link))
+    # Remove shared build/runtime artifacts from the cloned copy and symlink
+    # them back to the original project. They are read-only during verification
+    # and much cheaper to reuse than to duplicate in every worker.
+    for rel_path in shared_paths:
+        source = project_dir / rel_path
+        link_path = worker_dir / rel_path
+        if link_path.is_dir() and not link_path.is_symlink():
+            shutil.rmtree(link_path, ignore_errors=True)
+        elif link_path.exists() or link_path.is_symlink():
+            link_path.unlink(missing_ok=True)
+        link_path.parent.mkdir(parents=True, exist_ok=True)
+        _os.symlink(str(source.resolve()), str(link_path))
 
     return worker_dir
 
@@ -777,6 +816,22 @@ def _ensure_deps_installed(project_dir: Path) -> None:
     if pkg_json.exists() and not node_modules.exists():
         _sp.run(["npm", "install", "--no-audit", "--no-fund"],
                 cwd=str(project_dir), capture_output=True, timeout=120)
+
+
+def _build_project(project_dir: Path, config: dict[str, Any]) -> None:
+    """Compile the project once before worker fanout.
+
+    Build failures are logged and ignored so story verification can fall back
+    to the original dev-mode startup path.
+    """
+    from otto.certifier.baseline import AppRunner
+    from otto.certifier.classifier import classify
+
+    profile = classify(project_dir)
+    timeout = int(config.get("certifier_app_build_timeout", 120))
+    runner = AppRunner(project_dir, profile)
+    if not runner.build(timeout=timeout):
+        logger.warning("Shared build failed for %s; workers will use dev mode", project_dir)
 
 
 def _scavenge_stale_workers(project_dir: Path, max_age_s: float = 3600) -> None:

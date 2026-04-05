@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
+from unittest.mock import MagicMock
 
 from otto.certifier.adapter import RouteInfo, SeededUser, TestConfig as AdapterTestConfig
 from otto.certifier.baseline import (
@@ -1134,3 +1136,72 @@ def test_port_override_reuses_existing_app_without_autostart(monkeypatch, tmp_pa
     assert evidence.passed is False
     assert evidence.command == "(reuse existing app on http://localhost:3004)"
     assert "no app responding" in evidence.actual
+
+
+def test_apprunner_build_writes_marker_and_uses_next_start(monkeypatch, tmp_path: Path):
+    profile = _profile()
+    profile.start_command = "npm run dev"
+    (tmp_path / "package.json").write_text(json.dumps({"scripts": {"build": "next build"}}))
+    (tmp_path / "node_modules" / ".bin").mkdir(parents=True)
+    (tmp_path / "node_modules" / ".bin" / "next").write_text("#!/bin/sh\n")
+    (tmp_path / ".next").mkdir()
+
+    build_calls: list[str] = []
+
+    def fake_run(cmd, **kwargs):
+        build_calls.append(cmd if isinstance(cmd, str) else " ".join(cmd))
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    popen_calls: list[tuple[str, dict[str, str]]] = []
+
+    def fake_popen(cmd, **kwargs):
+        popen_calls.append((cmd, kwargs["env"]))
+        proc = MagicMock()
+        proc.pid = 1234
+        proc.poll.return_value = None
+        proc.stdout = io.StringIO("")
+        return proc
+
+    monkeypatch.setattr("otto.certifier.baseline.subprocess.run", fake_run)
+    monkeypatch.setattr("otto.certifier.baseline.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("otto.certifier.baseline.requests.get", lambda *args, **kwargs: FakeResponse(200))
+
+    runner = AppRunner(tmp_path, profile)
+    assert runner.build() is True
+
+    metadata = AppRunner.load_build_metadata(tmp_path)
+    assert metadata is not None
+    assert ".next" in metadata["artifacts"]
+
+    evidence = runner.start(timeout=1)
+
+    assert evidence.passed is True
+    assert build_calls == ["npm run build"]
+    assert "next start -p" in popen_calls[0][0]
+    assert popen_calls[0][1]["NODE_ENV"] == "production"
+
+
+def test_apprunner_keeps_dev_start_without_build_marker(monkeypatch, tmp_path: Path):
+    profile = _profile()
+    profile.start_command = "npm run dev"
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / ".next").mkdir()
+
+    popen_calls: list[str] = []
+
+    def fake_popen(cmd, **kwargs):
+        popen_calls.append(cmd)
+        proc = MagicMock()
+        proc.pid = 1234
+        proc.poll.return_value = None
+        proc.stdout = io.StringIO("")
+        return proc
+
+    monkeypatch.setattr("otto.certifier.baseline.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("otto.certifier.baseline.requests.get", lambda *args, **kwargs: FakeResponse(200))
+
+    runner = AppRunner(tmp_path, profile)
+    evidence = runner.start(timeout=1)
+
+    assert evidence.passed is True
+    assert popen_calls == [f"npm run dev -- -p {runner.port}"]
