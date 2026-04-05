@@ -492,7 +492,9 @@ async def verify_all_stories(
     total_cost = 0.0
     start_time = time.monotonic()
 
-    max_parallel = int(config.get("certifier_parallel_stories", 3))
+    # Default sequential — parallel SDK sessions crash the subprocess.
+    # Set certifier_parallel_stories > 1 to experiment with parallelism.
+    max_parallel = int(config.get("certifier_parallel_stories", 1))
 
     async def _run_one_story(i: int, story: UserStory) -> JourneyResult:
         """Run a single story with optional timeout."""
