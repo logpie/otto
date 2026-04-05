@@ -224,8 +224,17 @@ class AppRunner:
                 ["npm", "install", "--no-audit", "--no-fund"],
                 cwd=str(self.project_dir), capture_output=True, timeout=120,
             )
-            # Prisma projects need generate + db push after fresh install
-            if (self.project_dir / "prisma" / "schema.prisma").exists():
+
+        # Prisma: always ensure DB exists (worker copies have symlinked
+        # node_modules but no dev.db — need generate + db push)
+        prisma_schema = self.project_dir / "prisma" / "schema.prisma"
+        if prisma_schema.exists():
+            # Check if DB file exists (could be ./dev.db or ./prisma/dev.db)
+            has_db = (
+                (self.project_dir / "dev.db").exists()
+                or (self.project_dir / "prisma" / "dev.db").exists()
+            )
+            if not has_db:
                 subprocess.run(
                     ["npx", "prisma", "generate"],
                     cwd=str(self.project_dir), capture_output=True, timeout=60,
