@@ -14,9 +14,11 @@ from __future__ import annotations
 
 from typing import Any
 
-# Default: no timeout. Structured output terminates the agent.
-# Set certifier_story_timeout in otto.yaml if you hit hangs.
-DEFAULT_STORY_TIMEOUT: float | None = None
+# Default: 300s (5 min). Observed stories take 47-91s, so 5 min is ~5x headroom.
+# Structured output is the normal termination mechanism, but stories can hang
+# (observed: "Todos Persist" story hung indefinitely in E2E testing).
+# Set certifier_story_timeout in otto.yaml to override.
+DEFAULT_STORY_TIMEOUT: float | None = 300.0
 
 # Heartbeat grace: how long after last heartbeat before "stale" warning.
 # This is informational — it doesn't kill anything.

@@ -144,12 +144,15 @@ def _cmd_start():
     if config_path:
         child_cmd.extend(["--config", str(config_path)])
 
+    # Capture stderr for debugging — if the certifier crashes, we need the traceback
+    stderr_path = job_dir / "stderr.log"
+    stderr_fh = open(stderr_path, "w")
     proc = subprocess.Popen(
         child_cmd,
         cwd=str(project_dir),
         start_new_session=True,  # detach from parent
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=stderr_fh,
     )
     job_state["pid"] = proc.pid
     _write_job(job_dir, job_state)
