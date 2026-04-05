@@ -193,17 +193,19 @@ def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
 
 JOURNEY_AGENT_SYSTEM_PROMPT = """\
 You are a QA tester verifying a product works for a real user scenario.
-
 Execute each step using the product manifest for routes, fields, and auth.
 
 RULES:
-1. Make REAL HTTP requests via Bash (curl). Never simulate responses.
-2. Verify outcomes by checking response data, not just status codes.
-3. Carry state between steps (IDs, tokens, cookies).
-4. If a step fails, diagnose the root cause (missing endpoint, wrong fields, auth, server error).
+1. Make REAL HTTP requests via Bash (curl). Never simulate or assume responses.
+2. Verify outcomes by checking response data — not just status codes. Check that
+   values, structure, and user context are correct.
+3. Carry state between steps. If step 1 returns an ID or token, use it in later steps.
+4. If a step fails, DIAGNOSE the root cause: missing endpoint? wrong fields? auth
+   issue? server error? Be specific so a developer can fix it.
 5. Continue testing even if a step fails — cover as much as possible.
-6. Do NOT use WebFetch — it cannot access localhost. Use curl via Bash only.
-7. Be concise. One curl command per verification, check the result, move on.
+6. For each failure, suggest a concrete fix (what code change would resolve it).
+7. Do NOT use WebFetch for localhost URLs — it cannot reach them. Use curl via Bash.
+8. Be efficient. One curl per verification, check the result, move on.
 """
 
 
@@ -236,8 +238,13 @@ Report what you find. These do NOT affect the pass/fail verdict.
     browser_text = ""
     if has_browser:
         browser_text = """
-BROWSER: You have chrome-devtools tools available. Use them to verify UI
-renders correctly after each API step (navigate, take screenshot, check elements).
+BROWSER VERIFICATION (after each API step, verify the UI):
+  agent-browser open <url>              # navigate to a page
+  agent-browser snapshot -i             # get accessibility tree with @refs
+  agent-browser click @e3               # click element by ref
+  agent-browser screenshot <dir>        # capture visual state
+  agent-browser close                   # cleanup when done
+Use these to confirm the UI reflects the API state (e.g. created item appears in list).
 """
 
     return f"""\
@@ -289,8 +296,9 @@ async def verify_story(
     verdict_file = log_dir / f"journey-{story.id}-verdict.json"
     verdict_file.unlink(missing_ok=True)
 
+    import shutil as _shutil
     skip_break = config.get("certifier_skip_break", True)  # default: skip break phase
-    has_browser = bool(config.get("chrome_mcp"))
+    has_browser = _shutil.which("agent-browser") is not None or bool(config.get("chrome_mcp"))
 
     prompt = _build_journey_prompt(
         story, manifest, base_url,
@@ -303,13 +311,18 @@ async def verify_story(
     if chrome_config:
         mcp_servers["chrome-devtools"] = chrome_config
 
-    # Simplified structured output — smaller schema = faster verdict generation.
+    # Structured output — kept lean but retains fields needed downstream:
+    # - fix_suggestion: flows into fix task generation for coding agent
+    # - blocked_at: used by certify CLI for progress tracking
+    # - break_findings: only when break phase enabled
     verdict_schema: dict[str, Any] = {
         "type": "object",
         "properties": {
             "story_passed": {"type": "boolean"},
+            "blocked_at": {"type": ["string", "null"]},
             "summary": {"type": "string"},
             "diagnosis": {"type": ["string", "null"]},
+            "fix_suggestion": {"type": ["string", "null"]},
             "steps": {
                 "type": "array",
                 "items": {
@@ -318,6 +331,7 @@ async def verify_story(
                         "action": {"type": "string"},
                         "outcome": {"type": "string", "enum": ["pass", "fail", "blocked"]},
                         "diagnosis": {"type": ["string", "null"]},
+                        "fix_suggestion": {"type": ["string", "null"]},
                     },
                 },
             },
@@ -334,6 +348,7 @@ async def verify_story(
                     "technique": {"type": "string"},
                     "description": {"type": "string"},
                     "severity": {"type": "string"},
+                    "fix_suggestion": {"type": "string"},
                 },
             },
         }
