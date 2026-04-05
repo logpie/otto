@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -145,6 +146,16 @@ RULES:
 - Mark which steps should be verified via browser (UI/UX check) vs API (data check)
 - Include data dependencies: "use the task created in step 2"
 - Generate 5-8 stories covering ALL features mentioned in the intent
+- Stories must only describe actions through the product's user interface (API requests, CLI commands, browser interactions)
+- Do NOT include operational steps like: restart server, kill process, edit source files, modify database directly, change environment variables, install packages
+- For persistence testing, use "close the session and start a new one" NOT "restart the server"
+
+STORY IDs:
+Each story must have a stable "id" field — a short kebab-case slug describing the scenario's
+INTENT (e.g. "first-todo-crud", "persist-across-sessions", "two-user-data-isolation",
+"unauth-access-denied", "edge-case-inputs"). The id should be based on WHAT the story tests,
+not the exact title wording. Two compilations of the same intent should produce the same ids
+even if titles differ slightly.
 
 Output JSON only:
 {{
@@ -225,6 +236,18 @@ async def compile_stories(
     return story_set
 
 
+def _slugify(text: str, max_len: int = 60) -> str:
+    """Convert a title/narrative into a kebab-case slug for use as a fallback story ID."""
+    slug = text.lower().strip()
+    slug = re.sub(r"[^a-z0-9\s-]", "", slug)
+    slug = re.sub(r"[\s_]+", "-", slug)
+    slug = re.sub(r"-{2,}", "-", slug)
+    slug = slug.strip("-")
+    if len(slug) > max_len:
+        slug = slug[:max_len].rsplit("-", 1)[0]
+    return slug or "story"
+
+
 def _parse_stories(raw: str, intent: str) -> StorySet:
     """Parse LLM output into StorySet."""
     text = raw.strip()
@@ -249,7 +272,8 @@ def _parse_stories(raw: str, intent: str) -> StorySet:
         # Attempt repair (same fix as product_planner._fix_json_newlines).
         data = json.loads(_fix_json_newlines(json_str))
     stories = []
-    for item in data.get("stories", []):
+    seen_ids: set[str] = set()
+    for idx, item in enumerate(data.get("stories", [])):
         steps = []
         for s in item.get("steps", []):
             steps.append(
@@ -263,9 +287,22 @@ def _parse_stories(raw: str, intent: str) -> StorySet:
                     uses_output_from=s.get("uses_output_from"),
                 )
             )
+        # Use LLM-provided id; fall back to slug from narrative (intent-based)
+        # then title, then index.
+        story_id = item.get("id", "").strip()
+        if not story_id:
+            source = item.get("narrative", "") or item.get("title", "")
+            story_id = _slugify(source) if source else f"story-{idx}"
+        # Deduplicate ids
+        base_id = story_id
+        counter = 2
+        while story_id in seen_ids:
+            story_id = f"{base_id}-{counter}"
+            counter += 1
+        seen_ids.add(story_id)
         stories.append(
             UserStory(
-                id=item.get("id", ""),
+                id=story_id,
                 persona=item.get("persona", "unknown"),
                 title=item.get("title", ""),
                 narrative=item.get("narrative", ""),
