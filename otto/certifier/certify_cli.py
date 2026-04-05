@@ -133,22 +133,14 @@ def _cmd_status():
     # Check if process is still alive
     pid = job_state.get("pid")
     if pid and job_state.get("status") == "running":
-        # Wall-clock timeout: kill certifier if it's been running too long
-        started_at = job_state.get("started_at", "")
-        max_certify_seconds = 1800  # 30 min hard cap
-        if started_at:
-            try:
-                start_time = time.mktime(time.strptime(started_at, "%Y-%m-%d %H:%M:%S"))
-                elapsed = time.time() - start_time
-                if elapsed > max_certify_seconds:
-                    os.kill(pid, signal.SIGTERM)
-                    job_state["status"] = "error"
-                    job_state["message"] = f"Certifier timed out after {int(elapsed)}s (max {max_certify_seconds}s)"
-                    _write_job(job_dir, job_state)
-                    print(json.dumps(job_state))
-                    return
-            except (ValueError, OSError):
-                pass
+        # Check heartbeat — certifier writes one every story start/complete.
+        # If heartbeat is stale (> 5 min), certifier is probably hung on a non-story phase.
+        heartbeat = _read_heartbeat(job_dir)
+        if heartbeat:
+            job_state["heartbeat"] = heartbeat
+            stale_seconds = heartbeat.get("stale_seconds", 0)
+            if stale_seconds > 300:  # 5 min with no heartbeat update
+                job_state["warning"] = f"No heartbeat for {int(stale_seconds)}s — certifier may be stuck"
 
         try:
             os.kill(pid, 0)  # check if alive
@@ -366,6 +358,29 @@ def _read_progress(job_dir):
                         "message": f"Testing in progress: {completed}/{started} stories verified so far...",
                     }
     return {}
+
+
+def _read_heartbeat(job_dir):
+    """Read certifier heartbeat. Returns dict with staleness info."""
+    # Heartbeat is written by journey_agent.py to the worktree
+    wt_parent = job_dir.parent.parent / ".otto-worktrees"
+    if not wt_parent.exists():
+        return None
+    for wt in sorted(wt_parent.iterdir(), reverse=True):
+        if wt.name.startswith("certifier-"):
+            hb_path = wt / "otto_logs" / "certifier" / "heartbeat.json"
+            if hb_path.exists():
+                try:
+                    hb = json.loads(hb_path.read_text())
+                    # Compute staleness
+                    ts = hb.get("timestamp", "")
+                    if ts:
+                        hb_time = time.mktime(time.strptime(ts, "%Y-%m-%d %H:%M:%S"))
+                        hb["stale_seconds"] = round(time.time() - hb_time)
+                    return hb
+                except (json.JSONDecodeError, ValueError):
+                    pass
+    return None
 
 
 def _load_history(job_dir):

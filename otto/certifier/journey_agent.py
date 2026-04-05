@@ -14,6 +14,7 @@ Evidence is captured by the runtime, not authored by the agent.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -434,6 +435,32 @@ def _parse_verdict(
 # ---------------------------------------------------------------------------
 
 
+def _story_timeout(story: UserStory, config: dict[str, Any]) -> float:
+    """Compute per-story timeout based on complexity.
+
+    Base + per-step time + break phase bonus. Configurable via config.
+    """
+    base = float(config.get("certifier_story_timeout_base", 120))  # 2 min base
+    per_step = float(config.get("certifier_story_timeout_per_step", 30))  # 30s per step
+    break_bonus = float(config.get("certifier_story_timeout_break", 60))  # 1 min for break phase
+    steps = len(story.steps) if story.steps else 3
+    return base + (per_step * steps) + break_bonus
+
+
+def _write_heartbeat(project_dir: Path, story_title: str, stories_completed: int, stories_total: int) -> None:
+    """Write a heartbeat file so external watchers know we're alive."""
+    heartbeat_path = project_dir / "otto_logs" / "certifier" / "heartbeat.json"
+    heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
+    import json
+    heartbeat_path.write_text(json.dumps({
+        "alive": True,
+        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "current_story": story_title,
+        "stories_completed": stories_completed,
+        "stories_total": stories_total,
+    }))
+
+
 async def verify_all_stories(
     stories: list[UserStory],
     manifest: ProductManifest,
@@ -448,15 +475,43 @@ async def verify_all_stories(
     total_cost = 0.0
     start_time = time.monotonic()
 
-    for story in stories:
+    for i, story in enumerate(stories):
         logger.info("Verifying story: %s (%s)", story.title, story.persona)
-        result = await verify_story(story, manifest, base_url, project_dir, config)
+        _write_heartbeat(project_dir, story.title, i, len(stories))
+
+        # Per-story deadline — if the journey agent hangs, skip and continue
+        timeout = _story_timeout(story, config)
+        try:
+            result = await asyncio.wait_for(
+                verify_story(story, manifest, base_url, project_dir, config),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Story timed out after %.0fs: %s", timeout, story.title)
+            result = JourneyResult(
+                story_id=story.id,
+                story_title=story.title,
+                persona=story.persona,
+                passed=False,
+                blocked_at=f"timed out after {int(timeout)}s",
+                summary=f"Story verification timed out after {int(timeout)}s",
+                diagnosis="The journey agent did not complete within the deadline. "
+                          "This may indicate a hung HTTP request, a stuck app, or an agent loop.",
+                fix_suggestion="Check if the app is responding and if the endpoint under test is hanging.",
+                steps=[],
+                break_findings=[],
+                cost_usd=0.0,
+                duration_s=timeout,
+            )
+
         results.append(result)
         total_cost += result.cost_usd
         all_break_findings.extend(result.break_findings)
 
         status = "✓" if result.passed else "✗"
         logger.info("  %s %s (%.1fs, $%.3f)", status, story.title, result.duration_s, result.cost_usd)
+
+    _write_heartbeat(project_dir, "done", len(stories), len(stories))
 
     passed = sum(1 for r in results if r.passed)
     failed = len(results) - passed
