@@ -356,15 +356,31 @@ def format_tier4_json(tier4_results: list[Any]) -> list[dict[str, Any]]:
     ]
 
 
+def _clean_evidence_output(output: str) -> str:
+    """Clean evidence output for display — strip noise, paths, base64."""
+    import re
+    output = _strip_ansi(output)
+    # Strip base64 image data (agent Read-ing screenshot PNGs)
+    if "base64" in output and len(output) > 200:
+        return "(image data)"
+    # Strip absolute paths — keep just the filename or relative part
+    output = re.sub(
+        r"/Users/[^\s\"']+/otto_logs/certifier/",
+        "otto_logs/certifier/",
+        output,
+    )
+    return output[:500]
+
+
 def generate_tier4_html(
     tier4_results: list[Any],
     report: Any,
     output_dir: Path,
 ) -> Path:
-    """Generate an HTML proof-of-work report with embedded screenshots and video.
+    """Generate an HTML proof-of-work report for human audit.
 
-    Self-contained HTML file — screenshots embedded as base64, video linked.
-    Opens in any browser. Zero extra cost (pure Python formatting).
+    Organized by story flow, not data source. Screenshots embedded,
+    video linked, raw evidence in expandable section.
     """
     import base64
 
@@ -377,27 +393,35 @@ def generate_tier4_html(
 <html><head><meta charset="utf-8">
 <title>Certification Report</title>
 <style>
-body {{ font-family: -apple-system, system-ui, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; color: #1a1a1a; }}
+body {{ font-family: -apple-system, system-ui, sans-serif; max-width: 960px; margin: 2em auto; padding: 0 1em; color: #1a1a1a; line-height: 1.5; }}
 h1 {{ border-bottom: 2px solid #e5e7eb; padding-bottom: 0.5em; }}
-.meta {{ color: #6b7280; margin-bottom: 2em; }}
-.outcome {{ color: {outcome_color}; font-weight: bold; font-size: 1.2em; }}
-.story {{ border: 1px solid #e5e7eb; border-radius: 8px; padding: 1.5em; margin: 1em 0; }}
+.outcome {{ color: {outcome_color}; font-weight: bold; font-size: 1.3em; }}
+.meta {{ color: #6b7280; margin-bottom: 1.5em; }}
+.prechecks {{ background: #f9fafb; border-radius: 8px; padding: 1em 1.5em; margin: 1em 0; }}
+.prechecks .check {{ margin: 0.3em 0; }}
+.story {{ border: 1px solid #e5e7eb; border-radius: 8px; padding: 1.5em; margin: 1.5em 0; }}
 .story.pass {{ border-left: 4px solid #22c55e; }}
 .story.fail {{ border-left: 4px solid #ef4444; }}
-.evidence {{ background: #f9fafb; border-radius: 4px; padding: 1em; margin: 1em 0; font-family: monospace; font-size: 0.85em; white-space: pre-wrap; overflow-x: auto; }}
-.evidence .cmd {{ color: #2563eb; }}
-.evidence .out {{ color: #374151; }}
-.evidence .err {{ color: #ef4444; }}
-.evidence .ts {{ color: #9ca3af; }}
-.screenshots {{ display: flex; flex-wrap: wrap; gap: 1em; margin: 1em 0; }}
-.screenshots img {{ max-width: 400px; border: 1px solid #e5e7eb; border-radius: 4px; cursor: pointer; }}
-.screenshots img:hover {{ box-shadow: 0 2px 8px rgba(0,0,0,0.15); }}
-table {{ border-collapse: collapse; width: 100%; margin: 1em 0; }}
-th, td {{ border: 1px solid #e5e7eb; padding: 0.5em 1em; text-align: left; }}
+.story h3 {{ margin-top: 0; }}
+.api-call {{ background: #f0f4ff; border-radius: 4px; padding: 0.6em 1em; margin: 0.5em 0; font-family: monospace; font-size: 0.85em; }}
+.api-call .method {{ color: #2563eb; font-weight: bold; }}
+.api-call .status {{ color: #059669; }}
+.api-call .status.err {{ color: #ef4444; }}
+.api-call .body {{ color: #374151; word-break: break-all; }}
+.screenshots {{ display: flex; flex-wrap: wrap; gap: 0.8em; margin: 1em 0; }}
+.screenshot {{ text-align: center; }}
+.screenshot img {{ max-width: 380px; border: 1px solid #d1d5db; border-radius: 4px; cursor: pointer; transition: transform 0.2s; }}
+.screenshot img:hover {{ transform: scale(1.02); box-shadow: 0 4px 12px rgba(0,0,0,0.15); }}
+.screenshot .caption {{ font-size: 0.8em; color: #6b7280; margin-top: 0.3em; }}
+video {{ max-width: 100%; border-radius: 8px; margin: 1em 0; }}
+.diagnosis {{ background: #fef2f2; border-left: 3px solid #ef4444; padding: 0.5em 1em; margin: 0.5em 0; border-radius: 0 4px 4px 0; }}
+.fix {{ background: #f0fdf4; border-left: 3px solid #22c55e; padding: 0.5em 1em; margin: 0.5em 0; border-radius: 0 4px 4px 0; }}
+details {{ margin: 1em 0; }}
+details summary {{ cursor: pointer; color: #6b7280; font-size: 0.9em; }}
+details .evidence {{ background: #f9fafb; border-radius: 4px; padding: 1em; font-family: monospace; font-size: 0.8em; white-space: pre-wrap; overflow-x: auto; max-height: 400px; overflow-y: auto; }}
+table {{ border-collapse: collapse; width: 100%; margin: 0.5em 0; }}
+th, td {{ border: 1px solid #e5e7eb; padding: 0.4em 0.8em; text-align: left; font-size: 0.9em; }}
 th {{ background: #f9fafb; }}
-video {{ max-width: 100%; border-radius: 4px; margin: 1em 0; }}
-.diagnosis {{ background: #fef2f2; border-left: 3px solid #ef4444; padding: 0.5em 1em; margin: 0.5em 0; }}
-.fix {{ background: #f0fdf4; border-left: 3px solid #22c55e; padding: 0.5em 1em; margin: 0.5em 0; }}
 </style>
 </head><body>
 <h1>Certification Report</h1>
@@ -405,64 +429,109 @@ video {{ max-width: 100%; border-radius: 4px; margin: 1em 0; }}
   <span class="outcome">{report.outcome.value.upper()}</span> &mdash;
   {report.duration_s:.0f}s &mdash; ${report.cost_usd:.2f} &mdash;
   {time.strftime('%Y-%m-%d %H:%M:%S')}
-</div>
+</div>"""]
 
-<table>
-<tr><th>Tier</th><th>Status</th><th>Duration</th><th>Cost</th></tr>"""]
-
+    # Pre-checks section from tiers 1-3
+    html.append('<div class="prechecks"><strong>Pre-checks</strong>')
     for t in report.tiers:
-        html.append(f"<tr><td>{t.tier}. {t.name}</td><td>{t.status.value}</td><td>{t.duration_s:.1f}s</td><td>${t.cost_usd:.3f}</td></tr>")
-    html.append("</table>")
+        if t.tier >= 4:
+            continue
+        icon = "✓" if t.status.value == "passed" else ("⊘" if t.status.value == "skipped" else "✗")
+        detail = ""
+        if t.findings:
+            issues = [f.description for f in t.findings[:3]]
+            detail = f' — {"; ".join(issues)}'
+        html.append(f'<div class="check">{icon} Tier {t.tier}: {t.name} ({t.duration_s:.1f}s){detail}</div>')
+    html.append("</div>")
 
+    # Stories
     if tier4_results:
         html.append(f"<h2>Story Verification ({passed}/{total} passed)</h2>")
         for r in tier4_results:
             cls = "pass" if r.passed else "fail"
             icon = "✓" if r.passed else "✗"
             html.append(f'<div class="story {cls}">')
-            html.append(f"<h3>{icon} {_strip_ansi(r.story_title)} ({r.persona}, {r.duration_s:.0f}s, ${r.cost_usd:.3f})</h3>")
+            html.append(f"<h3>{icon} {_html_escape(_strip_ansi(r.story_title))}</h3>")
+            html.append(f"<p><em>{r.persona}</em> &mdash; {r.duration_s:.0f}s &mdash; ${r.cost_usd:.3f}</p>")
 
             if not r.passed and r.diagnosis:
-                html.append(f'<div class="diagnosis"><strong>Diagnosis:</strong> {_strip_ansi(r.diagnosis)}</div>')
+                html.append(f'<div class="diagnosis"><strong>Diagnosis:</strong> {_html_escape(_strip_ansi(r.diagnosis))}</div>')
             if not r.passed and r.fix_suggestion:
-                html.append(f'<div class="fix"><strong>Fix:</strong> {_strip_ansi(r.fix_suggestion)}</div>')
+                html.append(f'<div class="fix"><strong>Suggested fix:</strong> {_html_escape(_strip_ansi(r.fix_suggestion))}</div>')
 
-            # Screenshots — embed as base64
+            # Video first — most useful for audit
             evidence_dir = output_dir / f"evidence-{r.story_id}"
             if evidence_dir.exists():
+                video = evidence_dir / "recording.webm"
+                if video.exists():
+                    rel_path = f"evidence-{r.story_id}/recording.webm"
+                    html.append(f'<video controls><source src="{rel_path}" type="video/webm"></video>')
+
+            # API calls — extract curl requests + responses as clean pairs
+            evidence = getattr(r, "evidence_chain", None) or []
+            api_calls = [e for e in evidence
+                         if e.get("tool") == "Bash"
+                         and "curl " in str(e.get("input", ""))
+                         and not e.get("is_error")]
+            if api_calls:
+                html.append("<h4>API Verification</h4>")
+                for e in api_calls:
+                    cmd = _extract_command(e.get("input", ""))
+                    out = _clean_evidence_output(e.get("output", ""))
+                    # Try to extract method + path from curl command
+                    import re
+                    method_match = re.search(r"-X\s+(POST|PUT|DELETE|PATCH)", cmd)
+                    method = method_match.group(1) if method_match else "GET"
+                    path_match = re.search(r"http://localhost:\d+(/\S+)", cmd)
+                    path = path_match.group(1) if path_match else ""
+                    # Extract HTTP status from output
+                    status = ""
+                    status_match = re.search(r"HTTP[_ ](?:STATUS:)?(\d+)", out) or re.search(r"^(\d{3})$", out.strip())
+                    if status_match:
+                        status = status_match.group(1)
+                    status_cls = "err" if status and int(status) >= 400 else ""
+                    html.append(f'<div class="api-call">')
+                    html.append(f'<span class="method">{method}</span> {_html_escape(path)}')
+                    if status:
+                        html.append(f' → <span class="status {status_cls}">{status}</span>')
+                    if out and out != status:
+                        body = out.replace(f"HTTP_STATUS:{status}", "").replace(f"---HTTP_CODE:{status}", "").strip()
+                        if body and len(body) < 300:
+                            html.append(f'<div class="body">{_html_escape(body[:200])}</div>')
+                    html.append("</div>")
+
+            # Screenshots with captions
+            if evidence_dir and evidence_dir.exists():
                 pngs = sorted(evidence_dir.glob("*.png"))
                 if pngs:
-                    html.append('<h4>Screenshots</h4><div class="screenshots">')
+                    html.append("<h4>Screenshots</h4><div class='screenshots'>")
                     for png in pngs:
                         try:
                             b64 = base64.b64encode(png.read_bytes()).decode()
+                            caption = png.stem.replace("-", " ").replace("_", " ")
+                            html.append(f'<div class="screenshot">')
                             html.append(f'<img src="data:image/png;base64,{b64}" title="{png.name}" />')
+                            html.append(f'<div class="caption">{_html_escape(caption)}</div></div>')
                         except OSError:
                             pass
                     html.append("</div>")
 
-                # Video — link (not embed base64, too large)
-                video = evidence_dir / "recording.webm"
-                if video.exists():
-                    rel_path = f"evidence-{r.story_id}/recording.webm"
-                    html.append(f'<h4>Video Recording</h4>')
-                    html.append(f'<video controls><source src="{rel_path}" type="video/webm">Video: {rel_path}</video>')
-
-            # Evidence trail
-            evidence = getattr(r, "evidence_chain", None) or []
+            # Raw evidence trail — expandable
             if evidence:
-                html.append('<h4>Evidence Trail</h4><div class="evidence">')
+                html.append("<details><summary>Full evidence trail ({} tool calls)</summary>".format(len(evidence)))
+                html.append('<div class="evidence">')
                 for e in evidence:
                     ts = e.get("timestamp", "")
                     cmd = _strip_ansi(_extract_command(e.get("input", "")))
-                    out = _strip_ansi(e.get("output", ""))[:500]
-                    err_cls = "err" if e.get("is_error") else "out"
-                    html.append(f'<span class="ts">[{ts}]</span> <span class="cmd">{_html_escape(cmd)}</span>')
-                    if out:
-                        html.append(f'  <span class="{err_cls}">→ {_html_escape(out)}</span>')
-                html.append("</div>")
+                    out = _clean_evidence_output(e.get("output", ""))
+                    if not out or out == "(image data)":
+                        html.append(f'[{ts}] {_html_escape(cmd)}')
+                    else:
+                        err = " [ERROR]" if e.get("is_error") else ""
+                        html.append(f'[{ts}] {_html_escape(cmd)}\n  → {_html_escape(out)}{err}')
+                html.append("</div></details>")
 
-            html.append("</div>")
+            html.append("</div>")  # story
 
     html.append("</body></html>")
     report_path = output_dir / "proof-of-work.html"
