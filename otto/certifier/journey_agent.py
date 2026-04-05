@@ -18,6 +18,7 @@ import asyncio
 import json
 import logging
 import time
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,7 @@ from otto.agent import (
 )
 from otto.certifier.manifest import ProductManifest, format_manifest_for_agent
 from otto.certifier.stories import UserStory
+from otto.certifier.timeouts import DEFAULT_HEARTBEAT_GRACE_S, story_timeout_seconds
 from otto.observability import append_text_log
 
 logger = logging.getLogger("otto.certifier.journey_agent")
@@ -295,20 +297,26 @@ async def verify_story(
     cost_usd = 0.0
     verdict_data: dict[str, Any] | None = None
 
-    async for message in query(prompt=prompt, options=options):
-        if isinstance(message, ResultMessage):
-            raw_cost = getattr(message, "total_cost_usd", None)
-            if isinstance(raw_cost, (int, float)):
-                cost_usd = float(raw_cost)
-            # Structured output is on the ResultMessage
-            structured = getattr(message, "structured_output", None)
-            if isinstance(structured, dict):
-                verdict_data = structured
-            break
-        elif isinstance(message, AssistantMessage):
-            for block in message.content:
-                if isinstance(block, TextBlock) and block.text:
-                    text_parts.append(block.text)
+    stream = query(prompt=prompt, options=options)
+    try:
+        async for message in stream:
+            if isinstance(message, ResultMessage):
+                raw_cost = getattr(message, "total_cost_usd", None)
+                if isinstance(raw_cost, (int, float)):
+                    cost_usd = float(raw_cost)
+                # Structured output is on the ResultMessage
+                structured = getattr(message, "structured_output", None)
+                if isinstance(structured, dict):
+                    verdict_data = structured
+                break
+            elif isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if isinstance(block, TextBlock) and block.text:
+                        text_parts.append(block.text)
+    finally:
+        close_stream = getattr(stream, "aclose", None)
+        if callable(close_stream):
+            await close_stream()
 
     duration_s = round(time.monotonic() - started_at, 1)
     raw_output = "".join(text_parts)
@@ -436,29 +444,33 @@ def _parse_verdict(
 
 
 def _story_timeout(story: UserStory, config: dict[str, Any]) -> float:
-    """Compute per-story timeout based on complexity.
-
-    Base + per-step time + break phase bonus. Configurable via config.
-    """
-    base = float(config.get("certifier_story_timeout_base", 120))  # 2 min base
-    per_step = float(config.get("certifier_story_timeout_per_step", 30))  # 30s per step
-    break_bonus = float(config.get("certifier_story_timeout_break", 60))  # 1 min for break phase
-    steps = len(story.steps) if story.steps else 3
-    return base + (per_step * steps) + break_bonus
+    """Compute the per-story watchdog timeout from shared certifier settings."""
+    return story_timeout_seconds(config, steps=len(story.steps) if story.steps else 3)
 
 
-def _write_heartbeat(project_dir: Path, story_title: str, stories_completed: int, stories_total: int) -> None:
+def _write_heartbeat(
+    project_dir: Path,
+    story_title: str,
+    stories_completed: int,
+    stories_total: int,
+    *,
+    story_timeout_s: float | None = None,
+) -> None:
     """Write a heartbeat file so external watchers know we're alive."""
     heartbeat_path = project_dir / "otto_logs" / "certifier" / "heartbeat.json"
     heartbeat_path.parent.mkdir(parents=True, exist_ok=True)
     import json
-    heartbeat_path.write_text(json.dumps({
+    payload: dict[str, Any] = {
         "alive": True,
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
         "current_story": story_title,
         "stories_completed": stories_completed,
         "stories_total": stories_total,
-    }))
+    }
+    if story_timeout_s is not None:
+        payload["story_timeout_s"] = round(story_timeout_s, 1)
+        payload["stale_after_s"] = round(story_timeout_s + DEFAULT_HEARTBEAT_GRACE_S, 1)
+    heartbeat_path.write_text(json.dumps(payload))
 
 
 async def verify_all_stories(
@@ -477,16 +489,21 @@ async def verify_all_stories(
 
     for i, story in enumerate(stories):
         logger.info("Verifying story: %s (%s)", story.title, story.persona)
-        _write_heartbeat(project_dir, story.title, i, len(stories))
-
-        # Per-story deadline — if the journey agent hangs, skip and continue
         timeout = _story_timeout(story, config)
+        _write_heartbeat(project_dir, story.title, i, len(stories), story_timeout_s=timeout)
+
+        # Structured output is the normal completion path for journey verification.
+        # This timeout is only a last-resort safety net for hung SDK sessions or
+        # stuck network activity, so it must stay comfortably above legitimate runs.
+        story_task = asyncio.create_task(
+            verify_story(story, manifest, base_url, project_dir, config)
+        )
         try:
-            result = await asyncio.wait_for(
-                verify_story(story, manifest, base_url, project_dir, config),
-                timeout=timeout,
-            )
+            result = await asyncio.wait_for(story_task, timeout=timeout)
         except asyncio.TimeoutError:
+            story_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await story_task
             logger.warning("Story timed out after %.0fs: %s", timeout, story.title)
             result = JourneyResult(
                 story_id=story.id,

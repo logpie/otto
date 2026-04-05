@@ -20,7 +20,14 @@ import signal
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
+
+from otto.certifier.timeouts import (
+    heartbeat_stale_after_seconds as story_heartbeat_stale_after_seconds,
+    resolve_story_timeout_config,
+)
 
 
 def main():
@@ -54,11 +61,11 @@ def _cmd_start():
         if idx + 1 < len(sys.argv):
             config_path = Path(sys.argv[idx + 1]).resolve()
 
-    job_dir = project_dir / "otto_logs" / "certify-job"
-    job_dir.mkdir(parents=True, exist_ok=True)
+    job_root = _job_root(project_dir)
+    job_root.mkdir(parents=True, exist_ok=True)
 
     # Budget check
-    history = _load_history(job_dir)
+    history = _load_history(job_root)
     config = _load_config(config_path)
     max_calls = int(config.get("max_verification_rounds", 5))
     call_count = len(history)
@@ -73,19 +80,51 @@ def _cmd_start():
         }))
         return
 
+    active_job = _find_running_job(job_root)
+    if active_job is not None:
+        active_dir, active_state = active_job
+        print(json.dumps({
+            "status": "already_running",
+            "message": "A certification job is already running.",
+            "job_id": active_dir.name,
+            "pid": active_state.get("pid"),
+        }))
+        return
+
+    job_id = _new_job_id()
+    job_dir = job_root / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    timeout_config = resolve_story_timeout_config(config)
+    job_state = {
+        "job_id": job_id,
+        "status": "starting",
+        "round": call_count + 1,
+        "round_max": max_calls,
+        "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "pid": None,
+        "stories_total": 0,
+        "stories_completed": 0,
+        "timeout_config": timeout_config,
+    }
+    _write_job(job_dir, job_state)
+
     # Snapshot candidate
-    candidate_sha = _snapshot(project_dir)
+    try:
+        candidate_sha = _snapshot(project_dir, job_dir)
+    except RuntimeError:
+        print(json.dumps(_read_job(job_dir) or {
+            "status": "error",
+            "job_id": job_id,
+            "message": "Failed to snapshot certification candidate.",
+        }))
+        return
 
     # Write job state
     job_state = {
+        **job_state,
         "status": "running",
-        "round": call_count + 1,
-        "round_max": max_calls,
         "candidate_sha": candidate_sha,
-        "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "pid": None,  # filled after fork
-        "stories_total": 0,
-        "stories_completed": 0,
     }
     _write_job(job_dir, job_state)
 
@@ -97,6 +136,7 @@ def _cmd_start():
             _run_certifier_child(project_dir, intent_file, config_path, job_dir, candidate_sha, call_count + 1)
         except Exception as exc:
             _write_job(job_dir, {
+                "job_id": job_id,
                 "status": "error",
                 "message": str(exc),
                 "round": call_count + 1,
@@ -110,6 +150,7 @@ def _cmd_start():
         print(json.dumps({
             "status": "started",
             "message": f"Certification round {call_count + 1}/{max_calls} started. Use 'certify status' to check progress.",
+            "job_id": job_id,
             "round": call_count + 1,
             "round_max": max_calls,
             "candidate_sha": candidate_sha[:8],
@@ -123,7 +164,10 @@ def _cmd_status():
         sys.exit(1)
 
     project_dir = Path(sys.argv[2]).resolve()
-    job_dir = project_dir / "otto_logs" / "certify-job"
+    job_dir = _latest_job_dir(_job_root(project_dir))
+    if job_dir is None:
+        print(json.dumps({"status": "no_job", "message": "No certification running. Use 'certify start' first."}))
+        return
     job_state = _read_job(job_dir)
 
     if not job_state:
@@ -134,12 +178,13 @@ def _cmd_status():
     pid = job_state.get("pid")
     if pid and job_state.get("status") == "running":
         # Check heartbeat — certifier writes one every story start/complete.
-        # If heartbeat is stale (> 5 min), certifier is probably hung on a non-story phase.
         heartbeat = _read_heartbeat(job_dir)
         if heartbeat:
             job_state["heartbeat"] = heartbeat
             stale_seconds = heartbeat.get("stale_seconds", 0)
-            if stale_seconds > 300:  # 5 min with no heartbeat update
+            stale_after_s = heartbeat.get("stale_after_s") or _heartbeat_stale_after_seconds(job_state)
+            job_state["heartbeat_stale_after_s"] = stale_after_s
+            if stale_seconds > stale_after_s:
                 job_state["warning"] = f"No heartbeat for {int(stale_seconds)}s — certifier may be stuck"
 
         try:
@@ -170,7 +215,10 @@ def _cmd_results():
         sys.exit(1)
 
     project_dir = Path(sys.argv[2]).resolve()
-    job_dir = project_dir / "otto_logs" / "certify-job"
+    job_dir = _latest_job_dir(_job_root(project_dir))
+    if job_dir is None:
+        print(json.dumps({"error": "No results available. Run 'certify start' and wait for completion."}))
+        return
     result_path = job_dir / "result.json"
 
     if not result_path.exists():
@@ -211,6 +259,7 @@ def _run_certifier_child(project_dir, intent_file, config_path, job_dir, candida
     issues = []
     for f in report.critical_findings():
         issues.append({
+            "category": f.category,
             "what": f.description,
             "detail": f.diagnosis,
             "suggestion": f.fix_suggestion,
@@ -238,17 +287,18 @@ def _run_certifier_child(project_dir, intent_file, config_path, job_dir, candida
             })
 
     # Round context from history
-    history = _load_history(job_dir)
-    prev_issues = set()
+    history = _load_history(job_dir.parent)
+    prev_issues: set[str] = set()
     if history:
         prev = history[-1]
-        prev_issues = {i.get("what", "") for i in prev.get("issues", [])}
-    current_issues = {i["what"] for i in issues}
+        prev_issues = _issue_fingerprints(prev.get("issues", []))
+    current_issues = _issue_fingerprints(issues)
     same_issues = prev_issues & current_issues
     new_issues = current_issues - prev_issues
     resolved_issues = prev_issues - current_issues
 
     result = {
+        "job_id": job_dir.name,
         "status": status,
         "round": round_num,
         "stories_passed": sum(1 for s in stories if s["passed"]),
@@ -285,7 +335,7 @@ def _run_certifier_child(project_dir, intent_file, config_path, job_dir, candida
 
     # Append to history
     history.append(result)
-    _save_history(job_dir, history)
+    _save_history(job_dir.parent, history)
 
 
 def _progress_message(same, new, resolved, status):
@@ -313,16 +363,55 @@ def _progress_message(same, new, resolved, status):
 
 # ── Helpers ──
 
-def _snapshot(project_dir):
-    subprocess.run(["git", "add", "-A"], cwd=project_dir, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "--allow-empty", "-m", "otto: certify candidate"],
-        cwd=project_dir, capture_output=True,
+def _snapshot(project_dir, job_dir):
+    add_result = subprocess.run(
+        ["git", "add", "-A"],
+        cwd=project_dir,
+        capture_output=True,
+        text=True,
     )
+    if add_result.returncode != 0:
+        _write_job_error(
+            job_dir,
+            "Failed to stage certification snapshot.",
+            phase="snapshot",
+            command="git add -A",
+            stdout=add_result.stdout.strip(),
+            stderr=add_result.stderr.strip(),
+        )
+        raise RuntimeError("Failed to stage certification snapshot.")
+
+    commit_result = subprocess.run(
+        ["git", "commit", "--allow-empty", "-m", "otto: certify candidate"],
+        cwd=project_dir,
+        capture_output=True,
+        text=True,
+    )
+    if commit_result.returncode != 0:
+        _write_job_error(
+            job_dir,
+            "Failed to create certification snapshot commit.",
+            phase="snapshot",
+            command="git commit --allow-empty -m 'otto: certify candidate'",
+            stdout=commit_result.stdout.strip(),
+            stderr=commit_result.stderr.strip(),
+        )
+        raise RuntimeError("Failed to create certification snapshot commit.")
+
     result = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=project_dir, capture_output=True, text=True,
     )
+    if result.returncode != 0:
+        _write_job_error(
+            job_dir,
+            "Failed to read certification snapshot commit SHA.",
+            phase="snapshot",
+            command="git rev-parse HEAD",
+            stdout=result.stdout.strip(),
+            stderr=result.stderr.strip(),
+        )
+        raise RuntimeError("Failed to read certification snapshot commit SHA.")
     return result.stdout.strip()
 
 
@@ -343,7 +432,7 @@ def _read_job(job_dir):
 def _read_progress(job_dir):
     """Read partial progress from certifier worktree (if available)."""
     # Check for journey-agent.log in any active worktree
-    wt_parent = job_dir.parent.parent / ".otto-worktrees"
+    wt_parent = _project_dir_from_job_dir(job_dir) / ".otto-worktrees"
     if wt_parent.exists():
         for wt in sorted(wt_parent.iterdir(), reverse=True):
             if wt.name.startswith("certifier-"):
@@ -363,7 +452,7 @@ def _read_progress(job_dir):
 def _read_heartbeat(job_dir):
     """Read certifier heartbeat. Returns dict with staleness info."""
     # Heartbeat is written by journey_agent.py to the worktree
-    wt_parent = job_dir.parent.parent / ".otto-worktrees"
+    wt_parent = _project_dir_from_job_dir(job_dir) / ".otto-worktrees"
     if not wt_parent.exists():
         return None
     for wt in sorted(wt_parent.iterdir(), reverse=True):
@@ -377,6 +466,8 @@ def _read_heartbeat(job_dir):
                     if ts:
                         hb_time = time.mktime(time.strptime(ts, "%Y-%m-%d %H:%M:%S"))
                         hb["stale_seconds"] = round(time.time() - hb_time)
+                    if "stale_after_s" not in hb:
+                        hb["stale_after_s"] = _heartbeat_stale_after_seconds(_read_job(job_dir) or {})
                     return hb
                 except (json.JSONDecodeError, ValueError):
                     pass
@@ -413,6 +504,79 @@ def _load_config(config_path):
         import yaml
         return yaml.safe_load(Path(config_path).read_text()) or {}
     return {}
+
+
+def _job_root(project_dir: Path) -> Path:
+    return project_dir / "otto_logs" / "certify-job"
+
+
+def _latest_job_dir(job_root: Path) -> Path | None:
+    if not job_root.exists():
+        return None
+    job_dirs = sorted((path for path in job_root.iterdir() if path.is_dir()), reverse=True)
+    return job_dirs[0] if job_dirs else None
+
+
+def _new_job_id() -> str:
+    return datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+
+
+def _find_running_job(job_root: Path) -> tuple[Path, dict[str, object]] | None:
+    if not job_root.exists():
+        return None
+    for job_dir in sorted((path for path in job_root.iterdir() if path.is_dir()), reverse=True):
+        state = _read_job(job_dir)
+        if not state or state.get("status") != "running":
+            continue
+        pid = state.get("pid")
+        if isinstance(pid, int) and _pid_alive(pid):
+            return job_dir, state
+    return None
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _project_dir_from_job_dir(job_dir: Path) -> Path:
+    return job_dir.parent.parent.parent
+
+
+def _heartbeat_stale_after_seconds(job_state: dict[str, object]) -> float:
+    timeout_config = job_state.get("timeout_config")
+    if isinstance(timeout_config, dict):
+        return story_heartbeat_stale_after_seconds(timeout_config)
+    return story_heartbeat_stale_after_seconds({})
+
+
+def _issue_fingerprints(issues: list[dict[str, object]]) -> set[str]:
+    from otto.feedback import finding_fingerprints
+
+    return finding_fingerprints([
+        SimpleNamespace(
+            category=str(issue.get("category", "") or ""),
+            description=str(issue.get("what", "") or ""),
+            story_id=str(issue.get("story", "") or ""),
+        )
+        for issue in issues
+    ])
+
+
+def _write_job_error(job_dir: Path, message: str, **extra: object) -> None:
+    state = _read_job(job_dir) or {"job_id": job_dir.name}
+    state.update({
+        "status": "error",
+        "message": message,
+        "completed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        **extra,
+    })
+    _write_job(job_dir, state)
 
 
 if __name__ == "__main__":

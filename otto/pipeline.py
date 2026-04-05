@@ -536,8 +536,13 @@ async def build_agentic(
     a job-based CLI: start (non-blocking) → poll status → read results.
     The certifier runs in an isolated worktree.
     """
+    import asyncio
     import sys
     from otto.agent import ClaudeAgentOptions, _subprocess_env, run_agent_query
+    from otto.certifier.certify_cli import _job_root as _certify_job_root
+    from otto.certifier.certify_cli import _latest_job_dir as _latest_certify_job_dir
+    from otto.certifier.certify_cli import _read_job as _read_certify_job
+    from otto.certifier.timeouts import heartbeat_stale_after_seconds
 
     build_id = f"build-{int(time.time())}-{os.getpid()}"
     build_dir = project_dir / "otto_logs" / "builds" / build_id
@@ -587,28 +592,58 @@ Certify commands for this project:
     # One session — agent drives everything
     text, cost, result_msg = await run_agent_query(prompt, options)
 
+    job_root = _certify_job_root(project_dir)
+    latest_job_dir = _latest_certify_job_dir(job_root)
+    latest_job_state = _read_certify_job(latest_job_dir) if latest_job_dir else None
+    build_error = ""
+
+    if latest_job_dir and latest_job_state and latest_job_state.get("status") == "running":
+        wait_timeout_s = float(config.get("agentic_certify_wait_timeout_s") or 0.0)
+        if wait_timeout_s <= 0:
+            wait_timeout_s = max(600.0, heartbeat_stale_after_seconds(config))
+        deadline = time.monotonic() + wait_timeout_s
+        while time.monotonic() < deadline:
+            await asyncio.sleep(2)
+            latest_job_state = _read_certify_job(latest_job_dir)
+            if not latest_job_state or latest_job_state.get("status") != "running":
+                break
+        if latest_job_state and latest_job_state.get("status") == "running":
+            build_error = (
+                f"Timed out waiting for certification job "
+                f"{latest_job_state.get('job_id', latest_job_dir.name)} to finish."
+            )
+
     # Parse result from certify job history
-    job_dir = project_dir / "otto_logs" / "certify-job"
-    history_path = job_dir / "history.json"
+    history_path = job_root / "history.json"
     rounds = 0
     passed = False
     certifier_cost = 0.0
+    history_rounds = 0
 
     if history_path.exists():
         try:
             history = json.loads(history_path.read_text())
-            rounds = len(history)
+            history_rounds = len(history)
+            rounds = history_rounds
             certifier_cost = sum(h.get("cost_usd", 0) for h in history)
             if history:
                 passed = history[-1].get("status") == "passed"
         except (json.JSONDecodeError, KeyError):
             pass
 
+    if latest_job_state:
+        latest_round = int(latest_job_state.get("round", 0) or 0)
+        rounds = max(rounds, latest_round)
+        passed = latest_job_state.get("status") == "passed"
+        if latest_round > history_rounds:
+            certifier_cost += float(latest_job_state.get("cost_usd", 0.0) or 0.0)
+
     return BuildResult(
         passed=passed,
         build_id=build_id,
         rounds=rounds,
         total_cost=cost + certifier_cost,
+        error=build_error,
     )
 
 

@@ -1,5 +1,6 @@
 """Tests for continuous/agentic build infrastructure: session, feedback, isolated certifier."""
 
+import asyncio
 import json
 import subprocess
 from pathlib import Path
@@ -256,6 +257,24 @@ class TestFeedback:
         ]
         assert finding_fingerprints(findings_a) != finding_fingerprints(findings_b)
 
+    def test_certify_cli_issue_fingerprints_ignore_detail_text(self):
+        from otto.certifier.certify_cli import _issue_fingerprints
+
+        issues_a = [{
+            "category": "journey",
+            "what": "Task creation stores raw HTML in title",
+            "detail": "first diagnosis",
+            "story": "story-1",
+        }]
+        issues_b = [{
+            "category": "journey",
+            "what": "Task creation stores raw HTML in title",
+            "detail": "different diagnosis wording",
+            "story": "story-1",
+        }]
+
+        assert _issue_fingerprints(issues_a) == _issue_fingerprints(issues_b)
+
 
 class TestContinuousBuild:
     def test_snapshot_candidate_rejects_pre_existing_untracked_source_files(self, tmp_git_repo):
@@ -320,12 +339,20 @@ class TestContinuousBuild:
         async def fake_query(prompt, options, **kwargs):
             # Simulate: agent built product and certify passed
             # Write fake history to simulate certify CLI results
-            job_dir = tmp_git_repo / "otto_logs" / "certify-job"
-            job_dir.mkdir(parents=True, exist_ok=True)
-            (job_dir / "history.json").write_text(_json.dumps([
+            job_root = tmp_git_repo / "otto_logs" / "certify-job"
+            job_root.mkdir(parents=True, exist_ok=True)
+            job_dir = job_root / "20260404-000000-000001"
+            job_dir.mkdir()
+            (job_root / "history.json").write_text(_json.dumps([
                 {"status": "passed", "round": 1, "cost_usd": 1.50,
                  "issues_count": 0, "stories_passed": 7, "stories_total": 7}
             ]))
+            (job_dir / "job.json").write_text(_json.dumps({
+                "job_id": job_dir.name,
+                "status": "passed",
+                "round": 1,
+                "cost_usd": 1.50,
+            }))
             return "built and certified", 0.5, SimpleNamespace(session_id="s1")
 
         with patch("otto.agent.run_agent_query", side_effect=fake_query), \
@@ -337,6 +364,140 @@ class TestContinuousBuild:
         assert result.passed is True
         assert result.rounds == 1
         assert result.total_cost == 2.0  # 0.5 agent + 1.5 certifier
+
+    @pytest.mark.asyncio
+    async def test_agentic_waits_for_running_certify_job(self, tmp_git_repo):
+        from otto.pipeline import build_agentic
+
+        async def fake_query(prompt, options, **kwargs):
+            job_root = tmp_git_repo / "otto_logs" / "certify-job"
+            job_root.mkdir(parents=True, exist_ok=True)
+            job_dir = job_root / "20260404-000000-000002"
+            job_dir.mkdir()
+            (job_dir / "job.json").write_text(json.dumps({
+                "job_id": job_dir.name,
+                "status": "running",
+                "round": 1,
+                "pid": 12345,
+            }))
+
+            async def finish_job():
+                await asyncio.sleep(0.05)
+                (job_dir / "job.json").write_text(json.dumps({
+                    "job_id": job_dir.name,
+                    "status": "passed",
+                    "round": 1,
+                    "cost_usd": 1.25,
+                }))
+                (job_root / "history.json").write_text(json.dumps([
+                    {"status": "passed", "round": 1, "cost_usd": 1.25}
+                ]))
+
+            asyncio.create_task(finish_job())
+            return "agent returned before certify finished", 0.4, SimpleNamespace(session_id="s1")
+
+        with patch("otto.agent.run_agent_query", side_effect=fake_query), \
+             patch("otto.pipeline._commit_artifacts"):
+            result = await build_agentic(
+                "Build a todo app",
+                tmp_git_repo,
+                {"default_branch": "main", "agentic_certify_wait_timeout_s": 2},
+            )
+
+        assert result.passed is True
+        assert result.rounds == 1
+        assert result.total_cost == pytest.approx(1.65)
+        assert result.error == ""
+
+    def test_certify_start_refuses_when_another_job_is_alive(self, tmp_path, monkeypatch, capsys):
+        from otto.certifier import certify_cli
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        intent_file = tmp_path / "intent.md"
+        intent_file.write_text("Build a todo app")
+
+        job_dir = project_dir / "otto_logs" / "certify-job" / "20260404-000000-000001"
+        job_dir.mkdir(parents=True)
+        (job_dir / "job.json").write_text(json.dumps({
+            "job_id": job_dir.name,
+            "status": "running",
+            "pid": 99999,
+        }))
+
+        monkeypatch.setattr(certify_cli.sys, "argv", [
+            "certify_cli.py",
+            "start",
+            str(project_dir),
+            str(intent_file),
+        ])
+        monkeypatch.setattr(certify_cli.os, "kill", lambda pid, sig: None)
+
+        certify_cli._cmd_start()
+
+        output = json.loads(capsys.readouterr().out)
+        assert output["status"] == "already_running"
+        assert output["job_id"] == job_dir.name
+
+    def test_snapshot_writes_job_error_when_commit_fails(self, tmp_path):
+        from otto.certifier import certify_cli
+
+        job_dir = tmp_path / "otto_logs" / "certify-job" / "20260404-000000-000001"
+        job_dir.mkdir(parents=True)
+        certify_cli._write_job(job_dir, {"job_id": job_dir.name, "status": "starting"})
+
+        calls = [
+            subprocess.CompletedProcess(["git", "add", "-A"], 0, stdout="", stderr=""),
+            subprocess.CompletedProcess(["git", "commit"], 1, stdout="", stderr="commit failed"),
+        ]
+
+        with patch("otto.certifier.certify_cli.subprocess.run", side_effect=calls):
+            with pytest.raises(RuntimeError, match="Failed to create certification snapshot commit"):
+                certify_cli._snapshot(tmp_path, job_dir)
+
+        state = certify_cli._read_job(job_dir)
+        assert state["status"] == "error"
+        assert state["phase"] == "snapshot"
+        assert "commit failed" in state["stderr"]
+
+    @pytest.mark.asyncio
+    async def test_verify_all_stories_awaits_timeout_cleanup(self, tmp_path, monkeypatch):
+        from otto.certifier.journey_agent import verify_all_stories
+        from otto.certifier.stories import StoryStep, UserStory
+
+        cleanup = asyncio.Event()
+
+        async def fake_verify_story(*args, **kwargs):
+            try:
+                await asyncio.sleep(10)
+            finally:
+                cleanup.set()
+
+        monkeypatch.setattr("otto.certifier.journey_agent.verify_story", fake_verify_story)
+
+        story = UserStory(
+            id="story-1",
+            persona="user",
+            title="Times out",
+            narrative="test",
+            steps=[StoryStep(action="wait", verify="eventually")],
+            critical=True,
+        )
+
+        result = await verify_all_stories(
+            stories=[story],
+            manifest=SimpleNamespace(),
+            base_url="http://localhost:3000",
+            project_dir=tmp_path,
+            config={
+                "certifier_story_timeout_base": 0.01,
+                "certifier_story_timeout_per_step": 0,
+                "certifier_story_timeout_break": 0,
+            },
+        )
+
+        assert result.results[0].passed is False
+        assert cleanup.is_set()
 
     @pytest.mark.asyncio
     async def test_continuous_fix_loop(self, tmp_git_repo):
