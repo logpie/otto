@@ -308,13 +308,8 @@ async def verify_story(
     verdict_file = log_dir / f"journey-{story.id}-verdict.json"
     verdict_file.unlink(missing_ok=True)
 
-    import shutil as _shutil
     skip_break = config.get("certifier_skip_break", True)  # default: skip break phase
-    # Auto-detect browser tools. Override with certifier_browser: true/false.
-    if "certifier_browser" in config:
-        has_browser = bool(config["certifier_browser"])
-    else:
-        has_browser = _shutil.which("agent-browser") is not None or bool(config.get("chrome_mcp"))
+    has_browser = bool(config.get("certifier_browser"))  # off unless explicitly enabled
 
     prompt = _build_journey_prompt(
         story, manifest, base_url,
