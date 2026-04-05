@@ -491,6 +491,7 @@ class TestContinuousBuild:
             project_dir=tmp_path,
             config={
                 "certifier_story_timeout": 0.01,
+                "certifier_parallel_stories": 1,
             },
         )
 

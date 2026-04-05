@@ -488,58 +488,81 @@ async def verify_all_stories(
     Used by the certifier to check app health and auto-restart if needed.
     """
     config = config or {}
-    results: list[JourneyResult] = []
     all_break_findings: list[BreakFinding] = []
     total_cost = 0.0
     start_time = time.monotonic()
 
-    for i, story in enumerate(stories):
-        # Between stories: check app health, restart if needed
-        if i > 0 and on_between_stories is not None:
-            try:
-                on_between_stories()
-            except Exception as exc:
-                logger.warning("Between-story callback failed: %s", exc)
+    max_parallel = int(config.get("certifier_parallel_stories", 3))
+
+    async def _run_one_story(i: int, story: UserStory) -> JourneyResult:
+        """Run a single story with optional timeout."""
         logger.info("Verifying story: %s (%s)", story.title, story.persona)
         timeout = _story_timeout(story, config)
         _write_heartbeat(project_dir, story.title, i, len(stories), story_timeout_s=timeout)
 
-        # Structured output is the normal completion path for journey verification.
-        # The timeout (if configured) is a last-resort safety net for hung SDK sessions.
-        # Default: None (no timeout) — structured output has 100% success rate.
-        # Set certifier_story_timeout in otto.yaml if you hit hangs.
         if timeout is not None:
-            story_task = asyncio.create_task(
+            task = asyncio.create_task(
                 verify_story(story, manifest, base_url, project_dir, config)
             )
             try:
-                result = await asyncio.wait_for(story_task, timeout=timeout)
+                return await asyncio.wait_for(task, timeout=timeout)
             except asyncio.TimeoutError:
-                story_task.cancel()
+                task.cancel()
                 with suppress(asyncio.CancelledError):
-                    await story_task
+                    await task
                 logger.warning("Story timed out after %.0fs: %s", timeout, story.title)
-                result = JourneyResult(
+                return JourneyResult(
                     story_id=story.id,
                     story_title=story.title,
                     persona=story.persona,
                     passed=False,
                     blocked_at=f"timed out after {int(timeout)}s",
                     summary=f"Story verification timed out after {int(timeout)}s",
-                    diagnosis="The journey agent did not complete within the configured deadline. "
-                              "This may indicate a hung HTTP request or agent loop.",
-                    fix_suggestion="Check if the app is responding. Consider increasing certifier_story_timeout.",
+                    diagnosis="The journey agent did not complete within the configured deadline.",
+                    fix_suggestion="Check if the app is responding.",
                     steps=[],
                     break_findings=[],
                     cost_usd=0.0,
                     duration_s=timeout,
                 )
         else:
-            result = await verify_story(story, manifest, base_url, project_dir, config)
+            return await verify_story(story, manifest, base_url, project_dir, config)
 
-        results.append(result)
-        total_cost += result.cost_usd
-        all_break_findings.extend(result.break_findings)
+    if max_parallel <= 1:
+        # Sequential (original behavior)
+        results: list[JourneyResult] = []
+        for i, story in enumerate(stories):
+            if i > 0 and on_between_stories is not None:
+                try:
+                    on_between_stories()
+                except Exception as exc:
+                    logger.warning("Between-story callback failed: %s", exc)
+            result = await _run_one_story(i, story)
+            results.append(result)
+            total_cost += result.cost_usd
+            all_break_findings.extend(result.break_findings)
+    else:
+        # Parallel with bounded concurrency
+        logger.info("Running %d stories with max %d parallel", len(stories), max_parallel)
+        sem = asyncio.Semaphore(max_parallel)
+
+        async def _bounded(i: int, story: UserStory) -> JourneyResult:
+            async with sem:
+                return await _run_one_story(i, story)
+
+        tasks = [_bounded(i, s) for i, s in enumerate(stories)]
+        results = list(await asyncio.gather(*tasks, return_exceptions=False))
+
+        for result in results:
+            total_cost += result.cost_usd
+            all_break_findings.extend(result.break_findings)
+
+        # Health check after parallel batch
+        if on_between_stories is not None:
+            try:
+                on_between_stories()
+            except Exception:
+                pass
 
         status = "✓" if result.passed else "✗"
         logger.info("  %s %s (%.1fs, $%.3f)", status, story.title, result.duration_s, result.cost_usd)
