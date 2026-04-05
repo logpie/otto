@@ -30,13 +30,64 @@ from otto.certifier.timeouts import (
 )
 
 
+HELP_TEXT = """\
+Certify CLI — submit your product for user testing.
+
+WORKFLOW:
+  1. Build your product. Write tests. Make tests pass.
+  2. Run: certify start <project_dir> <intent_file>
+     → Starts certification in the background. Returns immediately.
+     → Your tests are checked first — if they fail, certification is refused.
+  3. Run: certify status <project_dir>
+     → Check progress. Call every 30-60 seconds.
+     → Shows: "running, 4/7 stories verified" or final results.
+  4. When status shows "passed", "failed", or "error" — read the results.
+  5. Run: certify results <project_dir>
+     → Detailed results with per-story pass/fail, diagnosis, and fix suggestions.
+
+IF FAILED:
+  - Read the issues carefully. Each has a diagnosis and fix suggestion.
+  - Fix your code. Then run certify start again.
+  - Round 2+ automatically skips stories that already passed (faster).
+  - Progress tracking tells you if you're making progress or stuck.
+
+IF ERROR:
+  - This means the testing infrastructure failed, NOT your code.
+  - Do NOT attempt code fixes. Report the error.
+
+COMMANDS:
+  certify start <project_dir> <intent_file> [--config <file>]
+    Start a certification round. Runs tests first as a gate.
+    Returns: {"status": "started", "job_id": "...", "round": N}
+
+  certify status <project_dir>
+    Check progress of the running certification.
+    Returns: {"status": "running|passed|failed|error", ...}
+
+  certify results <project_dir>
+    Get detailed results after certification completes.
+    Returns: full JSON with per-story results, issues, warnings, progress.
+
+  certify help
+    Show this help text.
+
+NOTES:
+  - Each certification round takes 5-15 minutes (7 user stories tested).
+  - Budget: max 5 rounds by default (configurable in otto.yaml).
+  - Results include progress tracking: new vs persisting vs resolved issues.
+  - Cost and budget info included in results.
+"""
+
+
 def main():
     if len(sys.argv) < 2:
-        print(json.dumps({"error": "Usage: certify start|status|results <project_dir> [<intent_file>]"}))
-        sys.exit(1)
+        print(HELP_TEXT)
+        sys.exit(0)
 
     command = sys.argv[1]
-    if command == "start":
+    if command in ("help", "--help", "-h"):
+        print(HELP_TEXT)
+    elif command == "start":
         _cmd_start()
     elif command == "status":
         _cmd_status()
@@ -45,7 +96,8 @@ def main():
     elif command == "_run_child":
         _cmd_run_child()
     else:
-        print(json.dumps({"error": f"Unknown command: {command}. Use: start, status, results"}))
+        print(f"Unknown command: {command}\n")
+        print(HELP_TEXT)
         sys.exit(1)
 
 

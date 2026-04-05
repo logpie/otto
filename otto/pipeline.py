@@ -504,21 +504,12 @@ You are building a product from scratch. You are an autonomous developer.
 
 1. Read the intent carefully. Plan your approach.
 2. Build the product — write code, write tests, make tests pass.
-3. When ready, use the certify commands to get real user feedback:
-   a. Start: `{certify_start}` — launches certification (returns immediately)
-   b. Poll:  `{certify_status}` — check progress (call every 30-60 seconds)
-   c. When status is "passed", "failed", or "error" — read the results
-4. If "failed": read the issues carefully, fix them, then certify again.
+3. When ready, use the certify tool to get real user feedback.
+   Run `{certify_help}` to see full usage instructions.
+   Quick version: `certify start` → poll `certify status` → read results.
+4. If "failed": read the issues, fix them, certify again.
 5. If "passed": you're done.
 6. If "error": infrastructure problem, NOT your code. Stop and report.
-
-Certification runs real user tests against your product. It takes 5-15 minutes.
-The status command shows progress (e.g. "4/7 stories verified").
-
-The results include:
-- Per-story pass/fail with diagnosis
-- Progress tracking: which issues are new vs persisting vs resolved
-- Cost and budget info
 
 If the progress info says "no progress since last round" — try a different
 approach or stop. Don't repeat the same fix.
@@ -559,13 +550,13 @@ async def build_agentic(
     certify_base = f"{python} -m otto.certifier.certify_cli"
     config_flag = f" --config {project_dir / 'otto.yaml'}" if (project_dir / "otto.yaml").exists() else ""
 
+    certify_help = f"{certify_base} help"
     certify_start = f"{certify_base} start {project_dir} {project_dir / 'intent.md'}{config_flag}"
     certify_status = f"{certify_base} status {project_dir}"
     certify_results = f"{certify_base} results {project_dir}"
 
     prompt = AGENTIC_SYSTEM_PROMPT.format(
-        certify_start=certify_start,
-        certify_status=certify_status,
+        certify_help=certify_help,
     ) + f"""
 
 Now build this product:
@@ -573,6 +564,7 @@ Now build this product:
 {intent}
 
 Certify commands for this project:
+  Help:    {certify_help}
   Start:   {certify_start}
   Status:  {certify_status}
   Results: {certify_results}
