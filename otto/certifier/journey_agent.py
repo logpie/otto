@@ -337,7 +337,7 @@ async def verify_story(
 
     # Evidence dir: absolute path under log_dir so it persists regardless
     # of execution mode (direct or subprocess worker).
-    evidence_dir = log_dir / f"evidence-{story.id}"
+    evidence_dir = (log_dir / f"evidence-{story.id}").resolve()
     evidence_dir.mkdir(parents=True, exist_ok=True)
 
     prompt = _build_journey_prompt(
