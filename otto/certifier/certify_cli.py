@@ -42,6 +42,8 @@ def main():
         _cmd_status()
     elif command == "results":
         _cmd_results()
+    elif command == "_run_child":
+        _cmd_run_child()
     else:
         print(json.dumps({"error": f"Unknown command: {command}. Use: start, status, results"}))
         sys.exit(1)
@@ -128,28 +130,32 @@ def _cmd_start():
     }
     _write_job(job_dir, job_state)
 
-    # Fork the certifier as a background process
-    pid = os.fork()
-    if pid == 0:
-        # Child: run certifier, write results, exit
-        try:
-            _run_certifier_child(project_dir, intent_file, config_path, job_dir, candidate_sha, call_count + 1)
-        except Exception as exc:
-            _write_job(job_dir, {
-                "job_id": job_id,
-                "status": "error",
-                "message": str(exc),
-                "round": call_count + 1,
-                "completed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            })
-        os._exit(0)
-    else:
-        # Parent: record PID, return immediately
-        job_state["pid"] = pid
-        _write_job(job_dir, job_state)
-        print(json.dumps({
-            "status": "started",
-            "message": f"Certification round {call_count + 1}/{max_calls} started. Use 'certify status' to check progress.",
+    # Spawn certifier as a separate process (not fork — fork breaks asyncio/threads).
+    # Run certify_cli.py with a special _run_child subcommand.
+    child_cmd = [
+        sys.executable, "-m", "otto.certifier.certify_cli",
+        "_run_child",
+        str(project_dir),
+        str(intent_file),
+        str(job_dir),
+        candidate_sha,
+        str(call_count + 1),
+    ]
+    if config_path:
+        child_cmd.extend(["--config", str(config_path)])
+
+    proc = subprocess.Popen(
+        child_cmd,
+        cwd=str(project_dir),
+        start_new_session=True,  # detach from parent
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    job_state["pid"] = proc.pid
+    _write_job(job_dir, job_state)
+    print(json.dumps({
+        "status": "started",
+        "message": f"Certification round {call_count + 1}/{max_calls} started. Use 'certify status' to check progress.",
             "job_id": job_id,
             "round": call_count + 1,
             "round_max": max_calls,
@@ -229,10 +235,36 @@ def _cmd_results():
     print(json.dumps(result, indent=2))
 
 
+def _cmd_run_child():
+    """Internal: run certifier in a spawned subprocess. Not for user use."""
+    # _run_child <project_dir> <intent_file> <job_dir> <candidate_sha> <round_num> [--config <file>]
+    if len(sys.argv) < 7:
+        sys.exit(1)
+    project_dir = Path(sys.argv[2]).resolve()
+    intent_file = Path(sys.argv[3]).resolve()
+    job_dir = Path(sys.argv[4]).resolve()
+    candidate_sha = sys.argv[5]
+    round_num = int(sys.argv[6])
+    config_path = None
+    if "--config" in sys.argv:
+        idx = sys.argv.index("--config")
+        if idx + 1 < len(sys.argv):
+            config_path = Path(sys.argv[idx + 1]).resolve()
+
+    try:
+        _run_certifier_child(project_dir, intent_file, config_path, job_dir, candidate_sha, round_num)
+    except Exception as exc:
+        _write_job(job_dir, {
+            "job_id": job_dir.name,
+            "status": "error",
+            "message": str(exc),
+            "round": round_num,
+            "completed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        })
+
+
 def _run_certifier_child(project_dir, intent_file, config_path, job_dir, candidate_sha, round_num):
-    """Run the certifier (in forked child process). Writes results to job_dir."""
-    # Detach from parent's process group so we don't get killed
-    os.setsid()
+    """Run the certifier (in spawned subprocess). Writes results to job_dir."""
 
     intent = intent_file.read_text().strip()
     config = _load_config(config_path)
