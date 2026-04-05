@@ -254,17 +254,23 @@ Report what you find. These do NOT affect the pass/fail verdict.
 
     browser_text = ""
     if has_browser:
-        screenshots_dir = f"{base_url.replace('http://localhost:', 'screenshots-port')}"
-        browser_text = f"""
-BROWSER VERIFICATION (after each API step, verify the UI):
-  agent-browser open <url>              # navigate to a page
-  agent-browser snapshot -i             # accessibility tree with @refs
-  agent-browser click @e3               # click element by ref
-  agent-browser screenshot {screenshots_dir}/   # capture visual proof
-  agent-browser close                   # cleanup when done
+        browser_text = """
+BROWSER VERIFICATION:
+At the START of testing, begin video recording:
+  agent-browser record start ./evidence/recording.webm
 
-Take a screenshot after each major step as visual proof.
-Use these to confirm the UI reflects the API state (created items appear, deleted items gone).
+After each major step, take a screenshot AND verify the UI:
+  agent-browser open <url>
+  agent-browser snapshot -i             # accessibility tree with @refs
+  agent-browser screenshot ./evidence/  # visual proof per step
+  agent-browser click @e3               # interact with elements
+
+At the END of testing (before writing VERDICT), stop recording:
+  agent-browser record stop
+  agent-browser close
+
+The screenshots and video are evidence for the proof-of-work report.
+Verify the UI reflects the API state (created items appear, deleted items gone).
 """
 
     return f"""\
@@ -828,18 +834,26 @@ def _kill_orphan_app(story_dir: Path) -> None:
 
 
 def _copy_story_logs(worker_dir: Path, story_dir: Path) -> None:
-    """Copy ALL certifier logs from worker copy to story_dir for observability.
+    """Copy certifier logs + evidence from worker copy to story_dir.
 
     Worker copies are deleted after each story — these logs are the only
     surviving record of what the journey agent did.
     """
     import shutil
+    # Certifier logs
     src = worker_dir / "otto_logs" / "certifier"
-    if not src.exists():
-        return
-    for item in src.iterdir():
-        if item.is_file():
-            shutil.copy2(item, story_dir / item.name)
+    if src.exists():
+        for item in src.iterdir():
+            if item.is_file():
+                shutil.copy2(item, story_dir / item.name)
+
+    # Evidence directory (screenshots, video recordings)
+    evidence_src = worker_dir / "evidence"
+    if evidence_src.exists():
+        evidence_dst = story_dir / "evidence"
+        if evidence_dst.exists():
+            shutil.rmtree(evidence_dst, ignore_errors=True)
+        shutil.copytree(evidence_src, evidence_dst)
 
 
 async def _run_story_in_subprocess(

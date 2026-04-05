@@ -301,6 +301,17 @@ def format_tier4_markdown(tier4_results: list[Any]) -> list[str]:
                     lines.append(f"  → {out}{err}")
             lines.append("```")
 
+            # Check for video/screenshot evidence files
+            video_files = [e for e in evidence if "record start" in e.get("input", "")]
+            screenshot_files = [e for e in evidence if "screenshot" in e.get("input", "")]
+            if video_files or screenshot_files:
+                lines.append("")
+                lines.append("**Visual evidence:**")
+                if video_files:
+                    lines.append("- 🎥 Video recording: `evidence/recording.webm`")
+                if screenshot_files:
+                    lines.append(f"- 📸 Screenshots: `evidence/` ({len(screenshot_files)} captures)")
+
         lines.append("")
     return lines
 
