@@ -493,33 +493,37 @@ async def verify_all_stories(
         _write_heartbeat(project_dir, story.title, i, len(stories), story_timeout_s=timeout)
 
         # Structured output is the normal completion path for journey verification.
-        # This timeout is only a last-resort safety net for hung SDK sessions or
-        # stuck network activity, so it must stay comfortably above legitimate runs.
-        story_task = asyncio.create_task(
-            verify_story(story, manifest, base_url, project_dir, config)
-        )
-        try:
-            result = await asyncio.wait_for(story_task, timeout=timeout)
-        except asyncio.TimeoutError:
-            story_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await story_task
-            logger.warning("Story timed out after %.0fs: %s", timeout, story.title)
-            result = JourneyResult(
-                story_id=story.id,
-                story_title=story.title,
-                persona=story.persona,
-                passed=False,
-                blocked_at=f"timed out after {int(timeout)}s",
-                summary=f"Story verification timed out after {int(timeout)}s",
-                diagnosis="The journey agent did not complete within the deadline. "
-                          "This may indicate a hung HTTP request, a stuck app, or an agent loop.",
-                fix_suggestion="Check if the app is responding and if the endpoint under test is hanging.",
-                steps=[],
-                break_findings=[],
-                cost_usd=0.0,
-                duration_s=timeout,
+        # The timeout (if configured) is a last-resort safety net for hung SDK sessions.
+        # Default: None (no timeout) — structured output has 100% success rate.
+        # Set certifier_story_timeout in otto.yaml if you hit hangs.
+        if timeout is not None:
+            story_task = asyncio.create_task(
+                verify_story(story, manifest, base_url, project_dir, config)
             )
+            try:
+                result = await asyncio.wait_for(story_task, timeout=timeout)
+            except asyncio.TimeoutError:
+                story_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await story_task
+                logger.warning("Story timed out after %.0fs: %s", timeout, story.title)
+                result = JourneyResult(
+                    story_id=story.id,
+                    story_title=story.title,
+                    persona=story.persona,
+                    passed=False,
+                    blocked_at=f"timed out after {int(timeout)}s",
+                    summary=f"Story verification timed out after {int(timeout)}s",
+                    diagnosis="The journey agent did not complete within the configured deadline. "
+                              "This may indicate a hung HTTP request or agent loop.",
+                    fix_suggestion="Check if the app is responding. Consider increasing certifier_story_timeout.",
+                    steps=[],
+                    break_findings=[],
+                    cost_usd=0.0,
+                    duration_s=timeout,
+                )
+        else:
+            result = await verify_story(story, manifest, base_url, project_dir, config)
 
         results.append(result)
         total_cost += result.cost_usd

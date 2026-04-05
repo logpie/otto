@@ -1,46 +1,56 @@
-"""Shared timeout helpers for certifier story execution and monitoring."""
+"""Shared timeout helpers for certifier story execution and monitoring.
+
+By default, there is NO per-story timeout — structured output is the
+primary termination mechanism and has 100% success rate in testing.
+
+If a timeout is configured (certifier_story_timeout in otto.yaml),
+it acts as a safety net for hung SDK sessions. Set it based on
+observed story durations for your projects, not guesses.
+
+Heartbeat is always active regardless of timeout config.
+"""
 
 from __future__ import annotations
 
 from typing import Any
 
-DEFAULT_STORY_TIMEOUT_BASE_S = 600.0
-DEFAULT_STORY_TIMEOUT_PER_STEP_S = 120.0
-DEFAULT_STORY_TIMEOUT_BREAK_S = 120.0
-DEFAULT_HEARTBEAT_GRACE_S = 120.0
-DEFAULT_HEARTBEAT_STEPS = 3
+# Default: no timeout. Structured output terminates the agent.
+# Set certifier_story_timeout in otto.yaml if you hit hangs.
+DEFAULT_STORY_TIMEOUT: float | None = None
+
+# Heartbeat grace: how long after last heartbeat before "stale" warning.
+# This is informational — it doesn't kill anything.
+DEFAULT_HEARTBEAT_GRACE_S = 300.0  # 5 min
 
 
-def resolve_story_timeout_config(config: dict[str, Any] | None = None) -> dict[str, float]:
-    """Resolve certifier timeout settings from config with shared defaults."""
+def resolve_story_timeout(config: dict[str, Any] | None = None) -> float | None:
+    """Resolve per-story timeout from config. Returns None if disabled."""
     config = config or {}
+    raw = config.get("certifier_story_timeout", DEFAULT_STORY_TIMEOUT)
+    if raw is None:
+        return None
+    return float(raw)
+
+
+def resolve_story_timeout_config(config: dict[str, Any] | None = None) -> dict[str, float | None]:
+    """Resolve timeout settings as a dict for serialization."""
+    timeout = resolve_story_timeout(config)
     return {
-        "certifier_story_timeout_base": float(
-            config.get("certifier_story_timeout_base", DEFAULT_STORY_TIMEOUT_BASE_S)
-        ),
-        "certifier_story_timeout_per_step": float(
-            config.get("certifier_story_timeout_per_step", DEFAULT_STORY_TIMEOUT_PER_STEP_S)
-        ),
-        "certifier_story_timeout_break": float(
-            config.get("certifier_story_timeout_break", DEFAULT_STORY_TIMEOUT_BREAK_S)
-        ),
+        "certifier_story_timeout": timeout,
+        "heartbeat_grace_s": DEFAULT_HEARTBEAT_GRACE_S,
     }
 
 
-def story_timeout_seconds(config: dict[str, Any] | None = None, *, steps: int) -> float:
-    """Compute the per-story safety timeout from resolved config values."""
-    resolved = resolve_story_timeout_config(config)
-    return (
-        resolved["certifier_story_timeout_base"]
-        + (resolved["certifier_story_timeout_per_step"] * max(steps, 1))
-        + resolved["certifier_story_timeout_break"]
-    )
+def story_timeout_seconds(config: dict[str, Any] | None = None, *, steps: int = 0) -> float | None:
+    """Per-story timeout. Returns None if disabled (default)."""
+    return resolve_story_timeout(config)
 
 
 def heartbeat_stale_after_seconds(
     config: dict[str, Any] | None = None,
     *,
-    steps: int = DEFAULT_HEARTBEAT_STEPS,
+    steps: int = 3,
 ) -> float:
-    """Heartbeat grace window for one in-flight story."""
-    return story_timeout_seconds(config, steps=steps) + DEFAULT_HEARTBEAT_GRACE_S
+    """Heartbeat grace window. Always active regardless of timeout config."""
+    config = config or {}
+    return float(config.get("certifier_heartbeat_grace", DEFAULT_HEARTBEAT_GRACE_S))

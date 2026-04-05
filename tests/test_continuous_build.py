@@ -490,9 +490,7 @@ class TestContinuousBuild:
             base_url="http://localhost:3000",
             project_dir=tmp_path,
             config={
-                "certifier_story_timeout_base": 0.01,
-                "certifier_story_timeout_per_step": 0,
-                "certifier_story_timeout_break": 0,
+                "certifier_story_timeout": 0.01,
             },
         )
 
