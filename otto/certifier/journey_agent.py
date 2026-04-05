@@ -727,7 +727,10 @@ def _create_worker_copy(project_dir: Path, worker_id: str) -> Path:
     import subprocess as _sp
     import sys as _sys  # noqa: F811
 
-    workers_dir = project_dir / ".otto-workers" / "stories"
+    import tempfile as _tmp
+    # Workers dir OUTSIDE project — avoids self-referential copy
+    # (cp -c -r project project/.otto-workers/... is infinite recursion)
+    workers_dir = Path(_tmp.gettempdir()) / "otto-workers" / project_dir.resolve().name
     worker_dir = workers_dir / worker_id
     workers_dir.mkdir(parents=True, exist_ok=True)
 
@@ -779,7 +782,8 @@ def _ensure_deps_installed(project_dir: Path) -> None:
 def _scavenge_stale_workers(project_dir: Path, max_age_s: float = 3600) -> None:
     """Remove orphaned worker copies from previous crashed runs."""
     import shutil
-    workers_dir = project_dir / ".otto-workers" / "stories"
+    import tempfile as _tmp
+    workers_dir = Path(_tmp.gettempdir()) / "otto-workers" / project_dir.resolve().name
     if not workers_dir.exists():
         return
     now = time.time()

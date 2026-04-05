@@ -297,7 +297,11 @@ def test_parse_tagged_verdict_password_not_false_pass():
 def test_scavenge_stale_workers(tmp_path):
     from otto.certifier.journey_agent import _scavenge_stale_workers
 
-    workers_dir = tmp_path / ".otto-workers" / "stories"
+    # Workers are now in tempdir/otto-workers/{project_name}/
+    # Mock by creating the expected structure and patching project_dir.resolve().name
+    project_dir = tmp_path / "my-project"
+    project_dir.mkdir()
+    workers_dir = tmp_path / "otto-workers" / "my-project"
     workers_dir.mkdir(parents=True)
 
     # Create an old dir and a fresh dir
@@ -311,7 +315,8 @@ def test_scavenge_stale_workers(tmp_path):
     old_time = time.time() - 7200
     os.utime(old, (old_time, old_time))
 
-    _scavenge_stale_workers(tmp_path, max_age_s=3600)
+    with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+        _scavenge_stale_workers(project_dir, max_age_s=3600)
 
     assert not old.exists()
     assert fresh.exists()
