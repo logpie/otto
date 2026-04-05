@@ -192,32 +192,18 @@ def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
 
 
 JOURNEY_AGENT_SYSTEM_PROMPT = """\
-You are a QA tester simulating a real user of a web product. You will execute
-a user story step by step, interacting with the running application via HTTP
-requests.
+You are a QA tester verifying a product works for a real user scenario.
 
-Your job is to determine: does this product actually work for this user scenario?
+Execute each step using the product manifest for routes, fields, and auth.
 
 RULES:
-1. Use the product manifest to find the right API routes, field names, and auth flow.
-2. Make REAL HTTP requests — do not simulate or assume responses.
-3. After each step, VERIFY the outcome. Don't just check status codes — check that
-   the data makes sense (correct values, correct structure, correct user context).
-4. Carry state between steps. If step 2 creates a task and returns ID "abc123",
-   use that ID in later steps.
-5. If a step fails, DIAGNOSE why. Is the endpoint missing? Wrong fields? Auth issue?
-   Server error? Explain the root cause.
-6. Continue to the next step even if one fails — test as much as possible.
-7. For browser verification: if you have browser tools, use them to check the UI.
-   If not, verify via API only and note that browser verification was skipped.
-
-WORKFLOW:
-1. Execute all happy path steps, verifying each one
-2. If BREAK strategies are specified, spend a few turns trying to break the product
-3. When done, your final response will be collected as the verdict automatically
-
-Your final output will be structured as JSON automatically. Include all step
-results and any break findings in your final response.
+1. Make REAL HTTP requests via Bash (curl). Never simulate responses.
+2. Verify outcomes by checking response data, not just status codes.
+3. Carry state between steps (IDs, tokens, cookies).
+4. If a step fails, diagnose the root cause (missing endpoint, wrong fields, auth, server error).
+5. Continue testing even if a step fails — cover as much as possible.
+6. Do NOT use WebFetch — it cannot access localhost. Use curl via Bash only.
+7. Be concise. One curl command per verification, check the result, move on.
 """
 
 
@@ -225,6 +211,9 @@ def _build_journey_prompt(
     story: UserStory,
     manifest: ProductManifest,
     base_url: str,
+    *,
+    skip_break: bool = False,
+    has_browser: bool = False,
 ) -> str:
     """Build the prompt for the journey verification agent."""
     manifest_text = format_manifest_for_agent(manifest)
@@ -232,39 +221,35 @@ def _build_journey_prompt(
     steps_text = ""
     for i, step in enumerate(story.steps):
         dep = f" (uses output from step {step.uses_output_from + 1})" if step.uses_output_from is not None else ""
-        browser = f"\n   Browser check: {step.verify_in_browser}" if step.verify_in_browser else ""
-        steps_text += f"""
-Step {i + 1}: {step.action}
-   Verify: {step.verify}{browser}
-   Entity: {step.entity}, Operation: {step.operation}, Mode: {step.mode}{dep}
-"""
+        steps_text += f"\n{i + 1}. {step.action}\n   Verify: {step.verify}{dep}"
 
     break_text = ""
-    if story.break_strategies:
+    if story.break_strategies and not skip_break:
         break_text = f"""
 
 BREAK PHASE (after happy path):
 Try these strategies to find quality issues:
 {chr(10).join(f'- {s}' for s in story.break_strategies)}
-
 Report what you find. These do NOT affect the pass/fail verdict.
 """
 
-    return f"""\
-Execute this user story and verify each step.
+    browser_text = ""
+    if has_browser:
+        browser_text = """
+BROWSER: You have chrome-devtools tools available. Use them to verify UI
+renders correctly after each API step (navigate, take screenshot, check elements).
+"""
 
-STORY: {story.title}
-Persona: {story.persona}
-Narrative: {story.narrative}
+    return f"""\
+{story.title} — {story.persona}
+{story.narrative}
 
 {manifest_text}
-
 Base URL: {base_url}
 
 STEPS:
 {steps_text}
-{break_text}
-"""
+{break_text}{browser_text}"""
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +289,13 @@ async def verify_story(
     verdict_file = log_dir / f"journey-{story.id}-verdict.json"
     verdict_file.unlink(missing_ok=True)
 
-    prompt = _build_journey_prompt(story, manifest, base_url)
+    skip_break = config.get("certifier_skip_break", True)  # default: skip break phase
+    has_browser = bool(config.get("chrome_mcp"))
+
+    prompt = _build_journey_prompt(
+        story, manifest, base_url,
+        skip_break=skip_break, has_browser=has_browser,
+    )
 
     # Configure agent with HTTP tools (Bash for curl) + optional browser (chrome-devtools)
     mcp_servers = {}
@@ -312,16 +303,13 @@ async def verify_story(
     if chrome_config:
         mcp_servers["chrome-devtools"] = chrome_config
 
-    # Structured output: SDK enforces verdict JSON as the agent's final response.
-    # Session terminates naturally when the agent produces its output — no hang.
+    # Simplified structured output — smaller schema = faster verdict generation.
     verdict_schema: dict[str, Any] = {
         "type": "object",
         "properties": {
             "story_passed": {"type": "boolean"},
-            "blocked_at": {"type": ["string", "null"]},
             "summary": {"type": "string"},
             "diagnosis": {"type": ["string", "null"]},
-            "fix_suggestion": {"type": ["string", "null"]},
             "steps": {
                 "type": "array",
                 "items": {
@@ -329,28 +317,26 @@ async def verify_story(
                     "properties": {
                         "action": {"type": "string"},
                         "outcome": {"type": "string", "enum": ["pass", "fail", "blocked"]},
-                        "verification": {"type": "string"},
                         "diagnosis": {"type": ["string", "null"]},
-                        "fix_suggestion": {"type": ["string", "null"]},
-                    },
-                },
-            },
-            "break_findings": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "technique": {"type": "string"},
-                        "description": {"type": "string"},
-                        "result": {"type": "string"},
-                        "severity": {"type": "string"},
-                        "fix_suggestion": {"type": "string"},
                     },
                 },
             },
         },
         "required": ["story_passed", "summary", "steps"],
     }
+    # Only include break_findings in schema when break phase is enabled
+    if not skip_break:
+        verdict_schema["properties"]["break_findings"] = {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "technique": {"type": "string"},
+                    "description": {"type": "string"},
+                    "severity": {"type": "string"},
+                },
+            },
+        }
 
     options = ClaudeAgentOptions(
         permission_mode="bypassPermissions",

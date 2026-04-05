@@ -97,103 +97,57 @@ class StorySet:
 
 
 STORY_COMPILER_PROMPT = """\
-You are a QA test designer. Given a product intent, design user stories that test
-the product END-TO-END as real users would use it.
+Design user stories that test this product end-to-end as real users would use it.
 
 Intent: {intent}
 
-Each story is a realistic scenario from a specific persona's perspective.
-Stories test INTEGRATION — features working together — not individual endpoints.
-
-PERSONAS:
-- new_user: first-time user (register → first action → verify)
-- returning_user: existing user (login → use features → verify state)
-- admin: administrator (login → manage → verify admin capabilities)
-- visitor: unauthenticated person (try to access → verify rejection)
-
-REQUIRED STORIES (generate ALL of these):
-1. **First Experience**: A new user registers, uses the core feature for the first time,
-   and verifies it worked. This tests the primary value proposition.
-2. **Feature Lifecycle**: Create something, modify it, verify changes, delete it.
-   Tests the full CRUD cycle and state consistency.
-3. **Data Isolation**: Two different users each create data. Verify each user only
-   sees their own data. Tests multi-user security.
-4. **Persistence**: Create data, log out, log back in, verify data is still there.
-   Tests that data is durable, not just in-memory.
-5. **Access Control**: An unauthenticated visitor tries to use protected features.
-   Tests that auth is enforced.
-6. **Search/Filter** (if applicable): Create multiple items with different attributes,
-   then search/filter and verify correct results.
-7. **Edge Cases**: Try common edge cases within realistic flows — empty inputs,
-   very long strings, special characters in names.
-
-For each story, also specify BREAK STRATEGIES — things to try after the happy path
-to see if the product handles edge cases well:
-- double_submit: submit the same form/request twice rapidly
-- long_input: use very long strings (1000+ chars)
-- empty_required: submit with empty required fields
-- special_chars: use special characters (emoji, unicode, HTML tags)
-- id_guessing: try to access another user's data by guessing IDs
-- direct_url: navigate directly to protected URLs without auth
-- back_after_submit: go back in browser after form submission
-- concurrent_modify: modify the same resource from two sessions
+REQUIRED STORIES (generate ALL that apply):
+1. **First Experience**: New user registers, uses core feature, verifies it worked.
+2. **Feature Lifecycle**: Create → modify → verify changes → delete. Full CRUD.
+3. **Data Isolation**: Two users create data. Each only sees their own.
+4. **Persistence**: Create data, end session, start new session, verify data persists.
+5. **Access Control**: Unauthenticated request to protected features → rejected.
+6. **Search/Filter** (if applicable): Create items with different attributes, filter, verify.
+7. **Edge Cases**: Empty inputs, long strings, special characters in realistic flows.
 
 RULES:
-- Each step describes WHAT to do and WHAT to verify, in plain English
-- Do NOT include HTTP methods, paths, field names, or status codes
-- Do NOT assume any specific API convention
-- Steps should be written as instructions to a human tester
-- Mark which steps should be verified via browser (UI/UX check) vs API (data check)
-- Include data dependencies: "use the task created in step 2"
-- Generate 5-8 stories covering ALL features mentioned in the intent
-- Stories must only describe actions through the product's user interface (API requests, CLI commands, browser interactions)
-- Do NOT include operational steps like: restart server, kill process, edit source files, modify database directly, change environment variables, install packages
-- For persistence testing, use "close the session and start a new one" NOT "restart the server"
+- Steps describe WHAT to do and verify, in plain English. No HTTP methods or paths.
+- Include data dependencies between steps: "use the item created in step 2"
+- 5-8 stories, 2-4 steps each. Keep stories focused — one integration concern each.
+- Do NOT include operational steps (restart server, edit files, modify database).
+- For persistence: "end the session and start a new one", NOT "restart the server".
+- break_strategies: optional adversarial tests per story (double_submit, long_input, special_chars, id_guessing). Can be empty.
 
-STORY IDs:
-Each story must have a stable "id" field — a short kebab-case slug describing the scenario's
-INTENT (e.g. "first-todo-crud", "persist-across-sessions", "two-user-data-isolation",
-"unauth-access-denied", "edge-case-inputs"). The id should be based on WHAT the story tests,
-not the exact title wording. Two compilations of the same intent should produce the same ids
-even if titles differ slightly.
+STORY IDs: stable kebab-case slug based on WHAT the story tests (e.g. "first-experience",
+"crud-lifecycle", "data-isolation", "persistence", "access-control"). Same intent should
+produce the same ids across compilations.
 
 Output JSON only:
 {{
   "stories": [
     {{
-      "id": "new-user-first-task",
+      "id": "first-experience",
       "persona": "new_user",
-      "title": "New User Creates Their First Task",
-      "narrative": "A new user registers, creates their first task, and verifies it appears in their list.",
+      "title": "New User First Experience",
+      "narrative": "A new user registers and uses the core feature for the first time.",
       "critical": true,
-      "tests_integration": ["auth", "task-crud", "task-list"],
-      "break_strategies": ["double_submit", "long_input", "special_chars"],
+      "tests_integration": ["auth", "core-feature"],
+      "break_strategies": [],
       "steps": [
         {{
           "action": "register a new account with email and password",
-          "verify": "registration succeeds, user is logged in or can log in",
-          "verify_in_browser": "registration form submits successfully, redirected to main page",
+          "verify": "registration succeeds, user can access the product",
           "entity": "user",
           "operation": "auth",
-          "mode": "both"
+          "mode": "api"
         }},
         {{
-          "action": "create a task with a specific title and description",
-          "verify": "task is created and returned with an ID",
-          "verify_in_browser": "task appears in the task list on the page",
-          "entity": "task",
+          "action": "use the product's main feature",
+          "verify": "feature works correctly, data is created/returned",
+          "entity": "",
           "operation": "create",
-          "mode": "both",
+          "mode": "api",
           "uses_output_from": 0
-        }},
-        {{
-          "action": "list all tasks",
-          "verify": "the created task appears in the list with correct title",
-          "verify_in_browser": "task list shows the task with its title and details",
-          "entity": "task",
-          "operation": "list",
-          "mode": "both",
-          "uses_output_from": 1
         }}
       ]
     }}
