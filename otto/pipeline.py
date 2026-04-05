@@ -393,8 +393,8 @@ async def build_continuous(
         )
 
         # Certify in isolated worktree.
-        # Run in executor: certifier uses asyncio.run() internally,
-        # which can't be called from the running event loop.
+        # Run in executor: certifier is sync but internally creates its
+        # own event loop for async journey agents.
         import asyncio as _asyncio
         _loop = _asyncio.get_event_loop()
         report = await _loop.run_in_executor(

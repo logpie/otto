@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import os
-import signal
 import subprocess
 import sys
 import time
@@ -250,9 +249,10 @@ def _cmd_start():
     if skip_break:
         child_cmd.append("--skip-break")
 
-    # Capture stderr for debugging — if the certifier crashes, we need the traceback
+    # Capture stderr for debugging — if the certifier crashes, we need the traceback.
+    # Line-buffered (buffering=1) so writes flush on newline, preventing data loss on crash.
     stderr_path = job_dir / "stderr.log"
-    stderr_fh = open(stderr_path, "w")
+    stderr_fh = open(stderr_path, "w", buffering=1)
     proc = subprocess.Popen(
         child_cmd,
         cwd=str(project_dir),
@@ -315,7 +315,14 @@ def _cmd_status():
                 print(json.dumps(job_state))
             else:
                 job_state["status"] = "error"
-                job_state["message"] = "Certifier process died without writing results"
+                # Include stderr.log contents for debugging — this is the
+                # traceback from the crashed subprocess, without which the
+                # crash is completely silent and undiagnosable.
+                stderr_log = _read_stderr_log(job_dir)
+                if stderr_log:
+                    job_state["message"] = f"Certifier process crashed. Traceback:\n{stderr_log}"
+                else:
+                    job_state["message"] = "Certifier process died without writing results or stderr"
                 _write_job(job_dir, job_state)
                 print(json.dumps(job_state))
     else:
@@ -381,39 +388,77 @@ def _cmd_stories():
 
 
 def _cmd_run_child():
-    """Internal: run certifier in a spawned subprocess. Not for user use."""
-    # _run_child <project_dir> <intent_file> <job_dir> <candidate_sha> <round_num> [--config <file>]
-    if len(sys.argv) < 7:
-        sys.exit(1)
-    project_dir = Path(sys.argv[2]).resolve()
-    intent_file = Path(sys.argv[3]).resolve()
-    job_dir = Path(sys.argv[4]).resolve()
-    candidate_sha = sys.argv[5]
-    round_num = int(sys.argv[6])
-    config_path = None
-    if "--config" in sys.argv:
-        idx = sys.argv.index("--config")
-        if idx + 1 < len(sys.argv):
-            config_path = Path(sys.argv[idx + 1]).resolve()
+    """Internal: run certifier in a spawned subprocess. Not for user use.
 
-    # Parse flags forwarded from start
-    retest_failed = _parse_flag("--retest-failed")
-    only_story = _parse_option("--only")
-    skip_break = _parse_flag("--skip-break")
+    The entire function body is wrapped in try/except so that ANY crash
+    (import errors, arg parsing, certifier internals) writes a job error
+    with a full traceback — preventing silent subprocess deaths.
+    """
+    import signal
+    import traceback
+
+    job_dir = None
+    round_num = 0
+
+    def _signal_handler(signum, frame):
+        """Log signal to stderr before dying — prevents silent deaths."""
+        sig_name = signal.Signals(signum).name if hasattr(signal, "Signals") else str(signum)
+        msg = f"certify_cli _run_child killed by signal {sig_name} (pid={os.getpid()})\n"
+        sys.stderr.write(msg)
+        sys.stderr.flush()
+        if job_dir is not None:
+            try:
+                _write_job(job_dir, {
+                    "job_id": job_dir.name,
+                    "status": "error",
+                    "message": f"Certifier process killed by signal {sig_name}",
+                    "round": round_num,
+                    "completed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                })
+            except Exception:
+                pass
+        sys.exit(128 + signum)
+
+    signal.signal(signal.SIGTERM, _signal_handler)
+    signal.signal(signal.SIGINT, _signal_handler)
 
     try:
+        # _run_child <project_dir> <intent_file> <job_dir> <candidate_sha> <round_num> [--config <file>]
+        if len(sys.argv) < 7:
+            sys.exit(1)
+        project_dir = Path(sys.argv[2]).resolve()
+        intent_file = Path(sys.argv[3]).resolve()
+        job_dir = Path(sys.argv[4]).resolve()
+        candidate_sha = sys.argv[5]
+        round_num = int(sys.argv[6])
+        config_path = None
+        if "--config" in sys.argv:
+            idx = sys.argv.index("--config")
+            if idx + 1 < len(sys.argv):
+                config_path = Path(sys.argv[idx + 1]).resolve()
+
+        # Parse flags forwarded from start
+        retest_failed = _parse_flag("--retest-failed")
+        only_story = _parse_option("--only")
+        skip_break = _parse_flag("--skip-break")
+
         _run_certifier_child(
             project_dir, intent_file, config_path, job_dir, candidate_sha, round_num,
             retest_failed=retest_failed, only_story=only_story, skip_break=skip_break,
         )
     except Exception as exc:
-        _write_job(job_dir, {
-            "job_id": job_dir.name,
-            "status": "error",
-            "message": str(exc),
-            "round": round_num,
-            "completed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        })
+        tb = traceback.format_exc()
+        # Always print to stderr so the parent's stderr.log captures it
+        print(f"certify_cli _run_child CRASHED:\n{tb}", file=sys.stderr, flush=True)
+        if job_dir is not None:
+            _write_job(job_dir, {
+                "job_id": job_dir.name,
+                "status": "error",
+                "message": str(exc),
+                "traceback": tb,
+                "round": round_num,
+                "completed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            })
 
 
 def _run_certifier_child(
@@ -625,6 +670,23 @@ def _snapshot(project_dir, job_dir):
         )
         raise RuntimeError("Failed to read certification snapshot commit SHA.")
     return result.stdout.strip()
+
+
+def _read_stderr_log(job_dir: Path) -> str:
+    """Read the stderr.log from a crashed certifier subprocess.
+
+    Returns the last 2000 chars (enough for a traceback) or empty string.
+    """
+    stderr_path = job_dir / "stderr.log"
+    if stderr_path.exists():
+        try:
+            content = stderr_path.read_text().strip()
+            if len(content) > 2000:
+                content = "...\n" + content[-2000:]
+            return content
+        except OSError:
+            return ""
+    return ""
 
 
 def _write_job(job_dir, state):

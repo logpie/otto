@@ -283,12 +283,18 @@ def run_certifier_v2(
             stories_to_test = [s for s in stories_to_test if s.id not in skip_story_ids]
             logger.info("Targeted re-verify: testing %d of %d stories", len(stories_to_test), len(story_set.stories))
 
-        cert_result = asyncio.run(
-            verify_all_stories(
-                stories_to_test, manifest, runner.base_url, project_dir, config,
-                on_between_stories=runner.ensure_alive,
+        # Use new_event_loop + run_until_complete instead of asyncio.run() —
+        # asyncio.run() installs signal handlers which crashes in non-main threads.
+        _loop = asyncio.new_event_loop()
+        try:
+            cert_result = _loop.run_until_complete(
+                verify_all_stories(
+                    stories_to_test, manifest, runner.base_url, project_dir, config,
+                    on_between_stories=runner.ensure_alive,
+                )
             )
-        )
+        finally:
+            _loop.close()
     finally:
         runner.stop()
 
@@ -489,6 +495,15 @@ def run_unified_certifier(
                 description="Journey verification blocked by manifest build failure",
             )
         else:
+            # When running parallel stories (default), each worker subprocess
+            # starts its own app instance. Stop the parent app first to free
+            # the port and avoid conflicts.
+            parallel = int(config.get("certifier_parallel_stories", 3))
+            if parallel > 1:
+                try:
+                    runner.stop()
+                except Exception:
+                    pass
             tier4 = _run_tier4_journeys(
                 intent=intent,
                 project_dir=project_dir,
@@ -610,9 +625,14 @@ def _run_tier4_journeys(
         )
 
     # Run journey agents
+    # Use new_event_loop + run_until_complete instead of asyncio.run() because
+    # asyncio.run() installs signal handlers, which crashes with "signal only
+    # works in main thread" when called from a thread (e.g. via run_in_executor
+    # in verification.py's PER fix loop).
     ensure_alive = getattr(runner, "ensure_alive", None)
+    loop = asyncio.new_event_loop()
     try:
-        cert_result = asyncio.run(
+        cert_result = loop.run_until_complete(
             verify_all_stories(
                 stories_to_test, manifest, runner.base_url, project_dir, config,
                 on_between_stories=ensure_alive,
@@ -629,6 +649,8 @@ def _run_tier4_journeys(
             duration_s=round(time.monotonic() - start, 1),
             cost_usd=compile_cost,
         )
+    finally:
+        loop.close()
 
     # Convert to findings
     findings: list[Finding] = []

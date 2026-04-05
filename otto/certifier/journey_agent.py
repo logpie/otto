@@ -19,7 +19,7 @@ import json
 import logging
 import time
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -98,6 +98,92 @@ class CertificationResult:
     certified: bool
     total_cost_usd: float = 0.0
     total_duration_s: float = 0.0
+
+
+# ---------------------------------------------------------------------------
+# Serialization — for subprocess IPC (JSON files)
+# ---------------------------------------------------------------------------
+
+
+def _journey_result_to_dict(r: JourneyResult) -> dict[str, Any]:
+    """Serialize a JourneyResult to a JSON-friendly dict."""
+    return asdict(r)
+
+
+def _journey_result_from_dict(d: dict[str, Any]) -> JourneyResult:
+    """Reconstruct a JourneyResult from a dict (JSON round-trip)."""
+    steps = [
+        StepResult(
+            action=s.get("action", ""),
+            outcome=s.get("outcome", "blocked"),
+            verification=s.get("verification", ""),
+            evidence=s.get("evidence", []),
+            diagnosis=s.get("diagnosis", ""),
+            fix_suggestion=s.get("fix_suggestion", ""),
+        )
+        for s in d.get("steps", [])
+    ]
+    break_findings = [
+        BreakFinding(
+            technique=b.get("technique", ""),
+            description=b.get("description", ""),
+            result=b.get("result", ""),
+            severity=b.get("severity", "minor"),
+            fix_suggestion=b.get("fix_suggestion", ""),
+        )
+        for b in d.get("break_findings", [])
+    ]
+    return JourneyResult(
+        story_id=d.get("story_id", ""),
+        story_title=d.get("story_title", ""),
+        persona=d.get("persona", ""),
+        passed=d.get("passed", False),
+        steps=steps,
+        break_findings=break_findings,
+        summary=d.get("summary", ""),
+        evidence_chain=d.get("evidence_chain", []),
+        blocked_at=d.get("blocked_at", ""),
+        diagnosis=d.get("diagnosis", ""),
+        fix_suggestion=d.get("fix_suggestion", ""),
+        cost_usd=d.get("cost_usd", 0.0),
+        duration_s=d.get("duration_s", 0.0),
+    )
+
+
+def _story_from_dict(d: dict[str, Any]) -> UserStory:
+    """Reconstruct a UserStory from a dict (JSON round-trip)."""
+    from otto.certifier.stories import StoryStep, UserStory as _UserStory
+
+    steps = [
+        StoryStep(
+            action=s.get("action", ""),
+            verify=s.get("verify", ""),
+            verify_in_browser=s.get("verify_in_browser", ""),
+            entity=s.get("entity", ""),
+            operation=s.get("operation", ""),
+            mode=s.get("mode", "api"),
+            uses_output_from=s.get("uses_output_from"),
+        )
+        for s in d.get("steps", [])
+    ]
+    return _UserStory(
+        id=d.get("id", ""),
+        persona=d.get("persona", ""),
+        title=d.get("title", ""),
+        narrative=d.get("narrative", ""),
+        steps=steps,
+        critical=d.get("critical", False),
+        tests_integration=d.get("tests_integration", []),
+        break_strategies=d.get("break_strategies", []),
+    )
+
+
+def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
+    """Write JSON atomically — temp file + os.replace to prevent partial writes."""
+    import os as _os
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2, default=str))
+    _os.replace(str(tmp), str(path))
 
 
 # ---------------------------------------------------------------------------
@@ -492,9 +578,9 @@ async def verify_all_stories(
     total_cost = 0.0
     start_time = time.monotonic()
 
-    # Default sequential — parallel SDK sessions crash the subprocess.
-    # Set certifier_parallel_stories > 1 to experiment with parallelism.
-    max_parallel = int(config.get("certifier_parallel_stories", 1))
+    # Default 3 — each story runs in its own subprocess with its own project
+    # copy and app instance, so parallelism is safe. Set to 1 for sequential.
+    max_parallel = int(config.get("certifier_parallel_stories", 3))
 
     async def _run_one_story(i: int, story: UserStory) -> JourneyResult:
         """Run a single story with optional timeout."""
@@ -544,30 +630,40 @@ async def verify_all_stories(
             total_cost += result.cost_usd
             all_break_findings.extend(result.break_findings)
     else:
-        # Parallel with bounded concurrency
-        logger.info("Running %d stories with max %d parallel", len(stories), max_parallel)
+        # Subprocess-per-story: each story in own process with own app instance
+        import uuid as _uuid
+
+        logger.info("Running %d stories with max %d parallel (subprocess-isolated)",
+                     len(stories), max_parallel)
+        _scavenge_stale_workers(project_dir)
+        _ensure_deps_installed(project_dir)
+
+        run_id = f"{time.strftime('%Y%m%d-%H%M%S')}-{_uuid.uuid4().hex[:8]}"
+        stories_dir = project_dir / "otto_logs" / "certifier" / "stories" / run_id
+        stories_dir.mkdir(parents=True, exist_ok=True)
+
         sem = asyncio.Semaphore(max_parallel)
 
         async def _bounded(i: int, story: UserStory) -> JourneyResult:
             async with sem:
-                return await _run_one_story(i, story)
+                story_dir = stories_dir / f"{i:02d}-{story.id}"
+                story_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    return await _run_story_in_subprocess(
+                        story, project_dir, config, story_dir)
+                except Exception as exc:
+                    logger.exception("Subprocess failed for %s", story.id)
+                    return JourneyResult(
+                        story_id=story.id, story_title=story.title,
+                        persona=story.persona, passed=False,
+                        diagnosis=f"Subprocess error: {exc}")
 
         tasks = [_bounded(i, s) for i, s in enumerate(stories)]
-        results = list(await asyncio.gather(*tasks, return_exceptions=False))
+        results = list(await asyncio.gather(*tasks))
 
         for result in results:
             total_cost += result.cost_usd
             all_break_findings.extend(result.break_findings)
-
-        # Health check after parallel batch
-        if on_between_stories is not None:
-            try:
-                on_between_stories()
-            except Exception:
-                pass
-
-        status = "✓" if result.passed else "✗"
-        logger.info("  %s %s (%.1fs, $%.3f)", status, story.title, result.duration_s, result.cost_usd)
 
     _write_heartbeat(project_dir, "done", len(stories), len(stories))
 
@@ -593,3 +689,366 @@ async def verify_all_stories(
         total_cost_usd=total_cost,
         total_duration_s=round(time.monotonic() - start_time, 1),
     )
+
+
+# ---------------------------------------------------------------------------
+# Subprocess-per-story infrastructure
+# ---------------------------------------------------------------------------
+
+# Dirs/patterns excluded from per-worker project copies.
+# .venv excluded: absolute paths in shebangs/pyvenv.cfg break in copies.
+# node_modules INCLUDED: uses relative requires, safe to clone.
+WORKER_EXCLUDE_DIRS = {
+    ".git", ".venv", "node_modules",
+    "otto_logs", ".otto-worktrees", ".otto-workers",
+    "__pycache__", ".pytest_cache", ".mypy_cache",
+}
+# .venv excluded: absolute paths in shebangs/pyvenv.cfg break in copies.
+#   AppRunner re-creates per worker.
+# node_modules excluded from COPY but SYMLINKED back (see below).
+#   Symlink works because Node.js resolves require() relative to the
+#   symlink target (the original), so .bin/ scripts resolve correctly.
+#   Read-only at runtime — no concurrent write issues.
+# NOTE: SQLite files (dev.db) are INCLUDED in copies. Each APFS clone gets
+# copy-on-write isolation — writes in one worker don't affect others.
+# On non-Mac, copytree creates a real copy, also isolated.
+WORKER_EXCLUDE_PATTERNS: tuple[str, ...] = ()
+
+
+def _create_worker_copy(project_dir: Path, worker_id: str) -> Path:
+    """Create a lightweight isolated copy of the project for one story worker.
+
+    Uses APFS clone (cp -c) on macOS for near-instant copy-on-write.
+    Falls back to shutil.copytree on other platforms.
+    """
+    import fnmatch
+    import os as _os
+    import shutil  # noqa: F811
+    import subprocess as _sp
+    import sys as _sys  # noqa: F811
+
+    workers_dir = project_dir / ".otto-workers" / "stories"
+    worker_dir = workers_dir / worker_id
+    workers_dir.mkdir(parents=True, exist_ok=True)
+
+    if _sys.platform == "darwin":
+        _sp.run(["cp", "-c", "-r", str(project_dir), str(worker_dir)],
+                capture_output=True, check=True)
+        for d in WORKER_EXCLUDE_DIRS:
+            p = worker_dir / d
+            if p.is_dir():
+                shutil.rmtree(p, ignore_errors=True)
+            elif p.exists():
+                p.unlink(missing_ok=True)
+        for pat in WORKER_EXCLUDE_PATTERNS:
+            for f in worker_dir.glob(f"**/{pat}"):
+                f.unlink(missing_ok=True)
+    else:
+        def _ignore(directory: str, contents: list[str]) -> list[str]:
+            return [c for c in contents
+                    if c in WORKER_EXCLUDE_DIRS
+                    or any(fnmatch.fnmatch(c, p) for p in WORKER_EXCLUDE_PATTERNS)]
+        shutil.copytree(project_dir, worker_dir, ignore=_ignore,
+                        symlinks=True, ignore_dangling_symlinks=True)
+
+    # Symlink node_modules back to the original — avoids 30s npm install
+    # per worker. Symlink works because Node.js resolves require() relative
+    # to the symlink target, so .bin/ scripts find their siblings correctly.
+    nm = project_dir / "node_modules"
+    nm_link = worker_dir / "node_modules"
+    if nm.exists() and not nm_link.exists():
+        _os.symlink(str(nm.resolve()), str(nm_link))
+
+    return worker_dir
+
+
+def _ensure_deps_installed(project_dir: Path) -> None:
+    """Ensure node_modules exists in the original project (for symlink sharing).
+
+    Python .venv is created per-worker by AppRunner (absolute paths break in copies).
+    """
+    import subprocess as _sp
+
+    pkg_json = project_dir / "package.json"
+    node_modules = project_dir / "node_modules"
+    if pkg_json.exists() and not node_modules.exists():
+        _sp.run(["npm", "install", "--no-audit", "--no-fund"],
+                cwd=str(project_dir), capture_output=True, timeout=120)
+
+
+def _scavenge_stale_workers(project_dir: Path, max_age_s: float = 3600) -> None:
+    """Remove orphaned worker copies from previous crashed runs."""
+    import shutil
+    workers_dir = project_dir / ".otto-workers" / "stories"
+    if not workers_dir.exists():
+        return
+    now = time.time()
+    for d in workers_dir.iterdir():
+        if d.is_dir() and (now - d.stat().st_mtime) > max_age_s:
+            shutil.rmtree(d, ignore_errors=True)
+
+
+async def _kill_process_tree(proc: asyncio.subprocess.Process, grace_s: float = 5.0) -> None:
+    """Two-phase shutdown: SIGTERM → grace → SIGKILL. Kills entire process group."""
+    import os as _os
+    import signal as _signal
+
+    try:
+        _os.killpg(_os.getpgid(proc.pid), _signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=grace_s)
+    except asyncio.TimeoutError:
+        try:
+            _os.killpg(_os.getpgid(proc.pid), _signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        await proc.wait()
+
+
+def _kill_orphan_app(story_dir: Path) -> None:
+    """Kill app process group that survived worker hard-kill."""
+    import os as _os
+    import signal as _signal
+
+    pid_file = story_dir / "app.pid"
+    if pid_file.exists():
+        try:
+            pgid = int(pid_file.read_text().strip())
+            _os.killpg(pgid, _signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, ValueError, OSError):
+            pass
+
+
+def _copy_story_logs(worker_dir: Path, story_dir: Path) -> None:
+    """Copy journey agent logs from worker copy to story_dir for observability."""
+    import shutil
+    src = worker_dir / "otto_logs" / "certifier"
+    if not src.exists():
+        return
+    for item in src.iterdir():
+        if item.is_file() and (item.name.startswith("journey-") or item.name == "heartbeat.json"):
+            shutil.copy2(item, story_dir / item.name)
+
+
+async def _run_story_in_subprocess(
+    story: UserStory,
+    project_dir: Path,
+    config: dict[str, Any],
+    story_dir: Path,
+) -> JourneyResult:
+    """Run a single story verification in an isolated subprocess.
+
+    Each subprocess gets its own project copy, app instance, and SDK session.
+    """
+    import os as _os
+    import shutil
+    import signal as _signal
+    import sys as _sys
+
+    from otto.certifier.manifest import manifest_to_dict
+
+    input_path = story_dir / "input.json"
+    output_path = story_dir / "output.json"
+    stderr_path = story_dir / "stderr.log"
+    worker_id = story_dir.name
+
+    # Clear stale artifacts
+    for p in (input_path, output_path, stderr_path):
+        p.unlink(missing_ok=True)
+
+    # Create isolated project copy
+    worker_dir = _create_worker_copy(project_dir, worker_id)
+
+    _atomic_write_json(input_path, {
+        "story": asdict(story),
+        "worker_dir": str(worker_dir),
+        "config": config,
+    })
+
+    stderr_fh = open(stderr_path, "w", buffering=1)
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            _sys.executable, "-m", "otto.certifier.journey_agent",
+            "_worker", str(input_path), str(output_path),
+            stderr=stderr_fh,
+            stdout=asyncio.subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        timeout = _story_timeout(story, config)
+        try:
+            if timeout is not None:
+                await asyncio.wait_for(proc.wait(), timeout=timeout)
+            else:
+                await proc.wait()
+        except asyncio.TimeoutError:
+            await _kill_process_tree(proc)
+            _kill_orphan_app(story_dir)
+            return JourneyResult(
+                story_id=story.id, story_title=story.title,
+                persona=story.persona, passed=False,
+                blocked_at=f"timed out after {int(timeout)}s",
+                diagnosis="Story verification timed out.",
+            )
+    except asyncio.CancelledError:
+        if proc is not None and proc.returncode is None:
+            await _kill_process_tree(proc)
+        _kill_orphan_app(story_dir)
+        raise
+    finally:
+        stderr_fh.close()
+        _kill_orphan_app(story_dir)  # idempotent — catches hard-kill orphans
+        _copy_story_logs(worker_dir, story_dir)
+        shutil.rmtree(worker_dir, ignore_errors=True)
+
+    if output_path.exists():
+        try:
+            data = json.loads(output_path.read_text())
+            return _journey_result_from_dict(data)
+        except (json.JSONDecodeError, KeyError) as exc:
+            logger.warning("Failed to parse worker output for %s: %s", story.id, exc)
+
+    stderr_content = ""
+    if stderr_path.exists():
+        stderr_content = stderr_path.read_text()
+        if len(stderr_content) > 2000:
+            stderr_content = "...\n" + stderr_content[-2000:]
+    return JourneyResult(
+        story_id=story.id, story_title=story.title,
+        persona=story.persona, passed=False,
+        diagnosis=f"Worker crashed without output.\n{stderr_content}",
+    )
+
+
+def _worker_main(input_path: Path, output_path: Path) -> None:
+    """Subprocess entry point for story verification.
+
+    Each worker:
+    1. Creates its own app instance (AppRunner on OS-assigned port)
+    2. Builds its own manifest from its running app
+    3. Runs verify_story with its own event loop
+    4. Writes result to output.json (single writer — signal-safe)
+
+    IMPORTANT: input_path and output_path are resolved to absolute paths
+    before os.chdir(worker_dir), so they remain valid after the chdir.
+    """
+    import os as _os
+    import signal as _signal
+    import sys as _sys
+    import traceback
+
+    from otto.certifier.baseline import AppRunner
+    from otto.certifier.classifier import classify
+    from otto.certifier.manifest import build_manifest
+    from otto.certifier.adapter import analyze_project
+
+    _killed_by_signal: int | None = None
+
+    def _signal_handler(signum: int, frame: Any) -> None:
+        nonlocal _killed_by_signal
+        _killed_by_signal = signum
+        raise SystemExit(128 + signum)
+
+    _signal.signal(_signal.SIGTERM, _signal_handler)
+    _signal.signal(_signal.SIGINT, _signal_handler)
+
+    # Resolve to absolute BEFORE chdir — paths are relative to launch dir
+    input_path = input_path.resolve()
+    output_path = output_path.resolve()
+
+    result_dict: dict[str, Any] | None = None
+    story_id = "unknown"
+    runner: AppRunner | None = None
+    story_dir = input_path.parent
+
+    try:
+        payload = json.loads(input_path.read_text())
+        story = _story_from_dict(payload["story"])
+        story_id = story.id
+        worker_dir = Path(payload["worker_dir"]).resolve()
+        config = payload.get("config", {})
+
+        _os.chdir(worker_dir)
+
+        # Start own isolated app instance.
+        # Extended timeout: Next.js/heavy frameworks recompile in cloned dirs.
+        profile = classify(worker_dir)
+        runner = AppRunner(worker_dir, profile)
+        start_timeout = int(config.get("certifier_app_start_timeout", 90))
+        evidence = runner.start(timeout=start_timeout)
+
+        # Write app PID so parent can kill orphan on hard kill
+        if runner.process:
+            try:
+                (story_dir / "app.pid").write_text(
+                    str(_os.getpgid(runner.process.pid)))
+            except (ProcessLookupError, OSError):
+                pass
+
+        if not evidence.passed:
+            result_dict = {
+                "story_id": story_id, "story_title": story.title,
+                "persona": story.persona, "passed": False,
+                "diagnosis": f"App failed to start: {evidence.actual}",
+                "steps": [], "break_findings": [],
+                "cost_usd": 0.0, "duration_s": 0.0,
+            }
+        else:
+            # Build manifest from THIS app instance (correct base_url)
+            test_config = analyze_project(worker_dir)
+            manifest = build_manifest(test_config, profile, runner.base_url)
+
+            loop = asyncio.new_event_loop()
+            try:
+                result = loop.run_until_complete(
+                    verify_story(story, manifest, runner.base_url, worker_dir, config))
+            finally:
+                loop.close()
+            result_dict = _journey_result_to_dict(result)
+
+    except SystemExit:
+        pass  # signal handler raised this — fall through to finally
+    except Exception:
+        tb = traceback.format_exc()
+        result_dict = {
+            "story_id": story_id, "story_title": "", "persona": "",
+            "passed": False, "diagnosis": f"Worker crashed: {tb}",
+            "steps": [], "break_findings": [],
+            "cost_usd": 0.0, "duration_s": 0.0,
+        }
+        print(tb, file=_sys.stderr, flush=True)
+    finally:
+        # Stop app
+        if runner is not None:
+            try:
+                runner.stop()
+            except Exception:
+                pass
+        # SINGLE WRITER — only this block writes output
+        if result_dict is None:
+            sig_name = "unknown"
+            if _killed_by_signal is not None:
+                try:
+                    import signal as _s
+                    sig_name = _s.Signals(_killed_by_signal).name
+                except (ValueError, AttributeError):
+                    sig_name = str(_killed_by_signal)
+            result_dict = {
+                "story_id": story_id, "story_title": "", "persona": "",
+                "passed": False, "diagnosis": f"Worker killed by signal {sig_name}",
+                "steps": [], "break_findings": [],
+                "cost_usd": 0.0, "duration_s": 0.0,
+            }
+        _atomic_write_json(output_path, result_dict)
+
+
+# ---------------------------------------------------------------------------
+# Module entry point — subprocess worker
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    import sys as _sys
+    if len(_sys.argv) == 4 and _sys.argv[1] == "_worker":
+        _worker_main(Path(_sys.argv[2]), Path(_sys.argv[3]))

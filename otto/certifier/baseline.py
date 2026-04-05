@@ -279,7 +279,7 @@ class AppRunner:
             start_time = time.time()
             while time.time() - start_time < timeout:
                 try:
-                    response = requests.get(self.base_url, timeout=2)
+                    response = requests.get(self.base_url, timeout=10)
                     if response.status_code < 500:
                         return Evidence(
                             step="start app",
@@ -290,7 +290,7 @@ class AppRunner:
                             outcome="pass",
                             timestamp=time.strftime("%H:%M:%S"),
                         )
-                except requests.ConnectionError:
+                except (requests.ConnectionError, requests.Timeout):
                     time.sleep(1)
 
             return Evidence(

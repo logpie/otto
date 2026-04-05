@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -227,3 +227,13 @@ def format_manifest_for_agent(manifest: ProductManifest) -> str:
         lines.append("")
 
     return "\n".join(lines)
+
+
+def manifest_to_dict(m: ProductManifest) -> dict[str, Any]:
+    """Serialize a ProductManifest to a JSON-friendly dict."""
+    return asdict(m)
+
+
+def manifest_from_dict(d: dict[str, Any]) -> ProductManifest:
+    """Reconstruct a ProductManifest from a dict (JSON round-trip)."""
+    return ProductManifest(**d)
