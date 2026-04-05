@@ -286,6 +286,7 @@ def run_certifier_v2(
         cert_result = asyncio.run(
             verify_all_stories(
                 stories_to_test, manifest, runner.base_url, project_dir, config,
+                on_between_stories=runner.ensure_alive,
             )
         )
     finally:
@@ -609,10 +610,12 @@ def _run_tier4_journeys(
         )
 
     # Run journey agents
+    ensure_alive = getattr(runner, "ensure_alive", None)
     try:
         cert_result = asyncio.run(
             verify_all_stories(
                 stories_to_test, manifest, runner.base_url, project_dir, config,
+                on_between_stories=ensure_alive,
             )
         )
     except Exception as exc:

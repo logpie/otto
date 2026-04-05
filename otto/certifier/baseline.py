@@ -334,6 +334,49 @@ class AppRunner:
         except (subprocess.TimeoutExpired, FileNotFoundError):
             pass
 
+    def ensure_alive(self) -> bool:
+        """Check if the app is still running. If dead, restart it.
+
+        Returns True if the app is alive (or was successfully restarted).
+        Called between stories by the certifier to recover from journey
+        agents that accidentally kill the app process.
+        """
+        if self.profile.extra.get("reuse_existing_app"):
+            return self._port_in_use()
+
+        if self.process is None:
+            return False
+
+        # Check if process is still alive
+        if self.process.poll() is not None:
+            # Process died — restart
+            logger.warning(
+                "App process died (exit code %s). Restarting...",
+                self.process.returncode,
+            )
+            self.process = None
+            evidence = self.start()
+            if evidence.passed:
+                logger.info("App restarted successfully on %s", self.base_url)
+                return True
+            else:
+                logger.error("App restart failed: %s", evidence.actual)
+                return False
+
+        # Process alive but check if port still responds
+        if not self._port_in_use():
+            logger.warning("App process alive but port %d not responding. Restarting...", self.port)
+            self.stop()
+            evidence = self.start()
+            if evidence.passed:
+                logger.info("App restarted successfully on %s", self.base_url)
+                return True
+            else:
+                logger.error("App restart failed: %s", evidence.actual)
+                return False
+
+        return True
+
     def _port_in_use(self) -> bool:
         import socket
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:

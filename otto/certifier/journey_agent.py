@@ -479,8 +479,14 @@ async def verify_all_stories(
     base_url: str,
     project_dir: Path,
     config: dict[str, Any] | None = None,
+    *,
+    on_between_stories: Any | None = None,
 ) -> CertificationResult:
-    """Verify all user stories and produce a certification result."""
+    """Verify all user stories and produce a certification result.
+
+    on_between_stories: optional callable invoked between stories.
+    Used by the certifier to check app health and auto-restart if needed.
+    """
     config = config or {}
     results: list[JourneyResult] = []
     all_break_findings: list[BreakFinding] = []
@@ -488,6 +494,12 @@ async def verify_all_stories(
     start_time = time.monotonic()
 
     for i, story in enumerate(stories):
+        # Between stories: check app health, restart if needed
+        if i > 0 and on_between_stories is not None:
+            try:
+                on_between_stories()
+            except Exception as exc:
+                logger.warning("Between-story callback failed: %s", exc)
         logger.info("Verifying story: %s (%s)", story.title, story.persona)
         timeout = _story_timeout(story, config)
         _write_heartbeat(project_dir, story.title, i, len(stories), story_timeout_s=timeout)
