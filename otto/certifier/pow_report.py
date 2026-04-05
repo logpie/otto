@@ -413,6 +413,9 @@ h1 {{ border-bottom: 2px solid #e5e7eb; padding-bottom: 0.5em; }}
 .screenshot img {{ max-width: 380px; border: 1px solid #d1d5db; border-radius: 4px; cursor: pointer; transition: transform 0.2s; }}
 .screenshot img:hover {{ transform: scale(1.02); box-shadow: 0 4px 12px rgba(0,0,0,0.15); }}
 .screenshot .caption {{ font-size: 0.8em; color: #6b7280; margin-top: 0.3em; }}
+.lightbox {{ display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 1000; cursor: pointer; justify-content: center; align-items: center; }}
+.lightbox.active {{ display: flex; }}
+.lightbox img {{ max-width: 95%; max-height: 95%; border-radius: 8px; }}
 video {{ max-width: 100%; border-radius: 8px; margin: 1em 0; }}
 .diagnosis {{ background: #fef2f2; border-left: 3px solid #ef4444; padding: 0.5em 1em; margin: 0.5em 0; border-radius: 0 4px 4px 0; }}
 .fix {{ background: #f0fdf4; border-left: 3px solid #22c55e; padding: 0.5em 1em; margin: 0.5em 0; border-radius: 0 4px 4px 0; }}
@@ -541,7 +544,19 @@ th {{ background: #f9fafb; }}
 
             html.append("</div>")  # story
 
-    html.append("</body></html>")
+    html.append("""\
+<div class="lightbox" id="lightbox" onclick="this.classList.remove('active')">
+<img id="lightbox-img" src="" />
+</div>
+<script>
+document.querySelectorAll('.screenshot img').forEach(img => {
+  img.onclick = () => {
+    document.getElementById('lightbox-img').src = img.src;
+    document.getElementById('lightbox').classList.add('active');
+  };
+});
+</script>
+</body></html>""")
     report_path = output_dir / "proof-of-work.html"
     report_path.write_text("\n".join(html))
     return report_path
