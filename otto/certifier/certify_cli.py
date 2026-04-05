@@ -133,6 +133,23 @@ def _cmd_status():
     # Check if process is still alive
     pid = job_state.get("pid")
     if pid and job_state.get("status") == "running":
+        # Wall-clock timeout: kill certifier if it's been running too long
+        started_at = job_state.get("started_at", "")
+        max_certify_seconds = 1800  # 30 min hard cap
+        if started_at:
+            try:
+                start_time = time.mktime(time.strptime(started_at, "%Y-%m-%d %H:%M:%S"))
+                elapsed = time.time() - start_time
+                if elapsed > max_certify_seconds:
+                    os.kill(pid, signal.SIGTERM)
+                    job_state["status"] = "error"
+                    job_state["message"] = f"Certifier timed out after {int(elapsed)}s (max {max_certify_seconds}s)"
+                    _write_job(job_dir, job_state)
+                    print(json.dumps(job_state))
+                    return
+            except (ValueError, OSError):
+                pass
+
         try:
             os.kill(pid, 0)  # check if alive
             # Still running — report progress
