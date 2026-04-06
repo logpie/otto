@@ -178,19 +178,32 @@ def _run_verification_sync(
     tasks_path: Path,
     config: dict[str, Any],
 ) -> dict[str, Any]:
-    """Run verification synchronously (certifier uses asyncio.run internally)."""
-    import asyncio
-    from otto.verification import run_product_verification
-    from otto.tasks import task_build_scope
+    """Run verification synchronously.
 
-    with task_build_scope(config.get("build_id")):
-        return asyncio.run(run_product_verification(
-            product_spec_path=product_spec_path,
-            project_dir=project_dir,
-            tasks_path=tasks_path,
-            config=config,
-            intent=intent,
-        ))
+    Called from run_in_executor (already in a thread). Calls
+    run_unified_certifier directly — it's sync. No asyncio needed here.
+    """
+    from otto.certifier import run_unified_certifier
+    from otto.certifier.report import CertificationOutcome
+
+    report = run_unified_certifier(
+        intent=intent,
+        project_dir=project_dir,
+        config=config,
+    )
+
+    # Translate CertificationReport to verification-compatible dict
+    return {
+        "product_passed": report.outcome == CertificationOutcome.PASSED,
+        "total_cost": report.cost_usd,
+        "duration_s": report.duration_s,
+        "journeys": [],
+        "break_findings": [
+            {"severity": f.severity, "description": f.description,
+             "diagnosis": f.diagnosis, "fix_suggestion": f.fix_suggestion}
+            for f in report.break_findings()
+        ],
+    }
 
 
 def _build_task_counts(tasks_path: Path, build_id: str) -> tuple[int, int]:

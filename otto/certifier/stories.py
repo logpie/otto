@@ -349,11 +349,18 @@ def load_or_compile_stories(
         return load_stories(cache), "cache", cache, 0.0
 
     started_at = time.monotonic()
-    story_set = asyncio.run(compile_stories(
-        intent, config=config,
-        product_type=product_type or "unknown",
-        interaction=interaction or "unknown",
-    ))
+    # Use new_event_loop instead of asyncio.run() — asyncio.run() installs
+    # signal handlers which crashes with "signal only works in main thread"
+    # when called from a thread (e.g., via run_in_executor in verification.py).
+    loop = asyncio.new_event_loop()
+    try:
+        story_set = loop.run_until_complete(compile_stories(
+            intent, config=config,
+            product_type=product_type or "unknown",
+            interaction=interaction or "unknown",
+        ))
+    finally:
+        loop.close()
     duration = round(time.monotonic() - started_at, 1)
     save_stories(story_set, cache)
     return story_set, "compiled", cache, duration
