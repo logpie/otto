@@ -652,10 +652,11 @@ async def run_agentic_certifier(
                     if not passed:
                         findings.append(Finding(
                             tier=4,
-                            severity="critical" if not passed else "note",
+                            severity="critical",
                             category="journey",
                             description=f"Story failed: {sid}",
                             diagnosis=summary,
+                            fix_suggestion=summary,
                             story_id=sid,
                         ))
 

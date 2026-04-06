@@ -718,18 +718,18 @@ async def build_agentic_v2(
     project_dir: Path,
     config: dict[str, Any],
 ) -> BuildResult:
-    """Agentic build: coding agent builds, then SEPARATE certifier agent tests.
+    """Agentic build with certify→fix loop.
 
-    Two sessions, builder-blind:
-    - Session 1: coding agent builds the product (no certification knowledge)
-    - Session 2: certifier agent tests it (no build knowledge, fresh context)
+    Two agents, builder-blind:
+    - Coding agent: builds (session persists across fix rounds via resume)
+    - Certifier agent: tests (fresh session each round, blind to builder)
 
-    The certifier can't cheat — it doesn't know what the builder did.
+    Loop: build → certify → if failed: resume coding with findings → re-certify
     """
-    import asyncio
-    from otto.agent import ClaudeAgentOptions, _subprocess_env, run_agent_query, tool_use_summary
+    from otto.agent import ClaudeAgentOptions, _subprocess_env
     from otto.certifier import run_agentic_certifier
     from otto.certifier.report import CertificationOutcome
+    from otto.session import AgentSession
 
     build_id = f"build-{int(time.time())}-{os.getpid()}"
     build_dir = project_dir / "otto_logs" / "builds" / build_id
@@ -740,9 +740,9 @@ async def build_agentic_v2(
         grounding_path.write_text(intent)
     _commit_artifacts(project_dir)
 
-    # ── Session 1: Build ──
-    build_prompt = AGENTIC_V2_BUILD_PROMPT + f"\n\nBuild this product:\n\n{intent}"
+    max_rounds = int(config.get("max_certify_rounds", 3))
 
+    # Coding agent session (persists across rounds via resume)
     options = ClaudeAgentOptions(
         permission_mode="bypassPermissions",
         cwd=str(project_dir),
@@ -754,70 +754,100 @@ async def build_agentic_v2(
     if model:
         options.model = str(model)
 
-    # Build agent logging
-    build_log_path = build_dir / "build-agent.log"
-    build_log_lines: list[str] = []
-    _build_start = time.monotonic()
-
-    def _on_text(text_chunk: str) -> None:
-        elapsed = round(time.monotonic() - _build_start, 1)
-        build_log_lines.append(f"[{elapsed:6.1f}s] {text_chunk}")
-
-    def _on_tool(block) -> None:
-        elapsed = round(time.monotonic() - _build_start, 1)
-        summary = tool_use_summary(block)
-        build_log_lines.append(f"[{elapsed:6.1f}s] \u25cf {block.name}  {summary}")
-
-    def _on_tool_result(block) -> None:
-        elapsed = round(time.monotonic() - _build_start, 1)
-        content = str(getattr(block, "content", ""))
-        truncated = content[:200] + "..." if len(content) > 200 else content
-        build_log_lines.append(f"[{elapsed:6.1f}s]   \u2192 {truncated}")
-
-    build_text, build_cost, _ = await run_agent_query(
-        build_prompt, options,
-        on_text=_on_text, on_tool=_on_tool, on_tool_result=_on_tool_result,
-    )
-    _commit_artifacts(project_dir)
-
-    _build_elapsed = round(time.monotonic() - _build_start, 1)
-    build_log_lines.append(f"[{_build_elapsed:6.1f}s] BUILD END  cost=${build_cost:.2f}")
-    try:
-        ts = time.strftime("%Y-%m-%d %H:%M:%S")
-        build_log_path.write_text(f"<!-- generated: {ts} -->\n" + "\n".join(build_log_lines))
-    except OSError:
-        pass
-    logger.info("Build phase done: %.1fs, $%.2f", _build_elapsed, build_cost)
-
-    # ── Session 2: Certify (blind to build) ──
-    report = await run_agentic_certifier(
+    session = AgentSession(
         intent=intent,
+        options=options,
         project_dir=project_dir,
         config=config,
+        checkpoint_dir=build_dir,
     )
 
-    passed = report.outcome == CertificationOutcome.PASSED
-    total_cost = float(build_cost or 0) + report.cost_usd
+    total_cost = 0.0
+    last_report = None
+    journeys: list[dict[str, Any]] = []
+    rounds_run = 0
 
-    # Build journeys for CLI display
-    journeys = []
-    break_findings_list = []
-    for f in report.findings:
-        journeys.append({"name": f.description, "passed": f.severity == "note", "story_id": getattr(f, "story_id", "")})
-    if hasattr(report, 'tiers') and report.tiers:
-        tier4 = next((t for t in report.tiers if t.tier == 4), None)
-        if tier4 and hasattr(tier4, '_cert_result'):
-            for r in tier4._cert_result.results:
-                journeys.append({"name": r.story_title or r.story_id, "passed": r.passed})
+    for round_num in range(1, max_rounds + 1):
+        rounds_run = round_num
+        logger.info("=== Round %d/%d ===", round_num, max_rounds)
+
+        # ── Coding agent: build or fix ──
+        if round_num == 1:
+            build_prompt = AGENTIC_V2_BUILD_PROMPT + f"\n\nBuild this product:\n\n{intent}"
+            result = await session.start(build_prompt)
+        else:
+            # Resume with certifier findings — agent has full context from build
+            findings_text = _format_certifier_findings(last_report)
+            fix_prompt = (
+                f"The product certifier tested your code and found issues:\n\n"
+                f"{findings_text}\n\n"
+                f"Fix these issues. Make tests pass. Commit when done."
+            )
+            result = await session.resume(fix_prompt)
+
+        total_cost += result.cost
+        _commit_artifacts(project_dir)
+        logger.info("Round %d coding: %.1fs, $%.2f, session_id=%s",
+                     round_num, 0.0, result.cost, session.session_id)
+
+        # ── Certifier agent: test (fresh session, blind to builder) ──
+        report = await run_agentic_certifier(
+            intent=intent,
+            project_dir=project_dir,
+            config=config,
+        )
+        last_report = report
+        total_cost += report.cost_usd
+        logger.info("Round %d certify: %s, $%.2f",
+                     round_num, report.outcome.value, report.cost_usd)
+
+        # Parse journeys for display
+        journeys = []
+        for f in report.findings:
+            sid = getattr(f, "story_id", "")
+            journeys.append({"name": f.description, "passed": f.severity == "note", "story_id": sid})
+
+        # Save checkpoint
+        session.checkpoint(
+            candidate_sha=session._get_head_sha(),
+            state="certified" if report.outcome == CertificationOutcome.PASSED else "fixing",
+            certifier_outcome=report.outcome.value,
+            certifier_cost_so_far=report.cost_usd,
+        )
+
+        if report.outcome == CertificationOutcome.PASSED:
+            logger.info("Certification passed on round %d", round_num)
+            break
+
+        if round_num >= max_rounds:
+            logger.info("Max rounds (%d) reached", max_rounds)
+            break
+
+    passed = last_report and last_report.outcome == CertificationOutcome.PASSED
 
     return BuildResult(
-        passed=passed,
+        passed=bool(passed),
         build_id=build_id,
-        rounds=1,
+        rounds=rounds_run,
         total_cost=total_cost,
         journeys=journeys,
-        break_findings=break_findings_list,
     )
+
+
+def _format_certifier_findings(report: Any) -> str:
+    """Format certifier findings as text for the coding agent's fix prompt."""
+    if not report or not report.findings:
+        return "No specific findings."
+    lines = []
+    for f in report.findings:
+        sid = getattr(f, "story_id", "")
+        prefix = f"[{sid}] " if sid else ""
+        lines.append(f"- {prefix}{f.description}")
+        if f.diagnosis:
+            lines.append(f"  Diagnosis: {f.diagnosis}")
+        if f.fix_suggestion:
+            lines.append(f"  Fix: {f.fix_suggestion}")
+    return "\n".join(lines)
 
 
 async def resume_continuous(
