@@ -136,20 +136,40 @@ async def build_product(
         )
 
     # Certify -> Fix -> Verify
+    # The certifier uses the Claude SDK which installs signal handlers —
+    # that only works in the main thread. Since we're inside asyncio.run(),
+    # we spawn the certifier as a subprocess to get its own main thread.
     if not build_config.get("skip_product_qa"):
         build_config.setdefault("proof_of_work", True)
 
-        loop = asyncio.get_event_loop()
-        verify_result = await loop.run_in_executor(
-            None,
-            lambda: _run_verification_sync(
-                certifier_intent,
-                certifier_grounding_path,
-                project_dir,
-                tasks_path,
-                build_config,
-            ),
+        import subprocess as _sp
+        import sys as _sys
+        certify_result = _sp.run(
+            [_sys.executable, "-c", f"""
+import json, sys
+sys.path.insert(0, '.')
+from otto.certifier import run_unified_certifier
+from otto.certifier.report import CertificationOutcome
+report = run_unified_certifier(
+    intent={certifier_intent!r},
+    project_dir=__import__('pathlib').Path({str(project_dir)!r}),
+    config=__import__('json').loads({json.dumps(build_config)!r}),
+)
+result = {{
+    "product_passed": report.outcome == CertificationOutcome.PASSED,
+    "total_cost": report.cost_usd,
+    "duration_s": report.duration_s,
+}}
+print(json.dumps(result))
+"""],
+            capture_output=True, text=True,
+            timeout=int(build_config.get("certifier_timeout", 600)),
         )
+        if certify_result.returncode == 0 and certify_result.stdout.strip():
+            verify_result = json.loads(certify_result.stdout.strip().split("\n")[-1])
+        else:
+            logger.warning("Certifier subprocess failed: %s", certify_result.stderr[-500:])
+            verify_result = {"product_passed": False, "total_cost": 0.0}
         total_cost += verify_result.get("total_cost", 0.0)
         verification_passed = bool(verify_result.get("product_passed", False))
         tasks_passed, tasks_failed = _build_task_counts(tasks_path, build_id)
@@ -178,32 +198,30 @@ def _run_verification_sync(
     tasks_path: Path,
     config: dict[str, Any],
 ) -> dict[str, Any]:
-    """Run verification synchronously.
+    """Run the full certify → fix → re-certify loop synchronously.
 
-    Called from run_in_executor (already in a thread). Calls
-    run_unified_certifier directly — it's sync. No asyncio needed here.
+    Called from run_in_executor (already in a thread). Uses nest_asyncio
+    to allow nested event loops — the SDK internally uses asyncio.run()
+    which installs signal handlers, and new_event_loop alone doesn't
+    prevent that.
     """
-    from otto.certifier import run_unified_certifier
-    from otto.certifier.report import CertificationOutcome
+    import asyncio
+    import nest_asyncio
+    from otto.verification import run_product_verification
 
-    report = run_unified_certifier(
-        intent=intent,
-        project_dir=project_dir,
-        config=config,
-    )
-
-    # Translate CertificationReport to verification-compatible dict
-    return {
-        "product_passed": report.outcome == CertificationOutcome.PASSED,
-        "total_cost": report.cost_usd,
-        "duration_s": report.duration_s,
-        "journeys": [],
-        "break_findings": [
-            {"severity": f.severity, "description": f.description,
-             "diagnosis": f.diagnosis, "fix_suggestion": f.fix_suggestion}
-            for f in report.break_findings()
-        ],
-    }
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    nest_asyncio.apply(loop)
+    try:
+        return loop.run_until_complete(run_product_verification(
+            product_spec_path=product_spec_path,
+            project_dir=project_dir,
+            tasks_path=tasks_path,
+            config=config,
+            intent=intent,
+        ))
+    finally:
+        loop.close()
 
 
 def _build_task_counts(tasks_path: Path, build_id: str) -> tuple[int, int]:
