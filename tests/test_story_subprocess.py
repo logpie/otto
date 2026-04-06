@@ -663,21 +663,21 @@ async def test_verify_all_stories_parallel_builds_once_and_clears_marker(tmp_pat
         calls.append("build")
         AppRunner.build_marker_path(project_dir).write_text(json.dumps({"framework": "nextjs", "artifacts": [".next"]}))
 
-    async def fake_run_story(story, project_dir, config, story_dir, interaction, manifest=None):
-        calls.append(f"story:{story.id}")
-        assert interaction == "cli"
-        return JourneyResult(
-            story_id=story.id,
-            story_title=story.title,
-            persona=story.persona,
+    async def fake_run_batch(stories, project_dir, config, story_dir, interaction, manifest=None):
+        for story in stories:
+            calls.append(f"story:{story.id}")
+        return [JourneyResult(
+            story_id=s.id,
+            story_title=s.title,
+            persona=s.persona,
             passed=True,
-        )
+        ) for s in stories]
 
     with patch("otto.certifier.journey_agent._ensure_deps_installed", side_effect=fake_ensure), \
          patch("otto.certifier.journey_agent._build_project", side_effect=fake_build), \
          patch("otto.certifier.journey_agent._scavenge_stale_workers"), \
          patch("otto.certifier.journey_agent._scavenge_old_story_runs"), \
-         patch("otto.certifier.journey_agent._run_story_in_subprocess", side_effect=fake_run_story):
+         patch("otto.certifier.journey_agent._run_stories_in_subprocess", side_effect=fake_run_batch):
         result = await verify_all_stories(
             stories=[story1, story2],
             manifest=MagicMock(interaction="cli"),

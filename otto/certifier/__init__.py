@@ -67,7 +67,7 @@ def run_unified_certifier(
     # ── Project Discovery ──
     # LLM agent reads the project and figures out: what it is, how to start it,
     # and how to test it. Heuristic classifier provides hints.
-    from otto.certifier.journey_agent import discover_project
+    from otto.certifier.journey_agent import discover_project, ProjectDiscovery
 
     profile = classify(project_dir)
     effective_port = port_override or config.get("port_override")
@@ -80,9 +80,19 @@ def run_unified_certifier(
 
     # LLM discovery: one agent reads the project, installs deps, classifies,
     # starts the app, and reports how to test. Handles ANY framework/environment.
-    discovery = discover_project(
-        project_dir, config, hint_profile=profile)
-    total_cost += discovery.cost
+    # Skip when heuristic classifier is confident (known framework = known interaction).
+    _confident = profile.product_type not in ("unknown", "") and profile.interaction not in ("unknown", "")
+    if _confident:
+        logger.info("Skipping discovery — classifier confident: %s/%s",
+                     profile.product_type, profile.interaction)
+        discovery = ProjectDiscovery(
+            product_type=profile.product_type,
+            interaction=profile.interaction,
+        )
+    else:
+        discovery = discover_project(
+            project_dir, config, hint_profile=profile)
+        total_cost += discovery.cost
 
     interaction = config.get("certifier_interaction") or discovery.interaction or profile.interaction or "http"
     is_cli = interaction == "cli"

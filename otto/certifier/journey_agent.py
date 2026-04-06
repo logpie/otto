@@ -636,40 +636,46 @@ async def verify_all_stories(
             total_cost += result.cost_usd
             all_break_findings.extend(result.break_findings)
     else:
-        # Subprocess-per-story: each story in own process with own app instance
+        # Batched subprocess parallelism: split stories into batches, each batch
+        # runs in one subprocess with one agent session and one app instance.
+        # Fewer LLM sessions (3 instead of 7), same parallelism.
         import uuid as _uuid
         from otto.certifier.baseline import AppRunner
 
-        logger.info("Running %d stories with max %d parallel (subprocess-isolated)",
+        logger.info("Running %d stories with max %d parallel (batched subprocess)",
                      len(stories), max_parallel)
         _scavenge_stale_workers(project_dir)
         _scavenge_old_story_runs(project_dir)
         _ensure_deps_installed(project_dir)
         _build_project(project_dir, config)
 
+        # Split stories into batches (one per subprocess)
+        batches: list[list[UserStory]] = [[] for _ in range(max_parallel)]
+        for i, story in enumerate(stories):
+            batches[i % max_parallel].append(story)
+        batches = [b for b in batches if b]  # remove empty
+
         try:
             run_id = f"{time.strftime('%Y%m%d-%H%M%S')}-{_uuid.uuid4().hex[:8]}"
             stories_dir = project_dir / "otto_logs" / "certifier" / "stories" / run_id
             stories_dir.mkdir(parents=True, exist_ok=True)
 
-            sem = asyncio.Semaphore(max_parallel)
+            async def _run_batch(batch_idx: int, batch: list[UserStory]) -> list[JourneyResult]:
+                story_dir = stories_dir / f"batch-{batch_idx:02d}"
+                story_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    return await _run_stories_in_subprocess(
+                        batch, project_dir, config, story_dir, manifest.interaction, manifest)
+                except Exception as exc:
+                    logger.exception("Batch %d subprocess failed", batch_idx)
+                    return [JourneyResult(
+                        story_id=s.id, story_title=s.title,
+                        persona=s.persona, passed=False,
+                        diagnosis=f"Subprocess error: {exc}") for s in batch]
 
-            async def _bounded(i: int, story: UserStory) -> JourneyResult:
-                async with sem:
-                    story_dir = stories_dir / f"{i:02d}-{story.id}"
-                    story_dir.mkdir(parents=True, exist_ok=True)
-                    try:
-                        return await _run_story_in_subprocess(
-                            story, project_dir, config, story_dir, manifest.interaction, manifest)
-                    except Exception as exc:
-                        logger.exception("Subprocess failed for %s", story.id)
-                        return JourneyResult(
-                            story_id=story.id, story_title=story.title,
-                            persona=story.persona, passed=False,
-                            diagnosis=f"Subprocess error: {exc}")
-
-            tasks = [_bounded(i, s) for i, s in enumerate(stories)]
-            results = list(await asyncio.gather(*tasks))
+            batch_tasks = [_run_batch(i, b) for i, b in enumerate(batches)]
+            batch_results = await asyncio.gather(*batch_tasks)
+            results = [r for batch in batch_results for r in batch]
 
             for result in results:
                 total_cost += result.cost_usd
@@ -1447,6 +1453,101 @@ def _copy_story_logs(worker_dir: Path, story_dir: Path) -> None:
             shutil.copytree(item, dst)
 
 
+async def _run_stories_in_subprocess(
+    stories: list[UserStory],
+    project_dir: Path,
+    config: dict[str, Any],
+    story_dir: Path,
+    interaction: str,
+    manifest: Any = None,
+) -> list[JourneyResult]:
+    """Run a BATCH of stories in one subprocess with one app instance.
+
+    One worker copy, one app, one agent session per batch.
+    Returns a list of JourneyResults (one per story).
+    """
+    import shutil
+    import sys as _sys
+
+    input_path = story_dir / "input.json"
+    output_path = story_dir / "output.json"
+    stderr_path = story_dir / "stderr.log"
+    worker_id = story_dir.name
+
+    for p in (input_path, output_path, stderr_path):
+        p.unlink(missing_ok=True)
+
+    worker_dir = _create_worker_copy(project_dir, worker_id)
+
+    _atomic_write_json(input_path, {
+        "stories": [asdict(s) for s in stories],
+        "worker_dir": str(worker_dir),
+        "interaction": interaction,
+        "config": config,
+        "discovery": {
+            "product_type": getattr(manifest, "product_type", ""),
+            "interaction": interaction,
+            "cli_entrypoint": getattr(manifest, "cli_entrypoint", []),
+            "test_approach": getattr(manifest, "cli_help_text", ""),
+        },
+    })
+
+    stderr_fh = open(stderr_path, "w", buffering=1)
+    proc = None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            _sys.executable, "-m", "otto.certifier.journey_agent",
+            "_worker", str(input_path), str(output_path),
+            stderr=stderr_fh,
+            stdout=asyncio.subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        # Batch timeout: sum of per-story timeouts
+        total_timeout = sum(_story_timeout(s, config) or 300.0 for s in stories)
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=total_timeout)
+        except asyncio.TimeoutError:
+            await _kill_process_tree(proc)
+            _kill_orphan_app(story_dir)
+            return [JourneyResult(
+                story_id=s.id, story_title=s.title,
+                persona=s.persona, passed=False,
+                blocked_at=f"batch timed out after {int(total_timeout)}s",
+                diagnosis="Story verification batch timed out.",
+            ) for s in stories]
+    except asyncio.CancelledError:
+        if proc is not None and proc.returncode is None:
+            await _kill_process_tree(proc)
+        _kill_orphan_app(story_dir)
+        raise
+    finally:
+        stderr_fh.close()
+        _kill_orphan_app(story_dir)
+        _copy_story_logs(worker_dir, story_dir)
+        shutil.rmtree(worker_dir, ignore_errors=True)
+
+    if output_path.exists():
+        try:
+            data = json.loads(output_path.read_text())
+            if isinstance(data, list):
+                return [_journey_result_from_dict(d) for d in data]
+            # Single result (backward compat)
+            return [_journey_result_from_dict(data)]
+        except (json.JSONDecodeError, KeyError) as exc:
+            logger.warning("Failed to parse batch output: %s", exc)
+
+    stderr_content = ""
+    if stderr_path.exists():
+        stderr_content = stderr_path.read_text()
+        if len(stderr_content) > 2000:
+            stderr_content = "...\n" + stderr_content[-2000:]
+    return [JourneyResult(
+        story_id=s.id, story_title=s.title,
+        persona=s.persona, passed=False,
+        diagnosis=f"Worker crashed without output.\n{stderr_content}",
+    ) for s in stories]
+
+
 async def _run_story_in_subprocess(
     story: UserStory,
     project_dir: Path,
@@ -1579,15 +1680,19 @@ def _worker_main(input_path: Path, output_path: Path) -> None:
     input_path = input_path.resolve()
     output_path = output_path.resolve()
 
-    result_dict: dict[str, Any] | None = None
+    all_results: list[dict[str, Any]] | None = None
     story_id = "unknown"
     runner: AppRunner | None = None
     story_dir = input_path.parent
 
     try:
         payload = json.loads(input_path.read_text())
-        story = _story_from_dict(payload["story"])
-        story_id = story.id
+        # Support both single story ("story") and batch ("stories")
+        if "stories" in payload:
+            stories_batch = [_story_from_dict(s) for s in payload["stories"]]
+        else:
+            stories_batch = [_story_from_dict(payload["story"])]
+        story_id = stories_batch[0].id
         worker_dir = Path(payload["worker_dir"]).resolve()
         interaction = payload.get("interaction")
         config = payload.get("config", {})
@@ -1621,57 +1726,59 @@ def _worker_main(input_path: Path, output_path: Path) -> None:
                 if recovery.app_started and recovery.base_url:
                     base_url = recovery.base_url
                 else:
-                    result_dict = {
-                        "story_id": story_id, "story_title": story.title,
-                        "persona": story.persona, "passed": False,
+                    all_results = [{
+                        "story_id": s.id, "story_title": s.title,
+                        "persona": s.persona, "passed": False,
                         "diagnosis": f"App failed to start: {evidence.actual}\n"
                                      f"Recovery: {recovery.diagnosis}",
                         "steps": [], "break_findings": [],
-                        "cost_usd": recovery.cost, "duration_s": 0.0,
-                    }
+                        "cost_usd": recovery.cost / len(stories_batch), "duration_s": 0.0,
+                    } for s in stories_batch]
                     base_url = ""
             else:
                 base_url = runner.base_url
         else:
             # CLI/library/websocket: no server to start per-worker
-            # But still need per-worker deps (venv has absolute paths, can't share)
             if profile.language == "python":
                 _setup_worker_python_venv(worker_dir)
             _ensure_prisma_if_needed(worker_dir)
             _activate_worker_venv(worker_dir)
             base_url = ""
 
-        if result_dict is None:
+        if all_results is None:
             test_config = analyze_project(worker_dir)
             manifest = build_manifest(
                 test_config, profile,
                 base_url=base_url or None,
                 interaction=interaction,
             )
-            # Enrich from parent discovery
             if parent_discovery.get("cli_entrypoint"):
                 manifest.cli_entrypoint = parent_discovery["cli_entrypoint"]
             if parent_discovery.get("test_approach"):
                 manifest.cli_help_text = parent_discovery["test_approach"]
 
+            # Run ALL stories in this batch sequentially in one event loop
+            all_results = []
             loop = asyncio.new_event_loop()
             try:
-                result = loop.run_until_complete(
-                    verify_story(story, manifest, base_url, worker_dir, config))
+                for story in stories_batch:
+                    story_id = story.id
+                    result = loop.run_until_complete(
+                        verify_story(story, manifest, base_url, worker_dir, config))
+                    all_results.append(_journey_result_to_dict(result))
             finally:
                 loop.close()
-            result_dict = _journey_result_to_dict(result)
 
     except SystemExit:
         pass  # signal handler raised this — fall through to finally
     except Exception:
         tb = traceback.format_exc()
-        result_dict = {
+        all_results = [{
             "story_id": story_id, "story_title": "", "persona": "",
             "passed": False, "diagnosis": f"Worker crashed: {tb}",
             "steps": [], "break_findings": [],
             "cost_usd": 0.0, "duration_s": 0.0,
-        }
+        }]
         print(tb, file=_sys.stderr, flush=True)
     finally:
         # Stop app
@@ -1681,7 +1788,7 @@ def _worker_main(input_path: Path, output_path: Path) -> None:
             except Exception:
                 pass
         # SINGLE WRITER — only this block writes output
-        if result_dict is None:
+        if all_results is None:
             sig_name = "unknown"
             if _killed_by_signal is not None:
                 try:
@@ -1689,13 +1796,15 @@ def _worker_main(input_path: Path, output_path: Path) -> None:
                     sig_name = _s.Signals(_killed_by_signal).name
                 except (ValueError, AttributeError):
                     sig_name = str(_killed_by_signal)
-            result_dict = {
+            all_results = [{
                 "story_id": story_id, "story_title": "", "persona": "",
                 "passed": False, "diagnosis": f"Worker killed by signal {sig_name}",
                 "steps": [], "break_findings": [],
                 "cost_usd": 0.0, "duration_s": 0.0,
-            }
-        _atomic_write_json(output_path, result_dict)
+            }]
+        # Write list for batch, single dict for backward compat
+        output = all_results if len(all_results) != 1 else all_results[0]
+        _atomic_write_json(output_path, output)
 
 
 # ---------------------------------------------------------------------------
