@@ -129,7 +129,11 @@ def _certifier_worktree(
 
 
 def _copy_reports(wt_dir: Path, project_dir: Path) -> None:
-    """Copy certifier reports from worktree back to main project for observability."""
+    """Copy ALL certifier logs from worktree back to main project.
+
+    Copies files AND directories (stories/, evidence-*/, batch logs)
+    so certifier behavior can be audited after the worktree is cleaned up.
+    """
     src = wt_dir / "otto_logs" / "certifier"
     dst = project_dir / "otto_logs" / "certifier"
     if src.exists():
@@ -138,15 +142,10 @@ def _copy_reports(wt_dir: Path, project_dir: Path) -> None:
             dest_path = dst / item.name
             if item.is_file():
                 shutil.copy2(item, dest_path)
-
-    # Also copy journey agent logs if they exist
-    src_reports = wt_dir / "certifier-reports"
-    if src_reports.exists():
-        dst_reports = project_dir / "otto_logs" / "certifier"
-        dst_reports.mkdir(parents=True, exist_ok=True)
-        for item in src_reports.iterdir():
-            if item.is_file():
-                shutil.copy2(item, dst_reports / item.name)
+            elif item.is_dir():
+                if dest_path.exists():
+                    shutil.rmtree(dest_path, ignore_errors=True)
+                shutil.copytree(item, dest_path)
 
 
 def certify_with_retry(
