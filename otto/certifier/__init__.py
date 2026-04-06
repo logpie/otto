@@ -712,9 +712,14 @@ async def run_agentic_certifier(
         (report_dir / "proof-of-work.json").write_text(
             _json.dumps(pow_data, indent=2, default=str))
 
+        # HTML PoW
+        _generate_agentic_html_pow(report_dir, story_results, outcome.value,
+                                    total_duration, float(cost or 0),
+                                    stories_passed, stories_tested)
+
         # Markdown PoW
         md_lines = [
-            "# Proof-of-Work Certification Report (v2 Agentic)",
+            "# Proof-of-Work Certification Report",
             "",
             f"> **Generated:** {time.strftime('%Y-%m-%d %H:%M:%S')}",
             f"> **Outcome:** {outcome.value}",
@@ -732,7 +737,55 @@ async def run_agentic_certifier(
         logger.warning("Failed to write PoW report: %s", exc)
 
     logger.info(
-        "Agentic certifier v2 done: %s, %d/%d stories, %.1fs, $%.3f",
+        "Agentic certifier done: %s, %d/%d stories, %.1fs, $%.3f",
         outcome.value, stories_passed, stories_tested, total_duration, float(cost or 0),
     )
     return report
+
+
+def _generate_agentic_html_pow(
+    output_dir: Path,
+    story_results: list[dict],
+    outcome: str,
+    duration: float,
+    cost: float,
+    passed: int,
+    total: int,
+) -> None:
+    """Generate HTML PoW report for the agentic certifier."""
+    html = [
+        "<!DOCTYPE html><html><head><meta charset='utf-8'>",
+        "<title>Certification Report</title>",
+        "<style>",
+        "body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; }",
+        "h1 { border-bottom: 2px solid #333; padding-bottom: 0.5em; }",
+        ".meta { color: #666; margin-bottom: 2em; }",
+        ".story { border: 1px solid #ddd; border-radius: 8px; padding: 1em; margin: 1em 0; }",
+        ".story.pass { border-left: 4px solid #22c55e; }",
+        ".story.fail { border-left: 4px solid #ef4444; }",
+        ".badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-weight: bold; font-size: 0.85em; }",
+        ".badge.pass { background: #dcfce7; color: #166534; }",
+        ".badge.fail { background: #fee2e2; color: #991b1b; }",
+        ".summary { margin-top: 0.5em; color: #444; }",
+        "</style></head><body>",
+        "<h1>Certification Report</h1>",
+        f"<div class='meta'>",
+        f"<strong>Outcome:</strong> {outcome} &nbsp; ",
+        f"<strong>Stories:</strong> {passed}/{total} &nbsp; ",
+        f"<strong>Duration:</strong> {duration:.0f}s &nbsp; ",
+        f"<strong>Cost:</strong> ${cost:.2f} &nbsp; ",
+        f"<strong>Generated:</strong> {time.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"</div>",
+    ]
+
+    for s in story_results:
+        status_class = "pass" if s["passed"] else "fail"
+        badge = "PASS" if s["passed"] else "FAIL"
+        html.append(f"<div class='story {status_class}'>")
+        html.append(f"<span class='badge {status_class}'>{badge}</span> ")
+        html.append(f"<strong>{s.get('story_id', '')}</strong>")
+        html.append(f"<div class='summary'>{s.get('summary', '')}</div>")
+        html.append("</div>")
+
+    html.append("</body></html>")
+    (output_dir / "proof-of-work.html").write_text("\n".join(html))
