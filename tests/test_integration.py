@@ -14,10 +14,6 @@ from click.testing import CliRunner
 from otto.cli import main
 from otto.config import create_config, load_config
 from otto.product_planner import PlannedTask, ProductPlan, _parse_planner_output
-import warnings
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore", DeprecationWarning)
-    from otto.product_qa import _parse_qa_output, _qa_model, _qa_settings
 from otto.runner import run_task_v45
 from otto.tasks import add_task, load_tasks
 
@@ -539,7 +535,7 @@ class TestPipelineE2E:
         assert call_count == 2
 
 
-class TestPlannerAndQaConfig:
+class TestPlannerConfig:
     def test_decomposed_plan_requires_product_spec_file(self, tmp_path):
         raw = json.dumps({
             "mode": "decomposed",
@@ -548,24 +544,6 @@ class TestPlannerAndQaConfig:
 
         with pytest.raises(ValueError, match="product-spec.md"):
             _parse_planner_output(raw, tmp_path)
-
-    def test_product_qa_config_prefers_qa_specific_values_with_planner_fallback(self):
-        assert _qa_settings({"planner_agent_settings": "user,project"}) == ["user", "project"]
-        assert _qa_model({"planner_model": "planner-model"}) == "planner-model"
-        assert _qa_settings({
-            "qa_agent_settings": "project",
-            "planner_agent_settings": "user,project",
-        }) == ["project"]
-        assert _qa_model({
-            "qa_model": "qa-model",
-            "planner_model": "planner-model",
-        }) == "qa-model"
-
-    def test_parse_qa_output_uses_outermost_json_object(self):
-        parsed = _parse_qa_output('prefix {"product_passed": true, "journeys": [{"name": "happy", "passed": true}]} suffix')
-
-        assert parsed["product_passed"] is True
-        assert parsed["journeys"][0]["name"] == "happy"
 
 
 class TestUnifiedCertifierRegressions:
@@ -576,7 +554,6 @@ class TestUnifiedCertifierRegressions:
         seen_config = {}
         create_config(tmp_git_repo)
         config = load_config(tmp_git_repo / "otto.yaml")
-        config["unified_certifier"] = True
 
         async def fake_run_per(config, tasks_path, project_dir):
             seen_config.update(config)

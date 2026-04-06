@@ -27,106 +27,9 @@ def _verification_log(project_dir: Path, *lines: str) -> None:
     )
 
 
-def _specs_from_journeys(failed_journeys: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Extract verification specs from failed journey steps.
-
-    Each failed step becomes a [must] spec item — the coding agent's fix
-    will be verified against these specific criteria. Skips spec gen.
-    """
-    specs = []
-    for story in failed_journeys:
-        for step in story.get("steps", []):
-            if step.get("outcome") == "fail":
-                fix = step.get("fix_suggestion") or step.get("diagnosis") or ""
-                specs.append({
-                    "text": f"{step.get('action', 'fix')}: {fix}" if fix else step.get("action", "fix"),
-                    "binding": "must",
-                    "verifiable": True,
-                })
-    return specs
-
-
 def _grounding_reference(product_spec_path: Path) -> str:
     """Render the grounding file name for fix prompts."""
     return product_spec_path.name or str(product_spec_path)
-
-
-def _bundle_fix_tasks(
-    failed_journeys: list[dict[str, Any]],
-    product_spec_path: Path,
-) -> tuple[str, list[dict[str, Any]]]:
-    """Bundle all failed journeys into a single fix task prompt + specs.
-
-    Returns (prompt, specs). Specs come from the certifier diagnosis —
-    no need for spec gen, the certifier already knows what to verify.
-    """
-    specs = _specs_from_journeys(failed_journeys)
-    grounding_ref = _grounding_reference(product_spec_path)
-
-    if len(failed_journeys) == 1:
-        return _fix_task_from_journey(failed_journeys[0], product_spec_path), specs
-
-    lines = [f"Fix {len(failed_journeys)} product issues found by user journey testing:\n"]
-    for i, story in enumerate(failed_journeys, 1):
-        lines.append(f"--- Issue {i}: {story.get('name', 'unknown')} ---")
-        if story.get("diagnosis"):
-            lines.append(f"Diagnosis: {story['diagnosis']}")
-        if story.get("fix_suggestion"):
-            lines.append(f"Suggested fix: {story['fix_suggestion']}")
-        failed_steps = [s for s in story.get("steps", []) if s.get("outcome") == "fail"]
-        if failed_steps:
-            lines.append("Failed steps:")
-            for step in failed_steps:
-                lines.append(f"  - {step.get('action', '?')}")
-                if step.get("diagnosis"):
-                    lines.append(f"    {step['diagnosis']}")
-        lines.append("")
-
-    lines.append(
-        "Fix all issues above. Do not change the product spec or scope. "
-        f"See {grounding_ref} for the full product definition."
-    )
-    return "\n".join(lines), specs
-
-
-def _fix_task_from_journey(story: dict[str, Any], product_spec_path: Path) -> str:
-    """Build a targeted fix task prompt from a failed journey story.
-
-    Includes: what failed, where it failed, diagnosis, suggested fix,
-    and failing step details — so the coding agent has full context.
-    """
-    name = story.get("name", "unknown story")
-    diagnosis = story.get("diagnosis", "")
-    fix_suggestion = story.get("fix_suggestion", "")
-    blocked_at = story.get("blocked_at", "")
-    steps = story.get("steps", [])
-    grounding_ref = _grounding_reference(product_spec_path)
-
-    lines = [f"Fix product issue: user story '{name}' failed"]
-    if blocked_at:
-        lines[0] += f" (blocked at: {blocked_at})"
-
-    if diagnosis:
-        lines.append(f"\nDiagnosis: {diagnosis}")
-    if fix_suggestion:
-        lines.append(f"\nSuggested fix: {fix_suggestion}")
-
-    # Include failing step details for targeted context
-    failed_steps = [s for s in steps if s.get("outcome") == "fail"]
-    if failed_steps:
-        lines.append("\nFailed steps:")
-        for step in failed_steps:
-            lines.append(f"- {step.get('action', '?')}")
-            if step.get("diagnosis"):
-                lines.append(f"  Diagnosis: {step['diagnosis']}")
-            if step.get("fix_suggestion"):
-                lines.append(f"  Fix: {step['fix_suggestion']}")
-
-    lines.append(
-        "\nFix the specific failure. Do not change the product spec or scope. "
-        f"See {grounding_ref} for the full product definition."
-    )
-    return "\n".join(lines)
 
 
 async def run_product_verification(
@@ -143,9 +46,6 @@ async def run_product_verification(
     run_per is the only execution engine. This function just decides
     what to verify and what fix tasks to create.
 
-    Uses the unified certifier when available (default for otto build).
-    Falls back to run_certifier_v2 for backward compat.
-
     Returns dict with:
         product_passed, rounds, total_cost, journeys, fix_tasks_created.
     """
@@ -154,7 +54,6 @@ async def run_product_verification(
     from otto.orchestrator import run_per
     from otto.tasks import add_task, load_tasks
 
-    use_unified = config.get("unified_certifier", True)
     total_cost = 0.0
     fix_tasks_created = 0
     last_journeys: list[dict[str, Any]] = []
@@ -195,193 +94,127 @@ async def run_product_verification(
         loop = asyncio.get_event_loop()
         _focus = focus
 
-        if use_unified:
-            from otto.certifier import run_unified_certifier
-            from otto.certifier.report import CertificationOutcome
+        from otto.certifier import run_unified_certifier
+        from otto.certifier.report import CertificationOutcome
 
-            report = await loop.run_in_executor(
-                None,
-                lambda: run_unified_certifier(
-                    intent=intent,
-                    project_dir=project_dir,
-                    config=config,
-                    port_override=port_override,
-                    skip_story_ids=_focus,
-                ),
-            )
-            total_cost += report.cost_usd
+        report = await loop.run_in_executor(
+            None,
+            lambda: run_unified_certifier(
+                intent=intent,
+                project_dir=project_dir,
+                config=config,
+                port_override=port_override,
+                skip_story_ids=_focus,
+            ),
+        )
+        total_cost += report.cost_usd
 
-            # Extract journeys and break findings for display
-            tier4 = next((t for t in report.tiers if t.tier == 4), None)
-            if tier4 and hasattr(tier4, "_stories_output"):
-                last_journeys = tier4._stories_output  # type: ignore[attr-defined]
-            last_break_findings = [
-                {
-                    "severity": f.severity,
-                    "description": f.description,
-                    "diagnosis": f.diagnosis,
-                    "fix_suggestion": f.fix_suggestion,
-                    "story_id": f.story_id,
-                }
-                for f in report.break_findings()
-            ]
+        # Extract journeys and break findings for display
+        tier4 = next((t for t in report.tiers if t.tier == 4), None)
+        if tier4 and hasattr(tier4, "_stories_output"):
+            last_journeys = tier4._stories_output  # type: ignore[attr-defined]
+        last_break_findings = [
+            {
+                "severity": f.severity,
+                "description": f.description,
+                "diagnosis": f.diagnosis,
+                "fix_suggestion": f.fix_suggestion,
+                "story_id": f.story_id,
+            }
+            for f in report.break_findings()
+        ]
 
+        _verification_log(
+            project_dir,
+            f"certifier: {report.duration_s:.0f}s, ${report.cost_usd:.2f}, "
+            f"outcome={report.outcome.value}",
+        )
+
+        # Per-tier summary in verification.log for debuggability
+        for tier in report.tiers:
+            detail = f"{tier.duration_s:.1f}s"
+            if tier.cost_usd > 0:
+                detail += f", ${tier.cost_usd:.2f}"
+            if tier.skip_reason:
+                detail += f" ({tier.skip_reason})"
+            elif tier.blocked_by:
+                detail += f" (blocked by {tier.blocked_by})"
+            # Tier 4 extras: story count from raw cert result
+            if tier.tier == 4 and hasattr(tier, "_cert_result"):
+                cr = tier._cert_result  # type: ignore[attr-defined]
+                detail += f", {cr.stories_tested} stories"
             _verification_log(
                 project_dir,
-                f"certifier: {report.duration_s:.0f}s, ${report.cost_usd:.2f}, "
-                f"outcome={report.outcome.value}",
+                f"  Tier {tier.tier} ({tier.name}): {tier.status.value}, {detail}",
             )
 
-            # Per-tier summary in verification.log for debuggability
-            for tier in report.tiers:
-                detail = f"{tier.duration_s:.1f}s"
-                if tier.cost_usd > 0:
-                    detail += f", ${tier.cost_usd:.2f}"
-                if tier.skip_reason:
-                    detail += f" ({tier.skip_reason})"
-                elif tier.blocked_by:
-                    detail += f" (blocked by {tier.blocked_by})"
-                # Tier 4 extras: story count from raw cert result
-                if tier.tier == 4 and hasattr(tier, "_cert_result"):
-                    cr = tier._cert_result  # type: ignore[attr-defined]
-                    detail += f", {cr.stories_tested} stories"
-                _verification_log(
-                    project_dir,
-                    f"  Tier {tier.tier} ({tier.name}): {tier.status.value}, {detail}",
-                )
+        # Track passed stories from tier 4 results
+        if tier4 and hasattr(tier4, "_cert_result"):
+            for r in tier4._cert_result.results:  # type: ignore[attr-defined]
+                if r.passed:
+                    passed_story_ids.add(r.story_id)
 
-            # Track passed stories from tier 4 results
-            if tier4 and hasattr(tier4, "_cert_result"):
-                for r in tier4._cert_result.results:  # type: ignore[attr-defined]
-                    if r.passed:
-                        passed_story_ids.add(r.story_id)
+        # BLOCKED — not a product bug, stop without fix tasks
+        if report.outcome == CertificationOutcome.BLOCKED:
+            _verification_log(project_dir, f"BLOCKED (round {round_num})")
+            break
 
-            # BLOCKED — not a product bug, stop without fix tasks
-            if report.outcome == CertificationOutcome.BLOCKED:
-                _verification_log(project_dir, f"BLOCKED (round {round_num})")
-                break
+        # PASSED — done
+        if report.passed:
+            _verification_log(project_dir, f"PASSED (round {round_num})")
+            return {
+                "product_passed": True,
+                "rounds": round_num,
+                "total_cost": total_cost,
+                "journeys": last_journeys,
+                "break_findings": last_break_findings,
+                "fix_tasks_created": fix_tasks_created,
+            }
 
-            # PASSED — done
-            if report.passed:
-                _verification_log(project_dir, f"PASSED (round {round_num})")
-                return {
-                    "product_passed": True,
-                    "rounds": round_num,
-                    "total_cost": total_cost,
-                    "journeys": last_journeys,
-                    "break_findings": last_break_findings,
-                    "fix_tasks_created": fix_tasks_created,
-                }
+        # FAILED — use native findings for fix tasks
+        # Diagnosis compaction: only critical/important, dedupe by root cause,
+        # suppress blocked derivatives
+        critical = report.critical_findings()
+        failure_count = len(critical)
 
-            # FAILED — use native findings for fix tasks
-            # Diagnosis compaction: only critical/important, dedupe by root cause,
-            # suppress blocked derivatives
-            critical = report.critical_findings()
-            failure_count = len(critical)
+        _verification_log(
+            project_dir,
+            f"FAILED (round {round_num}): {failure_count} critical finding(s)",
+            f"  findings: {[f.description[:60] for f in critical]}",
+        )
 
+        if failure_count == 0:
+            _verification_log(project_dir, "no critical findings to fix — stopping")
+            break
+
+        if round_num >= max_rounds:
+            _verification_log(project_dir, f"max rounds ({max_rounds}) reached")
+            break
+
+        if round_num > 1 and failure_count >= prev_failure_count > 0:
             _verification_log(
                 project_dir,
-                f"FAILED (round {round_num}): {failure_count} critical finding(s)",
-                f"  findings: {[f.description[:60] for f in critical]}",
+                f"no progress ({prev_failure_count} → {failure_count} findings)",
             )
+            break
 
-            if failure_count == 0:
-                _verification_log(project_dir, "no critical findings to fix — stopping")
-                break
+        prev_failure_count = failure_count
 
-            if round_num >= max_rounds:
-                _verification_log(project_dir, f"max rounds ({max_rounds}) reached")
-                break
-
-            if round_num > 1 and failure_count >= prev_failure_count > 0:
-                _verification_log(
-                    project_dir,
-                    f"no progress ({prev_failure_count} → {failure_count} findings)",
-                )
-                break
-
-            prev_failure_count = failure_count
-
-            # Build fix prompt from findings (not journey dicts)
-            fix_prompt, fix_specs = _bundle_fix_from_findings(critical, product_spec_path)
-            add_task(tasks_path, fix_prompt, spec=fix_specs)
-            fix_tasks_created += 1
-            _verification_log(
-                project_dir,
-                f"  fix task created ({failure_count} finding(s) bundled)",
-            )
-
-        else:
-            # Legacy path: run_certifier_v2
-            from otto.certifier import run_certifier_v2
-
-            result = await loop.run_in_executor(
-                None,
-                lambda: run_certifier_v2(
-                    intent=intent,
-                    project_dir=project_dir,
-                    config=config,
-                    port_override=port_override,
-                    skip_story_ids=_focus,
-                ),
-            )
-            total_cost += result.get("cost_usd", 0.0)
-
-            for j in result.get("journeys", []):
-                if j.get("passed") and j.get("story_id"):
-                    passed_story_ids.add(j["story_id"])
-
-            last_journeys = result.get("journeys", [])
-
-            _verification_log(
-                project_dir,
-                f"certifier: {result.get('duration_s', 0):.0f}s, "
-                f"${result.get('cost_usd', 0):.2f}",
-            )
-
-            if result.get("product_passed"):
-                _verification_log(project_dir, f"PASSED (round {round_num})")
-                return {
-                    "product_passed": True,
-                    "rounds": round_num,
-                    "total_cost": total_cost,
-                    "journeys": last_journeys,
-                    "fix_tasks_created": fix_tasks_created,
-                }
-
-            if result.get("error"):
-                _verification_log(
-                    project_dir,
-                    f"INFRA ERROR (round {round_num}): {result['error'][:200]}",
-                )
-                break
-
-            failed_journeys = [j for j in result.get("journeys", []) if not j.get("passed")]
-            failure_count = len(failed_journeys)
-
-            _verification_log(
-                project_dir,
-                f"FAILED (round {round_num}): {failure_count} journey(s) failed",
-            )
-
-            if failure_count == 0:
-                break
-            if round_num >= max_rounds:
-                break
-            if round_num > 1 and failure_count >= prev_failure_count > 0:
-                break
-
-            prev_failure_count = failure_count
-            fix_prompt, fix_specs = _bundle_fix_tasks(failed_journeys, product_spec_path)
-            add_task(tasks_path, fix_prompt, spec=fix_specs)
-            fix_tasks_created += 1
+        # Build fix prompt from findings (not journey dicts)
+        fix_prompt, fix_specs = _bundle_fix_from_findings(critical, product_spec_path)
+        add_task(tasks_path, fix_prompt, spec=fix_specs)
+        fix_tasks_created += 1
+        _verification_log(
+            project_dir,
+            f"  fix task created ({failure_count} finding(s) bundled)",
+        )
 
     return {
         "product_passed": False,
         "rounds": round_num,  # noqa: F821 — loop always runs at least once
         "total_cost": total_cost,
         "journeys": last_journeys,
-        "break_findings": last_break_findings if use_unified else [],
+        "break_findings": last_break_findings,
         "fix_tasks_created": fix_tasks_created,
     }
 

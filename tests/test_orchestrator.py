@@ -1311,7 +1311,7 @@ class TestOuterLoop:
             return 1
 
         with patch("otto.orchestrator.run_per", side_effect=fake_run_per):
-            with patch("otto.certifier.run_certifier_v2", side_effect=AssertionError("Certifier should not run")):
+            with patch("otto.certifier.run_unified_certifier", side_effect=AssertionError("Certifier should not run")):
                 result = await run_product_verification(
                     product_spec_path=product_spec_path,
                     project_dir=tmp_git_repo,
@@ -1325,27 +1325,35 @@ class TestOuterLoop:
 
     @pytest.mark.asyncio
     async def test_stops_when_certifier_makes_no_progress(self, tmp_git_repo):
+        from otto.certifier.report import (
+            CertificationOutcome, CertificationReport, Finding, TierResult, TierStatus,
+        )
+
         tasks_path = tmp_git_repo / "tasks.yaml"
         tasks_path.write_text(yaml.dump({"tasks": []}))
         product_spec_path = tmp_git_repo / "product-spec.md"
         product_spec_path.write_text("# Product Spec\n")
 
-        qa_results = [
-            {
-                "product_passed": False,
-                "journeys": [
-                    {"name": "checkout", "passed": False, "error": "button broken", "evidence": "trace"},
+        def make_failing_report(cost):
+            return CertificationReport(
+                product_type="web", interaction="http",
+                tiers=[
+                    TierResult(tier=1, name="structural", status=TierStatus.PASSED),
+                    TierResult(tier=4, name="journeys", status=TierStatus.FAILED,
+                        findings=[Finding(tier=4, severity="critical", category="journey",
+                            description="Story failed: checkout",
+                            diagnosis="button broken", fix_suggestion="fix button",
+                            story_id="checkout")]),
                 ],
-                "cost_usd": 0.1,
-            },
-            {
-                "product_passed": False,
-                "journeys": [
-                    {"name": "checkout", "passed": False, "error": "button still broken", "evidence": "trace"},
-                ],
-                "cost_usd": 0.2,
-            },
-        ]
+                findings=[Finding(tier=4, severity="critical", category="journey",
+                    description="Story failed: checkout",
+                    diagnosis="button broken", fix_suggestion="fix button",
+                    story_id="checkout")],
+                outcome=CertificationOutcome.FAILED,
+                cost_usd=cost, duration_s=10.0,
+            )
+
+        certifier_results = [make_failing_report(0.1), make_failing_report(0.2)]
 
         async def fake_run_per(config, tasks_path, project_dir):
             for task in load_tasks(tasks_path):
@@ -1353,14 +1361,14 @@ class TestOuterLoop:
                     update_task(tasks_path, task["key"], status="passed")
             return 0
 
-        certifier_mock = MagicMock(side_effect=qa_results)
+        certifier_mock = MagicMock(side_effect=certifier_results)
         with patch("otto.orchestrator.run_per", side_effect=fake_run_per):
-            with patch("otto.certifier.run_certifier_v2", certifier_mock):
+            with patch("otto.certifier.run_unified_certifier", certifier_mock):
                 result = await run_product_verification(
                     product_spec_path=product_spec_path,
                     project_dir=tmp_git_repo,
                     tasks_path=tasks_path,
-                    config={"unified_certifier": False},
+                    config={},
                     intent="test product",
                     max_rounds=3,
                 )
@@ -1372,52 +1380,47 @@ class TestOuterLoop:
 
     @pytest.mark.asyncio
     async def test_fix_prompts_use_passed_grounding_file(self, tmp_git_repo):
+        from otto.certifier.report import (
+            CertificationOutcome, CertificationReport, Finding, TierResult, TierStatus,
+        )
+
         tasks_path = tmp_git_repo / "tasks.yaml"
         tasks_path.write_text(yaml.dump({"tasks": []}))
         intent_path = tmp_git_repo / "intent.md"
         intent_path.write_text("# Intent\n")
 
-        qa_results = [
-            {
-                "product_passed": False,
-                "journeys": [
-                    {
-                        "name": "checkout",
-                        "passed": False,
-                        "diagnosis": "submit button is disabled",
-                        "fix_suggestion": "enable the button after form validation",
-                        "steps": [
-                            {
-                                "action": "Click Submit",
-                                "outcome": "fail",
-                                "diagnosis": "button never enables",
-                                "fix_suggestion": "enable after valid input",
-                            }
-                        ],
-                    },
+        def make_failing_report():
+            return CertificationReport(
+                product_type="web", interaction="http",
+                tiers=[
+                    TierResult(tier=1, name="structural", status=TierStatus.PASSED),
+                    TierResult(tier=4, name="journeys", status=TierStatus.FAILED,
+                        findings=[Finding(tier=4, severity="critical", category="journey",
+                            description="Story failed: checkout",
+                            diagnosis="submit button is disabled",
+                            fix_suggestion="enable the button after form validation",
+                            story_id="checkout",
+                            evidence={"steps": [
+                                {"action": "Click Submit", "outcome": "fail",
+                                 "diagnosis": "button never enables",
+                                 "fix_suggestion": "enable after valid input"},
+                            ]})]),
                 ],
-                "cost_usd": 0.1,
-            },
-            {
-                "product_passed": False,
-                "journeys": [
-                    {
-                        "name": "checkout",
-                        "passed": False,
-                        "diagnosis": "submit button is still disabled",
-                        "fix_suggestion": "keep investigating",
-                        "steps": [
-                            {
-                                "action": "Click Submit",
-                                "outcome": "fail",
-                                "diagnosis": "button never enables",
-                            }
-                        ],
-                    },
-                ],
-                "cost_usd": 0.1,
-            },
-        ]
+                findings=[Finding(tier=4, severity="critical", category="journey",
+                    description="Story failed: checkout",
+                    diagnosis="submit button is disabled",
+                    fix_suggestion="enable the button after form validation",
+                    story_id="checkout",
+                    evidence={"steps": [
+                        {"action": "Click Submit", "outcome": "fail",
+                         "diagnosis": "button never enables",
+                         "fix_suggestion": "enable after valid input"},
+                    ]})],
+                outcome=CertificationOutcome.FAILED,
+                cost_usd=0.1, duration_s=10.0,
+            )
+
+        certifier_results = [make_failing_report(), make_failing_report()]
 
         async def fake_run_per(config, tasks_path, project_dir):
             for task in load_tasks(tasks_path):
@@ -1425,14 +1428,14 @@ class TestOuterLoop:
                     update_task(tasks_path, task["key"], status="passed")
             return 0
 
-        certifier_mock = MagicMock(side_effect=qa_results)
+        certifier_mock = MagicMock(side_effect=certifier_results)
         with patch("otto.orchestrator.run_per", side_effect=fake_run_per):
-            with patch("otto.certifier.run_certifier_v2", certifier_mock):
+            with patch("otto.certifier.run_unified_certifier", certifier_mock):
                 result = await run_product_verification(
                     product_spec_path=intent_path,
                     project_dir=tmp_git_repo,
                     tasks_path=tasks_path,
-                    config={"unified_certifier": False},
+                    config={},
                     intent="test product",
                     max_rounds=3,
                 )
