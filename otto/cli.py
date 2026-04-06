@@ -499,17 +499,17 @@ def run(prompt, dry_run, no_spec, no_qa, no_test):
 @click.option("--no-review", is_flag=True, help="Skip plan review, execute immediately")
 @click.option("--no-qa", is_flag=True, help="Skip product certification after build")
 @click.option("--plan/--no-plan", "use_planner", default=None, help="Force planner on/off")
-@click.option("--continuous", is_flag=True, help="Session-continuous build — agent keeps context across build→certify→fix")
-@click.option("--agentic", is_flag=True, help="Agentic build — agent drives everything, calls certify when ready")
+@click.option("--orchestrated", is_flag=True, help="Orchestrator-driven build (PER mode, non-default)")
+@click.option("--continuous", is_flag=True, help="Session-continuous build — orchestrator manages, agent keeps context")
 @click.option("--interactive", is_flag=True, help="Pause for human input after each certification round")
-def build(intent, no_review, no_qa, use_planner, continuous, agentic, interactive):
+def build(intent, no_review, no_qa, use_planner, orchestrated, continuous, interactive):
     """Build a product from a natural language intent.
 
-    Three build modes:
+    Default: agentic mode — one agent builds, certifies, and fixes
+    autonomously in a single session.
 
-      Default:      Orchestrator drives build → certify → fix → re-certify
-      --continuous: Agent keeps session context across build/fix cycles
-      --agentic:    Agent drives everything, calls certify tool when ready
+      --orchestrated: Orchestrator drives build → certify → fix (PER mode)
+      --continuous:   Agent keeps session, orchestrator manages certify loop
 
     The certifier verifies the product works by running real user
     stories (HTTP, CLI, import, WebSocket — any product type).
@@ -517,7 +517,7 @@ def build(intent, no_review, no_qa, use_planner, continuous, agentic, interactiv
     Examples:
         otto build "bookmark manager with tags and search"
         otto build "CLI tool that converts CSV to JSON"
-        otto build "weather app like Apple's" --agentic
+        otto build "weather app" --orchestrated
     """
     require_git()
     project_dir = Path.cwd()
@@ -542,11 +542,8 @@ def build(intent, no_review, no_qa, use_planner, continuous, agentic, interactiv
     console.print()
 
     try:
-        if agentic:
-            console.print("  [bold]Agentic mode[/bold] — agent drives the loop")
-            result: BuildResult = asyncio.run(
-                build_agentic(intent, project_dir, config)
-            )
+        if orchestrated:
+            result: BuildResult = asyncio.run(build_product(intent, project_dir, config))
         elif continuous:
             on_feedback = None
             if interactive:
@@ -564,7 +561,11 @@ def build(intent, no_review, no_qa, use_planner, continuous, agentic, interactiv
                                  on_human_feedback=on_feedback)
             )
         else:
-            result: BuildResult = asyncio.run(build_product(intent, project_dir, config))
+            # Default: agentic — agent drives everything
+            console.print("  [bold]Agentic mode[/bold] — agent builds, certifies, fixes\n")
+            result: BuildResult = asyncio.run(
+                build_agentic(intent, project_dir, config)
+            )
     except KeyboardInterrupt:
         console.print("\n  Aborted.")
         sys.exit(1)
