@@ -322,9 +322,7 @@ class TestPipelineE2E:
                 tier4._stories_output = []
                 return CertificationReport(
                     product_type="web", interaction="http",
-                    tiers=[TierResult(tier=1, name="structural", status=TierStatus.PASSED),
-                           TierResult(tier=2, name="probes", status=TierStatus.PASSED),
-                           tier4],
+                    tiers=[tier4],
                     findings=tier4.findings,
                     outcome=CertificationOutcome.FAILED,
                     cost_usd=0.50, duration_s=30.0,
@@ -342,9 +340,7 @@ class TestPipelineE2E:
             tier4._stories_output = []
             return CertificationReport(
                 product_type="web", interaction="http",
-                tiers=[TierResult(tier=1, name="structural", status=TierStatus.PASSED),
-                       TierResult(tier=2, name="probes", status=TierStatus.PASSED),
-                       tier4],
+                tiers=[tier4],
                 outcome=CertificationOutcome.PASSED,
                 cost_usd=0.30, duration_s=20.0,
             )
@@ -400,8 +396,7 @@ class TestPipelineE2E:
         def fake_certifier(**kwargs):
             return CertificationReport(
                 product_type="web", interaction="http",
-                tiers=[TierResult(tier=1, name="structural", status=TierStatus.PASSED),
-                       TierResult(tier=4, name="journeys", status=TierStatus.PASSED, cost_usd=0.30)],
+                tiers=[TierResult(tier=4, name="journeys", status=TierStatus.PASSED, cost_usd=0.30)],
                 outcome=CertificationOutcome.PASSED,
                 cost_usd=0.30, duration_s=15.0,
             )
@@ -448,15 +443,11 @@ class TestPipelineE2E:
             return CertificationReport(
                 product_type="web", interaction="http",
                 tiers=[
-                    TierResult(tier=1, name="structural", status=TierStatus.FAILED,
-                        findings=[Finding(tier=1, severity="critical", category="build",
+                    TierResult(tier=4, name="journeys", status=TierStatus.FAILED,
+                        findings=[Finding(tier=4, severity="critical", category="journey",
                             description="App failed to start", diagnosis="port 3000 not responding")]),
-                    TierResult(tier=2, name="probes", status=TierStatus.BLOCKED,
-                        blocked_by="tier_1:app_start"),
-                    TierResult(tier=4, name="journeys", status=TierStatus.BLOCKED,
-                        blocked_by="tier_1:app_start"),
                 ],
-                findings=[Finding(tier=1, severity="critical", category="build",
+                findings=[Finding(tier=4, severity="critical", category="journey",
                     description="App failed to start", diagnosis="port 3000 not responding")],
                 outcome=CertificationOutcome.FAILED,
                 cost_usd=0.0, duration_s=5.0,
@@ -507,7 +498,6 @@ class TestPipelineE2E:
             return CertificationReport(
                 product_type="web", interaction="http",
                 tiers=[
-                    TierResult(tier=1, name="structural", status=TierStatus.PASSED),
                     TierResult(tier=4, name="journeys", status=TierStatus.FAILED,
                         findings=[Finding(tier=4, severity="critical", category="journey",
                             description="Story failed: broken story",
@@ -559,12 +549,14 @@ class TestUnifiedCertifierRegressions:
             seen_config.update(config)
             return 0
 
+        fake_subprocess_result = MagicMock()
+        fake_subprocess_result.returncode = 0
+        fake_subprocess_result.stdout = json.dumps({"product_passed": True, "rounds": 1, "total_cost": 0.0, "journeys": []})
+        fake_subprocess_result.stderr = ""
+
         with patch("otto.pipeline._commit_artifacts"), \
              patch("otto.orchestrator.run_per", side_effect=fake_run_per), \
-             patch(
-                 "otto.pipeline._run_verification_sync",
-                 return_value={"product_passed": True, "rounds": 1, "journeys": []},
-             ):
+             patch("subprocess.run", return_value=fake_subprocess_result):
             result = await build_product(
                 "Build a demo app",
                 tmp_git_repo,
@@ -576,7 +568,7 @@ class TestUnifiedCertifierRegressions:
         assert seen_config["skip_spec"] is True
 
     def test_tier4_fails_on_story_result_count_mismatch(self, tmp_git_repo):
-        from otto.certifier import _run_tier4_journeys
+        from otto.certifier import _run_journeys
         from otto.certifier.report import CertificationReport, TierStatus
         from otto.certifier.stories import StorySet, StoryStep, UserStory
 
@@ -623,12 +615,11 @@ class TestUnifiedCertifierRegressions:
             "otto.certifier.journey_agent.verify_all_stories",
             new=AsyncMock(return_value=cert_result),
         ):
-            result = _run_tier4_journeys(
+            result = _run_journeys(
                 intent="intent",
                 project_dir=tmp_git_repo,
                 config={},
-                runner=SimpleNamespace(base_url="http://localhost:3000"),
-                manifest=SimpleNamespace(),
+                manifest=SimpleNamespace(base_url="http://localhost:3000"),
                 stories_path=None,
                 skip_story_ids=None,
             )
@@ -650,7 +641,7 @@ class TestUnifiedCertifierRegressions:
         assert report.critical_findings() == []
 
     def test_tier4_uses_story_criticality_and_empty_story_status(self, tmp_git_repo):
-        from otto.certifier import _run_tier4_journeys
+        from otto.certifier import _run_journeys
         from otto.certifier.report import TierStatus
         from otto.certifier.stories import StorySet, StoryStep, UserStory
 
@@ -697,12 +688,11 @@ class TestUnifiedCertifierRegressions:
             "otto.certifier.journey_agent.verify_all_stories",
             new=AsyncMock(return_value=cert_result),
         ):
-            result = _run_tier4_journeys(
+            result = _run_journeys(
                 intent="intent",
                 project_dir=tmp_git_repo,
                 config={},
-                runner=SimpleNamespace(base_url="http://localhost:3000"),
-                manifest=SimpleNamespace(),
+                manifest=SimpleNamespace(base_url="http://localhost:3000"),
                 stories_path=None,
                 skip_story_ids=None,
             )
@@ -715,12 +705,11 @@ class TestUnifiedCertifierRegressions:
             "otto.certifier.stories.load_or_compile_stories",
             return_value=(empty_story_set, "cache", None, 0.0),
         ):
-            empty_result = _run_tier4_journeys(
+            empty_result = _run_journeys(
                 intent="intent",
                 project_dir=tmp_git_repo,
                 config={},
-                runner=SimpleNamespace(base_url="http://localhost:3000"),
-                manifest=SimpleNamespace(),
+                manifest=SimpleNamespace(base_url="http://localhost:3000"),
                 stories_path=None,
                 skip_story_ids=None,
             )
@@ -732,37 +721,37 @@ class TestUnifiedCertifierRegressions:
             "otto.certifier.stories.load_or_compile_stories",
             return_value=(story_set, "cache", None, 0.0),
         ):
-            skipped_result = _run_tier4_journeys(
+            skipped_result = _run_journeys(
                 intent="intent",
                 project_dir=tmp_git_repo,
                 config={},
-                runner=SimpleNamespace(base_url="http://localhost:3000"),
-                manifest=SimpleNamespace(),
+                manifest=SimpleNamespace(base_url="http://localhost:3000"),
                 stories_path=None,
                 skip_story_ids={story.id},
             )
 
         assert skipped_result.status == TierStatus.PASSED
 
-    def test_unified_certifier_manifest_failure_returns_blocked_and_stops_runner(self, tmp_git_repo):
+    def test_unified_certifier_manifest_failure_falls_back_to_minimal(self, tmp_git_repo):
         from otto.certifier import run_unified_certifier
-        from otto.certifier.report import CertificationOutcome, TierResult, TierStatus
+        from otto.certifier.report import CertificationOutcome, TierStatus
         from otto.certifier.journey_agent import ProjectDiscovery
-
-        runner = SimpleNamespace(base_url="http://localhost:3000", stop=MagicMock())
-        tier1 = TierResult(tier=1, name="structural", status=TierStatus.PASSED)
-        tier1._app_started = True  # type: ignore[attr-defined]
 
         discovery = ProjectDiscovery(
             product_type="api", interaction="http",
             base_url="http://localhost:3000", app_started=True,
         )
 
+        # When build_manifest fails, certifier should fall back to minimal
+        # manifest and still run journeys (which we mock to pass).
+        from otto.certifier.stories import StorySet
+        empty_stories = StorySet(intent="intent", stories=[], cost_usd=0.0)
+
         with patch("otto.certifier.classifier.classify", return_value=SimpleNamespace(
             product_type="web",
             interaction="http",
-            port=3000,
-            extra={},
+            framework="unknown",
+            language="unknown",
         )), patch(
             "otto.certifier.adapter.analyze_project",
             return_value=SimpleNamespace(),
@@ -770,28 +759,17 @@ class TestUnifiedCertifierRegressions:
             "otto.certifier.journey_agent.discover_project",
             return_value=discovery,
         ), patch(
-            "otto.certifier.baseline.AppRunner",
-            return_value=runner,
-        ), patch(
-            "otto.certifier.tiers.run_tier1_structural",
-            return_value=tier1,
-        ), patch(
             "otto.certifier.manifest.build_manifest",
             side_effect=RuntimeError("manifest boom"),
+        ), patch(
+            "otto.certifier.stories.load_or_compile_stories",
+            return_value=(empty_stories, "cache", None, 0.0),
         ):
             report = run_unified_certifier("intent", tmp_git_repo, {})
 
-        assert report.outcome == CertificationOutcome.BLOCKED
-        assert any(t.blocked_by == "certifier:manifest_build" for t in report.tiers)
-        assert report.tiers[2].status == TierStatus.SKIPPED
-
-    def test_detect_expected_files_includes_requirements_txt(self, tmp_path):
-        from otto.certifier.tiers import _detect_expected_files
-
-        (tmp_path / "requirements.txt").write_text("pytest\n")
-        expected = _detect_expected_files(tmp_path)
-
-        assert ("requirements.txt", tmp_path / "requirements.txt") in expected
+        # With no stories, journeys tier is SKIPPED, outcome is PASSED
+        assert report.outcome == CertificationOutcome.PASSED
+        assert any(t.name == "journeys" for t in report.tiers)
 
     def test_verification_log_timestamps_every_line(self, tmp_path):
         from otto.verification import _verification_log

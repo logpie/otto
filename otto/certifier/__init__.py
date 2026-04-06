@@ -4,15 +4,7 @@ Evaluates any software product against its original intent. Builder-blind:
 doesn't know if otto, bare CC, or a human built it.
 
 Architecture:
-  Intent → Intent Compiler → Requirement Matrix
-                                    ↓
-                          Product Classifier
-                                    ↓
-                          Deterministic Baseline (Tier 1)
-                                    ↓
-                          Sequential Journeys (Tier 2)
-                                    ↓
-                          Judge → Proof-of-Work Report
+  discover_project() → compile_stories() → verify_all_stories() → done
 """
 
 from __future__ import annotations
@@ -36,16 +28,12 @@ def run_unified_certifier(
 ) -> "CertificationReport":
     """Unified certifier: single source of product truth.
 
-    Runs 4 tiers sequentially:
-      Tier 1 — Structural: files, build, tests, app start (seconds, no LLM)
-      Tier 2 — Probes: HTTP route checks (seconds, no LLM)
-      Tier 3 — Regression: graduated tests from prior runs (seconds, no LLM)
-      Tier 4 — Journeys: agentic story verification (minutes, LLM)
+    Flow: discover_project() → compile_stories() → verify_all_stories() → done
 
-    No early exit — every applicable tier runs. Returns CertificationReport.
+    The journey agent handles everything: deps, app start, testing.
+    Returns CertificationReport.
     """
     from otto.certifier.adapter import analyze_project
-    from otto.certifier.baseline import AppRunner
     from otto.certifier.classifier import classify
     from otto.certifier.manifest import ProductManifest, build_manifest
     from otto.certifier.report import (
@@ -55,7 +43,6 @@ def run_unified_certifier(
         TierResult,
         TierStatus,
     )
-    from otto.certifier.tiers import run_tier1_structural, run_tier2_probes, run_tier2_cli_probes
 
     config = dict(config or {})
     start_time = time.monotonic()
@@ -67,182 +54,74 @@ def run_unified_certifier(
     # ── Project Discovery ──
     # LLM agent reads the project, installs deps, classifies, starts the app,
     # and reports how to test. No heuristic classifier — LLM decides everything.
-    from otto.certifier.journey_agent import discover_project, ProjectDiscovery
+    from otto.certifier.journey_agent import discover_project
 
     test_config = analyze_project(project_dir)
-    test_command = config.get("test_command")
 
     discovery = discover_project(project_dir, config)
     total_cost += discovery.cost
 
     interaction = config.get("certifier_interaction") or discovery.interaction or "http"
-    is_cli = interaction == "cli"
-    is_http = interaction in ("http", "browser")
-    is_library = interaction == "import"
 
-    # Build a lightweight profile from discovery for components that still need it
+    # Build a lightweight profile from discovery for manifest construction
     profile = classify(project_dir)
     if discovery.product_type != "unknown":
         profile.product_type = discovery.product_type
         profile.interaction = discovery.interaction
-    effective_port = port_override or config.get("port_override")
-    if effective_port is not None:
-        profile.port = int(effective_port)
-        profile.extra["reuse_existing_app"] = True
-
-    # AppRunner only needed if discovery didn't already start the app
-    runner = None
-    if is_http and not discovery.app_started:
-        runner = AppRunner(project_dir, profile)
 
     try:
-
-        # ── Tier 1: Structural ──
-        tier1 = run_tier1_structural(
-            project_dir, profile,
-            test_command=test_command,
-            app_runner=runner,  # None when discovery already started app or CLI
-        )
-        tiers.append(tier1)
-        all_findings.extend(tier1.findings)
-        logger.info("Tier 1 (structural): %s, %.1fs", tier1.status.value, tier1.duration_s)
-
-        # ── Tier 2: Probes ──
-        # App is "started" if discovery started it OR AppRunner started it
-        app_started = discovery.app_started or getattr(tier1, "_app_started", False)
-        base_url = discovery.base_url or (runner.base_url if runner else "")
-        app_not_needed = is_cli or is_library
+        # ── Build manifest ──
+        base_url = discovery.base_url or ""
         manifest = None
-
-        if is_cli:
-            try:
-                manifest = build_manifest(test_config, profile, base_url=None, interaction=interaction)
-                if discovery.cli_entrypoint:
-                    manifest.cli_entrypoint = discovery.cli_entrypoint
-            except Exception as exc:
-                logger.exception("CLI manifest build failed")
-                tier2 = _blocked_tier_result(
-                    tier=2, name="probes",
-                    blocked_by="certifier:manifest_build",
-                    description="CLI manifest build failed",
-                    diagnosis=str(exc),
-                )
-            else:
-                tier2 = run_tier2_cli_probes(project_dir, manifest, profile)
-        elif app_started and base_url:
-            try:
-                manifest = build_manifest(test_config, profile, base_url, interaction=interaction)
-            except Exception as exc:
-                logger.exception("Tier 2/4 manifest build failed")
-                tier2 = _blocked_tier_result(
-                    tier=2, name="probes",
-                    blocked_by="certifier:manifest_build",
-                    description="Certifier manifest build failed",
-                    diagnosis=str(exc),
-                )
-            else:
-                tier2 = run_tier2_probes(project_dir, manifest, base_url, tier1)
-        elif app_not_needed:
-            # Library/non-server: build manifest without probes
-            try:
-                manifest = build_manifest(test_config, profile, base_url=None, interaction=interaction)
-            except Exception as exc:
-                logger.exception("Manifest build failed")
-                tier2 = _blocked_tier_result(
-                    tier=2, name="probes",
-                    blocked_by="certifier:manifest_build",
-                    description="Manifest build failed",
-                    diagnosis=str(exc),
-                )
-            else:
-                tier2 = TierResult(
-                    tier=2, name="probes", status=TierStatus.SKIPPED,
-                    skip_reason=f"No probes for {interaction} products",
-                )
-        else:
-            tier2 = TierResult(
-                tier=2, name="probes", status=TierStatus.BLOCKED,
-                blocked_by="discovery:app_start",
+        try:
+            manifest = build_manifest(test_config, profile, base_url=base_url or None, interaction=interaction)
+        except Exception:
+            # Minimal manifest — journey agent will discover the rest
+            manifest = ProductManifest(
+                framework=getattr(profile, "framework", "unknown"),
+                language=getattr(profile, "language", "unknown"),
+                product_type=discovery.product_type or getattr(profile, "product_type", "unknown"),
+                interaction=interaction,
+                auth_type="unknown",
+                register_endpoint="",
+                login_endpoint="",
+                seeded_users=[],
+                routes=[],
+                models=[],
+                base_url=base_url,
+                cli_entrypoint=discovery.cli_entrypoint,
             )
-        tiers.append(tier2)
-        all_findings.extend(tier2.findings)
-        logger.info("Tier 2 (probes): %s, %.1fs", tier2.status.value, tier2.duration_s)
-
-        # ── Tier 3: Regression (graduated tests from prior runs) ──
-        tier3 = TierResult(
-            tier=3, name="regression", status=TierStatus.SKIPPED,
-            skip_reason="Regression tests not yet implemented (Phase 2)",
-        )
-        tiers.append(tier3)
-
-        # ── Tier 4: Journeys (agentic story verification) ──
-        # Never block Tier 4. The journey agent has Bash access and can
-        # figure out startup, deps, and testing approach for ANY product.
-        # Build a minimal manifest if we don't have one.
-        if manifest is None:
-            try:
-                manifest = build_manifest(test_config, profile, base_url=base_url or None, interaction=interaction)
-            except Exception:
-                # Minimal manifest — agent will discover the rest
-                manifest = ProductManifest(
-                    framework=getattr(profile, "framework", "unknown"),
-                    language=getattr(profile, "language", "unknown"),
-                    product_type=discovery.product_type or getattr(profile, "product_type", "unknown"),
-                    interaction=interaction,
-                    auth_type="unknown",
-                    register_endpoint="",
-                    login_endpoint="",
-                    seeded_users=[],
-                    routes=[],
-                    models=[],
-                    base_url=base_url,
-                    cli_entrypoint=discovery.cli_entrypoint,
-                )
         if discovery.cli_entrypoint and not manifest.cli_entrypoint:
             manifest.cli_entrypoint = discovery.cli_entrypoint
         if discovery.test_approach:
             manifest.cli_help_text = discovery.test_approach
 
-        # For HTTP with parallel stories, stop parent app to free port.
-        if is_http and runner is not None:
-            parallel = int(config.get("certifier_parallel_stories", 3))
-            if parallel > 1:
-                try:
-                    runner.stop()
-                except Exception:
-                    pass
-        tier4 = _run_tier4_journeys(
+        # ── Journeys: agentic story verification ──
+        journeys = _run_journeys(
             intent=intent,
             project_dir=project_dir,
             config=config,
-            runner=runner,
             manifest=manifest,
             stories_path=stories_path,
             skip_story_ids=skip_story_ids,
         )
-        tiers.append(tier4)
-        all_findings.extend(tier4.findings)
-        total_cost += tier4.cost_usd
-        logger.info("Tier 4 (journeys): %s, %.1fs, $%.3f",
-                    tier4.status.value, tier4.duration_s, tier4.cost_usd)
+        tiers.append(journeys)
+        all_findings.extend(journeys.findings)
+        total_cost += journeys.cost_usd
+        logger.info("Journeys: %s, %.1fs, $%.3f",
+                    journeys.status.value, journeys.duration_s, journeys.cost_usd)
     except Exception as exc:
         logger.exception("Unified certifier failed unexpectedly")
         infra_error = True
         blocked = _blocked_tier_result(
-            tier=0,
-            name="certifier",
+            tier=4,
+            name="journeys",
             blocked_by="certifier:internal_error",
             description="Unified certifier failed unexpectedly",
             diagnosis=str(exc),
         )
         tiers.append(blocked)
         all_findings.extend(blocked.findings)
-    finally:
-        if runner is not None:
-            try:
-                runner.stop()
-            except Exception:
-                pass
 
     # Determine outcome
     total_duration = round(time.monotonic() - start_time, 1)
@@ -268,12 +147,12 @@ def run_unified_certifier(
         duration_s=total_duration,
     )
 
-    # Generate proof-of-work report (includes Tier 4 if available)
+    # Generate proof-of-work report
     tier4_obj = next((t for t in tiers if t.tier == 4), None)
     tier4_results = tier4_obj._cert_result.results if tier4_obj and hasattr(tier4_obj, "_cert_result") else None
     try:
         report_dir = project_dir / "otto_logs" / "certifier"
-        _generate_tier4_pow(report_dir, tier4_results, report)
+        _generate_pow(report_dir, tier4_results, report)
     except Exception as exc:
         logger.warning("Failed to generate PoW report: %s", exc)
 
@@ -284,14 +163,14 @@ def run_unified_certifier(
     return report
 
 
-def _generate_tier4_pow(
+def _generate_pow(
     output_dir: Path,
     tier4_results: list[Any] | None,
     report: Any,
 ) -> None:
-    """Generate a PoW report for the unified certifier (Tier 4 focused).
+    """Generate a PoW report for the unified certifier.
 
-    Uses shared formatters from pow_report.py for Tier 4 sections.
+    Uses shared formatters from pow_report.py for journey sections.
     """
     import json as _json
     from otto.certifier.pow_report import format_tier4_json, format_tier4_markdown, generate_tier4_html
@@ -306,14 +185,7 @@ def _generate_tier4_pow(
         f"> **Duration:** {report.duration_s:.0f}s",
         f"> **Cost:** ${report.cost_usd:.2f}",
         "",
-        "## Tier Summary",
-        "",
-        "| Tier | Status | Duration | Cost |",
-        "|------|--------|----------|------|",
     ]
-    for t in report.tiers:
-        lines.append(f"| {t.tier}. {t.name} | {t.status.value} | {t.duration_s:.1f}s | ${t.cost_usd:.3f} |")
-    lines.append("")
 
     if tier4_results:
         lines.extend(format_tier4_markdown(tier4_results))
@@ -347,16 +219,15 @@ def _generate_tier4_pow(
     )
 
 
-def _run_tier4_journeys(
+def _run_journeys(
     intent: str,
     project_dir: Path,
     config: dict[str, Any],
-    runner: Any,
     manifest: Any,
     stories_path: Path | None,
     skip_story_ids: set[str] | None,
 ) -> "TierResult":
-    """Run tier 4 journey verification."""
+    """Run journey verification (story compilation + agentic verification)."""
     import asyncio
     from otto.certifier.journey_agent import verify_all_stories
     from otto.certifier.report import Finding, TierResult, TierStatus
@@ -377,7 +248,7 @@ def _run_tier4_journeys(
             )
             compile_cost = story_set.cost_usd
     except Exception as exc:
-        logger.exception("Tier 4 story loading failed")
+        logger.exception("Story loading failed")
         return _blocked_tier_result(
             tier=4,
             name="journeys",
@@ -411,18 +282,16 @@ def _run_tier4_journeys(
     # asyncio.run() installs signal handlers, which crashes with "signal only
     # works in main thread" when called from a thread (e.g. via run_in_executor
     # in verification.py's PER fix loop).
-    ensure_alive = getattr(runner, "ensure_alive", None)
-    base_url = runner.base_url if runner is not None else ""
+    base_url = getattr(manifest, "base_url", "") or ""
     loop = asyncio.new_event_loop()
     try:
         cert_result = loop.run_until_complete(
             verify_all_stories(
                 stories_to_test, manifest, base_url, project_dir, config,
-                on_between_stories=ensure_alive,
             )
         )
     except Exception as exc:
-        logger.exception("Tier 4 journey verification failed")
+        logger.exception("Journey verification failed")
         return _blocked_tier_result(
             tier=4,
             name="journeys",
