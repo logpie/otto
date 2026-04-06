@@ -78,21 +78,12 @@ def run_unified_certifier(
     test_config = analyze_project(project_dir)
     test_command = config.get("test_command")
 
-    # LLM discovery: one agent reads the project, installs deps, classifies,
-    # starts the app, and reports how to test. Handles ANY framework/environment.
-    # Skip when heuristic classifier is confident (known framework = known interaction).
-    _confident = profile.product_type not in ("unknown", "") and profile.interaction not in ("unknown", "")
-    if _confident:
-        logger.info("Skipping discovery — classifier confident: %s/%s",
-                     profile.product_type, profile.interaction)
-        discovery = ProjectDiscovery(
-            product_type=profile.product_type,
-            interaction=profile.interaction,
-        )
-    else:
-        discovery = discover_project(
-            project_dir, config, hint_profile=profile)
-        total_cost += discovery.cost
+    # LLM discovery: always runs. One agent reads the project, installs deps,
+    # classifies, starts the app, and reports how to test.
+    # Heuristic classifier is a hint only — never the decision maker.
+    discovery = discover_project(
+        project_dir, config, hint_profile=profile)
+    total_cost += discovery.cost
 
     interaction = config.get("certifier_interaction") or discovery.interaction or profile.interaction or "http"
     is_cli = interaction == "cli"
