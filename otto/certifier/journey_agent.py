@@ -1157,19 +1157,16 @@ def discover_project(
     project_dir: Path,
     config: dict[str, Any],
     *,
-    hint_profile: Any | None = None,
     startup_error: str = "",
 ) -> ProjectDiscovery:
     """LLM agent reads the project and figures out everything the certifier needs.
 
-    This is the primary classification + startup path. The heuristic classifier
-    provides hints, but the agent makes the final decision. Handles ANY product
-    type — web apps, CLI tools, libraries, WebSocket servers, data pipelines.
+    One agent call that classifies, installs deps, starts the app, and reports
+    how to test. Handles ANY product type — no heuristic hints needed.
 
     Args:
         project_dir: Path to the project
         config: Certifier config dict
-        hint_profile: Optional heuristic classifier output (for context)
         startup_error: If a previous startup attempt failed, include the error
     """
     import re as _re
@@ -1205,16 +1202,6 @@ def discover_project(
             if not any(skip in rel for skip in ["node_modules", ".venv", "target/", "__pycache__"]):
                 files_list.append(rel)
 
-    hint_text = ""
-    if hint_profile:
-        hint_text = f"""
-## Heuristic Classifier Output (may be wrong)
-Product type: {getattr(hint_profile, 'product_type', 'unknown')}
-Interaction: {getattr(hint_profile, 'interaction', 'unknown')}
-Framework: {getattr(hint_profile, 'framework', 'unknown')}
-Start command: {getattr(hint_profile, 'start_command', '')}
-"""
-
     error_text = ""
     if startup_error:
         error_text = f"""
@@ -1232,7 +1219,7 @@ Analyze this project and get it ready for testing.
 {chr(10).join(files_list) if files_list else "(none found)"}
 
 {f"## README{chr(10)}{readme}" if readme else ""}
-{hint_text}{error_text}
+{error_text}
 
 ## Your Tasks
 
@@ -1721,7 +1708,7 @@ def _worker_main(input_path: Path, output_path: Path) -> None:
             if not evidence.passed:
                 # LLM recovery: let an agent figure out startup
                 recovery = discover_project(
-                    worker_dir, config, hint_profile=profile,
+                    worker_dir, config,
                     startup_error=str(evidence.actual))
                 if recovery.app_started and recovery.base_url:
                     base_url = recovery.base_url

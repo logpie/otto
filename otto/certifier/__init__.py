@@ -65,35 +65,30 @@ def run_unified_certifier(
     infra_error = False
 
     # ── Project Discovery ──
-    # LLM agent reads the project and figures out: what it is, how to start it,
-    # and how to test it. Heuristic classifier provides hints.
+    # LLM agent reads the project, installs deps, classifies, starts the app,
+    # and reports how to test. No heuristic classifier — LLM decides everything.
     from otto.certifier.journey_agent import discover_project, ProjectDiscovery
-
-    profile = classify(project_dir)
-    effective_port = port_override or config.get("port_override")
-    if effective_port is not None:
-        profile.port = int(effective_port)
-        profile.extra["reuse_existing_app"] = True
 
     test_config = analyze_project(project_dir)
     test_command = config.get("test_command")
 
-    # LLM discovery: always runs. One agent reads the project, installs deps,
-    # classifies, starts the app, and reports how to test.
-    # Heuristic classifier is a hint only — never the decision maker.
-    discovery = discover_project(
-        project_dir, config, hint_profile=profile)
+    discovery = discover_project(project_dir, config)
     total_cost += discovery.cost
 
-    interaction = config.get("certifier_interaction") or discovery.interaction or profile.interaction or "http"
+    interaction = config.get("certifier_interaction") or discovery.interaction or "http"
     is_cli = interaction == "cli"
     is_http = interaction in ("http", "browser")
     is_library = interaction == "import"
 
-    # Update profile from discovery
+    # Build a lightweight profile from discovery for components that still need it
+    profile = classify(project_dir)
     if discovery.product_type != "unknown":
         profile.product_type = discovery.product_type
         profile.interaction = discovery.interaction
+    effective_port = port_override or config.get("port_override")
+    if effective_port is not None:
+        profile.port = int(effective_port)
+        profile.extra["reuse_existing_app"] = True
 
     # AppRunner only needed if discovery didn't already start the app
     runner = None
