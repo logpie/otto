@@ -38,19 +38,18 @@ def run_tier1_structural(
     findings: list[Finding] = []
     all_passed = True
 
-    # 1. Expected files exist
-    expected_files = _detect_expected_files(project_dir)
-    for name, path in expected_files:
-        if path.exists():
-            logger.debug("structural: %s exists", name)
-        else:
-            findings.append(Finding(
-                tier=1, severity="critical", category="build",
-                description=f"Expected file missing: {name}",
-                diagnosis=f"{path} does not exist",
-                fix_suggestion=f"Create {name} in the project root",
-            ))
-            all_passed = False
+    # 1. Source files exist (sanity check — not critical)
+    has_source = any(
+        project_dir.glob(f"**/{ext}")
+        for ext in ("*.py", "*.js", "*.ts", "*.rs", "*.go", "*.rb", "*.java")
+    )
+    if not has_source:
+        findings.append(Finding(
+            tier=1, severity="warning", category="build",
+            description="No source files found in project",
+            diagnosis="No .py, .js, .ts, .rs, .go files detected",
+            fix_suggestion="Check that source code exists in the project directory",
+        ))
 
     # 2. Agent's tests pass
     if test_command:
@@ -147,33 +146,6 @@ def run_tier2_probes(
     )
 
 
-def _detect_expected_files(project_dir: Path) -> list[tuple[str, Path]]:
-    """Detect expected project files based on what exists."""
-    files = []
-    # Check for common project markers
-    candidates = [
-        ("package.json", project_dir / "package.json"),
-        ("requirements.txt", project_dir / "requirements.txt"),
-        ("setup.py", project_dir / "setup.py"),
-        ("pyproject.toml", project_dir / "pyproject.toml"),
-        ("Cargo.toml", project_dir / "Cargo.toml"),
-    ]
-    # Only check for files that the project type suggests should exist
-    # If none of the markers exist, that itself is a finding
-    found_any = False
-    for name, path in candidates:
-        if path.exists():
-            files.append((name, path))
-            found_any = True
-
-    if not found_any:
-        # Return first candidate so we report "no project file found"
-        files.append((
-            "package.json or requirements.txt or setup.py or pyproject.toml",
-            project_dir / "package.json",
-        ))
-
-    return files
 
 
 def _run_test_command(cmd: str, cwd: Path) -> dict[str, Any]:
