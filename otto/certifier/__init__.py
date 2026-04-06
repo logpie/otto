@@ -28,11 +28,18 @@ def run_unified_certifier(
 ) -> "CertificationReport":
     """Unified certifier: single source of product truth.
 
-    Flow: discover_project() → compile_stories() → verify_all_stories() → done
-
-    The journey agent handles everything: deps, app start, testing.
-    Returns CertificationReport.
+    Routes to agentic v2 (single agent + subagents) when certifier_mode=v2,
+    otherwise uses the existing discovery + stories + journey flow.
     """
+    config = config or {}
+    if config.get("certifier_mode") == "v2":
+        return run_agentic_certifier(
+            intent=intent,
+            project_dir=project_dir,
+            config=config,
+            port_override=port_override,
+        )
+
     from otto.certifier.adapter import analyze_project
     from otto.certifier.classifier import classify
     from otto.certifier.manifest import ProductManifest, build_manifest
@@ -486,3 +493,237 @@ def _format_stories_output(cert_result: Any) -> list[dict[str, Any]]:
             ],
         })
     return stories
+
+
+# ---------------------------------------------------------------------------
+# Agentic certifier v2 — single agent, subagent-driven
+# ---------------------------------------------------------------------------
+
+CERTIFIER_V2_PROMPT = """\
+You are a QA lead certifying a software product. Your job: verify it works
+for real users by testing it thoroughly.
+
+## Product Intent
+{intent}
+
+## Your Process
+
+1. **Read the project** — understand what it is, what framework, what files exist.
+2. **Install dependencies** if needed (npm install, pip install, etc.)
+3. **Start the app** if it's a server (web app, API). For CLI/library, skip this.
+4. **Plan test stories** — use this coverage checklist:
+   - First Experience: new user registers/starts and uses the core feature
+   - CRUD Lifecycle: create → read → update → delete (full cycle)
+   - Data Isolation: two users' data doesn't leak between them
+   - Persistence: data survives across sessions
+   - Access Control: unauthenticated requests are rejected (if auth exists)
+   - Search/Filter: find items by various criteria (if applicable)
+   - Edge Cases: empty inputs, special characters, boundary values
+   Skip stories that don't apply to this product type.
+5. **Test each story** by dispatching a subagent for parallel execution:
+   - Use the Agent tool to dispatch each story as a separate subagent
+   - Give each subagent: what to test, how to interact (curl/CLI/browser/import),
+     the base URL or entrypoint, and any auth credentials you set up
+   - Dispatch multiple subagents in parallel for speed
+6. **Collect results** from all subagents.
+7. **Report verdict** using the exact format below.
+
+## Testing Rules
+- Make REAL requests (curl for HTTP, run commands for CLI, write test scripts for libraries)
+- For web apps with UI: use agent-browser for visual verification if available
+- Test the ACTUAL product, never simulate or assume
+- For each failure: diagnose the root cause and suggest a fix
+
+## Verdict Format
+End your final message with these EXACT markers:
+
+STORIES_TESTED: <number>
+STORIES_PASSED: <number>
+STORY_RESULT: <story_id> | <PASS or FAIL> | <one-line summary>
+STORY_RESULT: <story_id> | <PASS or FAIL> | <one-line summary>
+...
+
+VERDICT: PASS or VERDICT: FAIL
+DIAGNOSIS: <overall assessment or null>
+
+Include one STORY_RESULT line per story tested. These markers are machine-parsed.
+"""
+
+
+def run_agentic_certifier(
+    intent: str,
+    project_dir: Path,
+    config: dict[str, Any] | None = None,
+    *,
+    port_override: int | None = None,
+) -> "CertificationReport":
+    """Agentic certifier v2: one agent, subagent-driven testing.
+
+    A single certifier agent reads the project, plans test stories,
+    dispatches subagents for parallel execution, and reports results.
+    No discovery agent, no story compiler, no worker infrastructure.
+    """
+    import re as _re
+    from otto.agent import ClaudeAgentOptions, _subprocess_env, run_agent_query
+    from otto.certifier.report import (
+        CertificationOutcome,
+        CertificationReport,
+        Finding,
+        TierResult,
+        TierStatus,
+    )
+
+    config = config or {}
+    start_time = time.monotonic()
+
+    prompt = CERTIFIER_V2_PROMPT.format(intent=intent)
+
+    options = ClaudeAgentOptions(
+        permission_mode="bypassPermissions",
+        cwd=str(project_dir),
+        setting_sources=["project"],
+        env=_subprocess_env(),
+        system_prompt={"type": "preset", "preset": "claude_code"},
+    )
+    model = config.get("model") or config.get("planner_model")
+    if model:
+        options.model = str(model)
+
+    logger.info("Running agentic certifier v2 on %s", project_dir)
+
+    # One LLM call — the agent does everything
+    import asyncio
+    loop = asyncio.new_event_loop()
+    try:
+        text, cost, result_msg = loop.run_until_complete(
+            run_agent_query(prompt, options))
+    except Exception as exc:
+        logger.exception("Agentic certifier v2 crashed")
+        duration = round(time.monotonic() - start_time, 1)
+        return CertificationReport(
+            product_type="unknown",
+            interaction="unknown",
+            outcome=CertificationOutcome.BLOCKED,
+            cost_usd=0.0,
+            duration_s=duration,
+        )
+    finally:
+        loop.close()
+
+    # Parse results from agent output
+    total_duration = round(time.monotonic() - start_time, 1)
+    findings: list[Finding] = []
+    stories_tested = 0
+    stories_passed = 0
+    story_results: list[dict[str, Any]] = []
+
+    if text:
+        for line in text.split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("STORIES_TESTED:"):
+                try:
+                    stories_tested = int(stripped.split(":", 1)[1].strip())
+                except ValueError:
+                    pass
+            elif stripped.startswith("STORIES_PASSED:"):
+                try:
+                    stories_passed = int(stripped.split(":", 1)[1].strip())
+                except ValueError:
+                    pass
+            elif stripped.startswith("STORY_RESULT:"):
+                parts = stripped[len("STORY_RESULT:"):].strip().split("|")
+                if len(parts) >= 2:
+                    sid = parts[0].strip()
+                    passed = "PASS" in parts[1].upper()
+                    summary = parts[2].strip() if len(parts) > 2 else ""
+                    story_results.append({
+                        "story_id": sid,
+                        "passed": passed,
+                        "summary": summary,
+                    })
+                    if not passed:
+                        findings.append(Finding(
+                            tier=4,
+                            severity="critical" if not passed else "note",
+                            category="journey",
+                            description=f"Story failed: {sid}",
+                            diagnosis=summary,
+                            story_id=sid,
+                        ))
+
+    # Determine outcome
+    has_failures = any(not s["passed"] for s in story_results)
+    verdict_pass = False
+    if text:
+        for line in reversed(text.split("\n")):
+            if line.strip().startswith("VERDICT:"):
+                verdict_pass = "PASS" in line.upper()
+                break
+
+    if verdict_pass and not has_failures:
+        outcome = CertificationOutcome.PASSED
+    elif has_failures:
+        outcome = CertificationOutcome.FAILED
+    else:
+        outcome = CertificationOutcome.FAILED  # no verdict marker = fail
+
+    # Build tier result for backward compat
+    tier4 = TierResult(
+        tier=4, name="journeys",
+        status=TierStatus.PASSED if outcome == CertificationOutcome.PASSED else TierStatus.FAILED,
+        findings=findings,
+        cost_usd=float(cost or 0),
+        duration_s=total_duration,
+    )
+
+    report = CertificationReport(
+        product_type="unknown",  # agent didn't report this explicitly
+        interaction="unknown",
+        tiers=[tier4],
+        findings=findings,
+        outcome=outcome,
+        cost_usd=float(cost or 0),
+        duration_s=total_duration,
+    )
+
+    # Write PoW report
+    try:
+        report_dir = project_dir / "otto_logs" / "certifier"
+        report_dir.mkdir(parents=True, exist_ok=True)
+
+        import json as _json
+        pow_data = {
+            "generated": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "outcome": outcome.value,
+            "duration_s": total_duration,
+            "cost_usd": float(cost or 0),
+            "stories": story_results,
+            "agent_output_tail": (text or "")[-3000:],
+        }
+        (report_dir / "proof-of-work.json").write_text(
+            _json.dumps(pow_data, indent=2, default=str))
+
+        # Markdown PoW
+        md_lines = [
+            "# Proof-of-Work Certification Report (v2 Agentic)",
+            "",
+            f"> **Generated:** {time.strftime('%Y-%m-%d %H:%M:%S')}",
+            f"> **Outcome:** {outcome.value}",
+            f"> **Duration:** {total_duration:.0f}s",
+            f"> **Cost:** ${float(cost or 0):.2f}",
+            f"> **Stories:** {stories_passed}/{stories_tested}",
+            "",
+        ]
+        for s in story_results:
+            status = "PASS" if s["passed"] else "FAIL"
+            md_lines.append(f"- **{status}** {s['story_id']}: {s.get('summary', '')}")
+        md_lines.append("")
+        (report_dir / "proof-of-work.md").write_text("\n".join(md_lines))
+    except Exception as exc:
+        logger.warning("Failed to write PoW report: %s", exc)
+
+    logger.info(
+        "Agentic certifier v2 done: %s, %d/%d stories, %.1fs, $%.3f",
+        outcome.value, stories_passed, stories_tested, total_duration, float(cost or 0),
+    )
+    return report
