@@ -376,6 +376,9 @@ class AppRunner:
             "PORT": str(self.port),
             "NODE_ENV": "production" if use_built_start else "development",
             "NEXTAUTH_URL": f"http://localhost:{self.port}",
+            # NextAuth v5 needs AUTH_TRUST_HOST when running on a different
+            # port than what .env specifies
+            "AUTH_TRUST_HOST": "true",
         }
 
     def _expects_http_ready_check(self) -> bool:

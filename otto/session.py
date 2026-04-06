@@ -70,20 +70,22 @@ class SessionResult:
 
     @property
     def end_status(self) -> str:
-        """Parse structured output for end state. Falls back to 'ready_for_review'."""
-        if self.result_msg and hasattr(self.result_msg, "structured_output"):
-            so = self.result_msg.structured_output
-            if isinstance(so, dict) and "status" in so:
-                return so["status"]
+        """Parse end state from agent text. Looks for STATUS: marker."""
+        if self.text:
+            for line in reversed(self.text.split("\n")):
+                stripped = line.strip()
+                if stripped.upper().startswith("STATUS:"):
+                    return stripped[len("STATUS:"):].strip().lower()
         return "ready_for_review"
 
     @property
     def summary(self) -> str:
-        """Extract summary from structured output or last text."""
-        if self.result_msg and hasattr(self.result_msg, "structured_output"):
-            so = self.result_msg.structured_output
-            if isinstance(so, dict) and "summary" in so:
-                return so["summary"]
+        """Extract summary from agent text. Looks for SUMMARY: marker."""
+        if self.text:
+            for line in reversed(self.text.split("\n")):
+                stripped = line.strip()
+                if stripped.upper().startswith("SUMMARY:"):
+                    return stripped[len("SUMMARY:"):].strip()
         # Fallback: last 200 chars of text
         return self.text[-200:] if self.text else ""
 

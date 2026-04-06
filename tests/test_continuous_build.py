@@ -55,11 +55,9 @@ class TestSessionCheckpoint:
 
 
 class TestSessionResult:
-    def test_end_status_from_structured_output(self):
-        result_msg = SimpleNamespace(
-            structured_output={"status": "blocked", "summary": "stuck on auth"},
-        )
-        sr = SessionResult(text="", cost=0, result_msg=result_msg, session_id="s1")
+    def test_end_status_from_tagged_text(self):
+        text = "Built everything.\nSTATUS: blocked\nSUMMARY: stuck on auth"
+        sr = SessionResult(text=text, cost=0, result_msg=None, session_id="s1")
         assert sr.end_status == "blocked"
         assert sr.summary == "stuck on auth"
 
@@ -306,8 +304,8 @@ class TestContinuousBuild:
         from otto.pipeline import build_continuous
 
         async def fake_query(prompt, options, **kwargs):
-            return "built the product", 0.3, SimpleNamespace(
-                session_id="s1", structured_output={"status": "ready_for_review", "summary": "done"},
+            return "built the product\nSTATUS: ready_for_review\nSUMMARY: done", 0.3, SimpleNamespace(
+                session_id="s1",
             )
 
         passing_report = CertificationReport(
@@ -508,8 +506,8 @@ class TestContinuousBuild:
         async def fake_query(prompt, options, **kwargs):
             nonlocal call_count
             call_count += 1
-            return f"response {call_count}", 0.3, SimpleNamespace(
-                session_id="s1", structured_output={"status": "ready_for_review", "summary": f"round {call_count}"},
+            return f"response {call_count}\nSTATUS: ready_for_review\nSUMMARY: round {call_count}", 0.3, SimpleNamespace(
+                session_id="s1",
             )
 
         certifier_calls = []
@@ -579,9 +577,8 @@ class TestContinuousBuild:
         ).save(checkpoint_dir / "checkpoint.json")
 
         async def fake_query(prompt, options, **kwargs):
-            return "fixed the bugs", 0.2, SimpleNamespace(
+            return "fixed the bugs\nSTATUS: ready_for_review\nSUMMARY: fixed", 0.2, SimpleNamespace(
                 session_id="s1",
-                structured_output={"status": "ready_for_review", "summary": "fixed"},
             )
 
         passing_report = CertificationReport(
