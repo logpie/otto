@@ -395,6 +395,14 @@ def create_config(project_dir: Path) -> Path:
     lines += f"# qa_agent_settings: project         # project CLAUDE.md only\n"
     lines += f"# planner_agent_settings: project    # project CLAUDE.md only\n"
     lines += f"# Set to 'user,project' to also load ~/.claude/CLAUDE.md\n"
+    lines += "\n# Product certification (otto build verifies with certifier after coding):\n"
+    lines += f"# certifier_parallel_stories: 3  # stories per parallel batch (1 = sequential, 3 = default)\n"
+    lines += f"# certifier_browser: null        # null = auto-detect from product type; true/false to force\n"
+    lines += f"# certifier_skip_break: true     # skip adversarial break-testing phase (faster, default)\n"
+    lines += f"# certifier_timeout: 900         # max seconds for entire certification subprocess\n"
+    lines += f"# certifier_app_start_timeout: 90  # max seconds to wait for app to start per worker\n"
+    lines += f"# certifier_interaction: null    # override product interaction type (http/cli/import/websocket)\n"
+    lines += f"#                                # null = LLM discovery agent decides (recommended)\n"
     config_path.write_text(lines + "\n")
 
     # Update .git/info/exclude for runtime files (use git_meta_dir for linked worktrees)

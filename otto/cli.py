@@ -497,21 +497,27 @@ def run(prompt, dry_run, no_spec, no_qa, no_test):
 @main.command(context_settings=CONTEXT_SETTINGS)
 @click.argument("intent")
 @click.option("--no-review", is_flag=True, help="Skip plan review, execute immediately")
-@click.option("--no-qa", is_flag=True, help="Skip product-level QA after execution")
+@click.option("--no-qa", is_flag=True, help="Skip product certification after build")
 @click.option("--plan/--no-plan", "use_planner", default=None, help="Force planner on/off")
-@click.option("--continuous", is_flag=True, help="Use session-continuous build (experimental)")
-@click.option("--agentic", is_flag=True, help="Use agentic build — agent calls certify() tool (experimental)")
+@click.option("--continuous", is_flag=True, help="Session-continuous build — agent keeps context across build→certify→fix")
+@click.option("--agentic", is_flag=True, help="Agentic build — agent drives everything, calls certify when ready")
 @click.option("--interactive", is_flag=True, help="Pause for human input after each certification round")
 def build(intent, no_review, no_qa, use_planner, continuous, agentic, interactive):
     """Build a product from a natural language intent.
 
-    By default, one agent builds the entire product (monolithic).
-    Use --plan to enable the planner for parallel decomposition.
+    Three build modes:
+
+      Default:      Orchestrator drives build → certify → fix → re-certify
+      --continuous: Agent keeps session context across build/fix cycles
+      --agentic:    Agent drives everything, calls certify tool when ready
+
+    The certifier verifies the product works by running real user
+    stories (HTTP, CLI, import, WebSocket — any product type).
 
     Examples:
         otto build "bookmark manager with tags and search"
         otto build "CLI tool that converts CSV to JSON"
-        otto build "weather app like Apple's" --no-review
+        otto build "weather app like Apple's" --agentic
     """
     require_git()
     project_dir = Path.cwd()
