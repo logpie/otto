@@ -12,3 +12,5 @@ I2P
 - but does product qa do the same?? does product qa produce pow that feeds back?
 * bench against Superpowers?
 outerloop retry support mannual and with user feedback
+**Skill(superpowers:subagent-driven-development)
+k

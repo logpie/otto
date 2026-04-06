@@ -702,57 +702,52 @@ Certify commands for this project:
     )
 
 
-AGENTIC_V2_BUILD_PROMPT = """\
-You are building a product from scratch. You are an autonomous developer.
+AGENTIC_V2_PROMPT = """\
+You are building AND certifying a product from scratch. One session, you do everything.
 
+## Phase 1: Build
 1. Read the intent carefully. Plan your approach.
 2. Build the product — write code, write tests, make tests pass.
 3. Commit your work when tests pass.
-4. Output STATUS: BUILT when you're done building.
 
-Do NOT run any certification commands. Just build and test.
-"""
+## Phase 2: Certify
+After building, test the product thoroughly as a real user would:
 
-
-AGENTIC_V2_CERTIFY_PROMPT = """\
-The product has been built. Now certify it by testing thoroughly.
-
-## Product Intent
-{intent}
-
-## Your Process
-
-1. Read the project to understand what was built.
-2. Install dependencies if needed.
-3. Start the app if it's a server. For CLI/library, skip this.
-4. Plan test stories using this coverage checklist:
-   - First Experience: new user uses the core feature
-   - CRUD Lifecycle: create → read → update → delete
-   - Data Isolation: users' data doesn't leak
+4. Install any remaining dependencies if needed.
+5. Start the app if it's a server (web app, API). For CLI/library, skip this.
+6. Plan test stories using this coverage checklist:
+   - First Experience: new user registers/starts and uses the core feature
+   - CRUD Lifecycle: create → read → update → delete (full cycle)
+   - Data Isolation: two users' data doesn't leak between them
    - Persistence: data survives across sessions
-   - Access Control: unauthenticated requests rejected (if auth)
+   - Access Control: unauthenticated requests rejected (if auth exists)
    - Search/Filter: find items by criteria (if applicable)
-   - Edge Cases: empty inputs, special characters, boundaries
+   - Edge Cases: empty inputs, special characters, boundary values
    Skip stories that don't apply.
-5. Execute tests — dispatch subagents in parallel using the Agent tool:
-   Give each subagent: test instructions, base URL or entrypoint, auth info.
-   For simple tests, you may test inline instead.
-6. Collect results and report verdict.
+7. Execute tests — for speed, dispatch subagents in parallel using the Agent tool:
+   Give each subagent clear test instructions, base URL or CLI entrypoint, auth info.
+   For simple tests (quick CLI commands), you may test inline instead.
+8. Collect results from subagents.
+
+## Phase 3: Fix (if needed)
+9. If any story failed, fix the code and retest.
+10. Repeat until all stories pass or you've tried 3 rounds.
 
 ## Testing Rules
-- Make REAL requests (curl, CLI commands, test scripts). Never simulate.
-- Products can be hybrid (API + CLI + UI) — test ALL surfaces.
-- For web UI: use agent-browser if available.
+- Make REAL requests (curl for HTTP, CLI commands for CLI tools, test scripts for libraries)
+- Products can be hybrid (API + CLI + UI) — test ALL surfaces you find
+- For web UI pages: use agent-browser for visual verification if available
+- Never simulate or assume — actually run the product and check output
 
-## Verdict
-End with these EXACT markers:
+## Report
+End your final message with these EXACT markers:
 
 STORIES_TESTED: <number>
 STORIES_PASSED: <number>
-STORY_RESULT: <story_id> | <PASS or FAIL> | <summary>
+STORY_RESULT: <story_id> | <PASS or FAIL> | <one-line summary>
 ...
 VERDICT: PASS or VERDICT: FAIL
-DIAGNOSIS: <assessment or null>
+DIAGNOSIS: <overall assessment or null>
 """
 
 
@@ -761,15 +756,15 @@ async def build_agentic_v2(
     project_dir: Path,
     config: dict[str, Any],
 ) -> BuildResult:
-    """Agentic v2: build agent builds, then certifier agent tests directly.
+    """Truly monolithic agentic build: ONE agent builds, certifies, and fixes.
 
-    No certify_cli subprocess. The certifier runs in-process with full
-    Agent tool access for subagent dispatch.
+    Single session. The agent builds the product, then tests it against a
+    coverage checklist, fixes any failures, and reports. Full context
+    preserved — the agent knows exactly what it built and why.
     """
     import asyncio
-    from otto.agent import ClaudeAgentOptions, _subprocess_env, run_agent_query
-    from otto.certifier import run_agentic_certifier
-    from otto.certifier.report import CertificationOutcome
+    from otto.agent import ClaudeAgentOptions, _subprocess_env, run_agent_query, tool_use_summary
+    from otto.certifier.report import CertificationOutcome, CertificationReport, Finding, TierResult, TierStatus
 
     build_id = f"build-{int(time.time())}-{os.getpid()}"
     build_dir = project_dir / "otto_logs" / "builds" / build_id
@@ -780,8 +775,7 @@ async def build_agentic_v2(
         grounding_path.write_text(intent)
     _commit_artifacts(project_dir)
 
-    # Phase 1: Build
-    build_prompt = AGENTIC_V2_BUILD_PROMPT + f"\n\nBuild this product:\n\n{intent}"
+    prompt = AGENTIC_V2_PROMPT + f"\n\nNow build and certify this product:\n\n{intent}"
 
     options = ClaudeAgentOptions(
         permission_mode="bypassPermissions",
@@ -794,25 +788,118 @@ async def build_agentic_v2(
     if model:
         options.model = str(model)
 
-    build_text, build_cost, _ = await run_agent_query(build_prompt, options)
-    _commit_artifacts(project_dir)
-    logger.info("Build phase done: $%.2f", build_cost)
+    # Session logging
+    agent_log_path = build_dir / "agent-session.log"
+    agent_log_lines: list[str] = []
+    _agent_start = time.monotonic()
 
-    # Phase 2: Certify (in-process, Agent tool available)
-    report = await run_agentic_certifier(
-        intent=intent,
-        project_dir=project_dir,
-        config=config,
+    def _on_text(text_chunk: str) -> None:
+        elapsed = round(time.monotonic() - _agent_start, 1)
+        agent_log_lines.append(f"[{elapsed:6.1f}s] {text_chunk}")
+
+    def _on_tool(block) -> None:
+        elapsed = round(time.monotonic() - _agent_start, 1)
+        summary = tool_use_summary(block)
+        agent_log_lines.append(f"[{elapsed:6.1f}s] \u25cf {block.name}  {summary}")
+
+    def _on_tool_result(block) -> None:
+        elapsed = round(time.monotonic() - _agent_start, 1)
+        content = str(getattr(block, "content", ""))
+        truncated = content[:200] + "..." if len(content) > 200 else content
+        agent_log_lines.append(f"[{elapsed:6.1f}s]   \u2192 {truncated}")
+
+    # ONE session — build + certify + fix
+    text, cost, result_msg = await run_agent_query(
+        prompt, options,
+        on_text=_on_text,
+        on_tool=_on_tool,
+        on_tool_result=_on_tool_result,
     )
+    _commit_artifacts(project_dir)
 
-    passed = report.outcome == CertificationOutcome.PASSED
-    total_cost = float(build_cost or 0) + report.cost_usd
+    # Save agent log
+    _elapsed_total = round(time.monotonic() - _agent_start, 1)
+    agent_log_lines.append(f"[{_elapsed_total:6.1f}s] SESSION END  cost=${cost:.2f}")
+    try:
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        agent_log_path.write_text(f"<!-- generated: {ts} -->\n" + "\n".join(agent_log_lines))
+    except OSError:
+        pass
+
+    # Parse verdict from agent output
+    import re as _re
+    stories_tested = 0
+    stories_passed = 0
+    story_results: list[dict] = []
+    findings: list[Finding] = []
+    verdict_pass = False
+
+    if text:
+        for line in text.split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("STORIES_TESTED:"):
+                try: stories_tested = int(stripped.split(":", 1)[1].strip())
+                except ValueError: pass
+            elif stripped.startswith("STORIES_PASSED:"):
+                try: stories_passed = int(stripped.split(":", 1)[1].strip())
+                except ValueError: pass
+            elif stripped.startswith("STORY_RESULT:"):
+                parts = stripped[len("STORY_RESULT:"):].strip().split("|")
+                if len(parts) >= 2:
+                    sid = parts[0].strip()
+                    passed = "PASS" in parts[1].upper()
+                    summary = parts[2].strip() if len(parts) > 2 else ""
+                    story_results.append({"story_id": sid, "passed": passed, "summary": summary})
+                    if not passed:
+                        findings.append(Finding(tier=4, severity="critical", category="journey",
+                                                description=f"Story failed: {sid}", diagnosis=summary, story_id=sid))
+            elif stripped.startswith("VERDICT:"):
+                verdict_pass = "PASS" in stripped.upper()
+
+    has_failures = any(not s["passed"] for s in story_results)
+    if verdict_pass and not has_failures:
+        outcome = CertificationOutcome.PASSED
+    else:
+        outcome = CertificationOutcome.FAILED
+
+    # Write PoW report
+    try:
+        report_dir = project_dir / "otto_logs" / "certifier"
+        report_dir.mkdir(parents=True, exist_ok=True)
+        import json as _json
+        pow_data = {
+            "generated": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "outcome": outcome.value,
+            "duration_s": _elapsed_total,
+            "cost_usd": float(cost or 0),
+            "stories": story_results,
+        }
+        (report_dir / "proof-of-work.json").write_text(_json.dumps(pow_data, indent=2, default=str))
+        md_lines = [
+            "# Proof-of-Work Certification Report (Monolithic Agentic)",
+            "",
+            f"> **Generated:** {time.strftime('%Y-%m-%d %H:%M:%S')}",
+            f"> **Outcome:** {outcome.value}",
+            f"> **Duration:** {_elapsed_total:.0f}s",
+            f"> **Cost:** ${float(cost or 0):.2f}",
+            f"> **Stories:** {stories_passed}/{stories_tested}",
+            "",
+        ]
+        for s in story_results:
+            status = "PASS" if s["passed"] else "FAIL"
+            md_lines.append(f"- **{status}** {s['story_id']}: {s.get('summary', '')}")
+        (report_dir / "proof-of-work.md").write_text("\n".join(md_lines))
+    except Exception as exc:
+        logger.warning("Failed to write PoW: %s", exc)
+
+    logger.info("Monolithic agentic done: %s, %d/%d stories, %.1fs, $%.3f",
+                outcome.value, stories_passed, stories_tested, _elapsed_total, float(cost or 0))
 
     return BuildResult(
-        passed=passed,
+        passed=outcome == CertificationOutcome.PASSED,
         build_id=build_id,
         rounds=1,
-        total_cost=total_cost,
+        total_cost=float(cost or 0),
     )
 
 
