@@ -403,6 +403,7 @@ def create_config(project_dir: Path) -> Path:
     lines += f"# certifier_app_start_timeout: 90  # max seconds to wait for app to start per worker\n"
     lines += f"# certifier_interaction: null    # override product interaction type (http/cli/import/websocket)\n"
     lines += f"#                                # null = LLM discovery agent decides (recommended)\n"
+    lines += f"# max_certify_rounds: 3          # max certify→fix→re-certify loops (default 3)\n"
     config_path.write_text(lines + "\n")
 
     # Update .git/info/exclude for runtime files (use git_meta_dir for linked worktrees)

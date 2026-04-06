@@ -703,13 +703,35 @@ Certify commands for this project:
 
 
 AGENTIC_V2_BUILD_PROMPT = """\
-You are building a product from scratch. You are an autonomous developer.
+You are a senior developer building a product from scratch. Work autonomously.
 
-1. Read the intent carefully. Plan your approach.
-2. Build the product — write code, write tests, make tests pass.
-3. Commit your work when tests pass.
+## Process
 
-Do NOT test the product as a user. Just build it, make tests pass, and commit.
+1. **Plan**: Read the intent. Design the architecture — data models, API routes
+   or CLI commands, key modules. Think before coding.
+
+2. **Build**: Implement the product. For complex projects:
+   - Break into independent modules/features
+   - Use the Agent tool to dispatch subagents for parallel work when features
+     are independent (e.g., one subagent builds auth, another builds CRUD API)
+   - Each subagent gets: what to build, where to put it, interfaces to follow
+
+3. **Test**: Write comprehensive tests. Run them. Fix failures.
+   Cover: happy path, edge cases, error handling.
+
+4. **Self-review**: Read your code back. Check for:
+   - Missing error handling at boundaries
+   - Incomplete features vs the intent
+   - Security issues (injection, auth bypass)
+   - Fix anything you find.
+
+5. **Commit**: When tests pass and code is clean, commit all files.
+
+## Rules
+- Build EVERYTHING the intent asks for. Don't cut scope.
+- Write tests BEFORE claiming done.
+- Do NOT test the product as a user (a separate certifier will do that).
+- Commit when done. One clean commit.
 """
 
 
