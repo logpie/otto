@@ -135,40 +135,37 @@ async def build_product(
             total_cost=total_cost, tasks_passed=tasks_passed, tasks_failed=tasks_failed,
         )
 
-    # Certify -> Fix -> Verify
-    # The certifier uses the Claude SDK which installs signal handlers —
-    # that only works in the main thread. Since we're inside asyncio.run(),
-    # we spawn the certifier as a subprocess to get its own main thread.
+    # Certify -> Fix -> Re-certify loop
+    # Runs in a subprocess because the Claude SDK installs signal handlers
+    # that only work in the main thread. The subprocess gets its own main
+    # thread and runs the full verification loop (certify → fix → re-certify).
     if not build_config.get("skip_product_qa"):
         build_config.setdefault("proof_of_work", True)
 
         import subprocess as _sp
         import sys as _sys
+
+        verify_payload = json.dumps({
+            "intent": certifier_intent,
+            "project_dir": str(project_dir),
+            "tasks_path": str(tasks_path),
+            "product_spec_path": str(certifier_grounding_path) if certifier_grounding_path else None,
+            "config": build_config,
+        }, default=str)
+
         certify_result = _sp.run(
-            [_sys.executable, "-c", f"""
-import json, sys
-sys.path.insert(0, '.')
-from otto.certifier import run_unified_certifier
-from otto.certifier.report import CertificationOutcome
-report = run_unified_certifier(
-    intent={certifier_intent!r},
-    project_dir=__import__('pathlib').Path({str(project_dir)!r}),
-    config=__import__('json').loads({json.dumps(build_config)!r}),
-)
-result = {{
-    "product_passed": report.outcome == CertificationOutcome.PASSED,
-    "total_cost": report.cost_usd,
-    "duration_s": report.duration_s,
-}}
-print(json.dumps(result))
-"""],
+            [_sys.executable, "-m", "otto.certifier._verify_subprocess"],
+            input=verify_payload,
             capture_output=True, text=True,
-            timeout=int(build_config.get("certifier_timeout", 600)),
+            cwd=str(project_dir),
+            timeout=int(build_config.get("certifier_timeout", 900)),
         )
         if certify_result.returncode == 0 and certify_result.stdout.strip():
+            # Last line of stdout is the JSON result
             verify_result = json.loads(certify_result.stdout.strip().split("\n")[-1])
         else:
-            logger.warning("Certifier subprocess failed: %s", certify_result.stderr[-500:])
+            logger.warning("Verification subprocess failed (exit %d): %s",
+                          certify_result.returncode, certify_result.stderr[-500:])
             verify_result = {"product_passed": False, "total_cost": 0.0}
         total_cost += verify_result.get("total_cost", 0.0)
         verification_passed = bool(verify_result.get("product_passed", False))
