@@ -561,17 +561,11 @@ def build(intent, no_review, no_qa, use_planner, orchestrated, continuous, inter
                                  on_human_feedback=on_feedback)
             )
         else:
-            # Default: agentic — agent drives everything
-            if config.get("certifier_mode") == "v2":
-                console.print("  [bold]Agentic v2[/bold] — build then certify in-process\n")
-                result: BuildResult = asyncio.run(
-                    build_agentic_v2(intent, project_dir, config)
-                )
-            else:
-                console.print("  [bold]Agentic mode[/bold] — agent builds, certifies, fixes\n")
-                result: BuildResult = asyncio.run(
-                    build_agentic(intent, project_dir, config)
-                )
+            # Default: monolithic agentic — one agent builds, certifies, fixes
+            console.print("  [bold]Agentic mode[/bold] — one agent builds, certifies, fixes\n")
+            result: BuildResult = asyncio.run(
+                build_agentic_v2(intent, project_dir, config)
+            )
     except KeyboardInterrupt:
         console.print("\n  Aborted.")
         sys.exit(1)

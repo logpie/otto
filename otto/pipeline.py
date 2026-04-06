@@ -895,11 +895,23 @@ async def build_agentic_v2(
     logger.info("Monolithic agentic done: %s, %d/%d stories, %.1fs, $%.3f",
                 outcome.value, stories_passed, stories_tested, _elapsed_total, float(cost or 0))
 
+    # Build journeys list for _print_build_result display
+    journeys = [
+        {"name": s["summary"], "passed": s["passed"], "story_id": s["story_id"]}
+        for s in story_results
+    ]
+    break_findings = [
+        {"severity": "critical", "description": s["summary"], "story_id": s["story_id"]}
+        for s in story_results if not s["passed"]
+    ]
+
     return BuildResult(
         passed=outcome == CertificationOutcome.PASSED,
         build_id=build_id,
         rounds=1,
         total_cost=float(cost or 0),
+        journeys=journeys,
+        break_findings=break_findings,
     )
 
 
