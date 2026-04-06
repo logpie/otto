@@ -799,7 +799,7 @@ async def build_agentic_v2(
     logger.info("Build phase done: $%.2f", build_cost)
 
     # Phase 2: Certify (in-process, Agent tool available)
-    report = run_agentic_certifier(
+    report = await run_agentic_certifier(
         intent=intent,
         project_dir=project_dir,
         config=config,

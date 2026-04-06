@@ -33,12 +33,17 @@ def run_unified_certifier(
     """
     config = config or {}
     if config.get("certifier_mode") == "v2":
-        return run_agentic_certifier(
-            intent=intent,
-            project_dir=project_dir,
-            config=config,
-            port_override=port_override,
-        )
+        import asyncio
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(run_agentic_certifier(
+                intent=intent,
+                project_dir=project_dir,
+                config=config,
+                port_override=port_override,
+            ))
+        finally:
+            loop.close()
 
     from otto.certifier.adapter import analyze_project
     from otto.certifier.classifier import classify
@@ -566,7 +571,7 @@ Include one STORY_RESULT line per story tested. These markers are machine-parsed
 """
 
 
-def run_agentic_certifier(
+async def run_agentic_certifier(
     intent: str,
     project_dir: Path,
     config: dict[str, Any] | None = None,
@@ -608,26 +613,10 @@ def run_agentic_certifier(
     if model:
         options.model = str(model)
 
-    logger.info("Running agentic certifier v2 on %s", project_dir)
+    logger.info("Running agentic certifier on %s", project_dir)
 
     # One LLM call — the agent does everything
-    import asyncio
-    loop = asyncio.new_event_loop()
-    try:
-        text, cost, result_msg = loop.run_until_complete(
-            run_agent_query(prompt, options))
-    except Exception as exc:
-        logger.exception("Agentic certifier v2 crashed")
-        duration = round(time.monotonic() - start_time, 1)
-        return CertificationReport(
-            product_type="unknown",
-            interaction="unknown",
-            outcome=CertificationOutcome.BLOCKED,
-            cost_usd=0.0,
-            duration_s=duration,
-        )
-    finally:
-        loop.close()
+    text, cost, result_msg = await run_agent_query(prompt, options)
 
     # Parse results from agent output
     total_duration = round(time.monotonic() - start_time, 1)
