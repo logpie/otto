@@ -1634,6 +1634,11 @@ def _worker_main(input_path: Path, output_path: Path) -> None:
                 base_url = runner.base_url
         else:
             # CLI/library/websocket: no server to start per-worker
+            # But still need per-worker deps (venv has absolute paths, can't share)
+            if profile.language == "python":
+                _setup_worker_python_venv(worker_dir)
+            _ensure_prisma_if_needed(worker_dir)
+            _activate_worker_venv(worker_dir)
             base_url = ""
 
         if result_dict is None:

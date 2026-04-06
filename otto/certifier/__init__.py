@@ -78,7 +78,8 @@ def run_unified_certifier(
     test_config = analyze_project(project_dir)
     test_command = config.get("test_command")
 
-    # Run discovery agent — classifies, installs deps, starts the app
+    # LLM discovery: one agent reads the project, installs deps, classifies,
+    # starts the app, and reports how to test. Handles ANY framework/environment.
     discovery = discover_project(
         project_dir, config, hint_profile=profile)
     total_cost += discovery.cost
