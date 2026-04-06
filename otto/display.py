@@ -69,7 +69,8 @@ def _shorten_path(path: str) -> str:
             if "." in fname:  # has extension → likely a file
                 return fname
         return path
-    for marker in ("src/", "__tests__/", "tests/", "test/", "lib/", "app/", "components/"):
+    for marker in ("src/", "__tests__/", "tests/", "test/", "lib/", "app/", "components/",
+                    "packages/", "modules/", "internal/", "cmd/", "crates/"):
         idx = path.find(marker)
         if idx >= 0:
             return path[idx:]

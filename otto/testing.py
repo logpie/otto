@@ -142,11 +142,37 @@ def _install_deps(worktree_path: Path, timeout: int) -> str | None:
         if main_nm.is_dir():
             (worktree_path / "node_modules").symlink_to(main_nm)
         else:
+            # Detect package manager from lockfiles
+            if (worktree_path / "pnpm-lock.yaml").exists():
+                install_cmd = ["pnpm", "install", "--frozen-lockfile"]
+            elif (worktree_path / "yarn.lock").exists():
+                install_cmd = ["yarn", "install", "--frozen-lockfile"]
+            elif (worktree_path / "bun.lockb").exists():
+                install_cmd = ["bun", "install", "--frozen-lockfile"]
+            else:
+                # package-lock.json or no lockfile — npm is the safe default
+                install_cmd = ["npm", "install", "--no-audit", "--no-fund"]
             subprocess.run(
-                ["npm", "install", "--no-audit", "--no-fund"],
+                install_cmd,
                 cwd=worktree_path, capture_output=True, timeout=timeout,
                 env=env,
             )
+
+    # Poetry: poetry.lock (Python, but uses its own installer instead of pip)
+    if (worktree_path / "poetry.lock").exists():
+        subprocess.run(
+            ["poetry", "install", "--no-interaction"],
+            cwd=worktree_path, capture_output=True, timeout=timeout,
+            env=env,
+        )
+
+    # uv: uv.lock (Python, fast installer)
+    if (worktree_path / "uv.lock").exists():
+        subprocess.run(
+            ["uv", "sync"],
+            cwd=worktree_path, capture_output=True, timeout=timeout,
+            env=env,
+        )
 
     return venv_bin
 

@@ -525,14 +525,19 @@ class AppRunner:
         return self._development_start_command()
 
     def _development_start_command(self) -> str | None:
-        """Return the existing dev-mode start command."""
+        """Return the existing dev-mode start command.
+
+        PORT env var (set by ``_runtime_env``) is the primary mechanism for
+        binding the app to our chosen port.  Framework-specific CLI flags are
+        only added when a framework is known to ignore the PORT env var.
+        """
         cmd = self.profile.start_command
         if not cmd:
             return None
+        # Next.js ignores PORT in dev mode — pass -p explicitly.
         if self.profile.framework == "nextjs":
             return f"{cmd} -- -p {self.port}" if "npm" in cmd else f"{cmd} -p {self.port}"
-        if self.profile.framework in ("flask", "fastapi"):
-            return f"{cmd} --port {self.port}"
+        # All other frameworks: rely on PORT env var from _runtime_env().
         return cmd
 
     def _production_start_command(self) -> str | None:

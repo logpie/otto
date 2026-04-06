@@ -248,6 +248,106 @@ class TestInstallDeps:
         ]
 
 
+    @patch("otto.testing.subprocess.run")
+    def test_node_pnpm_from_lockfile(self, mock_run, tmp_path):
+        """pnpm-lock.yaml should trigger pnpm install."""
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        (worktree / "package.json").write_text('{"name": "test"}')
+        (worktree / "pnpm-lock.yaml").write_text("lockfileVersion: 5\n")
+
+        _install_deps(worktree, timeout=60)
+
+        install_calls = [
+            args[0]
+            for args, kwargs in mock_run.call_args_list
+            if args and isinstance(args[0], list) and args[0][0] == "pnpm"
+        ]
+        assert install_calls == [["pnpm", "install", "--frozen-lockfile"]]
+
+    @patch("otto.testing.subprocess.run")
+    def test_node_yarn_from_lockfile(self, mock_run, tmp_path):
+        """yarn.lock should trigger yarn install."""
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        (worktree / "package.json").write_text('{"name": "test"}')
+        (worktree / "yarn.lock").write_text("")
+
+        _install_deps(worktree, timeout=60)
+
+        install_calls = [
+            args[0]
+            for args, kwargs in mock_run.call_args_list
+            if args and isinstance(args[0], list) and args[0][0] == "yarn"
+        ]
+        assert install_calls == [["yarn", "install", "--frozen-lockfile"]]
+
+    @patch("otto.testing.subprocess.run")
+    def test_node_bun_from_lockfile(self, mock_run, tmp_path):
+        """bun.lockb should trigger bun install."""
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        (worktree / "package.json").write_text('{"name": "test"}')
+        (worktree / "bun.lockb").write_text("")
+
+        _install_deps(worktree, timeout=60)
+
+        install_calls = [
+            args[0]
+            for args, kwargs in mock_run.call_args_list
+            if args and isinstance(args[0], list) and args[0][0] == "bun"
+        ]
+        assert install_calls == [["bun", "install", "--frozen-lockfile"]]
+
+    @patch("otto.testing.subprocess.run")
+    def test_node_npm_default_when_no_lockfile(self, mock_run, tmp_path):
+        """No lockfile should fall back to npm install."""
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        (worktree / "package.json").write_text('{"name": "test"}')
+
+        _install_deps(worktree, timeout=60)
+
+        install_calls = [
+            args[0]
+            for args, kwargs in mock_run.call_args_list
+            if args and isinstance(args[0], list) and args[0][0] == "npm"
+        ]
+        assert install_calls == [["npm", "install", "--no-audit", "--no-fund"]]
+
+    @patch("otto.testing.subprocess.run")
+    def test_poetry_lock_triggers_poetry_install(self, mock_run, tmp_path):
+        """poetry.lock should trigger poetry install."""
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        (worktree / "poetry.lock").write_text("")
+
+        _install_deps(worktree, timeout=60)
+
+        poetry_calls = [
+            args[0]
+            for args, kwargs in mock_run.call_args_list
+            if args and isinstance(args[0], list) and args[0][0] == "poetry"
+        ]
+        assert poetry_calls == [["poetry", "install", "--no-interaction"]]
+
+    @patch("otto.testing.subprocess.run")
+    def test_uv_lock_triggers_uv_sync(self, mock_run, tmp_path):
+        """uv.lock should trigger uv sync."""
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        (worktree / "uv.lock").write_text("")
+
+        _install_deps(worktree, timeout=60)
+
+        uv_calls = [
+            args[0]
+            for args, kwargs in mock_run.call_args_list
+            if args and isinstance(args[0], list) and args[0][0] == "uv"
+        ]
+        assert uv_calls == [["uv", "sync"]]
+
+
 class TestIntegrationGate:
     @patch("otto.testing.run_local_tests")
     @patch("otto.testing._install_deps")

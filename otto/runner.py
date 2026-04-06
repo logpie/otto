@@ -85,7 +85,11 @@ def _suggest_claude_md(project_dir: Path) -> None:
     has_py = any((project_dir / f).exists() for f in
                  ("pyproject.toml", "requirements.txt", "setup.py"))
     has_tests = any((project_dir / d).exists() for d in
-                    ("__tests__", "tests", "test"))
+                    ("__tests__", "tests", "test", "spec", "e2e", "integration"))
+    if not has_tests:
+        # Check for test_* directories (e.g. test_utils/, test_integration/)
+        has_tests = any(d.is_dir() and d.name.startswith("test_")
+                        for d in project_dir.iterdir() if d.name.startswith("test_"))
 
     if has_pkg:
         # Check for common patterns
@@ -103,7 +107,7 @@ def _suggest_claude_md(project_dir: Path) -> None:
 
     if has_tests:
         # Check for shared test helpers (lightweight — cap files and read size)
-        for test_dir in ("__tests__", "tests", "test"):
+        for test_dir in ("__tests__", "tests", "test", "spec", "e2e", "integration"):
             d = project_dir / test_dir
             if d.exists():
                 found_test_helper = False
@@ -192,13 +196,21 @@ def preflight_checks(
     # Uses .git/info/exclude (local-only, never committed) instead of .gitignore
     # to avoid creating unrelated commits on the default branch.
     _FRAMEWORK_IGNORES: dict[str, list[str]] = {
-        "package.json": ["node_modules/", ".next/", "dist/", "build/", "coverage/", ".turbo/"],
-        "pyproject.toml": ["__pycache__/", ".venv/", "dist/", ".pytest_cache/", "*.egg-info"],
+        "package.json": ["node_modules/", ".next/", "dist/", "build/", "coverage/", ".turbo/",
+                         ".parcel-cache/", ".svelte-kit/", ".astro/", ".cache/"],
+        "pyproject.toml": ["__pycache__/", ".venv/", "dist/", ".pytest_cache/", "*.egg-info",
+                           "build/", ".eggs/", ".tox/", ".nox/"],
         "requirements.txt": ["__pycache__/", ".venv/", ".pytest_cache/"],
         "setup.py": ["__pycache__/", ".venv/", "dist/", "*.egg-info", "build/"],
         "Cargo.toml": ["target/"],
         "go.mod": ["vendor/"],
         "Gemfile": ["vendor/bundle/"],
+        "pom.xml": ["target/"],
+        "build.gradle": ["build/", ".gradle/"],
+        "build.gradle.kts": ["build/", ".gradle/"],
+        "CMakeLists.txt": ["build/", "cmake-build-*/"],
+        "Makefile": ["build/"],
+        "deno.json": [".deno/"],
     }
     from otto.config import git_meta_dir
     exclude_path = git_meta_dir(project_dir) / "info" / "exclude"
