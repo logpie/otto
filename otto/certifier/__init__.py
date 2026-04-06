@@ -496,10 +496,10 @@ def _format_stories_output(cert_result: Any) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Agentic certifier v2 — single agent, subagent-driven
+# Agentic certifier — single agent, subagent-driven
 # ---------------------------------------------------------------------------
 
-CERTIFIER_V2_PROMPT = """\
+CERTIFIER_AGENTIC_PROMPT = """\
 You are a QA lead certifying a software product. Your job: verify it works
 for real users by testing it thoroughly.
 
@@ -520,18 +520,34 @@ for real users by testing it thoroughly.
    - Search/Filter: find items by various criteria (if applicable)
    - Edge Cases: empty inputs, special characters, boundary values
    Skip stories that don't apply to this product type.
-5. **Test each story** by dispatching a subagent for parallel execution:
-   - Use the Agent tool to dispatch each story as a separate subagent
-   - Give each subagent: what to test, how to interact (curl/CLI/browser/import),
-     the base URL or entrypoint, and any auth credentials you set up
-   - Dispatch multiple subagents in parallel for speed
+
+5. **Execute tests using subagents for parallelism:**
+
+   You have the Agent tool. Use it to dispatch test stories in parallel:
+
+   ```
+   Agent("Test first-experience story: register a new user at http://localhost:3000/api/auth/register, then create an item. Use curl. Report PASS or FAIL with evidence.")
+
+   Agent("Test CRUD lifecycle: create, read, update, delete an item at http://localhost:3000/api/items. Report PASS or FAIL with evidence.")
+   ```
+
+   Give each subagent:
+   - Clear test instructions (what to do, what to verify)
+   - How to interact: curl for HTTP, CLI commands for CLI tools, Python scripts for libraries
+   - Base URL, auth credentials, or CLI entrypoint
+   - Ask it to report PASS or FAIL with evidence
+
+   Dispatch 3-5 subagents at once for parallel execution.
+   For simple tests (quick CLI commands), you may test inline instead.
+
 6. **Collect results** from all subagents.
 7. **Report verdict** using the exact format below.
 
 ## Testing Rules
 - Make REAL requests (curl for HTTP, run commands for CLI, write test scripts for libraries)
-- For web apps with UI: use agent-browser for visual verification if available
+- For web apps with UI pages: also use agent-browser if available (screenshots, visual check)
 - Test the ACTUAL product, never simulate or assume
+- Products can be hybrid (API + CLI + UI) — test ALL surfaces you find
 - For each failure: diagnose the root cause and suggest a fix
 
 ## Verdict Format
@@ -557,11 +573,14 @@ def run_agentic_certifier(
     *,
     port_override: int | None = None,
 ) -> "CertificationReport":
-    """Agentic certifier v2: one agent, subagent-driven testing.
+    """Agentic certifier: one monolithic agent does everything.
 
-    A single certifier agent reads the project, plans test stories,
-    dispatches subagents for parallel execution, and reports results.
-    No discovery agent, no story compiler, no worker infrastructure.
+    A single certifier agent reads the project, installs deps, starts the app,
+    plans test stories, dispatches subagents for parallel testing, and reports.
+
+    MUST run in the caller's process (not a subprocess) so the Agent tool
+    is available for subagent dispatch. Called directly from build_agentic()
+    or from run_unified_certifier() when certifier_mode=v2.
     """
     import re as _re
     from otto.agent import ClaudeAgentOptions, _subprocess_env, run_agent_query
@@ -576,7 +595,7 @@ def run_agentic_certifier(
     config = config or {}
     start_time = time.monotonic()
 
-    prompt = CERTIFIER_V2_PROMPT.format(intent=intent)
+    prompt = CERTIFIER_AGENTIC_PROMPT.format(intent=intent)
 
     options = ClaudeAgentOptions(
         permission_mode="bypassPermissions",

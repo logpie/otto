@@ -702,6 +702,120 @@ Certify commands for this project:
     )
 
 
+AGENTIC_V2_BUILD_PROMPT = """\
+You are building a product from scratch. You are an autonomous developer.
+
+1. Read the intent carefully. Plan your approach.
+2. Build the product — write code, write tests, make tests pass.
+3. Commit your work when tests pass.
+4. Output STATUS: BUILT when you're done building.
+
+Do NOT run any certification commands. Just build and test.
+"""
+
+
+AGENTIC_V2_CERTIFY_PROMPT = """\
+The product has been built. Now certify it by testing thoroughly.
+
+## Product Intent
+{intent}
+
+## Your Process
+
+1. Read the project to understand what was built.
+2. Install dependencies if needed.
+3. Start the app if it's a server. For CLI/library, skip this.
+4. Plan test stories using this coverage checklist:
+   - First Experience: new user uses the core feature
+   - CRUD Lifecycle: create → read → update → delete
+   - Data Isolation: users' data doesn't leak
+   - Persistence: data survives across sessions
+   - Access Control: unauthenticated requests rejected (if auth)
+   - Search/Filter: find items by criteria (if applicable)
+   - Edge Cases: empty inputs, special characters, boundaries
+   Skip stories that don't apply.
+5. Execute tests — dispatch subagents in parallel using the Agent tool:
+   Give each subagent: test instructions, base URL or entrypoint, auth info.
+   For simple tests, you may test inline instead.
+6. Collect results and report verdict.
+
+## Testing Rules
+- Make REAL requests (curl, CLI commands, test scripts). Never simulate.
+- Products can be hybrid (API + CLI + UI) — test ALL surfaces.
+- For web UI: use agent-browser if available.
+
+## Verdict
+End with these EXACT markers:
+
+STORIES_TESTED: <number>
+STORIES_PASSED: <number>
+STORY_RESULT: <story_id> | <PASS or FAIL> | <summary>
+...
+VERDICT: PASS or VERDICT: FAIL
+DIAGNOSIS: <assessment or null>
+"""
+
+
+async def build_agentic_v2(
+    intent: str,
+    project_dir: Path,
+    config: dict[str, Any],
+) -> BuildResult:
+    """Agentic v2: build agent builds, then certifier agent tests directly.
+
+    No certify_cli subprocess. The certifier runs in-process with full
+    Agent tool access for subagent dispatch.
+    """
+    import asyncio
+    from otto.agent import ClaudeAgentOptions, _subprocess_env, run_agent_query
+    from otto.certifier import run_agentic_certifier
+    from otto.certifier.report import CertificationOutcome
+
+    build_id = f"build-{int(time.time())}-{os.getpid()}"
+    build_dir = project_dir / "otto_logs" / "builds" / build_id
+    build_dir.mkdir(parents=True, exist_ok=True)
+
+    grounding_path = project_dir / "intent.md"
+    if not grounding_path.exists():
+        grounding_path.write_text(intent)
+    _commit_artifacts(project_dir)
+
+    # Phase 1: Build
+    build_prompt = AGENTIC_V2_BUILD_PROMPT + f"\n\nBuild this product:\n\n{intent}"
+
+    options = ClaudeAgentOptions(
+        permission_mode="bypassPermissions",
+        cwd=str(project_dir),
+        system_prompt={"type": "preset", "preset": "claude_code"},
+        env=_subprocess_env(),
+        setting_sources=["project"],
+    )
+    model = config.get("model")
+    if model:
+        options.model = str(model)
+
+    build_text, build_cost, _ = await run_agent_query(build_prompt, options)
+    _commit_artifacts(project_dir)
+    logger.info("Build phase done: $%.2f", build_cost)
+
+    # Phase 2: Certify (in-process, Agent tool available)
+    report = run_agentic_certifier(
+        intent=intent,
+        project_dir=project_dir,
+        config=config,
+    )
+
+    passed = report.outcome == CertificationOutcome.PASSED
+    total_cost = float(build_cost or 0) + report.cost_usd
+
+    return BuildResult(
+        passed=passed,
+        build_id=build_id,
+        rounds=1,
+        total_cost=total_cost,
+    )
+
+
 async def resume_continuous(
     checkpoint_path: Path,
     project_dir: Path,

@@ -536,7 +536,7 @@ def build(intent, no_review, no_qa, use_planner, orchestrated, continuous, inter
         config["no_review"] = True
 
     # Run the pipeline
-    from otto.pipeline import build_product, build_continuous, build_agentic, BuildResult
+    from otto.pipeline import build_product, build_continuous, build_agentic, build_agentic_v2, BuildResult
 
     build_start = time.time()
     console.print()
@@ -562,10 +562,16 @@ def build(intent, no_review, no_qa, use_planner, orchestrated, continuous, inter
             )
         else:
             # Default: agentic — agent drives everything
-            console.print("  [bold]Agentic mode[/bold] — agent builds, certifies, fixes\n")
-            result: BuildResult = asyncio.run(
-                build_agentic(intent, project_dir, config)
-            )
+            if config.get("certifier_mode") == "v2":
+                console.print("  [bold]Agentic v2[/bold] — build then certify in-process\n")
+                result: BuildResult = asyncio.run(
+                    build_agentic_v2(intent, project_dir, config)
+                )
+            else:
+                console.print("  [bold]Agentic mode[/bold] — agent builds, certifies, fixes\n")
+                result: BuildResult = asyncio.run(
+                    build_agentic(intent, project_dir, config)
+                )
     except KeyboardInterrupt:
         console.print("\n  Aborted.")
         sys.exit(1)
