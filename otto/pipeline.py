@@ -702,52 +702,14 @@ Certify commands for this project:
     )
 
 
-AGENTIC_V2_PROMPT = """\
-You are building AND certifying a product from scratch. One session, you do everything.
+AGENTIC_V2_BUILD_PROMPT = """\
+You are building a product from scratch. You are an autonomous developer.
 
-## Phase 1: Build
 1. Read the intent carefully. Plan your approach.
 2. Build the product — write code, write tests, make tests pass.
 3. Commit your work when tests pass.
 
-## Phase 2: Certify
-After building, test the product thoroughly as a real user would:
-
-4. Install any remaining dependencies if needed.
-5. Start the app if it's a server (web app, API). For CLI/library, skip this.
-6. Plan test stories using this coverage checklist:
-   - First Experience: new user registers/starts and uses the core feature
-   - CRUD Lifecycle: create → read → update → delete (full cycle)
-   - Data Isolation: two users' data doesn't leak between them
-   - Persistence: data survives across sessions
-   - Access Control: unauthenticated requests rejected (if auth exists)
-   - Search/Filter: find items by criteria (if applicable)
-   - Edge Cases: empty inputs, special characters, boundary values
-   Skip stories that don't apply.
-7. Execute tests — for speed, dispatch subagents in parallel using the Agent tool:
-   Give each subagent clear test instructions, base URL or CLI entrypoint, auth info.
-   For simple tests (quick CLI commands), you may test inline instead.
-8. Collect results from subagents.
-
-## Phase 3: Fix (if needed)
-9. If any story failed, fix the code and retest.
-10. Repeat until all stories pass or you've tried 3 rounds.
-
-## Testing Rules
-- Make REAL requests (curl for HTTP, CLI commands for CLI tools, test scripts for libraries)
-- Products can be hybrid (API + CLI + UI) — test ALL surfaces you find
-- For web UI pages: use agent-browser for visual verification if available
-- Never simulate or assume — actually run the product and check output
-
-## Report
-End your final message with these EXACT markers:
-
-STORIES_TESTED: <number>
-STORIES_PASSED: <number>
-STORY_RESULT: <story_id> | <PASS or FAIL> | <one-line summary>
-...
-VERDICT: PASS or VERDICT: FAIL
-DIAGNOSIS: <overall assessment or null>
+Do NOT test the product as a user. Just build it, make tests pass, and commit.
 """
 
 
@@ -756,15 +718,18 @@ async def build_agentic_v2(
     project_dir: Path,
     config: dict[str, Any],
 ) -> BuildResult:
-    """Truly monolithic agentic build: ONE agent builds, certifies, and fixes.
+    """Agentic build: coding agent builds, then SEPARATE certifier agent tests.
 
-    Single session. The agent builds the product, then tests it against a
-    coverage checklist, fixes any failures, and reports. Full context
-    preserved — the agent knows exactly what it built and why.
+    Two sessions, builder-blind:
+    - Session 1: coding agent builds the product (no certification knowledge)
+    - Session 2: certifier agent tests it (no build knowledge, fresh context)
+
+    The certifier can't cheat — it doesn't know what the builder did.
     """
     import asyncio
     from otto.agent import ClaudeAgentOptions, _subprocess_env, run_agent_query, tool_use_summary
-    from otto.certifier.report import CertificationOutcome, CertificationReport, Finding, TierResult, TierStatus
+    from otto.certifier import run_agentic_certifier
+    from otto.certifier.report import CertificationOutcome
 
     build_id = f"build-{int(time.time())}-{os.getpid()}"
     build_dir = project_dir / "otto_logs" / "builds" / build_id
@@ -775,7 +740,8 @@ async def build_agentic_v2(
         grounding_path.write_text(intent)
     _commit_artifacts(project_dir)
 
-    prompt = AGENTIC_V2_PROMPT + f"\n\nNow build and certify this product:\n\n{intent}"
+    # ── Session 1: Build ──
+    build_prompt = AGENTIC_V2_BUILD_PROMPT + f"\n\nBuild this product:\n\n{intent}"
 
     options = ClaudeAgentOptions(
         permission_mode="bypassPermissions",
@@ -788,130 +754,69 @@ async def build_agentic_v2(
     if model:
         options.model = str(model)
 
-    # Session logging
-    agent_log_path = build_dir / "agent-session.log"
-    agent_log_lines: list[str] = []
-    _agent_start = time.monotonic()
+    # Build agent logging
+    build_log_path = build_dir / "build-agent.log"
+    build_log_lines: list[str] = []
+    _build_start = time.monotonic()
 
     def _on_text(text_chunk: str) -> None:
-        elapsed = round(time.monotonic() - _agent_start, 1)
-        agent_log_lines.append(f"[{elapsed:6.1f}s] {text_chunk}")
+        elapsed = round(time.monotonic() - _build_start, 1)
+        build_log_lines.append(f"[{elapsed:6.1f}s] {text_chunk}")
 
     def _on_tool(block) -> None:
-        elapsed = round(time.monotonic() - _agent_start, 1)
+        elapsed = round(time.monotonic() - _build_start, 1)
         summary = tool_use_summary(block)
-        agent_log_lines.append(f"[{elapsed:6.1f}s] \u25cf {block.name}  {summary}")
+        build_log_lines.append(f"[{elapsed:6.1f}s] \u25cf {block.name}  {summary}")
 
     def _on_tool_result(block) -> None:
-        elapsed = round(time.monotonic() - _agent_start, 1)
+        elapsed = round(time.monotonic() - _build_start, 1)
         content = str(getattr(block, "content", ""))
         truncated = content[:200] + "..." if len(content) > 200 else content
-        agent_log_lines.append(f"[{elapsed:6.1f}s]   \u2192 {truncated}")
+        build_log_lines.append(f"[{elapsed:6.1f}s]   \u2192 {truncated}")
 
-    # ONE session — build + certify + fix
-    text, cost, result_msg = await run_agent_query(
-        prompt, options,
-        on_text=_on_text,
-        on_tool=_on_tool,
-        on_tool_result=_on_tool_result,
+    build_text, build_cost, _ = await run_agent_query(
+        build_prompt, options,
+        on_text=_on_text, on_tool=_on_tool, on_tool_result=_on_tool_result,
     )
     _commit_artifacts(project_dir)
 
-    # Save agent log
-    _elapsed_total = round(time.monotonic() - _agent_start, 1)
-    agent_log_lines.append(f"[{_elapsed_total:6.1f}s] SESSION END  cost=${cost:.2f}")
+    _build_elapsed = round(time.monotonic() - _build_start, 1)
+    build_log_lines.append(f"[{_build_elapsed:6.1f}s] BUILD END  cost=${build_cost:.2f}")
     try:
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
-        agent_log_path.write_text(f"<!-- generated: {ts} -->\n" + "\n".join(agent_log_lines))
+        build_log_path.write_text(f"<!-- generated: {ts} -->\n" + "\n".join(build_log_lines))
     except OSError:
         pass
+    logger.info("Build phase done: %.1fs, $%.2f", _build_elapsed, build_cost)
 
-    # Parse verdict from agent output
-    import re as _re
-    stories_tested = 0
-    stories_passed = 0
-    story_results: list[dict] = []
-    findings: list[Finding] = []
-    verdict_pass = False
+    # ── Session 2: Certify (blind to build) ──
+    report = await run_agentic_certifier(
+        intent=intent,
+        project_dir=project_dir,
+        config=config,
+    )
 
-    if text:
-        for line in text.split("\n"):
-            stripped = line.strip()
-            if stripped.startswith("STORIES_TESTED:"):
-                try: stories_tested = int(stripped.split(":", 1)[1].strip())
-                except ValueError: pass
-            elif stripped.startswith("STORIES_PASSED:"):
-                try: stories_passed = int(stripped.split(":", 1)[1].strip())
-                except ValueError: pass
-            elif stripped.startswith("STORY_RESULT:"):
-                parts = stripped[len("STORY_RESULT:"):].strip().split("|")
-                if len(parts) >= 2:
-                    sid = parts[0].strip()
-                    passed = "PASS" in parts[1].upper()
-                    summary = parts[2].strip() if len(parts) > 2 else ""
-                    story_results.append({"story_id": sid, "passed": passed, "summary": summary})
-                    if not passed:
-                        findings.append(Finding(tier=4, severity="critical", category="journey",
-                                                description=f"Story failed: {sid}", diagnosis=summary, story_id=sid))
-            elif stripped.startswith("VERDICT:"):
-                verdict_pass = "PASS" in stripped.upper()
+    passed = report.outcome == CertificationOutcome.PASSED
+    total_cost = float(build_cost or 0) + report.cost_usd
 
-    has_failures = any(not s["passed"] for s in story_results)
-    if verdict_pass and not has_failures:
-        outcome = CertificationOutcome.PASSED
-    else:
-        outcome = CertificationOutcome.FAILED
-
-    # Write PoW report
-    try:
-        report_dir = project_dir / "otto_logs" / "certifier"
-        report_dir.mkdir(parents=True, exist_ok=True)
-        import json as _json
-        pow_data = {
-            "generated": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "outcome": outcome.value,
-            "duration_s": _elapsed_total,
-            "cost_usd": float(cost or 0),
-            "stories": story_results,
-        }
-        (report_dir / "proof-of-work.json").write_text(_json.dumps(pow_data, indent=2, default=str))
-        md_lines = [
-            "# Proof-of-Work Certification Report (Monolithic Agentic)",
-            "",
-            f"> **Generated:** {time.strftime('%Y-%m-%d %H:%M:%S')}",
-            f"> **Outcome:** {outcome.value}",
-            f"> **Duration:** {_elapsed_total:.0f}s",
-            f"> **Cost:** ${float(cost or 0):.2f}",
-            f"> **Stories:** {stories_passed}/{stories_tested}",
-            "",
-        ]
-        for s in story_results:
-            status = "PASS" if s["passed"] else "FAIL"
-            md_lines.append(f"- **{status}** {s['story_id']}: {s.get('summary', '')}")
-        (report_dir / "proof-of-work.md").write_text("\n".join(md_lines))
-    except Exception as exc:
-        logger.warning("Failed to write PoW: %s", exc)
-
-    logger.info("Monolithic agentic done: %s, %d/%d stories, %.1fs, $%.3f",
-                outcome.value, stories_passed, stories_tested, _elapsed_total, float(cost or 0))
-
-    # Build journeys list for _print_build_result display
-    journeys = [
-        {"name": s["summary"], "passed": s["passed"], "story_id": s["story_id"]}
-        for s in story_results
-    ]
-    break_findings = [
-        {"severity": "critical", "description": s["summary"], "story_id": s["story_id"]}
-        for s in story_results if not s["passed"]
-    ]
+    # Build journeys for CLI display
+    journeys = []
+    break_findings_list = []
+    for f in report.findings:
+        journeys.append({"name": f.description, "passed": f.severity == "note", "story_id": getattr(f, "story_id", "")})
+    if hasattr(report, 'tiers') and report.tiers:
+        tier4 = next((t for t in report.tiers if t.tier == 4), None)
+        if tier4 and hasattr(tier4, '_cert_result'):
+            for r in tier4._cert_result.results:
+                journeys.append({"name": r.story_title or r.story_id, "passed": r.passed})
 
     return BuildResult(
-        passed=outcome == CertificationOutcome.PASSED,
+        passed=passed,
         build_id=build_id,
         rounds=1,
-        total_cost=float(cost or 0),
+        total_cost=total_cost,
         journeys=journeys,
-        break_findings=break_findings,
+        break_findings=break_findings_list,
     )
 
 
