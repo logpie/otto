@@ -660,7 +660,7 @@ async def verify_all_stories(
                     story_dir.mkdir(parents=True, exist_ok=True)
                     try:
                         return await _run_story_in_subprocess(
-                            story, project_dir, config, story_dir, manifest.interaction)
+                            story, project_dir, config, story_dir, manifest.interaction, manifest)
                     except Exception as exc:
                         logger.exception("Subprocess failed for %s", story.id)
                         return JourneyResult(
@@ -1453,6 +1453,7 @@ async def _run_story_in_subprocess(
     config: dict[str, Any],
     story_dir: Path,
     interaction: str,
+    manifest: Any = None,
 ) -> JourneyResult:
     """Run a single story verification in an isolated subprocess.
 
@@ -1478,6 +1479,13 @@ async def _run_story_in_subprocess(
         "worker_dir": str(worker_dir),
         "interaction": interaction,
         "config": config,
+        # Pass parent discovery so workers don't re-run the LLM agent
+        "discovery": {
+            "product_type": getattr(manifest, "product_type", ""),
+            "interaction": interaction,
+            "cli_entrypoint": getattr(manifest, "cli_entrypoint", []),
+            "test_approach": getattr(manifest, "cli_help_text", ""),
+        },
     })
 
     stderr_fh = open(stderr_path, "w", buffering=1)
@@ -1586,33 +1594,61 @@ def _worker_main(input_path: Path, output_path: Path) -> None:
 
         _os.chdir(worker_dir)
 
-        # ── Project discovery: LLM agent classifies + starts ──
+        # ── Use parent discovery results (avoid re-running LLM per worker) ──
         profile = classify(worker_dir)
-        discovery = discover_project(
-            worker_dir, config, hint_profile=profile)
+        parent_discovery = payload.get("discovery", {})
+        interaction = interaction or parent_discovery.get("interaction") or profile.interaction
 
-        interaction = interaction or discovery.interaction or profile.interaction
-        base_url = discovery.base_url
-        test_config = analyze_project(worker_dir)
-        manifest = build_manifest(
-            test_config, profile,
-            base_url=base_url or None,
-            interaction=interaction,
-        )
+        # For HTTP/browser: each worker starts its own app (port isolation)
+        # For CLI/library: no app needed, just build manifest
+        if interaction in ("http", "browser"):
+            runner = AppRunner(worker_dir, profile)
+            start_timeout = int(config.get("certifier_app_start_timeout", 90))
+            evidence = runner.start(timeout=start_timeout)
 
-        # Enrich manifest from discovery
-        if discovery.cli_entrypoint:
-            manifest.cli_entrypoint = discovery.cli_entrypoint
-        if discovery.test_approach:
-            manifest.cli_help_text = discovery.test_approach  # reuse field for context
+            if runner.process:
+                try:
+                    (story_dir / "app.pid").write_text(
+                        str(_os.getpgid(runner.process.pid)))
+                except (ProcessLookupError, OSError):
+                    pass
 
-        # Write app PID for orphan cleanup if discovery started a server
-        if discovery.app_started and runner is None:
-            # Discovery started the app — we don't have a runner PID.
-            # The agent's background process will be cleaned up on worker exit.
-            pass
+            if not evidence.passed:
+                # LLM recovery: let an agent figure out startup
+                recovery = discover_project(
+                    worker_dir, config, hint_profile=profile,
+                    startup_error=str(evidence.actual))
+                if recovery.app_started and recovery.base_url:
+                    base_url = recovery.base_url
+                else:
+                    result_dict = {
+                        "story_id": story_id, "story_title": story.title,
+                        "persona": story.persona, "passed": False,
+                        "diagnosis": f"App failed to start: {evidence.actual}\n"
+                                     f"Recovery: {recovery.diagnosis}",
+                        "steps": [], "break_findings": [],
+                        "cost_usd": recovery.cost, "duration_s": 0.0,
+                    }
+                    base_url = ""
+            else:
+                base_url = runner.base_url
+        else:
+            # CLI/library/websocket: no server to start per-worker
+            base_url = ""
 
         if result_dict is None:
+            test_config = analyze_project(worker_dir)
+            manifest = build_manifest(
+                test_config, profile,
+                base_url=base_url or None,
+                interaction=interaction,
+            )
+            # Enrich from parent discovery
+            if parent_discovery.get("cli_entrypoint"):
+                manifest.cli_entrypoint = parent_discovery["cli_entrypoint"]
+            if parent_discovery.get("test_approach"):
+                manifest.cli_help_text = parent_discovery["test_approach"]
+
             loop = asyncio.new_event_loop()
             try:
                 result = loop.run_until_complete(

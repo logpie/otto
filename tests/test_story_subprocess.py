@@ -509,12 +509,12 @@ def test_worker_main_writes_error_on_bad_input(tmp_path):
     assert "Worker crashed" in result["diagnosis"]
 
 
-def test_worker_main_uses_discovery_agent(tmp_path):
-    """Workers use discover_project() to classify and start the project."""
+def test_worker_main_uses_parent_discovery(tmp_path):
+    """Workers use parent discovery from payload, not re-running LLM."""
     from types import SimpleNamespace
 
     from otto.certifier.classifier import ProductProfile
-    from otto.certifier.journey_agent import _worker_main, ProjectDiscovery
+    from otto.certifier.journey_agent import _worker_main
 
     story = UserStory(
         id="cli-story", persona="user", title="CLI Story", narrative="test",
@@ -529,22 +529,19 @@ def test_worker_main_uses_discovery_agent(tmp_path):
         "worker_dir": str(worker_dir),
         "interaction": "cli",
         "config": {},
+        "discovery": {
+            "product_type": "cli",
+            "interaction": "cli",
+            "cli_entrypoint": ["python3", "notes.py"],
+            "test_approach": "Run CLI commands and check stdout",
+        },
     }))
 
     captured: dict[str, str] = {}
 
-    def fake_discover(project_dir, config, hint_profile=None):
-        captured["discovered"] = "yes"
-        return ProjectDiscovery(
-            product_type="cli",
-            interaction="cli",
-            cli_entrypoint=["python3", "notes.py"],
-            test_approach="Run CLI commands and check stdout",
-            app_started=False,
-        )
-
     async def fake_verify_story(story, manifest, base_url, project_dir, config):
         captured["base_url"] = base_url
+        captured["cli_entrypoint"] = str(getattr(manifest, "cli_entrypoint", []))
         return JourneyResult(
             story_id=story.id,
             story_title=story.title,
@@ -555,8 +552,7 @@ def test_worker_main_uses_discovery_agent(tmp_path):
     with patch("otto.certifier.classifier.classify", return_value=ProductProfile(
         product_type="unknown", framework="unknown", language="python",
         start_command="", port=None, test_command="pytest", interaction="unknown",
-    )), patch("otto.certifier.journey_agent.discover_project", side_effect=fake_discover), \
-         patch("otto.certifier.adapter.analyze_project", return_value=SimpleNamespace(
+    )), patch("otto.certifier.adapter.analyze_project", return_value=SimpleNamespace(
             auth_type="none", register_endpoint="", login_endpoint="",
             seeded_users=[], routes=[], models=[], model_fields={},
             creatable_fields={}, enum_values={}, cli_entrypoints=[], cli_commands=[],
@@ -564,8 +560,8 @@ def test_worker_main_uses_discovery_agent(tmp_path):
          patch("otto.certifier.journey_agent.verify_story", side_effect=fake_verify_story):
         _worker_main(input_path, output_path)
 
-    assert captured["discovered"] == "yes"
     assert captured["base_url"] == ""  # CLI has no base_url
+    assert "python3" in captured["cli_entrypoint"]  # parent discovery entrypoint passed through
     result = json.loads(output_path.read_text())
     assert result["passed"] is True
 
@@ -667,7 +663,7 @@ async def test_verify_all_stories_parallel_builds_once_and_clears_marker(tmp_pat
         calls.append("build")
         AppRunner.build_marker_path(project_dir).write_text(json.dumps({"framework": "nextjs", "artifacts": [".next"]}))
 
-    async def fake_run_story(story, project_dir, config, story_dir, interaction):
+    async def fake_run_story(story, project_dir, config, story_dir, interaction, manifest=None):
         calls.append(f"story:{story.id}")
         assert interaction == "cli"
         return JourneyResult(
