@@ -100,6 +100,8 @@ STORY_COMPILER_PROMPT = """\
 Design user stories that test this product end-to-end as real users would use it.
 
 Intent: {intent}
+Product type: {product_type}
+Interaction: {interaction}
 
 REQUIRED STORIES (generate ALL that apply):
 1. **First Experience**: New user registers, uses core feature, verifies it worked.
@@ -109,6 +111,15 @@ REQUIRED STORIES (generate ALL that apply):
 5. **Access Control**: Unauthenticated request to protected features → rejected.
 6. **Search/Filter** (if applicable): Create items with different attributes, filter, verify.
 7. **Edge Cases**: Empty inputs, long strings, special characters in realistic flows.
+
+FOR CLI TOOLS, adapt stories to command-line interactions:
+- "First Experience" = run the tool, see help, perform basic operation via commands
+- "Feature Lifecycle" = add → list → modify → delete via CLI subcommands
+- "Data Isolation" is about file/state isolation between invocations
+- "Persistence" = run command, exit, run again, verify state persists in storage
+- "Access Control" may not apply — skip if not relevant
+- "Edge Cases" = empty args, missing required args, very long input, special chars
+- Steps describe CLI commands and expected output, NOT HTTP requests
 
 RULES:
 - Steps describe WHAT to do and verify, in plain English. No HTTP methods or paths.
@@ -159,11 +170,18 @@ Output JSON only:
 async def compile_stories(
     intent: str,
     config: dict[str, Any] | None = None,
+    *,
+    product_type: str = "unknown",
+    interaction: str = "unknown",
 ) -> StorySet:
     """Compile user stories from intent. One LLM call."""
     config = config or {}
 
-    prompt = STORY_COMPILER_PROMPT.format(intent=intent)
+    prompt = STORY_COMPILER_PROMPT.format(
+        intent=intent,
+        product_type=product_type,
+        interaction=interaction,
+    )
 
     options = ClaudeAgentOptions(
         permission_mode="bypassPermissions",
@@ -273,8 +291,14 @@ def _parse_stories(raw: str, intent: str) -> StorySet:
 # --- Caching ---
 
 
-def story_cache_path(project_dir: Path, intent: str) -> Path:
-    digest = hashlib.sha256(intent.encode("utf-8")).hexdigest()[:16]
+def story_cache_path(
+    project_dir: Path,
+    intent: str,
+    product_type: str = "",
+    interaction: str = "",
+) -> Path:
+    key = f"{intent}|{product_type}|{interaction}"
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
     cache_dir = project_dir / "otto_logs" / "certifier"
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir / f"stories-{digest}.json"
@@ -313,16 +337,23 @@ def load_or_compile_stories(
     project_dir: Path,
     intent: str,
     config: dict[str, Any] | None = None,
+    *,
+    product_type: str = "",
+    interaction: str = "",
 ) -> tuple[StorySet, str, Path, float]:
     """Return cached stories when available, otherwise compile."""
     import asyncio
 
-    cache = story_cache_path(project_dir, intent)
+    cache = story_cache_path(project_dir, intent, product_type, interaction)
     if cache.exists():
         return load_stories(cache), "cache", cache, 0.0
 
     started_at = time.monotonic()
-    story_set = asyncio.run(compile_stories(intent, config=config))
+    story_set = asyncio.run(compile_stories(
+        intent, config=config,
+        product_type=product_type or "unknown",
+        interaction=interaction or "unknown",
+    ))
     duration = round(time.monotonic() - started_at, 1)
     save_stories(story_set, cache)
     return story_set, "compiled", cache, duration

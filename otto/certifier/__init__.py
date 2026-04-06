@@ -388,7 +388,7 @@ def run_unified_certifier(
     from otto.certifier.adapter import analyze_project
     from otto.certifier.baseline import AppRunner
     from otto.certifier.classifier import classify
-    from otto.certifier.manifest import build_manifest
+    from otto.certifier.manifest import ProductManifest, build_manifest
     from otto.certifier.report import (
         CertificationOutcome,
         CertificationReport,
@@ -396,7 +396,7 @@ def run_unified_certifier(
         TierResult,
         TierStatus,
     )
-    from otto.certifier.tiers import run_tier1_structural, run_tier2_probes
+    from otto.certifier.tiers import run_tier1_structural, run_tier2_probes, run_tier2_cli_probes
 
     config = dict(config or {})
     start_time = time.monotonic()
@@ -405,76 +405,114 @@ def run_unified_certifier(
     total_cost = 0.0
     infra_error = False
 
-    # Classify and analyze
+    # ── Project Discovery ──
+    # LLM agent reads the project and figures out: what it is, how to start it,
+    # and how to test it. Heuristic classifier provides hints.
+    from otto.certifier.journey_agent import discover_project
+
     profile = classify(project_dir)
     effective_port = port_override or config.get("port_override")
     if effective_port is not None:
         profile.port = int(effective_port)
         profile.extra["reuse_existing_app"] = True
 
-    interaction = config.get("certifier_interaction") or profile.interaction or "http"
     test_config = analyze_project(project_dir)
     test_command = config.get("test_command")
 
-    # For non-HTTP products, we can't run probes or HTTP journeys
-    # Phase 1: only HTTP executor is implemented
-    if interaction not in ("http", "browser"):
-        total_duration = round(time.monotonic() - start_time, 1)
-        report = CertificationReport(
-            product_type=profile.product_type or "unknown",
-            interaction=interaction,
-            outcome=CertificationOutcome.BLOCKED,
-            cost_usd=0.0,
-            duration_s=total_duration,
-        )
-        report.tiers.append(TierResult(
-            tier=1, name="structural", status=TierStatus.SKIPPED,
-            skip_reason=f"Interaction type '{interaction}' not yet supported (Phase 1 = HTTP only)",
-        ))
-        return report
+    # Run discovery agent — classifies, installs deps, starts the app
+    discovery = discover_project(
+        project_dir, config, hint_profile=profile)
+    total_cost += discovery.cost
 
-    # Create AppRunner for web apps
-    runner = AppRunner(project_dir, profile)
+    interaction = config.get("certifier_interaction") or discovery.interaction or profile.interaction or "http"
+    is_cli = interaction == "cli"
+    is_http = interaction in ("http", "browser")
+    is_library = interaction == "import"
+
+    # Update profile from discovery
+    if discovery.product_type != "unknown":
+        profile.product_type = discovery.product_type
+        profile.interaction = discovery.interaction
+
+    # AppRunner only needed if discovery didn't already start the app
+    runner = None
+    if is_http and not discovery.app_started:
+        runner = AppRunner(project_dir, profile)
 
     try:
+
         # ── Tier 1: Structural ──
         tier1 = run_tier1_structural(
             project_dir, profile,
             test_command=test_command,
-            app_runner=runner,
+            app_runner=runner,  # None when discovery already started app or CLI
         )
         tiers.append(tier1)
         all_findings.extend(tier1.findings)
         logger.info("Tier 1 (structural): %s, %.1fs", tier1.status.value, tier1.duration_s)
 
         # ── Tier 2: Probes ──
-        app_started = getattr(tier1, "_app_started", False)
+        # App is "started" if discovery started it OR AppRunner started it
+        app_started = discovery.app_started or getattr(tier1, "_app_started", False)
+        base_url = discovery.base_url or (runner.base_url if runner else "")
+        app_not_needed = is_cli or is_library
         manifest = None
-        if app_started:
+
+        if is_cli:
             try:
-                manifest = build_manifest(test_config, profile, runner.base_url)
+                manifest = build_manifest(test_config, profile, base_url=None, interaction=interaction)
+                if discovery.cli_entrypoint:
+                    manifest.cli_entrypoint = discovery.cli_entrypoint
+            except Exception as exc:
+                logger.exception("CLI manifest build failed")
+                tier2 = _blocked_tier_result(
+                    tier=2, name="probes",
+                    blocked_by="certifier:manifest_build",
+                    description="CLI manifest build failed",
+                    diagnosis=str(exc),
+                )
+            else:
+                tier2 = run_tier2_cli_probes(project_dir, manifest, profile)
+        elif app_started and base_url:
+            try:
+                manifest = build_manifest(test_config, profile, base_url, interaction=interaction)
             except Exception as exc:
                 logger.exception("Tier 2/4 manifest build failed")
                 tier2 = _blocked_tier_result(
-                    tier=2,
-                    name="probes",
+                    tier=2, name="probes",
                     blocked_by="certifier:manifest_build",
                     description="Certifier manifest build failed",
                     diagnosis=str(exc),
                 )
             else:
-                tier2 = run_tier2_probes(project_dir, manifest, runner.base_url, tier1)
+                tier2 = run_tier2_probes(project_dir, manifest, base_url, tier1)
+        elif app_not_needed:
+            # Library/non-server: build manifest without probes
+            try:
+                manifest = build_manifest(test_config, profile, base_url=None, interaction=interaction)
+            except Exception as exc:
+                logger.exception("Manifest build failed")
+                tier2 = _blocked_tier_result(
+                    tier=2, name="probes",
+                    blocked_by="certifier:manifest_build",
+                    description="Manifest build failed",
+                    diagnosis=str(exc),
+                )
+            else:
+                tier2 = TierResult(
+                    tier=2, name="probes", status=TierStatus.SKIPPED,
+                    skip_reason=f"No probes for {interaction} products",
+                )
         else:
             tier2 = TierResult(
                 tier=2, name="probes", status=TierStatus.BLOCKED,
-                blocked_by="tier_1:app_start",
+                blocked_by="discovery:app_start",
             )
         tiers.append(tier2)
         all_findings.extend(tier2.findings)
         logger.info("Tier 2 (probes): %s, %.1fs", tier2.status.value, tier2.duration_s)
 
         # ── Tier 3: Regression (graduated tests from prior runs) ──
-        # Phase 2 — not yet implemented, skip for now
         tier3 = TierResult(
             tier=3, name="regression", status=TierStatus.SKIPPED,
             skip_reason="Regression tests not yet implemented (Phase 2)",
@@ -482,37 +520,50 @@ def run_unified_certifier(
         tiers.append(tier3)
 
         # ── Tier 4: Journeys (agentic story verification) ──
-        if not app_started:
-            tier4 = TierResult(
-                tier=4, name="journeys", status=TierStatus.BLOCKED,
-                blocked_by="tier_1:app_start",
-            )
-        elif manifest is None:
-            tier4 = _blocked_tier_result(
-                tier=4,
-                name="journeys",
-                blocked_by="certifier:manifest_build",
-                description="Journey verification blocked by manifest build failure",
-            )
-        else:
-            # When running parallel stories (default), each worker subprocess
-            # starts its own app instance. Stop the parent app first to free
-            # the port and avoid conflicts.
+        # Never block Tier 4. The journey agent has Bash access and can
+        # figure out startup, deps, and testing approach for ANY product.
+        # Build a minimal manifest if we don't have one.
+        if manifest is None:
+            try:
+                manifest = build_manifest(test_config, profile, base_url=base_url or None, interaction=interaction)
+            except Exception:
+                # Minimal manifest — agent will discover the rest
+                manifest = ProductManifest(
+                    framework=getattr(profile, "framework", "unknown"),
+                    language=getattr(profile, "language", "unknown"),
+                    product_type=discovery.product_type or getattr(profile, "product_type", "unknown"),
+                    interaction=interaction,
+                    auth_type="unknown",
+                    register_endpoint="",
+                    login_endpoint="",
+                    seeded_users=[],
+                    routes=[],
+                    models=[],
+                    base_url=base_url,
+                    cli_entrypoint=discovery.cli_entrypoint,
+                )
+        if discovery.cli_entrypoint and not manifest.cli_entrypoint:
+            manifest.cli_entrypoint = discovery.cli_entrypoint
+        if discovery.test_approach:
+            manifest.cli_help_text = discovery.test_approach
+
+        # For HTTP with parallel stories, stop parent app to free port.
+        if is_http and runner is not None:
             parallel = int(config.get("certifier_parallel_stories", 3))
             if parallel > 1:
                 try:
                     runner.stop()
                 except Exception:
                     pass
-            tier4 = _run_tier4_journeys(
-                intent=intent,
-                project_dir=project_dir,
-                config=config,
-                runner=runner,
-                manifest=manifest,
-                stories_path=stories_path,
-                skip_story_ids=skip_story_ids,
-            )
+        tier4 = _run_tier4_journeys(
+            intent=intent,
+            project_dir=project_dir,
+            config=config,
+            runner=runner,
+            manifest=manifest,
+            stories_path=stories_path,
+            skip_story_ids=skip_story_ids,
+        )
         tiers.append(tier4)
         all_findings.extend(tier4.findings)
         total_cost += tier4.cost_usd
@@ -531,10 +582,11 @@ def run_unified_certifier(
         tiers.append(blocked)
         all_findings.extend(blocked.findings)
     finally:
-        try:
-            runner.stop()
-        except Exception:
-            pass
+        if runner is not None:
+            try:
+                runner.stop()
+            except Exception:
+                pass
 
     # Determine outcome
     total_duration = round(time.monotonic() - start_time, 1)
@@ -664,6 +716,8 @@ def _run_tier4_journeys(
         else:
             story_set, _, _, _ = load_or_compile_stories(
                 project_dir, intent, config=config,
+                product_type=getattr(manifest, "product_type", "") if manifest else "",
+                interaction=getattr(manifest, "interaction", "") if manifest else "",
             )
             compile_cost = story_set.cost_usd
     except Exception as exc:
@@ -702,11 +756,12 @@ def _run_tier4_journeys(
     # works in main thread" when called from a thread (e.g. via run_in_executor
     # in verification.py's PER fix loop).
     ensure_alive = getattr(runner, "ensure_alive", None)
+    base_url = runner.base_url if runner is not None else ""
     loop = asyncio.new_event_loop()
     try:
         cert_result = loop.run_until_complete(
             verify_all_stories(
-                stories_to_test, manifest, runner.base_url, project_dir, config,
+                stories_to_test, manifest, base_url, project_dir, config,
                 on_between_stories=ensure_alive,
             )
         )

@@ -32,6 +32,7 @@ from otto.agent import (
     ToolUseBlock,
     _subprocess_env,
     query,
+    run_agent_query,
 )
 from otto.certifier.manifest import ProductManifest, format_manifest_for_agent
 from otto.certifier.stories import UserStory
@@ -198,16 +199,20 @@ You are a QA tester verifying a product works for a real user scenario.
 Execute each step using the product manifest for routes, fields, and auth.
 
 RULES:
-1. Make REAL HTTP requests via Bash (curl). Never simulate or assume responses.
-2. Verify outcomes by checking response data — not just status codes. Check that
-   values, structure, and user context are correct.
+1. Test the product by ACTUALLY USING it. For HTTP/API products, make real
+   requests via curl. For CLI tools, run actual CLI commands via Bash.
+   Never simulate or assume responses.
+2. Verify outcomes by checking response data, stdout output, or exit codes.
+   Check that values, structure, and user context are correct.
 3. Carry state between steps. If step 1 returns an ID or token, use it in later steps.
 4. If a step fails, DIAGNOSE the root cause: missing endpoint? wrong fields? auth
-   issue? server error? Be specific so a developer can fix it.
+   issue? server error? Bad exit code? Be specific so a developer can fix it.
 5. Continue testing even if a step fails — cover as much as possible.
 6. For each failure, suggest a concrete fix (what code change would resolve it).
 7. Do NOT use WebFetch for localhost URLs — it cannot reach them. Use curl via Bash.
-8. Be efficient. One curl per verification, check the result, move on.
+8. Be efficient. One command per verification, check the result, move on.
+9. For CLI tools: run commands, check stdout/stderr and exit codes. State persists
+   in the filesystem between commands. Verify data persistence by running follow-up commands.
 
 VERDICT FORMAT — when you finish testing, end with these exact markers:
 
@@ -274,12 +279,13 @@ The screenshots and video are evidence for the proof-of-work report.
 Verify the UI reflects the API state (created items appear, deleted items gone).
 """
 
+    base_url_line = f"\nBase URL: {base_url}" if base_url else ""
+
     return f"""\
 {story.title} — {story.persona}
 {story.narrative}
 
-{manifest_text}
-Base URL: {base_url}
+{manifest_text}{base_url_line}
 
 STEPS:
 {steps_text}
@@ -305,19 +311,20 @@ async def verify_story(
     log_dir = project_dir / "otto_logs" / "certifier"
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    # Health check: verify app is still alive before each story
-    try:
-        r = _requests.get(base_url, timeout=5)
-        if r.status_code >= 500:
+    # Health check: verify app is still alive before each story (HTTP only)
+    if base_url:
+        try:
+            r = _requests.get(base_url, timeout=5)
+            if r.status_code >= 500:
+                return JourneyResult(
+                    story_id=story.id, story_title=story.title, persona=story.persona,
+                    passed=False, diagnosis=f"App health check failed: HTTP {r.status_code}",
+                )
+        except Exception as exc:
             return JourneyResult(
                 story_id=story.id, story_title=story.title, persona=story.persona,
-                passed=False, diagnosis=f"App health check failed: HTTP {r.status_code}",
+                passed=False, diagnosis=f"App not responding: {exc}",
             )
-    except Exception as exc:
-        return JourneyResult(
-            story_id=story.id, story_title=story.title, persona=story.persona,
-            passed=False, diagnosis=f"App not responding: {exc}",
-        )
 
     # Verdict file for the agent to write to
     verdict_file = log_dir / f"journey-{story.id}-verdict.json"
@@ -653,7 +660,7 @@ async def verify_all_stories(
                     story_dir.mkdir(parents=True, exist_ok=True)
                     try:
                         return await _run_story_in_subprocess(
-                            story, project_dir, config, story_dir)
+                            story, project_dir, config, story_dir, manifest.interaction)
                     except Exception as exc:
                         logger.exception("Subprocess failed for %s", story.id)
                         return JourneyResult(
@@ -805,17 +812,537 @@ def _create_worker_copy(project_dir: Path, worker_id: str) -> Path:
 
 
 def _ensure_deps_installed(project_dir: Path) -> None:
-    """Ensure node_modules exists in the original project (for symlink sharing).
+    """Ensure dependencies are installed in the original project.
 
-    Python .venv is created per-worker by AppRunner (absolute paths break in copies).
+    Node: installs node_modules (for symlink sharing with workers).
+    Python: creates .venv + installs requirements (workers create their own).
+    Prisma: generates client + pushes schema if needed (capability-based).
     """
-    import subprocess as _sp
-
+    # Node
     pkg_json = project_dir / "package.json"
     node_modules = project_dir / "node_modules"
     if pkg_json.exists() and not node_modules.exists():
-        _sp.run(["npm", "install", "--no-audit", "--no-fund"],
-                cwd=str(project_dir), capture_output=True, timeout=120)
+        try:
+            _run_bootstrap_command(
+                ["npm", "install", "--no-audit", "--no-fund"],
+                project_dir,
+                timeout=120,
+                label="npm install",
+            )
+        except FileNotFoundError:
+            logger.warning("npm not found while installing Node deps in %s", project_dir)
+
+    # Python
+    req = project_dir / "requirements.txt"
+    pyproject = project_dir / "pyproject.toml"
+    venv_dir = project_dir / ".venv"
+    if (req.exists() or pyproject.exists()) and not venv_dir.exists():
+        if _create_python_venv(venv_dir, project_dir):
+            _install_python_deps(project_dir, venv_dir / "bin" / "python", req, pyproject)
+
+    # Prisma (capability-based — if schema exists, regardless of product type)
+    _ensure_prisma_if_needed(project_dir)
+
+
+def _ensure_prisma_if_needed(project_dir: Path) -> None:
+    """Run prisma generate + db push if a schema exists and no database yet."""
+    import subprocess as _sp
+
+    schema = project_dir / "prisma" / "schema.prisma"
+    if not schema.exists():
+        return
+
+    node_modules = project_dir / "node_modules"
+    if not node_modules.exists():
+        return
+
+    shared_node_modules = node_modules.is_symlink()
+    generated_client = node_modules / ".prisma" / "client" / "index.js"
+    npx = str(node_modules / ".bin" / "prisma")
+    if not Path(npx).exists():
+        npx = "npx prisma"
+
+    if shared_node_modules and generated_client.exists():
+        logger.info(
+            "Skipping prisma generate in %s because shared node_modules already has generated client",
+            project_dir,
+        )
+    else:
+        result = _sp.run(
+            f"{npx} generate",
+            shell=True,
+            cwd=str(project_dir),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if result.returncode != 0:
+            logger.warning(
+                "prisma generate failed in %s with exit code %s%s",
+                project_dir,
+                result.returncode,
+                _bootstrap_failure_detail(result),
+            )
+
+    # Only push if no database file exists yet
+    has_db = any(project_dir.glob("*.db")) or any(project_dir.glob("prisma/*.db"))
+    if not has_db:
+        result = _sp.run(
+            f"{npx} db push --accept-data-loss",
+            shell=True,
+            cwd=str(project_dir),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if result.returncode != 0:
+            logger.warning(
+                "prisma db push failed in %s with exit code %s%s",
+                project_dir,
+                result.returncode,
+                _bootstrap_failure_detail(result),
+            )
+
+
+def _setup_worker_python_venv(worker_dir: Path) -> None:
+    """Create a fresh Python .venv in the worker copy and install deps."""
+    venv_dir = worker_dir / ".venv"
+    if venv_dir.exists():
+        return
+
+    req = worker_dir / "requirements.txt"
+    pyproject = worker_dir / "pyproject.toml"
+    if not req.exists() and not pyproject.exists():
+        return
+
+    if _create_python_venv(venv_dir, worker_dir):
+        _install_python_deps(worker_dir, venv_dir / "bin" / "python", req, pyproject)
+
+
+def _activate_worker_venv(worker_dir: Path) -> None:
+    """Prepend worker's .venv/bin to PATH so all python calls use it."""
+    import os as _os
+    venv_bin = worker_dir / ".venv" / "bin"
+    if venv_bin.exists():
+        _os.environ["PATH"] = str(venv_bin) + ":" + _os.environ.get("PATH", "")
+        _os.environ["VIRTUAL_ENV"] = str(worker_dir / ".venv")
+
+
+def _isolate_worker_cli_home(worker_dir: Path) -> None:
+    """Route CLI HOME/XDG writes into the disposable worker directory."""
+    import os as _os
+
+    home_dir = worker_dir / ".otto-worker-home"
+    xdg_config_home = home_dir / "xdg-config"
+    xdg_data_home = home_dir / "xdg-data"
+    xdg_cache_home = home_dir / "xdg-cache"
+    for path in (home_dir, xdg_config_home, xdg_data_home, xdg_cache_home):
+        path.mkdir(parents=True, exist_ok=True)
+
+    _os.environ["HOME"] = str(home_dir)
+    _os.environ["XDG_CONFIG_HOME"] = str(xdg_config_home)
+    _os.environ["XDG_DATA_HOME"] = str(xdg_data_home)
+    _os.environ["XDG_CACHE_HOME"] = str(xdg_cache_home)
+
+
+def _resolve_worker_cli_entrypoint(
+    worker_dir: Path,
+    profile: Any,
+    default_entrypoint: list[str],
+) -> list[str]:
+    """Resolve CLI entrypoint for a worker, preferring built binaries."""
+    from otto.certifier.baseline import AppRunner
+
+    # Check build marker for pre-built binary
+    build_meta = AppRunner.load_build_metadata(worker_dir)
+    if build_meta:
+        # Cargo: use binary from symlinked target/
+        binary_path = build_meta.get("binary_path")
+        if binary_path:
+            candidate = worker_dir / binary_path
+            if candidate.exists():
+                return [str(candidate)]
+
+        # Go: use binary by stored name
+        binary_name = build_meta.get("binary_name")
+        if binary_name:
+            candidate = worker_dir / binary_name
+            if candidate.exists():
+                return [str(candidate)]
+
+    return default_entrypoint if default_entrypoint else ["python3", "main.py"]
+
+
+def _capture_cli_help(manifest: Any, project_dir: Path) -> None:
+    """Run --help to populate manifest.cli_help_text."""
+    import subprocess as _sp
+
+    entrypoint = getattr(manifest, "cli_entrypoint", [])
+    if not entrypoint:
+        return
+
+    try:
+        result = _sp.run(
+            entrypoint + ["--help"],
+            cwd=str(project_dir), capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0 and result.stdout:
+            manifest.cli_help_text = result.stdout[:5000]
+    except Exception:
+        pass
+
+
+def _bootstrap_failure_detail(result: Any) -> str:
+    """Summarize a failed bootstrap subprocess result for logs."""
+    stderr = (getattr(result, "stderr", "") or "").strip()
+    stdout = (getattr(result, "stdout", "") or "").strip()
+    detail = stderr or stdout
+    if not detail:
+        return ""
+    if len(detail) > 200:
+        detail = detail[:200] + "..."
+    return f": {detail}"
+
+
+def _run_bootstrap_command(
+    argv: list[str],
+    project_dir: Path,
+    *,
+    timeout: int,
+    label: str,
+) -> Any | None:
+    """Run a bootstrap command, logging non-zero exits instead of failing silently."""
+    import subprocess as _sp
+
+    try:
+        result = _sp.run(
+            argv,
+            cwd=str(project_dir),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except _sp.TimeoutExpired:
+        logger.warning("%s timed out in %s", label, project_dir)
+        return None
+
+    if result.returncode != 0:
+        logger.warning(
+            "%s failed in %s with exit code %s%s",
+            label,
+            project_dir,
+            result.returncode,
+            _bootstrap_failure_detail(result),
+        )
+    return result
+
+
+def _create_python_venv(venv_dir: Path, project_dir: Path) -> bool:
+    """Create a Python venv, falling back to stdlib venv when uv is unavailable."""
+    import shutil
+    import sys as _sys
+
+    python_bin = venv_dir / "bin" / "python"
+
+    try:
+        _run_bootstrap_command(
+            ["uv", "venv", str(venv_dir)],
+            project_dir,
+            timeout=30,
+            label="uv venv",
+        )
+    except FileNotFoundError:
+        logger.warning(
+            "uv not found while creating Python venv in %s; falling back to python -m venv",
+            project_dir,
+        )
+    else:
+        if python_bin.exists():
+            return True
+        logger.warning(
+            "uv venv did not create %s in %s; falling back to python -m venv",
+            python_bin,
+            project_dir,
+        )
+
+    shutil.rmtree(venv_dir, ignore_errors=True)
+    result = _run_bootstrap_command(
+        [_sys.executable, "-m", "venv", str(venv_dir)],
+        project_dir,
+        timeout=30,
+        label="python -m venv",
+    )
+    return bool(result and result.returncode == 0 and python_bin.exists())
+
+
+def _install_python_deps(project_dir: Path, python_bin: Path, req: Path, pyproject: Path) -> None:
+    """Install Python deps into an existing venv, preferring uv with pip fallback."""
+    install_with_requirements = req.exists()
+
+    fallback_to_pip = False
+    try:
+        if install_with_requirements:
+            result = _run_bootstrap_command(
+                ["uv", "pip", "install", "-r", str(req), "--python", str(python_bin)],
+                project_dir,
+                timeout=120,
+                label="uv pip install -r requirements.txt",
+            )
+        else:
+            result = _run_bootstrap_command(
+                ["uv", "pip", "install", ".", "--python", str(python_bin)],
+                project_dir,
+                timeout=120,
+                label="uv pip install .",
+            )
+    except FileNotFoundError:
+        logger.warning(
+            "uv not found while installing Python deps in %s; falling back to pip",
+            project_dir,
+        )
+        fallback_to_pip = True
+    else:
+        fallback_to_pip = result is None or result.returncode != 0
+        if fallback_to_pip:
+            logger.warning(
+                "uv pip install did not complete successfully in %s; falling back to pip",
+                project_dir,
+            )
+
+    if fallback_to_pip:
+        if install_with_requirements:
+            result = _run_bootstrap_command(
+                [str(python_bin), "-m", "pip", "install", "-r", str(req)],
+                project_dir,
+                timeout=120,
+                label="pip install -r requirements.txt",
+            )
+        else:
+            result = _run_bootstrap_command(
+                [str(python_bin), "-m", "pip", "install", "."],
+                project_dir,
+                timeout=120,
+                label="pip install .",
+            )
+
+    if result is None:
+        logger.warning("Python dependency install did not complete in %s", project_dir)
+
+
+@dataclass
+class ProjectDiscovery:
+    """Result of LLM-assisted project discovery.
+
+    One agent call that figures out: what is this project, how to start it,
+    and how to interact with it. Replaces heuristic classification for all
+    product types.
+    """
+    product_type: str = "unknown"       # web, api, cli, library, websocket
+    interaction: str = "unknown"        # http, browser, cli, import, websocket
+    base_url: str = ""                  # http://localhost:PORT (if server)
+    cli_entrypoint: list[str] = field(default_factory=list)  # ["python3", "tool.py"]
+    test_approach: str = ""             # how to test: curl, cli commands, import, ws client
+    app_started: bool = False           # whether agent started a server
+    diagnosis: str = ""                 # why it failed (if it did)
+    cost: float = 0.0
+
+
+def discover_project(
+    project_dir: Path,
+    config: dict[str, Any],
+    *,
+    hint_profile: Any | None = None,
+    startup_error: str = "",
+) -> ProjectDiscovery:
+    """LLM agent reads the project and figures out everything the certifier needs.
+
+    This is the primary classification + startup path. The heuristic classifier
+    provides hints, but the agent makes the final decision. Handles ANY product
+    type — web apps, CLI tools, libraries, WebSocket servers, data pipelines.
+
+    Args:
+        project_dir: Path to the project
+        config: Certifier config dict
+        hint_profile: Optional heuristic classifier output (for context)
+        startup_error: If a previous startup attempt failed, include the error
+    """
+    import re as _re
+
+    logger.info("Running project discovery agent on %s", project_dir.name)
+
+    # Gather project context
+    readme = ""
+    for name in ("README.md", "readme.md", "README", "README.txt"):
+        p = project_dir / name
+        if p.exists():
+            try:
+                readme = p.read_text()[:3000]
+            except OSError:
+                pass
+            break
+
+    pkg_info = ""
+    for name in ("package.json", "requirements.txt", "pyproject.toml",
+                  "Cargo.toml", "go.mod", "Makefile", "setup.py", "setup.cfg"):
+        p = project_dir / name
+        if p.exists():
+            try:
+                pkg_info += f"\n--- {name} ---\n{p.read_text()[:2000]}\n"
+            except OSError:
+                pass
+
+    # List source files for context
+    files_list = []
+    for ext in ("*.py", "*.js", "*.ts", "*.rs", "*.go"):
+        for f in sorted(project_dir.glob(f"**/{ext}"))[:20]:
+            rel = str(f.relative_to(project_dir))
+            if not any(skip in rel for skip in ["node_modules", ".venv", "target/", "__pycache__"]):
+                files_list.append(rel)
+
+    hint_text = ""
+    if hint_profile:
+        hint_text = f"""
+## Heuristic Classifier Output (may be wrong)
+Product type: {getattr(hint_profile, 'product_type', 'unknown')}
+Interaction: {getattr(hint_profile, 'interaction', 'unknown')}
+Framework: {getattr(hint_profile, 'framework', 'unknown')}
+Start command: {getattr(hint_profile, 'start_command', '')}
+"""
+
+    error_text = ""
+    if startup_error:
+        error_text = f"""
+## Previous Startup Attempt Failed
+{startup_error}
+"""
+
+    prompt = f"""\
+Analyze this project and get it ready for testing.
+
+## Project Files
+{pkg_info}
+
+## Source Files
+{chr(10).join(files_list) if files_list else "(none found)"}
+
+{f"## README{chr(10)}{readme}" if readme else ""}
+{hint_text}{error_text}
+
+## Your Tasks
+
+1. **Read the project** to understand what it is and how it works.
+
+2. **Classify it** — what type of product is this?
+   - `web` = web app with UI (React, Next.js, Django templates)
+   - `api` = HTTP API server (Express, Flask, FastAPI)
+   - `cli` = command-line tool (argparse, click, clap)
+   - `library` = importable library with no server/CLI
+   - `websocket` = WebSocket or real-time server
+
+3. **Install dependencies** if needed (npm install, pip install, etc.)
+
+4. **Start the product** if it's a server (web/api/websocket):
+   - Start it in the background on any available port
+   - Verify it responds (curl for HTTP, or check process is running for WS)
+   - If it's a library or CLI, skip this step
+
+5. **Report results** using these EXACT markers at the end:
+
+PRODUCT_TYPE: <web|api|cli|library|websocket>
+INTERACTION: <http|browser|cli|import|websocket>
+BASE_URL: <http://localhost:PORT or empty>
+CLI_ENTRYPOINT: <command to run it, or empty>
+TEST_APPROACH: <one line: how should a tester interact with this product>
+APP_STARTED: <true|false>
+
+Example for an Express API:
+PRODUCT_TYPE: api
+INTERACTION: http
+BASE_URL: http://localhost:3000
+CLI_ENTRYPOINT:
+TEST_APPROACH: Make HTTP requests with curl to /api endpoints
+APP_STARTED: true
+
+Example for a Python CLI:
+PRODUCT_TYPE: cli
+INTERACTION: cli
+BASE_URL:
+CLI_ENTRYPOINT: python3 notes.py
+TEST_APPROACH: Run CLI commands and check stdout/exit codes
+APP_STARTED: false
+
+Example for a Python library:
+PRODUCT_TYPE: library
+INTERACTION: import
+BASE_URL:
+CLI_ENTRYPOINT:
+TEST_APPROACH: Write and run Python test scripts that import the library
+APP_STARTED: false
+
+Important:
+- Do NOT modify application code. Only install deps and start the app.
+- If it's a server, it must keep running in the background.
+- If you can't figure it out, still report your best guess for the markers.
+"""
+
+    options = ClaudeAgentOptions(
+        permission_mode="bypassPermissions",
+        cwd=str(project_dir),
+        setting_sources=["project"],
+        env=_subprocess_env(),
+        system_prompt={"type": "preset", "preset": "claude_code"},
+        max_turns=8,
+    )
+    model = config.get("model") or config.get("planner_model")
+    if model:
+        options.model = str(model)
+
+    try:
+        loop = asyncio.new_event_loop()
+        try:
+            text, cost, _ = loop.run_until_complete(run_agent_query(prompt, options))
+        finally:
+            loop.close()
+    except Exception as exc:
+        logger.warning("Project discovery agent failed: %s", exc)
+        return ProjectDiscovery(diagnosis=f"Discovery agent crashed: {exc}", cost=0.0)
+
+    # Parse markers from agent output
+    result = ProjectDiscovery(cost=cost)
+    if not text:
+        result.diagnosis = "Discovery agent produced no output"
+        return result
+
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("PRODUCT_TYPE:"):
+            result.product_type = stripped.split(":", 1)[1].strip().lower()
+        elif stripped.startswith("INTERACTION:"):
+            result.interaction = stripped.split(":", 1)[1].strip().lower()
+        elif stripped.startswith("BASE_URL:"):
+            url = stripped.split(":", 1)[1].strip()
+            if url and url.startswith("http"):
+                result.base_url = url
+        elif stripped.startswith("CLI_ENTRYPOINT:"):
+            entry = stripped.split(":", 1)[1].strip()
+            if entry:
+                import shlex
+                result.cli_entrypoint = shlex.split(entry)
+        elif stripped.startswith("TEST_APPROACH:"):
+            result.test_approach = stripped.split(":", 1)[1].strip()
+        elif stripped.startswith("APP_STARTED:"):
+            result.app_started = stripped.split(":", 1)[1].strip().lower() == "true"
+
+    if result.product_type == "unknown":
+        result.diagnosis = "Agent could not determine product type"
+    else:
+        logger.info(
+            "Discovery: type=%s, interaction=%s, base_url=%s, started=%s, cost=$%.2f",
+            result.product_type, result.interaction, result.base_url,
+            result.app_started, cost,
+        )
+
+    return result
 
 
 def _build_project(project_dir: Path, config: dict[str, Any]) -> None:
@@ -925,17 +1452,14 @@ async def _run_story_in_subprocess(
     project_dir: Path,
     config: dict[str, Any],
     story_dir: Path,
+    interaction: str,
 ) -> JourneyResult:
     """Run a single story verification in an isolated subprocess.
 
     Each subprocess gets its own project copy, app instance, and SDK session.
     """
-    import os as _os
     import shutil
-    import signal as _signal
     import sys as _sys
-
-    from otto.certifier.manifest import manifest_to_dict
 
     input_path = story_dir / "input.json"
     output_path = story_dir / "output.json"
@@ -952,6 +1476,7 @@ async def _run_story_in_subprocess(
     _atomic_write_json(input_path, {
         "story": asdict(story),
         "worker_dir": str(worker_dir),
+        "interaction": interaction,
         "config": config,
     })
 
@@ -1056,42 +1581,42 @@ def _worker_main(input_path: Path, output_path: Path) -> None:
         story = _story_from_dict(payload["story"])
         story_id = story.id
         worker_dir = Path(payload["worker_dir"]).resolve()
+        interaction = payload.get("interaction")
         config = payload.get("config", {})
 
         _os.chdir(worker_dir)
 
-        # Start own isolated app instance.
-        # Extended timeout: Next.js/heavy frameworks recompile in cloned dirs.
+        # ── Project discovery: LLM agent classifies + starts ──
         profile = classify(worker_dir)
-        runner = AppRunner(worker_dir, profile)
-        start_timeout = int(config.get("certifier_app_start_timeout", 90))
-        evidence = runner.start(timeout=start_timeout)
+        discovery = discover_project(
+            worker_dir, config, hint_profile=profile)
 
-        # Write app PID so parent can kill orphan on hard kill
-        if runner.process:
-            try:
-                (story_dir / "app.pid").write_text(
-                    str(_os.getpgid(runner.process.pid)))
-            except (ProcessLookupError, OSError):
-                pass
+        interaction = interaction or discovery.interaction or profile.interaction
+        base_url = discovery.base_url
+        test_config = analyze_project(worker_dir)
+        manifest = build_manifest(
+            test_config, profile,
+            base_url=base_url or None,
+            interaction=interaction,
+        )
 
-        if not evidence.passed:
-            result_dict = {
-                "story_id": story_id, "story_title": story.title,
-                "persona": story.persona, "passed": False,
-                "diagnosis": f"App failed to start: {evidence.actual}",
-                "steps": [], "break_findings": [],
-                "cost_usd": 0.0, "duration_s": 0.0,
-            }
-        else:
-            # Build manifest from THIS app instance (correct base_url)
-            test_config = analyze_project(worker_dir)
-            manifest = build_manifest(test_config, profile, runner.base_url)
+        # Enrich manifest from discovery
+        if discovery.cli_entrypoint:
+            manifest.cli_entrypoint = discovery.cli_entrypoint
+        if discovery.test_approach:
+            manifest.cli_help_text = discovery.test_approach  # reuse field for context
 
+        # Write app PID for orphan cleanup if discovery started a server
+        if discovery.app_started and runner is None:
+            # Discovery started the app — we don't have a runner PID.
+            # The agent's background process will be cleaned up on worker exit.
+            pass
+
+        if result_dict is None:
             loop = asyncio.new_event_loop()
             try:
                 result = loop.run_until_complete(
-                    verify_story(story, manifest, runner.base_url, worker_dir, config))
+                    verify_story(story, manifest, base_url, worker_dir, config))
             finally:
                 loop.close()
             result_dict = _journey_result_to_dict(result)

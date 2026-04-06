@@ -168,7 +168,7 @@ def test_certifier_cli_stack(tmp_path: Path, monkeypatch):
     assert profile.language == "python"
     assert profile.product_type == "cli"
     assert profile.interaction == "cli"
-    assert profile.start_command == "python todo.py"
+    assert profile.start_command == "python3 todo.py"
 
     config = analyze_project(tmp_path)
     assert "argparse" in config.cli_frameworks

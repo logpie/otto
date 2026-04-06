@@ -64,6 +64,7 @@ class TestConfig:
     response_wrapper: str = ""  # e.g. "data" if responses are {data: ...}
     cli_frameworks: list[str] = field(default_factory=list)
     cli_entrypoints: list[str] = field(default_factory=list)
+    cli_commands: list[dict[str, Any]] = field(default_factory=list)  # [{name, args, flags}]
 
     def admin_user(self) -> SeededUser | None:
         for u in self.seeded_users:
@@ -208,6 +209,19 @@ def _analyze_routes(project_dir: Path, config: TestConfig) -> None:
                     method = match.group(1).upper()
                     path = match.group(2)
                     config.routes.append(RouteInfo(path=path, methods=[method]))
+                # Flask: @app.route("/path", methods=["GET", "POST"])
+                for match in re.finditer(
+                    r'@\w+\.route\s*\(\s*[\'"]([^\'"]+)[\'"]'
+                    r'(?:\s*,\s*methods\s*=\s*\[([^\]]*)\])?',
+                    content,
+                ):
+                    path = match.group(1)
+                    methods_str = match.group(2)
+                    if methods_str:
+                        methods = [m.strip().strip("'\"").upper() for m in methods_str.split(",")]
+                    else:
+                        methods = ["GET"]
+                    config.routes.append(RouteInfo(path=path, methods=methods))
             except OSError:
                 pass
 
@@ -279,32 +293,91 @@ def _analyze_schema(project_dir: Path, config: TestConfig) -> None:
 
 
 def _analyze_cli(project_dir: Path, config: TestConfig) -> None:
-    """Detect Python CLI entrypoints and parser frameworks."""
+    """Detect CLI entrypoints, parser frameworks, and subcommands."""
 
     cli_frameworks: set[str] = set()
     entrypoints: list[str] = []
+    commands: list[dict[str, Any]] = []
 
     for source_file in _find_source_files(project_dir):
-        if source_file.suffix != ".py":
-            continue
         try:
             content = source_file.read_text()
         except OSError:
             continue
 
-        lower = content.lower()
-        if "argparse" in lower or "argumentparser(" in lower or ".add_argument(" in lower:
-            cli_frameworks.add("argparse")
-            entrypoints.append(str(source_file.relative_to(project_dir)))
-        if "import click" in lower or "@click." in lower or "click.command(" in lower:
-            cli_frameworks.add("click")
-            entrypoints.append(str(source_file.relative_to(project_dir)))
-        if "import typer" in lower or "typer.typer(" in lower:
-            cli_frameworks.add("typer")
-            entrypoints.append(str(source_file.relative_to(project_dir)))
+        rel_path = str(source_file.relative_to(project_dir))
+
+        if source_file.suffix == ".py":
+            lower = content.lower()
+            if "argparse" in lower or "argumentparser(" in lower or ".add_argument(" in lower:
+                cli_frameworks.add("argparse")
+                entrypoints.append(rel_path)
+                commands.extend(_extract_argparse_commands(content))
+            if "import click" in lower or "@click." in lower or "click.command(" in lower:
+                cli_frameworks.add("click")
+                entrypoints.append(rel_path)
+                commands.extend(_extract_click_commands(content))
+            if "import typer" in lower or "typer.typer(" in lower:
+                cli_frameworks.add("typer")
+                entrypoints.append(rel_path)
+                commands.extend(_extract_click_commands(content))  # typer uses similar patterns
+
+        elif source_file.suffix == ".rs":
+            if "clap" in content or "structopt" in content:
+                cli_frameworks.add("clap")
+                # Rust entrypoints handled by classifier (cargo run)
+
+        elif source_file.suffix == ".go":
+            if "cobra" in content or "flag.Parse" in content or '"flag"' in content:
+                cli_frameworks.add("go-flag")
+                # Go entrypoints handled by classifier (go run)
 
     config.cli_frameworks = sorted(cli_frameworks)
     config.cli_entrypoints = _dedupe_preserving_order(entrypoints)
+    config.cli_commands = _dedupe_commands(commands)
+
+
+def _extract_argparse_commands(content: str) -> list[dict[str, Any]]:
+    """Extract subcommand names from argparse add_subparsers/add_parser calls."""
+    commands: list[dict[str, Any]] = []
+    for match in re.finditer(r'add_parser\s*\(\s*["\'](\w+)["\']', content):
+        commands.append({"name": match.group(1), "args": [], "flags": []})
+    return commands
+
+
+def _extract_click_commands(content: str) -> list[dict[str, Any]]:
+    """Extract command names from click/typer decorators.
+
+    Handles stacked decorators between @cli.command() and def:
+        @cli.command("list")
+        @click.option("--tag")
+        def list_notes(tag): ...
+    """
+    commands: list[dict[str, Any]] = []
+    # Match .command() with optional explicit name, then skip stacked decorators to find def
+    for match in re.finditer(
+        r'\.command\s*\(\s*(?:["\'](\w[\w-]*)["\'])?\s*\)'  # @cli.command() or @cli.command("name")
+        r'(?:\s*\n\s*@[\w.]+\([^)]*\))*'                    # skip stacked @click.option/argument
+        r'\s*\n\s*def\s+(\w+)',                               # def func_name
+        content,
+    ):
+        explicit_name = match.group(1)  # from @cli.command("name")
+        func_name = match.group(2)      # from def func_name
+        name = explicit_name or func_name.replace("_", "-")
+        commands.append({"name": name, "args": [], "flags": []})
+    return commands
+
+
+def _dedupe_commands(commands: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Remove duplicate commands by name."""
+    seen: set[str] = set()
+    result: list[dict[str, Any]] = []
+    for cmd in commands:
+        name = cmd.get("name", "")
+        if name and name not in seen:
+            seen.add(name)
+            result.append(cmd)
+    return result
 
 
 def _analyze_seeds(project_dir: Path, config: TestConfig) -> None:
@@ -341,10 +414,13 @@ def _analyze_seeds(project_dir: Path, config: TestConfig) -> None:
 def _find_source_files(project_dir: Path) -> list[Path]:
     """Find all source files, excluding node_modules and build artifacts."""
     files = []
-    for ext in ("*.ts", "*.tsx", "*.js", "*.jsx", "*.py"):
+    for ext in ("*.ts", "*.tsx", "*.js", "*.jsx", "*.py", "*.rs", "*.go"):
         for f in project_dir.glob(f"**/{ext}"):
             path_str = str(f)
-            if any(skip in path_str for skip in ["node_modules", ".next", "__pycache__", "dist"]):
+            if any(skip in path_str for skip in [
+                "node_modules", ".next", "__pycache__", "dist",
+                "target/", ".venv", "vendor/",
+            ]):
                 continue
             files.append(f)
     return files

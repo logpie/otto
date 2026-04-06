@@ -234,7 +234,7 @@ class AppRunner:
             return False
 
         artifacts = self._detect_build_artifacts()
-        metadata = {
+        metadata: dict[str, Any] = {
             "framework": self.profile.framework,
             "language": self.profile.language,
             "product_type": self.profile.product_type,
@@ -242,6 +242,13 @@ class AppRunner:
             "artifacts": artifacts,
             "built_at": datetime.now(timezone.utc).isoformat(),
         }
+        # Store Go binary name so workers can find it (build uses project dir name)
+        if (self.project_dir / "go.mod").exists():
+            metadata["binary_name"] = self.project_dir.name
+        # Store Cargo binary path if detectable
+        cargo_bin = self._cargo_binary_path()
+        if cargo_bin is not None:
+            metadata["binary_path"] = str(cargo_bin.relative_to(self.project_dir))
         self.build_marker_path(self.project_dir).write_text(json.dumps(metadata, indent=2))
         self.profile.extra["prefer_built_start"] = True
         return True
@@ -371,7 +378,7 @@ class AppRunner:
 
     def _runtime_env(self, *, use_built_start: bool) -> dict[str, str]:
         """Build the environment for build/start subprocesses."""
-        return {
+        env = {
             **os.environ,
             "PORT": str(self.port),
             "NODE_ENV": "production" if use_built_start else "development",
@@ -380,6 +387,12 @@ class AppRunner:
             # port than what .env specifies
             "AUTH_TRUST_HOST": "true",
         }
+        # Activate project .venv if it exists (Python projects need this)
+        venv_bin = self.project_dir / ".venv" / "bin"
+        if venv_bin.exists():
+            env["PATH"] = str(venv_bin) + ":" + env.get("PATH", "")
+            env["VIRTUAL_ENV"] = str(self.project_dir / ".venv")
+        return env
 
     def _expects_http_ready_check(self) -> bool:
         """Return True when the started product should answer HTTP probes."""

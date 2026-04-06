@@ -119,13 +119,13 @@ def classify(project_dir: Path) -> ProductProfile:
         if (project_dir / "manage.py").exists():
             profile.framework = "django"
             profile.product_type = "web"
-            profile.start_command = "python manage.py runserver"
+            profile.start_command = "python3 manage.py runserver"
             profile.port = 8000
             profile.interaction = "browser"
         elif _file_contains(project_dir, "flask", ["app.py", "main.py", "server.py"]):
             profile.framework = "flask"
             profile.product_type = "api"
-            profile.start_command = "python app.py"
+            profile.start_command = "python3 app.py"
             profile.port = 5000
             profile.interaction = "http"
         elif _file_contains(project_dir, "fastapi", ["app.py", "main.py", "server.py"]):
@@ -141,7 +141,7 @@ def classify(project_dir: Path) -> ProductProfile:
             # Find the main script
             for f in ["main.py", "cli.py", "app.py"]:
                 if (project_dir / f).exists():
-                    profile.start_command = f"python {f}"
+                    profile.start_command = f"python3 {f}"
                     break
             if not profile.start_command:
                 for candidate in sorted(project_dir.glob("*.py")):
@@ -150,7 +150,7 @@ def classify(project_dir: Path) -> ProductProfile:
                     except OSError:
                         continue
                     if "argparse" in content or "click" in content or "typer" in content:
-                        profile.start_command = f"python {candidate.name}"
+                        profile.start_command = f"python3 {candidate.name}"
                         break
 
         # Python test command
