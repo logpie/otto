@@ -168,7 +168,7 @@ class TestBuildCommand:
                                tasks_passed=0, tasks_failed=1)
 
         runner = CliRunner()
-        with patch("otto.pipeline.build_product", side_effect=fake_build):
+        with patch("otto.pipeline.build_agentic_v3", side_effect=fake_build):
             result = runner.invoke(main, ["build", "demo app", "--no-review"])
 
         assert result.exit_code == 1
@@ -186,7 +186,7 @@ class TestBuildCommand:
             )
 
         runner = CliRunner()
-        with patch("otto.pipeline.build_product", side_effect=fake_build):
+        with patch("otto.pipeline.build_agentic_v3", side_effect=fake_build):
             result = runner.invoke(main, ["build", "demo app", "--no-review"])
 
         assert result.exit_code == 1
@@ -200,25 +200,25 @@ class TestBuildCommand:
             raise RuntimeError("qa boom")
 
         runner = CliRunner()
-        with patch("otto.pipeline.build_product", side_effect=fake_build):
+        with patch("otto.pipeline.build_agentic_v3", side_effect=fake_build):
             result = runner.invoke(main, ["build", "demo app", "--no-review"])
 
         assert result.exit_code == 1
         assert "qa boom" in result.output
 
-    def test_build_agentic_mode_runs(self, tmp_git_repo, monkeypatch):
+    def test_build_split_mode_runs(self, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)
         create_config(tmp_git_repo)
 
         from otto.pipeline import BuildResult
-        async def fake_agentic(intent, project_dir, config):
-            return BuildResult(passed=True, build_id="test-agentic", total_cost=0.5)
+        async def fake_split(intent, project_dir, config):
+            return BuildResult(passed=True, build_id="test-split", total_cost=0.5)
 
         runner = CliRunner()
-        with patch("otto.pipeline.build_agentic", side_effect=fake_agentic):
+        with patch("otto.pipeline.build_agentic_v2", side_effect=fake_split):
             result = runner.invoke(
                 main,
-                ["build", "demo app", "--agentic", "--no-review"],
+                ["build", "demo app", "--split", "--no-review"],
             )
 
         assert result.exit_code == 0
