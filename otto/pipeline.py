@@ -142,31 +142,10 @@ async def build_product(
     if not build_config.get("skip_product_qa"):
         build_config.setdefault("proof_of_work", True)
 
-        import subprocess as _sp
-        import sys as _sys
-
-        verify_payload = json.dumps({
-            "intent": certifier_intent,
-            "project_dir": str(project_dir),
-            "tasks_path": str(tasks_path),
-            "product_spec_path": str(certifier_grounding_path) if certifier_grounding_path else None,
-            "config": build_config,
-        }, default=str)
-
-        certify_result = _sp.run(
-            [_sys.executable, "-m", "otto.certifier._verify_subprocess"],
-            input=verify_payload,
-            capture_output=True, text=True,
-            cwd=str(project_dir),
-            timeout=int(build_config.get("certifier_timeout", 900)),
+        verify_result = _run_verify_subprocess(
+            certifier_intent, project_dir, tasks_path,
+            certifier_grounding_path, build_config,
         )
-        if certify_result.returncode == 0 and certify_result.stdout.strip():
-            # Last line of stdout is the JSON result
-            verify_result = json.loads(certify_result.stdout.strip().split("\n")[-1])
-        else:
-            logger.warning("Verification subprocess failed (exit %d): %s",
-                          certify_result.returncode, certify_result.stderr[-500:])
-            verify_result = {"product_passed": False, "total_cost": 0.0}
         total_cost += verify_result.get("total_cost", 0.0)
         verification_passed = bool(verify_result.get("product_passed", False))
         tasks_passed, tasks_failed = _build_task_counts(tasks_path, build_id)
@@ -186,6 +165,40 @@ async def build_product(
         passed=exit_code == 0 and tasks_failed == 0, build_id=build_id, total_cost=total_cost,
         tasks_passed=tasks_passed, tasks_failed=tasks_failed,
     )
+
+
+def _run_verify_subprocess(
+    intent: str,
+    project_dir: Path,
+    tasks_path: Path,
+    product_spec_path: Path | None,
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    """Run verification in a subprocess. Extracted so tests can patch this."""
+    import subprocess as _sp
+    import sys as _sys
+
+    verify_payload = json.dumps({
+        "intent": intent,
+        "project_dir": str(project_dir),
+        "tasks_path": str(tasks_path),
+        "product_spec_path": str(product_spec_path) if product_spec_path else None,
+        "config": config,
+    }, default=str)
+
+    certify_result = _sp.run(
+        [_sys.executable, "-m", "otto.certifier._verify_subprocess"],
+        input=verify_payload,
+        capture_output=True, text=True,
+        cwd=str(project_dir),
+        timeout=int(config.get("certifier_timeout", 900)),
+    )
+    if certify_result.returncode == 0 and certify_result.stdout.strip():
+        return json.loads(certify_result.stdout.strip().split("\n")[-1])
+    else:
+        logger.warning("Verification subprocess failed (exit %d): %s",
+                      certify_result.returncode, certify_result.stderr[-500:])
+        return {"product_passed": False, "total_cost": 0.0}
 
 
 def _run_verification_sync(
