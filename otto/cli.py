@@ -301,7 +301,10 @@ def _print_build_result(intent: str, result, build_duration: float) -> None:
     console.print()
     console.print(f"  [bold]Build Summary[/bold]  ({result.build_id})")
     console.print(f"  Intent: {rich_escape(intent[:80])}")
-    console.print(f"  Tasks: {result.tasks_passed} passed, {result.tasks_failed} failed")
+    if result.journeys:
+        console.print(f"  Stories: {result.tasks_passed} passed, {result.tasks_failed} failed")
+    else:
+        console.print(f"  Tasks: {result.tasks_passed} passed, {result.tasks_failed} failed")
     console.print(f"  [bold]Total cost: ${result.total_cost:.2f}[/bold]")
     console.print(f"  Duration: {build_duration / 60:.1f} min")
     if result.error:
@@ -499,16 +502,18 @@ def run(prompt, dry_run, no_spec, no_qa, no_test):
 @click.option("--no-review", is_flag=True, help="Skip plan review, execute immediately")
 @click.option("--no-qa", is_flag=True, help="Skip product certification after build")
 @click.option("--plan/--no-plan", "use_planner", default=None, help="Force planner on/off")
-@click.option("--orchestrated", is_flag=True, help="Orchestrator-driven build (PER mode, non-default)")
-@click.option("--continuous", is_flag=True, help="Session-continuous build — orchestrator manages, agent keeps context")
+@click.option("--orchestrated", is_flag=True, help="Orchestrator-driven build (PER mode)")
+@click.option("--continuous", is_flag=True, help="Session-continuous build — orchestrator manages certify loop")
+@click.option("--split", "use_split", is_flag=True, help="Split-session build — orchestrator drives build/certify as separate sessions")
 @click.option("--interactive", is_flag=True, help="Pause for human input after each certification round")
-def build(intent, no_review, no_qa, use_planner, orchestrated, continuous, interactive):
+def build(intent, no_review, no_qa, use_planner, orchestrated, continuous, use_split, interactive):
     """Build a product from a natural language intent.
 
-    Default: agentic mode — one agent builds, certifies, and fixes
-    autonomously in a single session.
+    Default: agentic — one agent builds, dispatches certifier, fixes, re-certifies.
+    The coding agent drives the entire loop autonomously.
 
-      --orchestrated: Orchestrator drives build → certify → fix (PER mode)
+      --split:        Split sessions — orchestrator drives build/certify separately
+      --orchestrated: Orchestrator-driven build (PER mode, legacy)
       --continuous:   Agent keeps session, orchestrator manages certify loop
 
     The certifier verifies the product works by running real user
@@ -517,7 +522,7 @@ def build(intent, no_review, no_qa, use_planner, orchestrated, continuous, inter
     Examples:
         otto build "bookmark manager with tags and search"
         otto build "CLI tool that converts CSV to JSON"
-        otto build "weather app" --orchestrated
+        otto build "weather app" --split
     """
     require_git()
     project_dir = Path.cwd()
@@ -536,7 +541,7 @@ def build(intent, no_review, no_qa, use_planner, orchestrated, continuous, inter
         config["no_review"] = True
 
     # Run the pipeline
-    from otto.pipeline import build_product, build_continuous, build_agentic, build_agentic_v2, BuildResult
+    from otto.pipeline import build_product, build_continuous, build_agentic, build_agentic_v2, build_agentic_v3, BuildResult
 
     build_start = time.time()
     console.print()
@@ -560,11 +565,16 @@ def build(intent, no_review, no_qa, use_planner, orchestrated, continuous, inter
                 build_continuous(intent, project_dir, config,
                                  on_human_feedback=on_feedback)
             )
-        else:
-            # Default: monolithic agentic — one agent builds, certifies, fixes
-            console.print("  [bold]Agentic mode[/bold] — one agent builds, certifies, fixes\n")
+        elif use_split:
+            console.print("  [bold]Split mode[/bold] — separate build and certify sessions\n")
             result: BuildResult = asyncio.run(
                 build_agentic_v2(intent, project_dir, config)
+            )
+        else:
+            # Default: fully agentic — one agent drives everything
+            console.print("  [bold]Agentic mode[/bold] — one agent builds, certifies, fixes\n")
+            result: BuildResult = asyncio.run(
+                build_agentic_v3(intent, project_dir, config)
             )
     except KeyboardInterrupt:
         console.print("\n  Aborted.")

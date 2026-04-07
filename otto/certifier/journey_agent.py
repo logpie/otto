@@ -208,7 +208,7 @@ RULES:
 4. If a step fails, DIAGNOSE the root cause: missing endpoint? wrong fields? auth
    issue? server error? Bad exit code? Be specific so a developer can fix it.
 5. Continue testing even if a step fails — cover as much as possible.
-6. For each failure, suggest a concrete fix (what code change would resolve it).
+6. For each failure, report WHAT is wrong and WHERE (symptom + evidence). Do NOT suggest fixes.
 7. Do NOT use WebFetch for localhost URLs — it cannot reach them. Use curl via Bash.
 8. Be efficient. One command per verification, check the result, move on.
 9. For CLI tools: run commands, check stdout/stderr and exit codes. State persists

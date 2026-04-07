@@ -459,8 +459,14 @@ async def run_agent_query(
     on_tool: Callable[[Any], Any] | None = None,
     on_tool_result: Callable[[Any], Any] | None = None,
     on_result: Callable[[Any], Any] | None = None,
+    capture_tool_output: bool = False,
 ) -> tuple[str, float, Any]:
-    """Run a provider query, dispatching normalized events to callbacks."""
+    """Run a provider query, dispatching normalized events to callbacks.
+
+    If capture_tool_output=True, tool result content (including subagent output)
+    is appended to the returned text. This is useful when the caller needs to
+    parse structured markers from subagent output.
+    """
     text_parts: list[str] = []
     cost = 0.0
     result_msg = None
@@ -476,6 +482,8 @@ async def run_agent_query(
         elif isinstance(message, AssistantMessage):
             for block in message.content:
                 if isinstance(block, ToolResultBlock):
+                    if capture_tool_output and block.content:
+                        text_parts.append(block.content)
                     if on_tool_result:
                         on_tool_result(block)
                 elif isinstance(block, ThinkingBlock):

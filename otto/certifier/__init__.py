@@ -550,13 +550,26 @@ for real users by testing it thoroughly.
 
 ## Testing Rules
 - Make REAL requests (curl for HTTP, run commands for CLI, write test scripts for libraries)
-- For web apps with UI pages: also use agent-browser if available (screenshots, visual check)
+- For web apps with UI pages: also use agent-browser CLI for visual verification:
+    agent-browser open http://localhost:PORT/page
+    agent-browser snapshot -i       # accessibility tree
+    agent-browser screenshot /tmp/  # save screenshot
+    agent-browser click @e3         # interact by ref
+    agent-browser close             # cleanup
 - Test the ACTUAL product, never simulate or assume
 - Products can be hybrid (API + CLI + UI) — test ALL surfaces you find
-- For each failure: diagnose the root cause and suggest a fix
+- For each failure: report WHAT is wrong and WHERE (symptom + evidence). Do NOT suggest fixes.
 
 ## Verdict Format
-End your final message with these EXACT markers:
+End your final message with these EXACT markers (machine-parsed):
+
+For EACH story, emit:
+
+STORY_EVIDENCE_START: <story_id>
+<paste the key command(s) you ran and their output — real evidence>
+STORY_EVIDENCE_END: <story_id>
+
+Then at the very end:
 
 STORIES_TESTED: <number>
 STORIES_PASSED: <number>
@@ -567,7 +580,7 @@ STORY_RESULT: <story_id> | <PASS or FAIL> | <one-line summary>
 VERDICT: PASS or VERDICT: FAIL
 DIAGNOSIS: <overall assessment or null>
 
-Include one STORY_RESULT line per story tested. These markers are machine-parsed.
+Include one STORY_RESULT line per story tested.
 """
 
 
@@ -613,10 +626,24 @@ async def run_agentic_certifier(
     if model:
         options.model = str(model)
 
+    report_dir = project_dir / "otto_logs" / "certifier"
+    report_dir.mkdir(parents=True, exist_ok=True)
     logger.info("Running agentic certifier on %s", project_dir)
 
     # One LLM call — the agent does everything
     text, cost, result_msg = await run_agent_query(prompt, options)
+
+    # Save full agent output for auditability (not truncated)
+    try:
+        agent_log = report_dir / "certifier-agent.log"
+        agent_log.write_text(
+            f"# Certifier agent output — {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"# Cost: ${float(cost or 0):.3f}\n"
+            f"# Text length: {len(text or '')} chars\n\n"
+            f"{text or '(no output)'}\n"
+        )
+    except Exception as exc:
+        logger.warning("Failed to write certifier agent log: %s", exc)
 
     # Parse results from agent output
     total_duration = round(time.monotonic() - start_time, 1)
@@ -624,8 +651,26 @@ async def run_agentic_certifier(
     stories_tested = 0
     stories_passed = 0
     story_results: list[dict[str, Any]] = []
+    # Extract per-story evidence blocks
+    story_evidence: dict[str, str] = {}
 
     if text:
+        # First pass: extract STORY_EVIDENCE blocks
+        current_evidence_id: str | None = None
+        evidence_lines: list[str] = []
+        for line in text.split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("STORY_EVIDENCE_START:"):
+                current_evidence_id = stripped.split(":", 1)[1].strip()
+                evidence_lines = []
+            elif stripped.startswith("STORY_EVIDENCE_END:") and current_evidence_id:
+                story_evidence[current_evidence_id] = "\n".join(evidence_lines)
+                current_evidence_id = None
+                evidence_lines = []
+            elif current_evidence_id is not None:
+                evidence_lines.append(line)
+
+        # Second pass: extract verdict markers
         for line in text.split("\n"):
             stripped = line.strip()
             if stripped.startswith("STORIES_TESTED:"):
@@ -648,6 +693,7 @@ async def run_agentic_certifier(
                         "story_id": sid,
                         "passed": passed,
                         "summary": summary,
+                        "evidence": story_evidence.get(sid, ""),
                     })
                     if not passed:
                         findings.append(Finding(
@@ -663,11 +709,23 @@ async def run_agentic_certifier(
     # Determine outcome
     has_failures = any(not s["passed"] for s in story_results)
     verdict_pass = False
+    overall_diagnosis = ""
     if text:
         for line in reversed(text.split("\n")):
-            if line.strip().startswith("VERDICT:"):
-                verdict_pass = "PASS" in line.upper()
-                break
+            stripped = line.strip()
+            if stripped.startswith("VERDICT:"):
+                verdict_pass = "PASS" in stripped.upper()
+            elif stripped.startswith("DIAGNOSIS:"):
+                diag = stripped[len("DIAGNOSIS:"):].strip()
+                # Strip leading "null" (agent sometimes writes DIAGNOSIS: null<text>)
+                if diag.lower().startswith("null"):
+                    diag = diag[4:].strip()
+                if diag:
+                    overall_diagnosis = diag
+            if verdict_pass or overall_diagnosis:
+                # Keep scanning for both markers
+                if verdict_pass and overall_diagnosis:
+                    break
 
     if verdict_pass and not has_failures:
         outcome = CertificationOutcome.PASSED
@@ -694,12 +752,11 @@ async def run_agentic_certifier(
         cost_usd=float(cost or 0),
         duration_s=total_duration,
     )
+    # Stash story results for upstream extraction (CLI display)
+    report._story_results = story_results  # type: ignore[attr-defined]
 
     # Write PoW report
     try:
-        report_dir = project_dir / "otto_logs" / "certifier"
-        report_dir.mkdir(parents=True, exist_ok=True)
-
         import json as _json
         pow_data = {
             "generated": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -707,7 +764,6 @@ async def run_agentic_certifier(
             "duration_s": total_duration,
             "cost_usd": float(cost or 0),
             "stories": story_results,
-            "agent_output_tail": (text or "")[-3000:],
         }
         (report_dir / "proof-of-work.json").write_text(
             _json.dumps(pow_data, indent=2, default=str))
@@ -715,7 +771,8 @@ async def run_agentic_certifier(
         # HTML PoW
         _generate_agentic_html_pow(report_dir, story_results, outcome.value,
                                     total_duration, float(cost or 0),
-                                    stories_passed, stories_tested)
+                                    stories_passed, stories_tested,
+                                    diagnosis=overall_diagnosis)
 
         # Markdown PoW
         md_lines = [
@@ -751,41 +808,116 @@ def _generate_agentic_html_pow(
     cost: float,
     passed: int,
     total: int,
+    *,
+    diagnosis: str = "",
+    round_history: list[dict] | None = None,
 ) -> None:
     """Generate HTML PoW report for the agentic certifier."""
+    import html as _html
+
+    outcome_color = "#22c55e" if outcome == "passed" else "#ef4444"
+    num_rounds = len(round_history) if round_history else 1
     html = [
         "<!DOCTYPE html><html><head><meta charset='utf-8'>",
         "<title>Certification Report</title>",
         "<style>",
-        "body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2em auto; padding: 0 1em; }",
-        "h1 { border-bottom: 2px solid #333; padding-bottom: 0.5em; }",
-        ".meta { color: #666; margin-bottom: 2em; }",
-        ".story { border: 1px solid #ddd; border-radius: 8px; padding: 1em; margin: 1em 0; }",
-        ".story.pass { border-left: 4px solid #22c55e; }",
-        ".story.fail { border-left: 4px solid #ef4444; }",
-        ".badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-weight: bold; font-size: 0.85em; }",
+        "* { box-sizing: border-box; }",
+        "body { font-family: system-ui, -apple-system, sans-serif; max-width: 960px; margin: 0 auto; padding: 2em 1.5em; color: #1a1a2e; background: #fafafa; }",
+        "h1 { border-bottom: 3px solid #1a1a2e; padding-bottom: 0.5em; margin-bottom: 0.3em; }",
+        ".outcome-banner { padding: 0.8em 1.2em; border-radius: 8px; margin-bottom: 1.5em; font-size: 1.1em; font-weight: 600; }",
+        f".outcome-banner {{ background: {outcome_color}18; border: 2px solid {outcome_color}; color: {outcome_color}; }}",
+        ".meta { display: flex; gap: 2em; flex-wrap: wrap; color: #555; margin-bottom: 2em; font-size: 0.95em; }",
+        ".meta-item { display: flex; flex-direction: column; }",
+        ".meta-label { font-size: 0.75em; text-transform: uppercase; letter-spacing: 0.05em; color: #888; }",
+        ".meta-value { font-weight: 600; font-size: 1.1em; }",
+        ".rounds { margin-bottom: 1.5em; padding: 1em; background: #f0f4ff; border: 1px solid #c7d2fe; border-radius: 8px; }",
+        ".rounds h3 { margin: 0 0 0.8em; font-size: 0.95em; color: #3730a3; }",
+        ".round-item { display: flex; align-items: center; gap: 0.8em; padding: 0.4em 0; }",
+        ".round-num { font-weight: 700; color: #4338ca; min-width: 5em; }",
+        ".round-verdict { font-weight: 600; }",
+        ".round-verdict.pass { color: #166534; }",
+        ".round-verdict.fail { color: #991b1b; }",
+        ".round-detail { color: #555; font-size: 0.9em; }",
+        ".story { border: 1px solid #e0e0e0; border-radius: 10px; padding: 1.2em; margin: 1em 0; background: #fff; }",
+        ".story.pass { border-left: 5px solid #22c55e; }",
+        ".story.fail { border-left: 5px solid #ef4444; }",
+        ".story-header { display: flex; align-items: center; gap: 0.8em; }",
+        ".badge { display: inline-block; padding: 3px 10px; border-radius: 5px; font-weight: 700; font-size: 0.8em; letter-spacing: 0.03em; }",
         ".badge.pass { background: #dcfce7; color: #166534; }",
         ".badge.fail { background: #fee2e2; color: #991b1b; }",
-        ".summary { margin-top: 0.5em; color: #444; }",
-        "</style></head><body>",
+        ".story-id { font-weight: 600; font-size: 1.05em; }",
+        ".summary { margin-top: 0.5em; color: #444; line-height: 1.5; }",
+        ".evidence { margin-top: 0.8em; }",
+        ".evidence-toggle { background: none; border: 1px solid #ccc; border-radius: 5px; padding: 4px 12px; cursor: pointer; font-size: 0.85em; color: #555; }",
+        ".evidence-toggle:hover { background: #f0f0f0; }",
+        ".evidence-content { display: none; margin-top: 0.5em; background: #f7f7f9; border: 1px solid #e8e8ec; border-radius: 6px; padding: 1em; font-family: 'SF Mono', Menlo, monospace; font-size: 0.82em; white-space: pre-wrap; word-break: break-word; max-height: 400px; overflow-y: auto; color: #333; line-height: 1.5; }",
+        ".diagnosis { margin-top: 1.5em; padding: 1em; background: #fff7ed; border: 1px solid #fed7aa; border-radius: 8px; }",
+        ".diagnosis h3 { margin: 0 0 0.5em; color: #9a3412; font-size: 0.95em; }",
+        ".diagnosis p { margin: 0; color: #7c2d12; line-height: 1.5; }",
+        "footer { margin-top: 2em; padding-top: 1em; border-top: 1px solid #e0e0e0; color: #999; font-size: 0.8em; }",
+        "</style>",
+        "<script>",
+        "function toggleEvidence(id) {",
+        "  var el = document.getElementById('evidence-' + id);",
+        "  el.style.display = el.style.display === 'block' ? 'none' : 'block';",
+        "}",
+        "</script>",
+        "</head><body>",
         "<h1>Certification Report</h1>",
-        f"<div class='meta'>",
-        f"<strong>Outcome:</strong> {outcome} &nbsp; ",
-        f"<strong>Stories:</strong> {passed}/{total} &nbsp; ",
-        f"<strong>Duration:</strong> {duration:.0f}s &nbsp; ",
-        f"<strong>Cost:</strong> ${cost:.2f} &nbsp; ",
-        f"<strong>Generated:</strong> {time.strftime('%Y-%m-%d %H:%M:%S')}",
-        f"</div>",
+        f"<div class='outcome-banner'>{outcome.upper()} &mdash; {passed}/{total} stories passed"
+        f"{f' (after {num_rounds} rounds)' if num_rounds > 1 else ''}</div>",
+        "<div class='meta'>",
+        f"<div class='meta-item'><span class='meta-label'>Duration</span><span class='meta-value'>{duration:.0f}s</span></div>",
+        f"<div class='meta-item'><span class='meta-label'>Cost</span><span class='meta-value'>${cost:.2f}</span></div>",
+        f"<div class='meta-item'><span class='meta-label'>Rounds</span><span class='meta-value'>{num_rounds}</span></div>",
+        f"<div class='meta-item'><span class='meta-label'>Generated</span><span class='meta-value'>{time.strftime('%Y-%m-%d %H:%M:%S')}</span></div>",
+        "</div>",
     ]
 
-    for s in story_results:
-        status_class = "pass" if s["passed"] else "fail"
-        badge = "PASS" if s["passed"] else "FAIL"
-        html.append(f"<div class='story {status_class}'>")
-        html.append(f"<span class='badge {status_class}'>{badge}</span> ")
-        html.append(f"<strong>{s.get('story_id', '')}</strong>")
-        html.append(f"<div class='summary'>{s.get('summary', '')}</div>")
+    # Round history (only shown if multiple rounds — fix loop was triggered)
+    if round_history and len(round_history) > 1:
+        html.append("<div class='rounds'><h3>Certification Rounds</h3>")
+        for r in round_history:
+            rn = r.get("round", "?")
+            v = r.get("verdict")
+            sc = r.get("stories_count", 0)
+            pc = r.get("passed_count", 0)
+            if v is None or sc == 0:
+                continue  # skip empty rounds
+            v_class = "pass" if v else "fail"
+            v_text = "PASS" if v else "FAIL"
+            html.append(
+                f"<div class='round-item'>"
+                f"<span class='round-num'>Round {rn}</span>"
+                f"<span class='round-verdict {v_class}'>{v_text}</span>"
+                f"<span class='round-detail'>{pc}/{sc} stories</span>"
+                f"</div>"
+            )
         html.append("</div>")
 
+    for i, s in enumerate(story_results):
+        status_class = "pass" if s["passed"] else "fail"
+        badge = "PASS" if s["passed"] else "FAIL"
+        sid = _html.escape(s.get("story_id", ""))
+        summary = _html.escape(s.get("summary", ""))
+        evidence = s.get("evidence", "")
+
+        html.append(f"<div class='story {status_class}'>")
+        html.append(f"<div class='story-header'><span class='badge {status_class}'>{badge}</span><span class='story-id'>{sid}</span></div>")
+        html.append(f"<div class='summary'>{summary}</div>")
+
+        if evidence:
+            eid = f"ev-{i}"
+            html.append(f"<div class='evidence'>")
+            html.append(f"<button class='evidence-toggle' onclick=\"toggleEvidence('{eid}')\">Show evidence</button>")
+            html.append(f"<div class='evidence-content' id='evidence-{eid}'>{_html.escape(evidence)}</div>")
+            html.append(f"</div>")
+
+        html.append("</div>")
+
+    if diagnosis:
+        html.append(f"<div class='diagnosis'><h3>Overall Diagnosis</h3><p>{_html.escape(diagnosis)}</p></div>")
+
+    html.append(f"<footer>Generated by otto certifier</footer>")
     html.append("</body></html>")
     (output_dir / "proof-of-work.html").write_text("\n".join(html))

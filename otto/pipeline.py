@@ -751,6 +751,7 @@ async def build_agentic_v2(
     from otto.agent import ClaudeAgentOptions, _subprocess_env
     from otto.certifier import run_agentic_certifier
     from otto.certifier.report import CertificationOutcome
+    from otto.observability import append_text_log
     from otto.session import AgentSession
 
     build_id = f"build-{int(time.time())}-{os.getpid()}"
@@ -784,6 +785,13 @@ async def build_agentic_v2(
         checkpoint_dir=build_dir,
     )
 
+    # Session log helper — appends timestamped lines to build-agent.log
+    agent_log_path = build_dir / "build-agent.log"
+
+    def _log_build(msg: str) -> None:
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        append_text_log(agent_log_path, [f"[{ts}] {msg}"])
+
     total_cost = 0.0
     last_report = None
     journeys: list[dict[str, Any]] = []
@@ -791,9 +799,11 @@ async def build_agentic_v2(
 
     for round_num in range(1, max_rounds + 1):
         rounds_run = round_num
+        _log_build(f"=== Round {round_num}/{max_rounds} ===")
         logger.info("=== Round %d/%d ===", round_num, max_rounds)
 
         # ── Coding agent: build or fix ──
+        round_start = time.monotonic()
         if round_num == 1:
             build_prompt = AGENTIC_V2_BUILD_PROMPT + f"\n\nBuild this product:\n\n{intent}"
             result = await session.start(build_prompt)
@@ -807,27 +817,40 @@ async def build_agentic_v2(
             )
             result = await session.resume(fix_prompt)
 
+        round_duration = round(time.monotonic() - round_start, 1)
         total_cost += result.cost
         _commit_artifacts(project_dir)
+
+        _log_build(f"Round {round_num} coding: {round_duration:.1f}s, ${result.cost:.2f}, "
+                   f"session_id={session.session_id}, status={result.end_status}")
+        if result.text:
+            # Save coding agent output (last 5000 chars for auditability)
+            _log_build(f"--- agent output tail ({len(result.text)} chars) ---")
+            for line in result.text[-5000:].split("\n"):
+                append_text_log(agent_log_path, [f"  {line}"])
+            _log_build("--- end agent output ---")
+
         logger.info("Round %d coding: %.1fs, $%.2f, session_id=%s",
-                     round_num, 0.0, result.cost, session.session_id)
+                     round_num, round_duration, result.cost, session.session_id)
 
         # ── Certifier agent: test (fresh session, blind to builder) ──
+        certify_start = time.monotonic()
         report = await run_agentic_certifier(
             intent=intent,
             project_dir=project_dir,
             config=config,
         )
+        certify_duration = round(time.monotonic() - certify_start, 1)
         last_report = report
         total_cost += report.cost_usd
-        logger.info("Round %d certify: %s, $%.2f",
-                     round_num, report.outcome.value, report.cost_usd)
 
-        # Parse journeys for display
-        journeys = []
-        for f in report.findings:
-            sid = getattr(f, "story_id", "")
-            journeys.append({"name": f.description, "passed": f.severity == "note", "story_id": sid})
+        _log_build(f"Round {round_num} certify: {report.outcome.value}, "
+                   f"{certify_duration:.1f}s, ${report.cost_usd:.2f}")
+        logger.info("Round %d certify: %s, %.1fs, $%.2f",
+                     round_num, report.outcome.value, certify_duration, report.cost_usd)
+
+        # Parse journeys for display — use story_results from PoW if available
+        journeys = _extract_journeys_from_report(report)
 
         # Save checkpoint
         session.checkpoint(
@@ -838,14 +861,24 @@ async def build_agentic_v2(
         )
 
         if report.outcome == CertificationOutcome.PASSED:
+            _log_build(f"Certification PASSED on round {round_num}")
             logger.info("Certification passed on round %d", round_num)
             break
 
         if round_num >= max_rounds:
+            _log_build(f"Max rounds ({max_rounds}) reached — certification {report.outcome.value}")
             logger.info("Max rounds (%d) reached", max_rounds)
             break
 
+        # Log findings for fix loop
+        for f in report.findings:
+            _log_build(f"  finding: [{f.severity}] {f.description}")
+
     passed = last_report and last_report.outcome == CertificationOutcome.PASSED
+
+    # Count stories for display (tasks_passed/failed maps to stories in agentic mode)
+    stories_passed = sum(1 for j in journeys if j.get("passed"))
+    stories_failed = sum(1 for j in journeys if not j.get("passed"))
 
     return BuildResult(
         passed=bool(passed),
@@ -853,7 +886,31 @@ async def build_agentic_v2(
         rounds=rounds_run,
         total_cost=total_cost,
         journeys=journeys,
+        tasks_passed=stories_passed,
+        tasks_failed=stories_failed,
     )
+
+
+def _extract_journeys_from_report(report: Any) -> list[dict[str, Any]]:
+    """Extract journey dicts from a certifier report for CLI display.
+
+    Reads the _story_results stash (set by run_agentic_certifier) if available,
+    falls back to findings.
+    """
+    story_results = getattr(report, "_story_results", None)
+    if story_results:
+        return [
+            {"name": s.get("summary", s.get("story_id", "")),
+             "passed": s["passed"],
+             "story_id": s.get("story_id", "")}
+            for s in story_results
+        ]
+    # Fallback: derive from findings (only failures have findings)
+    journeys = []
+    for f in report.findings:
+        sid = getattr(f, "story_id", "")
+        journeys.append({"name": f.description, "passed": f.severity == "note", "story_id": sid})
+    return journeys
 
 
 def _format_certifier_findings(report: Any) -> str:
@@ -870,6 +927,430 @@ def _format_certifier_findings(report: Any) -> str:
         if f.fix_suggestion:
             lines.append(f"  Fix: {f.fix_suggestion}")
     return "\n".join(lines)
+
+
+AGENTIC_V3_PROMPT = """\
+You are a senior developer building and shipping a product. Work autonomously.
+
+## Process
+
+1. **Plan**: Read the intent. Design the architecture — data models, API routes
+   or CLI commands, key modules. Think before coding.
+
+2. **Build**: Implement the product. For complex projects, use the Agent tool
+   to dispatch subagents for parallel work on independent features.
+
+3. **Test**: Write comprehensive tests. Run them. Fix failures.
+
+4. **Self-review**: Read your code. Fix issues you find.
+
+5. **Commit**: When tests pass, commit all files.
+
+6. **Certify**: Dispatch a certifier agent to test your product as a real user.
+   Use the Agent tool with this EXACT prompt (fill in the intent):
+
+   ```
+   Agent("You are a QA lead certifying a software product. Test it thoroughly as a real user.
+
+   Product intent: <PASTE THE FULL INTENT HERE>
+
+   Process:
+   1. Read the project — understand what it is, what framework, what files exist
+   2. Install dependencies if needed
+   3. Start the app if it's a server. For CLI/library, skip this
+   4. Plan test stories from this checklist:
+      - First Experience: new user uses the core feature
+      - CRUD Lifecycle: create, read, update, delete
+      - Data Isolation: users' data doesn't leak
+      - Persistence: data survives across sessions
+      - Access Control: auth required where applicable
+      - Search/Filter: find by criteria (if applicable)
+      - Edge Cases: empty inputs, special chars, boundaries
+      Skip stories that don't apply.
+   5. Test using subagents for parallelism (dispatch 3-5 at once)
+   6. Report results
+
+   Rules:
+   - Make REAL requests (curl, CLI commands, test scripts)
+   - For web apps with HTML pages: verify HTML content via curl AND use
+     agent-browser (a CLI tool) for visual verification:
+       agent-browser record start /tmp/certifier-recording.webm  # start video
+       agent-browser open http://localhost:PORT/page
+       agent-browser snapshot -i       # accessibility tree with @refs
+       agent-browser screenshot /tmp/  # save screenshot per page
+       agent-browser click @e3         # interact with elements by ref
+       agent-browser record stop       # stop video at end
+       agent-browser close             # cleanup when done
+     Use agent-browser to verify forms render, elements visible, styles applied.
+   - Test the ACTUAL product, never simulate
+   - For each failure: report WHAT is wrong and WHERE (symptom + evidence).
+     Do NOT suggest fixes — the developer will figure that out.
+
+   End your response with EXACT machine-parsed markers:
+   STORIES_TESTED: (number)
+   STORIES_PASSED: (number)
+   For each story: STORY_RESULT: (story-id) | PASS or FAIL | (one-line summary)
+   VERDICT: PASS or FAIL
+   DIAGNOSIS: (assessment or null)")
+   ```
+
+7. **Read the certifier's findings.** If it reports FAIL:
+   - Read each failed story's diagnosis carefully
+   - Fix the root causes in your code
+   - Run your tests again
+   - Commit the fix
+   - Run the certifier agent again (same prompt as step 6)
+   - Repeat until VERDICT: PASS
+
+8. **Report the final result.** After the certifier passes (or after your best effort),
+   you MUST include the certifier's results in your final message. Copy them EXACTLY:
+
+   CERTIFY_ROUND: <round number — 1 for first attempt, 2 for after first fix, etc.>
+   STORIES_TESTED: <N>
+   STORIES_PASSED: <N>
+   STORY_RESULT: <id> | PASS or FAIL | <one-line summary>
+   ...
+   VERDICT: PASS or FAIL
+   DIAGNOSIS: <assessment or null>
+
+   If you ran the certifier multiple times, report ALL rounds:
+   CERTIFY_ROUND: 1
+   VERDICT: FAIL
+   ... (round 1 results)
+   CERTIFY_ROUND: 2
+   VERDICT: PASS
+   ... (round 2 results)
+
+## Rules
+- Build EVERYTHING the intent asks for. Don't cut scope.
+- Write tests BEFORE claiming done.
+- The certifier is your quality gate — don't ship until it passes.
+- Commit before each certify run so the certifier sees clean code.
+- ALWAYS include the certifier's structured markers in your final message.
+"""
+
+
+async def build_agentic_v3(
+    intent: str,
+    project_dir: Path,
+    config: dict[str, Any],
+) -> BuildResult:
+    """Fully agent-driven build: one session, certifier as environment.
+
+    The coding agent does everything — build, self-test, dispatch certifier,
+    read findings, fix, re-certify. The orchestrator just launches and waits.
+    """
+    from otto.agent import ClaudeAgentOptions, _subprocess_env, run_agent_query
+    from otto.observability import append_text_log
+
+    build_id = f"build-{int(time.time())}-{os.getpid()}"
+    build_dir = project_dir / "otto_logs" / "builds" / build_id
+    build_dir.mkdir(parents=True, exist_ok=True)
+
+    grounding_path = project_dir / "intent.md"
+    if not grounding_path.exists():
+        grounding_path.write_text(intent)
+    _commit_artifacts(project_dir)
+
+    options = ClaudeAgentOptions(
+        permission_mode="bypassPermissions",
+        cwd=str(project_dir),
+        system_prompt={"type": "preset", "preset": "claude_code"},
+        env=_subprocess_env(),
+        setting_sources=["project"],
+    )
+    model = config.get("model")
+    if model:
+        options.model = str(model)
+
+    prompt = AGENTIC_V3_PROMPT + f"\n\nBuild this product:\n\n{intent}"
+
+    logger.info("Starting agentic v3 build: %s", build_id)
+    start_time = time.monotonic()
+
+    # One agent call — the agent drives everything.
+    # capture_tool_output=True so subagent output (certifier results) is included
+    # in the returned text for parsing.
+    text, cost, result_msg = await run_agent_query(
+        prompt, options, capture_tool_output=True)
+
+    total_duration = round(time.monotonic() - start_time, 1)
+
+    # Save agent output in two forms:
+    # 1. agent-raw.log — full unfiltered output (for deep debugging)
+    # 2. agent.log — structured summary: what was built, certifier results,
+    #    fixes applied, timing. Enough to debug without reading raw.
+    agent_log_path = build_dir / "agent.log"
+    try:
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        # Raw output — write once, full content
+        (build_dir / "agent-raw.log").write_text(text or "(no output)")
+
+        summary_lines = [
+            f"[{ts}] === Agentic v3 build ===",
+            f"[{ts}] Duration: {total_duration:.1f}s, Cost: ${cost:.2f}",
+            f"[{ts}] Raw output: {len(text or '')} chars → agent-raw.log",
+        ]
+
+        # Extract structured events from agent text
+        if text:
+            # Git commits = what was built/fixed
+            import subprocess as _sp
+            try:
+                git_log = _sp.run(
+                    ["git", "log", "--oneline", "--no-walk", "--all"],
+                    cwd=str(project_dir), capture_output=True, text=True,
+                ).stdout.strip()
+                if git_log:
+                    summary_lines.append(f"[{ts}] Git commits:")
+                    for line in git_log.split("\n"):
+                        summary_lines.append(f"[{ts}]   {line}")
+            except Exception:
+                pass
+
+            # Certifier markers + diagnosis + failed story details
+            for line in text.split("\n"):
+                stripped = line.strip()
+                if any(stripped.startswith(m) for m in (
+                    "CERTIFY_ROUND:", "STORIES_TESTED:", "STORIES_PASSED:",
+                    "VERDICT:", "DIAGNOSIS:",
+                )):
+                    summary_lines.append(f"[{ts}]   {stripped}")
+                elif stripped.startswith("STORY_RESULT:"):
+                    # Always log failures; log passes concisely
+                    if "FAIL" in stripped.upper():
+                        summary_lines.append(f"[{ts}]   {stripped}")
+                    else:
+                        summary_lines.append(f"[{ts}]   {stripped[:120]}")
+
+            # Agent's own summary text (last ~500 chars of TextBlock content,
+            # which is the agent's final message after certifier results)
+            # Look for the agent's wrap-up after the last VERDICT
+            last_verdict_idx = text.rfind("VERDICT:")
+            if last_verdict_idx >= 0:
+                tail = text[last_verdict_idx:].strip()
+                # Skip the markers, get the prose after
+                prose_lines = []
+                past_markers = False
+                for line in tail.split("\n"):
+                    s = line.strip()
+                    if past_markers and s and not s.startswith(("STORY_RESULT:", "STORIES_", "VERDICT:", "DIAGNOSIS:", "CERTIFY_ROUND:")):
+                        prose_lines.append(s)
+                    if s.startswith("DIAGNOSIS:"):
+                        past_markers = True
+                if prose_lines:
+                    summary_lines.append(f"[{ts}] Agent summary:")
+                    for p in prose_lines[:10]:  # cap at 10 lines
+                        summary_lines.append(f"[{ts}]   {p[:200]}")
+
+        append_text_log(agent_log_path, summary_lines)
+    except Exception:
+        logger.warning("Failed to write agent log")
+
+    # Parse certification results from agent output.
+    # The agent repeats the certifier's structured markers in its final message.
+    # If multiple rounds, we take the LAST round's results (the final state).
+    # We also track all rounds for the PoW report.
+    stories_tested = 0
+    stories_passed = 0
+    story_results: list[dict[str, Any]] = []
+    story_evidence: dict[str, str] = {}
+    verdict_pass = False
+    overall_diagnosis = ""
+    certify_rounds: list[dict[str, Any]] = []
+    max_round = 0
+
+    if text:
+        # Extract evidence blocks
+        current_eid: str | None = None
+        ev_lines: list[str] = []
+        for line in text.split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("STORY_EVIDENCE_START:"):
+                current_eid = stripped.split(":", 1)[1].strip()
+                ev_lines = []
+            elif stripped.startswith("STORY_EVIDENCE_END:") and current_eid:
+                story_evidence[current_eid] = "\n".join(ev_lines)
+                current_eid = None
+            elif current_eid is not None:
+                ev_lines.append(line)
+
+        # Parse per-round blocks. Each CERTIFY_ROUND starts a new round.
+        # Within each round, collect STORY_RESULTs and VERDICT.
+        current_round: dict[str, Any] = {"round": 0, "stories": [], "verdict": None, "diagnosis": ""}
+        for line in text.split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("CERTIFY_ROUND:"):
+                # Save previous round if it had results
+                if current_round["stories"] or current_round["verdict"] is not None:
+                    certify_rounds.append(current_round)
+                try:
+                    rn = int(stripped.split(":", 1)[1].strip())
+                except ValueError:
+                    rn = len(certify_rounds) + 1
+                max_round = max(max_round, rn)
+                current_round = {"round": rn, "stories": [], "verdict": None, "diagnosis": ""}
+            elif stripped.startswith("STORIES_TESTED:"):
+                try:
+                    current_round["tested"] = int(stripped.split(":", 1)[1].strip())
+                except ValueError:
+                    pass
+            elif stripped.startswith("STORIES_PASSED:"):
+                try:
+                    current_round["passed_count"] = int(stripped.split(":", 1)[1].strip())
+                except ValueError:
+                    pass
+            elif stripped.startswith("STORY_RESULT:"):
+                parts = stripped[len("STORY_RESULT:"):].strip().split("|")
+                if len(parts) >= 2:
+                    sid = parts[0].strip()
+                    passed = "PASS" in parts[1].upper()
+                    summary = parts[2].strip() if len(parts) > 2 else ""
+                    current_round["stories"].append({
+                        "story_id": sid,
+                        "passed": passed,
+                        "summary": summary,
+                        "evidence": story_evidence.get(sid, ""),
+                    })
+            elif stripped.startswith("VERDICT:"):
+                current_round["verdict"] = "PASS" in stripped.upper()
+            elif stripped.startswith("DIAGNOSIS:"):
+                diag_text = stripped[len("DIAGNOSIS:"):].strip()
+                if diag_text.lower().startswith("null"):
+                    diag_text = diag_text[4:].strip()
+                current_round["diagnosis"] = diag_text
+
+        # Save last round
+        if current_round["stories"] or current_round["verdict"] is not None:
+            certify_rounds.append(current_round)
+
+        # Use the LAST round with stories as the final result
+        final_round = None
+        for r in reversed(certify_rounds):
+            if r["stories"]:
+                final_round = r
+                break
+
+        if final_round:
+            story_results = final_round["stories"]
+            stories_tested = final_round.get("tested", len(story_results))
+            stories_passed = final_round.get("passed_count", sum(1 for s in story_results if s["passed"]))
+            verdict_pass = bool(final_round.get("verdict", False))
+            overall_diagnosis = final_round.get("diagnosis", "")
+        else:
+            # Fallback: scan from end for verdict/diagnosis (no CERTIFY_ROUND markers)
+            for line in reversed(text.split("\n")):
+                stripped = line.strip()
+                if stripped.startswith("VERDICT:") and not verdict_pass:
+                    verdict_pass = "PASS" in stripped.upper()
+                elif stripped.startswith("DIAGNOSIS:") and not overall_diagnosis:
+                    diag = stripped[len("DIAGNOSIS:"):].strip()
+                    if diag.lower().startswith("null"):
+                        diag = diag[4:].strip()
+                    if diag:
+                        overall_diagnosis = diag
+                if verdict_pass and overall_diagnosis:
+                    break
+            # Also extract STORY_RESULTs from flat output (no round markers)
+            for line in text.split("\n"):
+                stripped = line.strip()
+                if stripped.startswith("STORIES_TESTED:"):
+                    try:
+                        stories_tested = int(stripped.split(":", 1)[1].strip())
+                    except ValueError:
+                        pass
+                elif stripped.startswith("STORIES_PASSED:"):
+                    try:
+                        stories_passed = int(stripped.split(":", 1)[1].strip())
+                    except ValueError:
+                        pass
+                elif stripped.startswith("STORY_RESULT:"):
+                    parts = stripped[len("STORY_RESULT:"):].strip().split("|")
+                    if len(parts) >= 2:
+                        sid = parts[0].strip()
+                        p = "PASS" in parts[1].upper()
+                        summary = parts[2].strip() if len(parts) > 2 else ""
+                        story_results.append({
+                            "story_id": sid, "passed": p, "summary": summary,
+                            "evidence": story_evidence.get(sid, ""),
+                        })
+
+    passed = verdict_pass and all(s["passed"] for s in story_results)
+
+    journeys = [
+        {"name": s.get("summary", s["story_id"]), "passed": s["passed"], "story_id": s["story_id"]}
+        for s in story_results
+    ]
+
+    # Write PoW report
+    try:
+        from otto.certifier import _generate_agentic_html_pow
+        report_dir = project_dir / "otto_logs" / "certifier"
+        report_dir.mkdir(parents=True, exist_ok=True)
+
+        pow_data = {
+            "generated": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "outcome": "passed" if passed else "failed",
+            "duration_s": total_duration,
+            "cost_usd": float(cost or 0),
+            "stories": story_results,
+            "certify_rounds": len(certify_rounds),
+            "round_history": [
+                {"round": r.get("round", i+1), "verdict": r.get("verdict"),
+                 "stories_count": len(r.get("stories", [])),
+                 "passed_count": r.get("passed_count", 0)}
+                for i, r in enumerate(certify_rounds)
+            ] if len(certify_rounds) > 1 else [],
+            "mode": "agentic_v3",
+        }
+        (report_dir / "proof-of-work.json").write_text(
+            json.dumps(pow_data, indent=2, default=str))
+
+        # Build round_history for HTML from certify_rounds
+        html_round_history = [
+            {"round": r.get("round", i+1), "verdict": r.get("verdict"),
+             "stories_count": len(r.get("stories", [])),
+             "passed_count": r.get("passed_count", sum(1 for s in r.get("stories", []) if s.get("passed")))}
+            for i, r in enumerate(certify_rounds)
+        ] if certify_rounds else []
+
+        _generate_agentic_html_pow(
+            report_dir, story_results,
+            "passed" if passed else "failed",
+            total_duration, float(cost or 0),
+            stories_passed, stories_tested,
+            diagnosis=overall_diagnosis,
+            round_history=html_round_history,
+        )
+    except Exception as exc:
+        logger.warning("Failed to write PoW: %s", exc)
+
+    # Checkpoint
+    checkpoint = {
+        "build_id": build_id,
+        "mode": "agentic_v3",
+        "passed": passed,
+        "duration_s": total_duration,
+        "cost_usd": float(cost or 0),
+        "stories_tested": stories_tested,
+        "stories_passed": stories_passed,
+        "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    (build_dir / "checkpoint.json").write_text(json.dumps(checkpoint, indent=2))
+
+    logger.info("Agentic v3 done: %s, %d/%d stories, %.1fs, $%.2f",
+                "passed" if passed else "failed",
+                stories_passed, stories_tested, total_duration, float(cost or 0))
+
+    return BuildResult(
+        passed=passed,
+        build_id=build_id,
+        rounds=1,  # single session — no explicit rounds
+        total_cost=float(cost or 0),
+        journeys=journeys,
+        tasks_passed=sum(1 for j in journeys if j["passed"]),
+        tasks_failed=sum(1 for j in journeys if not j["passed"]),
+    )
 
 
 async def resume_continuous(
