@@ -117,10 +117,76 @@ class AllDone:
     timestamp: float = 0.0
 
 
+# ---------------------------------------------------------------------------
+# i2p verification events
+# ---------------------------------------------------------------------------
+
+@dataclass
+class BuildStarted:
+    event: str = "build_started"
+    build_id: str = ""
+    intent: str = ""
+    timestamp: float = 0.0
+
+
+@dataclass
+class ProductPlanCompleted:
+    event: str = "product_plan_completed"
+    build_id: str = ""
+    mode: str = ""  # "single_task" or "decomposed"
+    num_tasks: int = 0
+    cost_usd: float = 0.0
+    duration_s: float = 0.0
+    timestamp: float = 0.0
+
+
+@dataclass
+class ContextUpdated:
+    event: str = "context_updated"
+    build_id: str = ""
+    task_key: str = ""
+    cost_usd: float = 0.0
+    duration_s: float = 0.0
+    timestamp: float = 0.0
+
+
+@dataclass
+class ProductQACompleted:
+    event: str = "product_qa_completed"
+    build_id: str = ""
+    product_passed: bool = False
+    journeys_passed: int = 0
+    journeys_failed: int = 0
+    cost_usd: float = 0.0
+    duration_s: float = 0.0
+    round_num: int = 0
+    timestamp: float = 0.0
+
+
+@dataclass
+class BuildCompleted:
+    event: str = "build_completed"
+    build_id: str = ""
+    intent: str = ""
+    product_passed: bool = False
+    total_tasks: int = 0
+    tasks_passed: int = 0
+    tasks_failed: int = 0
+    cost_planning: float = 0.0
+    cost_tasks: float = 0.0
+    cost_qa: float = 0.0
+    cost_context: float = 0.0
+    cost_total: float = 0.0
+    duration_s: float = 0.0
+    timestamp: float = 0.0
+
+
 # Union of all event types
 TelemetryEvent = (
     TaskStarted | TaskMerged | TaskFailed | PhaseCompleted | VerifyCompleted |
-    AgentToolCall | ResearchComplete | BatchCompleted | PlanCreated | AllDone
+    AgentToolCall | ResearchComplete | BatchCompleted | PlanCreated | AllDone |
+    BuildStarted | ProductPlanCompleted | ContextUpdated | ProductQACompleted |
+    BuildCompleted
 )
 
 
@@ -131,7 +197,7 @@ TelemetryEvent = (
 class Telemetry:
     """Write-only JSONL telemetry with optional v3 dual-write.
 
-    Events are appended to ``<log_dir>/v4_events.jsonl``. When legacy mode is
+    Events are appended to ``<log_dir>/events.jsonl``. When legacy mode is
     enabled, events are also translated to v3 formats (pilot_results.jsonl,
     live-state.json) so that ``otto status -w`` and ``otto show`` still work.
     """
@@ -139,7 +205,7 @@ class Telemetry:
     def __init__(self, log_dir: Path) -> None:
         self._log_dir = log_dir
         self._log_dir.mkdir(parents=True, exist_ok=True)
-        self._events_path = log_dir / "v4_events.jsonl"
+        self._events_path = log_dir / "events.jsonl"
         self._legacy_enabled = False
         self._legacy_results_path = log_dir / "pilot_results.jsonl"
         self._legacy_live_state_path = log_dir / "live-state.json"

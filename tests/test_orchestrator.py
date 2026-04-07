@@ -268,6 +268,36 @@ class TestRunPerIntegration:
         assert exit_code == 0
 
     @pytest.mark.asyncio
+    async def test_build_scope_runs_only_matching_pending_tasks(self, tmp_git_repo):
+        tasks_path = tmp_git_repo / "tasks.yaml"
+        tasks_path.write_text(yaml.dump({"tasks": [
+            {"id": 1, "key": "user-task", "prompt": "Unrelated backlog", "status": "pending"},
+            {"id": 2, "key": "build-task", "prompt": "Current build task", "status": "pending", "build_id": "build-123"},
+        ]}))
+
+        config = self._make_config(tmp_git_repo)
+        config["build_id"] = "build-123"
+        seen_task_keys = []
+
+        async def fake_coding_loop(task_plan, context, config, project_dir, telemetry, tasks_file, task_work_dir=None, qa_mode="per_task", sibling_context=None):
+            seen_task_keys.append(task_plan.task_key)
+            return TaskResult(
+                task_key=task_plan.task_key,
+                success=True,
+                commit_sha="abc",
+                cost_usd=0.10,
+                worktree=None,
+            )
+
+        with patch("otto.orchestrator.coding_loop", side_effect=fake_coding_loop):
+            exit_code = await run_per(config, tasks_path, tmp_git_repo)
+
+        assert exit_code == 0
+        assert seen_task_keys == ["build-task"]
+        persisted = {task["key"]: task for task in load_tasks(tasks_path)}
+        assert persisted["user-task"]["status"] == "pending"
+
+    @pytest.mark.asyncio
     async def test_monolithic_mode_bypasses_planner_and_runs_one_integrated_unit(self, tmp_git_repo):
         tasks_path = tmp_git_repo / "tasks.yaml"
         tasks_path.write_text(yaml.dump({"tasks": [
@@ -785,7 +815,7 @@ class TestRunPerIntegration:
         assert exit_code == 1
         assert executed == ["task-one"]
 
-        events_path = tmp_git_repo / "otto_logs" / "v4_events.jsonl"
+        events_path = tmp_git_repo / "otto_logs" / "events.jsonl"
         all_done = json.loads(events_path.read_text().strip().splitlines()[-1])
         assert all_done["event"] == "all_done"
         assert all_done["total_missing_or_interrupted"] == 1
@@ -912,7 +942,7 @@ class TestRunPerIntegration:
         print_summary_mock.assert_called_once()
         assert print_summary_mock.call_args.kwargs["integration_passed"] is False
 
-        events_path = tmp_git_repo / "otto_logs" / "v4_events.jsonl"
+        events_path = tmp_git_repo / "otto_logs" / "events.jsonl"
         all_done = json.loads(events_path.read_text().strip().splitlines()[-1])
         assert all_done["event"] == "all_done"
         assert all_done["total_failed"] == 0
@@ -1263,6 +1293,8 @@ class TestRunPerIntegration:
         batch_qa_mock.assert_not_awaited()
         run_suite_mock.assert_called_once()
         assert run_suite_mock.call_args.kwargs["candidate_sha"] == "HEAD"
+
+
 
 
 class TestOrchestrationLogic:

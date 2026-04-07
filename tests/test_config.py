@@ -131,6 +131,72 @@ class TestDetectTestCommand:
         result = detect_test_command(tmp_git_repo)
         assert result is None
 
+    def test_skips_npm_placeholder_no_test_specified(self, tmp_git_repo):
+        """npm init placeholder should not produce 'npm test'."""
+        pkg = {"scripts": {"test": 'echo "Error: no test specified" && exit 1'}}
+        (tmp_git_repo / "package.json").write_text(json.dumps(pkg))
+        result = detect_test_command(tmp_git_repo)
+        assert result is None
+
+    def test_skips_npm_placeholder_echo_error(self, tmp_git_repo):
+        pkg = {"scripts": {"test": 'echo "Error" && exit 1'}}
+        (tmp_git_repo / "package.json").write_text(json.dumps(pkg))
+        result = detect_test_command(tmp_git_repo)
+        assert result is None
+
+    def test_detects_pnpm_from_lockfile(self, tmp_git_repo):
+        pkg = {"scripts": {"test": "vitest"}}
+        (tmp_git_repo / "package.json").write_text(json.dumps(pkg))
+        (tmp_git_repo / "pnpm-lock.yaml").write_text("lockfileVersion: 5\n")
+        result = detect_test_command(tmp_git_repo)
+        assert result == "pnpm test"
+
+    def test_detects_yarn_from_lockfile(self, tmp_git_repo):
+        pkg = {"scripts": {"test": "jest"}}
+        (tmp_git_repo / "package.json").write_text(json.dumps(pkg))
+        (tmp_git_repo / "yarn.lock").write_text("")
+        result = detect_test_command(tmp_git_repo)
+        assert result == "yarn test"
+
+    def test_detects_bun_from_lockfile(self, tmp_git_repo):
+        pkg = {"scripts": {"test": "bun:test"}}
+        (tmp_git_repo / "package.json").write_text(json.dumps(pkg))
+        (tmp_git_repo / "bun.lockb").write_text("")
+        result = detect_test_command(tmp_git_repo)
+        assert result == "bun test"
+
+    def test_detects_deno_test(self, tmp_git_repo):
+        (tmp_git_repo / "deno.json").write_text("{}")
+        result = detect_test_command(tmp_git_repo)
+        assert result == "deno test"
+
+    def test_detects_deno_jsonc(self, tmp_git_repo):
+        (tmp_git_repo / "deno.jsonc").write_text("{}")
+        result = detect_test_command(tmp_git_repo)
+        assert result == "deno test"
+
+    def test_detects_tox(self, tmp_git_repo):
+        (tmp_git_repo / "tests").mkdir()
+        (tmp_git_repo / "tests" / "test_example.py").write_text("def test_x(): pass\n")
+        (tmp_git_repo / "tox.ini").write_text("[tox]\nenvlist = py3\n")
+        result = detect_test_command(tmp_git_repo)
+        # tox should replace bare pytest
+        assert result == "tox"
+        assert "pytest" not in result
+
+    def test_detects_nox(self, tmp_git_repo):
+        (tmp_git_repo / "tests").mkdir()
+        (tmp_git_repo / "tests" / "test_example.py").write_text("def test_x(): pass\n")
+        (tmp_git_repo / "noxfile.py").write_text("import nox\n")
+        result = detect_test_command(tmp_git_repo)
+        assert result == "nox"
+        assert "pytest" not in result
+
+    def test_detects_makefile_test_target(self, tmp_git_repo):
+        (tmp_git_repo / "Makefile").write_text("test:\n\tpytest\n")
+        result = detect_test_command(tmp_git_repo)
+        assert result == "make test"
+
 
 class TestDetectDefaultBranch:
     def test_detects_main(self, tmp_git_repo):

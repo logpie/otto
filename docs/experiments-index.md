@@ -17,6 +17,11 @@ Last updated: 2026-04-01
 | Parallel QA | 2026-03-31 | `96e4ec4` | `docs/parallel-qa-findings.md` |
 | Greenfield fixes | 2026-03-31 | `6bea835`, `6cc614d` | pytest exit 5, jest, npm placeholder |
 | Agent-browser for QA | 2026-03-31 | `ecf9cd6` | Replaces chrome-devtools-mcp. 36% cheaper, parallel browser works |
+| Subprocess-per-story parallelism | 2026-04-05 | `c783c87` | APFS clone isolation, 2.5x speedup, build-once-start-many |
+| Tagged text verdict (drop structured output) | 2026-04-05 | `c37fb79` | 2.6x fewer turns, ~22s saved per story |
+| LLM discovery agent | 2026-04-05 | `46592ff` | Replaces if/else classifier. Handles CLI, library, WS, any product |
+| Repo-wide heuristic generalization | 2026-04-05 | `ba0cf74` | pnpm/yarn/bun/deno/tox/nox across config, testing, flaky, qa |
+| Dead code removal | 2026-04-05 | `aacf4e8` | -924 lines: run_certifier_v2, product_qa.py |
 
 ---
 
@@ -24,10 +29,17 @@ Last updated: 2026-04-01
 
 ### `worktree-i2p` (worktree at `.claude/worktrees/i2p`)
 **Intent-to-product / Certifier.** Outer loop around v4.5 inner loop. Journey-level execution with dual scoring (journey + step), proof-of-work reports, self-healing.
-- **Status:** Active development. Stress testing across diverse products.
+- **Status:** Active. LLM discovery agent shipped — certifier handles any product type.
+- **Key changes (2026-04-05):**
+  - `discover_project()` — LLM agent replaces if/else classifier for all product types
+  - CLI support (argparse, Click, Cargo, Go), library support (import testing), WebSocket support
+  - Parallel subprocess-per-story with build-once-start-many
+  - Heuristic generalization across 7 files (config, testing, flaky, qa, runner, display, baseline)
+  - Dead code removal: -924 lines (run_certifier_v2, product_qa.py)
+  - E2E validated on 7 product types: CLI, library, HTTP API, WebSocket, data pipeline, web app
 - **Key docs:** `docs/certifier-e2e-results-2026-03-31.md`, `docs/certifier-hidden-inputs-audit.md`
-- **Memory:** `project_i2p_findings.md`, `project_certifier_generalization.md`
-- **Revisit:** Check if inner loop QA optimizations from main should be pulled in.
+- **Memory:** `project_discovery_agent.md`, `project_agentic_architecture.md`
+- **Next:** Squash commits, Codex implementation gate, merge to main.
 
 ### `worktree-gate-pilot` (worktree at `.claude/worktrees/gate-pilot`)
 **Gate pilot.** LLM intelligence at batch decision boundaries. i2p v2 spec with outer loop.

@@ -1,7 +1,9 @@
 """Otto CLI — entrypoint for all otto commands."""
 
 import asyncio
+import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -130,7 +132,19 @@ def main():
 
     Run 'otto COMMAND -h' for command-specific options.
     """
-    pass
+    # Fail early if otto is loaded from a different source than expected.
+    # This catches the shared-venv bug where worktree otto runs main repo code.
+    import otto as _otto_pkg
+    _otto_src = str(Path(_otto_pkg.__file__).resolve().parent)
+    _cwd = str(Path.cwd().resolve())
+    if "worktree" in _cwd and "worktree" not in _otto_src:
+        click.echo(
+            f"ERROR: otto loaded from {_otto_src}\n"
+            f"  but cwd is a worktree ({_cwd}).\n"
+            f"  Use the worktree's own venv: .venv/bin/otto",
+            err=True,
+        )
+        sys.exit(1)
 
 
 
@@ -228,6 +242,73 @@ def _print_imported_tasks(tasks: list) -> None:
             for item in spec:
                 console.print(f"       [dim]-[/dim] {rich_escape(str(item))}")
     console.print(f"\n[success]✓[/success] Imported [bold]{len(tasks)}[/bold] tasks. Review specs in tasks.yaml before running.")
+
+
+def _collect_failed_tasks(tasks: list[dict]) -> list[dict]:
+    """Return terminal task failures that should block product QA."""
+    failed_statuses = {"failed", "merge_failed", "blocked", "conflict"}
+    return [task for task in tasks if task.get("status") in failed_statuses]
+
+
+def _print_failed_tasks(tasks: list[dict]) -> None:
+    """Show which tasks blocked the build before product QA."""
+    if not tasks:
+        return
+
+    console.print("  [red]Skipping product QA because some tasks failed[/red]")
+    for task in tasks:
+        status = rich_escape(str(task.get("status", "failed")))
+        prompt = rich_escape(str(task.get("prompt", ""))[:80])
+        console.print(f"    [red]✗[/red] #{task.get('id', '?')} [{status}] {prompt}")
+        if task.get("error"):
+            console.print(f"      {rich_escape(str(task['error'])[:100])}")
+
+
+def _print_build_result(intent: str, result, build_duration: float) -> None:
+    """Render build verification output and summary."""
+    if result.journeys:
+        console.print()
+        if result.passed:
+            console.print(f"  [success]All journeys passed[/success]"
+                          f" (round {result.rounds})")
+        else:
+            console.print(f"  [red]Some journeys failed[/red]"
+                          f" (after {result.rounds} round(s))")
+        for j in result.journeys:
+            status_icon = "[success]✓[/success]" if j.get("passed") else "[red]✗[/red]"
+            console.print(f"    {status_icon} {rich_escape(j.get('name', ''))}")
+
+    if result.break_findings:
+        console.print()
+        high_count = sum(1 for b in result.break_findings if b.get("severity") in ("critical", "important"))
+        warn_count = len(result.break_findings) - high_count
+        if high_count:
+            console.print(f"  [red bold]⚠ {high_count} quality issue(s) found (will trigger fix)[/red bold]")
+        if warn_count:
+            console.print(f"  [yellow]⚠ {warn_count} quality warning(s)[/yellow]")
+        for b in result.break_findings:
+            sev = b.get("severity", "?")
+            desc = rich_escape(b.get("description", "")[:100])
+            if sev in ("critical", "important"):
+                console.print(f"    [red]✗ [{sev}] {desc}[/red]")
+            else:
+                console.print(f"    [yellow]! [{sev}] {desc}[/yellow]")
+            fix = b.get("fix_suggestion", "")
+            if fix:
+                console.print(f"      fix: {rich_escape(fix[:120])}")
+
+    console.print()
+    console.print(f"  [bold]Build Summary[/bold]  ({result.build_id})")
+    console.print(f"  Intent: {rich_escape(intent[:80])}")
+    if result.journeys:
+        console.print(f"  Stories: {result.tasks_passed} passed, {result.tasks_failed} failed")
+    else:
+        console.print(f"  Tasks: {result.tasks_passed} passed, {result.tasks_failed} failed")
+    console.print(f"  [bold]Total cost: ${result.total_cost:.2f}[/bold]")
+    console.print(f"  Duration: {build_duration / 60:.1f} min")
+    if result.error:
+        console.print(f"  [red]Error: {rich_escape(result.error[:100])}[/red]")
+    console.print()
 
 
 @main.command(context_settings=CONTEXT_SETTINGS)
@@ -363,7 +444,7 @@ def run(prompt, dry_run, no_spec, no_qa, no_test):
         tasks = load_tasks(tasks_path)
         pending = [t for t in tasks if t.get("status") == "pending"]
         if not pending:
-            console.print("No pending tasks.")
+            console.print("Pending tasks: 0")
             return
 
         # Run the planner to show actual execution plan
@@ -412,6 +493,80 @@ def run(prompt, dry_run, no_spec, no_qa, no_test):
         exit_code = asyncio.run(run_per(config, tasks_path, project_dir))
         sys.exit(exit_code)
 
+
+
+
+@main.command(context_settings=CONTEXT_SETTINGS)
+@click.argument("intent")
+@click.option("--no-review", is_flag=True, help="Skip plan review, execute immediately")
+@click.option("--no-qa", is_flag=True, help="Skip product certification after build")
+@click.option("--plan/--no-plan", "use_planner", default=None, help="Force planner on/off")
+@click.option("--orchestrated", is_flag=True, help="Orchestrator-driven build (PER mode)")
+@click.option("--split", "use_split", is_flag=True, help="Split-session build — orchestrator drives build/certify as separate sessions")
+def build(intent, no_review, no_qa, use_planner, orchestrated, use_split):
+    """Build a product from a natural language intent.
+
+    Default: agentic — one agent builds, dispatches certifier, fixes, re-certifies.
+    The coding agent drives the entire loop autonomously.
+
+      --split:        Split sessions — orchestrator drives build/certify separately
+      --orchestrated: Orchestrator-driven build (PER mode, legacy)
+
+    The certifier verifies the product works by running real user
+    stories (HTTP, CLI, import, WebSocket — any product type).
+
+    Examples:
+        otto build "bookmark manager with tags and search"
+        otto build "CLI tool that converts CSV to JSON"
+        otto build "weather app" --split
+    """
+    require_git()
+    project_dir = Path.cwd()
+    config_path = project_dir / "otto.yaml"
+    if not config_path.exists():
+        create_config(project_dir)
+        console.print(f"[yellow]First run — created otto.yaml[/yellow]")
+        console.print()
+    config = load_config(config_path)
+
+    if no_qa:
+        config["skip_product_qa"] = True
+    if use_planner is not None:
+        config["use_planner"] = use_planner
+    if no_review:
+        config["no_review"] = True
+
+    # Run the pipeline
+    from otto.pipeline import build_product, build_agentic_v2, build_agentic_v3, BuildResult
+
+    build_start = time.time()
+    console.print()
+
+    try:
+        if orchestrated:
+            result: BuildResult = asyncio.run(build_product(intent, project_dir, config))
+        elif use_split:
+            console.print("  [bold]Split mode[/bold] — separate build and certify sessions\n")
+            result: BuildResult = asyncio.run(
+                build_agentic_v2(intent, project_dir, config)
+            )
+        else:
+            # Default: fully agentic — one agent drives everything
+            console.print("  [bold]Agentic mode[/bold] — one agent builds, certifies, fixes\n")
+            result: BuildResult = asyncio.run(
+                build_agentic_v3(intent, project_dir, config)
+            )
+    except KeyboardInterrupt:
+        console.print("\n  Aborted.")
+        sys.exit(1)
+    except Exception as e:
+        error_console.print(f"[error]Build failed: {rich_escape(str(e))}[/error]")
+        sys.exit(1)
+
+    build_duration = time.time() - build_start
+    _print_build_result(intent, result, build_duration)
+
+    sys.exit(0 if result.passed else 1)
 
 
 

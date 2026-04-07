@@ -191,6 +191,7 @@ class TestRun:
         assert result.exit_code == 0
 
 
+
 class TestStatus:
     def test_shows_no_tasks(self, runner, tmp_git_repo, monkeypatch):
         monkeypatch.chdir(tmp_git_repo)

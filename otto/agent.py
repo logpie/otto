@@ -77,8 +77,10 @@ class ResultMessage:
     result: str | None = None
     total_cost_usd: float | None = None
     usage: dict[str, Any] | None = None
+    structured_output: Any = None
 
 
+@dataclass
 @dataclass
 class AgentOptions:
     permission_mode: str | None = None
@@ -94,6 +96,8 @@ class AgentOptions:
     agents: dict[str, Any] | None = None
     max_buffer_size: int | None = None
     provider: str | None = None
+    disallowed_tools: list[str] | None = None
+    output_format: dict[str, Any] | None = None
 
 
 # Backward-compatible name used throughout the codebase and tests.
@@ -207,6 +211,8 @@ def _sdk_options(options: AgentOptions | None) -> Any:
         effort=opts.effort,
         agents=opts.agents,
         max_buffer_size=opts.max_buffer_size,
+        disallowed_tools=opts.disallowed_tools or [],
+        output_format=opts.output_format,
     )
 
 
@@ -260,6 +266,7 @@ def _normalize_message(message: Any) -> Any | None:
             result=getattr(message, "result", None),
             total_cost_usd=getattr(message, "total_cost_usd", None),
             usage=getattr(message, "usage", None),
+            structured_output=getattr(message, "structured_output", None),
         )
     if isinstance(message, AssistantMessage):
         return message
@@ -452,8 +459,14 @@ async def run_agent_query(
     on_tool: Callable[[Any], Any] | None = None,
     on_tool_result: Callable[[Any], Any] | None = None,
     on_result: Callable[[Any], Any] | None = None,
+    capture_tool_output: bool = False,
 ) -> tuple[str, float, Any]:
-    """Run a provider query, dispatching normalized events to callbacks."""
+    """Run a provider query, dispatching normalized events to callbacks.
+
+    If capture_tool_output=True, tool result content (including subagent output)
+    is appended to the returned text. This is useful when the caller needs to
+    parse structured markers from subagent output.
+    """
     text_parts: list[str] = []
     cost = 0.0
     result_msg = None
@@ -469,6 +482,8 @@ async def run_agent_query(
         elif isinstance(message, AssistantMessage):
             for block in message.content:
                 if isinstance(block, ToolResultBlock):
+                    if capture_tool_output and block.content:
+                        text_parts.append(block.content)
                     if on_tool_result:
                         on_tool_result(block)
                 elif isinstance(block, ThinkingBlock):

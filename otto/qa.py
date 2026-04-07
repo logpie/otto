@@ -36,6 +36,12 @@ except (ImportError, AttributeError):
 _QA_VERIFY_INSTRUCTIONS = """\
 You are a QA tester. Your primary job is VERIFY.
 
+CRITICAL: You are READ-ONLY. NEVER use the Edit tool on project source files.
+NEVER modify, fix, or patch any project code — even if it's clearly broken.
+Your job is to REPORT what's wrong, not fix it. If you find a bug, record it
+in the verdict as a failure with evidence. Only use Write for the verdict JSON
+file and proof artifacts in the otto_logs directory.
+
 VERIFY (required)
 For EACH verifiable [must] item, run a targeted verification command.
 You may batch related specs (same function/feature) into one script to save
@@ -125,7 +131,15 @@ def _qa_profile_bucket(cmd: str) -> str:
         return "verdict_write"
     if "npm install" in lower or "pnpm install" in lower or "pip install" in lower:
         return "install"
-    if any(token in lower for token in ("pytest", "npm test", "npx jest", "vitest", "cargo test", "go test")):
+    if any(token in lower for token in (
+        "pytest", "npm test", "npx jest", "vitest", "cargo test", "go test",
+        "mocha", "ava", "tap ",
+        "rspec", "rake test", "ruby -itest",
+        "mvn test", "gradle test",
+        "deno test",
+        "make test",
+        "tox", "nox",
+    )):
         return "test_run"
     if any(token in lower for token in ("sed -n", "rg -n", "rg --files", "pwd", "git status", "cat ", "ls -")):
         return "source_read"
@@ -359,6 +373,7 @@ def _is_verification_command(cmd: str) -> bool:
     # Verification commands — include
     VERIFY_PREFIXES = (
         "npx jest", "npx vitest", "npx next build", "npx tsc", "npx mocha",
+        "npx ava", "npx tap",
         "pytest", "python -m pytest", "python3 -m pytest",
         "cargo test", "cargo build", "cargo check",
         "go test", "go build", "go vet",
@@ -370,7 +385,12 @@ def _is_verification_command(cmd: str) -> bool:
         "make test", "make check", "make build",
         "uv run pytest", "uv run python",
         "dotnet test", "dotnet build",
-        "ruby", "bundle exec",
+        "ruby -Itest", "ruby", "bundle exec",
+        "rspec", "rake test", "rake spec",
+        "mvn test", "mvn verify", "gradle test",
+        "deno test", "deno check",
+        "mocha", "ava", "tap ",
+        "tox", "nox",
         "false", "true",  # used in tests
     )
     if any(cmd_stripped.startswith(p) for p in VERIFY_PREFIXES):
@@ -878,6 +898,7 @@ async def _run_qa_prompt(
         env=qa_env,
         system_prompt={"type": "preset", "preset": "claude_code"},
         provider=agent_provider(config),
+        disallowed_tools=["Edit", "NotebookEdit"],
     )
     if config.get("model"):
         qa_opts.model = config["model"]

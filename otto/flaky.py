@@ -1,7 +1,7 @@
 """Detect pre-existing (flaky) test failures to avoid blaming the coding agent.
 
 Extracts failing test names from test runner output. Framework-agnostic:
-jest, pytest, vitest, go test, cargo test.
+jest, pytest, vitest, go test, cargo test, mocha, TAP, unittest, rspec.
 """
 
 import re
@@ -36,6 +36,27 @@ def extract_failing_tests(output: str) -> set[str]:
 
     # Cargo: "test result: FAILED" + "test module::test_name ... FAILED"
     for m in re.finditer(r"^test\s+(\S+)\s+\.\.\.\s+FAILED", output, re.MULTILINE):
+        failures.add(m.group(1))
+
+    # Mocha: "  N failing" followed by numbered failures "  1) test name"
+    if re.search(r"^\s+\d+\s+failing", output, re.MULTILINE):
+        for m in re.finditer(r"^\s+\d+\)\s+(.+)$", output, re.MULTILINE):
+            failures.add(m.group(1).strip())
+
+    # TAP: "not ok 1 - description"
+    for m in re.finditer(r"^not ok\s+\d+\s+(?:-\s+)?(.+)$", output, re.MULTILINE):
+        failures.add(m.group(1).strip())
+
+    # Python unittest: "FAIL: test_method (test_module.TestClass)"
+    for m in re.finditer(r"^FAIL:\s+(\S+)\s+\((\S+)\)", output, re.MULTILINE):
+        failures.add(f"{m.group(2)}.{m.group(1)}")
+
+    # Vitest file-path style: "FAIL  src/foo.test.ts > suite > test name"
+    for m in re.finditer(r"^\s*FAIL\s+(\S+)\s+>\s+(.+)$", output, re.MULTILINE):
+        failures.add(f"{m.group(1)} > {m.group(2).strip()}")
+
+    # RSpec: "rspec ./spec/foo_spec.rb:42 # description"
+    for m in re.finditer(r"^rspec\s+(\S+:\d+)\s+#\s+(.+)$", output, re.MULTILINE):
         failures.add(m.group(1))
 
     return failures

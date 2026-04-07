@@ -1,571 +1,143 @@
-# Otto Architecture — Detailed Pipeline Reference
-
-This document is the source of truth for otto's execution pipeline. Use it for debugging, onboarding, and understanding what happens when you run `otto run`.
-
-Related living notes:
-- Claude/provider-agnostic bugs and findings discovered during Codex hardening: [`docs/claude-impact-findings.md`](claude-impact-findings.md)
+# Otto Architecture
 
 ## Overview
 
-```
-otto run
-  │
-  ├─ 1. Preflight (validate branch/tree, stale recovery, no mutations)
-  ├─ 2. Smart Planner (single LLM call, high effort)
-  │     ├─ INDEPENDENT → parallel batch
-  │     ├─ ADDITIVE (same file, diff functions) → parallel
-  │     ├─ DEPENDENT → serialize (later batch)
-  │     ├─ CONTRADICTORY → flag + schedule in separate batches (never drop)
-  │     └─ UNCERTAIN (same function) → serialize (conservative)
-  │     Missing tasks auto-added as serial batches (safety net)
-  │
-  ├─ 3. PER Loop (Plan-Execute-Replan)
-  │     │
-  │     ├─ For each batch:
-  │     │     │
-  │     │     ├─ PARALLEL (max_parallel > 1, batch_size > 1)
-  │     │     │    Each task → own git worktree → code + test
-  │     │     │    Then → serial merge phase
-  │     │     │
-  │     │     └─ SERIAL (max_parallel = 1 or single task)
-  │     │          Each task → own git worktree → code + test
-  │     │
-  │     │     QA: unified run_qa() — single task = per-task QA,
-  │     │          multi-task = batch QA with combined specs
-  │     │
-  │     ├─ Merge conflicts:
-  │     │    1. git merge (handles most cases)
-  │     │    2. If conflict → coding agent re-applies with full diff
-  │     │       (one agent, adapts intelligently, no cherry-pick)
-  │     │
-  │     ├─ Batch QA (one session, combined specs from all tasks)
-  │     │    Verify ALL [must] items on integrated codebase
-  │     │    Generate cross-task integration tests
-  │     │    If [must] fails → retry failed tasks (up to max_retries rounds)
-  │     │    Each round: re-code → re-merge → re-QA
-  │     │    If still failing after max_retries → rollback batch, continue run
-  │     │    (only infrastructure errors abort the entire run)
-  │     │
-  │     └─ Smart replan if failures occurred
-  │          Uses dependency analysis + failure context
-  │          Rolled-back tasks re-scheduled in later batches
-  │          Tasks depending on permanently failed tasks flagged
-  │
-  └─ 4. Summary + exit
-```
-
----
-
-## 1. Preflight
+Otto builds products from natural language intent. One autonomous agent session drives the entire lifecycle: plan → build → test → certify → fix → re-certify.
 
 ```
-run_per() entry point:
+otto build "REST API with auth, CRUD notes, search"
   │
-  ├─ Acquire otto.lock (prevent concurrent runs)
-  ├─ Clean orphaned worktrees from previous crashes
-  │
-  └─ preflight_checks() — read-only validation first, no mutations
+  └─ SDK launches one coding agent session
        │
-       ├─ Validate git state (fail-fast, never auto-checkout or stash):
-       │    ├─ Wrong branch → EXIT 2 ("run: git checkout {branch}")
-       │    └─ Dirty tree → EXIT 2 ("commit or stash before running")
+       ├─ Phase 1: BUILD
+       │    Plan architecture → implement → write tests → self-review → commit
+       │    (subagents for parallel features via Agent tool)
        │
-       ├─ Recover stale tasks:
-       │    running/verified/merge_pending → reset to pending
-       │    (merged tasks are NOT reset — code already on main)
+       ├─ Phase 2: CERTIFY
+       │    Dispatch certifier agent (builder-blind subagent)
+       │    Certifier reads project fresh, tests as real user
+       │    Returns: PASS/FAIL per story + evidence
        │
-       ├─ Update .git/info/exclude (framework + otto ignores, no commits)
-       ├─ Load tasks.yaml → filter pending tasks
-       │    └─ No pending tasks → EXIT 0
+       ├─ Phase 3: FIX (if FAIL)
+       │    Read certifier findings → fix code → run tests → commit
+       │    Re-dispatch certifier → repeat until PASS
        │
-       └─ Return (exit_code, pending_tasks)
+       └─ Done: proof-of-work report + build summary
 ```
 
-**Key files:** `orchestrator.py:run_per()` (lock, worktree cleanup), `runner.py:preflight_checks()`, `git_ops.py:check_clean_tree()`
+## Key Design Decisions
 
----
+### Certifier as environment
 
-## 2. Planning
+The certifier is an environment signal — like a test suite. The coding agent dispatches it via the Agent tool and reads the result. The certifier reports **symptoms** ("check/circle buttons display raw HTML entities") not fixes ("change `<%= to `<%-`"). The coding agent diagnoses and fixes.
+
+This is the core architectural insight: the coding agent treats certification like running `pytest` — dispatch, read failures, fix, re-run.
+
+### Builder-blind certification
+
+The certifier is a separate agent session (dispatched via Agent tool). It has zero knowledge of how the product was built — it reads the project files fresh, discovers the framework, installs deps, starts the app, and tests as a real user would. This prevents unconscious bias (testing what was built vs what should work).
+
+### One session, no orchestrator
+
+The coding agent drives everything — build, certify, fix loop. No external orchestrator manages the loop. This is simpler, cheaper (~50% vs split sessions), and the agent has full context across rounds.
+
+### Subagent parallelism
+
+Both the coding agent and certifier use the Agent tool for parallelism:
+- **Coding**: dispatches subagents for independent features (auth module, CRUD API, etc.)
+- **Certifier**: dispatches subagents for parallel story testing (first experience, CRUD lifecycle, edge cases, etc.)
+
+The Agent tool creates fresh CC subprocesses — each subagent has isolated context.
+
+### Auth discovery once
+
+The certifier discovers auth once (register → login → capture token/cookie) and passes working auth commands to every test subagent. This prevents each subagent from fumbling auth from scratch (~20 turns saved per story).
+
+## Code Map
+
+### Default path: `otto build "intent"`
 
 ```
-plan(pending_tasks)
-  │
-  ├─ Single task? → instant (no LLM needed)
-  │
-  └─ Multiple tasks? → single LLM call (effort=high)
+cli.py:build()
+  └─ pipeline.py:build_agentic_v3()
+       ├─ agent.py:run_agent_query(prompt, capture_tool_output=True)
+       │    └─ SDK query() → single agent session
+       │         ├─ Agent plans + builds + tests + commits
+       │         ├─ Agent dispatches certifier subagent
+       │         │    └─ certifier/__init__.py:CERTIFIER_AGENTIC_PROMPT
+       │         │         ├─ Reads project, installs deps, starts app
+       │         │         ├─ Dispatches test subagents (parallel stories)
+       │         │         └─ Returns STORY_RESULT + VERDICT markers
+       │         ├─ If FAIL: agent fixes + re-dispatches
+       │         └─ Agent repeats markers in final message
        │
-       ├─ Pairwise relationship analysis:
-       │    INDEPENDENT → parallel batch
-       │    ADDITIVE (same file, diff functions) → parallel
-       │    DEPENDENT → serialize (later batch)
-       │    CONTRADICTORY → separate batches (never dropped)
-       │    UNCERTAIN (same function) → serialize (conservative)
-       │
-       ├─ Respects depends_on constraints (topological sort)
-       ├─ Missing tasks auto-added as serial batches (safety net)
-       ├─ Returns ExecutionPlan { batches, analysis, conflicts }
-       │
-       └─ Parse fails? → fallback to serial_plan()
-
-Validation: _normalize_plan enforces dependency constraints
-  └─ Invalid coverage? → fallback to serial_plan()
+       ├─ Parse STORY_RESULT/VERDICT from agent text
+       ├─ Write agent.log (structured) + agent-raw.log (full)
+       ├─ Write proof-of-work.{json,html,md}
+       └─ Return BuildResult
 ```
 
-**Key files:** `planner.py:plan()`, `planner.py:serial_plan()`
-
----
-
-## 3. PER Loop (Plan-Execute-Replan)
-
-### 3a. Batch Execution Mode
+### Split path: `otto build --split`
 
 ```
-For each batch in plan:
-  │
-  ├─ All tasks → _run_task_in_worktree() (unified path)
-  │    ├─ git worktree add .otto-worktrees/otto-task-{key} base_sha --detach
-  │    ├─ Install deps in worktree
-  │    ├─ coding_loop(task_work_dir=worktree)
-  │    └─ Cleanup worktree (finally block)
-  │
-  ├─ max_parallel > 1 AND batch has 2+ tasks?
-  │    ├─ YES → run tasks concurrently (bounded by semaphore)
-  │    └─ NO → run tasks sequentially
-  │
-  └─ Then → merge_batch_results() for ALL batches (see section 3c)
+pipeline.py:build_agentic_v2()
+  ├─ Session 1: coding agent (AgentSession, persists via resume)
+  ├─ Session 2: certifier agent (fresh each round)
+  └─ Loop: build → certify → if fail: resume coding with findings → re-certify
 ```
 
-### 3b. Per-Task Pipeline (`coding_loop` → `run_task_v45`)
-
-This is the core of otto — what happens for each individual task:
+### Orchestrated path: `otto build --orchestrated`
 
 ```
-run_task_v45(task, config, project_dir, task_work_dir=worktree)
-  │
-  ╔══════════════════════════════════════════════════════╗
-  ║  PREPARE                                             ║
-  ╠══════════════════════════════════════════════════════╣
-  ║  ├─ Create log dir: otto_logs/{key}/                 ║
-  ║  ├─ Snapshot pre-existing untracked files             ║
-  ║  ├─ Run baseline tests                                ║
-  ║  │    ├─ Infra failure? → WARN + continue (agent fixes) ║
-  ║  │    └─ Real test failure? → EXIT (baseline_fail)    ║
-  ║  ├─ Record baseline test count                        ║
-  ║  └─ Emit: phase=prepare, status=done                  ║
-  ╚══════════════════════════════════════════════════════╝
-         │
-         │  (in parallel, background thread)
-         ├──────────────────────────────────────────┐
-         │                                          │
-  ╔══════╧═════════════════════╗    ╔═══════════════╧═══════════════╗
-  ║  CODING (attempt loop)     ║    ║  SPEC GENERATION (if enabled)  ║
-  ╠════════════════════════════╣    ╠════════════════════════════════╣
-  ║                            ║    ║  CC agent generates:           ║
-  ║  for attempt in max_retries║    ║  ├─ [must] gating criteria     ║
-  ║    │                       ║    ║  ├─ [must ◈] visual/subjective ║
-  ║    ├─ Build prompt:        ║    ║  ├─ [should] advisory          ║
-  ║    │  attempt 0: bare CC   ║    ║  └─ [should ◈] visual advisory ║
-  ║    │  attempt 1+: + spec   ║    ║                                ║
-  ║    │    + failure excerpt   ║    ║  Runs in background thread     ║
-  ║    │    + learnings         ║    ║  Available by attempt 2        ║
-  ║    │                       ║    ║                                ║
-  ║    │  ◄ spec feeds into ◄──╫────║  → coding prompt (attempt 1+)  ║
-  ║    │                       ║    ║  → QA acceptance criteria       ║
-  ║    │                       ║    ╚════════════════════════════════╝
-  ║    ├─ Run coding agent     ║
-  ║    │  (CC, bypassPerms,    ║
-  ║    │   no custom sys prompt)║
-  ║    │                       ║
-  ║    ├─ No changes?          ║
-  ║    │  └─ Run QA on existing║
-  ║    │     code (see below)  ║
-  ║    │                       ║
-  ║    ├─ Build candidate:     ║
-  ║    │  ├─ git reset --mixed ║
-  ║    │  ├─ git add (tracked  ║
-  ║    │  │   + new project    ║
-  ║    │  │   files only)      ║
-  ║    │  ├─ git commit        ║
-  ║    │  └─ Anchor as ref:    ║
-  ║    │     refs/otto/        ║
-  ║    │     candidates/{key}/ ║
-  ║    │     attempt-{N}       ║
-  ║    │                       ║
-  ║    ├─────────────────────► TESTING
-  ║    ├─────────────────────► QA (awaits spec from background thread)
-  ║    │                       ║
-  ║    ├─ All passed?          ║
-  ║    │  └─ Break (success)   ║
-  ║    │                       ║
-  ║    └─ Failed?              ║
-  ║       ├─ Set last_error    ║
-  ║       │  (failure excerpt, ║
-  ║       │   not raw output)  ║
-  ║       └─ Continue loop     ║
-  ╚════════════════════════════╝
+pipeline.py:build_product()
+  └─ orchestrator.py:run_per()
+       ├─ Planner → batches → parallel worktrees
+       ├─ Per-task: coding agent → tests → QA
+       └─ Merge → batch QA → retry/rollback
 ```
 
-#### Testing Phase Detail
+## File Reference
+
+| File | Lines | Role |
+|------|------:|------|
+| `pipeline.py` | 854 | Build pipelines (v3, v2, orchestrated) |
+| `certifier/__init__.py` | 440 | Agentic certifier + PoW generation |
+| `certifier/report.py` | 121 | CertificationReport dataclasses |
+| `agent.py` | 496 | Agent SDK wrapper |
+| `session.py` | 280 | AgentSession for split mode |
+| `cli.py` | 987 | CLI commands |
+| `config.py` | 410 | Config + otto.yaml |
+| `orchestrator.py` | 3469 | PER pipeline (--orchestrated) |
+| `runner.py` | 2334 | Task runner (orchestrated) |
+| `qa.py` | 2065 | QA agent (orchestrated) |
+
+## Observability
+
+### Build logs
 
 ```
-TESTING (clean disposable worktree — deterministic)
-  │
-  ├─ skip_test? → skip, proceed to QA
-  │
-  ├─ Create temp worktree at candidate_sha
-  ├─ Install deps
-  ├─ Run test_command (jest/pytest/etc.)
-  ├─ Run custom verify command (if task.verify set)
-  ├─ Write attempt-N-verify.log
-  │
-  ├─ Tests pass? → proceed to QA
-  └─ Tests fail? → build retry excerpt, retry
-  │
-  ├─ CLAIM VERIFICATION (audit-only, non-blocking)
-  │    └─ Regex audit: agent log vs test evidence
-  │       (e.g., agent said "tests pass" but exit code was 1)
-  │
-  └─ Emit: phase=test, status=done/fail
+otto_logs/builds/<build-id>/
+  agent.log           Structured: timestamps, commits, certifier rounds, verdict
+  agent-raw.log       Full unfiltered agent output (for debugging)
+  checkpoint.json     Build metadata: cost, duration, stories, rounds
 ```
 
-#### QA Phase Detail
+### Certifier reports
 
 ```
-QA
-  │
-  ├─ skip_qa? → skip, proceed to merge
-  │
-  ├─ Await spec (if still generating in background)
-  │
-  ├─ Run QA agent (CC, bypassPerms, browser always available)
-  │    PART 1 — VERIFY:
-  │    ├─ Test [must] items first (in order)
-  │    │    └─ Any [must] fails? → write verdict immediately, stop
-  │    ├─ Test [must ◈] visual items (browser required)
-  │    │    └─ Start dev server, navigate, take_screenshot(filePath=...)
-  │    ├─ Test [should] items (advisory only)
-  │    │
-  │    ├─ For each verified item, record proof:
-  │    │    ├─ Targeted command (jest --testPathPattern=X)
-  │    │    ├─ Command output
-  │    │    └─ Screenshot path (visual items)
-  │    │
-  │    └─ Write verdict JSON to output file
-  │
-  │    PART 2 — BREAK (after all specs pass):
-  │    ├─ Skim source to discover thresholds, branches, existing behaviors
-  │    ├─ 2-3 adversarial tool calls: boundary inputs, wrong types, edge cases
-  │    ├─ Classify: "regression" (existing broke) vs "edge_case" (new gap)
-  │    └─ All findings in "extras" — warning only, not gating
-  │
-  ├─ Verdict acquisition (3-layer fallback):
-  │    ├─ Layer 1: Early capture — intercept JSON from Write tool input
-  │    │    stream, validate with _is_verdict_complete(), confirm via
-  │    │    ToolResult. 15s grace timeout after confirmation to stop session.
-  │    │    Keeps LATEST valid Write (not first — honors agent corrections).
-  │    ├─ Layer 2: File-based — read verdict temp file, parse JSON, validate.
-  │    └─ Layer 3: Text parsing — search agent text for JSON blocks,
-  │         fallback to legacy "VERDICT: PASS/FAIL" detection.
-  │         Parse failure (no JSON, no fail markers) → infrastructure_error
-  │         (prevents false coding retries on unparseable verdicts).
-  │
-  ├─ Verdict validation:
-  │    ├─ must_passed recomputed from actual must_items statuses
-  │    │    (model's self-reported flag is advisory, not trusted)
-  │    ├─ Empty must_items → fall back to model flag (can't verify)
-  │    ├─ Single-task: checks regressions + test_suite_passed (same as batch)
-  │    └─ Batch: coverage matrix validation (expected vs actual spec pairs)
-  │
-  ├─ Infrastructure error? → retry QA (not coding)
-  │
-  ├─ Write proof artifacts:
-  │    ├─ qa-proofs/proof-report.md (human-readable)
-  │    ├─ qa-proofs/must-N.md (per-item)
-  │    ├─ qa-proofs/regression-check.sh (re-runnable)
-  │    └─ qa-proofs/screenshot-*.png (browser captures)
-  │
-  ├─ Proof quality audit:
-  │    └─ Flag [must] items with code-reading-only proofs (no command)
-  │
-  ├─ BREAK findings warning (if any):
-  │    └─ Logged loudly in qa-agent.log + progress callback
-  │
-  ├─ All [must] passed? → proceed to merge
-  │
-  └─ [must] failed? → build retry error from evidence, retry
-       └─ Retry error shows WHICH criteria failed + WHY
-          (not generic "QA failed")
+otto_logs/certifier/
+  proof-of-work.json  Machine-readable: stories, evidence, round history
+  proof-of-work.html  Styled HTML with collapsible evidence per story
+  proof-of-work.md    Markdown summary
 ```
 
-### 3c. Merge Phase (all modes)
+### Debugging
 
-After all tasks in a batch finish, merge verified candidates onto main one-by-one:
-
-```
-merge_batch_results()
-  │
-  For each verified task (sorted by key):
-    │
-    ├─ Find best candidate ref
-    │    └─ refs/otto/candidates/{key}/attempt-{highest}
-    │
-    ├─ merge_candidate(project_dir, candidate_sha, default_branch)
-    │    │
-    │    ├─ Create temp branch from current HEAD
-    │    ├─ git merge --no-edit candidate_sha
-    │    │
-    │    ├─ Merge succeeds? → proceed
-    │    └─ Merge conflicts? → abort, mark merge_conflict
-    │         └─ Queued for re-apply (see 3d below)
-    │
-    ├─ Per-task post-merge test (--no-qa mode ONLY — sole integration gate)
-    │    ├─ run_test_suite() in fresh worktree at new_sha
-    │    └─ Tests fail? → mark post_merge_test_fail, queue for re-apply
-    │
-    ├─ Fast-forward: git merge --ff-only new_sha
-    │
-    └─ Update task: status=merged (batch QA) or passed (per-task)
-
-Post-merge test strategy by mode:
-  PER_TASK (single):  skip — task's test phase already verified this code
-  BATCH (multi-task): skip per-task, one post-batch suite on HEAD (see 3d)
-  SKIP (--no-qa):     keep per-task — it's the only integration gate
-```
-
-### 3d. Post-batch Integration, Auto-Retry & Replan
-
-```
-After merge phase:
-  │
-  ├─ merge_conflict?
-  │    └─ _run_task_in_worktree with "MERGE CONFLICT CONTEXT" feedback:
-  │         ├─ Full diff from previous implementation
-  │         ├─ Files previously changed (diff --stat)
-  │         ├─ Strategy: "Read diff → read main → apply with Edit → test"
-  │         └─ Replace result in batch_results
-  │
-  ├─ post_merge_test_fail? (--no-qa mode only)
-  │    └─ _run_task_in_worktree with test failure feedback
-  │
-  ├─ Post-batch integration test (BATCH mode, 2+ merged tasks)
-  │    ├─ One deterministic run_test_suite() on integrated HEAD
-  │    ├─ Pass? → proceed to batch QA
-  │    └─ Fail? → HARD GATE: rollback batch, reset all tasks to pending
-  │
-  ├─ Batch QA (up to max_retries rounds)
-  │    ├─ parallel_qa: false (default) → one session, combined specs
-  │    ├─ parallel_qa: true → per-task sessions via asyncio.gather
-  │    │    Code-only tasks only (falls back to flat if any ◈ visual specs)
-  │    │    Each task gets own QA session running concurrently
-  │    │    Verdicts merged in Python, integration gated by post-batch test
-  │    │    Focused retries only re-verify failed tasks
-  │    │    Exception-safe: one session crash doesn't abort others
-  │    ├─ If [must] fails → re-code failed tasks → re-merge → re-QA
-  │    ├─ Repeat up to max_retries rounds
-  │    └─ After max_retries: rollback batch, mark failed tasks,
-  │         reset rolled-back (innocent) tasks to pending
-  │         Continue run (don't abort remaining batches)
-  │
-  ├─ Remove completed/failed tasks from plan
-  │    (rolled-back tasks stay in plan for replan)
-  │
-  └─ Any failures AND remaining batches?
-       │
-       └─ Smart replan(context, remaining_plan)
-            ├─ Receives: dependency analysis, failed vs rolled-back keys,
-            │    task prompts, completed results
-            ├─ Tasks depending on failed tasks → late batch with warning
-            ├─ Rolled-back tasks → re-scheduled (they passed before)
-            ├─ Independent tasks → can parallelize
-            └─ Falls back to serial remaining plan if replan fails
-```
-
----
-
-## 4. Task State Machine
-
-```
-                        ┌──────────┐
-                        │ pending   │◄──────────────────────────────┐
-                        └────┬──────┘                               │
-                             │ run starts (in worktree)             │
-                        ┌────▼──────┐                               │
-                        │ running    │                               │
-                        └────┬──────┘                               │
-                             │                                      │
-                    ┌────────┼────────┐                             │
-                    │                 │                              │
-             (coding ok)        (all failures)                      │
-                    │                 │                              │
-             ┌──────▼──────┐   ┌─────▼──────┐                      │
-             │  verified    │   │  failed     │                      │
-             └──────┬──────┘   └────────────┘                      │
-                    │          max_retries                           │
-             ┌──────▼──────┐   exhausted,                           │
-             │merge_pending │   timeout,                             │
-             └──────┬──────┘   baseline fail                        │
-                    │                                               │
-             ┌──────┼──────┐                                        │
-             │             │                                        │
-      ┌──────▼──────┐  ┌──▼────────┐   ┌────────┐                  │
-      │merge_failed  │  │  merged    │   │ passed  │                  │
-      └──────┬──────┘  └─────┬─────┘   └────────┘                  │
-             │               │                                      │
-             │        (batch QA mode)                               │
-             │               ├─ batch QA passes → passed            │
-             │               ├─ batch QA fails → retry (up to max)  │
-             │               └─ rollback → pending (innocent tasks) │
-             │                                                      │
-             └──► auto-retry: _run_task_in_worktree() ──────────────┘
-                  on updated main with previous
-                  diff as feedback (full pipeline)
-
-Planner-derived states (set by _recompute_planner_state):
-  conflict  — planner flagged CONTRADICTORY pair
-  blocked   — depends on a conflicting task
-```
-
----
-
-## 5. Cost Model
-
-| Component | Model | Typical Cost | When |
-|-----------|-------|-------------|------|
-| **Planner** | CC default | ~$0.02-0.05 | Once per run (effort=high, multi-task only) |
-| **Replanner** | CC default | ~$0.02-0.05 | After batch failure (with dependency context) |
-| **Spec gen** | CC default | ~$0.15-0.30 | Once per task (background thread) |
-| **Coding agent** | CC default | ~$0.50-1.50 | Per attempt (resumes session) |
-| **QA agent** | CC default | ~$0.30-1.00 | Per attempt (VERIFY + BREAK) |
-| **Merge re-apply** | CC default | ~$0.15-0.50 | Coding agent with full diff — adapts intelligently (e2e verified: ~$0.15) |
-| **Typical task** | | **~$1.00-2.50** | Single attempt, no retries |
-| **With retry** | | **~$2.50-4.00** | Coding + QA + retry coding + retry QA |
-
----
-
-## 6. Skip Flags
-
-| Flag | Skips | Effect | Use Case |
-|------|-------|--------|----------|
-| `--no-spec` | Spec generation | QA runs against original prompt only | Quick iteration |
-| `--no-qa` | QA phase entirely | Pass after tests succeed | Trusted changes |
-| `--no-test` | Testing phase | Pass after coding | Doc-only, config |
-
-These flags affect the per-task pipeline. Post-merge test verification only runs in `--no-qa` mode (it's the sole integration gate there). In batch QA mode, a post-batch integration test replaces per-task post-merge tests.
-
----
-
-## 7. File Layout
-
-```
-your-project/
-├── otto.yaml                          # Configuration
-├── tasks.yaml                         # Task queue (pending/running/passed/failed)
-├── .otto-worktrees/                   # Task worktrees (auto-cleaned)
-│   └── otto-task-{key}/               # One per task (serial + parallel)
-└── otto_logs/
-    ├── run-history.jsonl              # One line per run: tasks, cost, time
-    ├── v4_events.jsonl                # Telemetry events
-    ├── learnings.jsonl                # Cross-run learnings
-    ├── planner.log                    # Task analysis, relationships, batch structure
-    ├── orchestrator.log               # Batch decisions, merge, parallel lifecycle
-    ├── spec-agent.log                 # Spec generation logs
-    └── {task_key}/
-        ├── live-state.json            # Real-time progress (for otto status)
-        ├── task-summary.json          # Per-phase cost + timing breakdown
-        ├── attempt-N-agent.log        # Coding agent full log
-        ├── attempt-N-verify.log       # Test suite output
-        ├── qa-report.md               # QA agent report (latest)
-        ├── qa-verdict.json            # Structured verdict (latest)
-        ├── attempt-N-qa-report.md     # Per-attempt QA report (preserved)
-        ├── attempt-N-qa-verdict.json  # Per-attempt verdict (preserved)
-        ├── qa-agent.log               # QA agent ALL tool calls + timestamps (Bash, Write, Read, Grep, etc.)
-        ├── qa-tier.log                # QA decision log
-        ├── cost-warning.log           # Parallel $0 cost warnings
-        └── qa-proofs/
-            ├── proof-report.md        # Human-readable proof per must item
-            ├── regression-check.sh    # Re-runnable verification commands
-            ├── must-1.md ... must-N.md # Per-item evidence
-            └── screenshot-*.png       # Browser captures
-```
-
----
-
-## 8. Configuration Reference
-
-```yaml
-# otto.yaml
-max_retries: 3              # Attempts per task before giving up
-default_branch: main         # Target branch for merges
-verify_timeout: 300          # Test suite timeout (seconds)
-max_task_time: 3600          # Per-task circuit breaker (seconds)
-qa_timeout: 3600             # QA agent timeout (seconds)
-max_parallel: 1              # 1=serial (default), 2+=parallel worktrees
-parallel_qa: false           # true=per-task QA sessions in parallel (faster, costlier)
-install_timeout: 120         # npm ci / pip install timeout in worktrees
-
-# Per-agent setting scopes (which CLAUDE.md files each agent reads)
-coding_agent_settings: "project"           # Project CLAUDE.md only (default)
-spec_agent_settings: "project"             # Project CLAUDE.md only
-qa_agent_settings: "project"               # Project CLAUDE.md only
-planner_agent_settings: "project"          # Project CLAUDE.md only
-
-# Auto-detected (override in otto.yaml if wrong)
-test_command: "npx jest"     # or "pytest", "cargo test", etc.
-```
-
----
-
-## 9. Retry Excerpt
-
-When a task fails, the next attempt doesn't get the raw 847K test output. Instead, `build_retry_excerpt()` extracts:
-
-```
-Raw test output (847K chars)
-  │
-  ├─ Extract FAIL blocks (jest: "● Test Suite", pytest: "FAILED")
-  ├─ Extract summary lines ("Tests: 3 failed, 109 passed")
-  ├─ Drop PASS noise, warnings, coverage tables
-  └─ Result: ~2.5K chars of failure-relevant content
-
-Saves ~$2/retry by avoiding prompt cache invalidation.
-```
-
----
-
-## 10. Baseline Test Check
-
-```
-Baseline (run_task_v45 prepare phase):
-  _install_deps tries: pip install -e . then pip install -e ".[dev,test]"
-  Auto-detect test command → run tests in worktree
-  │
-  ├─ Tests pass? → record count ("baseline: N tests passing")
-  ├─ Infra failure? → WARN + continue (coding agent fixes deps)
-  │    (ModuleNotFoundError, command not found, SyntaxError, etc.)
-  └─ Real test failure? → EXIT (baseline_fail)
-
-After coding:
-  Full test suite in clean disposable worktree (deterministic)
-  Tests fail? → build retry excerpt, retry
-```
-
----
-
-## 11. Debugging Checklist
-
-When something goes wrong, check in this order:
-
-1. **`otto status`** — current task states, phase timings
-2. **`otto_logs/{key}/live-state.json`** — real-time progress
-3. **`otto_logs/{key}/task-summary.json`** — per-phase cost + timing breakdown
-4. **`otto_logs/{key}/attempt-N-agent.log`** — what the coding agent did
-5. **`otto_logs/{key}/attempt-N-verify.log`** — test output
-6. **`otto_logs/{key}/qa-agent.log`** — what QA ran (Bash commands + output)
-7. **`otto_logs/{key}/qa-report.md`** — QA findings
-8. **`otto_logs/{key}/qa-proofs/proof-report.md`** — evidence per spec item
-9. **`otto_logs/planner.log`** — task analysis, relationships, batch structure
-10. **`otto_logs/orchestrator.log`** — batch decisions, merge, parallel lifecycle
-11. **`otto_logs/run-history.jsonl`** — cost/time trends across runs
-12. **`otto_logs/v4_events.jsonl`** — detailed telemetry events
-13. **`git log --oneline -20`** — what got merged
-14. **`git worktree list`** — any orphaned worktrees?
+| Question | Where to look |
+|----------|---------------|
+| What was built? | `agent.log` → git commits |
+| What did certification find? | `agent.log` → STORY_RESULT lines |
+| Why did it fail? | `agent.log` → FAIL stories + DIAGNOSIS |
+| What was fixed? | `agent.log` → git commits between rounds |
+| Full agent trace? | `agent-raw.log` |
+| Cost breakdown? | `checkpoint.json` |

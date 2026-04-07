@@ -1,78 +1,42 @@
 # Otto
 
-Autonomous coding agent runner that makes coding agents safe to run unattended.
+Intent to product. Describe what you want, Otto builds it, certifies it works, and fixes what doesn't.
 
-Otto wraps coding agents in a reliability harness: task queue, git isolation, structured QA, and evidence-based verification. You describe what you want, Otto handles the rest.
-
-Provider support:
-- `claude` is the default provider.
-- `codex` is supported through the local `codex` CLI using your existing ChatGPT login.
-- `model` and `planner_model` are optional overrides; if unset, Otto defers to the provider's default model.
+One autonomous agent session: plan → build → test → certify → fix → re-certify → ship.
 
 ## How it works
 
 ```
-otto add "Add search that matches case-insensitively"
-otto run
+otto build "bookmark manager with tags and search"
 ```
 
-For each task, Otto:
+Otto launches a single coding agent that:
 
-1. **Runs a coding agent directly** — raw prompt, no spec bottleneck. The coding agent explores the codebase, implements the feature, and runs tests on its own.
-2. **Generates acceptance spec in parallel** — `[must]` (gating) and `[should]` (advisory) criteria with `◈` markers for visual/subjective items. Runs in a separate thread alongside coding.
-3. **Verifies externally** — runs all tests in a clean disposable worktree.
-4. **QA agent reviews** — two-part testing: VERIFY (check every [must] spec with evidence) then BREAK (adversarial boundary testing beyond specs). Browser available for visual items.
-5. **Merges** — squash merge to main, clean git history.
+1. **Plans** — reads the intent, designs architecture
+2. **Builds** — implements the product, dispatches subagents for parallel work on independent features
+3. **Tests** — writes comprehensive tests, runs them, fixes failures
+4. **Certifies** — dispatches a certifier agent (builder-blind) that tests the product as a real user
+5. **Fixes** — if certification fails, reads the findings, fixes the code, re-certifies
+6. **Ships** — commits when certification passes
 
-Independent tasks run **in parallel** using git worktrees (`max_parallel: 2+`). Merge conflicts are resolved by re-running the coding agent on updated main with the previous diff as context — same intelligence, full retry budget.
-
-Failed tasks get structured retry: the coding agent receives a focused failure excerpt (not 847K of raw test output), and pre-existing flaky tests are excluded from retry decisions.
-
-## What you see
+The certifier is a separate agent that doesn't know how the product was built. It reads the project fresh, installs deps, starts the app, and runs real user stories (curl for APIs, CLI commands for tools, import for libraries, agent-browser for web UIs). It reports what's wrong — the coding agent figures out the fix.
 
 ```
-  ● Running  #1  abc12345
-  17:08:20  ✓ prepare  16s  baseline: 109 tests passing
+  Agentic mode — one agent builds, certifies, fixes
 
-  17:08:20  ● coding  (coding agent)  · spec gen
-      ● Bash  find src -type f -name "*.tsx" | sort
-      ● Read  src/types/weather.ts
-      ... explored 13 files
-      ● Write  src/components/Feature.tsx
-        + "use client";
-        + import { getData } from "@/lib/data";
-          ...60 more lines
-      ● Edit  src/components/App.tsx
-        - import OldComponent from "./OldComponent";
-        + import Feature from "./Feature";
-      ● Bash  npx next build 2>&1 | tail -20
-  17:11:14  ✓ coding  174s  $0.81  3 files  +92  -10
-  17:11:52  ✓ test  22s  838 passed
-  17:11:52  ✓ spec gen  68s  $0.26  8 items (5 must, 3 should) (ready)
-      [must] A large emoji is displayed based on current conditions
-      [must] The emoji has a visible repeating pulse animation
-      ... +5 more
+  All journeys passed (round 1)
+    ✓ Registration, login, and first note creation work with JWT token flow
+    ✓ Create/Read/Update/Delete notes with tags return correct status codes
+    ✓ Cross-user read/update/delete blocked; list only shows own notes
+    ✓ Unauthenticated and invalid-token requests rejected
+    ✓ Tag and keyword search return correct results
+    ✓ Data survives server restart
+    ✓ Input validation, special characters, boundary conditions handled
 
-  17:11:52  ● qa  (full - adversarial testing)
-      Reading src/components/Feature.tsx
-      Testing: npx jest --no-coverage 2>&1 | tail -30
-      Building project
-      ✓ [must] Feature renders correctly
-        Component maps weather codes to emojis: 0→☀️, 3→☁️, 45-48→🌫️
-      ✓ [must] Animation runs continuously
-        globals.css defines --animate-weatherPulse: 3s ease-in-out infinite
-      ✓ [must ◈] Positioned prominently in weather section
-        Uses text-6xl, placed between condition name and temperature
-      · [should ◈] Animation is subtle and smooth
-        ease-in-out over 3s with modest scale(1.08)
-      · [should] Accessible with aria-label
-        role='img' and aria-label present
-  17:13:41  ✓ qa  109s  $0.39  tier 1  5 specs passed  5/5 proved
-  17:13:41  ✓ passed  5m36s  $1.47
-    3 files · 8 specs verified
-       proofs: /tmp/project/otto_logs/abc12345/qa-proofs/proof-report.md
-
-  1/1 tasks passed
+  Build Summary  (build-1775522841-19595)
+  Stories: 7 passed, 0 failed
+  Total cost: $1.04
+  Duration: 4.8 min
 ```
 
 ## Quick start
@@ -80,242 +44,115 @@ Failed tasks get structured retry: the coding agent receives a focused failure e
 ```bash
 # Install
 uv pip install -e .
-# Optional: install Claude SDK support too
-uv pip install -e '.[claude]'
 
-# In any git repo — add tasks
+# In any git repo
 cd your-project
-
-# Optional: switch providers in otto.yaml
-# provider: codex
-# model: gpt-5
-
-otto add "Add a search function that matches case-insensitively"
-otto add "Fix the slow API response — must be under 300ms"
-
-# Run
-otto run
+otto build "REST API for a todo app with user auth"
 ```
 
-No `otto init` needed — auto-initializes on first `add` or `run`.
+## What it builds
+
+Otto handles any product type:
+- **CLI tools** — argparse, Click, Cobra (curl + CLI command testing)
+- **REST APIs** — Express, Flask, FastAPI (curl + HTTP testing)
+- **Libraries** — Python, Node.js (import + unit testing)
+- **Web apps** — server-rendered HTML (curl + agent-browser visual testing)
+- **Hybrid** — API + CLI + UI tested across all surfaces
+
+## Architecture
+
+```
+otto build "intent"
+  │
+  └─ Coding Agent (one session, drives everything)
+       │
+       ├─ Plan architecture
+       ├─ Build (subagents for parallel features)
+       ├─ Write tests, run, fix
+       ├─ Commit
+       │
+       ├─ Dispatch Certifier Agent (builder-blind)
+       │    ├─ Read project fresh
+       │    ├─ Install deps, start app
+       │    ├─ Discover auth (once, share with subagents)
+       │    ├─ Dispatch test subagents (parallel stories)
+       │    │    ├─ First Experience
+       │    │    ├─ CRUD Lifecycle
+       │    │    ├─ Data Isolation
+       │    │    ├─ Persistence / Access Control
+       │    │    └─ Edge Cases
+       │    └─ Report: PASS/FAIL per story + evidence
+       │
+       ├─ If FAIL: read findings, fix code, commit
+       ├─ Re-dispatch certifier
+       └─ Repeat until PASS
+```
+
+The certifier reports symptoms only — no fix suggestions. The coding agent diagnoses and fixes.
+
+## Build modes
+
+```
+otto build "intent"              # default: agent-driven (recommended)
+otto build "intent" --split      # separate build + certify sessions
+otto build "intent" --orchestrated  # legacy PER pipeline with task queue
+```
 
 ## CLI reference
 
 ```
-otto add "prompt"       Add a task (spec generated at runtime, parallel with coding)
-otto add --spec "prompt"  Pre-generate spec before run
-otto add -f file        Import from .md/.txt/.yaml
-otto run                Run all pending tasks (parallel if max_parallel > 1)
-otto run "prompt"       One-off: add + run in single command
-otto run --no-spec      Skip spec generation
-otto run --no-qa        Skip QA (merge after tests pass)
-otto run --no-test      Skip testing (merge after coding)
-otto run --dry-run      Show execution plan without running
-otto status             Show task table with specs, cost, timing
-otto show <id>          Show task details + QA verdict
-otto retry <id>         Reset a failed task to pending
-otto retry --force <id> "feedback"  Reset any task with feedback
-otto logs <id>          Show agent logs for a task
-otto diff <id>          Show git diff for a task
-otto drop <id>          Remove a task from the queue (code stays on main)
-otto drop --all         Remove all tasks + clean otto/* branches
-otto revert <id>        Undo one task's git commit on main
-otto revert --all       Undo all otto commits + clear queue
+otto build "intent"     Build a product from natural language intent
+otto add "prompt"       Add a task to the queue (for --orchestrated mode)
+otto run                Run pending tasks (--orchestrated mode)
+otto status             Show task states
+otto logs <id>          Show agent logs
 ```
-
-## Architecture
-
-> **Full pipeline reference with debugging guide:** [`docs/architecture.md`](docs/architecture.md)
-
-### v5 pipeline
-
-Otto is infrastructure, not intelligence. The intelligence comes from the configured provider. Otto provides:
-
-```
-    ┌─────────────────────────────────────────────────────────┐
-    │  1. Smart Planner                                       │
-    │     Analyzes task relationships:                        │
-    │     INDEPENDENT → parallel  DEPENDENT → serialize       │
-    │     ADDITIVE (same file, diff functions) → parallel     │
-    │     UNCERTAIN (same function) → serialize               │
-    │     CONTRADICTORY → flag + separate batches (never drop) │
-    │                                                         │
-    │  2. Per-task pipeline (parallel worktrees):             │
-    │     Coding Agent → Tests → Verify (no QA yet)           │
-    │     Spec generation deferred to batch QA                │
-    │                                                         │
-    │  3. Merge phase                                         │
-    │     git merge → conflict? → coding agent re-apply       │
-    │     (full diff as context, agent adapts intelligently,  │
-    │      one agent — trust it to self-regulate)             │
-    │                                                         │
-    │  4. Batch QA                                            │
-    │     Default: one session, combined specs                │
-    │     parallel_qa: true → per-task sessions via           │
-    │       asyncio.gather (46% faster, +44% cost)            │
-    │     Verify ALL [must] items on integrated codebase      │
-    │     Generate cross-task integration tests               │
-    │     If [must] fails → retry (up to max_retries rounds)  │
-    │     Each round: re-code → re-merge → re-QA             │
-    │     Still failing? → rollback batch, continue run       │
-    │     Smart replan re-schedules rolled-back tasks         │
-    │                                                         │
-    │  5. Pass → proof report with commit SHA                 │
-    │     Fail → retry with failure excerpt                   │
-    └─────────────────────────────────────────────────────────┘
-```
-
-### Smart planner
-
-Before coding starts, the planner classifies task relationships:
-
-```
-Tasks: [A: add search] [B: add dark mode] [C: add search filters] [D: rewrite search]
-  │
-  Planner analysis:
-  ├─ A ↔ B: INDEPENDENT → parallel batch
-  ├─ A ↔ C: DEPENDENT (C needs A) → C in later batch
-  ├─ A ↔ D: CONTRADICTORY → flag + schedule in separate batches
-  └─ B ↔ C: INDEPENDENT → parallel batch
-  │
-  Plan: Batch 1 [A, B] → Batch 2 [C]
-  Conflicts: [A, D] — "Both rewrite search with incompatible goals"
-```
-
-### Parallel batch execution
-
-Independent tasks within a batch run concurrently in git worktrees:
-
-- **Within-batch** = parallel (tasks are independent, each in its own worktree)
-- **Cross-batch** = serial (later batches depend on earlier results)
-- **Same-file, different functions** = parallel (ADDITIVE — merge conflicts auto-resolved)
-- **Merge conflict** = coding agent re-applies with full diff as context (one agent, adapts intelligently — simple conflicts resolve fast, complex ones get more exploration)
-- **Batch QA** = one session on integrated codebase with combined specs, behavioral testing required
-
-Task states: `pending → running → verified → merged → passed`
-(or `→ failed` / `→ merge_failed → auto-retry` / `→ conflict`)
-
-### Spec binding model
-
-Each spec item has a binding level and verifiability marker:
-
-- **`[must]`** — gating. QA blocks merge if failed.
-- **`[must ◈]`** — gating + visual/subjective. Requires browser verification.
-- **`[should]`** — advisory. QA notes observations but doesn't block.
-- **`[should ◈]`** — advisory + visual. Noted with evidence.
-
-### QA verdict
-
-QA produces structured JSON with per-item evidence and proof. Verdict acquisition uses 3-layer fallback: (1) early capture from Write tool stream, (2) verdict temp file, (3) text parsing. `must_passed` is recomputed from actual item statuses — never trusting the model's self-reported flag.
-
-```json
-{
-  "must_passed": true,
-  "must_items": [
-    {
-      "spec_id": 1,
-      "criterion": "Banner appears when wind > 60 km/h",
-      "status": "pass",
-      "evidence": "detectSeverityConditions checks all 4 thresholds",
-      "proof": [
-        "ran jest weatherAlerts: 'detects wind > 60 km/h' passes",
-        "browser: banner visible after injecting extreme data",
-        "screenshot: qa-proofs/screenshot-banner.png"
-      ]
-    }
-  ]
-}
-```
-
-### Proof of work
-
-Each task produces reproducible evidence in `otto_logs/<key>/qa-proofs/`:
-
-```
-qa-proofs/
-  proof-report.md          Human-readable proof per must item
-  regression-check.sh      Re-runnable verification commands
-  must-1.md ... must-N.md  Per-item criterion + status + evidence
-  screenshot-*.png         Browser screenshots (visual ◈ items)
-```
-
-The **proof report** shows per-item proof with coverage:
-
-```markdown
-## ✓ [1] Banner appears when wind > 60 km/h
-Evidence: detectSeverityConditions checks all 4 thresholds
-Proof:
-- ran jest weatherAlerts: 'detects wind > 60 km/h' passes
-- browser: banner visible after injecting extreme data
-- screenshot-banner.png — Red banner at top with all conditions
-
----
-Proof coverage: 6/6 must items have proof recorded
-```
-
-The **regression script** is independently runnable ground truth — a third party can re-run it without trusting the agent:
-
-```bash
-bash otto_logs/<key>/qa-proofs/regression-check.sh
-# → Test Suites: 43 passed, Tests: 997 passed
-```
-
-### Display
-
-Semantic color hierarchy for scannability:
-
-- **Green `● Write`/`● Edit`** — code changes (key actions)
-- **Cyan `● Bash`** — commands
-- **Dim `● Read`** — background exploration
-- **Cyan `[must]`** — gating requirements
-- **Magenta `◈`** — visual/subjective marker
-- **Bold `Testing:`/`Curl:`** — QA verification actions
-- **Bold magenta `Browser:`** — visual testing
 
 ## Configuration
 
-`otto.yaml` (auto-created):
+`otto.yaml` (auto-created on first run):
 
 ```yaml
-max_retries: 3
-default_branch: main
-verify_timeout: 300       # seconds for test suite
-max_task_time: 3600       # 1hr circuit breaker per task
-qa_timeout: 3600          # QA agent timeout
-max_parallel: 1           # 1 = serial (default), 2+ = parallel worktrees
-parallel_qa: false        # true = per-task QA sessions in parallel (46% faster, +44% cost)
-install_timeout: 120      # seconds for npm ci / pip install in worktrees
+# Model (optional — defaults to provider's best)
+# model: claude-sonnet-4-5-20250514
 
-# Per-agent setting scopes (comma-separated: user, project)
-coding_agent_settings: "user,project"   # reads user + project CLAUDE.md
-spec_agent_settings: "project"          # project CLAUDE.md only
-qa_agent_settings: "project"            # project CLAUDE.md only
+# Product certification
+# certifier_timeout: 900        # max seconds for build+certify
+# certifier_browser: null       # null = auto-detect; true/false to force
+# certifier_interaction: null   # override product type (http/cli/import)
 ```
 
-Auto-detected: test_command, default_branch. Override anything in `otto.yaml`.
+## Logs
 
-### Parallel execution
-
-Set `max_parallel: 2` (or higher) to run independent tasks concurrently. Each task gets its own git worktree at `.otto-worktrees/otto-task-<key>/`. Worktrees are cleaned up after each run. Serial is the default — parallel is opt-in.
+```
+otto_logs/
+  builds/<build-id>/
+    agent.log            Key events: commits, certifier rounds, verdict
+    agent-raw.log        Full agent output (for deep debugging)
+    checkpoint.json      Build metadata: cost, duration, stories
+  certifier/
+    proof-of-work.json   Machine-readable: stories, evidence, rounds
+    proof-of-work.html   Human-readable: styled report with evidence
+    proof-of-work.md     Markdown summary
+```
 
 ## Project structure
 
 ```
 otto/
-  cli.py             — CLI (add, run, status, show, retry, drop, revert, logs)
-  runner.py           — v4.5 pipeline: bare CC coding, structured QA, retry
-  spec.py             — Spec generation with [must]/[should]/◈ classification
-  testing.py          — Testing in disposable worktrees
-  tasks.py            — Task CRUD with file locking
-  config.py           — Config loading, multi-framework test detection
-  orchestrator.py     — Batch execution: parallel worktrees, serial merge, auto-retry
-  display.py          — Live terminal display with semantic color hierarchy
-  display_preview.py  — HTML preview tool for display debugging
-  claim_verify.py     — Regex audit of agent log vs verify evidence
-  retry_excerpt.py    — Failure extraction from test output for retries
-  flaky.py            — Pre-existing flaky test detection
-  context.py          — Cross-task learnings with provenance
-  theme.py            — Shared console and styling constants
+  pipeline.py          Build pipelines (v3 default + v2 split + orchestrated)
+  certifier/
+    __init__.py        Agentic certifier (single agent + subagents)
+    report.py          CertificationReport, Finding, Outcome dataclasses
+  agent.py             Agent SDK wrapper (query, run_agent_query)
+  session.py           AgentSession for split mode (resume across rounds)
+  cli.py               CLI commands (build, add, run, status)
+  config.py            Config loading, otto.yaml creation
+  orchestrator.py      PER pipeline (--orchestrated mode)
+  runner.py            Task runner for orchestrated mode
+  qa.py                QA agent for orchestrated mode
+  display.py           Live terminal display
+  observability.py     Log writing utilities
 ```
 
 ## Requirements
@@ -323,7 +160,7 @@ otto/
 - Python 3.11+
 - [Claude Code CLI](https://claude.ai/code) installed and authenticated
 - Git repository
-- Optional: chrome-devtools MCP for browser-based QA testing
+- Optional: `agent-browser` CLI for visual web app testing
 
 ## License
 

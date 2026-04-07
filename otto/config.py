@@ -148,17 +148,35 @@ def detect_test_command(project_dir: Path) -> str | None:
     """
     candidates = []
 
-    # npm/node test (check first — JS projects often also have tests/ dir)
+    # npm/node/deno test (check first — JS projects often also have tests/ dir)
     pkg_json = project_dir / "package.json"
     if pkg_json.exists():
         try:
             pkg = json.loads(pkg_json.read_text())
             test_script = pkg.get("scripts", {}).get("test", "")
             # Skip npm init placeholder: 'echo "Error: no test specified" && exit 1'
-            if test_script and "no test specified" not in test_script:
-                candidates.append("npm test")
+            # Also skip other common placeholder patterns
+            is_placeholder = (
+                not test_script
+                or "no test specified" in test_script
+                or test_script.strip() == 'echo "Error" && exit 1'
+            )
+            if not is_placeholder:
+                # Use the correct package manager for running scripts
+                if (project_dir / "pnpm-lock.yaml").exists():
+                    candidates.append("pnpm test")
+                elif (project_dir / "yarn.lock").exists():
+                    candidates.append("yarn test")
+                elif (project_dir / "bun.lockb").exists():
+                    candidates.append("bun test")
+                else:
+                    candidates.append("npm test")
         except (json.JSONDecodeError, KeyError):
             pass
+
+    # deno test
+    if (project_dir / "deno.json").exists() or (project_dir / "deno.jsonc").exists():
+        candidates.append("deno test")
 
     # pytest — prefer project venv if it exists
     tests_dir = project_dir / "tests"
@@ -178,6 +196,17 @@ def detect_test_command(project_dir: Path) -> str | None:
             candidates.append(f"{venv_pytest}")
         else:
             candidates.append("pytest")
+
+    # tox (Python test runner — prefer over bare pytest when present)
+    if (project_dir / "tox.ini").exists():
+        # tox already detected — don't also add pytest (tox runs it)
+        candidates = [c for c in candidates if c not in ("pytest",) and not c.endswith("/pytest")]
+        candidates.append("tox")
+
+    # nox (Python test runner — similar to tox)
+    if (project_dir / "noxfile.py").exists():
+        candidates = [c for c in candidates if c not in ("pytest",) and not c.endswith("/pytest")]
+        candidates.append("nox")
 
     # go test
     if (project_dir / "go.mod").exists():
@@ -366,6 +395,15 @@ def create_config(project_dir: Path) -> Path:
     lines += f"# qa_agent_settings: project         # project CLAUDE.md only\n"
     lines += f"# planner_agent_settings: project    # project CLAUDE.md only\n"
     lines += f"# Set to 'user,project' to also load ~/.claude/CLAUDE.md\n"
+    lines += "\n# Build mode:\n"
+    lines += f"# Default: agentic — one agent builds, dispatches certifier, fixes, re-certifies.\n"
+    lines += f"# The coding agent drives the entire build→certify→fix loop autonomously.\n"
+    lines += f"# Alternatives: --split (separate build/certify sessions), --orchestrated (PER), --continuous\n"
+    lines += f"\n# Product certification:\n"
+    lines += f"# certifier_timeout: 900         # max seconds for entire build+certify session\n"
+    lines += f"# certifier_browser: null        # null = auto-detect; true/false to force browser testing\n"
+    lines += f"# certifier_interaction: null    # override product type (http/cli/import/websocket)\n"
+    lines += f"#                                # null = agent decides (recommended)\n"
     config_path.write_text(lines + "\n")
 
     # Update .git/info/exclude for runtime files (use git_meta_dir for linked worktrees)
