@@ -480,7 +480,16 @@ You are a senior developer building and shipping a product. Work autonomously.
    - Fix the root causes in your code
    - Run your tests again
    - Commit the fix
-   - Run the certifier agent again (same prompt as step 6)
+   - Re-dispatch the certifier, but this time ADD the failed stories to the prompt:
+
+     "Previous certification found these failures:
+     - <story_id>: <one-line summary of what failed>
+     - <story_id>: <one-line summary of what failed>
+
+     You MUST re-test these specific failures first to verify they are fixed.
+     Then test additional stories for broader coverage."
+
+     Append this BEFORE the "Process:" section in the certifier prompt.
    - Repeat until VERDICT: PASS
 
 8. **Report the final result.** After the certifier passes (or after your best effort),

@@ -40,7 +40,12 @@ for real users by testing it thoroughly.
    This is critical: do auth ONCE here, share with all subagents. Do NOT make
    each subagent figure out auth from scratch.
 
-5. **Plan test stories** — use this coverage checklist:
+5. **Plan test stories:**
+   If "Previous certification failures" are listed above the intent, you MUST
+   re-test those specific failures FIRST (use the same story IDs). These are
+   bugs that were supposedly fixed — verify they actually work now.
+
+   Then add broader coverage from this checklist:
    - First Experience: new user registers/starts and uses the core feature
    - CRUD Lifecycle: create → read → update → delete (full cycle)
    - Data Isolation: two users' data doesn't leak between them
