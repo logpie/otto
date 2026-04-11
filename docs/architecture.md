@@ -2,142 +2,117 @@
 
 ## Overview
 
-Otto builds products from natural language intent. One autonomous agent session drives the entire lifecycle: plan → build → test → certify → fix → re-certify.
+Otto is 4,982 lines of Python. Two commands: `build` and `certify`.
 
 ```
-otto build "REST API with auth, CRUD notes, search"
-  │
-  └─ SDK launches one coding agent session
-       │
-       ├─ Phase 1: BUILD
-       │    Plan architecture → implement → write tests → self-review → commit
-       │    (subagents for parallel features via Agent tool)
-       │
-       ├─ Phase 2: CERTIFY
-       │    Dispatch certifier agent (builder-blind subagent)
-       │    Certifier reads project fresh, tests as real user
-       │    Returns: PASS/FAIL per story + evidence
-       │
-       ├─ Phase 3: FIX (if FAIL)
-       │    Read certifier findings → fix code → run tests → commit
-       │    Re-dispatch certifier → repeat until PASS
-       │
-       └─ Done: proof-of-work report + build summary
+otto build "intent"     → one agent builds, certifies, fixes
+otto certify "intent"   → standalone verification on any project
 ```
 
-## Key Design Decisions
+## Core Design
+
+### One agent, one session
+
+`build_agentic_v3()` launches a single SDK agent session. The agent drives everything:
+build → test → dispatch certifier subagent → read findings → fix → re-dispatch.
+No orchestrator. No task queue. The agent IS the orchestrator.
 
 ### Certifier as environment
 
-The certifier is an environment signal — like a test suite. The coding agent dispatches it via the Agent tool and reads the result. The certifier reports **symptoms** ("check/circle buttons display raw HTML entities") not fixes ("change `<%= to `<%-`"). The coding agent diagnoses and fixes.
+The certifier is a subagent dispatched via the Agent tool. It's builder-blind —
+reads the project fresh, doesn't know how it was built. It reports symptoms
+("POST /toggle returns 500 without auth"), not fixes. The coding agent diagnoses
+and fixes.
 
-This is the core architectural insight: the coding agent treats certification like running `pytest` — dispatch, read failures, fix, re-run.
+This is like running `pytest` — the coding agent calls it, reads the output, acts.
 
-### Builder-blind certification
+### Prompts are files
 
-The certifier is a separate agent session (dispatched via Agent tool). It has zero knowledge of how the product was built — it reads the project files fresh, discovers the framework, installs deps, starts the app, and tests as a real user would. This prevents unconscious bias (testing what was built vs what should work).
-
-### One session, no orchestrator
-
-The coding agent drives everything — build, certify, fix loop. No external orchestrator manages the loop. This is simpler, cheaper (~50% vs split sessions), and the agent has full context across rounds.
-
-### Subagent parallelism
-
-Both the coding agent and certifier use the Agent tool for parallelism:
-- **Coding**: dispatches subagents for independent features (auth module, CRUD API, etc.)
-- **Certifier**: dispatches subagents for parallel story testing (first experience, CRUD lifecycle, edge cases, etc.)
-
-The Agent tool creates fresh CC subprocesses — each subagent has isolated context.
-
-### Auth discovery once
-
-The certifier discovers auth once (register → login → capture token/cookie) and passes working auth commands to every test subagent. This prevents each subagent from fumbling auth from scratch (~20 turns saved per story).
+Prompts live in `otto/prompts/build.md` and `otto/prompts/certifier.md`.
+Edit without touching Python. Loaded at runtime by `otto/prompts/__init__.py`.
 
 ## Code Map
 
-### Default path: `otto build "intent"`
-
 ```
-cli.py:build()
-  └─ pipeline.py:build_agentic_v3()
-       ├─ agent.py:run_agent_query(prompt, capture_tool_output=True)
-       │    └─ SDK query() → single agent session
-       │         ├─ Agent plans + builds + tests + commits
-       │         ├─ Agent dispatches certifier subagent
-       │         │    └─ certifier/__init__.py:CERTIFIER_AGENTIC_PROMPT
-       │         │         ├─ Reads project, installs deps, starts app
-       │         │         ├─ Dispatches test subagents (parallel stories)
-       │         │         └─ Returns STORY_RESULT + VERDICT markers
-       │         ├─ If FAIL: agent fixes + re-dispatches
-       │         └─ Agent repeats markers in final message
-       │
-       ├─ Parse STORY_RESULT/VERDICT from agent text
-       ├─ Write agent.log (structured) + agent-raw.log (full)
-       ├─ Write proof-of-work.{json,html,md}
-       └─ Return BuildResult
-```
+otto build "intent"
+  cli.py → build()
+    pipeline.py → build_agentic_v3()
+      prompts/__init__.py → load build.md
+      agent.py → run_agent_query(prompt, capture_tool_output=True)
+        SDK query() → single agent session
+          Agent builds, tests, commits
+          Agent dispatches certifier via Agent tool
+            prompts/__init__.py → load certifier.md
+            Certifier reads project, tests, returns verdict markers
+          Agent reads verdict, fixes if FAIL, re-dispatches
+      Parse STORY_RESULT/VERDICT from agent text
+      Write: agent.log, agent-raw.log, checkpoint.json
+      Write: proof-of-work.{json,html,md}, evidence/*.png, recording.webm
+      Write: run-history.jsonl, intent.md
+      Return BuildResult
 
-### Split path: `otto build --split`
-
-```
-pipeline.py:build_agentic_v2()
-  ├─ Session 1: coding agent (AgentSession, persists via resume)
-  ├─ Session 2: certifier agent (fresh each round)
-  └─ Loop: build → certify → if fail: resume coding with findings → re-certify
+otto certify "intent"
+  cli.py → certify()
+    certifier/__init__.py → run_agentic_certifier()
+      prompts/__init__.py → load certifier.md
+      agent.py → run_agent_query(prompt)
+      Parse verdict, write PoW reports
+      Return CertificationReport
 ```
 
-### Orchestrated path: `otto build --orchestrated`
+## Files
 
-```
-pipeline.py:build_product()
-  └─ orchestrator.py:run_per()
-       ├─ Planner → batches → parallel worktrees
-       ├─ Per-task: coding agent → tests → QA
-       └─ Merge → batch QA → retry/rollback
-```
+| File | Lines | Purpose |
+|------|------:|---------|
+| `pipeline.py` | 467 | `build_agentic_v3`, result parsing, intent/history |
+| `certifier/__init__.py` | 408 | `run_agentic_certifier`, PoW generation |
+| `certifier/report.py` | 121 | Dataclasses: CertificationReport, Finding |
+| `prompts/build.md` | 129 | Build prompt (editable) |
+| `prompts/certifier.md` | 85 | Certifier prompt (editable) |
+| `agent.py` | 496 | SDK wrapper: query, run_agent_query |
+| `cli.py` | 265 | CLI: build, certify + display |
+| `cli_logs.py` | 95 | CLI: history command |
+| `cli_setup.py` | 89 | CLI: setup command |
+| `cli_bench.py` | 267 | CLI: bench command |
+| `config.py` | 410 | Config loading, otto.yaml creation |
+| `display.py` | 1283 | Terminal display (partially legacy) |
+| `observability.py` | 43 | Log writing utilities |
+| `testing.py` | 432 | Test detection, subprocess env |
+| `telemetry.py` | 266 | Usage telemetry |
+| `theme.py` | 12 | Console styling |
 
-## File Reference
+## Error handling
 
-| File | Lines | Role |
-|------|------:|------|
-| `pipeline.py` | 854 | Build pipelines (v3, v2, orchestrated) |
-| `certifier/__init__.py` | 440 | Agentic certifier + PoW generation |
-| `certifier/report.py` | 121 | CertificationReport dataclasses |
-| `agent.py` | 496 | Agent SDK wrapper |
-| `session.py` | 280 | AgentSession for split mode |
-| `cli.py` | 987 | CLI commands |
-| `config.py` | 410 | Config + otto.yaml |
-| `orchestrator.py` | 3469 | PER pipeline (--orchestrated) |
-| `runner.py` | 2334 | Task runner (orchestrated) |
-| `qa.py` | 2065 | QA agent (orchestrated) |
+- **SDK crash**: `run_agent_query` wrapped in try/except. Build returns error text.
+  Certifier returns `CertificationOutcome.INFRA_ERROR`.
+- **Timeout**: Configurable via `certifier_timeout` in otto.yaml (default 900s).
+- **No output**: Agent produces no verdict markers → treated as FAIL.
+- **KeyboardInterrupt**: Always re-raised (user abort).
+
+## Retry with context
+
+When a build fails and the user re-runs `otto build`:
+1. Pipeline reads `run-history.jsonl` — last build failed?
+2. Reads `proof-of-work.json` — what specific stories failed?
+3. Injects findings into the prompt: "Previous build failed: S3 returned 500..."
+4. Agent sees the failures, avoids repeating them.
 
 ## Observability
-
-### Build logs
-
-```
-otto_logs/builds/<build-id>/
-  agent.log           Structured: timestamps, commits, certifier rounds, verdict
-  agent-raw.log       Full unfiltered agent output (for debugging)
-  checkpoint.json     Build metadata: cost, duration, stories, rounds
-```
-
-### Certifier reports
-
-```
-otto_logs/certifier/
-  proof-of-work.json  Machine-readable: stories, evidence, round history
-  proof-of-work.html  Styled HTML with collapsible evidence per story
-  proof-of-work.md    Markdown summary
-```
-
-### Debugging
 
 | Question | Where to look |
 |----------|---------------|
 | What was built? | `agent.log` → git commits |
 | What did certification find? | `agent.log` → STORY_RESULT lines |
 | Why did it fail? | `agent.log` → FAIL stories + DIAGNOSIS |
-| What was fixed? | `agent.log` → git commits between rounds |
 | Full agent trace? | `agent-raw.log` |
-| Cost breakdown? | `checkpoint.json` |
+| Visual evidence? | `evidence/*.png`, `evidence/recording.webm` |
+| Build history? | `otto history` or `run-history.jsonl` |
+| Cost? | `checkpoint.json` |
+
+## Real-world validation
+
+Tested on 4 open-source Flask projects (code we didn't write):
+- 3/4 had real bugs the certifier caught
+- 8 total bugs found, 0 false positives
+- Critical: auth bypass, data isolation failure (`user_id == user_id`)
+- See `docs/real-world-validation-2026-04-10.md`

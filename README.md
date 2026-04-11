@@ -1,62 +1,67 @@
 # Otto
 
-Intent to product. Describe what you want, Otto builds it, certifies it works, and fixes what doesn't.
+Build and certify software products from natural language.
 
-One autonomous agent session: plan → build → test → certify → fix → re-certify → ship.
+```bash
+otto build "bookmark manager with tags and search"
+otto certify                    # verify any project works
+```
 
 ## How it works
 
-```
-otto build "bookmark manager with tags and search"
-```
+**`otto build`** launches one autonomous agent that plans, builds, tests, certifies, and fixes:
 
-Otto launches a single coding agent that:
+1. **Explore** — reads existing code (if any), runs existing tests
+2. **Build** — implements the product, dispatches subagents for parallel work
+3. **Test** — writes tests, runs them, fixes failures
+4. **Certify** — dispatches a certifier agent (builder-blind) that tests as a real user
+5. **Fix** — if certification fails, reads findings, fixes code, re-certifies
+6. **Ship** — commits when certification passes
 
-1. **Plans** — reads the intent, designs architecture
-2. **Builds** — implements the product, dispatches subagents for parallel work on independent features
-3. **Tests** — writes comprehensive tests, runs them, fixes failures
-4. **Certifies** — dispatches a certifier agent (builder-blind) that tests the product as a real user
-5. **Fixes** — if certification fails, reads the findings, fixes the code, re-certifies
-6. **Ships** — commits when certification passes
-
-The certifier is a separate agent that doesn't know how the product was built. It reads the project fresh, installs deps, starts the app, and runs real user stories (curl for APIs, CLI commands for tools, import for libraries, agent-browser for web UIs). It reports what's wrong — the coding agent figures out the fix.
+**`otto certify`** runs independently on any project — regardless of how it was built:
 
 ```
-  Agentic mode — one agent builds, certifies, fixes
+$ otto certify "notes API with auth, CRUD, and search"
 
-  All journeys passed (round 1)
-    ✓ Registration, login, and first note creation work with JWT token flow
-    ✓ Create/Read/Update/Delete notes with tags return correct status codes
-    ✓ Cross-user read/update/delete blocked; list only shows own notes
-    ✓ Unauthenticated and invalid-token requests rejected
-    ✓ Tag and keyword search return correct results
-    ✓ Data survives server restart
-    ✓ Input validation, special characters, boundary conditions handled
+    ✓ Full CRUD lifecycle works correctly
+    ✓ Users cannot access each other's notes
+    ✓ Unauthenticated requests rejected with 401
+    ✓ Search by keyword and tag works
+    ✓ Edge cases handled
 
-  Build Summary  (build-1775522841-19595)
-  Stories: 7 passed, 0 failed
-  Total cost: $1.04
-  Duration: 4.8 min
+  PASSED — 5/5 stories
+  Cost: $1.10  Duration: 164s
+  Report: otto_logs/certifier/proof-of-work.html
 ```
+
+The certifier found real bugs in 3 out of 4 open-source projects tested — including
+a data isolation failure (`user_id == user_id` instead of `TaskModel.user_id == user_id`)
+and missing auth checks on endpoints. Zero false positives.
 
 ## Quick start
 
 ```bash
-# Install
 uv pip install -e .
 
-# In any git repo
 cd your-project
 otto build "REST API for a todo app with user auth"
 ```
 
-## What it builds
+Works on empty repos (greenfield) and existing codebases (incremental):
 
-Otto handles any product type:
-- **CLI tools** — argparse, Click, Cobra (curl + CLI command testing)
-- **REST APIs** — Express, Flask, FastAPI (curl + HTTP testing)
+```bash
+otto build "notes API with auth and CRUD"        # greenfield
+otto build "add search by keyword and tag"       # incremental (reads existing code)
+otto build "add pagination to note listing"      # incremental
+otto history                                      # see all builds
+```
+
+## What it handles
+
+- **CLI tools** — argparse, Click (CLI command testing)
+- **REST APIs** — Express, Flask, FastAPI (curl testing)
 - **Libraries** — Python, Node.js (import + unit testing)
-- **Web apps** — server-rendered HTML (curl + agent-browser visual testing)
+- **Web apps** — server-rendered HTML (curl + agent-browser screenshots + video)
 - **Hybrid** — API + CLI + UI tested across all surfaces
 
 ## Architecture
@@ -64,48 +69,35 @@ Otto handles any product type:
 ```
 otto build "intent"
   │
-  └─ Coding Agent (one session, drives everything)
-       │
-       ├─ Plan architecture
+  └─ Coding Agent (one session)
+       ├─ Explore existing code / plan architecture
        ├─ Build (subagents for parallel features)
        ├─ Write tests, run, fix
        ├─ Commit
-       │
        ├─ Dispatch Certifier Agent (builder-blind)
-       │    ├─ Read project fresh
-       │    ├─ Install deps, start app
-       │    ├─ Discover auth (once, share with subagents)
+       │    ├─ Read project fresh, install deps, start app
+       │    ├─ Discover auth once, share with subagents
        │    ├─ Dispatch test subagents (parallel stories)
-       │    │    ├─ First Experience
-       │    │    ├─ CRUD Lifecycle
-       │    │    ├─ Data Isolation
-       │    │    ├─ Persistence / Access Control
-       │    │    └─ Edge Cases
+       │    ├─ Visual walkthrough with agent-browser (web apps)
        │    └─ Report: PASS/FAIL per story + evidence
-       │
-       ├─ If FAIL: read findings, fix code, commit
-       ├─ Re-dispatch certifier
+       ├─ If FAIL: read findings, fix, commit, re-certify
        └─ Repeat until PASS
+
+otto certify "intent"
+  │
+  └─ Certifier Agent (standalone, builder-blind)
+       └─ Same as above, without the build phase
 ```
 
-The certifier reports symptoms only — no fix suggestions. The coding agent diagnoses and fixes.
-
-## Build modes
+## CLI
 
 ```
-otto build "intent"              # default: agent-driven (recommended)
-otto build "intent" --split      # separate build + certify sessions
-otto build "intent" --orchestrated  # legacy PER pipeline with task queue
-```
-
-## CLI reference
-
-```
-otto build "intent"     Build a product from natural language intent
-otto add "prompt"       Add a task to the queue (for --orchestrated mode)
-otto run                Run pending tasks (--orchestrated mode)
-otto status             Show task states
-otto logs <id>          Show agent logs
+otto build "intent"         Build + certify a product
+otto build "intent" --no-qa Build without certification
+otto certify "intent"       Certify any project (standalone)
+otto certify                Reads intent from intent.md or README.md
+otto history                Show build history with results
+otto setup                  Generate CLAUDE.md for the project
 ```
 
 ## Configuration
@@ -116,43 +108,48 @@ otto logs <id>          Show agent logs
 # Model (optional — defaults to provider's best)
 # model: claude-sonnet-4-5-20250514
 
-# Product certification
-# certifier_timeout: 900        # max seconds for build+certify
-# certifier_browser: null       # null = auto-detect; true/false to force
-# certifier_interaction: null   # override product type (http/cli/import)
+# Certification
+# certifier_timeout: 900         # max seconds for build+certify session
+# certifier_browser: null        # null = auto-detect; true/false to force
+# certifier_interaction: null    # override product type (http/cli/import)
 ```
 
-## Logs
+## Logs & evidence
 
 ```
 otto_logs/
   builds/<build-id>/
-    agent.log            Key events: commits, certifier rounds, verdict
-    agent-raw.log        Full agent output (for deep debugging)
-    checkpoint.json      Build metadata: cost, duration, stories
+    agent.log              Structured: commits, certifier rounds, verdict
+    agent-raw.log          Full agent output (deep debugging)
+    checkpoint.json        Build metadata: cost, duration, stories
   certifier/
-    proof-of-work.json   Machine-readable: stories, evidence, rounds
-    proof-of-work.html   Human-readable: styled report with evidence
-    proof-of-work.md     Markdown summary
+    proof-of-work.html     Styled report with embedded screenshots
+    proof-of-work.json     Machine-readable: stories, evidence, rounds
+    proof-of-work.md       Markdown summary
+    evidence/
+      homepage.png         Screenshot per page (web apps)
+      recording.webm       Video of browser walkthrough (web apps)
+  run-history.jsonl        One line per build for otto history
+intent.md                  Cumulative log of all build intents
 ```
 
 ## Project structure
 
 ```
-otto/
-  pipeline.py          Build pipelines (v3 default + v2 split + orchestrated)
+otto/                        4,982 lines total
+  pipeline.py               Build pipeline (build_agentic_v3)
   certifier/
-    __init__.py        Agentic certifier (single agent + subagents)
-    report.py          CertificationReport, Finding, Outcome dataclasses
-  agent.py             Agent SDK wrapper (query, run_agent_query)
-  session.py           AgentSession for split mode (resume across rounds)
-  cli.py               CLI commands (build, add, run, status)
-  config.py            Config loading, otto.yaml creation
-  orchestrator.py      PER pipeline (--orchestrated mode)
-  runner.py            Task runner for orchestrated mode
-  qa.py                QA agent for orchestrated mode
-  display.py           Live terminal display
-  observability.py     Log writing utilities
+    __init__.py             Certifier agent (run_agentic_certifier)
+    report.py               CertificationReport dataclasses
+  prompts/
+    build.md                Build prompt (editable without code changes)
+    certifier.md            Certifier prompt (editable)
+  agent.py                  Agent SDK wrapper
+  cli.py                    CLI commands
+  config.py                 Config + otto.yaml
+  display.py                Terminal display
+  observability.py          Log utilities
+tests/                       1,950 lines, 122 tests
 ```
 
 ## Requirements
@@ -160,7 +157,7 @@ otto/
 - Python 3.11+
 - [Claude Code CLI](https://claude.ai/code) installed and authenticated
 - Git repository
-- Optional: `agent-browser` CLI for visual web app testing
+- Optional: `agent-browser` CLI for visual web app testing + video recording
 
 ## License
 
