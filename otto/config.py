@@ -10,38 +10,19 @@ import yaml
 DEFAULT_CONFIG: dict[str, Any] = {
     # Core
     "default_branch": "main",
-    "max_retries": 3,
-    "max_parallel": 1,              # 0 or 1 = serial (default); >1 = parallel tasks per batch
-    "parallel_qa": True,            # per-task QA sessions in parallel (faster, costlier)
-    "proof_of_work": False,         # audit/reporting metadata only; must not change merge-gating QA behavior
-    "execution_mode": "monolithic", # monolithic = one integrated coding pass; planned = planner/batches
-    "spec_generation_mode": "parallel",  # parallel = overlap with coding, before_coding = block and feed spec into attempt 1
     "test_command": None,           # auto-detected if not set
     "provider": "claude",           # coding agent provider (claude or codex)
-    "planner_provider": None,       # planner-only provider override (None = provider)
     "model": None,                  # override provider model (e.g. sonnet, gpt-5)
-    "planner_model": None,          # planner-only model override (None = provider default)
-    "planner_effort": "medium",     # planner reasoning effort
-    "fixed_plan": None,             # optional fixed execution plan for deterministic benchmarking/debugging
-
-    # Timeouts
-    "install_timeout": 120,         # seconds for dependency installation in worktrees
-    "verify_timeout": 300,          # seconds for test suite in verify worktree
-    "max_task_time": 3600,          # 1hr circuit breaker per task
-    "qa_timeout": 3600,             # 1hr circuit breaker for QA agent
-
-    # Harness toggles — disable phases for debugging/benchmarking
-    "skip_spec": False,             # skip spec generation (no acceptance criteria)
-    "skip_qa": False,               # skip QA agent (merge after tests pass)
-    "skip_test": False,             # skip testing phase (merge after coding)
 
     # Agent CC settings scope — what settings each agent loads
     # "project": project CLAUDE.md only (default — no user skills/hooks overhead)
     # "user,project": also loads user CLAUDE.md, skills, hooks
     "coding_agent_settings": "project",
-    "spec_agent_settings": "project",
-    "qa_agent_settings": "project",
-    "planner_agent_settings": "project",
+
+    # Product certification
+    "certifier_timeout": 900,       # max seconds for entire build+certify session
+    "certifier_browser": None,      # null = auto-detect; true/false to force browser testing
+    "certifier_interaction": None,  # override product type (http/cli/import/websocket)
 }
 
 SUPPORTED_PROVIDERS = {"claude", "codex"}
@@ -71,15 +52,6 @@ def agent_provider(config: dict[str, Any]) -> str:
         key="provider",
     ) or DEFAULT_CONFIG["provider"]
 
-
-def planner_provider(config: dict[str, Any]) -> str:
-    """Return the effective planner provider."""
-    provider = normalize_provider(
-        config.get("planner_provider"),
-        default=None,
-        key="planner_provider",
-    )
-    return provider or agent_provider(config)
 
 
 def git_meta_dir(project_dir: Path) -> Path:
@@ -128,11 +100,6 @@ def load_config(config_path: Path) -> dict[str, Any]:
     raw = yaml.safe_load(config_path.read_text()) or {}
     config = {**DEFAULT_CONFIG, **raw}
     config["provider"] = agent_provider(config)
-    config["planner_provider"] = normalize_provider(
-        config.get("planner_provider"),
-        default=None,
-        key="planner_provider",
-    )
     # Auto-detect test_command if not explicitly configured
     if "test_command" not in raw:
         config["test_command"] = detect_test_command(config_path.parent)
@@ -354,11 +321,7 @@ def create_config(project_dir: Path) -> Path:
 
     config = {
         "default_branch": default_branch,
-        "max_retries": DEFAULT_CONFIG["max_retries"],
-        "verify_timeout": DEFAULT_CONFIG["verify_timeout"],
     }
-    # Only include optional keys if they differ from defaults,
-    # so the generated file is clean but discoverable via comments.
     if test_command:
         config["test_command"] = test_command
 
@@ -366,34 +329,16 @@ def create_config(project_dir: Path) -> Path:
     config_path = project_dir / "otto.yaml"
     lines = yaml.dump(config, default_flow_style=False, sort_keys=False).rstrip()
     lines += "\n"
-    lines += "\n# Parallelism:\n"
-    lines += f"# max_parallel: 1                # 0 or 1 = serial (default); >1 = parallel tasks per batch\n"
-    lines += f"# proof_of_work: false           # audit/reporting metadata only; should not affect merge-gating QA behavior\n"
-    lines += f"# execution_mode: monolithic     # monolithic = one integrated coding pass; planned = planner/batches\n"
-    lines += f"# spec_generation_mode: parallel # parallel or before_coding; before_coding feeds spec into attempt 1\n"
-    lines += "\n# Timeouts:\n"
-    lines += f"# verify_timeout: 300            # seconds for test suite in verify\n"
-    lines += f"# max_task_time: 3600            # 1hr circuit breaker per task\n"
-    lines += f"# qa_timeout: 3600               # 1hr circuit breaker for QA agent\n"
     lines += "\n# Provider + model:\n"
     lines += f"# provider: claude              # claude or codex\n"
-    lines += f"# planner_provider: null        # override planner provider only\n"
-    lines += f"# model: null                   # examples: sonnet, gpt-5.4, gpt-5.1, gpt-5-codex, gpt-5.1-codex\n"
-    lines += f"#                               # other current Codex options include gpt-5.4-mini, gpt-5.4-nano,\n"
-    lines += f"#                               # gpt-5.3-codex, gpt-5.2-codex, gpt-5.1-codex-max, gpt-5.1-codex-mini\n"
+    lines += f"# model: null                   # override provider model\n"
     lines += f"#                               # if unset, Otto uses the provider's local/default model\n"
-    lines += f"# planner_model: null           # override planner model only; same model IDs as above\n"
-    lines += f"# fixed_plan: null             # optional fixed execution plan (by task_ids/task_keys) for deterministic benchmarking\n"
-    lines += "\n# Harness toggles (disable phases for debugging):\n"
-    lines += f"# skip_spec: false               # skip spec generation\n"
-    lines += f"# skip_qa: false                 # skip QA (merge after tests pass)\n"
-    lines += f"# skip_test: false               # skip testing (merge after coding)\n"
     lines += "\n# Agent settings scope (project or user,project):\n"
     lines += f"# coding_agent_settings: project     # project CLAUDE.md only (default)\n"
     lines += f"# Set to 'user,project' to also load ~/.claude/CLAUDE.md\n"
     lines += "\n# Build mode:\n"
     lines += f"# Default: agentic v3 — one agent builds, dispatches certifier, fixes, re-certifies.\n"
-    lines += f"# The coding agent drives the entire build→certify→fix loop autonomously.\n"
+    lines += f"# The coding agent drives the entire build->certify->fix loop autonomously.\n"
     lines += f"\n# Product certification:\n"
     lines += f"# certifier_timeout: 900         # max seconds for entire build+certify session\n"
     lines += f"# certifier_browser: null        # null = auto-detect; true/false to force browser testing\n"
@@ -405,7 +350,7 @@ def create_config(project_dir: Path) -> Path:
     exclude_path = git_meta_dir(project_dir) / "info" / "exclude"
     exclude_path.parent.mkdir(parents=True, exist_ok=True)
     existing = exclude_path.read_text() if exclude_path.exists() else ""
-    entries = ["tasks.yaml", ".tasks.lock", "otto_logs/", "otto.lock", "otto_arch/", ".otto-worktrees/"]
+    entries = ["otto_logs/", "otto.lock"]
     to_add = [e for e in entries if e not in existing]
     if to_add:
         with open(exclude_path, "a") as f:

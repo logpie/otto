@@ -60,29 +60,8 @@ def sample_config(tmp_git_repo):
     config_path = tmp_git_repo / "otto.yaml"
     config = {
         "test_command": "pytest",
-        "max_retries": 3,
         "model": "sonnet",
-        "project_dir": ".",
         "default_branch": "main",
-        "verify_timeout": 300,
     }
     config_path.write_text(yaml.dump(config))
     return config_path
-
-
-@pytest.fixture
-def sample_tasks_file(tmp_git_repo):
-    """Create a sample tasks.yaml in the temp repo."""
-    tasks_path = tmp_git_repo / "tasks.yaml"
-    tasks = {
-        "tasks": [
-            {
-                "id": 1,
-                "key": "a1b2c3d4e5f6",
-                "prompt": "Add a hello function",
-                "status": "pending",
-            },
-        ]
-    }
-    tasks_path.write_text(yaml.dump(tasks))
-    return tasks_path

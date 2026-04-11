@@ -15,7 +15,6 @@ from otto.config import (
     detect_test_command,
     git_meta_dir,
     load_config,
-    planner_provider,
 )
 
 
@@ -45,22 +44,16 @@ class TestGitMetaDir:
 class TestLoadConfig:
     def test_loads_valid_config(self, tmp_git_repo):
         config_path = tmp_git_repo / "otto.yaml"
-        config_path.write_text(yaml.dump({"test_command": "pytest", "max_retries": 5}))
+        config_path.write_text(yaml.dump({"test_command": "pytest"}))
         cfg = load_config(config_path)
         assert cfg["test_command"] == "pytest"
-        assert cfg["max_retries"] == 5
 
     def test_fills_defaults_for_missing_keys(self, tmp_git_repo):
         config_path = tmp_git_repo / "otto.yaml"
         config_path.write_text(yaml.dump({"test_command": "pytest"}))
         cfg = load_config(config_path)
-        assert cfg["max_retries"] == DEFAULT_CONFIG["max_retries"]
-        assert cfg["proof_of_work"] is False
         assert cfg["provider"] == DEFAULT_CONFIG["provider"]
         assert cfg["model"] == DEFAULT_CONFIG["model"]
-        assert cfg["planner_model"] == DEFAULT_CONFIG["planner_model"]
-        assert cfg["planner_effort"] == DEFAULT_CONFIG["planner_effort"]
-        assert cfg["verify_timeout"] == DEFAULT_CONFIG["verify_timeout"]
 
     def test_returns_defaults_when_file_missing(self, tmp_git_repo):
         cfg = load_config(tmp_git_repo / "otto.yaml")
@@ -76,11 +69,9 @@ class TestLoadConfig:
         config_path = tmp_git_repo / "otto.yaml"
         config_path.write_text(yaml.dump({
             "provider": "CODEX",
-            "planner_provider": "claude",
         }))
         cfg = load_config(config_path)
         assert cfg["provider"] == "codex"
-        assert cfg["planner_provider"] == "claude"
 
     def test_rejects_invalid_provider(self, tmp_git_repo):
         config_path = tmp_git_repo / "otto.yaml"
@@ -92,10 +83,6 @@ class TestLoadConfig:
 class TestProviderHelpers:
     def test_agent_provider_defaults_to_claude(self):
         assert agent_provider({}) == "claude"
-
-    def test_planner_provider_falls_back_to_agent_provider(self):
-        cfg = {"provider": "codex", "planner_provider": None}
-        assert planner_provider(cfg) == "codex"
 
 
 class TestDetectTestCommand:
@@ -216,11 +203,9 @@ class TestCreateConfig:
         assert config_path.exists()
         cfg = yaml.safe_load(config_path.read_text())
         assert "default_branch" in cfg
-        assert "max_retries" in cfg
 
     def test_updates_git_info_exclude(self, tmp_git_repo):
         create_config(tmp_git_repo)
         exclude_path = tmp_git_repo / ".git" / "info" / "exclude"
         content = exclude_path.read_text()
-        assert "tasks.yaml" in content
         assert "otto_logs/" in content
