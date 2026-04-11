@@ -563,9 +563,8 @@ async def build_agentic_v3(
     build_dir = project_dir / "otto_logs" / "builds" / build_id
     build_dir.mkdir(parents=True, exist_ok=True)
 
-    grounding_path = project_dir / "intent.md"
-    if not grounding_path.exists():
-        grounding_path.write_text(intent)
+    # Append intent to cumulative log
+    _append_intent(project_dir, intent, build_id)
     _commit_artifacts(project_dir)
 
     options = ClaudeAgentOptions(
@@ -858,15 +857,44 @@ async def build_agentic_v3(
                 "passed" if passed else "failed",
                 stories_passed, stories_tested, total_duration, float(cost or 0))
 
+    # Append to run history (one line per build for `otto log`)
+    from otto.observability import append_text_log
+    history_path = project_dir / "otto_logs" / "run-history.jsonl"
+    history_entry = json.dumps({
+        "build_id": build_id,
+        "intent": intent[:200],
+        "passed": passed,
+        "stories_passed": stories_passed,
+        "stories_tested": stories_tested,
+        "certify_rounds": len(certify_rounds),
+        "cost_usd": round(float(cost or 0), 2),
+        "duration_s": total_duration,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    })
+    append_text_log(history_path, [history_entry])
+
     return BuildResult(
         passed=passed,
         build_id=build_id,
-        rounds=1,  # single session — no explicit rounds
+        rounds=1,
         total_cost=float(cost or 0),
         journeys=journeys,
         tasks_passed=sum(1 for j in journeys if j["passed"]),
         tasks_failed=sum(1 for j in journeys if not j["passed"]),
     )
+
+
+def _append_intent(project_dir: Path, intent: str, build_id: str) -> None:
+    """Append intent to cumulative log. Preserves history across builds."""
+    intent_path = project_dir / "intent.md"
+    ts = time.strftime("%Y-%m-%d %H:%M")
+    entry = f"\n## {ts} ({build_id})\n{intent}\n"
+    if intent_path.exists():
+        existing = intent_path.read_text()
+        if intent not in existing:
+            intent_path.write_text(existing.rstrip() + "\n" + entry)
+    else:
+        intent_path.write_text(f"# Build Intents\n{entry}")
 
 
 def _commit_artifacts(project_dir: Path) -> None:

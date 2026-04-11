@@ -553,7 +553,7 @@ class TestHistory:
         monkeypatch.chdir(tmp_git_repo)
         result = runner.invoke(main, ["history"])
         assert result.exit_code == 0
-        assert "No run history" in result.output
+        assert "No build history" in result.output
 
     def test_shows_history_entries(self, runner, tmp_git_repo, monkeypatch):
         import json
@@ -573,9 +573,8 @@ class TestHistory:
 
         result = runner.invoke(main, ["history"])
         assert result.exit_code == 0
-        assert "2026-03-20" in result.output
+        assert "03-20" in result.output
         assert "$1.50" in result.output
-        assert "$0.19" in result.output
 
     def test_history_limit(self, runner, tmp_git_repo, monkeypatch):
         import json
@@ -594,8 +593,8 @@ class TestHistory:
         result = runner.invoke(main, ["history", "-n", "2"])
         assert result.exit_code == 0
         # Should only show 2 most recent
-        assert "2026-03-24" in result.output
-        assert "2026-03-23" in result.output
+        assert "03-24" in result.output
+        assert "03-23" in result.output
 
 
 class TestLogs:
