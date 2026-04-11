@@ -169,7 +169,7 @@ class TestBuildCommand:
 
         runner = CliRunner()
         with patch("otto.pipeline.build_agentic_v3", side_effect=fake_build):
-            result = runner.invoke(main, ["build", "demo app", "--no-review"])
+            result = runner.invoke(main, ["build", "demo app", "--no-qa"])
 
         assert result.exit_code == 1
 
@@ -187,7 +187,7 @@ class TestBuildCommand:
 
         runner = CliRunner()
         with patch("otto.pipeline.build_agentic_v3", side_effect=fake_build):
-            result = runner.invoke(main, ["build", "demo app", "--no-review"])
+            result = runner.invoke(main, ["build", "demo app", "--no-qa"])
 
         assert result.exit_code == 1
         assert "Some journeys failed" in result.output
@@ -201,7 +201,7 @@ class TestBuildCommand:
 
         runner = CliRunner()
         with patch("otto.pipeline.build_agentic_v3", side_effect=fake_build):
-            result = runner.invoke(main, ["build", "demo app", "--no-review"])
+            result = runner.invoke(main, ["build", "demo app", "--no-qa"])
 
         assert result.exit_code == 1
         assert "qa boom" in result.output
@@ -218,7 +218,7 @@ class TestBuildCommand:
         with patch("otto.pipeline.build_agentic_v2", side_effect=fake_split):
             result = runner.invoke(
                 main,
-                ["build", "demo app", "--split", "--no-review"],
+                ["build", "demo app", "--split", "--no-qa"],
             )
 
         assert result.exit_code == 0

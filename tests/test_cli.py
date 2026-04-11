@@ -311,30 +311,6 @@ class TestRevert:
         assert result.exit_code != 0
 
 
-class TestResetAlias:
-    def test_reset_alias_works(self, runner, tmp_git_repo, monkeypatch):
-        """'otto reset --yes' should work as alias for 'otto drop --all --yes'."""
-        monkeypatch.chdir(tmp_git_repo)
-        runner.invoke(main, ["add", "Task 1"])
-        result = runner.invoke(main, ["reset", "--yes"])
-        assert result.exit_code == 0
-
-    def test_reset_revert_commits_alias(self, runner, tmp_git_repo, monkeypatch):
-        """'otto reset --revert-commits --yes' should work as alias for 'otto revert --all --yes'."""
-        monkeypatch.chdir(tmp_git_repo)
-        result = runner.invoke(main, ["reset", "--revert-commits", "--yes"])
-        assert result.exit_code == 0
-
-
-class TestDeleteAlias:
-    def test_delete_alias_works(self, runner, tmp_git_repo, monkeypatch):
-        """'otto delete 1' should work as alias for 'otto drop 1'."""
-        monkeypatch.chdir(tmp_git_repo)
-        runner.invoke(main, ["add", "Task 1"])
-        result = runner.invoke(main, ["delete", "--yes", "1"])
-        assert result.exit_code == 0
-
-
 class TestAddSpec:
     @patch("otto.cli.generate_spec")
     def test_add_generates_spec(self, mock_gen, runner, tmp_git_repo, monkeypatch):

@@ -128,7 +128,7 @@ async def _run_one_off_with_display(
 
 @click.group(context_settings=CONTEXT_SETTINGS)
 def main():
-    """Otto — autonomous coding agent runner.
+    """Otto — build and certify software products.
 
     Run 'otto COMMAND -h' for command-specific options.
     """
@@ -311,7 +311,7 @@ def _print_build_result(intent: str, result, build_duration: float) -> None:
     console.print()
 
 
-@main.command(context_settings=CONTEXT_SETTINGS)
+@main.command(context_settings=CONTEXT_SETTINGS, hidden=True)
 @click.argument("prompt", required=False)
 @click.option("--verify", default=None, help="Custom verification command")
 @click.option("--max-retries", default=None, type=int, help="Max retry attempts")
@@ -413,7 +413,7 @@ def add(prompt, verify, max_retries, import_file, gen_spec):
     console.print(f"[success]\u2713[/success] Added task [bold]#{task['id']}[/bold] [dim]({task['key']})[/dim]: {rich_escape(prompt[:70])}")
 
 
-@main.command(context_settings=CONTEXT_SETTINGS)
+@main.command(context_settings=CONTEXT_SETTINGS, hidden=True)
 @click.argument("prompt", required=False)
 @click.option("--dry-run", is_flag=True, help="Show what would run without executing")
 @click.option("--no-spec", is_flag=True, help="Skip spec generation")
@@ -498,27 +498,21 @@ def run(prompt, dry_run, no_spec, no_qa, no_test):
 
 @main.command(context_settings=CONTEXT_SETTINGS)
 @click.argument("intent")
-@click.option("--no-review", is_flag=True, help="Skip plan review, execute immediately")
 @click.option("--no-qa", is_flag=True, help="Skip product certification after build")
-@click.option("--plan/--no-plan", "use_planner", default=None, help="Force planner on/off")
-@click.option("--orchestrated", is_flag=True, help="Orchestrator-driven build (PER mode)")
-@click.option("--split", "use_split", is_flag=True, help="Split-session build — orchestrator drives build/certify as separate sessions")
-def build(intent, no_review, no_qa, use_planner, orchestrated, use_split):
+@click.option("--orchestrated", is_flag=True, hidden=True, help="Legacy: orchestrator-driven build (PER mode)")
+@click.option("--split", "use_split", is_flag=True, hidden=True, help="Legacy: split-session build")
+def build(intent, no_qa, orchestrated, use_split):
     """Build a product from a natural language intent.
 
-    Default: agentic — one agent builds, dispatches certifier, fixes, re-certifies.
-    The coding agent drives the entire loop autonomously.
-
-      --split:        Split sessions — orchestrator drives build/certify separately
-      --orchestrated: Orchestrator-driven build (PER mode, legacy)
-
-    The certifier verifies the product works by running real user
-    stories (HTTP, CLI, import, WebSocket — any product type).
+    One agent builds, certifies, and fixes autonomously. The certifier
+    verifies the product works by running real user stories (HTTP, CLI,
+    import, WebSocket — any product type).
 
     Examples:
+
         otto build "bookmark manager with tags and search"
-        otto build "CLI tool that converts CSV to JSON"
-        otto build "weather app" --split
+
+        otto build "CLI tool that converts CSV to JSON" --no-qa
     """
     require_git()
     project_dir = Path.cwd()
@@ -531,10 +525,6 @@ def build(intent, no_review, no_qa, use_planner, orchestrated, use_split):
 
     if no_qa:
         config["skip_product_qa"] = True
-    if use_planner is not None:
-        config["use_planner"] = use_planner
-    if no_review:
-        config["no_review"] = True
 
     # Run the pipeline
     from otto.pipeline import build_product, build_agentic_v2, build_agentic_v3, BuildResult
@@ -649,7 +639,7 @@ def certify(intent):
     sys.exit(0 if outcome == "passed" else 1)
 
 
-@main.command(context_settings=CONTEXT_SETTINGS)
+@main.command(context_settings=CONTEXT_SETTINGS, hidden=True)
 @click.option("-w", "--watch", is_flag=True, help="Auto-refresh every 2 seconds")
 def status(watch):
     """Show task status."""
@@ -686,7 +676,7 @@ def status(watch):
     console.print(build_status_table(tasks, show_phase=True))
 
 
-@main.command(context_settings=CONTEXT_SETTINGS)
+@main.command(context_settings=CONTEXT_SETTINGS, hidden=True)
 @click.argument("task_id", type=int)
 @click.argument("feedback", required=False)
 @click.option("--force", is_flag=True, help="Reset any task, not just failed ones")
@@ -747,7 +737,7 @@ def retry(task_id, feedback, force):
     sys.exit(1)
 
 
-@main.command(context_settings=CONTEXT_SETTINGS)
+@main.command(context_settings=CONTEXT_SETTINGS, hidden=True)
 @click.argument("task_id", type=int, required=False)
 @click.option("--all", "drop_all", is_flag=True, help="Remove all tasks and clean otto/* branches")
 @click.option("--yes", is_flag=True, help="Skip confirmation")
@@ -864,17 +854,6 @@ def _drop_all(yes: bool) -> None:
         lock_fh.close()
 
 
-# Hidden alias: 'otto delete' -> 'otto drop' (backward compat)
-@main.command("delete", hidden=True, context_settings=CONTEXT_SETTINGS)
-@click.argument("task_id", type=int, required=False)
-@click.option("--all", "drop_all", is_flag=True, hidden=True)
-@click.option("--yes", is_flag=True, hidden=True)
-@click.pass_context
-def delete_alias(ctx, task_id, drop_all, yes):
-    """Alias for 'otto drop' (deprecated)."""
-    ctx.invoke(drop, task_id=task_id, drop_all=drop_all, yes=yes)
-
-
 
 # Setup command (registered from otto/cli_setup.py)
 from otto.cli_setup import register_setup_command
@@ -885,7 +864,7 @@ from otto.cli_logs import register_log_commands
 register_log_commands(main)
 
 
-@main.command(context_settings=CONTEXT_SETTINGS)
+@main.command(context_settings=CONTEXT_SETTINGS, hidden=True)
 @click.argument("task_id", type=int, required=False)
 @click.option("--all", "revert_all", is_flag=True, help="Revert ALL otto commits")
 @click.option("--yes", is_flag=True, help="Skip confirmation")
@@ -1043,21 +1022,6 @@ def _revert_all(yes: bool) -> None:
     finally:
         fcntl.flock(lock_fh, fcntl.LOCK_UN)
         lock_fh.close()
-
-
-# Hidden alias: 'otto reset' -> backward compat
-@main.command("reset", hidden=True, context_settings=CONTEXT_SETTINGS)
-@click.option("--yes", is_flag=True, hidden=True)
-@click.option("--revert-commits", is_flag=True, hidden=True)
-@click.option("--hard", "revert_commits_compat", is_flag=True, hidden=True)
-@click.pass_context
-def reset_alias(ctx, yes, revert_commits, revert_commits_compat):
-    """Alias for 'otto drop --all' or 'otto revert --all' (deprecated)."""
-    hard = revert_commits or revert_commits_compat
-    if hard:
-        ctx.invoke(revert, task_id=None, revert_all=True, yes=yes)
-    else:
-        ctx.invoke(drop, task_id=None, drop_all=True, yes=yes)
 
 
 
