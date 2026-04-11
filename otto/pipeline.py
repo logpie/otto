@@ -580,6 +580,11 @@ async def build_agentic_v3(
 
     prompt = AGENTIC_V3_PROMPT + f"\n\nBuild this product:\n\n{intent}"
 
+    # Check for previous failed build — inject findings so agent doesn't repeat mistakes
+    prev_failure = _get_previous_failure(project_dir)
+    if prev_failure:
+        prompt += f"\n\n## Previous Build Failed\n{prev_failure}"
+
     logger.info("Starting agentic v3 build: %s", build_id)
     start_time = time.monotonic()
 
@@ -882,6 +887,58 @@ async def build_agentic_v3(
         tasks_passed=sum(1 for j in journeys if j["passed"]),
         tasks_failed=sum(1 for j in journeys if not j["passed"]),
     )
+
+
+def _get_previous_failure(project_dir: Path) -> str | None:
+    """Read the most recent failed build's certifier findings, if any."""
+    history_path = project_dir / "otto_logs" / "run-history.jsonl"
+    if not history_path.exists():
+        return None
+
+    # Read last entry
+    last_line = ""
+    try:
+        for line in history_path.read_text().splitlines():
+            if line.strip():
+                last_line = line.strip()
+    except OSError:
+        return None
+
+    if not last_line:
+        return None
+
+    try:
+        entry = json.loads(last_line)
+    except json.JSONDecodeError:
+        return None
+
+    if entry.get("passed", True):
+        return None  # last build passed, no failure context
+
+    # Read certifier findings from PoW
+    pow_path = project_dir / "otto_logs" / "certifier" / "proof-of-work.json"
+    if not pow_path.exists():
+        return f"The previous build failed but no certifier findings are available."
+
+    try:
+        pow_data = json.loads(pow_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return f"The previous build failed but certifier findings could not be read."
+
+    failures = [s for s in pow_data.get("stories", []) if not s.get("passed")]
+    if not failures:
+        return f"The previous build failed but the certifier reported no specific story failures."
+
+    lines = ["The previous build failed. The certifier found these issues:\n"]
+    for f in failures:
+        sid = f.get("story_id", "?")
+        summary = f.get("summary", "")
+        evidence = f.get("evidence", "")
+        lines.append(f"- **{sid}**: {summary}")
+        if evidence:
+            lines.append(f"  Evidence: {evidence[:300]}")
+    lines.append("\nFix these issues. Do NOT repeat the same mistakes.")
+    return "\n".join(lines)
 
 
 def _append_intent(project_dir: Path, intent: str, build_id: str) -> None:
