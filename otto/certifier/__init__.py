@@ -67,21 +67,23 @@ for real users by testing it thoroughly.
    For simple products (CLI tools), you may test inline instead.
 
 7. **Collect results** — read each subagent's response.
-8. **Report verdict** using the exact format below.
+
+8. **Visual verification** (web apps with HTML pages only — skip for CLI/API/library):
+   After subagents finish, do a visual walkthrough yourself using agent-browser:
+     agent-browser record start {evidence_dir}/recording.webm http://localhost:PORT
+     agent-browser screenshot {evidence_dir}/homepage.png
+     agent-browser open http://localhost:PORT/other-page
+     agent-browser screenshot {evidence_dir}/other-page.png
+     (visit each key page, take a screenshot of each)
+     agent-browser record stop
+     agent-browser close
+   This captures video of the entire walkthrough plus per-page screenshots.
+   Do NOT skip this step for web apps — the screenshots and video are evidence.
+
+9. **Report verdict** using the exact format below.
 
 ## Testing Rules
 - Make REAL requests (curl for HTTP, run commands for CLI, write test scripts for libraries)
-- For web apps with UI pages: use agent-browser CLI for visual verification.
-  Save all screenshots to: {evidence_dir}
-    agent-browser record start {evidence_dir}/recording.webm
-    agent-browser open http://localhost:PORT/page
-    agent-browser snapshot -i
-    agent-browser screenshot {evidence_dir}/page-name.png
-    agent-browser click @e3
-    ... test more pages ...
-    agent-browser record stop
-    agent-browser close
-  Take a screenshot of each key page. The screenshots are evidence for the report.
 - Test the ACTUAL product, never simulate or assume
 - Products can be hybrid (API + CLI + UI) — test ALL surfaces you find
 - For each failure: report WHAT is wrong and WHERE (symptom + evidence). Do NOT suggest fixes.
