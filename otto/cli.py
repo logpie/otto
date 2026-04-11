@@ -569,6 +569,85 @@ def build(intent, no_review, no_qa, use_planner, orchestrated, use_split):
     sys.exit(0 if result.passed else 1)
 
 
+@main.command(context_settings=CONTEXT_SETTINGS)
+@click.argument("intent", required=False)
+def certify(intent):
+    """Certify a product — independent, builder-blind verification.
+
+    Tests the product in the current directory as a real user. Works on
+    any project regardless of how it was built (otto, bare CC, human).
+
+    If no intent is given, reads intent.md or README.md from the project.
+
+    Examples:
+        otto certify "notes API with auth, CRUD, and search"
+        otto certify                   # reads intent.md
+        cd my-project && otto certify  # reads README.md
+    """
+    project_dir = Path.cwd()
+
+    # Resolve intent: argument > intent.md > README.md
+    if not intent:
+        intent_path = project_dir / "intent.md"
+        readme_path = project_dir / "README.md"
+        if intent_path.exists():
+            intent = intent_path.read_text().strip()
+            console.print(f"  [dim]Intent from intent.md[/dim]")
+        elif readme_path.exists():
+            intent = readme_path.read_text().strip()[:2000]
+            console.print(f"  [dim]Intent from README.md[/dim]")
+        else:
+            error_console.print("[error]No intent provided. Pass as argument or create intent.md[/error]")
+            sys.exit(2)
+
+    if not intent:
+        error_console.print("[error]Intent is empty[/error]")
+        sys.exit(2)
+
+    console.print(f"\n  [bold]Certifying[/bold] — independent product verification\n")
+
+    from otto.certifier import run_agentic_certifier
+
+    start = time.time()
+    try:
+        report = asyncio.run(run_agentic_certifier(
+            intent=intent,
+            project_dir=project_dir,
+        ))
+    except KeyboardInterrupt:
+        console.print("\n  Aborted.")
+        sys.exit(1)
+    except Exception as e:
+        error_console.print(f"[error]Certification failed: {rich_escape(str(e))}[/error]")
+        sys.exit(1)
+
+    duration = time.time() - start
+    story_results = getattr(report, "_story_results", [])
+    passed_count = sum(1 for s in story_results if s.get("passed"))
+
+    # Display results
+    if story_results:
+        for s in story_results:
+            icon = "[success]✓[/success]" if s.get("passed") else "[red]✗[/red]"
+            console.print(f"    {icon} {rich_escape(s.get('summary', s.get('story_id', '')))}")
+
+    console.print()
+    outcome = report.outcome.value
+    if outcome == "passed":
+        console.print(f"  [success bold]PASSED[/success bold] — {passed_count}/{len(story_results)} stories")
+    else:
+        console.print(f"  [red bold]FAILED[/red bold] — {passed_count}/{len(story_results)} stories")
+
+    console.print(f"  Cost: ${report.cost_usd:.2f}  Duration: {duration:.0f}s")
+
+    # PoW report location
+    pow_dir = project_dir / "otto_logs" / "certifier"
+    if (pow_dir / "proof-of-work.html").exists():
+        console.print(f"  Report: {pow_dir / 'proof-of-work.html'}")
+
+    console.print()
+    sys.exit(0 if outcome == "passed" else 1)
+
 
 @main.command(context_settings=CONTEXT_SETTINGS)
 @click.option("-w", "--watch", is_flag=True, help="Auto-refresh every 2 seconds")
