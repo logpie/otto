@@ -118,3 +118,54 @@ This validates otto certify's value proposition:
 - **Cost**: $3.75 per certification is expensive for a quality gate. Need to measure
   value per dollar.
 - **Coverage**: The certifier tested 6 stories. How many bugs exist that it didn't test for?
+
+## Additional Projects (Batch 2)
+
+### Project 3: flask-todo (patrickloeber)
+
+- **Source**: https://github.com/patrickloeber/flask-todo
+- **Size**: 50 lines (app.py only)
+
+**Result: 5/8 FAIL — 3 bugs found**
+
+| Bug | Detail |
+|-----|--------|
+| Empty title accepted | No validation on todo title — stores blank todos |
+| Update non-existent → 500 | PUT /update/9999 crashes instead of 404 |
+| Delete non-existent → 500 | DELETE /delete/9999 crashes instead of 404 |
+
+### Project 4: todo-app-flask-reactjs (Remy349)
+
+- **Source**: https://github.com/Remy349/todo-app-flask-reactjs
+- **Size**: 1,044 lines (Flask backend + React frontend)
+
+**Result: 2/4 FAIL — 2 critical bugs found**
+
+| Bug | Detail | Verified |
+|-----|--------|----------|
+| **Data isolation failure** | `.where(user_id == user_id)` compares var to itself (always True). Returns ALL tasks for every user. | Yes — line 23 of task_controller.py |
+| **No ownership on update/delete** | `update()` and `delete()` query by task_id only, no user_id filter. Any user can modify any task. | Yes — lines 53, 67 |
+| No input validation | Empty titles accepted, XSS payloads stored | Yes |
+
+The data isolation bug is a classic: the developer wrote `user_id == user_id` instead of
+`TaskModel.user_id == user_id`. SQLAlchemy doesn't warn — it evaluates as `True` and
+returns everything.
+
+## Cumulative Results
+
+| # | Project | Result | Bugs | False Positives |
+|---|---------|--------|------|-----------------|
+| 1 | onurtacc/flask-todo-app | PASS (5/5) | 0 | 0 |
+| 2 | Swappy514/Flask-TODO-APP | FAIL (5/6) | 2 (auth bypass) | 0 |
+| 3 | patrickloeber/flask-todo | FAIL (5/8) | 3 (validation, error handling) | 0 |
+| 4 | Remy349/todo-app-flask-reactjs | FAIL (2/4) | 3 (data isolation, validation) | 0 |
+| **Total** | | **1 PASS, 3 FAIL** | **8 real bugs** | **0 false positives** |
+
+**Bug severity breakdown:**
+- Critical: 3 (auth bypass, data isolation failure, no ownership checks)
+- Important: 3 (500 on missing resources, empty input accepted)
+- Minor: 2 (XSS stored in DB, no title validation)
+
+**Key finding**: 3/4 real open-source projects have bugs the certifier catches. 
+Zero false positives across 23 story tests. The certifier's value is real — it 
+finds bugs that developers ship.
