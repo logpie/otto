@@ -477,9 +477,17 @@ You are a senior developer. Work autonomously.
 
    Rules:
    - Make REAL requests (curl, CLI commands, test scripts)
-   - For web apps with HTML pages: also use agent-browser for visual checks:
-       agent-browser open URL, agent-browser snapshot -i, agent-browser screenshot otto_logs/certifier/evidence/
    - Never simulate. For failures: report WHAT is wrong + WHERE. No fix suggestions.
+   - IMPORTANT: For web apps with HTML pages, you MUST also do visual verification.
+     Use the agent-browser CLI tool to take screenshots of key pages:
+       agent-browser record start otto_logs/certifier/evidence/recording.webm
+       agent-browser open http://localhost:PORT/
+       agent-browser screenshot otto_logs/certifier/evidence/homepage.png
+       agent-browser open http://localhost:PORT/other-page
+       agent-browser screenshot otto_logs/certifier/evidence/other-page.png
+       agent-browser record stop
+       agent-browser close
+     Take at least one screenshot per page. This is REQUIRED for web apps.
 
    End with EXACT markers:
    STORY_EVIDENCE_START: (id)
