@@ -478,7 +478,7 @@ You are a senior developer. Work autonomously.
    Rules:
    - Make REAL requests (curl, CLI commands, test scripts)
    - For web apps with HTML pages: also use agent-browser for visual checks:
-       agent-browser open URL, agent-browser snapshot -i, agent-browser screenshot /tmp/
+       agent-browser open URL, agent-browser snapshot -i, agent-browser screenshot otto_logs/certifier/evidence/
    - Never simulate. For failures: report WHAT is wrong + WHERE. No fix suggestions.
 
    End with EXACT markers:
