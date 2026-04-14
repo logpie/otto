@@ -36,7 +36,6 @@ async def run_agentic_certifier(
     thorough: bool = False,
     mode: str | None = None,
     focus: str | None = None,
-    port_override: int | None = None,
 ) -> "CertificationReport":
     """Agentic certifier: one monolithic agent does everything.
 

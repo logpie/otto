@@ -247,9 +247,3 @@ register_history_command(main)
 from otto.cli_improve import register_improve_commands
 register_improve_commands(main)
 
-# Bench subcommands — hidden until otto.bench module is implemented
-try:
-    from otto.cli_bench import register_bench_commands
-    register_bench_commands(main)
-except ImportError:
-    pass

@@ -2,10 +2,8 @@
 
 import os
 import signal
-import shutil
 import subprocess
 import sys
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -319,114 +317,3 @@ def run_tier3(
         )
 
 
-def run_test_suite(
-    project_dir: Path,
-    candidate_sha: str,
-    test_command: str | None,
-    custom_test_cmd: str | None,
-    timeout: int,
-    exclude_test_files: list[Path] | None = None,
-) -> TestSuiteResult:
-    """Run all test tiers in a disposable worktree.
-
-    exclude_test_files: paths (relative to project root) to delete from
-    the disposable worktree before running tests. Used in parallel mode
-    to exclude sibling tasks' test files that can't pass yet.
-    """
-    tiers: list[TierResult] = []
-    worktree_path = Path(tempfile.mkdtemp(prefix="otto-verify-"))
-
-    try:
-        # Create disposable worktree with detached HEAD
-        subprocess.run(
-            ["git", "worktree", "add", "--detach", str(worktree_path), candidate_sha],
-            cwd=project_dir,
-            capture_output=True,
-            check=True,
-        )
-
-        # Remove sibling test files from disposable worktree (parallel mode)
-        if exclude_test_files:
-            for rel_path in exclude_test_files:
-                excl = worktree_path / rel_path
-                if excl.exists():
-                    excl.unlink()
-
-        # Install project dependencies in the disposable worktree.
-        # Without this, projects using third-party libs fail testing.
-        venv_bin = _install_deps(worktree_path, timeout)
-        env = _verification_env(venv_bin)
-
-        # Run all tests (existing + spec-generated) in one pass
-        t1 = run_local_tests(worktree_path, test_command, timeout, env=env)
-        tiers.append(t1)
-        if not t1.passed and not t1.skipped:
-            return TestSuiteResult(passed=False, tiers=tiers)
-
-        # Custom test command (if provided)
-        t3 = run_tier3(worktree_path, custom_test_cmd, timeout, env=env)
-        tiers.append(t3)
-
-        all_passed = all(t.passed for t in tiers)
-        return TestSuiteResult(passed=all_passed, tiers=tiers)
-
-    finally:
-        # Always clean up the worktree
-        subprocess.run(
-            ["git", "worktree", "remove", "--force", str(worktree_path)],
-            cwd=project_dir,
-            capture_output=True,
-        )
-        if worktree_path.exists():
-            shutil.rmtree(worktree_path, ignore_errors=True)
-
-
-def run_integration_gate(
-    project_dir: Path,
-    test_command: str | None,
-    integration_test_file: Path | None,
-    timeout: int,
-) -> TestSuiteResult:
-    """Run integration gate in a clean disposable worktree.
-
-    Tests HEAD of the current branch (all tasks already merged).
-    Runs the full test suite (cross-task regression) plus integration tests.
-    """
-    tiers: list[TierResult] = []
-
-    head_sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=project_dir, capture_output=True, text=True, check=True,
-    ).stdout.strip()
-
-    worktree_path = Path(tempfile.mkdtemp(prefix="otto-integration-"))
-
-    try:
-        subprocess.run(
-            ["git", "worktree", "add", "--detach", str(worktree_path), head_sha],
-            cwd=project_dir, capture_output=True, check=True,
-        )
-
-        # Copy integration test file into worktree
-        if integration_test_file and integration_test_file.exists():
-            dest = worktree_path / "tests" / "otto_integration.py"
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(integration_test_file, dest)
-
-        venv_bin = _install_deps(worktree_path, timeout)
-        env = _verification_env(venv_bin)
-
-        # Run full test suite (regression + integration tests in one pass)
-        t1 = run_local_tests(worktree_path, test_command, timeout, env=env)
-        tiers.append(t1)
-
-        all_passed = all(t.passed for t in tiers)
-        return TestSuiteResult(passed=all_passed, tiers=tiers)
-
-    finally:
-        subprocess.run(
-            ["git", "worktree", "remove", "--force", str(worktree_path)],
-            cwd=project_dir, capture_output=True,
-        )
-        if worktree_path.exists():
-            shutil.rmtree(worktree_path, ignore_errors=True)

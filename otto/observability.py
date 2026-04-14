@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Iterable
 
 
 def append_text_log(path: Path, lines: str | Iterable[str]) -> None:
@@ -32,21 +32,3 @@ def write_json_file(path: Path, data: Any) -> None:
         pass
 
 
-def update_json_file(path: Path, mutator: Callable[[dict[str, Any]], dict[str, Any] | None]) -> None:
-    """Read-modify-write a JSON object file without raising."""
-    try:
-        current: dict[str, Any] = {}
-        if path.exists():
-            try:
-                parsed = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(parsed, dict):
-                    current = parsed
-            except Exception:
-                current = {}
-        updated = mutator(dict(current))
-        if updated is None:
-            updated = current
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(updated, indent=2, sort_keys=True), encoding="utf-8")
-    except Exception:
-        pass

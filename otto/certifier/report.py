@@ -43,21 +43,6 @@ class Finding:
     evidence: dict[str, Any] | None = None
     story_id: str | None = None    # for tier 4 journey findings
 
-    def to_journey_dict(self) -> dict[str, Any]:
-        """Convert to legacy journey format for backward compat."""
-        return {
-            "name": self.description[:80],
-            "story_id": self.story_id or "",
-            "passed": False,
-            "diagnosis": self.diagnosis,
-            "fix_suggestion": self.fix_suggestion,
-            "steps": [{
-                "action": self.description,
-                "outcome": "fail",
-                "diagnosis": self.diagnosis,
-                "fix_suggestion": self.fix_suggestion,
-            }] if self.diagnosis else [],
-        }
 
 
 @dataclass
@@ -92,39 +77,6 @@ class CertificationReport:
     def passed(self) -> bool:
         return self.outcome == CertificationOutcome.PASSED
 
-    def critical_findings(self) -> list[Finding]:
-        """Findings that must be fixed (not warnings, not blocked derivatives)."""
-        return [f for f in self.findings if f.severity in ("critical", "important")]
-
     def break_findings(self) -> list[Finding]:
         """All break findings (edge-case category), any severity."""
         return [f for f in self.findings if f.category == "edge-case"]
-
-    def to_legacy_dict(self) -> dict[str, Any]:
-        """Legacy compat for CLI display and telemetry. NOT for control flow."""
-        # Journey-style entries from tier 4
-        journeys: list[dict[str, Any]] = []
-        for tier in self.tiers:
-            if tier.tier == 4:
-                for f in tier.findings:
-                    if f.category != "edge-case":
-                        journeys.append(f.to_journey_dict())
-                break
-
-        return {
-            "product_passed": self.passed,
-            "journeys": journeys,
-            "break_findings": [
-                {
-                    "severity": f.severity,
-                    "description": f.description,
-                    "diagnosis": f.diagnosis,
-                    "fix_suggestion": f.fix_suggestion,
-                    "story_id": f.story_id,
-                }
-                for f in self.break_findings()
-            ],
-            "cost_usd": self.cost_usd,
-            "duration_s": self.duration_s,
-            "outcome": self.outcome.value,
-        }

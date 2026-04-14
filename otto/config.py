@@ -14,15 +14,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "provider": "claude",           # coding agent provider (claude or codex)
     "model": None,                  # override provider model (e.g. sonnet, gpt-5)
 
-    # Agent CC settings scope — what settings each agent loads
-    # "project": project CLAUDE.md only (default — no user skills/hooks overhead)
-    # "user,project": also loads user CLAUDE.md, skills, hooks
-    "coding_agent_settings": "project",
-
     # Product certification
     "certifier_timeout": 900,       # max seconds for entire build+certify session
-    "certifier_browser": None,      # null = auto-detect; true/false to force browser testing
-    "certifier_interaction": None,  # override product type (http/cli/import/websocket)
 }
 
 SUPPORTED_PROVIDERS = {"claude", "codex"}
@@ -210,77 +203,6 @@ def detect_test_command(project_dir: Path) -> str | None:
     return " && ".join(candidates)
 
 
-def discover_project_facts(project_dir: Path) -> list[str]:
-    """Discover deterministic project facts for cross-run learnings.
-
-    Returns canonical fact strings derived from files on disk. No LLM.
-    Facts are refreshed each run — not accumulated.
-    """
-    facts: list[str] = []
-
-    # Package manager
-    if (project_dir / "package-lock.json").exists():
-        facts.append("package manager: npm")
-    elif (project_dir / "pnpm-lock.yaml").exists():
-        facts.append("package manager: pnpm")
-    elif (project_dir / "yarn.lock").exists():
-        facts.append("package manager: yarn")
-    elif (project_dir / "bun.lockb").exists():
-        facts.append("package manager: bun")
-
-    # Framework
-    pkg_json = project_dir / "package.json"
-    if pkg_json.exists():
-        try:
-            pkg = json.loads(pkg_json.read_text())
-            deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
-            if "next" in deps:
-                facts.append("framework: Next.js")
-            elif "nuxt" in deps:
-                facts.append("framework: Nuxt")
-            elif "react" in deps and "next" not in deps:
-                facts.append("framework: React (no Next.js)")
-            elif "vue" in deps:
-                facts.append("framework: Vue")
-            elif "svelte" in deps or "@sveltejs/kit" in deps:
-                facts.append("framework: Svelte")
-            # Module type
-            if pkg.get("type") == "module":
-                facts.append("module system: ESM (package.json type=module)")
-        except (json.JSONDecodeError, OSError):
-            pass
-
-    if (project_dir / "pyproject.toml").exists():
-        facts.append("python project: has pyproject.toml")
-
-    # Test directory
-    for test_dir in ("__tests__", "tests", "test", "spec"):
-        if (project_dir / test_dir).is_dir():
-            facts.append(f"test directory: {test_dir}/")
-            break
-
-    # Test command
-    test_cmd = detect_test_command(project_dir)
-    if test_cmd:
-        facts.append(f"test command: {test_cmd}")
-
-    # TypeScript
-    if (project_dir / "tsconfig.json").exists():
-        facts.append("language: TypeScript")
-
-    # CSS framework
-    if pkg_json.exists():
-        try:
-            pkg = json.loads(pkg_json.read_text())
-            deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
-            if "tailwindcss" in deps:
-                facts.append("styling: Tailwind CSS")
-        except (json.JSONDecodeError, OSError):
-            pass
-
-    return facts
-
-
 def detect_default_branch(project_dir: Path) -> str:
     """Detect the default branch name. Fallback to 'main'."""
     try:
@@ -333,17 +255,8 @@ def create_config(project_dir: Path) -> Path:
     lines += f"# provider: claude              # claude or codex\n"
     lines += f"# model: null                   # override provider model\n"
     lines += f"#                               # if unset, Otto uses the provider's local/default model\n"
-    lines += "\n# Agent settings scope (project or user,project):\n"
-    lines += f"# coding_agent_settings: project     # project CLAUDE.md only (default)\n"
-    lines += f"# Set to 'user,project' to also load ~/.claude/CLAUDE.md\n"
-    lines += "\n# Build mode:\n"
-    lines += f"# Default: agentic v3 — one agent builds, dispatches certifier, fixes, re-certifies.\n"
-    lines += f"# The coding agent drives the entire build->certify->fix loop autonomously.\n"
-    lines += f"\n# Product certification:\n"
+    lines += "\n# Product certification:\n"
     lines += f"# certifier_timeout: 900         # max seconds for entire build+certify session\n"
-    lines += f"# certifier_browser: null        # null = auto-detect; true/false to force browser testing\n"
-    lines += f"# certifier_interaction: null    # override product type (http/cli/import/websocket)\n"
-    lines += f"#                                # null = agent decides (recommended)\n"
     config_path.write_text(lines + "\n")
 
     # Update .git/info/exclude for runtime files (use git_meta_dir for linked worktrees)

@@ -32,11 +32,6 @@ try:
 except (ImportError, AttributeError):
     _SDKThinkingBlock = None
 
-try:
-    from claude_agent_sdk.types import AgentDefinition  # noqa: F401
-except (ImportError, AttributeError):
-    AgentDefinition = None  # type: ignore[assignment,misc]
-
 from otto.testing import _subprocess_env  # noqa: F401
 
 
@@ -101,38 +96,6 @@ class AgentOptions:
 
 # Backward-compatible name used throughout the codebase and tests.
 ClaudeAgentOptions = AgentOptions
-
-
-def normalize_usage(usage: Any) -> dict[str, int]:
-    """Normalize provider usage payloads into integer token counters."""
-    if not isinstance(usage, dict):
-        return {}
-    normalized: dict[str, int] = {}
-    for key in (
-        "input_tokens",
-        "cached_input_tokens",
-        "output_tokens",
-        "reasoning_tokens",
-        "reasoning_output_tokens",
-        "total_tokens",
-    ):
-        value = usage.get(key)
-        if isinstance(value, int):
-            normalized[key] = value
-        elif isinstance(value, float):
-            normalized[key] = int(value)
-    return normalized
-
-
-def merge_usage(*usages: dict[str, int] | None) -> dict[str, int]:
-    """Sum usage dicts by key."""
-    merged: dict[str, int] = {}
-    for usage in usages:
-        if not usage:
-            continue
-        for key, value in usage.items():
-            merged[key] = merged.get(key, 0) + int(value)
-    return merged
 
 
 def _provider_name(options: AgentOptions | None) -> str:
