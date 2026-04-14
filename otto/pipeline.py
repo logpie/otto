@@ -673,6 +673,136 @@ def _append_intent(project_dir: Path, intent: str, build_id: str) -> None:
         intent_path.write_text(f"# Build Intents\n{entry}")
 
 
+async def build_split(
+    intent: str,
+    project_dir: Path,
+    config: dict[str, Any],
+    *,
+    max_rounds: int = 3,
+) -> BuildResult:
+    """Split build: system-controlled certify loop with build journal.
+
+    The Python orchestrator drives every step:
+      1. Build agent builds (no certifier knowledge)
+      2. System runs certifier independently
+      3. System writes journal (current-state.md, round evidence)
+      4. If fail: build agent fixes (reads journal for context)
+      5. Repeat until pass or max_rounds
+    """
+    from otto.certifier import run_agentic_certifier
+    from otto.journal import (
+        append_journal, init_round, record_build, record_certifier,
+        update_current_state,
+    )
+
+    build_id = f"build-{int(time.time())}-{os.getpid()}"
+    start_time = time.monotonic()
+    total_cost = 0.0
+
+    _append_intent(project_dir, intent, build_id)
+    _commit_artifacts(project_dir)
+
+    # --- Round 1: Initial build ---
+    round_id = init_round(project_dir, f"build: {intent[:60]}")
+
+    build_config = dict(config)
+    build_config["skip_product_qa"] = True
+
+    logger.info("Split build round 1: building")
+    result = await build_agentic_v3(intent, project_dir, build_config)
+    total_cost += result.total_cost
+    record_build(project_dir, round_id, result)
+
+    # --- Certify + fix loop ---
+    last_stories: list[dict[str, Any]] = []
+    passed = False
+
+    for round_num in range(1, max_rounds + 1):
+        # Certify (system-controlled)
+        logger.info("Split build round %d: certifying", round_num)
+        report = await run_agentic_certifier(
+            intent=intent,
+            project_dir=project_dir,
+            config=config,
+        )
+        total_cost += report.cost_usd
+        stories = getattr(report, "_story_results", [])
+        last_stories = stories
+
+        record_certifier(project_dir, round_id, report, stories)
+        update_current_state(project_dir, round_id, stories,
+                             f"certify round {round_num}")
+
+        failures = [s for s in stories if not s.get("passed")]
+        result_str = f"PASS {len(stories) - len(failures)}/{len(stories)}"
+        if failures:
+            result_str = f"FAIL {len(stories) - len(failures)}/{len(stories)}"
+        append_journal(project_dir, round_id, f"certify round {round_num}",
+                       result_str, report.cost_usd)
+
+        if not failures:
+            passed = True
+            logger.info("Split build: PASS on round %d", round_num)
+            break
+
+        if round_num >= max_rounds:
+            logger.info("Split build: max rounds (%d) reached", max_rounds)
+            break
+
+        # --- Fix round ---
+        round_id = init_round(project_dir, f"fix round {round_num}")
+
+        # Build fix intent from failures
+        fix_lines = [
+            "Fix these issues found by the certifier.\n",
+            "Read current-state.md for context on what was tried before.\n",
+        ]
+        for f in failures:
+            sid = f.get("story_id", "?")
+            summary = f.get("summary", "")
+            evidence = f.get("evidence", "")
+            fix_lines.append(f"### {sid}")
+            fix_lines.append(f"**Symptom:** {summary}")
+            if evidence:
+                fix_lines.append(f"**Evidence:**\n```\n{evidence[:500]}\n```")
+            fix_lines.append("")
+
+        fix_config = dict(config)
+        fix_config["skip_product_qa"] = True
+
+        logger.info("Split build round %d: fixing %d issues", round_num, len(failures))
+        fix_result = await build_agentic_v3(
+            "\n".join(fix_lines), project_dir, fix_config)
+        total_cost += fix_result.total_cost
+        record_build(project_dir, round_id, fix_result)
+        append_journal(project_dir, round_id, f"fix round {round_num}",
+                       "done" if fix_result.passed else "warning",
+                       fix_result.total_cost)
+
+    total_duration = round(time.monotonic() - start_time, 1)
+
+    # Final journal entry
+    append_journal(project_dir, round_id, "build complete",
+                   "PASS" if passed else "FAIL", total_cost)
+
+    journeys = [
+        {"name": s.get("summary", s.get("story_id", "")),
+         "passed": s.get("passed", False),
+         "story_id": s.get("story_id", "")}
+        for s in last_stories
+    ]
+
+    return BuildResult(
+        passed=passed,
+        build_id=build_id,
+        rounds=max_rounds,
+        total_cost=total_cost,
+        journeys=journeys,
+        tasks_passed=sum(1 for j in journeys if j.get("passed")),
+        tasks_failed=sum(1 for j in journeys if not j.get("passed")),
+    )
+
+
 def _commit_artifacts(project_dir: Path) -> None:
     """Commit otto artifacts (intent.md, etc.) so agents see them."""
     git_timeout = 30  # seconds — prevent hang on locked repo

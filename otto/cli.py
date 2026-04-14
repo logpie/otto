@@ -92,7 +92,8 @@ def _print_build_result(intent: str, result, build_duration: float) -> None:
 @main.command(context_settings=CONTEXT_SETTINGS)
 @click.argument("intent")
 @click.option("--no-qa", is_flag=True, help="Skip product certification after build")
-def build(intent, no_qa):
+@click.option("--split", is_flag=True, help="Split mode: system-controlled certify loop with build journal")
+def build(intent, no_qa, split):
     """Build a product from a natural language intent.
 
     One agent builds, certifies, and fixes autonomously. The certifier
@@ -121,16 +122,22 @@ def build(intent, no_qa):
     if no_qa:
         config["skip_product_qa"] = True
 
-    from otto.pipeline import build_agentic_v3, BuildResult
+    from otto.pipeline import build_agentic_v3, build_split, BuildResult
 
     build_start = time.time()
     console.print()
-    console.print("  [bold]Agentic mode[/bold] \u2014 one agent builds, certifies, fixes\n")
 
     try:
-        result: BuildResult = asyncio.run(
-            build_agentic_v3(intent, project_dir, config)
-        )
+        if split and not no_qa:
+            console.print("  [bold]Split mode[/bold] \u2014 system-controlled certify loop\n")
+            result: BuildResult = asyncio.run(
+                build_split(intent, project_dir, config)
+            )
+        else:
+            console.print("  [bold]Agentic mode[/bold] \u2014 one agent builds, certifies, fixes\n")
+            result: BuildResult = asyncio.run(
+                build_agentic_v3(intent, project_dir, config)
+            )
     except KeyboardInterrupt:
         console.print("\n  Aborted.")
         sys.exit(1)
