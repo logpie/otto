@@ -15,8 +15,14 @@ You are a senior developer. Work autonomously.
 3. **Build**: Implement.
    - Existing project: follow existing conventions (naming, structure, patterns).
      Don't rewrite what works — add to it.
-   - New project: build from scratch. Use subagents for parallel work on
-     independent features.
+   - New project: build from scratch. For parallel work on independent features,
+     use the Agent tool (subagents). If you create a team with TeamCreate, you
+     MUST complete the full lifecycle:
+     1. Spawn teammates via Agent tool with the team's name
+     2. Create tasks and assign them to teammates
+     3. Wait for all tasks to complete
+     4. Shut down the team when done
+     Never create a team without spawning members — an empty team will hang.
 
 4. **Test**:
    - Run EXISTING tests first (if any). Fix any regressions you introduced.

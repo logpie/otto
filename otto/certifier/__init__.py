@@ -10,6 +10,7 @@ Architecture:
 from __future__ import annotations
 
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -21,10 +22,10 @@ logger = logging.getLogger("otto.certifier")
 # Agentic certifier — single agent, subagent-driven
 # ---------------------------------------------------------------------------
 
-def _load_certifier_prompt() -> str:
-    """Load the certifier prompt from otto/prompts/certifier.md."""
+def _load_certifier_prompt(*, mode: str = "standard") -> str:
+    """Load the certifier prompt."""
     from otto.prompts import certifier_prompt
-    return certifier_prompt()
+    return certifier_prompt(mode=mode)
 
 
 async def run_agentic_certifier(
@@ -32,6 +33,9 @@ async def run_agentic_certifier(
     project_dir: Path,
     config: dict[str, Any] | None = None,
     *,
+    thorough: bool = False,
+    mode: str | None = None,
+    focus: str | None = None,
     port_override: int | None = None,
 ) -> "CertificationReport":
     """Agentic certifier: one monolithic agent does everything.
@@ -43,8 +47,7 @@ async def run_agentic_certifier(
     is available for subagent dispatch. Called directly from build_agentic()
     or from run_unified_certifier() when certifier_mode=v2.
     """
-    import re as _re
-    from otto.agent import ClaudeAgentOptions, _subprocess_env, run_agent_query
+    from otto.agent import ClaudeAgentOptions, _subprocess_env, make_live_logger, run_agent_query
     from otto.certifier.report import (
         CertificationOutcome,
         CertificationReport,
@@ -56,11 +59,24 @@ async def run_agentic_certifier(
     config = config or {}
     start_time = time.monotonic()
 
-    # Evidence directory for screenshots and video
-    evidence_dir = project_dir / "otto_logs" / "certifier" / "evidence"
+    # Each certifier run gets a unique directory to prevent overwrites.
+    # Also write to the "latest" dir for tools that expect a fixed path.
+    run_id = f"certify-{int(time.time())}-{os.getpid()}"
+    report_dir = project_dir / "otto_logs" / "certifier" / run_id
+    report_dir.mkdir(parents=True, exist_ok=True)
+    latest_dir = project_dir / "otto_logs" / "certifier" / "latest"
+
+    # Evidence stays inside the run-specific directory so concurrent runs do
+    # not clobber each other's screenshots or recordings.
+    evidence_dir = report_dir / "evidence"
     evidence_dir.mkdir(parents=True, exist_ok=True)
 
-    prompt = _load_certifier_prompt().format(intent=intent, evidence_dir=str(evidence_dir))
+    focus_section = f"## Improvement Focus\n{focus}" if focus else ""
+    # Resolve certifier mode: explicit mode > thorough flag > standard
+    _mode = mode or ("thorough" if thorough else "standard")
+    prompt = _load_certifier_prompt(mode=_mode).format(
+        intent=intent, evidence_dir=str(evidence_dir), focus_section=focus_section,
+    )
 
     options = ClaudeAgentOptions(
         permission_mode="bypassPermissions",
@@ -69,21 +85,33 @@ async def run_agentic_certifier(
         env=_subprocess_env(),
         system_prompt={"type": "preset", "preset": "claude_code"},
     )
-    model = config.get("model") or config.get("planner_model")
+    model = config.get("model")
     if model:
         options.model = str(model)
 
-    report_dir = project_dir / "otto_logs" / "certifier"
-    report_dir.mkdir(parents=True, exist_ok=True)
     logger.info("Running agentic certifier on %s", project_dir)
 
     # One LLM call — the agent does everything
+    import asyncio as _asyncio
     try:
-        text, cost, result_msg = await run_agent_query(prompt, options)
-    except KeyboardInterrupt:
-        raise
-    except Exception as exc:
-        logger.exception("Certifier agent crashed")
+        certifier_timeout = int(config.get("certifier_timeout", 900))
+    except (ValueError, TypeError):
+        logger.warning("Invalid certifier_timeout, using default 900s")
+        certifier_timeout = 900
+    if certifier_timeout <= 0:
+        logger.warning("certifier_timeout must be positive, using default 900s")
+        certifier_timeout = 900
+    live_log = report_dir / "live.log"
+    live_callbacks = make_live_logger(live_log)
+    _close_log = live_callbacks.pop("_close")
+    try:
+        text, cost, result_msg = await _asyncio.wait_for(
+            run_agent_query(prompt, options, **live_callbacks),
+            timeout=certifier_timeout,
+        )
+    except _asyncio.TimeoutError:
+        logger.error("Certifier timed out after %ds", certifier_timeout)
+        _close_log()
         return CertificationReport(
             product_type="unknown", interaction="unknown",
             tiers=[], findings=[],
@@ -91,6 +119,21 @@ async def run_agentic_certifier(
             cost_usd=0.0,
             duration_s=round(time.monotonic() - start_time, 1),
         )
+    except KeyboardInterrupt:
+        _close_log()
+        raise
+    except Exception as exc:
+        logger.exception("Certifier agent crashed")
+        _close_log()
+        return CertificationReport(
+            product_type="unknown", interaction="unknown",
+            tiers=[], findings=[],
+            outcome=CertificationOutcome.INFRA_ERROR,
+            cost_usd=0.0,
+            duration_s=round(time.monotonic() - start_time, 1),
+        )
+
+    _close_log()
 
     # Save full agent output for auditability (not truncated)
     try:
@@ -120,10 +163,12 @@ async def run_agentic_certifier(
         for line in text.split("\n"):
             stripped = line.strip()
             if stripped.startswith("STORY_EVIDENCE_START:"):
+                # Close any orphaned block before starting a new one
                 current_evidence_id = stripped.split(":", 1)[1].strip()
                 evidence_lines = []
-            elif stripped.startswith("STORY_EVIDENCE_END:") and current_evidence_id:
-                story_evidence[current_evidence_id] = "\n".join(evidence_lines)
+            elif stripped.startswith("STORY_EVIDENCE_END:"):
+                if current_evidence_id:
+                    story_evidence[current_evidence_id] = "\n".join(evidence_lines)
                 current_evidence_id = None
                 evidence_lines = []
             elif current_evidence_id is not None:
@@ -143,9 +188,11 @@ async def run_agentic_certifier(
                 except ValueError:
                     pass
             elif stripped.startswith("STORY_RESULT:"):
-                parts = stripped[len("STORY_RESULT:"):].strip().split("|")
+                parts = stripped[len("STORY_RESULT:"):].strip().split("|", 2)
                 if len(parts) >= 2:
                     sid = parts[0].strip()
+                    if not sid or sid in ("(id)", "<story_id>", "<id>", "id"):
+                        continue  # skip empty or template placeholder entries
                     passed = "PASS" in parts[1].upper()
                     summary = parts[2].strip() if len(parts) > 2 else ""
                     story_results.append({
@@ -165,33 +212,46 @@ async def run_agentic_certifier(
                             story_id=sid,
                         ))
 
+    # Deduplicate stories by story_id — subagents may report the same story
+    # multiple times. Keep the LAST result per story_id (final state).
+    if story_results:
+        seen: dict[str, dict[str, Any]] = {}
+        for s in story_results:
+            seen[s["story_id"]] = s
+        story_results = list(seen.values())
+        # Rebuild findings from deduplicated stories
+        findings = [f for f in findings if not any(
+            s["story_id"] == f.story_id and s["passed"] for s in story_results
+        )]
+
     # Determine outcome
     has_failures = any(not s["passed"] for s in story_results)
     verdict_pass = False
     overall_diagnosis = ""
     if text:
+        found_verdict = False
         for line in reversed(text.split("\n")):
             stripped = line.strip()
-            if stripped.startswith("VERDICT:"):
+            if stripped.startswith("VERDICT:") and not found_verdict:
                 verdict_pass = "PASS" in stripped.upper()
-            elif stripped.startswith("DIAGNOSIS:"):
+                found_verdict = True
+            elif stripped.startswith("DIAGNOSIS:") and not overall_diagnosis:
                 diag = stripped[len("DIAGNOSIS:"):].strip()
                 # Strip leading "null" (agent sometimes writes DIAGNOSIS: null<text>)
                 if diag.lower().startswith("null"):
                     diag = diag[4:].strip()
                 if diag:
                     overall_diagnosis = diag
-            if verdict_pass or overall_diagnosis:
-                # Keep scanning for both markers
-                if verdict_pass and overall_diagnosis:
-                    break
+            if found_verdict and overall_diagnosis:
+                break
 
-    if verdict_pass and not has_failures:
+    # Require at least one story — VERDICT: PASS with no stories is not a real pass
+    if verdict_pass and not has_failures and story_results:
         outcome = CertificationOutcome.PASSED
     elif has_failures:
         outcome = CertificationOutcome.FAILED
     else:
-        outcome = CertificationOutcome.FAILED  # no verdict marker = fail
+        outcome = CertificationOutcome.FAILED  # no verdict marker or no stories = fail
 
     # Build tier result for backward compat
     tier4 = TierResult(
@@ -216,7 +276,7 @@ async def run_agentic_certifier(
 
     # Write PoW report
     try:
-        import json as _json
+        from otto.observability import write_json_file as _write_json
         pow_data = {
             "generated": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "outcome": outcome.value,
@@ -224,8 +284,7 @@ async def run_agentic_certifier(
             "cost_usd": float(cost or 0),
             "stories": story_results,
         }
-        (report_dir / "proof-of-work.json").write_text(
-            _json.dumps(pow_data, indent=2, default=str))
+        _write_json(report_dir / "proof-of-work.json", pow_data)
 
         # HTML PoW
         _generate_agentic_html_pow(report_dir, story_results, outcome.value,
@@ -251,6 +310,17 @@ async def run_agentic_certifier(
         (report_dir / "proof-of-work.md").write_text("\n".join(md_lines))
     except Exception as exc:
         logger.warning("Failed to write PoW report: %s", exc)
+
+    # Update "latest" symlink to point to this run
+    try:
+        if latest_dir.is_symlink():
+            latest_dir.unlink()
+        elif latest_dir.exists():
+            import shutil
+            shutil.rmtree(latest_dir)
+        latest_dir.symlink_to(report_dir.name)
+    except Exception:
+        pass
 
     logger.info(
         "Agentic certifier done: %s, %d/%d stories, %.1fs, $%.3f",

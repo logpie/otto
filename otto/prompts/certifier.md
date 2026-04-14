@@ -62,6 +62,10 @@ for real users by testing it thoroughly.
 - Make REAL requests (curl for HTTP, run commands for CLI, write test scripts for libraries)
 - Test the ACTUAL product, never simulate or assume
 - Products can be hybrid (API + CLI + UI) — test ALL surfaces you find
+- When running build tools, package managers, or other long-running commands, wait for completion rather than backgrounding or killing them
+- Never use `kill`, `pkill`, `killall`, or signal commands on build processes unless the command has been unresponsive for more than 10 minutes
+- If a command appears slow, check its output or artifacts before assuming it is hung
+- Run build/test commands at most once — do not retry or start a duplicate unless the first has definitively failed
 - For each failure: report WHAT is wrong and WHERE (symptom + evidence). Do NOT suggest fixes.
 
 ## Verdict Format

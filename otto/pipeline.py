@@ -45,7 +45,7 @@ async def build_agentic_v3(
     The coding agent does everything — build, self-test, dispatch certifier,
     read findings, fix, re-certify. The orchestrator just launches and waits.
     """
-    from otto.agent import ClaudeAgentOptions, _subprocess_env, run_agent_query
+    from otto.agent import ClaudeAgentOptions, _subprocess_env, make_live_logger, run_agent_query
     from otto.observability import append_text_log
 
     build_id = f"build-{int(time.time())}-{os.getpid()}"
@@ -55,6 +55,15 @@ async def build_agentic_v3(
     # Append intent to cumulative log
     _append_intent(project_dir, intent, build_id)
     _commit_artifacts(project_dir)
+
+    # Record HEAD before build so the improvement report can show only new commits
+    try:
+        _head_before = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(project_dir), capture_output=True, text=True,
+        ).stdout.strip()
+    except Exception:
+        _head_before = ""
 
     options = ClaudeAgentOptions(
         permission_mode="bypassPermissions",
@@ -69,6 +78,12 @@ async def build_agentic_v3(
 
     prompt = _load_build_prompt() + f"\n\nBuild this product:\n\n{intent}"
 
+    # Skip certifier if requested (e.g., otto improve handles verification itself)
+    if config.get("skip_product_qa"):
+        prompt += ("\n\n## IMPORTANT: Skip Certification\n"
+                   "Do NOT dispatch a certifier agent. Just fix the code, run tests, "
+                   "commit, and report your results. Certification is handled externally.")
+
     # Check for previous failed build — inject findings so agent doesn't repeat mistakes
     prev_failure = _get_previous_failure(project_dir)
     if prev_failure:
@@ -80,18 +95,35 @@ async def build_agentic_v3(
     # One agent call — the agent drives everything.
     # capture_tool_output=True so subagent output (certifier results) is included
     # in the returned text for parsing.
-    timeout = int(config.get("certifier_timeout", 900))
     try:
-        text, cost, result_msg = await run_agent_query(
-            prompt, options, capture_tool_output=True)
+        timeout = int(config.get("certifier_timeout", 1800))
+    except (ValueError, TypeError):
+        logger.warning("Invalid certifier_timeout, using default 1800s")
+        timeout = 1800
+    if timeout <= 0:
+        logger.warning("certifier_timeout must be positive, using default 1800s")
+        timeout = 1800
+    result_msg = None
+    build_live_log = build_dir / "live.log"
+    build_callbacks = make_live_logger(build_live_log)
+    _close_build_log = build_callbacks.pop("_close")
+    try:
+        text, cost, result_msg = await asyncio.wait_for(
+            run_agent_query(prompt, options, capture_tool_output=True,
+                            **build_callbacks),
+            timeout=timeout,
+        )
     except asyncio.TimeoutError:
         logger.error("Build timed out after %ds", timeout)
         text, cost = f"BUILD TIMED OUT after {timeout}s", 0.0
     except KeyboardInterrupt:
+        _close_build_log()
         raise
     except Exception as exc:
         logger.exception("Build agent crashed")
         text, cost = f"BUILD ERROR: {exc}", 0.0
+    finally:
+        _close_build_log()
 
     total_duration = round(time.monotonic() - start_time, 1)
 
@@ -116,8 +148,13 @@ async def build_agentic_v3(
             # Git commits = what was built/fixed
             import subprocess as _sp
             try:
+                git_log_cmd = ["git", "log", "--oneline"]
+                if _head_before:
+                    git_log_cmd.append(f"{_head_before}..HEAD")
+                else:
+                    git_log_cmd.append("--max-count=20")
                 git_log = _sp.run(
-                    ["git", "log", "--oneline", "--no-walk", "--all"],
+                    git_log_cmd,
                     cwd=str(project_dir), capture_output=True, text=True,
                 ).stdout.strip()
                 if git_log:
@@ -186,11 +223,14 @@ async def build_agentic_v3(
         for line in text.split("\n"):
             stripped = line.strip()
             if stripped.startswith("STORY_EVIDENCE_START:"):
+                # Close any orphaned block before starting a new one
                 current_eid = stripped.split(":", 1)[1].strip()
                 ev_lines = []
-            elif stripped.startswith("STORY_EVIDENCE_END:") and current_eid:
-                story_evidence[current_eid] = "\n".join(ev_lines)
+            elif stripped.startswith("STORY_EVIDENCE_END:"):
+                if current_eid:
+                    story_evidence[current_eid] = "\n".join(ev_lines)
                 current_eid = None
+                ev_lines = []
             elif current_eid is not None:
                 ev_lines.append(line)
 
@@ -220,9 +260,11 @@ async def build_agentic_v3(
                 except ValueError:
                     pass
             elif stripped.startswith("STORY_RESULT:"):
-                parts = stripped[len("STORY_RESULT:"):].strip().split("|")
+                parts = stripped[len("STORY_RESULT:"):].strip().split("|", 2)
                 if len(parts) >= 2:
                     sid = parts[0].strip()
+                    if not sid or sid in ("(id)", "<story_id>", "<id>", "id"):
+                        continue  # skip empty or template placeholder entries
                     passed = "PASS" in parts[1].upper()
                     summary = parts[2].strip() if len(parts) > 2 else ""
                     current_round["stories"].append({
@@ -232,6 +274,10 @@ async def build_agentic_v3(
                         "evidence": story_evidence.get(sid, ""),
                     })
             elif stripped.startswith("VERDICT:"):
+                # Skip template placeholders like "VERDICT: PASS or FAIL"
+                verdict_text = stripped.split(":", 1)[1].strip()
+                if "or" in verdict_text.lower():
+                    continue
                 current_round["verdict"] = "PASS" in stripped.upper()
             elif stripped.startswith("DIAGNOSIS:"):
                 diag_text = stripped[len("DIAGNOSIS:"):].strip()
@@ -251,26 +297,41 @@ async def build_agentic_v3(
                 break
 
         if final_round:
-            story_results = final_round["stories"]
+            # Deduplicate stories by story_id — if the same story appears multiple
+            # times within a round (agent re-reporting after a fix without using
+            # CERTIFY_ROUND markers), keep only the LAST result per story_id.
+            seen: dict[str, dict[str, Any]] = {}
+            for s in final_round["stories"]:
+                seen[s["story_id"]] = s
+            story_results = list(seen.values())
             stories_tested = final_round.get("tested", len(story_results))
             stories_passed = final_round.get("passed_count", sum(1 for s in story_results if s["passed"]))
             verdict_pass = bool(final_round.get("verdict", False))
             overall_diagnosis = final_round.get("diagnosis", "")
         else:
             # Fallback: scan from end for verdict/diagnosis (no CERTIFY_ROUND markers)
+            found_verdict = False
             for line in reversed(text.split("\n")):
                 stripped = line.strip()
-                if stripped.startswith("VERDICT:") and not verdict_pass:
+                if stripped.startswith("VERDICT:") and not found_verdict:
+                    verdict_text = stripped.split(":", 1)[1].strip()
+                    if "or" in verdict_text.lower():
+                        continue  # skip template placeholder
                     verdict_pass = "PASS" in stripped.upper()
+                    found_verdict = True
                 elif stripped.startswith("DIAGNOSIS:") and not overall_diagnosis:
                     diag = stripped[len("DIAGNOSIS:"):].strip()
                     if diag.lower().startswith("null"):
                         diag = diag[4:].strip()
                     if diag:
                         overall_diagnosis = diag
-                if verdict_pass and overall_diagnosis:
+                if found_verdict and overall_diagnosis:
                     break
-            # Also extract STORY_RESULTs from flat output (no round markers)
+            # Also extract STORY_RESULTs from flat output (no round markers).
+            # Use a dict keyed by story_id so that if the agent output contains
+            # multiple implicit rounds (fix loop without CERTIFY_ROUND markers),
+            # we keep only the LAST result per story (the final state).
+            story_by_id: dict[str, dict[str, Any]] = {}
             for line in text.split("\n"):
                 stripped = line.strip()
                 if stripped.startswith("STORIES_TESTED:"):
@@ -284,17 +345,28 @@ async def build_agentic_v3(
                     except ValueError:
                         pass
                 elif stripped.startswith("STORY_RESULT:"):
-                    parts = stripped[len("STORY_RESULT:"):].strip().split("|")
+                    parts = stripped[len("STORY_RESULT:"):].strip().split("|", 2)
                     if len(parts) >= 2:
                         sid = parts[0].strip()
+                        if not sid or sid in ("(id)", "<story_id>", "<id>", "id"):
+                            continue  # skip empty or template placeholder entries
                         p = "PASS" in parts[1].upper()
                         summary = parts[2].strip() if len(parts) > 2 else ""
-                        story_results.append({
+                        story_by_id[sid] = {
                             "story_id": sid, "passed": p, "summary": summary,
                             "evidence": story_evidence.get(sid, ""),
-                        })
+                        }
+            story_results = list(story_by_id.values())
 
-    passed = verdict_pass and all(s["passed"] for s in story_results)
+    # When QA is skipped (--no-qa), the agent won't produce certification markers.
+    # Consider the build passed if the agent completed without error.
+    skip_qa = bool(config.get("skip_product_qa"))
+    if skip_qa:
+        # Agent completed (text is real output, not an error placeholder)
+        passed = bool(text) and not text.startswith("BUILD ")
+    else:
+        # Require at least one story — VERDICT: PASS with no stories is not a real pass
+        passed = verdict_pass and bool(story_results) and all(s["passed"] for s in story_results)
 
     journeys = [
         {"name": s.get("summary", s["story_id"]), "passed": s["passed"], "story_id": s["story_id"]}
@@ -317,13 +389,13 @@ async def build_agentic_v3(
             "round_history": [
                 {"round": r.get("round", i+1), "verdict": r.get("verdict"),
                  "stories_count": len(r.get("stories", [])),
-                 "passed_count": r.get("passed_count", 0)}
+                 "passed_count": r.get("passed_count", sum(1 for s in r.get("stories", []) if s.get("passed")))}
                 for i, r in enumerate(certify_rounds)
             ] if len(certify_rounds) > 1 else [],
             "mode": "agentic_v3",
         }
-        (report_dir / "proof-of-work.json").write_text(
-            json.dumps(pow_data, indent=2, default=str))
+        from otto.observability import write_json_file
+        write_json_file(report_dir / "proof-of-work.json", pow_data)
 
         # Build round_history for HTML from certify_rounds
         html_round_history = [
@@ -355,11 +427,24 @@ async def build_agentic_v3(
         "stories_passed": stories_passed,
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
-    (build_dir / "checkpoint.json").write_text(json.dumps(checkpoint, indent=2))
+    from otto.observability import write_json_file
+    write_json_file(build_dir / "checkpoint.json", checkpoint)
 
     logger.info("Agentic v3 done: %s, %d/%d stories, %.1fs, $%.2f",
                 "passed" if passed else "failed",
                 stories_passed, stories_tested, total_duration, float(cost or 0))
+
+    # Improvement report — human-readable summary for post-auditing.
+    try:
+        _write_improvement_report(
+            build_dir, build_id, intent, project_dir,
+            certify_rounds, story_results, passed,
+            stories_passed, stories_tested,
+            total_duration, float(cost or 0),
+            head_before=_head_before,
+        )
+    except Exception as exc:
+        logger.warning("Failed to write improvement report: %s", exc)
 
     # Append to run history (one line per build for `otto history`)
     from otto.observability import append_text_log
@@ -380,12 +465,130 @@ async def build_agentic_v3(
     return BuildResult(
         passed=passed,
         build_id=build_id,
-        rounds=1,
+        rounds=max(len(certify_rounds), 1),
         total_cost=float(cost or 0),
         journeys=journeys,
         tasks_passed=sum(1 for j in journeys if j["passed"]),
         tasks_failed=sum(1 for j in journeys if not j["passed"]),
     )
+
+
+def _write_improvement_report(
+    build_dir: Path,
+    build_id: str,
+    intent: str,
+    project_dir: Path,
+    certify_rounds: list[dict[str, Any]],
+    story_results: list[dict[str, Any]],
+    passed: bool,
+    stories_passed: int,
+    stories_tested: int,
+    duration: float,
+    cost: float,
+    head_before: str = "",
+) -> None:
+    """Write a human-readable improvement report for post-auditing.
+
+    Shows: what was found (bugs), what was changed (commits + diff stat),
+    and what was verified (certifier results). Designed for human review.
+    """
+    lines = [
+        f"# Improvement Report — {build_id}",
+        f"> {time.strftime('%Y-%m-%d %H:%M')} | "
+        f"{'PASSED' if passed else 'FAILED'} | "
+        f"${cost:.2f} | {duration / 60:.1f} min",
+        "",
+        f"**Intent:** {intent[:300]}",
+        "",
+    ]
+
+
+    # Filter out template placeholder rounds (from build prompt examples)
+    real_rounds = [
+        r for r in certify_rounds
+        if r.get("stories") and not all(
+            s.get("story_id") in ("(id)", "<story_id>", "<id>", "id", "")
+            for s in r.get("stories", [])
+        )
+    ]
+
+    # === Bugs Found ===
+    # Extract failures from all rounds — these are the bugs that were found.
+    # Failures in early rounds that become passes in later rounds = bugs fixed.
+    all_failures: list[dict[str, Any]] = []
+    for r in real_rounds:
+        for s in r.get("stories", []):
+            if not s.get("passed"):
+                all_failures.append(s)
+
+    if all_failures:
+        lines.append("## Bugs Found")
+        for f in all_failures:
+            sid = f.get("story_id", "?")
+            summary = f.get("summary", "")
+            lines.append(f"- **{sid}**: {summary}")
+        lines.append("")
+
+    # === Changes Made ===
+    # Git commits + diff stat — what code was actually changed
+    try:
+        git_range = f"{head_before}..HEAD" if head_before else "--max-count=20"
+        git_log = subprocess.run(
+            ["git", "log", "--oneline", git_range],
+            cwd=str(project_dir), capture_output=True, text=True,
+        ).stdout.strip()
+        git_stat = subprocess.run(
+            ["git", "diff", "--stat", git_range],
+            cwd=str(project_dir), capture_output=True, text=True,
+        ).stdout.strip() if head_before else ""
+        if git_log:
+            lines.append("## Changes Made")
+            for commit_line in git_log.split("\n"):
+                lines.append(f"- `{commit_line}`")
+            if git_stat:
+                # Just the summary line (e.g., "6 files changed, 122 insertions(+)")
+                stat_lines = git_stat.strip().split("\n")
+                if stat_lines:
+                    lines.append(f"- {stat_lines[-1].strip()}")
+            lines.append("")
+    except Exception:
+        pass
+
+    # === Verification ===
+    # Show certifier rounds — what was tested and whether fixes hold
+    if real_rounds:
+        lines.append(f"## Verification ({len(real_rounds)} round{'s' if len(real_rounds) != 1 else ''})")
+        for i, r in enumerate(real_rounds):
+            rn = r.get("round", i + 1)
+            v = r.get("verdict")
+            stories = r.get("stories", [])
+            pc = r.get("passed_count", sum(1 for s in stories if s.get("passed")))
+            tc = r.get("tested", len(stories))
+            verdict_str = "PASS" if v else "FAIL"
+            lines.append(f"### Round {rn} — {verdict_str} ({pc}/{tc})")
+            for s in stories:
+                icon = "\u2713" if s.get("passed") else "\u2717"
+                sid = s.get("story_id", "?")
+                summary = s.get("summary", "")
+                lines.append(f"- {icon} {sid}: {summary}")
+            diag = r.get("diagnosis", "")
+            if diag:
+                lines.append(f"- **Diagnosis:** {diag}")
+            lines.append("")
+
+
+    # === Summary ===
+    lines.append("## Summary")
+    lines.append(f"- **Result:** {'PASSED' if passed else 'FAILED'}")
+    lines.append(f"- **Bugs found:** {len(all_failures)}")
+    lines.append(f"- **Stories verified:** {stories_passed}/{stories_tested}")
+    lines.append(f"- **Certification rounds:** {len(real_rounds)}")
+    lines.append(f"- **Cost:** ${cost:.2f}")
+    lines.append(f"- **Duration:** {duration / 60:.1f} min")
+    lines.append("")
+
+    report_path = build_dir / "improvement-report.md"
+    report_path.write_text("\n".join(lines))
 
 
 def _get_previous_failure(project_dir: Path) -> str | None:
@@ -394,12 +597,23 @@ def _get_previous_failure(project_dir: Path) -> str | None:
     if not history_path.exists():
         return None
 
-    # Read last entry
+    # Read last non-empty line efficiently (seek from end instead of reading all)
     last_line = ""
     try:
-        for line in history_path.read_text().splitlines():
-            if line.strip():
-                last_line = line.strip()
+        with open(history_path, "rb") as f:
+            # Seek to end, then scan backward for the last newline
+            f.seek(0, 2)
+            size = f.tell()
+            if size == 0:
+                return None
+            # Read up to last 4KB — each JSONL entry is well under this
+            read_size = min(size, 4096)
+            f.seek(size - read_size)
+            chunk = f.read().decode("utf-8", errors="replace")
+            for line in reversed(chunk.splitlines()):
+                if line.strip():
+                    last_line = line.strip()
+                    break
     except OSError:
         return None
 
@@ -447,7 +661,13 @@ def _append_intent(project_dir: Path, intent: str, build_id: str) -> None:
     entry = f"\n## {ts} ({build_id})\n{intent}\n"
     if intent_path.exists():
         existing = intent_path.read_text()
-        if intent not in existing:
+        # Check per-section, not substring — prevents "build X" blocking "build X and Y"
+        existing_intents = set()
+        for section in existing.split("\n## "):
+            lines = section.strip().split("\n", 1)
+            if len(lines) > 1:
+                existing_intents.add(lines[1].strip())
+        if intent.strip() not in existing_intents:
             intent_path.write_text(existing.rstrip() + "\n" + entry)
     else:
         intent_path.write_text(f"# Build Intents\n{entry}")
@@ -455,24 +675,21 @@ def _append_intent(project_dir: Path, intent: str, build_id: str) -> None:
 
 def _commit_artifacts(project_dir: Path) -> None:
     """Commit otto artifacts (intent.md, etc.) so agents see them."""
+    git_timeout = 30  # seconds — prevent hang on locked repo
     try:
         subprocess.run(
             ["git", "add", "intent.md", "otto.yaml"],
-            cwd=project_dir, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "diff", "--cached", "--quiet"],
-            cwd=project_dir, capture_output=True,
+            cwd=project_dir, capture_output=True, timeout=git_timeout,
         )
         # Only commit if there are staged changes
         result = subprocess.run(
             ["git", "diff", "--cached", "--quiet"],
-            cwd=project_dir, capture_output=True,
+            cwd=project_dir, capture_output=True, timeout=git_timeout,
         )
         if result.returncode != 0:
             subprocess.run(
                 ["git", "commit", "-q", "-m", "otto: commit artifacts"],
-                cwd=project_dir, capture_output=True,
+                cwd=project_dir, capture_output=True, timeout=git_timeout,
             )
     except Exception:
         pass

@@ -81,7 +81,6 @@ class ResultMessage:
 
 
 @dataclass
-@dataclass
 class AgentOptions:
     permission_mode: str | None = None
     cwd: str | None = None
@@ -451,6 +450,55 @@ def tool_use_summary(block) -> str:
     return ""
 
 
+def make_live_logger(log_path: Path) -> dict[str, Callable]:
+    """Create callback functions that write agent activity to a live log file.
+
+    Returns a dict with on_text, on_tool, on_tool_result keys suitable for
+    passing to run_agent_query as **kwargs.
+
+    The log is append-mode and flushed after each write, so it can be
+    tailed in real time: tail -f otto_logs/certifier/live.log
+    """
+    import time as _time
+    _start = _time.monotonic()
+    _fh = open(log_path, "a")
+
+    def _elapsed() -> str:
+        secs = _time.monotonic() - _start
+        return f"[{secs:6.1f}s]"
+
+    def _on_tool(block: Any) -> None:
+        name = getattr(block, "name", "?")
+        summary = tool_use_summary(block)
+        _fh.write(f"{_elapsed()} \u25cf {name}  {summary}\n")
+        _fh.flush()
+
+    def _on_tool_result(block: Any) -> None:
+        content = str(getattr(block, "content", "") or "")
+        is_error = getattr(block, "is_error", False)
+        prefix = "\u2717 error" if is_error else "\u2190 result"
+        # Truncate to first meaningful line
+        first_line = content.split("\n")[0][:200] if content else "(empty)"
+        _fh.write(f"{_elapsed()} {prefix}: {first_line}\n")
+        _fh.flush()
+
+    def _on_text(text: str) -> None:
+        # Only log thinking blocks and short text (skip large agent output)
+        if text.startswith("[thinking]"):
+            _fh.write(f"{_elapsed()} \u2192 {text[:150]}\n")
+            _fh.flush()
+
+    def _close() -> None:
+        _fh.close()
+
+    return {
+        "on_tool": _on_tool,
+        "on_tool_result": _on_tool_result,
+        "on_text": _on_text,
+        "_close": _close,
+    }
+
+
 async def run_agent_query(
     prompt: str,
     options: ClaudeAgentOptions,
@@ -476,7 +524,7 @@ async def run_agent_query(
             result_msg = message
             raw_cost = getattr(message, "total_cost_usd", None)
             if isinstance(raw_cost, (int, float)):
-                cost = float(raw_cost)
+                cost += float(raw_cost)
             if on_result:
                 on_result(message)
         elif isinstance(message, AssistantMessage):

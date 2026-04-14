@@ -14,7 +14,7 @@ os.environ.pop("CLAUDECODE", None)
 import click
 
 from otto.config import create_config, load_config, require_git
-from otto.display import console, format_cost, rich_escape
+from otto.display import console, rich_escape
 from otto.theme import error_console
 
 
@@ -105,6 +105,10 @@ def build(intent, no_qa):
 
         otto build "CLI tool that converts CSV to JSON" --no-qa
     """
+    if not intent or not intent.strip():
+        error_console.print("[error]Intent cannot be empty. Provide a description of what to build.[/error]")
+        sys.exit(2)
+
     require_git()
     project_dir = Path.cwd()
     config_path = project_dir / "otto.yaml"
@@ -142,7 +146,8 @@ def build(intent, no_qa):
 
 @main.command(context_settings=CONTEXT_SETTINGS)
 @click.argument("intent", required=False)
-def certify(intent):
+@click.option("--thorough", is_flag=True, help="Thorough mode — find what's broken, not just verify")
+def certify(intent, thorough):
     """Certify a product — independent, builder-blind verification.
 
     Tests the product in the current directory as a real user. Works on
@@ -150,12 +155,19 @@ def certify(intent):
 
     If no intent is given, reads intent.md or README.md from the project.
 
+    Use --thorough for deeper inspection: code review, edge case probing,
+    and escalating difficulty for builder tools.
+
     Examples:
         otto certify "notes API with auth, CRUD, and search"
         otto certify                   # reads intent.md
-        cd my-project && otto certify  # reads README.md
+        otto certify --thorough        # thorough inspection
     """
     project_dir = Path.cwd()
+
+    # Load config so certifier_timeout and other settings are respected
+    config_path = project_dir / "otto.yaml"
+    config = load_config(config_path) if config_path.exists() else {}
 
     # Resolve intent: argument > intent.md > README.md
     if not intent:
@@ -175,7 +187,8 @@ def certify(intent):
         error_console.print("[error]Intent is empty[/error]")
         sys.exit(2)
 
-    console.print(f"\n  [bold]Certifying[/bold] \u2014 independent product verification\n")
+    mode_label = "thorough inspection" if thorough else "independent product verification"
+    console.print(f"\n  [bold]Certifying[/bold] \u2014 {mode_label}\n")
 
     from otto.certifier import run_agentic_certifier
 
@@ -184,6 +197,8 @@ def certify(intent):
         report = asyncio.run(run_agentic_certifier(
             intent=intent,
             project_dir=project_dir,
+            config=config,
+            thorough=thorough,
         ))
     except KeyboardInterrupt:
         console.print("\n  Aborted.")
@@ -212,7 +227,7 @@ def certify(intent):
     console.print(f"  Cost: ${report.cost_usd:.2f}  Duration: {duration:.0f}s")
 
     # PoW report location
-    pow_dir = project_dir / "otto_logs" / "certifier"
+    pow_dir = project_dir / "otto_logs" / "certifier" / "latest"
     if (pow_dir / "proof-of-work.html").exists():
         console.print(f"  Report: {pow_dir / 'proof-of-work.html'}")
 
@@ -228,6 +243,13 @@ register_setup_command(main)
 from otto.cli_logs import register_history_command
 register_history_command(main)
 
-# Bench subcommands (registered from otto/cli_bench.py)
-from otto.cli_bench import register_bench_commands
-register_bench_commands(main)
+# Fix and improve commands (registered from otto/cli_improve.py)
+from otto.cli_improve import register_improve_commands
+register_improve_commands(main)
+
+# Bench subcommands — hidden until otto.bench module is implemented
+try:
+    from otto.cli_bench import register_bench_commands
+    register_bench_commands(main)
+except ImportError:
+    pass

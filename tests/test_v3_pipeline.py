@@ -337,3 +337,74 @@ class TestV3EdgeCases:
         intent_md = (tmp_git_repo / "intent.md").read_text()
         assert "feature one" in intent_md
         assert "feature two" in intent_md
+
+
+class TestV3SkipQA:
+    """--no-qa (skip_product_qa) should pass when agent completes successfully."""
+
+    @pytest.mark.asyncio
+    async def test_skip_qa_passes_without_markers(self, tmp_git_repo):
+        """With skip_product_qa, build passes even without certification markers."""
+        with patch("otto.agent.run_agent_query",
+                    side_effect=_make_mock_query(AGENT_OUTPUT_NO_MARKERS)):
+            result = await build_agentic_v3(
+                "test lib", tmp_git_repo, {"skip_product_qa": True},
+            )
+
+        assert result.passed is True
+
+    @pytest.mark.asyncio
+    async def test_skip_qa_passes_with_real_output(self, tmp_git_repo):
+        """With skip_product_qa, agent output with markers still passes."""
+        with patch("otto.agent.run_agent_query",
+                    side_effect=_make_mock_query(AGENT_OUTPUT_PASS)):
+            result = await build_agentic_v3(
+                "test app", tmp_git_repo, {"skip_product_qa": True},
+            )
+
+        assert result.passed is True
+
+    @pytest.mark.asyncio
+    async def test_skip_qa_fails_on_timeout(self, tmp_git_repo):
+        """With skip_product_qa, build still fails if agent times out."""
+        with patch("otto.agent.run_agent_query",
+                    side_effect=_make_mock_query("BUILD TIMED OUT after 30s")):
+            result = await build_agentic_v3(
+                "test", tmp_git_repo, {"skip_product_qa": True},
+            )
+
+        assert result.passed is False
+
+    @pytest.mark.asyncio
+    async def test_skip_qa_fails_on_error(self, tmp_git_repo):
+        """With skip_product_qa, build still fails if agent errors."""
+        with patch("otto.agent.run_agent_query",
+                    side_effect=_make_mock_query("BUILD ERROR: something broke")):
+            result = await build_agentic_v3(
+                "test", tmp_git_repo, {"skip_product_qa": True},
+            )
+
+        assert result.passed is False
+
+
+class TestEmptyIntent:
+    """Empty intent should be rejected at CLI level."""
+
+    def test_empty_intent_rejected(self):
+        """otto build '' should exit with code 2."""
+        from click.testing import CliRunner
+        from otto.cli import main
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["build", ""])
+        assert result.exit_code == 2
+        assert "empty" in result.output.lower() or "Intent" in result.output
+
+    def test_whitespace_intent_rejected(self):
+        """otto build '   ' should exit with code 2."""
+        from click.testing import CliRunner
+        from otto.cli import main
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["build", "   "])
+        assert result.exit_code == 2
