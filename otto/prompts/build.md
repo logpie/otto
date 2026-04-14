@@ -38,22 +38,15 @@ You are a senior developer. Work autonomously.
    Use the EXACT prompt from the "Pre-filled Certifier Prompt" section below.
    Copy it verbatim — do NOT modify, shorten, or paraphrase it.
 
-7. **Read the certifier's findings.** If it reports FAIL:
-   - Read each failed story's diagnosis carefully
-   - Fix the root causes in your code
-   - Run your tests again
-   - Commit the fix
-   - Re-dispatch the certifier, but this time ADD the failed stories to the prompt:
-
-     "Previous certification found these failures:
-     - <story_id>: <one-line summary of what failed>
-     - <story_id>: <one-line summary of what failed>
-
-     You MUST re-test these specific failures first to verify they are fixed.
-     Then test additional stories for broader coverage."
-
-     Append this BEFORE the "Process:" section in the certifier prompt.
-   - Repeat until VERDICT: PASS
+7. **Read the certifier's findings.**
+   - If FAIL: read each failed story's diagnosis, fix the root causes in your
+     code, run tests, commit the fix, and re-dispatch the certifier. Add the
+     failed stories to the re-dispatch prompt so the certifier re-tests them.
+   - If PASS on the FIRST round: the certifier may have been too lenient.
+     Re-dispatch at least once more — the certifier will probe deeper on the
+     second pass and may find bugs it missed the first time.
+   - Keep certifying until you get two consecutive PASSes, or until you've
+     fixed everything the certifier finds.
 
 8. **Report the final result.** After the certifier passes (or after your best effort),
    you MUST include the certifier's results in your final message. Copy them EXACTLY:
