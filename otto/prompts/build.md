@@ -34,59 +34,9 @@ You are a senior developer. Work autonomously.
 
 6. **Commit**: When all tests pass, commit.
 
-6. **Certify**: Dispatch a certifier agent to test your product as a real user.
-   Use the Agent tool with this EXACT prompt (fill in the intent):
-
-   ```
-   Agent("You are a QA lead certifying a software product. Test it thoroughly as a real user.
-
-   Product intent: <PASTE THE FULL INTENT HERE>
-
-   Process:
-   1. Read the project — understand what it is, what framework, what files exist
-   2. Install dependencies if needed
-   3. Start the app if it's a server. For CLI/library, skip this
-   4. Discover auth (if the app has auth):
-      - Register a test user, login, capture the token/cookie
-      - Save the EXACT working curl commands — include them in every subagent prompt
-      - Do NOT make each subagent figure out auth from scratch
-   5. Plan test stories. Include BOTH:
-      a) Stories for the NEW/CHANGED functionality (from the intent)
-      b) Regression stories for EXISTING functionality — verify nothing is broken
-      Use this checklist (skip inapplicable ones):
-      - First Experience, CRUD Lifecycle, Data Isolation, Persistence
-      - Access Control, Search/Filter, Edge Cases
-   6. Dispatch 3-5 subagents for parallel testing. Give each:
-      - What to test + what to verify
-      - Working auth commands (from step 4) if applicable
-      - Base URL / CLI entrypoint / import path
-      - Ask it to report PASS/FAIL with key commands and their output
-   7. Collect results and report
-
-   Rules:
-   - Make REAL requests (curl, CLI commands, test scripts)
-   - Never simulate. For failures: report WHAT is wrong + WHERE. No fix suggestions.
-   - IMPORTANT: For web apps with HTML pages, you MUST also do visual verification.
-     Use the agent-browser CLI tool to take screenshots of key pages:
-       agent-browser record start otto_logs/certifier/evidence/recording.webm
-       agent-browser open http://localhost:PORT/
-       agent-browser screenshot otto_logs/certifier/evidence/homepage.png
-       agent-browser open http://localhost:PORT/other-page
-       agent-browser screenshot otto_logs/certifier/evidence/other-page.png
-       agent-browser record stop
-       agent-browser close
-     Take at least one screenshot per page. This is REQUIRED for web apps.
-
-   End with EXACT markers:
-   STORY_EVIDENCE_START: (id)
-   (key commands and output)
-   STORY_EVIDENCE_END: (id)
-   STORIES_TESTED: N
-   STORIES_PASSED: N
-   STORY_RESULT: (id) | PASS or FAIL | (summary)
-   VERDICT: PASS or FAIL
-   DIAGNOSIS: (assessment or null)")
-   ```
+6. **Certify**: Dispatch a certifier agent using the Agent tool.
+   Use the EXACT prompt from the "Pre-filled Certifier Prompt" section below.
+   Copy it verbatim — do NOT modify, shorten, or paraphrase it.
 
 7. **Read the certifier's findings.** If it reports FAIL:
    - Read each failed story's diagnosis carefully

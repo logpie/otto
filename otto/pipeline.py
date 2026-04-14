@@ -83,6 +83,16 @@ async def build_agentic_v3(
         prompt += ("\n\n## IMPORTANT: Skip Certification\n"
                    "Do NOT dispatch a certifier agent. Just fix the code, run tests, "
                    "commit, and report your results. Certification is handled externally.")
+    else:
+        # Pre-fill the certifier prompt so the agent can dispatch it directly.
+        # This avoids the agent needing to read files or fill placeholders.
+        from otto.prompts import certifier_prompt
+        evidence_dir = str(project_dir / "otto_logs" / "certifier" / "evidence")
+        filled_certifier = certifier_prompt(mode="thorough").format(
+            intent=intent, evidence_dir=evidence_dir, focus_section="")
+        prompt += (f"\n\n## Pre-filled Certifier Prompt\n"
+                   f"When you dispatch the certifier agent, use this EXACT prompt:\n"
+                   f"```\n{filled_certifier}\n```")
 
     # Check for previous failed build — inject findings so agent doesn't repeat mistakes
     prev_failure = _get_previous_failure(project_dir)
@@ -724,6 +734,7 @@ async def build_split(
             intent=intent,
             project_dir=project_dir,
             config=config,
+            mode="thorough",
         )
         total_cost += report.cost_usd
         stories = getattr(report, "_story_results", [])
