@@ -84,6 +84,8 @@ def _run_improve_loop(
     certifier_mode: "thorough" (for fix) or "hillclimb" (for improve)
     command_label: display label ("Fixing" or "Improving")
     """
+    rounds = max(1, rounds)
+
     # Create improvement branch
     branch = _create_improve_branch(project_dir)
     console.print(f"\n  [bold]{command_label}[/bold] — branch: [info]{branch}[/info]")

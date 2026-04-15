@@ -91,8 +91,10 @@ async def build_agentic_v3(
         # This avoids the agent needing to read files or fill placeholders.
         from otto.prompts import certifier_prompt
         evidence_dir = str(project_dir / "otto_logs" / "certifier" / "evidence")
+        # Sanitize intent to prevent prompt injection via closing tags
+        safe_intent = intent.replace("</certifier_prompt>", "")
         filled_certifier = certifier_prompt(mode="thorough").format(
-            intent=intent, evidence_dir=evidence_dir, focus_section="")
+            intent=safe_intent, evidence_dir=evidence_dir, focus_section="")
         prompt += (f"\n\n## Pre-filled Certifier Prompt\n"
                    f"When you dispatch the certifier agent, use this EXACT prompt:\n"
                    f"<certifier_prompt>\n{filled_certifier}\n</certifier_prompt>")
