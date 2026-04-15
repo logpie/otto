@@ -9,8 +9,6 @@ import yaml
 
 DEFAULT_CONFIG: dict[str, Any] = {
     # Core
-    "default_branch": "main",
-    "test_command": None,           # auto-detected if not set
     "provider": "claude",           # coding agent provider (claude or codex)
     "model": None,                  # override provider model (e.g. sonnet, gpt-5)
 
@@ -38,7 +36,7 @@ def normalize_provider(
 
 
 def agent_provider(config: dict[str, Any]) -> str:
-    """Return the effective provider for coding/spec/QA agents."""
+    """Return the effective provider for coding agents."""
     return normalize_provider(
         config.get("provider"),
         default=DEFAULT_CONFIG["provider"],

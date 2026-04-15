@@ -63,7 +63,9 @@ class TestLoadConfig:
         config_path = tmp_git_repo / "otto.yaml"
         config_path.write_text("")
         cfg = load_config(config_path)
-        assert cfg == DEFAULT_CONFIG
+        # Auto-detect adds test_command (None for bare repo); rest matches defaults
+        expected = {**DEFAULT_CONFIG, "test_command": None}
+        assert cfg == expected
 
     def test_normalizes_provider_fields(self, tmp_git_repo):
         config_path = tmp_git_repo / "otto.yaml"

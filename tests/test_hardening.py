@@ -11,7 +11,7 @@ import pytest
 from otto.agent import AgentOptions
 from otto.config import create_config, load_config
 from otto.pipeline import build_agentic_v3, BuildResult
-from otto.testing import _subprocess_env, _install_deps
+from otto.testing import _subprocess_env
 
 
 # -- Fixtures --
@@ -226,24 +226,6 @@ class TestAgentOptions:
         assert opts.cwd == "/tmp"
 
 
-# -- Test: node_modules symlink uses project_dir --
-
-class TestInstallDepsNodeSymlink:
-    """_install_deps should use project_dir for node_modules symlink."""
-
-    def test_no_symlink_without_project_dir(self, tmp_path):
-        """Without project_dir, falls back to parent.parent (legacy behavior)."""
-        worktree = tmp_path / "worktree"
-        worktree.mkdir()
-        (worktree / "package.json").write_text('{"name": "test"}')
-
-        # No project_dir, no parent node_modules — should try npm install (will fail silently)
-        _install_deps(worktree, timeout=30)
-
-        # node_modules won't exist since npm install won't find anything meaningful
-        # but the important thing is it didn't crash
-
-
 # -- Test: Empty story_id is rejected --
 
 class TestEmptyStoryId:
@@ -350,15 +332,6 @@ class TestGitMetaDirEdgeCases:
         from otto.config import git_meta_dir
         (tmp_path / ".git").mkdir()
         assert git_meta_dir(tmp_path) == tmp_path / ".git"
-
-    def test_returns_tuple(self):
-        """Basic test: returns (stdout, stderr) tuple."""
-        from otto.testing import _terminate_process_group
-        proc = MagicMock()
-        proc.poll.return_value = 0  # already dead
-        proc.communicate.return_value = ("out", "err")
-        result = _terminate_process_group(proc)
-        assert result == ("out", "err")
 
     def test_certify_passes_config(self, tmp_git_repo):
         """Config should be loaded and passed to run_agentic_certifier."""

@@ -56,25 +56,6 @@ def _print_build_result(intent: str, result, build_duration: float) -> None:
             status_icon = "[success]\u2713[/success]" if j.get("passed") else "[red]\u2717[/red]"
             console.print(f"    {status_icon} {rich_escape(j.get('name', ''))}")
 
-    if result.break_findings:
-        console.print()
-        high_count = sum(1 for b in result.break_findings if b.get("severity") in ("critical", "important"))
-        warn_count = len(result.break_findings) - high_count
-        if high_count:
-            console.print(f"  [red bold]\u26a0 {high_count} quality issue(s) found (will trigger fix)[/red bold]")
-        if warn_count:
-            console.print(f"  [yellow]\u26a0 {warn_count} quality warning(s)[/yellow]")
-        for b in result.break_findings:
-            sev = b.get("severity", "?")
-            desc = rich_escape(b.get("description", "")[:100])
-            if sev in ("critical", "important"):
-                console.print(f"    [red]\u2717 [{sev}] {desc}[/red]")
-            else:
-                console.print(f"    [yellow]! [{sev}] {desc}[/yellow]")
-            fix = b.get("fix_suggestion", "")
-            if fix:
-                console.print(f"      fix: {rich_escape(fix[:120])}")
-
     console.print()
     console.print(f"  [bold]Build Summary[/bold]  ({result.build_id})")
     console.print(f"  Intent: {rich_escape(intent[:80])}")

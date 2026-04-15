@@ -12,14 +12,9 @@ from typing import Any
 
 
 class CertificationOutcome(Enum):
-    """Top-level certification result.
-
-    BLOCKED does not generate fix tasks — it's not a product bug,
-    it's a classification or infrastructure issue.
-    """
+    """Top-level certification result."""
     PASSED = "passed"
     FAILED = "failed"
-    BLOCKED = "blocked"
     INFRA_ERROR = "infra_error"
 
 
@@ -27,8 +22,6 @@ class TierStatus(Enum):
     """Status of a single tier's execution."""
     PASSED = "passed"
     FAILED = "failed"
-    BLOCKED = "blocked"   # prerequisite tier failed
-    SKIPPED = "skipped"   # not applicable for this product type
 
 
 @dataclass
@@ -52,8 +45,6 @@ class TierResult:
     name: str                      # "structural", "probes", "regression", "journeys"
     status: TierStatus
     findings: list[Finding] = field(default_factory=list)
-    blocked_by: str | None = None  # e.g. "tier_1:app_start"
-    skip_reason: str | None = None
     duration_s: float = 0.0
     cost_usd: float = 0.0
 
@@ -76,7 +67,3 @@ class CertificationReport:
     @property
     def passed(self) -> bool:
         return self.outcome == CertificationOutcome.PASSED
-
-    def break_findings(self) -> list[Finding]:
-        """All break findings (edge-case category), any severity."""
-        return [f for f in self.findings if f.category == "edge-case"]

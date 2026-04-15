@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from otto.config import DEFAULT_CONFIG
+
 logger = logging.getLogger("otto.pipeline")
 
 
@@ -23,7 +25,6 @@ class BuildResult:
     rounds: int = 1
     total_cost: float = 0.0
     journeys: list[dict[str, Any]] = field(default_factory=list)
-    break_findings: list[dict[str, Any]] = field(default_factory=list)
     error: str = ""
     tasks_passed: int = 0
     tasks_failed: int = 0
@@ -107,20 +108,20 @@ async def build_agentic_v3(
     # One agent call — the agent drives everything.
     # capture_tool_output=True so subagent output (certifier results) is included
     # in the returned text for parsing.
+    _default_timeout = DEFAULT_CONFIG.get("certifier_timeout", 900)
     try:
-        timeout = int(config.get("certifier_timeout", 1800))
+        timeout = int(config.get("certifier_timeout", _default_timeout))
     except (ValueError, TypeError):
-        logger.warning("Invalid certifier_timeout, using default 1800s")
-        timeout = 1800
+        logger.warning("Invalid certifier_timeout, using default %ds", _default_timeout)
+        timeout = _default_timeout
     if timeout <= 0:
-        logger.warning("certifier_timeout must be positive, using default 1800s")
-        timeout = 1800
-    result_msg = None
+        logger.warning("certifier_timeout must be positive, using default %ds", _default_timeout)
+        timeout = _default_timeout
     build_live_log = build_dir / "live.log"
     build_callbacks = make_live_logger(build_live_log)
     _close_build_log = build_callbacks.pop("_close")
     try:
-        text, cost, result_msg = await asyncio.wait_for(
+        text, cost, _ = await asyncio.wait_for(
             run_agent_query(prompt, options, capture_tool_output=True,
                             **build_callbacks),
             timeout=timeout,

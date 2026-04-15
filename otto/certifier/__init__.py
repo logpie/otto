@@ -43,8 +43,7 @@ async def run_agentic_certifier(
     plans test stories, dispatches subagents for parallel testing, and reports.
 
     MUST run in the caller's process (not a subprocess) so the Agent tool
-    is available for subagent dispatch. Called directly from build_agentic()
-    or from run_unified_certifier() when certifier_mode=v2.
+    is available for subagent dispatch.
     """
     from otto.agent import ClaudeAgentOptions, _subprocess_env, make_live_logger, run_agent_query
     from otto.certifier.report import (
