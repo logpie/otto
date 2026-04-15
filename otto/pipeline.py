@@ -721,7 +721,7 @@ async def build_split(
     project_dir: Path,
     config: dict[str, Any],
     *,
-    max_rounds: int = 3,
+    max_rounds: int | None = None,
 ) -> BuildResult:
     """Split build: system-controlled certify loop with build journal.
 
@@ -741,6 +741,9 @@ async def build_split(
     build_id = f"build-{int(time.time())}-{os.getpid()}"
     start_time = time.monotonic()
     total_cost = 0.0
+    if max_rounds is None:
+        max_rounds = int(config.get("max_certify_rounds", 3))
+    actual_rounds = 0
 
     _append_intent(project_dir, intent, build_id)
     _commit_artifacts(project_dir)
@@ -761,6 +764,7 @@ async def build_split(
     passed = False
 
     for round_num in range(1, max_rounds + 1):
+        actual_rounds = round_num
         # Certify (system-controlled)
         logger.info("Split build round %d: certifying", round_num)
         report = await run_agentic_certifier(
@@ -776,6 +780,14 @@ async def build_split(
         record_certifier(project_dir, round_id, report, stories)
         update_current_state(project_dir, round_id, stories,
                              f"certify round {round_num}")
+
+        # Check for infra error (certifier crashed/timed out)
+        from otto.certifier.report import CertificationOutcome
+        if getattr(report, "outcome", None) == CertificationOutcome.INFRA_ERROR:
+            logger.warning("Split build: certifier infra error on round %d", round_num)
+            append_journal(project_dir, round_id, f"certify round {round_num}",
+                           "INFRA_ERROR", report.cost_usd)
+            break
 
         failures = [s for s in stories if not s.get("passed")]
         result_str = f"PASS {len(stories) - len(failures)}/{len(stories)}"
@@ -839,7 +851,7 @@ async def build_split(
     return BuildResult(
         passed=passed,
         build_id=build_id,
-        rounds=max_rounds,
+        rounds=actual_rounds,
         total_cost=total_cost,
         journeys=journeys,
         tasks_passed=sum(1 for j in journeys if j.get("passed")),
