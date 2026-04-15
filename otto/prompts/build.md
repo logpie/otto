@@ -47,6 +47,8 @@ You are a senior developer. Work autonomously.
      second pass and may find bugs it missed the first time.
    - Keep certifying until you get two consecutive PASSes, or until you've
      fixed everything the certifier finds.
+   - Stop after {max_certify_rounds} certification rounds maximum — if issues
+     remain, report what's still failing and move on.
 
 8. **Report the final result.** After the certifier passes (or after your best effort),
    you MUST include the certifier's results in your final message. Copy them EXACTLY:

@@ -256,7 +256,8 @@ def create_config(project_dir: Path) -> Path:
     lines += f"# model: null                   # override provider model\n"
     lines += f"#                               # if unset, Otto uses the provider's local/default model\n"
     lines += "\n# Product certification:\n"
-    lines += f"# certifier_timeout: 900         # max seconds for entire build+certify session\n"
+    lines += f"# certifier_timeout: 1800        # max seconds for entire build+certify session\n"
+    lines += f"# max_certify_rounds: 8          # max certification rounds (agent stops after this many)\n"
     config_path.write_text(lines + "\n")
 
     # Update .git/info/exclude for runtime files (use git_meta_dir for linked worktrees)

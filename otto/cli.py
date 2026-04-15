@@ -93,7 +93,8 @@ def _print_build_result(intent: str, result, build_duration: float) -> None:
 @click.argument("intent")
 @click.option("--no-qa", is_flag=True, help="Skip product certification after build")
 @click.option("--split", is_flag=True, help="Split mode: system-controlled certify loop with build journal")
-def build(intent, no_qa, split):
+@click.option("--rounds", default=None, type=int, help="Max certification rounds (default: 8)")
+def build(intent, no_qa, split, rounds):
     """Build a product from a natural language intent.
 
     One agent builds, certifies, and fixes autonomously. The certifier
@@ -121,6 +122,8 @@ def build(intent, no_qa, split):
 
     if no_qa:
         config["skip_product_qa"] = True
+    if rounds is not None:
+        config["max_certify_rounds"] = rounds
 
     from otto.pipeline import build_agentic_v3, build_split, BuildResult
 

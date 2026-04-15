@@ -76,7 +76,9 @@ async def build_agentic_v3(
     if model:
         options.model = str(model)
 
-    prompt = _load_build_prompt() + f"\n\nBuild this product:\n\n{intent}"
+    max_certify_rounds = int(config.get("max_certify_rounds", 8))
+    raw_prompt = _load_build_prompt().replace("{max_certify_rounds}", str(max_certify_rounds))
+    prompt = raw_prompt + f"\n\nBuild this product:\n\n{intent}"
 
     # Skip certifier if requested (e.g., otto improve handles verification itself)
     if config.get("skip_product_qa"):
@@ -126,12 +128,15 @@ async def build_agentic_v3(
     except asyncio.TimeoutError:
         logger.error("Build timed out after %ds", timeout)
         text, cost = f"BUILD TIMED OUT after {timeout}s", 0.0
+        _cleanup_orphan_processes(project_dir)
     except KeyboardInterrupt:
         _close_build_log()
+        _cleanup_orphan_processes(project_dir)
         raise
     except Exception as exc:
         logger.exception("Build agent crashed")
         text, cost = f"BUILD ERROR: {exc}", 0.0
+        _cleanup_orphan_processes(project_dir)
     finally:
         _close_build_log()
 
@@ -599,6 +604,33 @@ def _write_improvement_report(
 
     report_path = build_dir / "improvement-report.md"
     report_path.write_text("\n".join(lines))
+
+
+def _cleanup_orphan_processes(project_dir: Path) -> None:
+    """Kill orphan processes (servers, watchers) left by the agent after timeout/crash."""
+    try:
+        # Find processes with cwd in the project directory
+        import signal
+        result = subprocess.run(
+            ["lsof", "-ti", "-sTCP:LISTEN"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.stdout.strip():
+            for pid_str in result.stdout.strip().split("\n"):
+                try:
+                    pid = int(pid_str.strip())
+                    # Check if process cwd matches project
+                    cwd_check = subprocess.run(
+                        ["lsof", "-p", str(pid), "-Fn"],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    if str(project_dir) in cwd_check.stdout:
+                        os.kill(pid, signal.SIGTERM)
+                        logger.info("Killed orphan process %d", pid)
+                except (ValueError, ProcessLookupError, PermissionError):
+                    pass
+    except Exception:
+        pass  # best-effort cleanup
 
 
 def _get_previous_failure(project_dir: Path) -> str | None:
