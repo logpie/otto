@@ -148,6 +148,19 @@ def _run_improve_loop(
             )
             break
 
+        # Empty stories = certifier produced no results (parsing failed, agent
+        # produced no markers). Treat as failed — don't mark passed.
+        if not stories:
+            console.print(
+                f"    [yellow]Warning: certifier returned no stories "
+                f"(${certify_cost:.2f}); stopping[/yellow]"
+            )
+            round_reports.append(
+                f"## Round {round_num}\n"
+                f"Certifier: no stories returned (possible parsing failure). ${certify_cost:.2f}\n"
+            )
+            break
+
         if not failures:
             console.print(f"    [success]No issues found[/success] (${certify_cost:.2f})")
             round_reports.append(

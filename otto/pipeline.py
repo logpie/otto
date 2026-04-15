@@ -77,7 +77,7 @@ async def build_agentic_v3(
     if model:
         options.model = str(model)
 
-    max_certify_rounds = int(config.get("max_certify_rounds", 8))
+    max_certify_rounds = max(1, int(config.get("max_certify_rounds", 8)))
     raw_prompt = _load_build_prompt().replace("{max_certify_rounds}", str(max_certify_rounds))
     prompt = raw_prompt + f"\n\nBuild this product:\n\n{intent}"
 
@@ -95,7 +95,7 @@ async def build_agentic_v3(
             intent=intent, evidence_dir=evidence_dir, focus_section="")
         prompt += (f"\n\n## Pre-filled Certifier Prompt\n"
                    f"When you dispatch the certifier agent, use this EXACT prompt:\n"
-                   f"```\n{filled_certifier}\n```")
+                   f"<certifier_prompt>\n{filled_certifier}\n</certifier_prompt>")
 
     # Check for previous failed build — inject findings so agent doesn't repeat mistakes
     prev_failure = _get_previous_failure(project_dir)
@@ -742,7 +742,8 @@ async def build_split(
     start_time = time.monotonic()
     total_cost = 0.0
     if max_rounds is None:
-        max_rounds = int(config.get("max_certify_rounds", 3))
+        max_rounds = int(config.get("max_certify_rounds", 8))
+    max_rounds = max(1, max_rounds)
     actual_rounds = 0
 
     _append_intent(project_dir, intent, build_id)
@@ -778,8 +779,6 @@ async def build_split(
         last_stories = stories
 
         record_certifier(project_dir, round_id, report, stories)
-        update_current_state(project_dir, round_id, stories,
-                             f"certify round {round_num}")
 
         # Check for infra error (certifier crashed/timed out)
         from otto.certifier.report import CertificationOutcome
@@ -788,6 +787,19 @@ async def build_split(
             append_journal(project_dir, round_id, f"certify round {round_num}",
                            "INFRA_ERROR", report.cost_usd)
             break
+
+        # Empty stories = certifier produced no results (parsing failed, agent
+        # produced no markers). Treat as failed — don't mark passed.
+        if not stories:
+            logger.warning("Split build round %d: certifier returned no stories", round_num)
+            append_journal(project_dir, round_id, f"certify round {round_num}",
+                           "FAIL (no stories)", report.cost_usd)
+            break
+
+        # Update current state AFTER infra/empty checks — avoids writing
+        # "all passing" when the certifier actually failed or produced no stories.
+        update_current_state(project_dir, round_id, stories,
+                             f"certify round {round_num}")
 
         failures = [s for s in stories if not s.get("passed")]
         result_str = f"PASS {len(stories) - len(failures)}/{len(stories)}"

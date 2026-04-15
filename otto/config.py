@@ -14,6 +14,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
     # Product certification
     "certifier_timeout": 900,       # max seconds for entire build+certify session
+    "max_certify_rounds": 8,        # max certification rounds in build loop
 }
 
 SUPPORTED_PROVIDERS = {"claude", "codex"}

@@ -89,6 +89,9 @@ async def run_agentic_certifier(
 
     logger.info("Running agentic certifier on %s", project_dir)
 
+    # Lazy import for orphan cleanup on timeout/crash
+    from otto.pipeline import _cleanup_orphan_processes
+
     # One LLM call — the agent does everything
     import asyncio as _asyncio
     try:
@@ -110,6 +113,7 @@ async def run_agentic_certifier(
     except _asyncio.TimeoutError:
         logger.error("Certifier timed out after %ds", certifier_timeout)
         _close_log()
+        _cleanup_orphan_processes(project_dir)
         return CertificationReport(
             product_type="unknown", interaction="unknown",
             tiers=[], findings=[],
@@ -119,10 +123,12 @@ async def run_agentic_certifier(
         )
     except KeyboardInterrupt:
         _close_log()
+        _cleanup_orphan_processes(project_dir)
         raise
     except Exception as exc:
         logger.exception("Certifier agent crashed")
         _close_log()
+        _cleanup_orphan_processes(project_dir)
         return CertificationReport(
             product_type="unknown", interaction="unknown",
             tiers=[], findings=[],
@@ -231,6 +237,10 @@ async def run_agentic_certifier(
         for line in reversed(text.split("\n")):
             stripped = line.strip()
             if stripped.startswith("VERDICT:") and not found_verdict:
+                # Skip template placeholders like "VERDICT: PASS or VERDICT: FAIL"
+                verdict_text = stripped.split(":", 1)[1].strip()
+                if "or" in verdict_text.lower():
+                    continue
                 verdict_pass = "PASS" in stripped.upper()
                 found_verdict = True
             elif stripped.startswith("DIAGNOSIS:") and not overall_diagnosis:

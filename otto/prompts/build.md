@@ -34,11 +34,11 @@ You are a senior developer. Work autonomously.
 
 6. **Commit**: When all tests pass, commit.
 
-6. **Certify**: Dispatch a certifier agent using the Agent tool.
+7. **Certify**: Dispatch a certifier agent using the Agent tool.
    Use the EXACT prompt from the "Pre-filled Certifier Prompt" section below.
    Copy it verbatim — do NOT modify, shorten, or paraphrase it.
 
-7. **Read the certifier's findings.**
+8. **Read the certifier's findings.**
    - If FAIL: read each failed story's diagnosis, fix the root causes in your
      code, run tests, commit the fix, and re-dispatch the certifier. Add the
      failed stories to the re-dispatch prompt so the certifier re-tests them.
@@ -50,7 +50,7 @@ You are a senior developer. Work autonomously.
    - Stop after {max_certify_rounds} certification rounds maximum — if issues
      remain, report what's still failing and move on.
 
-8. **Report the final result.** After the certifier passes (or after your best effort),
+9. **Report the final result.** After the certifier passes (or after your best effort),
    you MUST include the certifier's results in your final message. Copy them EXACTLY:
 
    CERTIFY_ROUND: <round number — 1 for first attempt, 2 for after first fix, etc.>
