@@ -36,6 +36,7 @@ async def run_agentic_certifier(
     thorough: bool = False,
     mode: str | None = None,
     focus: str | None = None,
+    target: str | None = None,
 ) -> "CertificationReport":
     """Agentic certifier: one monolithic agent does everything.
 
@@ -69,9 +70,14 @@ async def run_agentic_certifier(
     focus_section = f"## Improvement Focus\n{focus}" if focus else ""
     # Resolve certifier mode: explicit mode > thorough flag > standard
     _mode = mode or ("thorough" if thorough else "standard")
-    prompt = _load_certifier_prompt(mode=_mode).format(
-        intent=intent, evidence_dir=str(evidence_dir), focus_section=focus_section,
-    )
+    format_kwargs: dict[str, str] = {
+        "intent": intent,
+        "evidence_dir": str(evidence_dir),
+        "focus_section": focus_section,
+    }
+    if target:
+        format_kwargs["target"] = target
+    prompt = _load_certifier_prompt(mode=_mode).format(**format_kwargs)
 
     options = make_agent_options(project_dir, config)
 
@@ -155,6 +161,9 @@ async def run_agentic_certifier(
     )
     # Stash story results for upstream extraction (CLI display)
     report._story_results = story_results  # type: ignore[attr-defined]
+    report._metric_value = parsed.metric_value  # type: ignore[attr-defined]
+    report._metric_target = parsed.metric_target  # type: ignore[attr-defined]
+    report._metric_met = parsed.metric_met  # type: ignore[attr-defined]
 
     # Write PoW report
     try:

@@ -24,16 +24,18 @@ def code_prompt() -> str:
 
 
 def certifier_prompt(*, mode: str = "standard") -> str:
-    """The certifier prompt (with {intent} and {evidence_dir} placeholders).
+    """The certifier prompt (with {intent}, {evidence_dir}, etc. placeholders).
 
     Modes:
       standard  — verify product works (quick, default)
-      thorough  — find what's broken (adversarial, for otto improve)
-      hillclimb — suggest product improvements (for otto improve --mode quality)
+      thorough  — find what's broken (adversarial, otto improve bugs)
+      hillclimb — suggest product improvements (otto improve feature)
+      target    — measure metric against threshold (otto improve target)
     """
     prompts = {
         "standard": "certifier.md",
         "thorough": "certifier-thorough.md",
         "hillclimb": "certifier-hillclimb.md",
+        "target": "certifier-target.md",
     }
     return _load(prompts.get(mode, "certifier.md"))

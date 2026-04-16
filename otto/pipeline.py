@@ -563,6 +563,7 @@ async def run_certify_fix_loop(
     *,
     certifier_mode: str = "thorough",
     focus: str | None = None,
+    target: str | None = None,
     skip_initial_build: bool = False,
 ) -> BuildResult:
     """System-driven certify-fix loop.
@@ -573,7 +574,10 @@ async def run_certify_fix_loop(
       3. If issues found, build agent fixes
       4. Repeat until pass or max rounds
 
-    Used by: ``build --split``, ``fix``, ``improve``.
+    For target mode (certifier_mode="target"), loop termination is based on
+    METRIC_MET instead of story pass/fail.
+
+    Used by: ``otto improve bugs``, ``otto improve feature``, ``otto improve target``.
     """
     from otto.certifier import run_agentic_certifier
     from otto.certifier.report import CertificationOutcome
@@ -624,6 +628,7 @@ async def run_certify_fix_loop(
             config=config,
             mode=certifier_mode,
             focus=focus,
+            target=target,
         )
         total_cost += report.cost_usd
         stories = getattr(report, "_story_results", [])
@@ -653,10 +658,24 @@ async def run_certify_fix_loop(
         result_str = (f"FAIL {len(stories) - len(failures)}/{len(stories)}"
                       if failures else
                       f"PASS {len(stories) - len(failures)}/{len(stories)}")
+
+        # Target mode: check metric instead of story pass/fail
+        metric_met = getattr(report, "_metric_met", None)
+        metric_value = getattr(report, "_metric_value", "")
+        if certifier_mode == "target" and metric_met is not None:
+            result_str = f"{'MET' if metric_met else 'NOT MET'} ({metric_value})"
+
         append_journal(project_dir, round_id, f"certify round {round_num}",
                        result_str, report.cost_usd)
 
-        if not failures:
+        # Determine if we should stop
+        if certifier_mode == "target":
+            if metric_met:
+                passed = True
+                logger.info("Certify-fix loop: target met on round %d (%s)",
+                            round_num, metric_value)
+                break
+        elif not failures:
             passed = True
             logger.info("Certify-fix loop: PASS on round %d", round_num)
             break

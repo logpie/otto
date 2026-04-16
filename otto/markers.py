@@ -24,6 +24,10 @@ class ParsedMarkers:
     verdict_pass: bool = False
     diagnosis: str = ""
     certify_rounds: list[dict[str, Any]] = field(default_factory=list)
+    # Target mode metrics
+    metric_value: str = ""
+    metric_target: str = ""
+    metric_met: bool | None = None  # None = not a target run
 
 
 def _parse_diagnosis(raw: str) -> str:
@@ -170,6 +174,13 @@ def parse_certifier_markers(text: str) -> ParsedMarkers:
             diag = _parse_diagnosis(stripped[len("DIAGNOSIS:"):])
             current_round["diagnosis"] = diag
 
+        elif stripped.startswith("METRIC_VALUE:"):
+            current_round["metric_value"] = stripped.split(":", 1)[1].strip()
+        elif stripped.startswith("METRIC_TARGET:"):
+            current_round["metric_target"] = stripped.split(":", 1)[1].strip()
+        elif stripped.startswith("METRIC_MET:"):
+            current_round["metric_met"] = stripped.split(":", 1)[1].strip().upper() == "YES"
+
     # Save last round
     if current_round["stories"] or current_round["verdict"] is not None:
         certify_rounds.append(current_round)
@@ -181,6 +192,14 @@ def parse_certifier_markers(text: str) -> ParsedMarkers:
     for r in reversed(certify_rounds):
         if r["stories"]:
             final_round = r
+            break
+
+    # Extract metric fields from the last round that has them
+    for r in reversed(certify_rounds):
+        if r.get("metric_value"):
+            result.metric_value = r["metric_value"]
+            result.metric_target = r.get("metric_target", "")
+            result.metric_met = r.get("metric_met")
             break
 
     if final_round:

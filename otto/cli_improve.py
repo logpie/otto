@@ -1,4 +1,4 @@
-"""Otto CLI — fix and improve commands."""
+"""Otto CLI — improve command group (bugs, feature, target)."""
 
 import asyncio
 import subprocess
@@ -39,7 +39,6 @@ def _create_improve_branch(project_dir: Path) -> str:
         cwd=project_dir, capture_output=True, text=True,
     )
     if result.returncode != 0:
-        # Branch already exists — switch to it
         subprocess.run(
             ["git", "checkout", branch],
             cwd=project_dir, capture_output=True, text=True,
@@ -59,13 +58,15 @@ def _create_improve_branch(project_dir: Path) -> str:
     return branch
 
 
-def _run_fix_or_improve(
+def _run_improve(
     project_dir: Path,
     intent: str,
     rounds: int,
     focus: str | None,
     certifier_mode: str,
     command_label: str,
+    *,
+    target: str | None = None,
 ) -> None:
     """CLI wrapper: branch creation, display, and report around the shared loop."""
     from otto.config import load_config
@@ -76,6 +77,8 @@ def _run_fix_or_improve(
     console.print(f"\n  [bold]{command_label}[/bold] — branch: [info]{branch}[/info]")
     if focus:
         console.print(f"  Focus: {rich_escape(focus)}")
+    if target:
+        console.print(f"  Target: {rich_escape(target)}")
     console.print(f"  Rounds: up to {rounds}")
     console.print()
 
@@ -83,7 +86,7 @@ def _run_fix_or_improve(
     config = load_config(config_path) if config_path.exists() else {}
     config["max_certify_rounds"] = max(1, rounds)
 
-    # Use longer timeout for thorough/hillclimb certifier
+    # Use longer timeout for improve modes
     config["certifier_timeout"] = max(
         int(config.get("certifier_timeout", 900)), 3600
     )
@@ -96,6 +99,7 @@ def _run_fix_or_improve(
             config=config,
             certifier_mode=certifier_mode,
             focus=focus,
+            target=target,
             skip_initial_build=True,  # code already exists
         ))
     except KeyboardInterrupt:
@@ -119,6 +123,9 @@ def _run_fix_or_improve(
     ]
     if focus:
         report_lines.append(f"**Focus:** {focus}")
+        report_lines.append("")
+    if target:
+        report_lines.append(f"**Target:** {target}")
         report_lines.append("")
 
     if result.journeys:
@@ -160,71 +167,116 @@ def _run_fix_or_improve(
     console.print()
 
 
-def register_improve_commands(main: click.Group) -> None:
-    """Register fix and improve commands on the main CLI group."""
+def _require_intent(project_dir: Path) -> str:
+    """Resolve intent or exit with error."""
+    intent = _resolve_intent(project_dir)
+    if not intent:
+        error_console.print(
+            "[error]No product description found. Create intent.md[/error]"
+        )
+        sys.exit(2)
+    return intent
 
-    @main.command(context_settings=CONTEXT_SETTINGS)
+
+def register_improve_commands(main: click.Group) -> None:
+    """Register the improve command group on the main CLI group."""
+
+    @main.group(context_settings=CONTEXT_SETTINGS, invoke_without_command=True)
+    @click.pass_context
+    def improve(ctx):
+        """Improve the current project — find bugs, add features, or hit targets.
+
+        Requires a subcommand:
+
+        \b
+            otto improve bugs                  # find and fix bugs
+            otto improve feature "search UX"   # add/improve features
+            otto improve target "latency < 100ms"  # hit a metric target
+        """
+        if ctx.invoked_subcommand is None:
+            error_console.print(
+                "[error]Specify a mode: bugs, feature, target[/error]\n"
+            )
+            click.echo(ctx.get_help())
+            ctx.exit(2)
+
+    @improve.command(context_settings=CONTEXT_SETTINGS)
     @click.argument("focus", required=False)
     @click.option("--rounds", "-n", default=3, help="Maximum rounds (default: 3)")
-    def fix(focus, rounds):
-        """Find and fix bugs in the current project.
+    def bugs(focus, rounds):
+        """Find and fix bugs, edge cases, and error handling gaps.
 
-        Runs a thorough certifier to find edge cases, crashes, and error
-        handling gaps, then fixes them automatically.
+        Runs an adversarial certifier that tries to break the product,
+        then fixes what it finds. Creates an improvement branch.
 
-        Creates an improvement branch for isolation.
-
+        \b
         Examples:
-            otto fix                       # find and fix all bugs
-            otto fix "error handling"      # focus on error handling
-            otto fix --rounds 5            # 5 rounds
+            otto improve bugs                  # find and fix all bugs
+            otto improve bugs "error handling" # focus on error handling
+            otto improve bugs -n 5             # 5 rounds
         """
         project_dir = Path.cwd()
-        intent = _resolve_intent(project_dir)
-        if not intent:
-            error_console.print(
-                "[error]No product description found. Create intent.md[/error]"
-            )
-            sys.exit(2)
-
-        _run_fix_or_improve(
+        intent = _require_intent(project_dir)
+        _run_improve(
             project_dir=project_dir,
             intent=intent,
             rounds=rounds,
             focus=focus,
             certifier_mode="thorough",
-            command_label="Fixing",
+            command_label="Bug fixing",
         )
 
-    @main.command(context_settings=CONTEXT_SETTINGS)
+    @improve.command(context_settings=CONTEXT_SETTINGS)
     @click.argument("focus", required=False)
     @click.option("--rounds", "-n", default=3, help="Maximum rounds (default: 3)")
-    def improve(focus, rounds):
+    def feature(focus, rounds):
         """Suggest and implement product improvements.
 
-        Runs a product advisor to find missing features, UX gaps, and
-        design improvements, then implements them automatically.
+        Evaluates the product as a real user would, identifies missing
+        features and UX gaps, then implements them. Creates an improvement branch.
 
-        Creates an improvement branch for isolation.
-
+        \b
         Examples:
-            otto improve                   # suggest and implement improvements
-            otto improve "search UX"       # focus on search experience
-            otto improve --rounds 5        # 5 rounds
+            otto improve feature               # suggest and implement improvements
+            otto improve feature "search UX"   # focus on search experience
+            otto improve feature -n 5          # 5 rounds
         """
         project_dir = Path.cwd()
-        intent = _resolve_intent(project_dir)
-        if not intent:
-            error_console.print(
-                "[error]No product description found. Create intent.md[/error]"
-            )
-            sys.exit(2)
-
-        _run_fix_or_improve(
+        intent = _require_intent(project_dir)
+        _run_improve(
             project_dir=project_dir,
             intent=intent,
             rounds=rounds,
             focus=focus,
             certifier_mode="hillclimb",
-            command_label="Improving",
+            command_label="Feature improvement",
+        )
+
+    @improve.command(context_settings=CONTEXT_SETTINGS)
+    @click.argument("goal")
+    @click.option("--rounds", "-n", default=5, help="Maximum rounds (default: 5)")
+    def target(goal, rounds):
+        """Optimize toward a measurable target.
+
+        Measures a metric, compares to the target, and iterates until met.
+        The certifier measures the current value each round and the build
+        agent optimizes toward it. Creates an improvement branch.
+
+        \b
+        Examples:
+            otto improve target "latency < 100ms"
+            otto improve target "bundle size < 500kb"
+            otto improve target "test coverage > 90%"
+            otto improve target "lighthouse score > 95" -n 10
+        """
+        project_dir = Path.cwd()
+        intent = _require_intent(project_dir)
+        _run_improve(
+            project_dir=project_dir,
+            intent=intent,
+            rounds=rounds,
+            focus=None,
+            certifier_mode="target",
+            command_label=f"Target: {goal}",
+            target=goal,
         )
