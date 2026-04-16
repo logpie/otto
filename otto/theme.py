@@ -8,13 +8,9 @@ from rich.console import Console
 from rich.theme import Theme
 
 OTTO_THEME = Theme({
-    # Semantic styles
     "success": "green",
     "error": "red",
-    "warning": "yellow",
     "info": "cyan",
-    "active": "bold cyan",
-    "secondary": "dim",
 })
 
 # The one console instance — thread-safe, themed, no auto-highlighting

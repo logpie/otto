@@ -8,29 +8,17 @@ from pathlib import Path
 
 import click
 
-from otto.certifier.report import CertificationOutcome
-from otto.display import console, rich_escape
+from otto.display import CONTEXT_SETTINGS, console, rich_escape
 from otto.theme import error_console
-
-
-CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 
 
 def _resolve_intent(project_dir: Path) -> str | None:
     """Resolve product description from intent.md or README.md."""
-    intent_path = project_dir / "intent.md"
-    readme_path = project_dir / "README.md"
-    if intent_path.exists():
-        intent = intent_path.read_text().strip()
-        if intent:
-            console.print(f"  [dim]Intent from intent.md[/dim]")
-            return intent
-    if readme_path.exists():
-        intent = readme_path.read_text().strip()[:2000]
-        if intent:
-            console.print(f"  [dim]Intent from README.md[/dim]")
-            return intent
-    return None
+    from otto.config import resolve_intent
+    intent = resolve_intent(project_dir)
+    if intent:
+        console.print(f"  [dim]Intent from project files[/dim]")
+    return intent
 
 
 def _create_improve_branch(project_dir: Path) -> str:
@@ -71,7 +59,7 @@ def _create_improve_branch(project_dir: Path) -> str:
     return branch
 
 
-def _run_improve_loop(
+def _run_fix_or_improve(
     project_dir: Path,
     intent: str,
     rounds: int,
@@ -79,12 +67,9 @@ def _run_improve_loop(
     certifier_mode: str,
     command_label: str,
 ) -> None:
-    """Shared loop for fix and improve commands.
-
-    certifier_mode: "thorough" (for fix) or "hillclimb" (for improve)
-    command_label: display label ("Fixing" or "Improving")
-    """
-    rounds = max(1, rounds)
+    """CLI wrapper: branch creation, display, and report around the shared loop."""
+    from otto.config import load_config
+    from otto.pipeline import run_certify_fix_loop
 
     # Create improvement branch
     branch = _create_improve_branch(project_dir)
@@ -94,159 +79,40 @@ def _run_improve_loop(
     console.print(f"  Rounds: up to {rounds}")
     console.print()
 
-    from otto.certifier import run_agentic_certifier
-    from otto.config import load_config
-    from otto.pipeline import build_agentic_v3
-
     config_path = project_dir / "otto.yaml"
     config = load_config(config_path) if config_path.exists() else {}
+    config["max_certify_rounds"] = max(1, rounds)
 
     # Use longer timeout for thorough/hillclimb certifier
-    certify_config = dict(config)
-    certify_config["certifier_timeout"] = max(
-        int(certify_config.get("certifier_timeout", 900)), 3600
+    config["certifier_timeout"] = max(
+        int(config.get("certifier_timeout", 900)), 3600
     )
 
-    mode_label = "quality review" if certifier_mode == "hillclimb" else "thorough"
-    total_start = time.time()
-    total_cost = 0.0
-    total_issues = 0
-    round_reports: list[str] = []
+    start = time.time()
+    try:
+        result = asyncio.run(run_certify_fix_loop(
+            intent=intent,
+            project_dir=project_dir,
+            config=config,
+            certifier_mode=certifier_mode,
+            focus=focus,
+            skip_initial_build=True,  # code already exists
+        ))
+    except KeyboardInterrupt:
+        console.print("\n  Aborted.")
+        sys.exit(1)
+    except Exception as e:
+        error_console.print(f"[error]{command_label} failed: {rich_escape(str(e))}[/error]")
+        sys.exit(1)
 
-    for round_num in range(1, rounds + 1):
-        console.print(f"  [bold]Round {round_num}/{rounds}[/bold]")
+    duration = time.time() - start
 
-        # --- Certify ---
-        console.print(f"    Certifying ({mode_label})...")
-        try:
-            report = asyncio.run(run_agentic_certifier(
-                intent=intent,
-                project_dir=project_dir,
-                config=certify_config,
-                mode=certifier_mode,
-                focus=focus,
-            ))
-        except KeyboardInterrupt:
-            console.print("\n  Aborted.")
-            sys.exit(1)
-        except Exception as e:
-            error_console.print(f"[error]Certifier failed: {rich_escape(str(e))}[/error]")
-            break
-
-        certify_cost = getattr(report, "cost_usd", 0.0)
-        total_cost += certify_cost
-        stories = getattr(report, "_story_results", [])
-        failures = [s for s in stories if not s.get("passed")]
-        total_issues += len(failures)
-
-        if getattr(report, "outcome", None) == CertificationOutcome.INFRA_ERROR:
-            console.print(
-                f"    [yellow]Warning: certifier infrastructure error "
-                f"(${certify_cost:.2f}); stopping[/yellow]"
-            )
-            round_reports.append(
-                f"## Round {round_num}\n"
-                f"Certifier: infrastructure error. ${certify_cost:.2f}\n"
-            )
-            break
-
-        # Empty stories = certifier produced no results (parsing failed, agent
-        # produced no markers). Treat as failed — don't mark passed.
-        if not stories:
-            console.print(
-                f"    [yellow]Warning: certifier returned no stories "
-                f"(${certify_cost:.2f}); stopping[/yellow]"
-            )
-            round_reports.append(
-                f"## Round {round_num}\n"
-                f"Certifier: no stories returned (possible parsing failure). ${certify_cost:.2f}\n"
-            )
-            break
-
-        if not failures:
-            console.print(f"    [success]No issues found[/success] (${certify_cost:.2f})")
-            round_reports.append(
-                f"## Round {round_num}\n"
-                f"Certifier: no issues found. ${certify_cost:.2f}\n"
-            )
-            break
-
-        console.print(f"    Found {len(failures)} issue(s) (${certify_cost:.2f})")
-        for f in failures:
-            console.print(f"      [red]\u2717[/red] {rich_escape(f.get('summary', '')[:80])}")
-
-        # --- Build (fix) ---
-        console.print(f"    Fixing...")
-
-        fix_lines = [f"Fix these issues found by certification:\n"]
-        for f in failures:
-            sid = f.get("story_id", "?")
-            summary = f.get("summary", "")
-            evidence = f.get("evidence", "")
-            fix_lines.append(f"### {sid}")
-            fix_lines.append(f"**Symptom:** {summary}")
-            if evidence:
-                fix_lines.append(f"**Evidence:**\n```\n{evidence[:500]}\n```")
-            fix_lines.append("")
-        fix_lines.append(
-            "Diagnose the root causes in the code and fix them. "
-            "Do NOT fix by changing prompts unless the fix is generic."
-        )
-        fix_intent = "\n".join(fix_lines)
-
-        fix_config = dict(config)
-        fix_config["skip_product_qa"] = True
-
-        try:
-            build_result = asyncio.run(build_agentic_v3(
-                intent=fix_intent,
-                project_dir=project_dir,
-                config=fix_config,
-            ))
-        except KeyboardInterrupt:
-            console.print("\n  Aborted.")
-            sys.exit(1)
-        except Exception as e:
-            error_console.print(f"[error]Build failed: {rich_escape(str(e))}[/error]")
-            break
-
-        build_cost = getattr(build_result, "total_cost", 0.0)
-        total_cost += build_cost
-        if build_result.passed:
-            console.print(f"    Fixed ({len(failures)} issues, ${build_cost:.2f})")
-        else:
-            console.print(
-                f"    [yellow]Warning: fix phase did not complete cleanly "
-                f"(${build_cost:.2f})[/yellow]"
-            )
-
-        # Round report
-        round_report_lines = [
-            f"## Round {round_num}",
-            f"Certifier: {len(failures)} issues found. ${certify_cost:.2f}",
-        ]
-        for f in failures:
-            round_report_lines.append(f"- **{f.get('story_id', '?')}**: {f.get('summary', '')}")
-        if build_result.passed:
-            round_report_lines.append(
-                f"\nBuild: {build_result.tasks_passed} verified. ${build_cost:.2f}"
-            )
-        else:
-            round_report_lines.append(
-                f"\nBuild: warning - fix phase did not complete cleanly. ${build_cost:.2f}"
-            )
-        round_report_lines.append("")
-        round_reports.append("\n".join(round_report_lines))
-
-        console.print()
-
-    # --- Aggregate report ---
-    total_duration = time.time() - total_start
+    # --- Write report ---
     report_lines = [
         f"# {command_label} Report",
         f"> {time.strftime('%Y-%m-%d %H:%M')} | "
-        f"{rounds} rounds | ${total_cost:.2f} | {total_duration / 60:.1f} min",
-        f"",
+        f"{result.rounds} rounds | ${result.total_cost:.2f} | {duration / 60:.1f} min",
+        "",
         f"**Branch:** {branch}",
         f"**Intent:** {intent[:200]}",
         "",
@@ -255,14 +121,19 @@ def _run_improve_loop(
         report_lines.append(f"**Focus:** {focus}")
         report_lines.append("")
 
-    for rr in round_reports:
-        report_lines.append(rr)
+    if result.journeys:
+        report_lines.append("## Results")
+        for j in result.journeys:
+            icon = "\u2713" if j.get("passed") else "\u2717"
+            report_lines.append(f"- {icon} {j.get('name', '')}")
+        report_lines.append("")
 
     report_lines.append("## Summary")
-    report_lines.append(f"- Issues found: {total_issues}")
-    report_lines.append(f"- Rounds: {len(round_reports)}/{rounds}")
-    report_lines.append(f"- Cost: ${total_cost:.2f}")
-    report_lines.append(f"- Duration: {total_duration / 60:.1f} min")
+    report_lines.append(f"- **Result:** {'PASSED' if result.passed else 'FAILED'}")
+    report_lines.append(f"- **Stories:** {result.tasks_passed}/{result.tasks_passed + result.tasks_failed}")
+    report_lines.append(f"- **Rounds:** {result.rounds}")
+    report_lines.append(f"- **Cost:** ${result.total_cost:.2f}")
+    report_lines.append(f"- **Duration:** {duration / 60:.1f} min")
     report_lines.append("")
     report_lines.append(f"Review: `git diff main...{branch}`")
     report_lines.append(f"Merge: `git merge {branch}`")
@@ -275,10 +146,13 @@ def _run_improve_loop(
     # --- Summary ---
     console.print()
     console.print(f"  [bold]{command_label} complete[/bold]")
-    console.print(f"  Issues found: {total_issues}")
-    console.print(f"  Rounds: {len(round_reports)}/{rounds}")
-    console.print(f"  Cost: ${total_cost:.2f}")
-    console.print(f"  Duration: {total_duration / 60:.1f} min")
+    if result.journeys:
+        for j in result.journeys:
+            icon = "[success]\u2713[/success]" if j.get("passed") else "[red]\u2717[/red]"
+            console.print(f"    {icon} {rich_escape(j.get('name', ''))}")
+    console.print(f"  Rounds: {result.rounds}")
+    console.print(f"  Cost: ${result.total_cost:.2f}")
+    console.print(f"  Duration: {duration / 60:.1f} min")
     console.print(f"  Report: {report_path}")
     console.print()
     console.print(f"  Review: [info]git diff main...{branch}[/info]")
@@ -313,7 +187,7 @@ def register_improve_commands(main: click.Group) -> None:
             )
             sys.exit(2)
 
-        _run_improve_loop(
+        _run_fix_or_improve(
             project_dir=project_dir,
             intent=intent,
             rounds=rounds,
@@ -346,7 +220,7 @@ def register_improve_commands(main: click.Group) -> None:
             )
             sys.exit(2)
 
-        _run_improve_loop(
+        _run_fix_or_improve(
             project_dir=project_dir,
             intent=intent,
             rounds=rounds,

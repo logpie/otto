@@ -46,6 +46,53 @@ def agent_provider(config: dict[str, Any]) -> str:
 
 
 
+def get_timeout(config: dict[str, Any], key: str = "certifier_timeout") -> int:
+    """Read a timeout value from config with validation and default fallback."""
+    import logging
+    _logger = logging.getLogger("otto.config")
+    default = int(DEFAULT_CONFIG.get(key, 900))
+    try:
+        value = int(config.get(key, default))
+    except (ValueError, TypeError):
+        _logger.warning("Invalid %s, using default %ds", key, default)
+        return default
+    if value <= 0:
+        _logger.warning("%s must be positive, using default %ds", key, default)
+        return default
+    return value
+
+
+def get_max_rounds(config: dict[str, Any]) -> int:
+    """Read max_certify_rounds from config with validation."""
+    import logging
+    _logger = logging.getLogger("otto.config")
+    default = int(DEFAULT_CONFIG.get("max_certify_rounds", 8))
+    try:
+        value = int(config.get("max_certify_rounds", default))
+    except (ValueError, TypeError):
+        _logger.warning("Invalid max_certify_rounds, using default %d", default)
+        return default
+    return max(1, value)
+
+
+def resolve_intent(project_dir: Path) -> str | None:
+    """Resolve product description from intent.md or README.md.
+
+    Returns the intent string, or None if no intent file found or content empty.
+    """
+    intent_path = project_dir / "intent.md"
+    readme_path = project_dir / "README.md"
+    if intent_path.exists():
+        intent = intent_path.read_text().strip()
+        if intent:
+            return intent
+    if readme_path.exists():
+        intent = readme_path.read_text().strip()[:2000]
+        if intent:
+            return intent
+    return None
+
+
 def git_meta_dir(project_dir: Path) -> Path:
     """Return the canonical git metadata directory (handles linked worktrees).
 

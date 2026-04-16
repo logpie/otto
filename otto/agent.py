@@ -98,6 +98,30 @@ class AgentOptions:
 ClaudeAgentOptions = AgentOptions
 
 
+def make_agent_options(
+    project_dir: Path,
+    config: dict[str, Any] | None = None,
+    **overrides: Any,
+) -> AgentOptions:
+    """Create standard agent options for build/certify agents.
+
+    Sets bypassPermissions, project cwd, CC preset prompt, and model from config.
+    Pass keyword overrides for system_prompt, setting_sources, etc.
+    """
+    opts = AgentOptions(
+        permission_mode="bypassPermissions",
+        cwd=str(project_dir),
+        system_prompt={"type": "preset", "preset": "claude_code"},
+        env=_subprocess_env(),
+        setting_sources=["project"],
+        **overrides,
+    )
+    model = (config or {}).get("model")
+    if model:
+        opts.model = str(model)
+    return opts
+
+
 def _provider_name(options: AgentOptions | None) -> str:
     provider = (getattr(options, "provider", None) or "claude").strip().lower()
     if provider not in {"claude", "codex"}:

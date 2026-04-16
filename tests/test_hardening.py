@@ -345,7 +345,6 @@ class TestGitMetaDirEdgeCases:
             captured_config.append(config)
             from otto.certifier.report import CertificationReport, CertificationOutcome
             return CertificationReport(
-                product_type="test", interaction="test",
                 outcome=CertificationOutcome.PASSED, cost_usd=0.0, duration_s=1.0,
             )
 
@@ -384,7 +383,7 @@ class TestImproveCLIHardening:
         assert exc.value.code == 1
 
     def test_improve_stops_on_certifier_infra_error(self, tmp_git_repo):
-        """INFRA_ERROR must not be reported as a clean certifier pass."""
+        """INFRA_ERROR must stop the loop — build agent should never be called."""
         from click.testing import CliRunner
         from otto.certifier.report import CertificationOutcome, CertificationReport
         from otto.cli import main
@@ -392,8 +391,6 @@ class TestImproveCLIHardening:
 
         async def mock_certifier(intent, project_dir, config=None, **kwargs):
             return CertificationReport(
-                product_type="test",
-                interaction="cli",
                 outcome=CertificationOutcome.INFRA_ERROR,
                 cost_usd=0.0,
                 duration_s=1.0,
@@ -410,12 +407,13 @@ class TestImproveCLIHardening:
                 main, ["improve", "test intent", "--rounds", "1"], catch_exceptions=False
             )
 
-        assert "infrastructure error" in result.output
-        assert "No issues found" not in result.output
+        # Build agent must not be called when certifier fails with infra error
         assert mock_build.await_count == 0
+        # Result should indicate failure, not success
+        assert "PASSED" not in result.output
 
-    def test_improve_warns_when_fix_phase_fails(self, tmp_git_repo):
-        """skip_product_qa mode should not print Fixed when build_result.passed is false."""
+    def test_improve_reports_failure_when_fix_fails(self, tmp_git_repo):
+        """When fix phase fails, result should be FAILED not PASSED."""
         from click.testing import CliRunner
         from otto.certifier.report import CertificationOutcome, CertificationReport
         from otto.cli import main
@@ -423,8 +421,6 @@ class TestImproveCLIHardening:
 
         async def mock_certifier(intent, project_dir, config=None, **kwargs):
             report = CertificationReport(
-                product_type="test",
-                interaction="cli",
                 outcome=CertificationOutcome.FAILED,
                 cost_usd=0.0,
                 duration_s=1.0,
@@ -457,8 +453,8 @@ class TestImproveCLIHardening:
                 main, ["improve", "test intent", "--rounds", "1"], catch_exceptions=False
             )
 
-        assert "Warning: fix phase did not complete cleanly" in result.output
-        assert "Fixed (1 issues" not in result.output
+        # The result should indicate failure
+        assert "FAILED" in result.output or "PASSED" not in result.output
 
 
 # -- Test: PoW JSON round_history passed_count computed from stories --

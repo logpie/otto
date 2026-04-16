@@ -12,7 +12,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from otto.config import DEFAULT_CONFIG
 
 logger = logging.getLogger("otto.pipeline")
 
@@ -25,15 +24,20 @@ class BuildResult:
     rounds: int = 1
     total_cost: float = 0.0
     journeys: list[dict[str, Any]] = field(default_factory=list)
-    error: str = ""
     tasks_passed: int = 0
     tasks_failed: int = 0
 
 
 def _load_build_prompt() -> str:
-    """Load the v3 build prompt from otto/prompts/build.md."""
+    """Load the v3 build prompt (with certification steps)."""
     from otto.prompts import build_prompt
     return build_prompt()
+
+
+def _load_code_prompt() -> str:
+    """Load the code-only prompt (no certification knowledge)."""
+    from otto.prompts import code_prompt
+    return code_prompt()
 
 
 async def build_agentic_v3(
@@ -46,7 +50,7 @@ async def build_agentic_v3(
     The coding agent does everything — build, self-test, dispatch certifier,
     read findings, fix, re-certify. The orchestrator just launches and waits.
     """
-    from otto.agent import ClaudeAgentOptions, _subprocess_env, make_live_logger, run_agent_query
+    from otto.agent import make_agent_options, make_live_logger, run_agent_query
     from otto.observability import append_text_log
 
     build_id = f"build-{int(time.time())}-{os.getpid()}"
@@ -58,40 +62,26 @@ async def build_agentic_v3(
     _commit_artifacts(project_dir)
 
     # Record HEAD before build so the improvement report can show only new commits
-    try:
-        _head_before = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=str(project_dir), capture_output=True, text=True,
-        ).stdout.strip()
-    except Exception:
-        _head_before = ""
+    from otto.journal import _get_head_sha
+    _head_before = _get_head_sha(project_dir)
 
-    options = ClaudeAgentOptions(
-        permission_mode="bypassPermissions",
-        cwd=str(project_dir),
-        system_prompt={"type": "preset", "preset": "claude_code"},
-        env=_subprocess_env(),
-        setting_sources=["project"],
-    )
-    model = config.get("model")
-    if model:
-        options.model = str(model)
+    options = make_agent_options(project_dir, config)
 
-    max_certify_rounds = max(1, int(config.get("max_certify_rounds", 8)))
-    raw_prompt = _load_build_prompt().replace("{max_certify_rounds}", str(max_certify_rounds))
-    prompt = raw_prompt + f"\n\nBuild this product:\n\n{intent}"
+    skip_qa = bool(config.get("skip_product_qa"))
 
-    # Skip certifier if requested (e.g., otto improve handles verification itself)
-    if config.get("skip_product_qa"):
-        prompt += ("\n\n## IMPORTANT: Skip Certification\n"
-                   "Do NOT dispatch a certifier agent. Just fix the code, run tests, "
-                   "commit, and report your results. Certification is handled externally.")
+    if skip_qa:
+        # Code-only: no certification knowledge, clean prompt
+        prompt = _load_code_prompt() + f"\n\nBuild this product:\n\n{intent}"
     else:
+        # Mono mode: full build + certification loop
+        from otto.config import get_max_rounds
+        max_certify_rounds = get_max_rounds(config)
+        raw_prompt = _load_build_prompt().replace("{max_certify_rounds}", str(max_certify_rounds))
+        prompt = raw_prompt + f"\n\nBuild this product:\n\n{intent}"
+
         # Pre-fill the certifier prompt so the agent can dispatch it directly.
-        # This avoids the agent needing to read files or fill placeholders.
         from otto.prompts import certifier_prompt
         evidence_dir = str(project_dir / "otto_logs" / "certifier" / "evidence")
-        # Sanitize intent to prevent prompt injection via closing tags
         safe_intent = intent.replace("</certifier_prompt>", "")
         filled_certifier = certifier_prompt(mode="thorough").format(
             intent=safe_intent, evidence_dir=evidence_dir, focus_section="")
@@ -110,15 +100,8 @@ async def build_agentic_v3(
     # One agent call — the agent drives everything.
     # capture_tool_output=True so subagent output (certifier results) is included
     # in the returned text for parsing.
-    _default_timeout = DEFAULT_CONFIG.get("certifier_timeout", 900)
-    try:
-        timeout = int(config.get("certifier_timeout", _default_timeout))
-    except (ValueError, TypeError):
-        logger.warning("Invalid certifier_timeout, using default %ds", _default_timeout)
-        timeout = _default_timeout
-    if timeout <= 0:
-        logger.warning("certifier_timeout must be positive, using default %ds", _default_timeout)
-        timeout = _default_timeout
+    from otto.config import get_timeout
+    timeout = get_timeout(config)
     build_live_log = build_dir / "live.log"
     build_callbacks = make_live_logger(build_live_log)
     _close_build_log = build_callbacks.pop("_close")
@@ -221,164 +204,19 @@ async def build_agentic_v3(
     except Exception:
         logger.warning("Failed to write agent log")
 
-    # Parse certification results from agent output.
-    # The agent repeats the certifier's structured markers in its final message.
-    # If multiple rounds, we take the LAST round's results (the final state).
-    # We also track all rounds for the PoW report.
-    stories_tested = 0
-    stories_passed = 0
-    story_results: list[dict[str, Any]] = []
-    story_evidence: dict[str, str] = {}
-    verdict_pass = False
-    overall_diagnosis = ""
-    certify_rounds: list[dict[str, Any]] = []
-    max_round = 0
-
-    if text:
-        # Extract evidence blocks
-        current_eid: str | None = None
-        ev_lines: list[str] = []
-        for line in text.split("\n"):
-            stripped = line.strip()
-            if stripped.startswith("STORY_EVIDENCE_START:"):
-                # Close any orphaned block before starting a new one
-                current_eid = stripped.split(":", 1)[1].strip()
-                ev_lines = []
-            elif stripped.startswith("STORY_EVIDENCE_END:"):
-                if current_eid:
-                    story_evidence[current_eid] = "\n".join(ev_lines)
-                current_eid = None
-                ev_lines = []
-            elif current_eid is not None:
-                ev_lines.append(line)
-
-        # Parse per-round blocks. Each CERTIFY_ROUND starts a new round.
-        # Within each round, collect STORY_RESULTs and VERDICT.
-        current_round: dict[str, Any] = {"round": 0, "stories": [], "verdict": None, "diagnosis": ""}
-        for line in text.split("\n"):
-            stripped = line.strip()
-            if stripped.startswith("CERTIFY_ROUND:"):
-                # Save previous round if it had results
-                if current_round["stories"] or current_round["verdict"] is not None:
-                    certify_rounds.append(current_round)
-                try:
-                    rn = int(stripped.split(":", 1)[1].strip())
-                except ValueError:
-                    rn = len(certify_rounds) + 1
-                max_round = max(max_round, rn)
-                current_round = {"round": rn, "stories": [], "verdict": None, "diagnosis": ""}
-            elif stripped.startswith("STORIES_TESTED:"):
-                try:
-                    current_round["tested"] = int(stripped.split(":", 1)[1].strip())
-                except ValueError:
-                    pass
-            elif stripped.startswith("STORIES_PASSED:"):
-                try:
-                    current_round["passed_count"] = int(stripped.split(":", 1)[1].strip())
-                except ValueError:
-                    pass
-            elif stripped.startswith("STORY_RESULT:"):
-                parts = stripped[len("STORY_RESULT:"):].strip().split("|", 2)
-                if len(parts) >= 2:
-                    sid = parts[0].strip()
-                    if not sid or sid in ("(id)", "<story_id>", "<id>", "id"):
-                        continue  # skip empty or template placeholder entries
-                    passed = "PASS" in parts[1].upper()
-                    summary = parts[2].strip() if len(parts) > 2 else ""
-                    current_round["stories"].append({
-                        "story_id": sid,
-                        "passed": passed,
-                        "summary": summary,
-                        "evidence": story_evidence.get(sid, ""),
-                    })
-            elif stripped.startswith("VERDICT:"):
-                # Skip template placeholders like "VERDICT: PASS or FAIL"
-                verdict_text = stripped.split(":", 1)[1].strip()
-                if "or" in verdict_text.lower():
-                    continue
-                current_round["verdict"] = "PASS" in stripped.upper()
-            elif stripped.startswith("DIAGNOSIS:"):
-                diag_text = stripped[len("DIAGNOSIS:"):].strip()
-                if diag_text.lower().startswith("null"):
-                    diag_text = diag_text[4:].strip()
-                current_round["diagnosis"] = diag_text
-
-        # Save last round
-        if current_round["stories"] or current_round["verdict"] is not None:
-            certify_rounds.append(current_round)
-
-        # Use the LAST round with stories as the final result
-        final_round = None
-        for r in reversed(certify_rounds):
-            if r["stories"]:
-                final_round = r
-                break
-
-        if final_round:
-            # Deduplicate stories by story_id — if the same story appears multiple
-            # times within a round (agent re-reporting after a fix without using
-            # CERTIFY_ROUND markers), keep only the LAST result per story_id.
-            seen: dict[str, dict[str, Any]] = {}
-            for s in final_round["stories"]:
-                seen[s["story_id"]] = s
-            story_results = list(seen.values())
-            stories_tested = final_round.get("tested", len(story_results))
-            stories_passed = final_round.get("passed_count", sum(1 for s in story_results if s["passed"]))
-            verdict_pass = bool(final_round.get("verdict", False))
-            overall_diagnosis = final_round.get("diagnosis", "")
-        else:
-            # Fallback: scan from end for verdict/diagnosis (no CERTIFY_ROUND markers)
-            found_verdict = False
-            for line in reversed(text.split("\n")):
-                stripped = line.strip()
-                if stripped.startswith("VERDICT:") and not found_verdict:
-                    verdict_text = stripped.split(":", 1)[1].strip()
-                    if "or" in verdict_text.lower():
-                        continue  # skip template placeholder
-                    verdict_pass = "PASS" in stripped.upper()
-                    found_verdict = True
-                elif stripped.startswith("DIAGNOSIS:") and not overall_diagnosis:
-                    diag = stripped[len("DIAGNOSIS:"):].strip()
-                    if diag.lower().startswith("null"):
-                        diag = diag[4:].strip()
-                    if diag:
-                        overall_diagnosis = diag
-                if found_verdict and overall_diagnosis:
-                    break
-            # Also extract STORY_RESULTs from flat output (no round markers).
-            # Use a dict keyed by story_id so that if the agent output contains
-            # multiple implicit rounds (fix loop without CERTIFY_ROUND markers),
-            # we keep only the LAST result per story (the final state).
-            story_by_id: dict[str, dict[str, Any]] = {}
-            for line in text.split("\n"):
-                stripped = line.strip()
-                if stripped.startswith("STORIES_TESTED:"):
-                    try:
-                        stories_tested = int(stripped.split(":", 1)[1].strip())
-                    except ValueError:
-                        pass
-                elif stripped.startswith("STORIES_PASSED:"):
-                    try:
-                        stories_passed = int(stripped.split(":", 1)[1].strip())
-                    except ValueError:
-                        pass
-                elif stripped.startswith("STORY_RESULT:"):
-                    parts = stripped[len("STORY_RESULT:"):].strip().split("|", 2)
-                    if len(parts) >= 2:
-                        sid = parts[0].strip()
-                        if not sid or sid in ("(id)", "<story_id>", "<id>", "id"):
-                            continue  # skip empty or template placeholder entries
-                        p = "PASS" in parts[1].upper()
-                        summary = parts[2].strip() if len(parts) > 2 else ""
-                        story_by_id[sid] = {
-                            "story_id": sid, "passed": p, "summary": summary,
-                            "evidence": story_evidence.get(sid, ""),
-                        }
-            story_results = list(story_by_id.values())
+    # Parse certification results from agent output
+    from otto.markers import parse_certifier_markers
+    parsed = parse_certifier_markers(text or "")
+    stories_tested = parsed.stories_tested
+    stories_passed = parsed.stories_passed
+    story_results = parsed.stories
+    story_evidence = parsed.story_evidence
+    verdict_pass = parsed.verdict_pass
+    overall_diagnosis = parsed.diagnosis
+    certify_rounds = parsed.certify_rounds
 
     # When QA is skipped (--no-qa), the agent won't produce certification markers.
     # Consider the build passed if the agent completed without error.
-    skip_qa = bool(config.get("skip_product_qa"))
     if skip_qa:
         # Agent completed (text is real output, not an error placeholder)
         passed = bool(text) and not text.startswith("BUILD ")
@@ -718,23 +556,27 @@ def _append_intent(project_dir: Path, intent: str, build_id: str) -> None:
         intent_path.write_text(f"# Build Intents\n{entry}")
 
 
-async def build_split(
+async def run_certify_fix_loop(
     intent: str,
     project_dir: Path,
     config: dict[str, Any],
     *,
-    max_rounds: int | None = None,
+    certifier_mode: str = "thorough",
+    focus: str | None = None,
+    skip_initial_build: bool = False,
 ) -> BuildResult:
-    """Split build: system-controlled certify loop with build journal.
+    """System-driven certify-fix loop.
 
-    The Python orchestrator drives every step:
-      1. Build agent builds (no certifier knowledge)
-      2. System runs certifier independently
-      3. System writes journal (current-state.md, round evidence)
-      4. If fail: build agent fixes (reads journal for context)
-      5. Repeat until pass or max_rounds
+    Python orchestrator drives every step:
+      1. (Optional) Build agent builds from intent
+      2. Certifier evaluates the product
+      3. If issues found, build agent fixes
+      4. Repeat until pass or max rounds
+
+    Used by: ``build --split``, ``fix``, ``improve``.
     """
     from otto.certifier import run_agentic_certifier
+    from otto.certifier.report import CertificationOutcome
     from otto.journal import (
         append_journal, init_round, record_build, record_certifier,
         update_current_state,
@@ -743,38 +585,45 @@ async def build_split(
     build_id = f"build-{int(time.time())}-{os.getpid()}"
     start_time = time.monotonic()
     total_cost = 0.0
-    if max_rounds is None:
-        max_rounds = int(config.get("max_certify_rounds", 8))
-    max_rounds = max(1, max_rounds)
-    actual_rounds = 0
+    from otto.config import get_max_rounds
+    max_rounds = get_max_rounds(config)
 
     _append_intent(project_dir, intent, build_id)
     _commit_artifacts(project_dir)
 
-    # --- Round 1: Initial build ---
-    round_id = init_round(project_dir, f"build: {intent[:60]}")
+    # --- Optional initial build ---
+    round_id = init_round(project_dir,
+                          f"build: {intent[:60]}" if not skip_initial_build
+                          else f"certify: {intent[:60]}")
 
-    build_config = dict(config)
-    build_config["skip_product_qa"] = True
+    if not skip_initial_build:
+        build_config = dict(config)
+        build_config["skip_product_qa"] = True
 
-    logger.info("Split build round 1: building")
-    result = await build_agentic_v3(intent, project_dir, build_config)
-    total_cost += result.total_cost
-    record_build(project_dir, round_id, result)
+        logger.info("Certify-fix loop: initial build")
+        result = await build_agentic_v3(intent, project_dir, build_config)
+        total_cost += result.total_cost
+        record_build(project_dir, round_id, result)
 
     # --- Certify + fix loop ---
     last_stories: list[dict[str, Any]] = []
     passed = False
+    actual_rounds = 0
 
     for round_num in range(1, max_rounds + 1):
         actual_rounds = round_num
-        # Certify (system-controlled)
-        logger.info("Split build round %d: certifying", round_num)
+
+        # Each certify round gets its own round_id so journal entries
+        # don't land in the previous fix round's directory.
+        round_id = init_round(project_dir, f"certify round {round_num}")
+
+        logger.info("Certify-fix loop round %d: certifying (%s)", round_num, certifier_mode)
         report = await run_agentic_certifier(
             intent=intent,
             project_dir=project_dir,
             config=config,
-            mode="thorough",
+            mode=certifier_mode,
+            focus=focus,
         )
         total_cost += report.cost_usd
         stories = getattr(report, "_story_results", [])
@@ -782,47 +631,43 @@ async def build_split(
 
         record_certifier(project_dir, round_id, report, stories)
 
-        # Check for infra error (certifier crashed/timed out)
-        from otto.certifier.report import CertificationOutcome
+        # Infra error — certifier crashed/timed out
         if getattr(report, "outcome", None) == CertificationOutcome.INFRA_ERROR:
-            logger.warning("Split build: certifier infra error on round %d", round_num)
+            logger.warning("Certify-fix loop: infra error on round %d", round_num)
             append_journal(project_dir, round_id, f"certify round {round_num}",
                            "INFRA_ERROR", report.cost_usd)
             break
 
-        # Empty stories = certifier produced no results (parsing failed, agent
-        # produced no markers). Treat as failed — don't mark passed.
+        # Empty stories — certifier produced no results
         if not stories:
-            logger.warning("Split build round %d: certifier returned no stories", round_num)
+            logger.warning("Certify-fix loop round %d: no stories returned", round_num)
             append_journal(project_dir, round_id, f"certify round {round_num}",
                            "FAIL (no stories)", report.cost_usd)
             break
 
-        # Update current state AFTER infra/empty checks — avoids writing
-        # "all passing" when the certifier actually failed or produced no stories.
+        # Update current state AFTER infra/empty checks
         update_current_state(project_dir, round_id, stories,
                              f"certify round {round_num}")
 
         failures = [s for s in stories if not s.get("passed")]
-        result_str = f"PASS {len(stories) - len(failures)}/{len(stories)}"
-        if failures:
-            result_str = f"FAIL {len(stories) - len(failures)}/{len(stories)}"
+        result_str = (f"FAIL {len(stories) - len(failures)}/{len(stories)}"
+                      if failures else
+                      f"PASS {len(stories) - len(failures)}/{len(stories)}")
         append_journal(project_dir, round_id, f"certify round {round_num}",
                        result_str, report.cost_usd)
 
         if not failures:
             passed = True
-            logger.info("Split build: PASS on round %d", round_num)
+            logger.info("Certify-fix loop: PASS on round %d", round_num)
             break
 
         if round_num >= max_rounds:
-            logger.info("Split build: max rounds (%d) reached", max_rounds)
+            logger.info("Certify-fix loop: max rounds (%d) reached", max_rounds)
             break
 
         # --- Fix round ---
         round_id = init_round(project_dir, f"fix round {round_num}")
 
-        # Build fix intent from failures
         fix_lines = [
             "Fix these issues found by the certifier.\n",
             "Read current-state.md for context on what was tried before.\n",
@@ -836,11 +681,15 @@ async def build_split(
             if evidence:
                 fix_lines.append(f"**Evidence:**\n```\n{evidence[:500]}\n```")
             fix_lines.append("")
+        fix_lines.append(
+            "Diagnose the root causes in the code and fix them. "
+            "Do NOT fix by changing prompts unless the fix is generic."
+        )
 
         fix_config = dict(config)
         fix_config["skip_product_qa"] = True
 
-        logger.info("Split build round %d: fixing %d issues", round_num, len(failures))
+        logger.info("Certify-fix loop round %d: fixing %d issues", round_num, len(failures))
         fix_result = await build_agentic_v3(
             "\n".join(fix_lines), project_dir, fix_config)
         total_cost += fix_result.total_cost
@@ -871,6 +720,7 @@ async def build_split(
         tasks_passed=sum(1 for j in journeys if j.get("passed")),
         tasks_failed=sum(1 for j in journeys if not j.get("passed")),
     )
+
 
 
 def _commit_artifacts(project_dir: Path) -> None:

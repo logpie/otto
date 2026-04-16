@@ -10,8 +10,17 @@ def _load(name: str) -> str:
 
 
 def build_prompt() -> str:
-    """The v3 agentic build prompt."""
+    """The v3 agentic build prompt (includes certification steps 7-9)."""
     return _load("build.md")
+
+
+def code_prompt() -> str:
+    """Code-only prompt (steps 1-6: explore, plan, build, test, review, commit).
+
+    Used by system-driven modes where certification is handled externally.
+    No certification knowledge — the agent just builds/fixes code.
+    """
+    return _load("code.md")
 
 
 def certifier_prompt(*, mode: str = "standard") -> str:

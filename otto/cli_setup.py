@@ -9,18 +9,11 @@ import click
 
 from otto.agent import AssistantMessage, ClaudeAgentOptions, ResultMessage, TextBlock, _subprocess_env, query
 from otto.config import create_config, load_config
-from otto.display import console
+from otto.display import CONTEXT_SETTINGS, console
 from otto.theme import error_console
 
 
-CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
-
-
-def _read_text_if_possible(path: Path, max_chars: int) -> str | None:
-    try:
-        return path.read_text()[:max_chars]
-    except (OSError, UnicodeDecodeError):
-        return None
+from otto.agent import _safe_read as _read_text_if_possible  # noqa: E402
 
 
 def _build_file_tree(project_dir: Path, limit: int) -> str:

@@ -45,13 +45,10 @@ async def run_agentic_certifier(
     MUST run in the caller's process (not a subprocess) so the Agent tool
     is available for subagent dispatch.
     """
-    from otto.agent import ClaudeAgentOptions, _subprocess_env, make_live_logger, run_agent_query
+    from otto.agent import make_agent_options, make_live_logger, run_agent_query
     from otto.certifier.report import (
         CertificationOutcome,
         CertificationReport,
-        Finding,
-        TierResult,
-        TierStatus,
     )
 
     config = config or {}
@@ -76,16 +73,7 @@ async def run_agentic_certifier(
         intent=intent, evidence_dir=str(evidence_dir), focus_section=focus_section,
     )
 
-    options = ClaudeAgentOptions(
-        permission_mode="bypassPermissions",
-        cwd=str(project_dir),
-        setting_sources=["project"],
-        env=_subprocess_env(),
-        system_prompt={"type": "preset", "preset": "claude_code"},
-    )
-    model = config.get("model")
-    if model:
-        options.model = str(model)
+    options = make_agent_options(project_dir, config)
 
     logger.info("Running agentic certifier on %s", project_dir)
 
@@ -94,14 +82,8 @@ async def run_agentic_certifier(
 
     # One LLM call — the agent does everything
     import asyncio as _asyncio
-    try:
-        certifier_timeout = int(config.get("certifier_timeout", 900))
-    except (ValueError, TypeError):
-        logger.warning("Invalid certifier_timeout, using default 900s")
-        certifier_timeout = 900
-    if certifier_timeout <= 0:
-        logger.warning("certifier_timeout must be positive, using default 900s")
-        certifier_timeout = 900
+    from otto.config import get_timeout
+    certifier_timeout = get_timeout(config)
     live_log = report_dir / "live.log"
     live_callbacks = make_live_logger(live_log)
     _close_log = live_callbacks.pop("_close")
@@ -153,128 +135,20 @@ async def run_agentic_certifier(
 
     # Parse results from agent output
     total_duration = round(time.monotonic() - start_time, 1)
-    findings: list[Finding] = []
-    stories_tested = 0
-    stories_passed = 0
-    story_results: list[dict[str, Any]] = []
-    # Extract per-story evidence blocks
-    story_evidence: dict[str, str] = {}
-
-    if text:
-        # First pass: extract STORY_EVIDENCE blocks
-        current_evidence_id: str | None = None
-        evidence_lines: list[str] = []
-        for line in text.split("\n"):
-            stripped = line.strip()
-            if stripped.startswith("STORY_EVIDENCE_START:"):
-                # Close any orphaned block before starting a new one
-                current_evidence_id = stripped.split(":", 1)[1].strip()
-                evidence_lines = []
-            elif stripped.startswith("STORY_EVIDENCE_END:"):
-                if current_evidence_id:
-                    story_evidence[current_evidence_id] = "\n".join(evidence_lines)
-                current_evidence_id = None
-                evidence_lines = []
-            elif current_evidence_id is not None:
-                evidence_lines.append(line)
-
-        # Second pass: extract verdict markers
-        for line in text.split("\n"):
-            stripped = line.strip()
-            if stripped.startswith("STORIES_TESTED:"):
-                try:
-                    stories_tested = int(stripped.split(":", 1)[1].strip())
-                except ValueError:
-                    pass
-            elif stripped.startswith("STORIES_PASSED:"):
-                try:
-                    stories_passed = int(stripped.split(":", 1)[1].strip())
-                except ValueError:
-                    pass
-            elif stripped.startswith("STORY_RESULT:"):
-                parts = stripped[len("STORY_RESULT:"):].strip().split("|", 2)
-                if len(parts) >= 2:
-                    sid = parts[0].strip()
-                    if not sid or sid in ("(id)", "<story_id>", "<id>", "id"):
-                        continue  # skip empty or template placeholder entries
-                    passed = "PASS" in parts[1].upper()
-                    summary = parts[2].strip() if len(parts) > 2 else ""
-                    story_results.append({
-                        "story_id": sid,
-                        "passed": passed,
-                        "summary": summary,
-                        "evidence": story_evidence.get(sid, ""),
-                    })
-                    if not passed:
-                        findings.append(Finding(
-                            tier=4,
-                            severity="critical",
-                            category="journey",
-                            description=f"Story failed: {sid}",
-                            diagnosis=summary,
-                            fix_suggestion=summary,
-                            story_id=sid,
-                        ))
-
-    # Deduplicate stories by story_id — subagents may report the same story
-    # multiple times. Keep the LAST result per story_id (final state).
-    if story_results:
-        seen: dict[str, dict[str, Any]] = {}
-        for s in story_results:
-            seen[s["story_id"]] = s
-        story_results = list(seen.values())
-        # Rebuild findings from deduplicated stories
-        findings = [f for f in findings if not any(
-            s["story_id"] == f.story_id and s["passed"] for s in story_results
-        )]
+    from otto.markers import parse_certifier_markers
+    parsed = parse_certifier_markers(text or "")
+    story_results = parsed.stories
 
     # Determine outcome
     has_failures = any(not s["passed"] for s in story_results)
-    verdict_pass = False
-    overall_diagnosis = ""
-    if text:
-        found_verdict = False
-        for line in reversed(text.split("\n")):
-            stripped = line.strip()
-            if stripped.startswith("VERDICT:") and not found_verdict:
-                # Skip template placeholders like "VERDICT: PASS or VERDICT: FAIL"
-                verdict_text = stripped.split(":", 1)[1].strip()
-                if "or" in verdict_text.lower():
-                    continue
-                verdict_pass = "PASS" in stripped.upper()
-                found_verdict = True
-            elif stripped.startswith("DIAGNOSIS:") and not overall_diagnosis:
-                diag = stripped[len("DIAGNOSIS:"):].strip()
-                # Strip leading "null" (agent sometimes writes DIAGNOSIS: null<text>)
-                if diag.lower().startswith("null"):
-                    diag = diag[4:].strip()
-                if diag:
-                    overall_diagnosis = diag
-            if found_verdict and overall_diagnosis:
-                break
-
-    # Require at least one story — VERDICT: PASS with no stories is not a real pass
-    if verdict_pass and not has_failures and story_results:
+    if parsed.verdict_pass and not has_failures and story_results:
         outcome = CertificationOutcome.PASSED
     elif has_failures:
         outcome = CertificationOutcome.FAILED
     else:
-        outcome = CertificationOutcome.FAILED  # no verdict marker or no stories = fail
-
-    # Build tier result for backward compat
-    tier4 = TierResult(
-        tier=4, name="journeys",
-        status=TierStatus.PASSED if outcome == CertificationOutcome.PASSED else TierStatus.FAILED,
-        findings=findings,
-        cost_usd=float(cost or 0),
-        duration_s=total_duration,
-    )
+        outcome = CertificationOutcome.FAILED
 
     report = CertificationReport(
-        product_type="unknown",  # agent didn't report this explicitly
-        interaction="unknown",
-        tiers=[tier4],
-        findings=findings,
         outcome=outcome,
         cost_usd=float(cost or 0),
         duration_s=total_duration,
@@ -297,8 +171,8 @@ async def run_agentic_certifier(
         # HTML PoW
         _generate_agentic_html_pow(report_dir, story_results, outcome.value,
                                     total_duration, float(cost or 0),
-                                    stories_passed, stories_tested,
-                                    diagnosis=overall_diagnosis)
+                                    parsed.stories_passed, parsed.stories_tested,
+                                    diagnosis=parsed.diagnosis)
 
         # Markdown PoW
         md_lines = [
@@ -308,7 +182,7 @@ async def run_agentic_certifier(
             f"> **Outcome:** {outcome.value}",
             f"> **Duration:** {total_duration:.0f}s",
             f"> **Cost:** ${float(cost or 0):.2f}",
-            f"> **Stories:** {stories_passed}/{stories_tested}",
+            f"> **Stories:** {parsed.stories_passed}/{parsed.stories_tested}",
             "",
         ]
         for s in story_results:
@@ -332,7 +206,7 @@ async def run_agentic_certifier(
 
     logger.info(
         "Agentic certifier done: %s, %d/%d stories, %.1fs, $%.3f",
-        outcome.value, stories_passed, stories_tested, total_duration, float(cost or 0),
+        outcome.value, parsed.stories_passed, parsed.stories_tested, total_duration, float(cost or 0),
     )
     return report
 

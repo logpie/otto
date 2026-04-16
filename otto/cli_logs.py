@@ -7,11 +7,8 @@ from pathlib import Path
 
 import click
 
-from otto.display import console, format_cost, format_duration, rich_escape
+from otto.display import CONTEXT_SETTINGS, console, format_cost, format_duration, rich_escape
 from otto.theme import error_console
-
-
-CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 HISTORY_FILE = "otto_logs/run-history.jsonl"
 
 

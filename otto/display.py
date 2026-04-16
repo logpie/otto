@@ -4,6 +4,9 @@ from rich.markup import escape as rich_escape  # noqa: F401
 
 from otto.theme import console  # noqa: F401 — re-exported for backward compat
 
+# Shared Click context settings for all CLI modules
+CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
+
 
 # ---------------------------------------------------------------------------
 # Summary helpers

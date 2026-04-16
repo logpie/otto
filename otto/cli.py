@@ -14,11 +14,8 @@ os.environ.pop("CLAUDECODE", None)
 import click
 
 from otto.config import create_config, load_config, require_git
-from otto.display import console, rich_escape
+from otto.display import CONTEXT_SETTINGS, console, rich_escape
 from otto.theme import error_console
-
-
-CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 
 
 @click.group(context_settings=CONTEXT_SETTINGS)
@@ -65,8 +62,6 @@ def _print_build_result(intent: str, result, build_duration: float) -> None:
         console.print(f"  Tasks: {result.tasks_passed} passed, {result.tasks_failed} failed")
     console.print(f"  [bold]Total cost: ${result.total_cost:.2f}[/bold]")
     console.print(f"  Duration: {build_duration / 60:.1f} min")
-    if result.error:
-        console.print(f"  [red]Error: {rich_escape(result.error[:100])}[/red]")
     console.print()
 
 
@@ -74,7 +69,7 @@ def _print_build_result(intent: str, result, build_duration: float) -> None:
 @click.argument("intent")
 @click.option("--no-qa", is_flag=True, help="Skip product certification after build")
 @click.option("--split", is_flag=True, help="Split mode: system-controlled certify loop with build journal")
-@click.option("--rounds", default=None, type=int, help="Max certification rounds (default: 8)")
+@click.option("--rounds", "-n", default=None, type=int, help="Max certification rounds (default: 8)")
 def build(intent, no_qa, split, rounds):
     """Build a product from a natural language intent.
 
@@ -106,7 +101,7 @@ def build(intent, no_qa, split, rounds):
     if rounds is not None:
         config["max_certify_rounds"] = rounds
 
-    from otto.pipeline import build_agentic_v3, build_split, BuildResult
+    from otto.pipeline import build_agentic_v3, run_certify_fix_loop, BuildResult
 
     build_start = time.time()
     console.print()
@@ -115,7 +110,7 @@ def build(intent, no_qa, split, rounds):
         if split and not no_qa:
             console.print("  [bold]Split mode[/bold] \u2014 system-controlled certify loop\n")
             result: BuildResult = asyncio.run(
-                build_split(intent, project_dir, config)
+                run_certify_fix_loop(intent, project_dir, config)
             )
         else:
             console.print("  [bold]Agentic mode[/bold] \u2014 one agent builds, certifies, fixes\n")
@@ -162,21 +157,13 @@ def certify(intent, thorough):
 
     # Resolve intent: argument > intent.md > README.md
     if not intent:
-        intent_path = project_dir / "intent.md"
-        readme_path = project_dir / "README.md"
-        if intent_path.exists():
-            intent = intent_path.read_text().strip()
-            console.print(f"  [dim]Intent from intent.md[/dim]")
-        elif readme_path.exists():
-            intent = readme_path.read_text().strip()[:2000]
-            console.print(f"  [dim]Intent from README.md[/dim]")
+        from otto.config import resolve_intent
+        intent = resolve_intent(project_dir)
+        if intent:
+            console.print(f"  [dim]Intent from project files[/dim]")
         else:
             error_console.print("[error]No intent provided. Pass as argument or create intent.md[/error]")
             sys.exit(2)
-
-    if not intent:
-        error_console.print("[error]Intent is empty[/error]")
-        sys.exit(2)
 
     mode_label = "thorough inspection" if thorough else "independent product verification"
     console.print(f"\n  [bold]Certifying[/bold] \u2014 {mode_label}\n")
