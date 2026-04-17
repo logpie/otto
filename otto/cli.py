@@ -68,9 +68,10 @@ def _print_build_result(intent: str, result, build_duration: float) -> None:
 @main.command(context_settings=CONTEXT_SETTINGS)
 @click.argument("intent")
 @click.option("--no-qa", is_flag=True, help="Skip product certification after build")
+@click.option("--fast", is_flag=True, help="Fast certification — happy path smoke test only")
 @click.option("--split", is_flag=True, help="Split mode: system-controlled certify loop with build journal")
 @click.option("--rounds", "-n", default=None, type=int, help="Max certification rounds (default: 8)")
-def build(intent, no_qa, split, rounds):
+def build(intent, no_qa, fast, split, rounds):
     """Build a product from a natural language intent.
 
     One agent builds, certifies, and fixes autonomously. The certifier
@@ -80,6 +81,8 @@ def build(intent, no_qa, split, rounds):
     Examples:
 
         otto build "bookmark manager with tags and search"
+
+        otto build "bookmark manager" --fast    # quick smoke test
 
         otto build "CLI tool that converts CSV to JSON" --no-qa
     """
@@ -98,6 +101,8 @@ def build(intent, no_qa, split, rounds):
 
     if no_qa:
         config["skip_product_qa"] = True
+    if fast:
+        config["_certifier_mode"] = "fast"
     if rounds is not None:
         config["max_certify_rounds"] = rounds
 
@@ -106,16 +111,21 @@ def build(intent, no_qa, split, rounds):
     build_start = time.time()
     console.print()
 
+    certifier_mode = config.pop("_certifier_mode", "thorough")
+
     try:
         if split and not no_qa:
             console.print("  [bold]Split mode[/bold] \u2014 system-controlled certify loop\n")
             result: BuildResult = asyncio.run(
-                run_certify_fix_loop(intent, project_dir, config)
+                run_certify_fix_loop(intent, project_dir, config,
+                                     certifier_mode=certifier_mode)
             )
         else:
-            console.print("  [bold]Agentic mode[/bold] \u2014 one agent builds, certifies, fixes\n")
+            mode_label = "fast smoke test" if certifier_mode == "fast" else "one agent builds, certifies, fixes"
+            console.print(f"  [bold]Agentic mode[/bold] \u2014 {mode_label}\n")
             result: BuildResult = asyncio.run(
-                build_agentic_v3(intent, project_dir, config)
+                build_agentic_v3(intent, project_dir, config,
+                                 certifier_mode=certifier_mode)
             )
     except KeyboardInterrupt:
         console.print("\n  Aborted.")
@@ -133,7 +143,8 @@ def build(intent, no_qa, split, rounds):
 @main.command(context_settings=CONTEXT_SETTINGS)
 @click.argument("intent", required=False)
 @click.option("--thorough", is_flag=True, help="Thorough mode — find what's broken, not just verify")
-def certify(intent, thorough):
+@click.option("--fast", is_flag=True, help="Fast mode — happy path smoke test only")
+def certify(intent, thorough, fast):
     """Certify a product — independent, builder-blind verification.
 
     Tests the product in the current directory as a real user. Works on
@@ -141,13 +152,10 @@ def certify(intent, thorough):
 
     If no intent is given, reads intent.md or README.md from the project.
 
-    Use --thorough for deeper inspection: code review, edge case probing,
-    and escalating difficulty for builder tools.
-
     Examples:
-        otto certify "notes API with auth, CRUD, and search"
         otto certify                   # reads intent.md
-        otto certify --thorough        # thorough inspection
+        otto certify --fast            # quick smoke test (~1-2 min)
+        otto certify --thorough        # adversarial deep inspection
     """
     project_dir = Path.cwd()
 
@@ -165,7 +173,15 @@ def certify(intent, thorough):
             error_console.print("[error]No intent provided. Pass as argument or create intent.md[/error]")
             sys.exit(2)
 
-    mode_label = "thorough inspection" if thorough else "independent product verification"
+    if fast:
+        mode_label = "fast smoke test"
+        _mode = "fast"
+    elif thorough:
+        mode_label = "thorough inspection"
+        _mode = "thorough"
+    else:
+        mode_label = "independent product verification"
+        _mode = "standard"
     console.print(f"\n  [bold]Certifying[/bold] \u2014 {mode_label}\n")
 
     from otto.certifier import run_agentic_certifier
@@ -176,7 +192,7 @@ def certify(intent, thorough):
             intent=intent,
             project_dir=project_dir,
             config=config,
-            thorough=thorough,
+            mode=_mode,
         ))
     except KeyboardInterrupt:
         console.print("\n  Aborted.")

@@ -43,6 +43,7 @@ def certifier_prompt(*, mode: str = "standard") -> str:
     """
     prompts = {
         "standard": "certifier.md",
+        "fast": "certifier-fast.md",
         "thorough": "certifier-thorough.md",
         "hillclimb": "certifier-hillclimb.md",
         "target": "certifier-target.md",
