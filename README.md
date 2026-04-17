@@ -111,6 +111,7 @@ The intent describes what the product should do. The certifier generates test st
 ```bash
 otto certify                                            # reads intent.md or README.md
 otto certify "notes API with auth, CRUD, and search"    # explicit intent
+otto certify --fast                                     # quick smoke test (~30s)
 otto certify --thorough                                 # adversarial: edge cases, code review
 ```
 
@@ -125,8 +126,9 @@ Find and fix bugs, edge cases, error handling gaps. Adversarial certifier tries 
 ```bash
 otto improve bugs                       # find and fix all bugs
 otto improve bugs "error handling"      # focus on error handling
-otto improve bugs "auth and security"   # focus on auth
 otto improve bugs -n 5                  # up to 5 rounds (default: 3)
+otto improve bugs --split               # system-controlled loop (vs agent-driven)
+otto improve bugs --resume              # resume from last checkpoint
 ```
 
 #### `otto improve feature`
@@ -149,6 +151,7 @@ otto improve target "response time < 100ms"
 otto improve target "test coverage > 90%"
 otto improve target "bundle size < 500kb"
 otto improve target "lighthouse score > 95" -n 10    # up to 10 rounds (default: 5)
+otto improve target "latency < 50ms" --resume         # resume interrupted run
 ```
 
 ### `otto history`
