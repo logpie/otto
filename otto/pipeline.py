@@ -111,10 +111,11 @@ async def build_agentic_v3(
                    f"When you dispatch the certifier agent, use this EXACT prompt:\n"
                    f"<certifier_prompt>\n{filled_certifier}\n</certifier_prompt>")
 
-    # Check for previous failed build — inject findings so agent doesn't repeat mistakes
-    prev_failure = _get_previous_failure(project_dir)
-    if prev_failure:
-        prompt += f"\n\n## Previous Build Failed\n{prev_failure}"
+    # Inject cross-run memory — what was tested/found/fixed in previous runs
+    from otto.memory import format_for_prompt
+    memory_section = format_for_prompt(project_dir)
+    if memory_section:
+        prompt += f"\n\n{memory_section}"
 
     logger.info("Starting agentic v3 build: %s", build_id)
     start_time = time.monotonic()
@@ -327,6 +328,20 @@ async def build_agentic_v3(
     })
     append_text_log(history_path, [history_entry])
 
+    # Record cross-run memory (only if certification produced stories)
+    if story_results and not skip_qa:
+        try:
+            from otto.memory import record_run
+            record_run(
+                project_dir,
+                command="build",
+                certifier_mode=certifier_mode,
+                stories=story_results,
+                cost=float(cost or 0),
+            )
+        except Exception:
+            logger.warning("Failed to record certifier memory")
+
     return BuildResult(
         passed=passed,
         build_id=build_id,
@@ -482,68 +497,6 @@ def _cleanup_orphan_processes(project_dir: Path) -> None:
     except Exception:
         pass  # best-effort cleanup
 
-
-def _get_previous_failure(project_dir: Path) -> str | None:
-    """Read the most recent failed build's certifier findings, if any."""
-    history_path = project_dir / "otto_logs" / "run-history.jsonl"
-    if not history_path.exists():
-        return None
-
-    # Read last non-empty line efficiently (seek from end instead of reading all)
-    last_line = ""
-    try:
-        with open(history_path, "rb") as f:
-            # Seek to end, then scan backward for the last newline
-            f.seek(0, 2)
-            size = f.tell()
-            if size == 0:
-                return None
-            # Read up to last 4KB — each JSONL entry is well under this
-            read_size = min(size, 4096)
-            f.seek(size - read_size)
-            chunk = f.read().decode("utf-8", errors="replace")
-            for line in reversed(chunk.splitlines()):
-                if line.strip():
-                    last_line = line.strip()
-                    break
-    except OSError:
-        return None
-
-    if not last_line:
-        return None
-
-    try:
-        entry = json.loads(last_line)
-    except json.JSONDecodeError:
-        return None
-
-    if entry.get("passed", True):
-        return None  # last build passed, no failure context
-
-    # Read certifier findings from PoW
-    pow_path = project_dir / "otto_logs" / "certifier" / "proof-of-work.json"
-    if not pow_path.exists():
-        return f"The previous build failed but no certifier findings are available."
-
-    try:
-        pow_data = json.loads(pow_path.read_text())
-    except (json.JSONDecodeError, OSError):
-        return f"The previous build failed but certifier findings could not be read."
-
-    failures = [s for s in pow_data.get("stories", []) if not s.get("passed")]
-    if not failures:
-        return f"The previous build failed but the certifier reported no specific story failures."
-
-    lines = ["The previous build failed. The certifier found these issues:\n"]
-    for f in failures:
-        sid = f.get("story_id", "?")
-        summary = f.get("summary", "")
-        evidence = f.get("evidence", "")
-        lines.append(f"- **{sid}**: {summary}")
-        if evidence:
-            lines.append(f"  Evidence: {evidence[:300]}")
-    lines.append("\nFix these issues. Do NOT repeat the same mistakes.")
-    return "\n".join(lines)
 
 
 def _append_intent(project_dir: Path, intent: str, build_id: str) -> None:

@@ -283,14 +283,14 @@ class TestV3EdgeCases:
         assert result.passed is False
 
     @pytest.mark.asyncio
-    async def test_retry_injects_previous_failure(self, tmp_git_repo):
-        """After a failed build, re-running should inject failure context."""
-        # First build: FAIL
+    async def test_cross_run_memory_injected(self, tmp_git_repo):
+        """After a failed build, re-running should inject cross-run memory."""
+        # First build: FAIL — records memory
         with patch("otto.agent.run_agent_query",
                     side_effect=_make_mock_query(AGENT_OUTPUT_FAIL)):
             await build_agentic_v3("test", tmp_git_repo, {})
 
-        # Second build: capture the prompt to verify failure context
+        # Second build: capture the prompt to verify memory injection
         captured_prompts = []
         async def capture_query(prompt, options, **kwargs):
             captured_prompts.append(prompt)
@@ -300,28 +300,22 @@ class TestV3EdgeCases:
             result = await build_agentic_v3("test", tmp_git_repo, {})
 
         assert result.passed is True
-        # The prompt should contain previous failure context
-        assert "Previous Build Failed" in captured_prompts[0]
-        assert "isolation" in captured_prompts[0].lower() or "FAIL" in captured_prompts[0]
+        # The prompt should contain cross-run memory
+        assert "Previous Certification History" in captured_prompts[0]
+        assert "isolation" in captured_prompts[0].lower() or "FAIL" in captured_prompts[0].upper()
 
     @pytest.mark.asyncio
-    async def test_no_retry_context_after_pass(self, tmp_git_repo):
-        """After a passing build, re-running should NOT inject failure context."""
-        # First build: PASS
-        with patch("otto.agent.run_agent_query",
-                    side_effect=_make_mock_query(AGENT_OUTPUT_PASS)):
-            await build_agentic_v3("test", tmp_git_repo, {})
-
-        # Second build: check no failure context
+    async def test_no_memory_on_first_run(self, tmp_git_repo):
+        """First run should NOT have cross-run memory section."""
         captured_prompts = []
         async def capture_query(prompt, options, **kwargs):
             captured_prompts.append(prompt)
             return AGENT_OUTPUT_PASS, 0.50, MagicMock(session_id="s2")
 
         with patch("otto.agent.run_agent_query", side_effect=capture_query):
-            await build_agentic_v3("test again", tmp_git_repo, {})
+            await build_agentic_v3("test", tmp_git_repo, {})
 
-        assert "Previous Build Failed" not in captured_prompts[0]
+        assert "Previous Certification History" not in captured_prompts[0]
 
     @pytest.mark.asyncio
     async def test_intent_appends_not_overwrites(self, tmp_git_repo):

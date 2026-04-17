@@ -715,56 +715,63 @@ class TestCommitArtifactsTimeout:
             f"Expected all git calls to have timeout, got: {calls_with_timeout}"
 
 
-# -- Test: _get_previous_failure efficient last-line read --
+# -- Test: cross-run memory --
 
-class TestGetPreviousFailureEfficient:
-    """_get_previous_failure should read the last line efficiently."""
+class TestCrossRunMemory:
+    """Certifier memory should record and format run history."""
 
-    def test_reads_last_entry(self, tmp_path):
-        """Should return failure context from the last entry."""
-        from otto.pipeline import _get_previous_failure
+    def test_record_and_load(self, tmp_path):
+        """record_run writes JSONL, load_history reads it."""
+        from otto.memory import load_history, record_run
 
-        history = tmp_path / "otto_logs" / "run-history.jsonl"
-        history.parent.mkdir(parents=True)
+        record_run(
+            tmp_path,
+            command="build",
+            certifier_mode="thorough",
+            stories=[
+                {"story_id": "auth", "passed": True, "summary": "Auth works"},
+                {"story_id": "crud", "passed": False, "summary": "Create fails"},
+            ],
+            cost=1.50,
+        )
 
-        # Write multiple entries — last one is a failure
-        entries = [
-            json.dumps({"passed": True, "build_id": "build-1"}),
-            json.dumps({"passed": False, "build_id": "build-2"}),
-        ]
-        history.write_text("\n".join(entries) + "\n")
+        entries = load_history(tmp_path)
+        assert len(entries) == 1
+        assert entries[0]["command"] == "build"
+        assert entries[0]["tested"] == 2
+        assert entries[0]["passed"] == 1
+        assert len(entries[0]["findings"]) == 2
 
-        # Create PoW with failure details
-        pow_dir = tmp_path / "otto_logs" / "certifier"
-        pow_dir.mkdir(parents=True)
-        pow_data = {
-            "stories": [
-                {"story_id": "auth", "passed": False, "summary": "Login broken", "evidence": ""},
-            ]
-        }
-        (pow_dir / "proof-of-work.json").write_text(json.dumps(pow_data))
+    def test_format_for_prompt_empty(self, tmp_path):
+        """No history → empty string."""
+        from otto.memory import format_for_prompt
+        assert format_for_prompt(tmp_path) == ""
 
-        result = _get_previous_failure(tmp_path)
-        assert result is not None
-        assert "auth" in result
-        assert "Login broken" in result
+    def test_format_for_prompt_with_history(self, tmp_path):
+        """History → prompt section with findings."""
+        from otto.memory import format_for_prompt, record_run
 
-    def test_returns_none_for_passed(self, tmp_path):
-        """Should return None when last build passed."""
-        from otto.pipeline import _get_previous_failure
+        record_run(
+            tmp_path, command="certify", certifier_mode="fast",
+            stories=[{"story_id": "smoke", "passed": True, "summary": "Works"}],
+            cost=0.14,
+        )
 
-        history = tmp_path / "otto_logs" / "run-history.jsonl"
-        history.parent.mkdir(parents=True)
-        history.write_text(json.dumps({"passed": True}) + "\n")
+        result = format_for_prompt(tmp_path)
+        assert "Previous Certification History" in result
+        assert "smoke" in result
+        assert "VERIFY" in result  # must include verification guidance
 
-        assert _get_previous_failure(tmp_path) is None
+    def test_max_entries_cap(self, tmp_path):
+        """Only last N entries are returned."""
+        from otto.memory import MAX_ENTRIES, load_history, record_run
 
-    def test_handles_empty_file(self, tmp_path):
-        """Should return None for empty history file."""
-        from otto.pipeline import _get_previous_failure
+        for i in range(MAX_ENTRIES + 3):
+            record_run(
+                tmp_path, command="build", certifier_mode="fast",
+                stories=[{"story_id": f"s{i}", "passed": True, "summary": f"Story {i}"}],
+                cost=0.1,
+            )
 
-        history = tmp_path / "otto_logs" / "run-history.jsonl"
-        history.parent.mkdir(parents=True)
-        history.write_text("")
-
-        assert _get_previous_failure(tmp_path) is None
+        entries = load_history(tmp_path)
+        assert len(entries) == MAX_ENTRIES

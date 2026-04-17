@@ -79,6 +79,12 @@ async def run_agentic_certifier(
         format_kwargs["target"] = target
     prompt = _load_certifier_prompt(mode=_mode).format(**format_kwargs)
 
+    # Inject cross-run memory so certifier knows what was tested before
+    from otto.memory import format_for_prompt
+    memory_section = format_for_prompt(project_dir)
+    if memory_section:
+        prompt += f"\n\n{memory_section}"
+
     options = make_agent_options(project_dir, config)
 
     logger.info("Running agentic certifier on %s", project_dir)
@@ -189,6 +195,20 @@ async def run_agentic_certifier(
         "Agentic certifier done: %s, %d/%d stories, %.1fs, $%.3f",
         outcome.value, parsed.stories_passed, parsed.stories_tested, total_duration, float(cost or 0),
     )
+
+    # Record cross-run memory
+    try:
+        from otto.memory import record_run
+        record_run(
+            project_dir,
+            command="certify",
+            certifier_mode=_mode,
+            stories=story_results,
+            cost=float(cost or 0),
+        )
+    except Exception:
+        logger.warning("Failed to record certifier memory")
+
     return report
 
 
