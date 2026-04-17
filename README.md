@@ -85,27 +85,87 @@ otto improve target "all endpoints respond in < 100ms"
 - **Libraries** — Python, Node.js (import + unit testing)
 - **Web apps** — Next.js, React (browser testing, screenshots, video)
 
-## CLI
+## Command Reference
 
+### `otto build`
+
+Build a product from a natural language intent. One agent builds, certifies, and fixes autonomously.
+
+```bash
+otto build "bookmark manager with tags and search"
+otto build "CLI tool that converts CSV to JSON"
+otto build "add dark mode toggle to the settings page"   # incremental
+
+# Options
+otto build "intent" --no-qa        # skip certification (just build)
+otto build "intent" --split        # system-controlled certify loop (vs agent-driven)
+otto build "intent" -n 5           # max 5 certification rounds (default: 8)
 ```
-otto build "intent"                    Build + certify a product
-otto build "intent" --no-qa           Build without certification
-otto build "intent" --split           System-controlled certify loop
-otto build "intent" -n 5              Max 5 certification rounds
 
-otto certify                           Certify (reads intent.md)
-otto certify "intent"                  Certify with explicit intent
-otto certify --thorough                Adversarial deep inspection
+### `otto certify`
 
-otto improve bugs                      Find and fix bugs
-otto improve bugs "error handling"     Focused bug hunting
-otto improve feature                   Suggest improvements
-otto improve feature "search UX"       Focused feature work
-otto improve target "metric < value"   Optimize toward a target
-otto improve target "metric" -n 10     Up to 10 rounds
+Certify any project — independent, builder-blind verification. Tests the product as a real user. Works regardless of how it was built (otto, Claude Code, human).
 
-otto history                           Show build history
-otto setup                             Generate CLAUDE.md for project
+The intent describes what the product should do. The certifier generates test stories from it.
+
+```bash
+otto certify                                            # reads intent.md or README.md
+otto certify "notes API with auth, CRUD, and search"    # explicit intent
+otto certify --thorough                                 # adversarial: edge cases, code review
+```
+
+### `otto improve`
+
+Iterate on existing code. Three modes, each with a specialized certifier prompt. Creates an improvement branch for isolation.
+
+#### `otto improve bugs`
+
+Find and fix bugs, edge cases, error handling gaps. Adversarial certifier tries to break the product, then the build agent fixes what it finds.
+
+```bash
+otto improve bugs                       # find and fix all bugs
+otto improve bugs "error handling"      # focus on error handling
+otto improve bugs "auth and security"   # focus on auth
+otto improve bugs -n 5                  # up to 5 rounds (default: 3)
+```
+
+#### `otto improve feature`
+
+Suggest and implement product improvements. Evaluates the product as a real user, identifies missing features and UX gaps, then implements them.
+
+```bash
+otto improve feature                    # suggest and implement improvements
+otto improve feature "search UX"        # focus on search experience
+otto improve feature "mobile layout"    # focus on mobile
+otto improve feature -n 5              # up to 5 rounds (default: 3)
+```
+
+#### `otto improve target`
+
+Optimize toward a measurable target. Measures a metric, compares to the target, and iterates until met. The goal is a required argument.
+
+```bash
+otto improve target "response time < 100ms"
+otto improve target "test coverage > 90%"
+otto improve target "bundle size < 500kb"
+otto improve target "lighthouse score > 95" -n 10    # up to 10 rounds (default: 5)
+```
+
+### `otto history`
+
+Show build history with results, cost, and duration.
+
+```bash
+otto history             # show recent builds
+otto history -n 20       # show last 20 builds
+```
+
+### `otto setup`
+
+Generate a `CLAUDE.md` file with project conventions for the coding agent. Reads the project structure and creates instructions automatically.
+
+```bash
+otto setup
 ```
 
 ## Configuration
