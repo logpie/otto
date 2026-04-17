@@ -170,16 +170,42 @@ otto setup
 
 ## Configuration
 
-`otto.yaml` (auto-created on first run):
+`otto.yaml` is auto-created on first run (`otto build` or `otto setup`). All settings are optional — otto auto-detects what it can.
 
 ```yaml
-# Model (optional — defaults to provider's best)
-# model: claude-sonnet-4-5-20250514
+# Auto-detected (you usually don't need to set these)
+default_branch: main
+test_command: pytest                   # auto-detected from project files
 
-# Certification
-# certifier_timeout: 900         # max seconds for build+certify session
-# max_certify_rounds: 8          # max rounds in build loop
+# Provider — which coding agent to use
+provider: claude                       # "claude" (default) or "codex"
+model: null                            # override model (e.g. "sonnet", "gpt-5")
+                                       # if null, uses the provider's default
+
+# Certification tuning
+certifier_timeout: 900                 # max seconds per build+certify session
+max_certify_rounds: 8                  # max certification rounds before stopping
 ```
+
+### Providers
+
+Otto supports two agent providers:
+
+| Provider | What it uses | Set with |
+|----------|-------------|----------|
+| `claude` (default) | Claude Code CLI via Agent SDK | `provider: claude` |
+| `codex` | OpenAI Codex CLI | `provider: codex` |
+
+Both providers use the same prompts, certification loop, and output parsing. Switch providers by changing one line in `otto.yaml`.
+
+### Auto-detection
+
+On first run, otto detects:
+- **Test command** — npm test, pytest, cargo test, go test, etc. (15+ frameworks)
+- **Package manager** — npm, pnpm, yarn, bun
+- **Default branch** — from git remote
+
+You can override any auto-detected value in `otto.yaml`.
 
 ## Logs
 
