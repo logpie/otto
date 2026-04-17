@@ -50,7 +50,7 @@ async def build_agentic_v3(
     The coding agent does everything — build, self-test, dispatch certifier,
     read findings, fix, re-certify. The orchestrator just launches and waits.
     """
-    from otto.agent import make_agent_options, make_live_logger, run_agent_query
+    from otto.agent import AgentCallError, make_agent_options, run_agent_with_timeout
     from otto.observability import append_text_log
 
     build_id = f"build-{int(time.time())}-{os.getpid()}"
@@ -102,29 +102,16 @@ async def build_agentic_v3(
     # in the returned text for parsing.
     from otto.config import get_timeout
     timeout = get_timeout(config)
-    build_live_log = build_dir / "live.log"
-    build_callbacks = make_live_logger(build_live_log)
-    _close_build_log = build_callbacks.pop("_close")
     try:
-        text, cost, _ = await asyncio.wait_for(
-            run_agent_query(prompt, options, capture_tool_output=True,
-                            **build_callbacks),
+        text, cost = await run_agent_with_timeout(
+            prompt, options,
+            log_path=build_dir / "live.log",
             timeout=timeout,
+            project_dir=project_dir,
+            capture_tool_output=True,
         )
-    except asyncio.TimeoutError:
-        logger.error("Build timed out after %ds", timeout)
-        text, cost = f"BUILD TIMED OUT after {timeout}s", 0.0
-        _cleanup_orphan_processes(project_dir)
-    except KeyboardInterrupt:
-        _close_build_log()
-        _cleanup_orphan_processes(project_dir)
-        raise
-    except Exception as exc:
-        logger.exception("Build agent crashed")
-        text, cost = f"BUILD ERROR: {exc}", 0.0
-        _cleanup_orphan_processes(project_dir)
-    finally:
-        _close_build_log()
+    except AgentCallError as err:
+        text, cost = f"BUILD ERROR: {err.reason}", 0.0
 
     total_duration = round(time.monotonic() - start_time, 1)
 

@@ -46,7 +46,7 @@ async def run_agentic_certifier(
     MUST run in the caller's process (not a subprocess) so the Agent tool
     is available for subagent dispatch.
     """
-    from otto.agent import make_agent_options, make_live_logger, run_agent_query
+    from otto.agent import AgentCallError, make_agent_options, run_agent_with_timeout
     from otto.certifier.report import (
         CertificationOutcome,
         CertificationReport,
@@ -83,49 +83,21 @@ async def run_agentic_certifier(
 
     logger.info("Running agentic certifier on %s", project_dir)
 
-    # Lazy import for orphan cleanup on timeout/crash
-    from otto.pipeline import _cleanup_orphan_processes
-
-    # One LLM call — the agent does everything
-    import asyncio as _asyncio
     from otto.config import get_timeout
     certifier_timeout = get_timeout(config)
-    live_log = report_dir / "live.log"
-    live_callbacks = make_live_logger(live_log)
-    _close_log = live_callbacks.pop("_close")
     try:
-        text, cost, result_msg = await _asyncio.wait_for(
-            run_agent_query(prompt, options, **live_callbacks),
+        text, cost = await run_agent_with_timeout(
+            prompt, options,
+            log_path=report_dir / "live.log",
             timeout=certifier_timeout,
+            project_dir=project_dir,
         )
-    except _asyncio.TimeoutError:
-        logger.error("Certifier timed out after %ds", certifier_timeout)
-        _close_log()
-        _cleanup_orphan_processes(project_dir)
+    except AgentCallError:
         return CertificationReport(
-            product_type="unknown", interaction="unknown",
-            tiers=[], findings=[],
             outcome=CertificationOutcome.INFRA_ERROR,
             cost_usd=0.0,
             duration_s=round(time.monotonic() - start_time, 1),
         )
-    except KeyboardInterrupt:
-        _close_log()
-        _cleanup_orphan_processes(project_dir)
-        raise
-    except Exception as exc:
-        logger.exception("Certifier agent crashed")
-        _close_log()
-        _cleanup_orphan_processes(project_dir)
-        return CertificationReport(
-            product_type="unknown", interaction="unknown",
-            tiers=[], findings=[],
-            outcome=CertificationOutcome.INFRA_ERROR,
-            cost_usd=0.0,
-            duration_s=round(time.monotonic() - start_time, 1),
-        )
-
-    _close_log()
 
     # Save full agent output for auditability (not truncated)
     try:

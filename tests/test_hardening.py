@@ -181,7 +181,7 @@ class TestTimeoutEnforcement:
         # Check the raw log mentions timeout
         build_dir = tmp_git_repo / "otto_logs" / "builds" / result.build_id
         raw = (build_dir / "agent-raw.log").read_text()
-        assert "TIMED OUT" in raw
+        assert "Timed out" in raw or "TIMED OUT" in raw
 
 
 # -- Test: CLAUDECODE env var --

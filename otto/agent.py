@@ -122,6 +122,61 @@ def make_agent_options(
     return opts
 
 
+class AgentCallError(Exception):
+    """Raised when an agent call fails (timeout or crash)."""
+    def __init__(self, reason: str, text: str = "", cost: float = 0.0):
+        self.reason = reason
+        self.text = text
+        self.cost = cost
+        super().__init__(reason)
+
+
+async def run_agent_with_timeout(
+    prompt: str,
+    options: AgentOptions,
+    *,
+    log_path: Path,
+    timeout: int,
+    project_dir: Path,
+    capture_tool_output: bool = False,
+) -> tuple[str, float]:
+    """Run an agent query with live logging, timeout, and orphan cleanup.
+
+    Returns (text, cost) on success. Raises AgentCallError on timeout/crash.
+    Always closes the live logger and cleans up orphan processes on failure.
+    """
+    import asyncio as _asyncio
+    import logging as _logging
+
+    _log = _logging.getLogger("otto.agent")
+    callbacks = make_live_logger(log_path)
+    _close = callbacks.pop("_close")
+    try:
+        text, cost, _ = await _asyncio.wait_for(
+            run_agent_query(prompt, options,
+                            capture_tool_output=capture_tool_output,
+                            **callbacks),
+            timeout=timeout,
+        )
+        return text, cost
+    except _asyncio.TimeoutError:
+        _log.error("Agent timed out after %ds", timeout)
+        from otto.pipeline import _cleanup_orphan_processes
+        _cleanup_orphan_processes(project_dir)
+        raise AgentCallError(f"Timed out after {timeout}s")
+    except KeyboardInterrupt:
+        from otto.pipeline import _cleanup_orphan_processes
+        _cleanup_orphan_processes(project_dir)
+        raise
+    except Exception as exc:
+        _log.exception("Agent crashed")
+        from otto.pipeline import _cleanup_orphan_processes
+        _cleanup_orphan_processes(project_dir)
+        raise AgentCallError(f"Agent crashed: {exc}")
+    finally:
+        _close()
+
+
 def _provider_name(options: AgentOptions | None) -> str:
     provider = (getattr(options, "provider", None) or "claude").strip().lower()
     if provider not in {"claude", "codex"}:
