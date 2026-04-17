@@ -27,6 +27,13 @@ cat otto_logs/run-history.jsonl       # Machine-readable build log
 | `evidence/*.png` | Screenshots of web app pages |
 | `evidence/recording.webm` | Video of browser walkthrough |
 
+### Improve logs
+| File | What it tells you |
+|------|-------------------|
+| `build-journal.md` | Round-by-round index: action, result, cost |
+| `current-state.md` | Latest certifier findings (handoff for fix agent) |
+| `improvement-report.md` | Final summary with branch info and merge instructions |
+
 ### Other logs
 | File | What it tells you |
 |------|-------------------|

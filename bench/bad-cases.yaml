@@ -1,7 +1,0 @@
-# Otto Bad Cases — accumulated from pressure test runs
-# Used for fast regression testing. Cases graduate after 3 consecutive passes.
-# See .claude/skills/pressure-test/SKILL.md for format details.
-
-cases: []
-
-graduated: []

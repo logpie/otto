@@ -1,6 +1,0 @@
-PASS alias resolves to subcommand without error
-PASS array alias also resolves
-PASS direct key match still works
-PASS aliases appear in rendered help output
-PASS nested subcommand aliases resolve
-PASS unknown command still errors

@@ -1,1 +1,0 @@
-Improve parseQuery as discussed in issue #282 so the returned query object is safer to use with arbitrary keys while preserving the existing parsing semantics. Add tests that verify normal query parsing still works and that the returned object shape is compatible with keys that would otherwise collide with object-prototype properties. Run tests with: npm test

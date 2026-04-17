@@ -1,5 +1,0 @@
-PASS Unqualified keycap '#\u20E3' has width 2
-PASS Unqualified keycap '0\u20E3' has width 2
-PASS Minimally-qualified heart on fire has width 2
-PASS Minimally-qualified rainbow flag has width 2
-PASS Regular ASCII string has correct width

@@ -1,9 +1,0 @@
-All 7 tests pass. Here's what the fix does:
-
-1. **`index.js:9`** — Added a negative lookahead `(?![_.\- ]+)` to `NUMBERS_AND_IDENTIFIER` so it won't match digit-letter transitions when the letter is followed by a separator (meaning the letter belongs to the same word as the digits, not a new word).
-
-2. **`index.js:52-53`** — Swapped the replacement order: numbers are processed **before** separators, so separators are still present for the negative lookahead to check against.
-
-3. **`test.js`** — Added tests for `b2b_registration_request` → `b2bRegistrationRequest` and `b2b-registration-request` → `b2bRegistrationRequest`.
-
-The key insight: in `b2b_registration`, the `b` after `2` is part of the same word segment (`b2b`), with `_` being the real word boundary. The negative lookahead prevents the digit-to-letter transition from being treated as a word boundary when a separator immediately follows.

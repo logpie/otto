@@ -1,5 +1,0 @@
-FAIL Unqualified keycap '#\u20E3' has width 2: keycap #: expected 2, got 1
-FAIL Unqualified keycap '0\u20E3' has width 2: keycap 0: expected 2, got 1
-FAIL Minimally-qualified heart on fire has width 2: heart on fire MQ: expected 2, got 1
-FAIL Minimally-qualified rainbow flag has width 2: rainbow flag MQ: expected 2, got 1
-PASS Regular ASCII string has correct width

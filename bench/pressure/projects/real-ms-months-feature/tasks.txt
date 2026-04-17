@@ -1,1 +1,0 @@
-Add month-unit support to ms based on issue #57 / PR #251. The library should accept month strings such as 1mo and 2 months, and month-sized millisecond values should format back to month units consistently in both short and long modes. Add tests covering parsing, formatting, and consistency with the existing year unit. Run tests with: npm test

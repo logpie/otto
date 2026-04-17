@@ -1,3 +1,0 @@
-Create a Stack class in stack.py with push, pop, peek, is_empty, and size methods. Include tests.
-Add a min_stack method that returns the minimum element in O(1) time using an auxiliary stack. Include tests.
-Add evaluate_rpn(expression: str) that uses Stack to evaluate reverse polish notation like '3 4 + 2 *'. Include tests.

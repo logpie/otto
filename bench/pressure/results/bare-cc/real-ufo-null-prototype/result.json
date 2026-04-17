@@ -1,8 +1,0 @@
-{
-    "otto_pass": "DONE",
-    "verify_pass": "PASS",
-    "cost": 0.00,
-    "time_s": 72,
-    "attempts": 0,
-    "runner": "bare-cc"
-}

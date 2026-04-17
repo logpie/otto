@@ -1,2 +1,0 @@
-Create a REST API in index.js with GET /hello returning {message: 'hello world'} and POST /echo returning the request body. Use Express. Include tests with supertest.
-Add a GET /health endpoint returning {status: 'ok', uptime: process.uptime()} with tests.

@@ -1,1 +1,0 @@
-Add the preserveConsecutiveUppercase option requested in issue #76. When enabled, uppercase runs in the input should remain uppercase through camel-casing instead of being normalized to a single capitalized word. Keep the default behavior unchanged when the option is not provided, and add tests for both modes. Run tests with: npm test

@@ -1,1 +1,0 @@
-Fix the parseFilename bug from issue #283. Calling parseFilename without an options object should work normally, but the current implementation crashes when the second argument is omitted. Update the implementation and add tests that cover calls with no options as well as existing strict-mode behavior. Run tests with: npm test

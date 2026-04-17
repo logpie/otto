@@ -1,4 +1,0 @@
-Traceback (most recent call last):
-  File "/private/tmp/bench-real-humanize-precisedelta/verify_check.py", line 2, in <module>
-    import humanize
-ModuleNotFoundError: No module named 'humanize'

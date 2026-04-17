@@ -1,8 +1,0 @@
-{
-    "runner_pass": "PASS",
-    "verify_pass": "PASS",
-    "cost": 1.74,
-    "time_s": 1226,
-    "attempts": 1,
-    "runner": "otto"
-}

@@ -1,4 +1,0 @@
-Traceback (most recent call last):
-  File "/private/tmp/bench-real-cachetools-bugfix/verify_check.py", line 4, in <module>
-    from cachetools.func import lru_cache, ttl_cache
-ModuleNotFoundError: No module named 'cachetools'

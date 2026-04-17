@@ -1,11 +1,21 @@
 __pycache__/
 *.pyc
-logs/
-tasks.json
-tasks.lock
-weather2/.next/
-.worktrees/
+*.db
+*.sqlite
+
+# Otto runtime (generated during builds)
+otto_logs/
+otto.lock
+intent.md
+build-journal.md
+current-state.md
+
+# Development
 otto.egg-info/
-bench/smoke/results/
-bench/i2p-projects/
-qkrem.md
+.venv/
+.worktrees/
+.claude/worktrees/
+
+# Scratch
+qkrem*.md
+summary.json

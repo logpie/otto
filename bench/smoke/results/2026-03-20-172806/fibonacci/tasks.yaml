@@ -1,8 +1,0 @@
-tasks:
-- id: 1
-  key: daa5d7aa141b
-  prompt: Create a Python function in calc.py that computes fibonacci numbers. Include
-    tests.
-  status: failed
-  attempts: 2
-  error: pilot crashed during execution

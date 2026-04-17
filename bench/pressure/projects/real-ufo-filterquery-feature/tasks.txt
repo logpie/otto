@@ -1,1 +1,0 @@
-Add the filterQuery utility requested in issue #230. It should take a URL-like input and a predicate over query keys, then return the same URL with only the matching query parameters preserved while leaving the path and fragment untouched. Add tests covering basic filtering, repeated keys, and fragment preservation. Run tests with: npm test

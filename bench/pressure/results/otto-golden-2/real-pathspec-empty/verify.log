@@ -1,4 +1,0 @@
-PASS re2 backend does not raise ValueError on empty patterns
-PASS hyperscan backend does not raise ValueError on empty patterns
-FAIL re2 backend handles empty gracefully: re2 backend should handle empty patterns without raising
-PASS Default backend still handles empty patterns
