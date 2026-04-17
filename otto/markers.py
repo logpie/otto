@@ -58,7 +58,7 @@ def _parse_story_result(stripped: str, evidence: dict[str, str]) -> dict[str, An
 
 def _is_template_verdict(verdict_text: str) -> bool:
     """Check if VERDICT line is a template placeholder like 'PASS or FAIL'."""
-    return "or" in verdict_text.lower()
+    return " or " in verdict_text.lower()
 
 
 def _extract_evidence(text: str) -> dict[str, str]:

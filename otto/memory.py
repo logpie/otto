@@ -16,6 +16,7 @@ Design principles (from research):
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 import time
 from pathlib import Path
@@ -33,7 +34,22 @@ def record_run(
     stories: list[dict[str, Any]],
     cost: float,
 ) -> None:
-    """Append one entry after a run completes."""
+    """Append one entry after a run completes. Best-effort — never raises."""
+    try:
+        _record_run_impl(project_dir, command=command, certifier_mode=certifier_mode,
+                         stories=stories, cost=cost)
+    except Exception:
+        logging.getLogger("otto.memory").warning("Failed to record certifier memory")
+
+
+def _record_run_impl(
+    project_dir: Path,
+    *,
+    command: str,
+    certifier_mode: str,
+    stories: list[dict[str, Any]],
+    cost: float,
+) -> None:
     history_path = project_dir / HISTORY_FILE
     history_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -135,3 +151,13 @@ def format_for_prompt(project_dir: Path) -> str:
         lines.append("")
 
     return "\n".join(lines)
+
+
+def inject_memory(prompt: str, project_dir: Path, config: dict) -> str:
+    """Append cross-run memory to prompt if enabled in config."""
+    if not config.get("memory"):
+        return prompt
+    section = format_for_prompt(project_dir)
+    if section:
+        return prompt + f"\n\n{section}"
+    return prompt

@@ -33,8 +33,7 @@ async def run_agentic_certifier(
     project_dir: Path,
     config: dict[str, Any] | None = None,
     *,
-    thorough: bool = False,
-    mode: str | None = None,
+    mode: str = "standard",
     focus: str | None = None,
     target: str | None = None,
 ) -> "CertificationReport":
@@ -68,23 +67,18 @@ async def run_agentic_certifier(
     evidence_dir.mkdir(parents=True, exist_ok=True)
 
     focus_section = f"## Improvement Focus\n{focus}" if focus else ""
-    # Resolve certifier mode: explicit mode > thorough flag > standard
-    _mode = mode or ("thorough" if thorough else "standard")
+    _mode = mode
     format_kwargs: dict[str, str] = {
         "intent": intent,
         "evidence_dir": str(evidence_dir),
         "focus_section": focus_section,
+        "target": target or "",
     }
-    if target:
-        format_kwargs["target"] = target
     prompt = _load_certifier_prompt(mode=_mode).format(**format_kwargs)
 
     # Inject cross-run memory (opt-in via config)
-    if config.get("memory"):
-        from otto.memory import format_for_prompt
-        memory_section = format_for_prompt(project_dir)
-        if memory_section:
-            prompt += f"\n\n{memory_section}"
+    from otto.memory import inject_memory
+    prompt = inject_memory(prompt, project_dir, config)
 
     options = make_agent_options(project_dir, config)
 
@@ -141,7 +135,6 @@ async def run_agentic_certifier(
     # Stash story results for upstream extraction (CLI display)
     report._story_results = story_results  # type: ignore[attr-defined]
     report._metric_value = parsed.metric_value  # type: ignore[attr-defined]
-    report._metric_target = parsed.metric_target  # type: ignore[attr-defined]
     report._metric_met = parsed.metric_met  # type: ignore[attr-defined]
 
     # Write PoW report
@@ -198,17 +191,9 @@ async def run_agentic_certifier(
     )
 
     # Record cross-run memory
-    try:
-        from otto.memory import record_run
-        record_run(
-            project_dir,
-            command="certify",
-            certifier_mode=_mode,
-            stories=story_results,
-            cost=float(cost or 0),
-        )
-    except Exception:
-        logger.warning("Failed to record certifier memory")
+    from otto.memory import record_run
+    record_run(project_dir, command="certify", certifier_mode=_mode,
+               stories=story_results, cost=float(cost or 0))
 
     return report
 

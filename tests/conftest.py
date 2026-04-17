@@ -1,13 +1,9 @@
 """Shared test fixtures for otto tests."""
 
-import os
 import subprocess
-import tempfile
 from pathlib import Path
 
 import pytest
-import yaml
-
 
 
 def pytest_collection_modifyitems(items):
@@ -52,16 +48,3 @@ def tmp_git_repo(tmp_path):
         cwd=repo, capture_output=True, check=True,
     )
     return repo
-
-
-@pytest.fixture
-def sample_config(tmp_git_repo):
-    """Create a sample otto.yaml in the temp repo."""
-    config_path = tmp_git_repo / "otto.yaml"
-    config = {
-        "test_command": "pytest",
-        "model": "sonnet",
-        "default_branch": "main",
-    }
-    config_path.write_text(yaml.dump(config))
-    return config_path

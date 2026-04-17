@@ -2,117 +2,251 @@
 
 ## Overview
 
-Otto is ~3,500 lines of Python. Three commands: `build`, `certify`, `improve`.
+Otto is ~4,000 lines of Python. It builds, certifies, and improves software
+products using LLM agents.
 
 ```
-otto build "intent"                    # one agent builds, certifies, fixes
-otto certify                           # standalone verification on any project
+otto build "bookmark manager"          # build + certify + fix
+otto certify                           # standalone verification
 otto improve bugs                      # find and fix bugs
 otto improve feature "search UX"       # suggest and implement improvements
-otto improve target "latency < 100ms"  # optimize toward a metric target
+otto improve target "latency < 100ms"  # optimize toward a metric
 ```
 
-## Core Design
+## System Diagram
 
-### Two primitives
+```
+┌─────────────────────────────────────────────────────┐
+│                     CLI Layer                        │
+│  cli.py (build, certify)  cli_improve.py (improve)  │
+└──────────┬─────────────────────┬────────────────────┘
+           │                     │
+     ┌─────▼──────┐    ┌────────▼─────────┐
+     │ Agent Mode │    │   Split Mode     │
+     │ (default)  │    │   (--split)      │
+     └─────┬──────┘    └────────┬─────────┘
+           │                     │
+     ┌─────▼──────────┐  ┌──────▼───────────────┐
+     │ build_agentic  │  │ run_certify_fix_loop  │
+     │ _v3()          │  │                       │
+     │                │  │  ┌──► certify ──┐     │
+     │  One agent     │  │  │              │     │
+     │  session:      │  │  │  if fail:    │     │
+     │  build/certify │  │  │   ┌──────┐   │     │
+     │  /fix loop     │  │  └──┤ fix  ├───┘     │
+     │                │  │     └──────┘          │
+     └────────┬───────┘  └──────────┬────────────┘
+              │                      │
+        ┌─────▼──────────────────────▼─────┐
+        │        Agent SDK Layer           │
+        │  run_agent_with_timeout()        │
+        │  • live logging                  │
+        │  • timeout + orphan cleanup      │
+        │  • retry on error                │
+        │  • session_id for resume         │
+        └─────────────┬───────────────────┘
+                      │
+        ┌─────────────▼───────────────────┐
+        │     Claude Code / Codex CLI      │
+        └──────────────────────────────────┘
+```
 
-1. **Code agent** — builds/fixes code. Uses `code.md` prompt (steps 1-6: explore, plan, build, test, self-review, commit). No certification knowledge.
+## Build Flow (Agent Mode)
 
-2. **Certifier agent** — evaluates a product. Builder-blind: reads the project fresh, doesn't know how it was built. Reports symptoms, not fixes.
+```
+otto build "bookmark manager with tags"
+│
+├─ Load build.md prompt (explore → build → test → certify → fix → report)
+├─ Pre-fill certifier prompt (certifier-thorough.md with {intent})
+├─ Inject cross-run memory (if enabled)
+│
+└─ Single agent session ──────────────────────────────────────┐
+     │                                                         │
+     ├─ 1. Explore project, plan architecture                  │
+     ├─ 2. Build code, write tests, commit                     │
+     ├─ 3. Dispatch certifier subagent ───┐                    │
+     │                                     │                    │
+     │    Certifier (builder-blind):       │                    │
+     │    ├─ Read project fresh            │                    │
+     │    ├─ Install deps, start app       │                    │
+     │    ├─ Test 5-10 user stories        │                    │
+     │    └─ Report: PASS/FAIL per story   │                    │
+     │                                     │                    │
+     ├─ 4. Read findings ◄────────────────┘                    │
+     ├─ 5. If FAIL: fix code, commit, re-dispatch certifier    │
+     ├─ 6. Repeat until two consecutive PASSes                 │
+     └─ 7. Report structured markers ─────────────────────────┘
+                    │
+                    ▼
+        markers.py: parse STORY_RESULT, VERDICT, CERTIFY_ROUND
+                    │
+                    ▼
+        Write: agent.log, proof-of-work.{json,html}, checkpoint.json
+```
 
-### Two orchestration modes
+## Improve Flow (Split Mode)
 
-**Agent-driven (mono)** — `otto build`: one agent session drives everything. The build prompt (`build.md`) includes certification steps 7-9: dispatch certifier as subagent, read findings, fix, re-dispatch. Agent IS the orchestrator.
+```
+otto improve bugs "error handling" --split -n 5
+│
+├─ Create improvement branch (improve/2026-04-17)
+├─ Load config, set max_rounds=5
+│
+└─ Python-driven loop ──────────────────────────────────────┐
+     │                                                       │
+     │  ┌─── Round 1 ────────────────────────────────────┐   │
+     │  │                                                 │   │
+     │  │  Certify: fresh certifier agent session         │   │
+     │  │  ├─ Load certifier-thorough.md                  │   │
+     │  │  ├─ Test product, report findings               │   │
+     │  │  └─ Parse results (markers.py)                  │   │
+     │  │                                                 │   │
+     │  │  If FAIL:                                       │   │
+     │  │  Fix: fresh code agent session                  │   │
+     │  │  ├─ Load code.md                                │   │
+     │  │  ├─ Inject failures + previous attempts         │   │
+     │  │  └─ Fix code, commit                            │   │
+     │  │                                                 │   │
+     │  │  Write checkpoint ──► checkpoint.json            │   │
+     │  │  Write journal ──► build-journal.md              │   │
+     │  │                                                 │   │
+     │  └─────────────────────────────────────────────────┘   │
+     │                                                       │
+     │  Round 2, 3, ... (until PASS or max_rounds)           │
+     └───────────────────────────────────────────────────────┘
+```
 
-**System-driven (loop)** — `otto improve`: Python drives `certify → fix → certify → fix` loop. Each step is a fresh agent call. Loop terminates when certifier finds no issues (bugs/feature mode) or metric meets target (target mode).
+## Improve Flow (Agent Mode — Default)
 
-### Prompts are files
+```
+otto improve bugs "error handling" -n 5
+│
+├─ Create improvement branch
+│
+└─ Single agent session (improve.md prompt) ─────────────────┐
+     │                                                        │
+     ├─ 1. Explore project                                    │
+     ├─ 2. Dispatch certifier subagent                        │
+     ├─ 3. Read findings, fix, re-dispatch                    │
+     ├─ 4. Repeat until two consecutive PASSes                │
+     └─ 5. Report markers ───────────────────────────────────┘
+                    │
+     Agent IS the memory (single session, auto-compact)
+```
+
+## Certifier Modes
+
+```
+                    ┌─────────────┐
+                    │   certify   │
+                    └──────┬──────┘
+                           │
+         ┌─────────┬───────┼────────┬──────────┐
+         ▼         ▼       ▼        ▼          ▼
+     ┌───────┐ ┌───────┐ ┌──────┐ ┌────────┐ ┌───────┐
+     │ fast  │ │ std   │ │ thor │ │ hill   │ │target │
+     │       │ │       │ │ ough │ │ climb  │ │       │
+     └───┬───┘ └───┬───┘ └──┬───┘ └───┬────┘ └───┬───┘
+         │         │        │         │           │
+      3-5 happy  full     adver-   suggest    measure
+      paths,     verify   sarial,  features,  metric,
+      inline,    + sub-   edge     UX gaps    compare
+      ~30s       agents   cases               to target
+                 ~2min    ~5min    ~3min      ~2min
+```
+
+## Checkpoint & Resume
+
+```
+otto improve bugs --split -n 50
+│
+├─ Round 1 ──► checkpoint.json {round:1, status:in_progress}
+│   ├─ Certify ──► checkpoint.json {round:1, stories:...}
+│   └─ Fix
+│
+├─ Round 2 ──► checkpoint.json {round:2, ...}
+│   ├─ Certify
+│   └─ Fix
+│
+├─ [CRASH or Ctrl+C]
+│   └─ checkpoint.json {round:2, status:paused}
+│
+└─ otto improve bugs --split --resume
+    └─ Reads checkpoint → "Resuming from round 3"
+       └─ Round 3, 4, ... continues
+```
+
+Error retry: certifier/build retried up to 2x on failure before moving on.
+
+## Prompts
+
+All prompts are markdown files — edit without touching Python.
 
 ```
 otto/prompts/
-  build.md                # Full build + certify loop (mono mode)
-  code.md                 # Code-only (system-driven mode)
-  certifier.md            # Standard verification
-  certifier-thorough.md   # Adversarial bug hunting (improve bugs)
-  certifier-hillclimb.md  # Feature suggestions (improve feature)
-  certifier-target.md     # Metric measurement (improve target)
+  build.md                  Agent-mode build (explore→build→certify→fix loop)
+  improve.md                Agent-mode improve (certify→fix loop, no build step)
+  code.md                   Code-only (split-mode fix agent, no cert knowledge)
+  certifier.md              Standard verification (subagents, screenshots)
+  certifier-fast.md         Happy path smoke test (inline, ~30s)
+  certifier-thorough.md     Adversarial (edge cases, code review)
+  certifier-hillclimb.md    Product improvements (missing features, UX)
+  certifier-target.md       Metric measurement (METRIC_VALUE/METRIC_MET)
 ```
 
-Edit without touching Python. Loaded at runtime by `otto/prompts/__init__.py`.
+## Key Modules
 
-## Code Map
-
-```
-otto build "intent"
-  cli.py → build()
-    pipeline.py → build_agentic_v3()
-      Load build.md + pre-fill certifier prompt
-      agent.py → run_agent_with_timeout()
-        Agent builds, tests, dispatches certifier, reads findings, fixes
-      markers.py → parse_certifier_markers() → stories, verdict, rounds
-      Write logs, PoW reports, run history
-      Return BuildResult
-
-otto certify
-  cli.py → certify()
-    certifier/__init__.py → run_agentic_certifier()
-      Load certifier prompt, fill {intent}/{evidence_dir}
-      agent.py → run_agent_with_timeout()
-      markers.py → parse results
-      Write PoW reports
-      Return CertificationReport
-
-otto improve bugs/feature/target
-  cli_improve.py → improve group
-    Create improvement branch
-    pipeline.py → run_certify_fix_loop()
-      Loop: certifier → parse results → if not done: code agent fixes → repeat
-      Target mode: checks METRIC_MET instead of story pass/fail
-      Journal: tracks rounds, findings, current state
-    Display results, write report
-```
-
-## Files
-
-| File | Lines | Purpose |
-|------|------:|---------|
-| `pipeline.py` | 751 | `build_agentic_v3`, `run_certify_fix_loop`, result parsing, PoW |
-| `agent.py` | 591 | SDK wrapper, `run_agent_with_timeout`, `make_agent_options` |
-| `certifier/__init__.py` | 350 | `run_agentic_certifier`, PoW generation |
-| `config.py` | 334 | Config loading, `resolve_intent`, `get_timeout`, `get_max_rounds` |
-| `cli_improve.py` | 282 | `improve` command group: bugs, feature, target |
+| Module | Lines | Purpose |
+|--------|------:|---------|
+| `pipeline.py` | 880 | `build_agentic_v3`, `run_certify_fix_loop`, PoW reports |
+| `agent.py` | 593 | SDK abstraction, `run_agent_with_timeout`, provider switching |
+| `certifier/__init__.py` | 371 | Standalone certifier, PoW generation |
+| `cli_improve.py` | 349 | `improve` command group (bugs/feature/target) |
+| `config.py` | 334 | Config loading, auto-detection, helpers |
 | `journal.py` | 245 | Build journal: round tracking, current state |
-| `markers.py` | 238 | Parse STORY_RESULT, VERDICT, METRIC_VALUE from agent output |
-| `cli.py` | 227 | CLI: build, certify |
-| `cli_setup.py` | 215 | CLI: setup (generates CLAUDE.md) |
-| `cli_logs.py` | 103 | CLI: history command |
-| `certifier/report.py` | 21 | `CertificationReport`, `CertificationOutcome` |
-| `prompts/__init__.py` | 41 | Prompt loader |
+| `cli.py` | 243 | `build`, `certify` commands |
+| `markers.py` | 238 | Parse STORY_RESULT/VERDICT/METRIC from agent output |
+| `checkpoint.py` | 117 | Checkpoint read/write/clear for resume |
+| `memory.py` | 137 | Cross-run certifier memory (opt-in) |
 
-## Error handling
+## Error Handling
 
 Centralized in `run_agent_with_timeout()`:
-- **Timeout**: Configurable via `certifier_timeout` in otto.yaml (default 900s). Orphan processes cleaned up.
-- **Agent crash**: Raises `AgentCallError`. Build returns error text; certifier returns `INFRA_ERROR`.
+- **Timeout**: Configurable via `certifier_timeout` (default 900s). Orphan processes cleaned up.
+- **Agent crash**: `AgentCallError` raised. Callers retry up to 2x.
 - **No output**: No verdict markers → treated as FAIL.
-- **KeyboardInterrupt**: Always re-raised.
-
-## Retry with context
-
-When a build fails and the user re-runs `otto build`:
-1. Pipeline reads `run-history.jsonl` — last build failed?
-2. Reads `proof-of-work.json` — what stories failed?
-3. Injects findings into prompt: "Previous build failed: auth returned 500..."
-4. Agent avoids repeating the same mistakes.
+- **KeyboardInterrupt**: Checkpoint written (status=paused), re-raised.
 
 ## Observability
 
 | Question | Where to look |
 |----------|---------------|
-| What was built? | `otto_logs/builds/<id>/agent.log` → git commits |
-| What did certification find? | `agent.log` → STORY_RESULT lines |
+| What was built/fixed? | `otto_logs/builds/<id>/agent.log` |
 | Full agent trace? | `agent-raw.log` |
-| Visual evidence? | `otto_logs/certifier/*/evidence/` |
+| Live tool calls? | `live.log` (timestamped) |
+| Certifier results? | `otto_logs/certifier/*/proof-of-work.{json,html}` |
 | Build history? | `otto history` or `run-history.jsonl` |
-| Cost? | `otto_logs/builds/<id>/checkpoint.json` |
-| Improve rounds? | `build-journal.md` |
+| Improve progress? | `build-journal.md`, `checkpoint.json` |
+| Cost? | `checkpoint.json` → `total_cost` |
+
+## Data Flow
+
+```
+User intent
+    │
+    ▼
+┌─────────┐     ┌──────────┐     ┌──────────┐
+│  Build  │────▶│ Certify  │────▶│  Parse   │
+│  Agent  │     │  Agent   │     │ Markers  │
+└─────────┘     └──────────┘     └────┬─────┘
+                                      │
+              ┌───────────────────────┤
+              │                       │
+        ┌─────▼─────┐          ┌─────▼─────┐
+        │   Logs    │          │  Reports  │
+        │           │          │           │
+        │ agent.log │          │ PoW.html  │
+        │ live.log  │          │ PoW.json  │
+        │ history   │          │ journal   │
+        └───────────┘          └───────────┘
+```

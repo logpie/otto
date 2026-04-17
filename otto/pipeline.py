@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -38,6 +37,16 @@ def _load_code_prompt() -> str:
     """Load the code-only prompt (no certification knowledge)."""
     from otto.prompts import code_prompt
     return code_prompt()
+
+
+def _stories_to_journeys(stories: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert story results to journey dicts for BuildResult."""
+    return [
+        {"name": s.get("summary", s.get("story_id", "")),
+         "passed": s.get("passed", False),
+         "story_id": s.get("story_id", "")}
+        for s in stories
+    ]
 
 
 async def build_agentic_v3(
@@ -107,20 +116,16 @@ async def build_agentic_v3(
         safe_intent = intent.replace("</certifier_prompt>", "")
         format_kwargs: dict[str, str] = {
             "intent": safe_intent, "evidence_dir": evidence_dir, "focus_section": "",
+            "target": config.get("_target") or "",
         }
-        # Target mode needs the {target} placeholder
-        if config.get("_target"):
-            format_kwargs["target"] = config["_target"]
         filled_certifier = certifier_prompt(mode=certifier_mode).format(**format_kwargs)
         prompt += (f"\n\n## Pre-filled Certifier Prompt\n"
                    f"When you dispatch the certifier agent, use this EXACT prompt:\n"
                    f"<certifier_prompt>\n{filled_certifier}\n</certifier_prompt>")
 
     # Inject cross-run memory (opt-in via config)
-    from otto.memory import format_for_prompt
-    memory_section = format_for_prompt(project_dir) if config.get("memory") else ""
-    if memory_section:
-        prompt += f"\n\n{memory_section}"
+    from otto.memory import inject_memory
+    prompt = inject_memory(prompt, project_dir, config)
 
     logger.info("Starting agentic v3 build: %s", build_id)
     start_time = time.monotonic()
@@ -242,7 +247,6 @@ async def build_agentic_v3(
     stories_tested = parsed.stories_tested
     stories_passed = parsed.stories_passed
     story_results = parsed.stories
-    story_evidence = parsed.story_evidence
     verdict_pass = parsed.verdict_pass
     overall_diagnosis = parsed.diagnosis
     certify_rounds = parsed.certify_rounds
@@ -256,10 +260,7 @@ async def build_agentic_v3(
         # Require at least one story — VERDICT: PASS with no stories is not a real pass
         passed = verdict_pass and bool(story_results) and all(s["passed"] for s in story_results)
 
-    journeys = [
-        {"name": s.get("summary", s["story_id"]), "passed": s["passed"], "story_id": s["story_id"]}
-        for s in story_results
-    ]
+    journeys = _stories_to_journeys(story_results)
 
     # Write PoW report
     try:
@@ -274,24 +275,19 @@ async def build_agentic_v3(
             "cost_usd": float(cost or 0),
             "stories": story_results,
             "certify_rounds": len(certify_rounds),
-            "round_history": [
-                {"round": r.get("round", i+1), "verdict": r.get("verdict"),
-                 "stories_count": len(r.get("stories", [])),
-                 "passed_count": r.get("passed_count", sum(1 for s in r.get("stories", []) if s.get("passed")))}
-                for i, r in enumerate(certify_rounds)
-            ] if len(certify_rounds) > 1 else [],
             "mode": "agentic_v3",
         }
-        from otto.observability import write_json_file
-        write_json_file(report_dir / "proof-of-work.json", pow_data)
-
-        # Build round_history for HTML from certify_rounds
-        html_round_history = [
+        # Build round history once, reuse for JSON and HTML
+        round_history = [
             {"round": r.get("round", i+1), "verdict": r.get("verdict"),
              "stories_count": len(r.get("stories", [])),
              "passed_count": r.get("passed_count", sum(1 for s in r.get("stories", []) if s.get("passed")))}
             for i, r in enumerate(certify_rounds)
         ] if certify_rounds else []
+        pow_data["round_history"] = round_history if len(certify_rounds) > 1 else []
+
+        from otto.observability import write_json_file
+        write_json_file(report_dir / "proof-of-work.json", pow_data)
 
         _generate_agentic_html_pow(
             report_dir, story_results,
@@ -299,7 +295,7 @@ async def build_agentic_v3(
             total_duration, float(cost or 0),
             stories_passed, stories_tested,
             diagnosis=overall_diagnosis,
-            round_history=html_round_history,
+            round_history=round_history,
         )
     except Exception as exc:
         logger.warning("Failed to write PoW: %s", exc)
@@ -352,17 +348,9 @@ async def build_agentic_v3(
 
     # Record cross-run memory (only if certification produced stories)
     if story_results and not skip_qa:
-        try:
-            from otto.memory import record_run
-            record_run(
-                project_dir,
-                command="build",
-                certifier_mode=certifier_mode,
-                stories=story_results,
-                cost=float(cost or 0),
-            )
-        except Exception:
-            logger.warning("Failed to record certifier memory")
+        from otto.memory import record_run
+        record_run(project_dir, command="build", certifier_mode=certifier_mode,
+                   stories=story_results, cost=float(cost or 0))
 
     return BuildResult(
         passed=passed,
@@ -604,9 +592,23 @@ async def run_certify_fix_loop(
     last_stories: list[dict[str, Any]] = []
     passed = False
     actual_rounds = 0
-    # Track previous attempts so fix agents know what was already tried
     previous_attempts: list[dict[str, Any]] = []
     MAX_RETRIES = 2
+
+    def _save_cp(status: str = "in_progress") -> None:
+        """Write checkpoint with current loop state."""
+        try:
+            _write_cp(
+                project_dir,
+                run_id=build_id, command="improve", mode=certifier_mode,
+                certifier_mode=certifier_mode,
+                focus=focus, target=target,
+                max_rounds=max_rounds, current_round=actual_rounds,
+                total_cost=total_cost, rounds=checkpoint_rounds,
+                status=status,
+            )
+        except Exception:
+            pass
 
     for round_num in range(start_round, max_rounds + 1):
         try:
@@ -615,18 +617,7 @@ async def run_certify_fix_loop(
             # Each certify round gets its own round_id
             round_id = init_round(project_dir, f"certify round {round_num}")
 
-            # Write checkpoint at round start (so crashes mid-round are recoverable)
-            try:
-                _write_cp(
-                    project_dir,
-                    run_id=build_id, command="improve", mode=certifier_mode,
-                    certifier_mode=certifier_mode,
-                    focus=focus, target=target,
-                    max_rounds=max_rounds, current_round=round_num,
-                    total_cost=total_cost, rounds=checkpoint_rounds,
-                )
-            except Exception:
-                pass
+            _save_cp()
 
             # --- Certify with retry ---
             report = None
@@ -700,18 +691,7 @@ async def run_certify_fix_loop(
                 "cost": round(report.cost_usd, 2),
             })
 
-            # Write checkpoint after each certify round
-            try:
-                _write_cp(
-                    project_dir,
-                    run_id=build_id, command="improve", mode=certifier_mode,
-                    certifier_mode=certifier_mode,
-                    focus=focus, target=target,
-                    max_rounds=max_rounds, current_round=round_num,
-                    total_cost=total_cost, rounds=checkpoint_rounds,
-                )
-            except Exception:
-                pass
+            _save_cp()
 
             # Determine if we should stop
             if certifier_mode == "target":
@@ -814,14 +794,7 @@ async def run_certify_fix_loop(
         except KeyboardInterrupt:
             logger.info("Paused at round %d", round_num)
             try:
-                _write_cp(
-                    project_dir,
-                    run_id=build_id, command="improve", mode=certifier_mode,
-                    certifier_mode=certifier_mode, status="paused",
-                    focus=focus, target=target,
-                    max_rounds=max_rounds, current_round=round_num,
-                    total_cost=total_cost, rounds=checkpoint_rounds,
-                )
+                _save_cp(status="paused")
             except Exception:
                 pass
             raise
@@ -839,12 +812,7 @@ async def run_certify_fix_loop(
     except Exception:
         pass
 
-    journeys = [
-        {"name": s.get("summary", s.get("story_id", "")),
-         "passed": s.get("passed", False),
-         "story_id": s.get("story_id", "")}
-        for s in last_stories
-    ]
+    journeys = _stories_to_journeys(last_stories)
 
     return BuildResult(
         passed=passed,

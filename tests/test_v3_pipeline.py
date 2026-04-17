@@ -283,7 +283,6 @@ class TestV3EdgeCases:
         assert result.passed is False
 
     @pytest.mark.asyncio
-    @pytest.mark.asyncio
     async def test_cross_run_memory_injected_when_enabled(self, tmp_git_repo):
         """With memory enabled, re-running should inject cross-run memory."""
         # First build: FAIL — records memory
@@ -302,8 +301,6 @@ class TestV3EdgeCases:
 
         assert result.passed is True
         assert "Previous Certification History" in captured_prompts[0]
-
-    @pytest.mark.asyncio
 
     @pytest.mark.asyncio
     async def test_no_memory_on_first_run(self, tmp_git_repo):
