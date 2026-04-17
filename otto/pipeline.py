@@ -47,6 +47,7 @@ async def build_agentic_v3(
     *,
     certifier_mode: str = "thorough",
     prompt_mode: str = "build",
+    resume_session_id: str | None = None,
 ) -> BuildResult:
     """Fully agent-driven session: one agent, certifier as environment.
 
@@ -54,6 +55,8 @@ async def build_agentic_v3(
       "build"   — build.md: build first, then certify (otto build)
       "improve" — improve.md: certify first, then fix (otto improve)
       "code"    — code.md: just build/fix, no certification (skip_product_qa)
+
+    resume_session_id: if set, resumes an existing SDK session instead of starting fresh.
 
     certifier_mode controls which certifier prompt is pre-filled.
     """
@@ -73,6 +76,8 @@ async def build_agentic_v3(
     _head_before = _get_head_sha(project_dir)
 
     options = make_agent_options(project_dir, config)
+    if resume_session_id:
+        options.resume = resume_session_id
 
     skip_qa = bool(config.get("skip_product_qa"))
 
@@ -126,7 +131,7 @@ async def build_agentic_v3(
     from otto.config import get_timeout
     timeout = get_timeout(config)
     try:
-        text, cost = await run_agent_with_timeout(
+        text, cost, session_id = await run_agent_with_timeout(
             prompt, options,
             log_path=build_dir / "live.log",
             timeout=timeout,
@@ -134,9 +139,26 @@ async def build_agentic_v3(
             capture_tool_output=True,
         )
     except AgentCallError as err:
-        text, cost = f"BUILD ERROR: {err.reason}", 0.0
+        text, cost, session_id = f"BUILD ERROR: {err.reason}", 0.0, ""
 
     total_duration = round(time.monotonic() - start_time, 1)
+
+    # Write checkpoint so this session can be resumed if needed
+    try:
+        from otto.checkpoint import write_checkpoint
+        write_checkpoint(
+            project_dir,
+            run_id=build_id,
+            command="build" if prompt_mode == "build" else "improve",
+            mode=prompt_mode,
+            certifier_mode=certifier_mode,
+            prompt_mode=prompt_mode,
+            session_id=session_id,
+            total_cost=float(cost or 0),
+            status="completed",
+        )
+    except Exception:
+        logger.warning("Failed to write checkpoint")
 
     # Save agent output in two forms:
     # 1. agent-raw.log — full unfiltered output (for deep debugging)
@@ -527,6 +549,9 @@ async def run_certify_fix_loop(
     focus: str | None = None,
     target: str | None = None,
     skip_initial_build: bool = False,
+    start_round: int = 1,
+    resume_cost: float = 0.0,
+    resume_rounds: list[dict[str, Any]] | None = None,
 ) -> BuildResult:
     """System-driven certify-fix loop.
 
@@ -548,11 +573,15 @@ async def run_certify_fix_loop(
         update_current_state,
     )
 
+    from otto.agent import AgentCallError
+    from otto.checkpoint import write_checkpoint as _write_cp
+
     build_id = f"build-{int(time.time())}-{os.getpid()}"
     start_time = time.monotonic()
-    total_cost = 0.0
+    total_cost = resume_cost
     from otto.config import get_max_rounds
     max_rounds = get_max_rounds(config)
+    checkpoint_rounds = list(resume_rounds or [])
 
     _append_intent(project_dir, intent, build_id)
     _commit_artifacts(project_dir)
@@ -577,152 +606,238 @@ async def run_certify_fix_loop(
     actual_rounds = 0
     # Track previous attempts so fix agents know what was already tried
     previous_attempts: list[dict[str, Any]] = []
+    MAX_RETRIES = 2
 
-    for round_num in range(1, max_rounds + 1):
-        actual_rounds = round_num
+    for round_num in range(start_round, max_rounds + 1):
+        try:
+            actual_rounds = round_num
 
-        # Each certify round gets its own round_id so journal entries
-        # don't land in the previous fix round's directory.
-        round_id = init_round(project_dir, f"certify round {round_num}")
+            # Each certify round gets its own round_id
+            round_id = init_round(project_dir, f"certify round {round_num}")
 
-        logger.info("Certify-fix loop round %d: certifying (%s)", round_num, certifier_mode)
-        report = await run_agentic_certifier(
-            intent=intent,
-            project_dir=project_dir,
-            config=config,
-            mode=certifier_mode,
-            focus=focus,
-            target=target,
-        )
-        total_cost += report.cost_usd
-        stories = getattr(report, "_story_results", [])
-        last_stories = stories
+            # Write checkpoint at round start (so crashes mid-round are recoverable)
+            try:
+                _write_cp(
+                    project_dir,
+                    run_id=build_id, command="improve", mode=certifier_mode,
+                    certifier_mode=certifier_mode,
+                    focus=focus, target=target,
+                    max_rounds=max_rounds, current_round=round_num,
+                    total_cost=total_cost, rounds=checkpoint_rounds,
+                )
+            except Exception:
+                pass
 
-        record_certifier(project_dir, round_id, report, stories)
+            # --- Certify with retry ---
+            report = None
+            for attempt in range(MAX_RETRIES + 1):
+                try:
+                    logger.info("Certify-fix loop round %d: certifying (%s)", round_num, certifier_mode)
+                    report = await run_agentic_certifier(
+                        intent=intent,
+                        project_dir=project_dir,
+                        config=config,
+                        mode=certifier_mode,
+                        focus=focus,
+                        target=target,
+                    )
+                    break
+                except (AgentCallError, Exception) as err:
+                    if attempt < MAX_RETRIES:
+                        logger.warning("Certify round %d attempt %d failed: %s. Retrying...",
+                                       round_num, attempt + 1, err)
+                        continue
+                    logger.error("Certify round %d failed after %d attempts", round_num, MAX_RETRIES + 1)
 
-        # Infra error — certifier crashed/timed out
-        if getattr(report, "outcome", None) == CertificationOutcome.INFRA_ERROR:
-            logger.warning("Certify-fix loop: infra error on round %d", round_num)
-            append_journal(project_dir, round_id, f"certify round {round_num}",
-                           "INFRA_ERROR", report.cost_usd)
-            break
-
-        # Empty stories — certifier produced no results
-        if not stories:
-            logger.warning("Certify-fix loop round %d: no stories returned", round_num)
-            append_journal(project_dir, round_id, f"certify round {round_num}",
-                           "FAIL (no stories)", report.cost_usd)
-            break
-
-        # Update current state AFTER infra/empty checks
-        update_current_state(project_dir, round_id, stories,
-                             f"certify round {round_num}")
-
-        failures = [s for s in stories if not s.get("passed")]
-        result_str = (f"FAIL {len(stories) - len(failures)}/{len(stories)}"
-                      if failures else
-                      f"PASS {len(stories) - len(failures)}/{len(stories)}")
-
-        # Target mode: check metric instead of story pass/fail
-        metric_met = getattr(report, "_metric_met", None)
-        metric_value = getattr(report, "_metric_value", "")
-        if certifier_mode == "target" and metric_met is not None:
-            result_str = f"{'MET' if metric_met else 'NOT MET'} ({metric_value})"
-
-        append_journal(project_dir, round_id, f"certify round {round_num}",
-                       result_str, report.cost_usd)
-
-        # Determine if we should stop
-        if certifier_mode == "target":
-            if metric_met:
-                passed = True
-                logger.info("Certify-fix loop: target met on round %d (%s)",
-                            round_num, metric_value)
+            if report is None:
+                append_journal(project_dir, round_id, f"certify round {round_num}",
+                               "ERROR (all retries failed)", 0.0)
                 break
-        elif not failures:
-            passed = True
-            logger.info("Certify-fix loop: PASS on round %d", round_num)
-            break
 
-        if round_num >= max_rounds:
-            logger.info("Certify-fix loop: max rounds (%d) reached", max_rounds)
-            break
+            total_cost += report.cost_usd
+            stories = getattr(report, "_story_results", [])
+            last_stories = stories
 
-        # --- Fix round ---
-        round_id = init_round(project_dir, f"fix round {round_num}")
+            record_certifier(project_dir, round_id, report, stories)
 
-        fix_lines = [
-            "Fix these issues found by the certifier.\n",
-        ]
+            # Infra error — certifier crashed/timed out
+            if getattr(report, "outcome", None) == CertificationOutcome.INFRA_ERROR:
+                logger.warning("Certify-fix loop: infra error on round %d", round_num)
+                append_journal(project_dir, round_id, f"certify round {round_num}",
+                               "INFRA_ERROR", report.cost_usd)
+                break
 
-        # Inject memory: what was tried in previous rounds
-        if previous_attempts:
-            fix_lines.append("## Previous Attempts (DO NOT repeat these)")
-            for attempt in previous_attempts:
-                fix_lines.append(f"\n### Round {attempt['round']}")
-                fix_lines.append(f"**Tried:** {attempt['commits']}")
-                fix_lines.append(f"**Changed:** {attempt['diff_stat']}")
-                still_failing = attempt.get("still_failing", [])
-                if still_failing:
-                    fix_lines.append(f"**Still failing:** {', '.join(still_failing)}")
-            fix_lines.append("")
+            # Empty stories — certifier produced no results
+            if not stories:
+                logger.warning("Certify-fix loop round %d: no stories returned", round_num)
+                append_journal(project_dir, round_id, f"certify round {round_num}",
+                               "FAIL (no stories)", report.cost_usd)
+                break
 
-        fix_lines.append("## Current Failures\n")
-        for f in failures:
-            sid = f.get("story_id", "?")
-            summary = f.get("summary", "")
-            evidence = f.get("evidence", "")
-            fix_lines.append(f"### {sid}")
-            fix_lines.append(f"**Symptom:** {summary}")
-            if evidence:
-                fix_lines.append(f"**Evidence:**\n```\n{evidence[:500]}\n```")
-            fix_lines.append("")
-        fix_lines.append(
-            "Diagnose the root causes in the code and fix them. "
-            "Do NOT fix by changing prompts unless the fix is generic."
-        )
+            # Update current state AFTER infra/empty checks
+            update_current_state(project_dir, round_id, stories,
+                                 f"certify round {round_num}")
 
-        fix_config = dict(config)
-        fix_config["skip_product_qa"] = True
+            failures = [s for s in stories if not s.get("passed")]
+            result_str = (f"FAIL {len(stories) - len(failures)}/{len(stories)}"
+                          if failures else
+                          f"PASS {len(stories) - len(failures)}/{len(stories)}")
 
-        # Record HEAD before fix so we can capture what changed
-        from otto.journal import _get_head_sha
-        head_before_fix = _get_head_sha(project_dir)
+            # Target mode: check metric instead of story pass/fail
+            metric_met = getattr(report, "_metric_met", None)
+            metric_value = getattr(report, "_metric_value", "")
+            if certifier_mode == "target" and metric_met is not None:
+                result_str = f"{'MET' if metric_met else 'NOT MET'} ({metric_value})"
 
-        logger.info("Certify-fix loop round %d: fixing %d issues", round_num, len(failures))
-        fix_result = await build_agentic_v3(
-            "\n".join(fix_lines), project_dir, fix_config)
-        total_cost += fix_result.total_cost
-        record_build(project_dir, round_id, fix_result)
-        append_journal(project_dir, round_id, f"fix round {round_num}",
-                       "done" if fix_result.passed else "warning",
-                       fix_result.total_cost)
+            append_journal(project_dir, round_id, f"certify round {round_num}",
+                           result_str, report.cost_usd)
 
-        # Record this attempt for future rounds
-        head_after_fix = _get_head_sha(project_dir)
-        commits = ""
-        diff_stat = "(no changes)"
-        if head_before_fix and head_after_fix and head_before_fix != head_after_fix:
-            commits = subprocess.run(
-                ["git", "log", "--oneline", f"{head_before_fix}..{head_after_fix}"],
-                cwd=str(project_dir), capture_output=True, text=True,
-            ).stdout.strip()
-            diff_stat = subprocess.run(
-                ["git", "diff", "--stat", head_before_fix, head_after_fix],
-                cwd=str(project_dir), capture_output=True, text=True,
-            ).stdout.strip().split("\n")[-1].strip()  # just the summary line
-        previous_attempts.append({
-            "round": round_num,
-            "commits": commits or "(no commits)",
-            "diff_stat": diff_stat,
-            "still_failing": [f.get("story_id", "?") for f in failures],
-        })
+            # Record round in checkpoint
+            checkpoint_rounds.append({
+                "round": round_num,
+                "stories_tested": len(stories),
+                "stories_passed": len(stories) - len(failures),
+                "cost": round(report.cost_usd, 2),
+            })
+
+            # Write checkpoint after each certify round
+            try:
+                _write_cp(
+                    project_dir,
+                    run_id=build_id, command="improve", mode=certifier_mode,
+                    certifier_mode=certifier_mode,
+                    focus=focus, target=target,
+                    max_rounds=max_rounds, current_round=round_num,
+                    total_cost=total_cost, rounds=checkpoint_rounds,
+                )
+            except Exception:
+                pass
+
+            # Determine if we should stop
+            if certifier_mode == "target":
+                if metric_met:
+                    passed = True
+                    logger.info("Certify-fix loop: target met on round %d (%s)",
+                                round_num, metric_value)
+                    break
+            elif not failures:
+                passed = True
+                logger.info("Certify-fix loop: PASS on round %d", round_num)
+                break
+
+            if round_num >= max_rounds:
+                logger.info("Certify-fix loop: max rounds (%d) reached", max_rounds)
+                break
+
+            # --- Fix round with retry ---
+            round_id = init_round(project_dir, f"fix round {round_num}")
+
+            fix_lines = [
+                "Fix these issues found by the certifier.\n",
+            ]
+
+            # Inject memory: what was tried in previous rounds
+            if previous_attempts:
+                fix_lines.append("## Previous Attempts (DO NOT repeat these)")
+                for attempt in previous_attempts:
+                    fix_lines.append(f"\n### Round {attempt['round']}")
+                    fix_lines.append(f"**Tried:** {attempt['commits']}")
+                    fix_lines.append(f"**Changed:** {attempt['diff_stat']}")
+                    still_failing = attempt.get("still_failing", [])
+                    if still_failing:
+                        fix_lines.append(f"**Still failing:** {', '.join(still_failing)}")
+                fix_lines.append("")
+
+            fix_lines.append("## Current Failures\n")
+            for f in failures:
+                sid = f.get("story_id", "?")
+                summary = f.get("summary", "")
+                evidence = f.get("evidence", "")
+                fix_lines.append(f"### {sid}")
+                fix_lines.append(f"**Symptom:** {summary}")
+                if evidence:
+                    fix_lines.append(f"**Evidence:**\n```\n{evidence[:500]}\n```")
+                fix_lines.append("")
+            fix_lines.append(
+                "Diagnose the root causes in the code and fix them. "
+                "Do NOT fix by changing prompts unless the fix is generic."
+            )
+
+            fix_config = dict(config)
+            fix_config["skip_product_qa"] = True
+
+            from otto.journal import _get_head_sha
+            head_before_fix = _get_head_sha(project_dir)
+
+            fix_result = None
+            for attempt in range(MAX_RETRIES + 1):
+                try:
+                    logger.info("Certify-fix loop round %d: fixing %d issues (attempt %d)",
+                                round_num, len(failures), attempt + 1)
+                    fix_result = await build_agentic_v3(
+                        "\n".join(fix_lines), project_dir, fix_config)
+                    break
+                except Exception as err:
+                    if attempt < MAX_RETRIES:
+                        logger.warning("Fix round %d attempt %d failed: %s. Retrying...",
+                                       round_num, attempt + 1, err)
+                        continue
+                    logger.error("Fix round %d failed after %d attempts", round_num, MAX_RETRIES + 1)
+
+            if fix_result:
+                total_cost += fix_result.total_cost
+                record_build(project_dir, round_id, fix_result)
+                append_journal(project_dir, round_id, f"fix round {round_num}",
+                               "done" if fix_result.passed else "warning",
+                               fix_result.total_cost)
+
+            # Record this attempt for future rounds
+            head_after_fix = _get_head_sha(project_dir)
+            commits = ""
+            diff_stat = "(no changes)"
+            if head_before_fix and head_after_fix and head_before_fix != head_after_fix:
+                commits = subprocess.run(
+                    ["git", "log", "--oneline", f"{head_before_fix}..{head_after_fix}"],
+                    cwd=str(project_dir), capture_output=True, text=True,
+                ).stdout.strip()
+                diff_stat = subprocess.run(
+                    ["git", "diff", "--stat", head_before_fix, head_after_fix],
+                    cwd=str(project_dir), capture_output=True, text=True,
+                ).stdout.strip().split("\n")[-1].strip()
+            previous_attempts.append({
+                "round": round_num,
+                "commits": commits or "(no commits)",
+                "diff_stat": diff_stat,
+                "still_failing": [f.get("story_id", "?") for f in failures],
+            })
+
+        except KeyboardInterrupt:
+            logger.info("Paused at round %d", round_num)
+            try:
+                _write_cp(
+                    project_dir,
+                    run_id=build_id, command="improve", mode=certifier_mode,
+                    certifier_mode=certifier_mode, status="paused",
+                    focus=focus, target=target,
+                    max_rounds=max_rounds, current_round=round_num,
+                    total_cost=total_cost, rounds=checkpoint_rounds,
+                )
+            except Exception:
+                pass
+            raise
 
     total_duration = round(time.monotonic() - start_time, 1)
 
     # Final journal entry
     append_journal(project_dir, round_id, "build complete",
                    "PASS" if passed else "FAIL", total_cost)
+
+    # Mark checkpoint completed
+    try:
+        from otto.checkpoint import complete_checkpoint
+        complete_checkpoint(project_dir, total_cost)
+    except Exception:
+        pass
 
     journeys = [
         {"name": s.get("summary", s.get("story_id", "")),

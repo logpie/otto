@@ -68,10 +68,37 @@ def _run_improve(
     *,
     target: str | None = None,
     split: bool = False,
+    resume: bool = False,
 ) -> None:
     """CLI wrapper: branch creation, display, and report around the shared loop."""
+    from otto.checkpoint import clear_checkpoint, load_checkpoint
     from otto.config import load_config
     from otto.pipeline import build_agentic_v3, run_certify_fix_loop
+
+    # Check for existing checkpoint
+    checkpoint = load_checkpoint(project_dir)
+    resume_session_id = None
+    start_round = 1
+    resume_cost = 0.0
+    resume_rounds: list = []
+
+    if checkpoint and not resume:
+        cr = checkpoint.get("current_round", 0)
+        cost = checkpoint.get("total_cost", 0)
+        console.print(
+            f"\n  [yellow]Found checkpoint: round {cr}, ${cost:.2f} spent[/yellow]"
+        )
+        console.print(f"  Run with --resume to continue, or starting fresh.\n")
+        clear_checkpoint(project_dir)
+    elif checkpoint and resume:
+        start_round = checkpoint.get("current_round", 1) + 1
+        resume_cost = checkpoint.get("total_cost", 0.0)
+        resume_rounds = checkpoint.get("rounds", [])
+        resume_session_id = checkpoint.get("session_id", "")
+        console.print(
+            f"\n  [info]Resuming from round {start_round} "
+            f"(${resume_cost:.2f} spent so far)[/info]"
+        )
 
     # Create improvement branch
     branch = _create_improve_branch(project_dir)
@@ -116,6 +143,9 @@ def _run_improve(
                 focus=focus,
                 target=target,
                 skip_initial_build=True,
+                start_round=start_round,
+                resume_cost=resume_cost,
+                resume_rounds=resume_rounds,
             ))
         else:
             # Agent-driven: one session, agent drives certify→fix loop
@@ -125,10 +155,11 @@ def _run_improve(
                 config,
                 certifier_mode=certifier_mode,
                 prompt_mode="improve",
+                resume_session_id=resume_session_id if resume else None,
             ))
     except KeyboardInterrupt:
-        console.print("\n  Aborted.")
-        sys.exit(1)
+        console.print("\n  [yellow]Paused. Run with --resume to continue.[/yellow]")
+        sys.exit(0)
     except Exception as e:
         error_console.print(f"[error]{command_label} failed: {rich_escape(str(e))}[/error]")
         sys.exit(1)
@@ -228,7 +259,8 @@ def register_improve_commands(main: click.Group) -> None:
     @click.argument("focus", required=False)
     @click.option("--rounds", "-n", default=3, help="Maximum rounds (default: 3)")
     @click.option("--split", is_flag=True, help="System-controlled loop (vs agent-driven)")
-    def bugs(focus, rounds, split):
+    @click.option("--resume", is_flag=True, help="Resume from last checkpoint")
+    def bugs(focus, rounds, split, resume):
         """Find and fix bugs, edge cases, and error handling gaps.
 
         One agent certifies, reads findings, fixes, and re-certifies
@@ -251,13 +283,15 @@ def register_improve_commands(main: click.Group) -> None:
             certifier_mode="thorough",
             command_label="Bug fixing",
             split=split,
+            resume=resume,
         )
 
     @improve.command(context_settings=CONTEXT_SETTINGS)
     @click.argument("focus", required=False)
     @click.option("--rounds", "-n", default=3, help="Maximum rounds (default: 3)")
     @click.option("--split", is_flag=True, help="System-controlled loop (vs agent-driven)")
-    def feature(focus, rounds, split):
+    @click.option("--resume", is_flag=True, help="Resume from last checkpoint")
+    def feature(focus, rounds, split, resume):
         """Suggest and implement product improvements.
 
         One agent evaluates the product, identifies improvements, implements
@@ -279,13 +313,15 @@ def register_improve_commands(main: click.Group) -> None:
             certifier_mode="hillclimb",
             command_label="Feature improvement",
             split=split,
+            resume=resume,
         )
 
     @improve.command(context_settings=CONTEXT_SETTINGS)
     @click.argument("goal")
     @click.option("--rounds", "-n", default=5, help="Maximum rounds (default: 5)")
     @click.option("--split", is_flag=True, help="System-controlled loop (vs agent-driven)")
-    def target(goal, rounds, split):
+    @click.option("--resume", is_flag=True, help="Resume from last checkpoint")
+    def target(goal, rounds, split, resume):
         """Optimize toward a measurable target.
 
         Measures a metric, compares to the target, and iterates until met.
@@ -309,4 +345,5 @@ def register_improve_commands(main: click.Group) -> None:
             command_label=f"Target: {goal}",
             target=goal,
             split=split,
+            resume=resume,
         )

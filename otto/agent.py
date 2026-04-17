@@ -139,10 +139,11 @@ async def run_agent_with_timeout(
     timeout: int,
     project_dir: Path,
     capture_tool_output: bool = False,
-) -> tuple[str, float]:
+) -> tuple[str, float, str]:
     """Run an agent query with live logging, timeout, and orphan cleanup.
 
-    Returns (text, cost) on success. Raises AgentCallError on timeout/crash.
+    Returns (text, cost, session_id) on success.
+    Raises AgentCallError on timeout/crash.
     Always closes the live logger and cleans up orphan processes on failure.
     """
     import asyncio as _asyncio
@@ -152,13 +153,14 @@ async def run_agent_with_timeout(
     callbacks = make_live_logger(log_path)
     _close = callbacks.pop("_close")
     try:
-        text, cost, _ = await _asyncio.wait_for(
+        text, cost, result_msg = await _asyncio.wait_for(
             run_agent_query(prompt, options,
                             capture_tool_output=capture_tool_output,
                             **callbacks),
             timeout=timeout,
         )
-        return text, cost
+        session_id = getattr(result_msg, "session_id", "") or ""
+        return text, cost, session_id
     except _asyncio.TimeoutError:
         _log.error("Agent timed out after %ds", timeout)
         from otto.pipeline import _cleanup_orphan_processes

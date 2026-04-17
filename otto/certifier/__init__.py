@@ -93,7 +93,7 @@ async def run_agentic_certifier(
     from otto.config import get_timeout
     certifier_timeout = get_timeout(config)
     try:
-        text, cost = await run_agent_with_timeout(
+        text, cost, _session_id = await run_agent_with_timeout(
             prompt, options,
             log_path=report_dir / "live.log",
             timeout=certifier_timeout,
