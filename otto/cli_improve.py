@@ -67,14 +67,16 @@ def _run_improve(
     command_label: str,
     *,
     target: str | None = None,
+    split: bool = False,
 ) -> None:
     """CLI wrapper: branch creation, display, and report around the shared loop."""
     from otto.config import load_config
-    from otto.pipeline import run_certify_fix_loop
+    from otto.pipeline import build_agentic_v3, run_certify_fix_loop
 
     # Create improvement branch
     branch = _create_improve_branch(project_dir)
-    console.print(f"\n  [bold]{command_label}[/bold] — branch: [info]{branch}[/info]")
+    mode_label = "split" if split else "agentic"
+    console.print(f"\n  [bold]{command_label}[/bold] ({mode_label}) — branch: [info]{branch}[/info]")
     if focus:
         console.print(f"  Focus: {rich_escape(focus)}")
     if target:
@@ -91,17 +93,39 @@ def _run_improve(
         int(config.get("certifier_timeout", 900)), 3600
     )
 
+    # Pass target to config for prompt filling
+    if target:
+        config["_target"] = target
+
+    # Build the improve intent with focus/target context
+    improve_intent = intent
+    if focus:
+        improve_intent += f"\n\n## Improvement Focus\n{focus}"
+    if target:
+        improve_intent += f"\n\n## Target\n{target}"
+
     start = time.time()
     try:
-        result = asyncio.run(run_certify_fix_loop(
-            intent=intent,
-            project_dir=project_dir,
-            config=config,
-            certifier_mode=certifier_mode,
-            focus=focus,
-            target=target,
-            skip_initial_build=True,  # code already exists
-        ))
+        if split:
+            # System-driven: Python controls certify→fix loop
+            result = asyncio.run(run_certify_fix_loop(
+                intent=intent,
+                project_dir=project_dir,
+                config=config,
+                certifier_mode=certifier_mode,
+                focus=focus,
+                target=target,
+                skip_initial_build=True,
+            ))
+        else:
+            # Agent-driven: one session, agent drives certify→fix loop
+            result = asyncio.run(build_agentic_v3(
+                improve_intent,
+                project_dir,
+                config,
+                certifier_mode=certifier_mode,
+                prompt_mode="improve",
+            ))
     except KeyboardInterrupt:
         console.print("\n  Aborted.")
         sys.exit(1)
@@ -203,17 +227,19 @@ def register_improve_commands(main: click.Group) -> None:
     @improve.command(context_settings=CONTEXT_SETTINGS)
     @click.argument("focus", required=False)
     @click.option("--rounds", "-n", default=3, help="Maximum rounds (default: 3)")
-    def bugs(focus, rounds):
+    @click.option("--split", is_flag=True, help="System-controlled loop (vs agent-driven)")
+    def bugs(focus, rounds, split):
         """Find and fix bugs, edge cases, and error handling gaps.
 
-        Runs an adversarial certifier that tries to break the product,
-        then fixes what it finds. Creates an improvement branch.
+        One agent certifies, reads findings, fixes, and re-certifies
+        autonomously. Use --split for system-controlled loop instead.
 
         \b
         Examples:
             otto improve bugs                  # find and fix all bugs
             otto improve bugs "error handling" # focus on error handling
             otto improve bugs -n 5             # 5 rounds
+            otto improve bugs --split          # system-controlled loop
         """
         project_dir = Path.cwd()
         intent = _require_intent(project_dir)
@@ -224,16 +250,18 @@ def register_improve_commands(main: click.Group) -> None:
             focus=focus,
             certifier_mode="thorough",
             command_label="Bug fixing",
+            split=split,
         )
 
     @improve.command(context_settings=CONTEXT_SETTINGS)
     @click.argument("focus", required=False)
     @click.option("--rounds", "-n", default=3, help="Maximum rounds (default: 3)")
-    def feature(focus, rounds):
+    @click.option("--split", is_flag=True, help="System-controlled loop (vs agent-driven)")
+    def feature(focus, rounds, split):
         """Suggest and implement product improvements.
 
-        Evaluates the product as a real user would, identifies missing
-        features and UX gaps, then implements them. Creates an improvement branch.
+        One agent evaluates the product, identifies improvements, implements
+        them, and re-evaluates. Use --split for system-controlled loop.
 
         \b
         Examples:
@@ -250,17 +278,18 @@ def register_improve_commands(main: click.Group) -> None:
             focus=focus,
             certifier_mode="hillclimb",
             command_label="Feature improvement",
+            split=split,
         )
 
     @improve.command(context_settings=CONTEXT_SETTINGS)
     @click.argument("goal")
     @click.option("--rounds", "-n", default=5, help="Maximum rounds (default: 5)")
-    def target(goal, rounds):
+    @click.option("--split", is_flag=True, help="System-controlled loop (vs agent-driven)")
+    def target(goal, rounds, split):
         """Optimize toward a measurable target.
 
         Measures a metric, compares to the target, and iterates until met.
-        The certifier measures the current value each round and the build
-        agent optimizes toward it. Creates an improvement branch.
+        Use --split for system-controlled loop.
 
         \b
         Examples:
@@ -279,4 +308,5 @@ def register_improve_commands(main: click.Group) -> None:
             certifier_mode="target",
             command_label=f"Target: {goal}",
             target=goal,
+            split=split,
         )

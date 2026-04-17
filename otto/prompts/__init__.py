@@ -14,6 +14,15 @@ def build_prompt() -> str:
     return _load("build.md")
 
 
+def improve_prompt() -> str:
+    """Improve prompt — certify first, then fix. Agent drives the loop.
+
+    Used by agent-mode improve (default). Starts with certification
+    instead of building.
+    """
+    return _load("improve.md")
+
+
 def code_prompt() -> str:
     """Code-only prompt (steps 1-6: explore, plan, build, test, review, commit).
 

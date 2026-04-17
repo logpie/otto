@@ -404,7 +404,7 @@ class TestImproveCLIHardening:
              patch("pathlib.Path.cwd", return_value=tmp_git_repo):
             runner = CliRunner()
             result = runner.invoke(
-                main, ["improve", "feature", "test intent", "--rounds", "1"], catch_exceptions=False
+                main, ["improve", "feature", "test intent", "--rounds", "1", "--split"], catch_exceptions=False
             )
 
         # Build agent must not be called when certifier fails with infra error
@@ -450,7 +450,7 @@ class TestImproveCLIHardening:
              patch("pathlib.Path.cwd", return_value=tmp_git_repo):
             runner = CliRunner()
             result = runner.invoke(
-                main, ["improve", "feature", "test intent", "--rounds", "1"], catch_exceptions=False
+                main, ["improve", "feature", "test intent", "--rounds", "1", "--split"], catch_exceptions=False
             )
 
         # The result should indicate failure

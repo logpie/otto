@@ -44,11 +44,18 @@ async def build_agentic_v3(
     intent: str,
     project_dir: Path,
     config: dict[str, Any],
+    *,
+    certifier_mode: str = "thorough",
+    prompt_mode: str = "build",
 ) -> BuildResult:
-    """Fully agent-driven build: one session, certifier as environment.
+    """Fully agent-driven session: one agent, certifier as environment.
 
-    The coding agent does everything — build, self-test, dispatch certifier,
-    read findings, fix, re-certify. The orchestrator just launches and waits.
+    prompt_mode controls the starting prompt:
+      "build"   — build.md: build first, then certify (otto build)
+      "improve" — improve.md: certify first, then fix (otto improve)
+      "code"    — code.md: just build/fix, no certification (skip_product_qa)
+
+    certifier_mode controls which certifier prompt is pre-filled.
     """
     from otto.agent import AgentCallError, make_agent_options, run_agent_with_timeout
     from otto.observability import append_text_log
@@ -69,22 +76,37 @@ async def build_agentic_v3(
 
     skip_qa = bool(config.get("skip_product_qa"))
 
+    # Select prompt based on mode
     if skip_qa:
-        # Code-only: no certification knowledge, clean prompt
+        prompt_mode = "code"
+
+    if prompt_mode == "code":
         prompt = _load_code_prompt() + f"\n\nBuild this product:\n\n{intent}"
+    elif prompt_mode == "improve":
+        from otto.config import get_max_rounds
+        from otto.prompts import improve_prompt
+        max_certify_rounds = get_max_rounds(config)
+        raw_prompt = improve_prompt().replace("{max_certify_rounds}", str(max_certify_rounds))
+        prompt = raw_prompt + f"\n\nImprove this product:\n\n{intent}"
     else:
-        # Mono mode: full build + certification loop
+        # Default: build mode
         from otto.config import get_max_rounds
         max_certify_rounds = get_max_rounds(config)
         raw_prompt = _load_build_prompt().replace("{max_certify_rounds}", str(max_certify_rounds))
         prompt = raw_prompt + f"\n\nBuild this product:\n\n{intent}"
 
-        # Pre-fill the certifier prompt so the agent can dispatch it directly.
+    # Pre-fill certifier prompt for modes that use certification
+    if prompt_mode != "code":
         from otto.prompts import certifier_prompt
         evidence_dir = str(project_dir / "otto_logs" / "certifier" / "evidence")
         safe_intent = intent.replace("</certifier_prompt>", "")
-        filled_certifier = certifier_prompt(mode="thorough").format(
-            intent=safe_intent, evidence_dir=evidence_dir, focus_section="")
+        format_kwargs: dict[str, str] = {
+            "intent": safe_intent, "evidence_dir": evidence_dir, "focus_section": "",
+        }
+        # Target mode needs the {target} placeholder
+        if config.get("_target"):
+            format_kwargs["target"] = config["_target"]
+        filled_certifier = certifier_prompt(mode=certifier_mode).format(**format_kwargs)
         prompt += (f"\n\n## Pre-filled Certifier Prompt\n"
                    f"When you dispatch the certifier agent, use this EXACT prompt:\n"
                    f"<certifier_prompt>\n{filled_certifier}\n</certifier_prompt>")
@@ -600,6 +622,8 @@ async def run_certify_fix_loop(
     last_stories: list[dict[str, Any]] = []
     passed = False
     actual_rounds = 0
+    # Track previous attempts so fix agents know what was already tried
+    previous_attempts: list[dict[str, Any]] = []
 
     for round_num in range(1, max_rounds + 1):
         actual_rounds = round_num
@@ -676,8 +700,21 @@ async def run_certify_fix_loop(
 
         fix_lines = [
             "Fix these issues found by the certifier.\n",
-            "Read current-state.md for context on what was tried before.\n",
         ]
+
+        # Inject memory: what was tried in previous rounds
+        if previous_attempts:
+            fix_lines.append("## Previous Attempts (DO NOT repeat these)")
+            for attempt in previous_attempts:
+                fix_lines.append(f"\n### Round {attempt['round']}")
+                fix_lines.append(f"**Tried:** {attempt['commits']}")
+                fix_lines.append(f"**Changed:** {attempt['diff_stat']}")
+                still_failing = attempt.get("still_failing", [])
+                if still_failing:
+                    fix_lines.append(f"**Still failing:** {', '.join(still_failing)}")
+            fix_lines.append("")
+
+        fix_lines.append("## Current Failures\n")
         for f in failures:
             sid = f.get("story_id", "?")
             summary = f.get("summary", "")
@@ -695,6 +732,10 @@ async def run_certify_fix_loop(
         fix_config = dict(config)
         fix_config["skip_product_qa"] = True
 
+        # Record HEAD before fix so we can capture what changed
+        from otto.journal import _get_head_sha
+        head_before_fix = _get_head_sha(project_dir)
+
         logger.info("Certify-fix loop round %d: fixing %d issues", round_num, len(failures))
         fix_result = await build_agentic_v3(
             "\n".join(fix_lines), project_dir, fix_config)
@@ -703,6 +744,26 @@ async def run_certify_fix_loop(
         append_journal(project_dir, round_id, f"fix round {round_num}",
                        "done" if fix_result.passed else "warning",
                        fix_result.total_cost)
+
+        # Record this attempt for future rounds
+        head_after_fix = _get_head_sha(project_dir)
+        commits = ""
+        diff_stat = "(no changes)"
+        if head_before_fix and head_after_fix and head_before_fix != head_after_fix:
+            commits = subprocess.run(
+                ["git", "log", "--oneline", f"{head_before_fix}..{head_after_fix}"],
+                cwd=str(project_dir), capture_output=True, text=True,
+            ).stdout.strip()
+            diff_stat = subprocess.run(
+                ["git", "diff", "--stat", head_before_fix, head_after_fix],
+                cwd=str(project_dir), capture_output=True, text=True,
+            ).stdout.strip().split("\n")[-1].strip()  # just the summary line
+        previous_attempts.append({
+            "round": round_num,
+            "commits": commits or "(no commits)",
+            "diff_stat": diff_stat,
+            "still_failing": [f.get("story_id", "?") for f in failures],
+        })
 
     total_duration = round(time.monotonic() - start_time, 1)
 
