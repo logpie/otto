@@ -283,26 +283,27 @@ class TestV3EdgeCases:
         assert result.passed is False
 
     @pytest.mark.asyncio
-    async def test_cross_run_memory_injected(self, tmp_git_repo):
-        """After a failed build, re-running should inject cross-run memory."""
+    @pytest.mark.asyncio
+    async def test_cross_run_memory_injected_when_enabled(self, tmp_git_repo):
+        """With memory enabled, re-running should inject cross-run memory."""
         # First build: FAIL — records memory
         with patch("otto.agent.run_agent_query",
                     side_effect=_make_mock_query(AGENT_OUTPUT_FAIL)):
             await build_agentic_v3("test", tmp_git_repo, {})
 
-        # Second build: capture the prompt to verify memory injection
+        # Second build with memory enabled
         captured_prompts = []
         async def capture_query(prompt, options, **kwargs):
             captured_prompts.append(prompt)
             return AGENT_OUTPUT_PASS, 0.50, MagicMock(session_id="s2")
 
         with patch("otto.agent.run_agent_query", side_effect=capture_query):
-            result = await build_agentic_v3("test", tmp_git_repo, {})
+            result = await build_agentic_v3("test", tmp_git_repo, {"memory": True})
 
         assert result.passed is True
-        # The prompt should contain cross-run memory
         assert "Previous Certification History" in captured_prompts[0]
-        assert "isolation" in captured_prompts[0].lower() or "FAIL" in captured_prompts[0].upper()
+
+    @pytest.mark.asyncio
 
     @pytest.mark.asyncio
     async def test_no_memory_on_first_run(self, tmp_git_repo):

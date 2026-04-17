@@ -79,11 +79,12 @@ async def run_agentic_certifier(
         format_kwargs["target"] = target
     prompt = _load_certifier_prompt(mode=_mode).format(**format_kwargs)
 
-    # Inject cross-run memory so certifier knows what was tested before
-    from otto.memory import format_for_prompt
-    memory_section = format_for_prompt(project_dir)
-    if memory_section:
-        prompt += f"\n\n{memory_section}"
+    # Inject cross-run memory (opt-in via config)
+    if config.get("memory"):
+        from otto.memory import format_for_prompt
+        memory_section = format_for_prompt(project_dir)
+        if memory_section:
+            prompt += f"\n\n{memory_section}"
 
     options = make_agent_options(project_dir, config)
 

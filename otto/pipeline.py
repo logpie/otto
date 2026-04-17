@@ -111,9 +111,9 @@ async def build_agentic_v3(
                    f"When you dispatch the certifier agent, use this EXACT prompt:\n"
                    f"<certifier_prompt>\n{filled_certifier}\n</certifier_prompt>")
 
-    # Inject cross-run memory — what was tested/found/fixed in previous runs
+    # Inject cross-run memory (opt-in via config)
     from otto.memory import format_for_prompt
-    memory_section = format_for_prompt(project_dir)
+    memory_section = format_for_prompt(project_dir) if config.get("memory") else ""
     if memory_section:
         prompt += f"\n\n{memory_section}"
 
