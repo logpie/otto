@@ -237,11 +237,21 @@ otto/prompts/
 ## Error Handling
 
 Centralized in `run_agent_with_timeout()`:
-- **Timeout**: Configurable via `certifier_timeout` (default 900s). Orphan processes cleaned up.
-- **Agent crash**: `AgentCallError` raised. Callers retry up to 2x.
+- **Timeout**: Derived from `RunBudget.for_call()` — the one timeout knob is
+  `run_budget_seconds` (default 3600s), a wall-clock cap on the whole
+  `otto build` / `otto certify` / `otto improve` invocation. Per-call timeouts
+  shrink naturally as budget drains. `spec_timeout` (default 600s) is the
+  only per-phase cap, applied inline in the spec agent call as
+  `min(budget.remaining, spec_timeout)`. Orphan processes cleaned up.
+- **Agent crash**: `AgentCallError` raised with preserved `session_id` from
+  streaming state so `--resume` can continue the SDK conversation. Callers
+  retry up to 2x for transient errors (not budget exhaustion).
 - **No output**: No verdict markers → treated as FAIL.
 - **KeyboardInterrupt**: Checkpoint written (status=paused, current phase
   recorded), re-raised.
+- **Budget exhaustion**: Either pre-call (budget.exhausted()) or mid-call
+  (AgentCallError from asyncio timeout) → `status=paused` checkpoint, exits
+  non-zero. `otto build --resume` picks up from the recorded phase.
 
 **Target-mode semantics:**
 Target mode is invoked via `certifier_mode="target"` or

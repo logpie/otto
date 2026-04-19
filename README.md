@@ -4,9 +4,10 @@ Build, certify, and improve software products from natural language.
 
 ```bash
 otto build "bookmark manager with tags and search"
-otto certify                              # verify any project works
-otto improve bugs                         # find and fix bugs
-otto improve target "latency < 100ms"     # optimize toward a metric
+otto build "bookmark manager" --spec              # preview + approve spec first
+otto certify                                      # verify any project works
+otto improve bugs                                 # find and fix bugs
+otto improve target "latency < 100ms"             # optimize toward a metric
 ```
 
 ## How it works
@@ -19,6 +20,8 @@ otto improve target "latency < 100ms"     # optimize toward a metric
 4. **Certify** — dispatches a builder-blind certifier agent that tests as a real user
 5. **Fix** — if certification fails, reads findings, fixes code, re-certifies
 6. **Ship** — commits when certification passes
+
+Optionally, a **spec gate** runs first: `otto build "intent" --spec` generates a short reviewable spec (What It Does / Must Have / Must NOT Have Yet / Success Criteria), pauses for you to approve, then hands the approved spec to both the build agent and certifier — so scope creep and "Must NOT Have" features are flagged by the certifier as FAIL.
 
 **`otto certify`** runs independently on any project — regardless of how it was built:
 
@@ -64,6 +67,9 @@ uv pip install -e ".[claude]"
 cd your-project && git init
 otto build "REST API for a todo app with SQLite"
 
+# Build with a reviewable spec (recommended for non-trivial intents)
+otto build "bookmark manager with tags" --spec
+
 # Build on existing code (incremental)
 otto build "add search by keyword and tag"
 otto build "add pagination to listings"
@@ -95,12 +101,24 @@ Build a product from a natural language intent. One agent builds, certifies, and
 otto build "bookmark manager with tags and search"
 otto build "CLI tool that converts CSV to JSON"
 otto build "add dark mode toggle to the settings page"   # incremental
-
-# Options
-otto build "intent" --no-qa        # skip certification (just build)
-otto build "intent" --split        # system-controlled certify loop (vs agent-driven)
-otto build "intent" -n 5           # max 5 certification rounds (default: 8)
 ```
+
+| Flag | What it does |
+|---|---|
+| `--spec` | Generate a reviewable spec first; pause for approval before building |
+| `--spec-file PATH` | Use a pre-written spec (e.g. from `/office-hours` or spec-kit); implies `--yes` |
+| `--yes` | Auto-approve the generated spec (CI/scripts) |
+| `--force` | Discard an active paused spec run and start fresh |
+| `--fast` | Fast certification — happy-path smoke test only (the default) |
+| `--thorough` | Thorough certification — adversarial edge cases + code review |
+| `--no-qa` | Skip certification entirely (just build) |
+| `--split` | Python-driven certify→fix loop (vs. single agent session) |
+| `--rounds N` / `-n N` | Max certification rounds (default 8) |
+| `--resume` | Resume from last checkpoint; intent inherited from checkpoint |
+
+**Certifier mode selection**: CLI flag > `otto.yaml` > `fast` fallback. No flag + no yaml setting → `fast`. Projects that want real verification by default set `certifier_mode: standard` (or `thorough`) in `otto.yaml`.
+
+**Spec gate**: `--spec` generates `otto_logs/runs/<run-id>/spec.md` with sections _Intent / What It Does / Core User Journey / Must Have / Must NOT Have Yet / Success Criteria / Open Questions_. Pauses for `[a]pprove / [e]dit / [r]egenerate / [q]uit`. Approved spec flows into build.md + the certifier prompt — the certifier flags features found in "Must NOT Have Yet" as scope-creep FAILures.
 
 ### `otto certify`
 
@@ -171,9 +189,9 @@ Generate a `CLAUDE.md` file with project conventions for the coding agent. Reads
 otto setup
 ```
 
-## Configuration
+## Configuration (`otto.yaml`)
 
-`otto.yaml` is auto-created on first run (`otto build` or `otto setup`). All settings are optional — otto auto-detects what it can.
+`otto.yaml` is auto-created on first run (`otto build` or `otto setup`). All settings are optional — otto auto-detects what it can, and the CLI fallback is sane for quick iteration.
 
 ```yaml
 # Auto-detected (you usually don't need to set these)
@@ -185,10 +203,35 @@ provider: claude                       # "claude" (default) or "codex"
 model: null                            # override model (e.g. "sonnet", "gpt-5")
                                        # if null, uses the provider's default
 
-# Certification tuning
-certifier_timeout: 900                 # max seconds per build+certify session
-max_certify_rounds: 8                  # max certification rounds before stopping
+# Budget + certification
+run_budget_seconds: 3600               # total wall-clock for the whole invocation (primary knob)
+certifier_mode: fast                   # fast | standard | thorough
+                                       # CLI no-flag default is `fast` (cheap dev loop);
+                                       # set this to `standard` or `thorough` for real QA
+max_certify_rounds: 8                  # max certify→fix attempts before giving up
+spec_timeout: 600                      # cap on the spec-agent call specifically
 ```
+
+### Timeout semantics
+
+Only two timeout knobs, both orthogonal:
+
+| Knob | Scope | Default |
+|---|---|---|
+| `run_budget_seconds` | Total wall-clock across the whole `otto build` / `otto certify` / `otto improve` run. If exhausted, the run pauses with a resumable checkpoint. | `3600` (1h) |
+| `spec_timeout` | Per-phase cap on the spec-agent call specifically. Applied as `min(run_budget_remaining, spec_timeout)`. | `600` (10m) |
+
+Previous `certifier_timeout` and `agent_timeout` keys have been removed — `run_budget_seconds` replaces them end-to-end.
+
+### Certifier modes
+
+| Mode | Prompt | Use when |
+|---|---|---|
+| `fast` (default) | `certifier-fast.md` — 3-5 happy paths, inline, ~30s | Dev iteration, quick smoke check |
+| `standard` | `certifier.md` — subagents + screenshots, ~2 min | Real verification without adversarial probing |
+| `thorough` | `certifier-thorough.md` — adversarial, edge cases, code review, ~5 min | Production-grade QA |
+
+All three modes respect the spec (if `--spec` was used): scope-creep features in "Must NOT Have Yet" are reported as `STORY_RESULT: scope-creep-<slug> | FAIL` in any mode.
 
 ### Providers
 
@@ -210,37 +253,91 @@ On first run, otto detects:
 
 You can override any auto-detected value in `otto.yaml`.
 
+## Common Workflows
+
+### Quick iteration (cheap, seconds-per-loop)
+
+```bash
+otto build "CLI that converts CSV to JSON"        # fast certifier by default
+otto build --resume                               # if interrupted
+```
+
+### Non-trivial product (spec-gated)
+
+```bash
+otto build "bookmark manager with tags and share links" --spec
+# → spec agent writes otto_logs/runs/<id>/spec.md
+# → summary printed: Intent / Must-Have / Must-NOT-Have / Open questions
+# → [a]pprove / [e]dit / [r]egenerate / [q]uit
+# approve → build runs with spec-aware certifier
+```
+
+### Production QA at the project level
+
+Set `certifier_mode: thorough` in `otto.yaml` and let the project run real verification by default. Developers override with `--fast` for quick checks.
+
+### Using an external spec (e.g. from `/office-hours` or Spec Kit)
+
+```bash
+otto build --spec-file ./my-product-spec.md    # skips spec agent; implies --yes
+```
+
+The file must contain `**Intent:** <line>` plus required sections (`## Must Have`, `## Must NOT Have Yet`, `## Success Criteria`).
+
+### CI / scripted runs
+
+```bash
+otto build "intent" --spec --yes --thorough    # spec + auto-approve + real QA
+# Non-zero exit if certification failed.
+```
+
+### Crash / timeout recovery
+
+```bash
+otto build "intent" --spec       # crashes or Ctrl-C
+otto build --resume              # picks up from the last checkpoint phase
+                                 # (spec / spec_review / spec_approved / build / certify / round_complete)
+```
+
 ## Logs
 
 ```
 otto_logs/
+  checkpoint.json            Current run state (run_id, phase, cost, session_id)
+  runs/<run-id>/
+    spec.md                  Approved or in-review spec (spec-gate)
+    spec-v1.md, spec-v2.md   Prior versions after regen
+    spec-agent.log           Spec agent trace
   builds/<build-id>/
-    agent.log              Structured: commits, certifier rounds, verdict
-    agent-raw.log          Full agent output
-    checkpoint.json        Cost, duration, stories tested/passed
-  certifier/<run-id>/
-    proof-of-work.html     Report with embedded screenshots
-    proof-of-work.json     Machine-readable results
-    evidence/              Screenshots, video recordings
-  run-history.jsonl        One line per build (for otto history)
-build-journal.md           Round-by-round tracking (improve mode)
-improvement-report.md      Final improve summary with merge instructions
+    agent.log                Structured: commits, certifier rounds, verdict
+    agent-raw.log            Full agent output
+    checkpoint.json          Cost, duration, stories tested/passed
+  certifier/<cert-id>/
+    proof-of-work.html       Report with embedded screenshots
+    proof-of-work.json       Machine-readable results
+    evidence/                Screenshots, video recordings
+  run-history.jsonl          One line per build (for otto history)
+build-journal.md             Round-by-round tracking (improve mode)
+improvement-report.md        Final improve summary with merge instructions
 ```
 
 ## Project structure
 
 ```
-otto/                        ~3,500 lines
+otto/                        ~5,400 lines
   pipeline.py               Build pipeline, certify-fix loop
   certifier/__init__.py     Certifier agent
+  spec.py                   Spec-gate: run_spec_agent, review_spec, validate_spec
+  budget.py                 RunBudget — wall-clock budget tracker
+  checkpoint.py             Resume state, phase tracking, atomic writes
   markers.py                Parse STORY_RESULT/VERDICT/METRIC from agent output
-  prompts/                  Editable prompts (build, certify, improve modes)
-  agent.py                  Agent SDK wrapper
-  cli.py                    CLI: build, certify
+  prompts/                  Editable prompts (spec, build, certifier modes, code, improve)
+  agent.py                  Agent SDK wrapper, AgentCallError, session_id preservation
+  cli.py                    CLI: build, certify (+ spec orchestration)
   cli_improve.py            CLI: improve (bugs, feature, target)
   config.py                 Config, intent resolution, helpers
   journal.py                Build journal for improve rounds
-tests/                       89 tests
+tests/                       158 tests
 ```
 
 ## Requirements
