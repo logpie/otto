@@ -255,16 +255,14 @@ async def run_spec_agent(
 
     options = make_agent_options(project_dir, config)
 
-    # Spec-agent timeout: derived from run budget (if provided) with
-    # `spec_timeout` as an optional per-call safety cap.
+    # Spec-agent timeout: `spec_timeout` caps this specific phase (spec is
+    # expected to be fast — 1-3 min in practice). With a run budget active,
+    # the tighter of the two bounds this call.
     try:
         spec_cap = int(config.get("spec_timeout", 600))
     except (ValueError, TypeError):
         spec_cap = 600
-    if budget is not None:
-        timeout: int | None = budget.for_call(safety_cap=spec_cap)
-    else:
-        timeout = spec_cap
+    timeout: int = min(budget.for_call(), spec_cap) if budget is not None else spec_cap
 
     log_name = f"spec-agent{'-v' + str(version) if version else ''}.log"
     log_path = run_dir / log_name

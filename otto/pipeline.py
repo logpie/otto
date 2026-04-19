@@ -211,13 +211,10 @@ async def build_agentic_v3(
     # One agent call — the agent drives everything.
     # capture_tool_output=True so subagent output (certifier results) is included
     # in the returned text for parsing.
-    from otto.config import get_timeout
-    safety_cap = get_timeout(config)  # optional per-call cap (escape hatch)
-    if budget is not None:
-        timeout = budget.for_call(safety_cap=safety_cap)
-    else:
-        # No budget — use safety_cap if set, else a very large default.
-        timeout = safety_cap if safety_cap is not None else 86400
+    # Timeout derives from the run budget. `None` means no timeout (asyncio
+    # wait_for accepts this), so a call-level safety cap is unnecessary —
+    # run_budget_seconds bounds the whole run.
+    timeout = budget.for_call() if budget is not None else None
 
     try:
         text, cost, session_id = await run_agent_with_timeout(

@@ -17,20 +17,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # calls. 1h default.
     "run_budget_seconds": 3600,
 
-    # Optional per-agent-call safety caps. Applied as min(remaining_budget,
-    # cap) when set. `run_budget_seconds` is the primary control — these are
-    # belt-and-suspenders for unusual scenarios.
+    # Per-phase cap: the spec agent is short (1-3 min in practice). This
+    # bounds it without eating the full run budget.
     "spec_timeout": 600,            # cap on the spec-agent call specifically
-    # "agent_timeout": None,        # cap on build/certify/fix agent calls
-                                    # (`certifier_timeout` is the deprecated
-                                    # alias, still honored with warning)
     "max_certify_rounds": 8,        # max certification rounds in build loop
-}
-
-# Deprecated config keys → canonical name. Logged with a warning if user still
-# has them in otto.yaml; canonical key wins when both are set.
-_DEPRECATED_ALIASES: dict[str, str] = {
-    "certifier_timeout": "agent_timeout",
 }
 
 SUPPORTED_PROVIDERS = {"claude", "codex"}
@@ -79,40 +69,6 @@ def get_run_budget(config: dict[str, Any]) -> int:
     if value <= 0:
         _logger.warning("run_budget_seconds must be positive, using default %ds", default)
         return default
-    return value
-
-
-def get_timeout(config: dict[str, Any], key: str = "agent_timeout") -> int | None:
-    """Read a per-call safety cap from config. Returns None if unset.
-
-    Callers use this as a belt-and-suspenders cap on top of `run_budget_seconds`.
-    When a deprecated alias (``certifier_timeout``) is set and the canonical
-    key is not, the alias is honored with a deprecation warning.
-    """
-    import logging
-    _logger = logging.getLogger("otto.config")
-
-    raw_value: Any = config.get(key)
-    if raw_value is None:
-        for old_key, new_key in _DEPRECATED_ALIASES.items():
-            if new_key == key and config.get(old_key) is not None:
-                raw_value = config.get(old_key)
-                _logger.warning(
-                    "Config key `%s` is deprecated; use `%s` instead",
-                    old_key, new_key,
-                )
-                break
-    if raw_value is None:
-        return None
-
-    try:
-        value = int(raw_value)
-    except (ValueError, TypeError):
-        _logger.warning("Invalid %s (%r), ignoring", key, raw_value)
-        return None
-    if value <= 0:
-        _logger.warning("%s must be positive (got %d), ignoring", key, value)
-        return None
     return value
 
 
@@ -360,7 +316,6 @@ def create_config(project_dir: Path) -> Path:
     lines += "# certifier_mode: standard      # fast | standard | thorough — CLI no-flag default is fast (cheap dev loop)\n"
     lines += "# max_certify_rounds: 8         # max certify→fix attempts before giving up\n"
     lines += "# spec_timeout: 600             # cap on the spec-agent call specifically\n"
-    lines += "# agent_timeout:                # per-call safety cap (expert knob; leave unset)\n"
     config_path.write_text(lines + "\n")
 
     # Update .git/info/exclude for runtime files (use git_meta_dir for linked worktrees)

@@ -113,12 +113,8 @@ async def run_agentic_certifier(
 
     logger.info("Running agentic certifier on %s", project_dir)
 
-    from otto.config import get_timeout
-    safety_cap = get_timeout(config)
-    if budget is not None:
-        timeout = budget.for_call(safety_cap=safety_cap)
-    else:
-        timeout = safety_cap if safety_cap is not None else 86400
+    # Timeout derives from the run budget (None = no timeout).
+    timeout = budget.for_call() if budget is not None else None
 
     text, cost, _session_id = await run_agent_with_timeout(
         prompt, options,

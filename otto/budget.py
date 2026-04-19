@@ -1,7 +1,6 @@
 """Run budget: total wall-clock cap across an entire otto invocation.
 
-Replaces per-agent-call `agent_timeout` / `certifier_timeout` as the primary
-user-facing knob. One number (default 3600s = 1h) that caps the full
+The single user-facing timeout knob (default 3600s = 1h). Caps the full
 `otto build` / `otto certify` / `otto improve` run, no matter how many
 internal agent calls the pipeline makes.
 
@@ -15,7 +14,7 @@ Usage:
         return
 
     # Compute per-call timeout (shrinks as budget drains):
-    timeout = budget.for_call(safety_cap=some_safety_value)
+    timeout = budget.for_call()
 """
 
 from __future__ import annotations
@@ -50,21 +49,12 @@ class RunBudget:
     def exhausted(self) -> bool:
         return self.remaining() <= 0
 
-    def for_call(self, safety_cap: int | None = None) -> int:
+    def for_call(self) -> int:
         """Per-agent-call timeout in seconds.
 
-        Returns the lesser of `remaining()` and `safety_cap`. Callers must
-        check `exhausted()` BEFORE calling; this method does NOT floor at a
-        positive value, so `asyncio.wait_for` will correctly raise
-        TimeoutError immediately if called with a non-positive timeout.
-
-        `safety_cap` exists as a belt-and-suspenders escape hatch for the
-        deprecated `agent_timeout` config key — when both are set, the
-        smaller bounds the call.
+        Returns remaining budget as int. Callers must check `exhausted()`
+        BEFORE calling; this method does NOT floor at a positive value, so
+        `asyncio.wait_for` will correctly raise TimeoutError immediately if
+        called with a non-positive timeout.
         """
-        remaining = int(self.remaining())
-        # Ignore zero/negative caps — they'd force an immediate timeout even
-        # when budget is plenty. Treat them as "no cap" (user misconfig).
-        if safety_cap is not None and safety_cap > 0:
-            remaining = min(remaining, safety_cap)
-        return remaining
+        return int(self.remaining())

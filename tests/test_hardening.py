@@ -117,11 +117,12 @@ DIAGNOSIS: null
 # -- Test: Timeout is actually enforced --
 
 class TestTimeoutEnforcement:
-    """Build should time out when certifier_timeout is exceeded."""
+    """Build should time out when the run budget is exceeded."""
 
     @pytest.mark.asyncio
     async def test_build_times_out(self, tmp_git_repo):
         import time as _time
+        from otto.budget import RunBudget
         async def slow_query(prompt, options, **kwargs):
             await asyncio.sleep(10)
             return "never reached", 0.0, MagicMock()
@@ -129,7 +130,8 @@ class TestTimeoutEnforcement:
         start = _time.monotonic()
         with patch("otto.agent.run_agent_query", side_effect=slow_query):
             result = await build_agentic_v3(
-                "test", tmp_git_repo, {"certifier_timeout": 1}
+                "test", tmp_git_repo, {},
+                budget=RunBudget(total=1.0, start=_time.monotonic()),
             )
         elapsed = _time.monotonic() - start
 
@@ -265,9 +267,9 @@ class TestCertifyPassesConfig:
     run_agentic_certifier (not ignore user-configured timeouts etc.)."""
 
     def test_certify_passes_config(self, tmp_git_repo):
-        # Write a custom timeout to otto.yaml
+        # Write a custom setting to otto.yaml and verify it reaches the certifier.
         config_path = tmp_git_repo / "otto.yaml"
-        config_path.write_text("certifier_timeout: 1200\n")
+        config_path.write_text("spec_timeout: 1200\n")
 
         captured_config = []
 
@@ -287,7 +289,7 @@ class TestCertifyPassesConfig:
             runner.invoke(main, ["certify", "test intent"], catch_exceptions=False)
 
         assert captured_config, "run_agentic_certifier was not called"
-        assert captured_config[0].get("certifier_timeout") == 1200
+        assert captured_config[0].get("spec_timeout") == 1200
 
 
 class TestImproveCLIHardening:
@@ -687,10 +689,13 @@ class TestResultMsgInit:
             await asyncio.sleep(10)
             return "never", 0.0, MagicMock()
 
+        import time as _time
+        from otto.budget import RunBudget
         with patch("otto.agent.run_agent_query", side_effect=slow_query):
             # This should not raise UnboundLocalError
             result = await build_agentic_v3(
-                "test", tmp_git_repo, {"certifier_timeout": 1}
+                "test", tmp_git_repo, {},
+                budget=RunBudget(total=1.0, start=_time.monotonic()),
             )
 
         assert result.passed is False
@@ -722,9 +727,14 @@ class TestSessionIdPreservedOnFailure:
             await asyncio.sleep(10)
             return "never", 0.0, MagicMock()
 
+        import time as _time
+        from otto.budget import RunBudget
+        # Budget must be >=2s so int(remaining) is positive when wait_for
+        # schedules the coroutine, letting the mock set state before timeout.
         with patch("otto.agent.run_agent_query", side_effect=streaming_query):
             result = await build_agentic_v3(
-                "test", tmp_git_repo, {"agent_timeout": 1}
+                "test", tmp_git_repo, {},
+                budget=RunBudget(total=3.0, start=_time.monotonic()),
             )
         assert result.passed is False
 
@@ -786,39 +796,6 @@ class TestAppendIntentDedup:
     # gets created on first write.)
 
 
-# -- Test: agent_timeout safety cap (optional; None when unset or invalid) --
-
-class TestTimeoutValidation:
-    """`agent_timeout` is now an optional per-call safety cap. Unset or
-    invalid → returns None (no cap applied). `certifier_timeout` is a
-    deprecated alias."""
-
-    @pytest.mark.parametrize("bad_value", ["abc", 0, -5, "", "0"])
-    def test_invalid_agent_timeout_returns_none(self, bad_value):
-        from otto.config import get_timeout
-        assert get_timeout({"agent_timeout": bad_value}) is None
-
-    def test_unset_returns_none(self):
-        from otto.config import get_timeout
-        assert get_timeout({}) is None
-
-    def test_valid_agent_timeout_honored(self):
-        from otto.config import get_timeout
-        assert get_timeout({"agent_timeout": 120}) == 120
-        assert get_timeout({"agent_timeout": "120"}) == 120
-
-    def test_deprecated_certifier_timeout_honored_with_warning(self, caplog):
-        import logging
-        from otto.config import get_timeout
-        with caplog.at_level(logging.WARNING, logger="otto.config"):
-            assert get_timeout({"certifier_timeout": 120}) == 120
-        assert any("deprecated" in r.message.lower() for r in caplog.records)
-
-    def test_canonical_wins_over_alias(self):
-        from otto.config import get_timeout
-        assert get_timeout({"agent_timeout": 300, "certifier_timeout": 100}) == 300
-
-
 class TestRunBudget:
     """Total-run budget replaces per-call timeout as primary knob."""
 
@@ -851,21 +828,11 @@ class TestRunBudget:
         b = RunBudget(total=0.01, start=_time.monotonic() - 1.0)
         assert b.exhausted()
 
-    def test_for_call_with_safety_cap(self):
+    def test_for_call_returns_remaining(self):
         import time as _time
         from otto.budget import RunBudget
         b = RunBudget(total=1000.0, start=_time.monotonic())
-        # safety cap smaller than remaining → cap wins
-        assert b.for_call(safety_cap=60) == 60
-        # no cap → full remaining
         assert b.for_call() == pytest.approx(1000, abs=1)
-
-    def test_for_call_remaining_wins_when_smaller(self):
-        import time as _time
-        from otto.budget import RunBudget
-        b = RunBudget(total=30.0, start=_time.monotonic())
-        # safety cap larger than remaining → remaining wins
-        assert b.for_call(safety_cap=3600) == pytest.approx(30, abs=1)
 
 
 class TestBudgetExhaustionInPipeline:
@@ -930,14 +897,13 @@ class TestBudgetExhaustionInPipeline:
         assert cp["session_id"] == "mid-stream-sid"
 
 
-# -- Test: Certifier timeout validation --
+# -- Test: invalid spec_timeout in config is tolerated --
 
-class TestCertifierTimeoutValidation:
-    """Certifier runs successfully even with invalid timeout config.
-    Narrow integration test — unit behavior lives in TestTimeoutValidation."""
+class TestSpecTimeoutTolerance:
+    """spec.py should fall back to the default when spec_timeout is non-numeric."""
 
     @pytest.mark.asyncio
-    async def test_certifier_tolerates_invalid_timeout(self, tmp_git_repo):
+    async def test_certifier_ignores_unknown_timeout_keys(self, tmp_git_repo):
         from otto.certifier import run_agentic_certifier
         from otto.certifier.report import CertificationOutcome
 
@@ -945,13 +911,11 @@ class TestCertifierTimeoutValidation:
             return ("VERDICT: PASS\nSTORY_RESULT: x | PASS | ok\n"
                     "STORIES_TESTED: 1\nSTORIES_PASSED: 1\nDIAGNOSIS: null"), 0.1, MagicMock()
 
+        # Obsolete keys like `certifier_timeout` are now ignored — no raise.
         with patch("otto.agent.run_agent_query", side_effect=mock_query):
             report = await run_agentic_certifier(
                 "test", tmp_git_repo, config={"certifier_timeout": "not-a-number"}
             )
-        # Stronger than "report is not None": verify the run completed and
-        # parsed the mock output (the weak isinstance check used to pass even
-        # on a crashed/empty report).
         assert report.outcome == CertificationOutcome.PASSED
         assert report.story_results and report.story_results[0]["story_id"] == "x"
 
