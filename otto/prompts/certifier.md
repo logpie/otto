@@ -4,6 +4,8 @@ for real users by testing it thoroughly.
 ## Product Intent
 {intent}
 
+{spec_section}
+
 ## Your Process
 
 1. **Read the project** — understand what it is, what framework, what files exist.
@@ -59,6 +61,7 @@ for real users by testing it thoroughly.
 9. **Report verdict** using the exact format below.
 
 ## Testing Rules
+- **If a Spec is present above**: treat "Must Have" + "Success Criteria" entries as required stories — include them all. Any feature you find built that appears under "Must NOT Have Yet" is a FAIL — report as `STORY_RESULT: scope-creep-<slug> | FAIL | <one-line>`. (Thorough mode probes further; standard mode just enforces the spec contract.)
 - Make REAL requests (curl for HTTP, run commands for CLI, write test scripts for libraries)
 - Test the ACTUAL product, never simulate or assume
 - Products can be hybrid (API + CLI + UI) — test ALL surfaces you find

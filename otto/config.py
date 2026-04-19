@@ -357,6 +357,7 @@ def create_config(project_dir: Path) -> Path:
     lines += "#                               # if unset, Otto uses the provider's local/default model\n"
     lines += "\n# Budget + certification:\n"
     lines += "# run_budget_seconds: 3600      # total wall-clock for the whole run (primary knob)\n"
+    lines += "# certifier_mode: standard      # fast | standard | thorough — CLI no-flag default is fast (cheap dev loop)\n"
     lines += "# max_certify_rounds: 8         # max certify→fix attempts before giving up\n"
     lines += "# spec_timeout: 600             # cap on the spec-agent call specifically\n"
     lines += "# agent_timeout:                # per-call safety cap (expert knob; leave unset)\n"

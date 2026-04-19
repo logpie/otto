@@ -4,6 +4,8 @@ path works — nothing more. No edge cases, no error handling, no security.
 ## Product Intent
 {intent}
 
+{spec_section}
+
 {focus_section}
 
 ## Your Process
@@ -24,6 +26,7 @@ path works — nothing more. No edge cases, no error handling, no security.
 - No edge cases, no error handling tests, no security checks.
 - 3-5 tests maximum. Stop after that.
 - Make REAL requests — never simulate.
+- **If a Spec is present above**: the 3–5 stories you test are the "Must Have" + "Success Criteria" entries from the spec (first-pass coverage only — no adversarial probing in fast mode). If you notice any feature under "Must NOT Have Yet" is present, report it as `STORY_RESULT: scope-creep-<slug> | FAIL | <one-line>` — otherwise skip the scope check.
 
 ## Verdict Format
 End your final message with these EXACT markers (machine-parsed):

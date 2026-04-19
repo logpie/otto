@@ -318,7 +318,8 @@ def _print_build_result(intent: str, result, build_duration: float) -> None:
 @main.command(context_settings=CONTEXT_SETTINGS)
 @click.argument("intent", required=False)
 @click.option("--no-qa", is_flag=True, help="Skip product certification after build")
-@click.option("--fast", is_flag=True, help="Fast certification — happy path smoke test only")
+@click.option("--fast", is_flag=True, help="Fast certification — happy path smoke test only (default)")
+@click.option("--thorough", is_flag=True, help="Thorough certification — adversarial edge cases + code review")
 @click.option("--split", is_flag=True, help="Split mode: system-controlled certify loop with build journal")
 @click.option("--rounds", "-n", default=None, type=int, help="Max certification rounds (default: 8)")
 @click.option("--resume", is_flag=True, help="Resume from last checkpoint (requires an in-progress run)")
@@ -327,7 +328,7 @@ def _print_build_result(intent: str, result, build_duration: float) -> None:
               default=None, help="Use a pre-written spec file (implies --yes)")
 @click.option("--yes", is_flag=True, help="Auto-approve the generated spec (for CI/scripts)")
 @click.option("--force", is_flag=True, help="Discard an active paused spec run and start fresh")
-def build(intent, no_qa, fast, split, rounds, resume, spec, spec_file, yes, force):
+def build(intent, no_qa, fast, thorough, split, rounds, resume, spec, spec_file, yes, force):
     """Build a product from a natural language intent.
 
     One agent builds, certifies, and fixes autonomously. The certifier
@@ -394,16 +395,12 @@ def build(intent, no_qa, fast, split, rounds, resume, spec, spec_file, yes, forc
         or is_spec_phase(resume_state.phase)
         or bool(resume_state.spec_path)
     )
-    if use_spec:
-        if split:
-            error_console.print("[error]--spec is not compatible with --split (v1).[/error]")
-            sys.exit(2)
-        if fast:
-            error_console.print("[error]--spec is not compatible with --fast (v1).[/error]")
-            sys.exit(2)
-        if no_qa:
-            error_console.print("[error]--spec requires the certifier; --no-qa is incompatible.[/error]")
-            sys.exit(2)
+    if use_spec and no_qa:
+        error_console.print(
+            "[error]--spec requires the certifier (Must-NOT-Have scope check); "
+            "--no-qa is incompatible.[/error]"
+        )
+        sys.exit(2)
 
     intent = (intent or "").strip()
 
@@ -464,8 +461,13 @@ def build(intent, no_qa, fast, split, rounds, resume, spec, spec_file, yes, forc
 
     if no_qa:
         config["skip_product_qa"] = True
+    if fast and thorough:
+        error_console.print("[error]--fast and --thorough are mutually exclusive.[/error]")
+        sys.exit(2)
     if fast:
         config["_certifier_mode"] = "fast"
+    elif thorough:
+        config["_certifier_mode"] = "thorough"
     if rounds is not None:
         config["max_certify_rounds"] = rounds
 
@@ -497,7 +499,10 @@ def build(intent, no_qa, fast, split, rounds, resume, spec, spec_file, yes, forc
 
     console.print()
 
-    certifier_mode = config.pop("_certifier_mode", "thorough")
+    # Priority: CLI flag (stored in _certifier_mode) > otto.yaml (certifier_mode)
+    # > "fast" fallback (cheap default for quick iteration; users who want real
+    # QA set `certifier_mode: standard` or `thorough` in otto.yaml).
+    certifier_mode = config.pop("_certifier_mode", None) or config.get("certifier_mode", "fast")
 
     try:
         if split and not no_qa:
