@@ -2,7 +2,7 @@
 
 ## Overview
 
-Otto is ~4,000 lines of Python. It builds, certifies, and improves software
+Otto is ~4,300 lines of Python. It builds, certifies, and improves software
 products using LLM agents.
 
 ```
@@ -150,31 +150,56 @@ otto improve bugs "error handling" -n 5
          │         │        │         │           │
       3-5 happy  full     adver-   suggest    measure
       paths,     verify   sarial,  features,  metric,
-      inline,    + sub-   edge     UX gaps    compare
-      ~30s       agents   cases               to target
+      inline,    + sub-   edge     UX gaps    require
+      ~30s       agents   cases               METRIC_MET
                  ~2min    ~5min    ~3min      ~2min
 ```
 
 ## Checkpoint & Resume
 
+Both modes write `otto_logs/checkpoint.json`. Agent mode uses `session_id`
+for SDK-level resume; split mode replays from the last completed round.
+
 ```
 otto improve bugs --split -n 50
 │
-├─ Round 1 ──► checkpoint.json {round:1, status:in_progress}
-│   ├─ Certify ──► checkpoint.json {round:1, stories:...}
-│   └─ Fix
+├─ Pre-write ──► checkpoint.json {status:in_progress, phase:initial_build}
+├─ Initial build (if not resuming)
 │
-├─ Round 2 ──► checkpoint.json {round:2, ...}
+├─ Round 1 starts ──► checkpoint {phase:certify, current_round:0}   (last COMPLETED = 0)
 │   ├─ Certify
-│   └─ Fix
+│   ├─ Fix (on FAIL)
+│   └─ Round complete ──► checkpoint {phase:round_complete, current_round:1}
 │
-├─ [CRASH or Ctrl+C]
-│   └─ checkpoint.json {round:2, status:paused}
+├─ Round 2 starts ──► checkpoint {phase:certify, current_round:1}
+│   ├─ Certify
+│   ├─ [CRASH or Ctrl+C]
+│   └─ checkpoint {status:paused, phase:certify, current_round:1}
 │
 └─ otto improve bugs --split --resume
-    └─ Reads checkpoint → "Resuming from round 3"
-       └─ Round 3, 4, ... continues
+    └─ resolve_resume reads checkpoint → start_round = current_round + 1 = 2
+       └─ Replays round 2's certify phase (not round 3 — the crashed phase
+          didn't complete, so we don't skip it).
 ```
+
+**Key invariants:**
+- `current_round` = last FULLY completed round (start with 0, advance only
+  after the round's fix phase finishes).
+- `phase` distinguishes where a crash happened. `phase=""` (old checkpoints)
+  is treated as "unknown — don't skip the initial build."
+- Checkpoint writes are atomic: `checkpoint.json.tmp` + `os.replace()` so a
+  concurrent reader never sees a half-written file. Read path never touches
+  `.tmp` — it belongs to an in-flight writer.
+- Agent mode writes an `in_progress` checkpoint BEFORE calling the SDK so a
+  crash mid-session still has a resumable marker (session_id may be empty
+  until the agent returns).
+- Inner `build_agentic_v3` calls from `run_certify_fix_loop` pass
+  `manage_checkpoint=False` so they don't stomp the outer loop's checkpoint.
+- Command attribution is fine-grained: checkpoints record
+  `improve.bugs`/`.feature`/`.target` not just `improve`, so a mismatch
+  warning fires if you resume under a different subcommand.
+- `otto improve target --resume` inherits the goal from the checkpoint and
+  hard-fails if the prior run wasn't `improve.target`.
 
 Error retry: certifier/build retried up to 2x on failure before moving on.
 
@@ -198,16 +223,16 @@ otto/prompts/
 
 | Module | Lines | Purpose |
 |--------|------:|---------|
-| `pipeline.py` | 880 | `build_agentic_v3`, `run_certify_fix_loop`, PoW reports |
-| `agent.py` | 593 | SDK abstraction, `run_agent_with_timeout`, provider switching |
-| `certifier/__init__.py` | 371 | Standalone certifier, PoW generation |
-| `cli_improve.py` | 349 | `improve` command group (bugs/feature/target) |
+| `pipeline.py` | 919 | `build_agentic_v3`, `run_certify_fix_loop`, PoW reports |
+| `agent.py` | 596 | SDK abstraction, `run_agent_with_timeout`, provider switching |
+| `cli_improve.py` | 380 | `improve` command group (bugs/feature/target), exit-code wiring |
+| `certifier/__init__.py` | 350 | Standalone certifier, PoW generation, target-mode gate |
 | `config.py` | 334 | Config loading, auto-detection, helpers |
+| `cli.py` | 283 | `build`, `certify` commands |
 | `journal.py` | 245 | Build journal: round tracking, current state |
-| `cli.py` | 243 | `build`, `certify` commands |
-| `markers.py` | 238 | Parse STORY_RESULT/VERDICT/METRIC from agent output |
-| `checkpoint.py` | 117 | Checkpoint read/write/clear for resume |
-| `memory.py` | 137 | Cross-run certifier memory (opt-in) |
+| `markers.py` | 237 | Parse STORY_RESULT/VERDICT/METRIC_MET from agent output |
+| `checkpoint.py` | 233 | Atomic checkpoint read/write/clear, `resolve_resume`, `ResumeState` |
+| `memory.py` | 161 | Cross-run certifier memory (opt-in) |
 
 ## Error Handling
 
@@ -215,7 +240,21 @@ Centralized in `run_agent_with_timeout()`:
 - **Timeout**: Configurable via `certifier_timeout` (default 900s). Orphan processes cleaned up.
 - **Agent crash**: `AgentCallError` raised. Callers retry up to 2x.
 - **No output**: No verdict markers → treated as FAIL.
-- **KeyboardInterrupt**: Checkpoint written (status=paused), re-raised.
+- **KeyboardInterrupt**: Checkpoint written (status=paused, current phase
+  recorded), re-raised.
+
+**Target-mode semantics:**
+Target mode is invoked via `certifier_mode="target"` or
+`config["_target"]`. The gate is strict: `result.passed is True` requires
+BOTH story-level success AND `METRIC_MET: YES` from the certifier. A
+target run where stories pass but the certifier omits `METRIC_MET:`
+fails — in split mode with a fail-fast journal entry
+(`"FAIL (certifier omitted METRIC_MET)"`) so the fix loop doesn't waste
+a round on random guessing. Non-target modes (bugs/feature) never
+consult `metric_met`.
+
+`otto improve` exits non-zero on failure (matching `otto build`), so
+CI wrappers can detect when the run didn't reach its goal.
 
 ## Observability
 
