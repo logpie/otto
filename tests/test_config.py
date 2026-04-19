@@ -84,6 +84,9 @@ class TestProviderHelpers:
     def test_agent_provider_defaults_to_claude(self):
         assert agent_provider({}) == "claude"
 
+    def test_default_config_exposes_spec_timeout(self):
+        assert DEFAULT_CONFIG["spec_timeout"] == 600
+
 
 class TestDetectTestCommand:
     def test_detects_pytest(self, tmp_bare_git_repo):
@@ -188,6 +191,10 @@ class TestCreateConfig:
         assert config_path.exists()
         cfg = yaml.safe_load(config_path.read_text())
         assert "default_branch" in cfg
+
+    def test_create_config_mentions_spec_timeout(self, tmp_bare_git_repo):
+        config_path = create_config(tmp_bare_git_repo)
+        assert "# spec_timeout: 600" in config_path.read_text()
 
     def test_updates_git_info_exclude(self, tmp_bare_git_repo):
         create_config(tmp_bare_git_repo)

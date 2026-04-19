@@ -75,6 +75,7 @@ async def build_agentic_v3(
     from otto.agent import AgentCallError, make_agent_options, run_agent_with_timeout
 
     build_id = f"build-{int(time.time())}-{os.getpid()}"
+    checkpoint_run_id = run_id or build_id
     build_dir = project_dir / "otto_logs" / "builds" / build_id
     build_dir.mkdir(parents=True, exist_ok=True)
 
@@ -175,12 +176,12 @@ async def build_agentic_v3(
         try:
             write_checkpoint(
                 project_dir,
-                run_id=build_id,
+                run_id=checkpoint_run_id,
                 command=command,
                 certifier_mode=certifier_mode,
                 prompt_mode=prompt_mode,
                 session_id=session_id,
-                total_cost=total_run_cost + float(cost or 0),
+                total_cost=total_run_cost,
                 status=status,
                 spec_cost=float(spec_cost or 0.0),
             )

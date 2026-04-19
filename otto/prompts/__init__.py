@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 _PROMPTS_DIR = Path(__file__).parent
@@ -20,6 +21,10 @@ _KNOWN_PLACEHOLDERS = frozenset({
     "target",
 })
 
+_PLACEHOLDER_PATTERN = re.compile(
+    r"\{(" + "|".join(map(re.escape, sorted(_KNOWN_PLACEHOLDERS))) + r")\}"
+)
+
 def _load(name: str) -> str:
     return (_PROMPTS_DIR / name).read_text()
 
@@ -33,11 +38,10 @@ def render_prompt(name: str, **vars: object) -> str:
     files survive unchanged.
     """
     text = _load(name)
-    for key in _KNOWN_PLACEHOLDERS:
-        placeholder = "{" + key + "}"
-        value = vars.get(key, "")
-        text = text.replace(placeholder, "" if value is None else str(value))
-    return text
+    return _PLACEHOLDER_PATTERN.sub(
+        lambda match: "" if vars.get(match.group(1), "") is None else str(vars.get(match.group(1), "")),
+        text,
+    )
 
 
 def build_prompt() -> str:

@@ -212,6 +212,16 @@ class TestRenderPromptSpec:
         assert '{"foo": "bar"}' in rendered
         assert "Intent: demo" in rendered
 
+    def test_render_prompt_does_not_re_expand_substituted_values(self, tmp_path, monkeypatch):
+        """A placeholder value containing another placeholder token is not re-expanded."""
+        import otto.prompts as prompts
+
+        prompt_path = tmp_path / "nested.md"
+        prompt_path.write_text("A:{spec_section}\nB:{intent}\n")
+        monkeypatch.setattr(prompts, "_PROMPTS_DIR", tmp_path)
+        out = prompts.render_prompt("nested.md", spec_section="{intent}", intent="REAL")
+        assert out == "A:{intent}\nB:REAL\n"
+
 
 class TestCheckpointSpecPhases:
     def test_is_spec_phase(self):

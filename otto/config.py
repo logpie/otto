@@ -13,6 +13,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "model": None,                  # override provider model (e.g. sonnet, gpt-5)
 
     # Product certification
+    "spec_timeout": 600,            # max seconds for spec generation/review steps
     "certifier_timeout": 900,       # max seconds for entire build+certify session
     "max_certify_rounds": 8,        # max certification rounds in build loop
 }
@@ -302,6 +303,7 @@ def create_config(project_dir: Path) -> Path:
     lines += "# model: null                   # override provider model\n"
     lines += "#                               # if unset, Otto uses the provider's local/default model\n"
     lines += "\n# Product certification:\n"
+    lines += "# spec_timeout: 600             # max seconds for spec generation/review steps\n"
     lines += "# certifier_timeout: 1800        # max seconds for entire build+certify session\n"
     lines += "# max_certify_rounds: 8          # max certification rounds (agent stops after this many)\n"
     config_path.write_text(lines + "\n")
