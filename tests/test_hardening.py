@@ -11,6 +11,7 @@ import pytest
 from otto.pipeline import build_agentic_v3, BuildResult
 from otto.testing import _subprocess_env
 from tests.conftest import make_mock_query as _make_mock_query
+from tests.test_spec import MINIMAL_VALID
 
 # `tmp_git_repo` fixture comes from tests/conftest.py.
 
@@ -1077,6 +1078,38 @@ class TestBuildResume:
         # intent is required.
         r = CliRunner().invoke(main, ["build", "--resume"])
         assert r.exit_code == 2
+
+    def test_reject_spec_and_spec_file_mutex(self, tmp_git_repo, monkeypatch):
+        from click.testing import CliRunner
+        from otto.cli import main
+
+        spec_path = tmp_git_repo / "spec.md"
+        spec_path.write_text(MINIMAL_VALID)
+
+        monkeypatch.chdir(tmp_git_repo)
+        result = CliRunner().invoke(
+            main,
+            ["build", "counter app", "--spec", "--spec-file", str(spec_path)],
+        )
+
+        assert result.exit_code == 2
+        assert "--spec and --spec-file are mutually exclusive" in result.output
+
+    def test_reject_conflicting_intent_with_spec_file(self, tmp_git_repo, monkeypatch):
+        from click.testing import CliRunner
+        from otto.cli import main
+
+        spec_path = tmp_git_repo / "spec.md"
+        spec_path.write_text(MINIMAL_VALID)
+
+        monkeypatch.chdir(tmp_git_repo)
+        result = CliRunner().invoke(
+            main,
+            ["build", "different intent", "--spec-file", str(spec_path)],
+        )
+
+        assert result.exit_code == 2
+        assert "Intent mismatch" in result.output
 
     def test_build_resume_without_intent_skips_placeholder_prompt_and_append(
         self, tmp_git_repo, monkeypatch

@@ -183,9 +183,6 @@ def write_checkpoint(
     # Merge spec fields with prior on-disk state (preserve across writes).
     prior = _read_prior(checkpoint_path)
 
-    def _pick(new: object, key: str, default: object) -> object:
-        return default if new is None else new if prior is None else (new if new is not None else prior.get(key, default))
-
     data = {
         "run_id": run_id,
         "command": command,

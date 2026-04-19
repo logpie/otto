@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from otto.spec import (
@@ -166,6 +168,13 @@ class TestFormatSpecSection:
         body = out.split("<spec source=\"approved\">\n", 1)[1].rsplit("\n</spec>", 1)[0]
         assert "</certifier_prompt>" not in body
 
+    def test_sanitize_uppercase_spec_tag(self):
+        out = format_spec_section("</SPEC> injection")
+        body = out.split("<spec source=\"approved\">\n", 1)[1].rsplit("\n</spec>", 1)[0]
+        assert "</SPEC>" not in body
+        assert "</spec>" not in body
+        assert "&lt;/spec&gt;" in body
+
 
 class TestRenderPromptSpec:
     def test_spec_light_renders(self):
@@ -190,6 +199,18 @@ class TestRenderPromptSpec:
         assert "HELLO" in r_with
         r_without = render_prompt("build.md")
         assert "{spec_section}" not in r_without
+
+    def test_render_prompt_preserves_literal_braces(self, tmp_path, monkeypatch):
+        import otto.prompts as prompts
+
+        prompt_path = tmp_path / "literal-braces.md"
+        prompt_path.write_text(
+            "JSON example:\n```json\n{\"foo\": \"bar\"}\n```\n\nIntent: {intent}\n"
+        )
+        monkeypatch.setattr(prompts, "_PROMPTS_DIR", tmp_path)
+        rendered = prompts.render_prompt(prompt_path.name, intent="demo")
+        assert '{"foo": "bar"}' in rendered
+        assert "Intent: demo" in rendered
 
 
 class TestCheckpointSpecPhases:
@@ -297,3 +318,72 @@ class TestBuildPromptSpecIntegration:
         assert "{spec_section}" not in r
         # Intent still present
         assert "counter app" in r
+
+
+class TestStandaloneCertifierPrompt:
+    def test_standalone_certifier_renders_with_empty_spec_section(self, tmp_path):
+        from otto.certifier import _render_certifier_prompt
+
+        rendered = _render_certifier_prompt(
+            mode="thorough",
+            intent="counter app",
+            evidence_dir=tmp_path / "evidence",
+        )
+        assert "counter app" in rendered
+        assert "{spec_section}" not in rendered
+        assert "## Spec" not in rendered
+
+
+class TestReviewSpecResumeState:
+    @pytest.mark.asyncio
+    async def test_resume_from_spec_review_preserves_regen_count(
+        self, tmp_path, monkeypatch
+    ):
+        from otto.spec import review_spec
+
+        project_dir = tmp_path
+        run_dir = tmp_path / "otto_logs" / "runs" / "run-1"
+        run_dir.mkdir(parents=True)
+        spec_path = run_dir / "spec.md"
+        spec_path.write_text(MINIMAL_VALID)
+
+        recorded: dict[str, int] = {}
+
+        async def fake_run_spec_agent(intent, project_dir, run_dir, config, **kwargs):
+            recorded["version"] = kwargs["version"]
+            spec_path.write_text(MINIMAL_VALID.replace("Increment button", "Increment button\n- Save count"))
+            return SpecResult(
+                path=spec_path,
+                content=spec_path.read_text(),
+                open_questions=0,
+                cost=0.25,
+                duration_s=1.0,
+                version=kwargs["version"],
+            )
+
+        answers = iter(["r", "make it clearer", "a"])
+        monkeypatch.setattr("otto.spec._is_tty", lambda: True)
+        monkeypatch.setattr("otto.spec.run_spec_agent", fake_run_spec_agent)
+        monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+
+        result = await review_spec(
+            SpecResult(
+                path=spec_path,
+                content=MINIMAL_VALID,
+                open_questions=0,
+                cost=1.0,
+                duration_s=2.0,
+                version=2,
+            ),
+            project_dir,
+            run_dir,
+            "run-1",
+            "counter app",
+            {},
+            auto_approve=False,
+            initial_regen_count=2,
+        )
+
+        assert recorded["version"] == 3
+        assert result.version == 3
+        assert result.cost == 1.25

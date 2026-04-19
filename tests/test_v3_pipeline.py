@@ -241,6 +241,14 @@ class TestV3PipelinePass:
         assert intent in entry["intent"]
 
 
+@pytest.mark.asyncio
+async def test_build_result_total_cost_includes_spec_cost(tmp_git_repo):
+    with patch("otto.agent.run_agent_query", side_effect=_make_mock_query(AGENT_OUTPUT_PASS)):
+        result = await build_agentic_v3("test", tmp_git_repo, {}, spec_cost=0.25)
+
+    assert result.total_cost == 0.75
+
+
 class TestV3PipelineFail:
     """Agent builds, certifier finds bugs, build fails."""
 

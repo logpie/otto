@@ -50,6 +50,7 @@ class SpecResult:
     open_questions: int
     cost: float
     duration_s: float
+    version: int = 0
 
 
 class ReviewAction(Enum):
@@ -184,7 +185,7 @@ def _sanitize_spec_content(content: str) -> str:
     out = content
     for tok in _DANGEROUS_TOKENS:
         safe = tok.replace("<", "&lt;").replace(">", "&gt;")
-        out = out.replace(tok, safe)
+        out = re.sub(re.escape(tok), safe, out, flags=re.IGNORECASE)
     return out
 
 
@@ -213,6 +214,7 @@ def format_spec_section(content: str | None) -> str:
 
 async def run_spec_agent(
     intent: str,
+    project_dir: Path,
     run_dir: Path,
     config: dict[str, object],
     *,
@@ -255,7 +257,7 @@ async def run_spec_agent(
         prior_spec_section=prior_block,
     )
 
-    options = make_agent_options(run_dir.parent.parent, config)  # cwd = project_dir
+    options = make_agent_options(project_dir, config)
 
     # Small timeout for spec generation (default 600s). Spec is short; no
     # need for certifier-style timeouts.
@@ -271,7 +273,7 @@ async def run_spec_agent(
             prompt, options,
             log_path=log_path,
             timeout=timeout,
-            project_dir=run_dir.parent.parent,
+            project_dir=project_dir,
             capture_tool_output=False,
         )
     except AgentCallError as err:
@@ -298,6 +300,7 @@ async def run_spec_agent(
         open_questions=count_open_questions(content),
         cost=float(cost or 0.0),
         duration_s=duration,
+        version=version,
     )
 
 
@@ -348,11 +351,14 @@ def _summarize_spec(content: str) -> str:
 
 async def review_spec(
     spec_result: SpecResult,
+    project_dir: Path,
     run_dir: Path,
+    run_id: str,
     intent: str,
     config: dict[str, object],
     *,
     auto_approve: bool,
+    initial_regen_count: int = 0,
 ) -> SpecResult:
     """Interactive review gate for a generated spec.
 
@@ -362,6 +368,8 @@ async def review_spec(
 
     When `auto_approve` is True, returns immediately (no prompt).
     """
+    from otto.checkpoint import clear_checkpoint, write_checkpoint
+
     if auto_approve:
         return spec_result
 
@@ -372,7 +380,7 @@ async def review_spec(
         )
 
     current = spec_result
-    regen_count = 0
+    regen_count = initial_regen_count
 
     while True:
         print()
@@ -422,6 +430,7 @@ async def review_spec(
                 open_questions=count_open_questions(content),
                 cost=current.cost,
                 duration_s=current.duration_s,
+                version=current.version,
             )
             continue
 
@@ -445,7 +454,7 @@ async def review_spec(
             except OSError as exc:
                 logger.warning("Could not archive prior spec: %s", exc)
             new = await run_spec_agent(
-                intent, run_dir, config,
+                intent, project_dir, run_dir, config,
                 prior_spec=current.content,
                 user_notes=note,
                 version=regen_count,
@@ -457,10 +466,23 @@ async def review_spec(
                 open_questions=new.open_questions,
                 cost=current.cost + new.cost,
                 duration_s=current.duration_s + new.duration_s,
+                version=regen_count,
+            )
+            write_checkpoint(
+                project_dir,
+                run_id=run_id,
+                command="build",
+                phase="spec_review",
+                intent=intent,
+                spec_path=str(current.path),
+                spec_hash=spec_hash(current.content),
+                spec_version=regen_count,
+                spec_cost=current.cost,
             )
             continue
 
         if action == "q":
+            clear_checkpoint(project_dir)
             print("  Aborted.")
             sys.exit(0)
 

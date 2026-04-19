@@ -104,6 +104,10 @@ async def _run_spec_phase(
         return run_id, content, resume_state.spec_cost
 
     spec_cost = resume_state.spec_cost or 0.0
+    current_phase = "spec"
+    current_spec_path = resume_state.spec_path or ""
+    current_spec_hash = resume_state.spec_hash or ""
+    current_spec_version = resume_state.spec_version or 0
 
     # Resume mid-review: spec.md exists, re-open the gate.
     resume_mid_review = (
@@ -134,12 +138,17 @@ async def _run_spec_phase(
                 path=spec_path_out,
                 content=content,
                 open_questions=count_open_questions(content),
-                cost=0.0,
+                cost=spec_cost,
                 duration_s=0.0,
+                version=resume_state.spec_version,
             )
             # --spec-file implies auto-approve
             auto_approve = True
             # Write spec_review checkpoint before approval (so crash = resumable)
+            current_phase = "spec_review"
+            current_spec_path = str(spec_path_out)
+            current_spec_hash = spec_hash(content)
+            current_spec_version = resume_state.spec_version
             write_checkpoint(
                 project_dir,
                 run_id=run_id,
@@ -147,7 +156,8 @@ async def _run_spec_phase(
                 phase="spec_review",
                 intent=intent,
                 spec_path=str(spec_path_out),
-                spec_hash=spec_hash(content),
+                spec_hash=current_spec_hash,
+                spec_version=current_spec_version,
                 spec_cost=spec_cost,
             )
         elif resume_mid_review or resume_mid_spec_with_file:
@@ -159,59 +169,96 @@ async def _run_spec_phase(
                 console.print(f"  [yellow]Existing spec has issues: {'; '.join(errors)}[/yellow]")
                 console.print("  [yellow]Re-running spec agent.[/yellow]\n")
                 # Fall through to agent path
+                current_phase = "spec"
                 write_checkpoint(
                     project_dir, run_id=run_id, command="build", phase="spec",
-                    intent=intent, spec_cost=spec_cost,
+                    intent=intent, spec_cost=spec_cost, spec_version=resume_state.spec_version,
                 )
-                spec_result = await run_spec_agent(intent, run_dir, config)
+                spec_result = await run_spec_agent(
+                    intent, project_dir, run_dir, config, version=resume_state.spec_version
+                )
                 spec_cost += spec_result.cost
+                current_phase = "spec_review"
+                current_spec_path = str(spec_result.path)
+                current_spec_hash = spec_hash(spec_result.content)
+                current_spec_version = spec_result.version
                 write_checkpoint(
                     project_dir, run_id=run_id, command="build", phase="spec_review",
                     intent=intent, spec_path=str(spec_result.path),
-                    spec_hash=spec_hash(spec_result.content), spec_cost=spec_cost,
+                    spec_hash=current_spec_hash, spec_version=current_spec_version, spec_cost=spec_cost,
                 )
             else:
                 spec_result = SpecResult(
                     path=existing_path,
                     content=content,
                     open_questions=count_open_questions(content),
-                    cost=0.0,
+                    cost=spec_cost,
                     duration_s=0.0,
+                    version=resume_state.spec_version,
                 )
+                current_phase = "spec_review"
+                current_spec_path = str(existing_path)
+                current_spec_hash = spec_hash(content)
+                current_spec_version = resume_state.spec_version
                 console.print(f"  [info]Resuming at review gate (existing spec at {existing_path})[/info]\n")
         else:
             # Fresh spec generation.
+            current_phase = "spec"
             write_checkpoint(
                 project_dir, run_id=run_id, command="build", phase="spec",
-                intent=intent, spec_cost=spec_cost,
+                intent=intent, spec_cost=spec_cost, spec_version=resume_state.spec_version,
             )
             console.print("  [bold]Spec phase[/bold] — generating product spec...\n")
-            spec_result = await run_spec_agent(intent, run_dir, config)
+            spec_result = await run_spec_agent(intent, project_dir, run_dir, config)
             spec_cost += spec_result.cost
+            current_phase = "spec_review"
+            current_spec_path = str(spec_result.path)
+            current_spec_hash = spec_hash(spec_result.content)
+            current_spec_version = spec_result.version
             write_checkpoint(
                 project_dir, run_id=run_id, command="build", phase="spec_review",
                 intent=intent, spec_path=str(spec_result.path),
-                spec_hash=spec_hash(spec_result.content), spec_cost=spec_cost,
+                spec_hash=current_spec_hash, spec_version=current_spec_version, spec_cost=spec_cost,
             )
 
         # Review gate
         approved = await review_spec(
-            spec_result, run_dir, intent, config,
+            spec_result, project_dir, run_dir, run_id, intent, config,
             auto_approve=auto_approve,
+            initial_regen_count=resume_state.spec_version,
         )
-        spec_cost = max(spec_cost, approved.cost)  # review may have regen'd
+        spec_cost = approved.cost
+        current_phase = "spec_approved"
+        current_spec_path = str(approved.path)
+        current_spec_hash = spec_hash(approved.content)
+        current_spec_version = approved.version
 
         # Record approved state
         write_checkpoint(
             project_dir, run_id=run_id, command="build", phase="spec_approved",
             intent=intent, spec_path=str(approved.path),
-            spec_hash=spec_hash(approved.content), spec_cost=spec_cost,
+            spec_hash=current_spec_hash, spec_version=current_spec_version, spec_cost=spec_cost,
         )
         return run_id, approved.content, spec_cost
 
     except ValueError as exc:
         error_console.print(f"[error]{exc}[/error]")
         sys.exit(2)
+    except KeyboardInterrupt:
+        prior_cp = load_checkpoint(project_dir) or {}
+        write_checkpoint(
+            project_dir,
+            run_id=run_id,
+            command="build",
+            phase=(prior_cp.get("phase", "") or current_phase),
+            intent=intent,
+            status="paused",
+            spec_path=(prior_cp.get("spec_path", "") or current_spec_path),
+            spec_hash=(prior_cp.get("spec_hash", "") or current_spec_hash),
+            spec_version=int(prior_cp.get("spec_version", current_spec_version) or 0),
+            spec_cost=float(prior_cp.get("spec_cost", spec_cost) or 0.0),
+        )
+        raise
     except RuntimeError as exc:
         # spec agent failed or produced invalid output
         error_console.print(f"[error]Spec phase failed: {exc}[/error]")
@@ -279,8 +326,50 @@ def build(intent, no_qa, fast, split, rounds, resume, spec, spec_file, yes, forc
     require_git()
     project_dir = Path.cwd()
 
-    # --- Spec-gate compatibility + flag sanity ---
-    use_spec = bool(spec or spec_file)
+    from otto.checkpoint import (
+        initial_build_completed,
+        load_checkpoint,
+        is_spec_phase,
+        print_resume_status,
+        resolve_resume,
+    )
+    from otto.spec import read_spec_file
+
+    if spec and spec_file:
+        error_console.print("[error]--spec and --spec-file are mutually exclusive.[/error]")
+        sys.exit(2)
+
+    cp = load_checkpoint(project_dir)
+
+    # Protect paused spec checkpoints before resolve_resume() can clear them.
+    if cp and is_spec_phase(cp.get("phase", "") or "") and not resume:
+        if not force:
+            error_console.print(
+                "[error]Paused spec run detected at "
+                f"phase={cp.get('phase')!r}, run_id={cp.get('run_id', '')!r}.[/error]\n"
+                "  Use --resume to continue, or --force to discard."
+            )
+            sys.exit(2)
+        from otto.checkpoint import clear_checkpoint
+        run_id_to_archive = cp.get("run_id", "") or ""
+        if run_id_to_archive:
+            run_dir_old = project_dir / "otto_logs" / "runs" / run_id_to_archive
+            run_dir_abandoned = project_dir / "otto_logs" / "runs" / f"{run_id_to_archive}.abandoned"
+            if run_dir_old.exists():
+                try:
+                    run_dir_old.rename(run_dir_abandoned)
+                    console.print(f"  [yellow]Archived prior spec run to {run_dir_abandoned}[/yellow]")
+                except OSError as exc:
+                    console.print(f"  [yellow]Could not archive prior spec run: {exc}[/yellow]")
+        clear_checkpoint(project_dir)
+        cp = None
+
+    resume_state = resolve_resume(project_dir, resume, expected_command="build")
+    use_spec = (
+        bool(spec or spec_file)
+        or is_spec_phase(resume_state.phase)
+        or bool(resume_state.spec_path)
+    )
     if use_spec:
         if split:
             error_console.print("[error]--spec is not compatible with --split (v1).[/error]")
@@ -292,32 +381,30 @@ def build(intent, no_qa, fast, split, rounds, resume, spec, spec_file, yes, forc
             error_console.print("[error]--spec requires the certifier; --no-qa is incompatible.[/error]")
             sys.exit(2)
 
-    from otto.checkpoint import (
-        initial_build_completed,
-        is_spec_phase,
-        print_resume_status,
-        resolve_resume,
-    )
-    resume_state = resolve_resume(project_dir, resume, expected_command="build")
-
-    # If a paused spec* run exists and user is invoking without --resume
-    # and without --force: refuse (data-safety). Non-spec paused runs follow
-    # the existing warn-and-clear behavior (done inside resolve_resume when
-    # resume=False; that path is already taken by the time we reach here,
-    # so we need to re-check on the resume path.)
-    # resolve_resume already handled the clear on non-resume. For the
-    # explicit spec-safety check, we look at what remained:
-    from otto.checkpoint import load_checkpoint
-    cp = load_checkpoint(project_dir)
-    if cp and is_spec_phase(cp.get("phase", "") or "") and not resume and not force:
-        error_console.print(
-            "[error]Paused spec run detected at "
-            f"phase={cp.get('phase')!r}, run_id={cp.get('run_id', '')!r}.[/error]\n"
-            "  Use --resume to continue, or --force to discard."
-        )
-        sys.exit(2)
-
     intent = (intent or "").strip()
+
+    if spec_file:
+        try:
+            file_intent, _ = read_spec_file(Path(spec_file))
+        except ValueError as exc:
+            error_console.print(f"[error]{exc}[/error]")
+            sys.exit(2)
+        if intent and intent != file_intent:
+            error_console.print(
+                f"[error]Intent mismatch: CLI intent does not match {spec_file}.[/error]"
+            )
+            sys.exit(2)
+        if resume and resume_state.resumed and resume_state.spec_path:
+            expected_spec_path = Path(resume_state.spec_path).resolve(strict=False)
+            given_spec_path = Path(spec_file).resolve(strict=False)
+            if given_spec_path != expected_spec_path:
+                error_console.print(
+                    "[error]Cannot change --spec-file on resume. "
+                    f"Checkpoint spec is {expected_spec_path}, got {given_spec_path}.[/error]"
+                )
+                sys.exit(2)
+        intent = file_intent
+
     resume_without_intent = bool(resume and resume_state.resumed and not intent)
     display_intent = intent or "(resumed run)"
 
@@ -338,35 +425,12 @@ def build(intent, no_qa, fast, split, rounds, resume, spec, spec_file, yes, forc
                     )
                     sys.exit(2)
                     return
-        elif spec_file:
-            # --spec-file without CLI intent: read intent from the file.
-            try:
-                from otto.spec import read_spec_file
-                intent, _ = read_spec_file(Path(spec_file))
-                display_intent = intent
-            except ValueError as exc:
-                error_console.print(f"[error]{exc}[/error]")
-                sys.exit(2)
         else:
             error_console.print("[error]Intent cannot be empty. Provide a description of what to build.[/error]")
             sys.exit(2)
 
+    display_intent = intent or display_intent
     print_resume_status(console, resume_state, resume, expected_command="build")
-
-    # --- --force: discard active paused spec run ---
-    if force and cp and is_spec_phase(cp.get("phase", "") or ""):
-        from otto.checkpoint import clear_checkpoint
-        run_id_to_archive = cp.get("run_id", "") or ""
-        if run_id_to_archive:
-            run_dir_old = project_dir / "otto_logs" / "runs" / run_id_to_archive
-            run_dir_abandoned = project_dir / "otto_logs" / "runs" / f"{run_id_to_archive}.abandoned"
-            if run_dir_old.exists():
-                try:
-                    run_dir_old.rename(run_dir_abandoned)
-                    console.print(f"  [yellow]Archived prior spec run to {run_dir_abandoned}[/yellow]")
-                except OSError as exc:
-                    console.print(f"  [yellow]Could not archive prior spec run: {exc}[/yellow]")
-        clear_checkpoint(project_dir)
 
     config_path = project_dir / "otto.yaml"
     if not config_path.exists():
@@ -389,15 +453,19 @@ def build(intent, no_qa, fast, split, rounds, resume, spec, spec_file, yes, forc
     run_id: str = resume_state.run_id or ""
     spec_cost_total: float = resume_state.spec_cost or 0.0
     if use_spec:
-        run_id, spec_content, spec_cost_total = asyncio.run(_run_spec_phase(
-            project_dir=project_dir,
-            intent=intent,
-            spec=spec,
-            spec_file=spec_file,
-            auto_approve=yes,
-            resume_state=resume_state,
-            config=config,
-        ))
+        try:
+            run_id, spec_content, spec_cost_total = asyncio.run(_run_spec_phase(
+                project_dir=project_dir,
+                intent=intent,
+                spec=spec,
+                spec_file=spec_file,
+                auto_approve=yes,
+                resume_state=resume_state,
+                config=config,
+            ))
+        except KeyboardInterrupt:
+            console.print("\n  [yellow]Paused. Run `otto build --resume` to continue.[/yellow]")
+            sys.exit(0)
 
     build_start = time.time()
     console.print()
@@ -431,7 +499,8 @@ def build(intent, no_qa, fast, split, rounds, resume, spec, spec_file, yes, forc
                                  record_intent=not resume_without_intent,
                                  resume_existing_session=resume_without_intent,
                                  spec=spec_content,
-                                 run_id=run_id or None)
+                                 run_id=run_id or None,
+                                 spec_cost=spec_cost_total)
             )
     except KeyboardInterrupt:
         console.print("\n  [yellow]Paused. Run `otto build --resume` to continue.[/yellow]")

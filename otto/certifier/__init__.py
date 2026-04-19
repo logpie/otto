@@ -18,6 +18,35 @@ from typing import Any
 logger = logging.getLogger("otto.certifier")
 
 
+def _render_certifier_prompt(
+    *,
+    mode: str,
+    intent: str,
+    evidence_dir: Path,
+    focus: str | None = None,
+    target: str | None = None,
+) -> str:
+    """Render a standalone certifier prompt with safe placeholder defaults."""
+    from otto.prompts import render_prompt
+
+    focus_section = f"## Improvement Focus\n{focus}" if focus else ""
+    prompt_name = {
+        "standard": "certifier.md",
+        "fast": "certifier-fast.md",
+        "thorough": "certifier-thorough.md",
+        "hillclimb": "certifier-hillclimb.md",
+        "target": "certifier-target.md",
+    }.get(mode, "certifier.md")
+    return render_prompt(
+        prompt_name,
+        intent=intent,
+        evidence_dir=str(evidence_dir),
+        focus_section=focus_section,
+        spec_section="",
+        target=target or "",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Agentic certifier — single agent, subagent-driven
 # ---------------------------------------------------------------------------
@@ -60,15 +89,13 @@ async def run_agentic_certifier(
     evidence_dir = report_dir / "evidence"
     evidence_dir.mkdir(parents=True, exist_ok=True)
 
-    focus_section = f"## Improvement Focus\n{focus}" if focus else ""
-    format_kwargs: dict[str, str] = {
-        "intent": intent,
-        "evidence_dir": str(evidence_dir),
-        "focus_section": focus_section,
-        "target": target or "",
-    }
-    from otto.prompts import certifier_prompt
-    prompt = certifier_prompt(mode=mode).format(**format_kwargs)
+    prompt = _render_certifier_prompt(
+        mode=mode,
+        intent=intent,
+        evidence_dir=evidence_dir,
+        focus=focus,
+        target=target,
+    )
 
     # Inject cross-run memory (opt-in via config)
     from otto.memory import inject_memory

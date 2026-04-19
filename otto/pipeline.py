@@ -51,6 +51,7 @@ async def build_agentic_v3(
     resume_existing_session: bool = False,
     spec: str | None = None,
     run_id: str | None = None,
+    spec_cost: float = 0.0,
 ) -> BuildResult:
     """Fully agent-driven session: one agent, certifier as environment.
 
@@ -159,6 +160,7 @@ async def build_agentic_v3(
     from otto.checkpoint import load_checkpoint, write_checkpoint
 
     checkpoint_session_id = resume_session_id or ""
+    total_run_cost = float(spec_cost or 0.0)
     if manage_checkpoint and not checkpoint_session_id:
         try:
             checkpoint_session_id = (
@@ -178,8 +180,9 @@ async def build_agentic_v3(
                 certifier_mode=certifier_mode,
                 prompt_mode=prompt_mode,
                 session_id=session_id,
-                total_cost=float(cost or 0),
+                total_cost=total_run_cost + float(cost or 0),
                 status=status,
+                spec_cost=float(spec_cost or 0.0),
             )
         except Exception as exc:
             logger.warning("Failed to write checkpoint: %s", exc)
@@ -204,6 +207,7 @@ async def build_agentic_v3(
         )
     except AgentCallError as err:
         text, cost, session_id = f"BUILD ERROR: {err.reason}", 0.0, ""
+    total_run_cost += float(cost or 0)
 
     total_duration = round(time.monotonic() - start_time, 1)
 
@@ -223,7 +227,7 @@ async def build_agentic_v3(
 
         summary_lines = [
             f"[{ts}] === Agentic v3 build ===",
-            f"[{ts}] Duration: {total_duration:.1f}s, Cost: ${cost:.2f}",
+            f"[{ts}] Duration: {total_duration:.1f}s, Cost: ${total_run_cost:.2f}",
             f"[{ts}] Raw output: {len(text or '')} chars -> agent-raw.log",
         ]
 
@@ -356,7 +360,7 @@ async def build_agentic_v3(
         "mode": "agentic_v3",
         "passed": passed,
         "duration_s": total_duration,
-        "cost_usd": float(cost or 0),
+        "cost_usd": total_run_cost,
         "stories_tested": stories_tested,
         "stories_passed": stories_passed,
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -366,7 +370,7 @@ async def build_agentic_v3(
 
     logger.info("Agentic v3 done: %s, %d/%d stories, %.1fs, $%.2f",
                 "passed" if passed else "failed",
-                stories_passed, stories_tested, total_duration, float(cost or 0))
+                stories_passed, stories_tested, total_duration, total_run_cost)
 
     # Improvement report — human-readable summary for post-auditing.
     try:
@@ -374,7 +378,7 @@ async def build_agentic_v3(
             build_dir, build_id, intent, project_dir,
             certify_rounds, story_results, passed,
             stories_passed, stories_tested,
-            total_duration, float(cost or 0),
+            total_duration, total_run_cost,
             head_before=_head_before,
         )
     except Exception as exc:
@@ -390,7 +394,7 @@ async def build_agentic_v3(
         "stories_passed": stories_passed,
         "stories_tested": stories_tested,
         "certify_rounds": len(certify_rounds),
-        "cost_usd": round(float(cost or 0), 2),
+        "cost_usd": round(total_run_cost, 2),
         "duration_s": total_duration,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
     })
@@ -406,7 +410,7 @@ async def build_agentic_v3(
         passed=passed,
         build_id=build_id,
         rounds=max(len(certify_rounds), 1),
-        total_cost=float(cost or 0),
+        total_cost=total_run_cost,
         journeys=journeys,
         tasks_passed=sum(1 for j in journeys if j["passed"]),
         tasks_failed=sum(1 for j in journeys if not j["passed"]),
