@@ -49,6 +49,8 @@ async def build_agentic_v3(
     manage_checkpoint: bool = True,
     record_intent: bool = True,
     resume_existing_session: bool = False,
+    spec: str | None = None,
+    run_id: str | None = None,
 ) -> BuildResult:
     """Fully agent-driven session: one agent, certifier as environment.
 
@@ -98,36 +100,51 @@ async def build_agentic_v3(
     if resume_existing_session and resume_session_id:
         prompt = ""
     else:
+        # Spec-aware prompt rendering via safe render_prompt helper.
+        from otto.prompts import render_prompt
+        from otto.spec import format_spec_section
+        spec_section = format_spec_section(spec)
+
         # Select prompt based on mode
         if prompt_mode == "code":
-            from otto.prompts import code_prompt
-            prompt = code_prompt() + f"\n\nBuild this product:\n\n{intent}"
+            prompt = render_prompt("code.md", spec_section=spec_section) + f"\n\nBuild this product:\n\n{intent}"
         elif prompt_mode == "improve":
             from otto.config import get_max_rounds
-            from otto.prompts import improve_prompt
             max_certify_rounds = get_max_rounds(config)
-            raw_prompt = improve_prompt().replace("{max_certify_rounds}", str(max_certify_rounds))
-            prompt = raw_prompt + f"\n\nImprove this product:\n\n{intent}"
+            prompt = render_prompt("improve.md",
+                                   max_certify_rounds=str(max_certify_rounds),
+                                   spec_section=spec_section)
+            prompt += f"\n\nImprove this product:\n\n{intent}"
         else:
             # Default: build mode
             from otto.config import get_max_rounds
-            from otto.prompts import build_prompt
             max_certify_rounds = get_max_rounds(config)
-            raw_prompt = build_prompt().replace("{max_certify_rounds}", str(max_certify_rounds))
-            prompt = raw_prompt + f"\n\nBuild this product:\n\n{intent}"
+            prompt = render_prompt("build.md",
+                                   max_certify_rounds=str(max_certify_rounds),
+                                   spec_section=spec_section)
+            prompt += f"\n\nBuild this product:\n\n{intent}"
 
         # Pre-fill certifier prompt for modes that use certification
         if prompt_mode != "code":
-            from otto.prompts import certifier_prompt
             # Per-run evidence dir so parallel/sequential runs don't clobber each other
             evidence_dir_path = project_dir / "otto_logs" / "certifier" / "evidence" / build_id
             evidence_dir = str(evidence_dir_path)
             safe_intent = intent.replace("</certifier_prompt>", "")
-            format_kwargs: dict[str, str] = {
-                "intent": safe_intent, "evidence_dir": evidence_dir, "focus_section": "",
-                "target": config.get("_target") or "",
-            }
-            filled_certifier = certifier_prompt(mode=certifier_mode).format(**format_kwargs)
+            certifier_filename = {
+                "standard": "certifier.md",
+                "fast": "certifier-fast.md",
+                "thorough": "certifier-thorough.md",
+                "hillclimb": "certifier-hillclimb.md",
+                "target": "certifier-target.md",
+            }.get(certifier_mode, "certifier.md")
+            filled_certifier = render_prompt(
+                certifier_filename,
+                intent=safe_intent,
+                evidence_dir=evidence_dir,
+                focus_section="",
+                spec_section=spec_section,
+                target=config.get("_target") or "",
+            )
             prompt += (f"\n\n## Pre-filled Certifier Prompt\n"
                        f"When you dispatch the certifier agent, use this EXACT prompt:\n"
                        f"<certifier_prompt>\n{filled_certifier}\n</certifier_prompt>")

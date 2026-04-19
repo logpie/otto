@@ -1,0 +1,467 @@
+"""Spec-gate: generate a reviewable product spec before otto builds.
+
+Flow:
+  run_spec_agent()  — agent writes spec.md given an intent
+  validate_spec()   — enforce required sections (Intent, Must Have, Must NOT
+                      Have Yet, Success Criteria) and size cap
+  read_spec_file()  — parse an externally-supplied spec (`--spec-file`)
+  review_spec()     — interactive TTY gate (approve / edit / regenerate / quit)
+  format_spec_section() — wrap spec content for injection into build/certifier
+                          prompts, sanitizing delimiter tokens
+"""
+
+from __future__ import annotations
+
+import hashlib
+import logging
+import re
+import sys
+import time
+from dataclasses import dataclass
+from enum import Enum
+from pathlib import Path
+
+logger = logging.getLogger("otto.spec")
+
+# Line cap for a valid spec. Generous enough for the `light` template plus
+# commentary, strict enough to refuse "agent dumped a PRD" mistakes.
+MAX_SPEC_LINES = 300
+
+# Regenerate cap in the interactive review gate. 6th request forces the user
+# to approve, edit manually, or quit.
+MAX_REGENERATIONS = 5
+
+# Required section headings (exact match after stripping whitespace). The
+# spec prompt is constrained to produce these — validation catches drift.
+_REQUIRED_HEADINGS = (
+    "## Must Have",
+    "## Must NOT Have Yet",
+    "## Success Criteria",
+)
+
+_INTENT_LINE = re.compile(r"^\s*\*\*Intent:\*\*\s+(?P<value>\S.*?)\s*$", re.MULTILINE)
+
+
+@dataclass
+class SpecResult:
+    """Outcome of a spec generation or load."""
+    path: Path
+    content: str
+    open_questions: int
+    cost: float
+    duration_s: float
+
+
+class ReviewAction(Enum):
+    APPROVE = "approve"
+    EDIT = "edit"
+    REGENERATE = "regenerate"
+    QUIT = "quit"
+    PAUSE = "pause"          # KeyboardInterrupt / EOF — re-raise to caller
+
+
+# ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
+
+def validate_spec(content: str) -> list[str]:
+    """Return a list of human-readable validation errors. Empty list = valid.
+
+    A valid spec has:
+      - a single `**Intent:**` line with a non-empty value
+      - all required `##` headings (Must Have, Must NOT Have Yet, Success
+        Criteria)
+      - non-empty content
+      - fewer than MAX_SPEC_LINES lines
+    """
+    errors: list[str] = []
+
+    if not content.strip():
+        errors.append("spec is empty")
+        return errors
+
+    line_count = len(content.splitlines())
+    if line_count > MAX_SPEC_LINES:
+        errors.append(f"spec is {line_count} lines (max {MAX_SPEC_LINES})")
+
+    intents = _INTENT_LINE.findall(content)
+    if not intents:
+        errors.append("missing `**Intent:** <one line>` at the top")
+    elif len(intents) > 1:
+        errors.append(f"multiple `**Intent:**` lines found ({len(intents)}); expected exactly 1")
+
+    for heading in _REQUIRED_HEADINGS:
+        if heading not in content:
+            errors.append(f"missing required heading: `{heading}`")
+
+    return errors
+
+
+def count_open_questions(content: str) -> int:
+    """Count `[NEEDS CLARIFICATION:` markers in the spec."""
+    return content.count("[NEEDS CLARIFICATION:")
+
+
+# ---------------------------------------------------------------------------
+# Spec file parsing (for --spec-file)
+# ---------------------------------------------------------------------------
+
+def read_spec_file(path: Path) -> tuple[str, str]:
+    """Load a user-supplied spec. Returns (intent, content).
+
+    Raises ValueError with a human-readable message if:
+      - the file does not exist or is empty
+      - validation fails
+      - no `**Intent:**` line is found
+      - multiple `**Intent:**` lines are found
+    """
+    if not path.exists():
+        raise ValueError(f"spec file not found: {path}")
+    content = path.read_text()
+    if not content.strip():
+        raise ValueError(f"spec file is empty: {path}")
+
+    errors = validate_spec(content)
+    if errors:
+        detail = "; ".join(errors)
+        raise ValueError(f"spec file failed validation: {detail}")
+
+    matches = _INTENT_LINE.findall(content)
+    # validate_spec has already checked for exactly 1, but be explicit
+    if len(matches) != 1:
+        raise ValueError(
+            f"spec file must contain exactly one `**Intent:**` line (found {len(matches)})"
+        )
+    intent = matches[0].strip()
+    if not intent:
+        raise ValueError("spec file's `**Intent:**` line is blank")
+
+    return intent, content
+
+
+# ---------------------------------------------------------------------------
+# Hash (for resume-tamper detection)
+# ---------------------------------------------------------------------------
+
+def spec_hash(content: str) -> str:
+    """SHA256 of normalized spec content.
+
+    Normalization: CRLF → LF, trailing whitespace stripped per line, UTF-8
+    bytes. Lets user edits that are line-ending-only changes register as
+    mutations (we WANT that — the user actually changed the file), while
+    cross-platform CRLF rewrites don't create noisy mismatches.
+
+    Actually, re-reading: CRLF→LF normalization means a CRLF edit DOESN'T
+    register. That's the intended behavior — git on Windows may rewrite line
+    endings on checkout and we don't want that to trigger a mismatch.
+    """
+    normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+    # Strip trailing whitespace per line (catches accidental trailing spaces
+    # from editors, keeps intentional content changes).
+    lines = [line.rstrip() for line in normalized.splitlines()]
+    normalized = "\n".join(lines)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Prompt injection — safe embedding
+# ---------------------------------------------------------------------------
+
+# Tokens that, if present in user-supplied spec content, could break out of
+# prompt-embedding wrappers. Sanitized to entity-like placeholders on render.
+_DANGEROUS_TOKENS = (
+    "</certifier_prompt>",
+    "<certifier_prompt>",
+    "</spec>",
+    "<spec>",
+    "</intent>",
+    "<intent>",
+)
+
+
+def _sanitize_spec_content(content: str) -> str:
+    """Neutralize delimiter tokens that could break prompt wrappers."""
+    out = content
+    for tok in _DANGEROUS_TOKENS:
+        safe = tok.replace("<", "&lt;").replace(">", "&gt;")
+        out = out.replace(tok, safe)
+    return out
+
+
+def format_spec_section(content: str | None) -> str:
+    """Wrap a spec for safe embedding in build.md / certifier-thorough.md.
+
+    Returns empty string if no spec — caller passes this through `render_prompt`
+    which substitutes it as a plain value with no extra formatting.
+    """
+    if not content or not content.strip():
+        return ""
+    sanitized = _sanitize_spec_content(content)
+    return (
+        "## Spec\n\n"
+        "The build is gated on this approved spec. Treat it as authoritative — it wins on scope conflicts with the raw intent.\n\n"
+        "<spec source=\"approved\">\n"
+        f"{sanitized}\n"
+        "</spec>\n\n"
+        "**Must-Have** entries are requirements. **Must NOT Have Yet** entries are OUT OF SCOPE — do not build them."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Agent runner
+# ---------------------------------------------------------------------------
+
+async def run_spec_agent(
+    intent: str,
+    run_dir: Path,
+    config: dict[str, object],
+    *,
+    prior_spec: str | None = None,
+    user_notes: str | None = None,
+    version: int = 0,
+) -> SpecResult:
+    """Run the spec agent once and return the written spec.
+
+    `version` is used for the `spec-agent.log` filename — 0 = initial, N>0 =
+    regeneration N.
+
+    Does NOT call `inject_memory()` — memory is about prior certification
+    findings, not relevant to product-level spec generation.
+    """
+    from otto.agent import AgentCallError, make_agent_options, run_agent_with_timeout
+    from otto.prompts import render_prompt
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    spec_path = run_dir / "spec.md"
+
+    prior_block = ""
+    if prior_spec:
+        prior_block = (
+            "## Prior Spec (regeneration)\n"
+            "A previous version of the spec was rejected. Consider the user's"
+            " note and produce an improved version. Preserve what was correct;"
+            " change what the note calls out.\n\n"
+            "<prior_spec>\n"
+            f"{_sanitize_spec_content(prior_spec)}\n"
+            "</prior_spec>\n"
+        )
+        if user_notes:
+            prior_block += f"\n**User note:** {user_notes.strip()}\n"
+
+    prompt = render_prompt(
+        "spec-light.md",
+        intent=intent,
+        spec_path=str(spec_path),
+        prior_spec_section=prior_block,
+    )
+
+    options = make_agent_options(run_dir.parent.parent, config)  # cwd = project_dir
+
+    # Small timeout for spec generation (default 600s). Spec is short; no
+    # need for certifier-style timeouts.
+    timeout_raw = config.get("spec_timeout", 600)
+    timeout = int(timeout_raw) if isinstance(timeout_raw, (int, float, str)) else 600
+
+    log_name = f"spec-agent{'-v' + str(version) if version else ''}.log"
+    log_path = run_dir / log_name
+
+    start = time.monotonic()
+    try:
+        _text, cost, _session = await run_agent_with_timeout(
+            prompt, options,
+            log_path=log_path,
+            timeout=timeout,
+            project_dir=run_dir.parent.parent,
+            capture_tool_output=False,
+        )
+    except AgentCallError as err:
+        raise RuntimeError(f"spec agent failed: {err.reason}") from err
+
+    duration = round(time.monotonic() - start, 1)
+
+    if not spec_path.exists():
+        raise RuntimeError(
+            f"spec agent did not write {spec_path}. See {log_path} for details."
+        )
+
+    content = spec_path.read_text()
+    errors = validate_spec(content)
+    if errors:
+        raise RuntimeError(
+            "spec agent produced an invalid spec: " + "; ".join(errors)
+            + f". Inspect {spec_path} and {log_path}."
+        )
+
+    return SpecResult(
+        path=spec_path,
+        content=content,
+        open_questions=count_open_questions(content),
+        cost=float(cost or 0.0),
+        duration_s=duration,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Review gate
+# ---------------------------------------------------------------------------
+
+def _is_tty() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _summarize_spec(content: str) -> str:
+    """Produce a short textual summary for the review prompt."""
+    intents = _INTENT_LINE.findall(content)
+    intent = intents[0].strip() if intents else "(missing)"
+    # Extract Must-Have + Must-NOT-Have bullets
+    def _section_bullets(heading: str, limit: int = 4) -> list[str]:
+        lines = content.splitlines()
+        try:
+            start = next(i for i, line in enumerate(lines) if line.strip() == heading)
+        except StopIteration:
+            return []
+        out: list[str] = []
+        for line in lines[start + 1:]:
+            stripped = line.strip()
+            if stripped.startswith("##"):
+                break
+            if stripped.startswith("-") or stripped.startswith("*"):
+                out.append(stripped.lstrip("-* ").strip())
+                if len(out) >= limit:
+                    break
+        return out
+
+    must_have = _section_bullets("## Must Have", 3)
+    must_not = _section_bullets("## Must NOT Have Yet", 3)
+    open_q = count_open_questions(content)
+    lines = content.count("\n") + 1
+
+    parts = [
+        f"  Intent:        {intent[:80]}",
+        f"  Must-Have:     {', '.join(b[:40] for b in must_have) if must_have else '(none)'}",
+        f"  Must-NOT-Have: {', '.join(b[:40] for b in must_not) if must_not else '(none)'}",
+        f"  Open:          {open_q} question(s)",
+        f"  Size:          {lines} lines",
+    ]
+    return "\n".join(parts)
+
+
+async def review_spec(
+    spec_result: SpecResult,
+    run_dir: Path,
+    intent: str,
+    config: dict[str, object],
+    *,
+    auto_approve: bool,
+) -> SpecResult:
+    """Interactive review gate for a generated spec.
+
+    Returns the final SpecResult the user approved. Raises SystemExit(0) on
+    quit. Re-raises KeyboardInterrupt so the caller writes a paused
+    checkpoint.
+
+    When `auto_approve` is True, returns immediately (no prompt).
+    """
+    if auto_approve:
+        return spec_result
+
+    if not _is_tty():
+        raise RuntimeError(
+            "spec review requires a TTY. Pass --yes to auto-approve, "
+            "or --spec-file to skip the spec agent."
+        )
+
+    current = spec_result
+    regen_count = 0
+
+    while True:
+        print()
+        print(f"  Spec written to {current.path} ({current.path.stat().st_size} bytes, "
+              f"{current.open_questions} open question(s))")
+        print()
+        print(_summarize_spec(current.content))
+        print()
+        if regen_count >= MAX_REGENERATIONS:
+            print("  [regen cap reached — approve, edit, or quit]")
+        print("  [a] approve and build")
+        print("  [e] edit spec.md yourself (I'll wait)")
+        print("  [r] regenerate with notes")
+        print("  [q] quit")
+        try:
+            choice = input("  Choice: ").strip().lower()
+        except EOFError:
+            raise KeyboardInterrupt("EOF during spec review")
+
+        if not choice:
+            continue
+
+        action = choice[0]
+        if action == "a":
+            return current
+
+        if action == "e":
+            print()
+            print(f"  Edit {current.path} then press Enter to continue...")
+            try:
+                input()
+            except EOFError:
+                raise KeyboardInterrupt("EOF during spec review")
+            try:
+                content = current.path.read_text()
+            except OSError as exc:
+                print(f"  [error] could not read spec: {exc}")
+                continue
+            errors = validate_spec(content)
+            if errors:
+                print(f"  [error] spec is invalid after edit: {'; '.join(errors)}")
+                print("  [error] fix the file and try again, or press Ctrl-C to abort")
+                continue
+            current = SpecResult(
+                path=current.path,
+                content=content,
+                open_questions=count_open_questions(content),
+                cost=current.cost,
+                duration_s=current.duration_s,
+            )
+            continue
+
+        if action == "r":
+            if regen_count >= MAX_REGENERATIONS:
+                print(f"  [regen cap of {MAX_REGENERATIONS} reached — approve, edit, or quit]")
+                continue
+            try:
+                note = input("  One-line note (what to change): ").strip()
+            except EOFError:
+                raise KeyboardInterrupt("EOF during spec review")
+            if not note:
+                print("  [skipped — empty note]")
+                continue
+            regen_count += 1
+            # Archive the prior version
+            archive_path = run_dir / f"spec-v{regen_count}.md"
+            try:
+                archive_path.write_text(current.content)
+                logger.info("Archived prior spec to %s", archive_path)
+            except OSError as exc:
+                logger.warning("Could not archive prior spec: %s", exc)
+            new = await run_spec_agent(
+                intent, run_dir, config,
+                prior_spec=current.content,
+                user_notes=note,
+                version=regen_count,
+            )
+            # Combine cost so the caller sees total spec cost
+            current = SpecResult(
+                path=new.path,
+                content=new.content,
+                open_questions=new.open_questions,
+                cost=current.cost + new.cost,
+                duration_s=current.duration_s + new.duration_s,
+            )
+            continue
+
+        if action == "q":
+            print("  Aborted.")
+            sys.exit(0)
+
+        print(f"  [unrecognized: {choice!r}]")

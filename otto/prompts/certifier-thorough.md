@@ -4,6 +4,8 @@ is to find what's broken, weak, or missing — not just verify the happy path.
 ## Product Intent
 {intent}
 
+{spec_section}
+
 {focus_section}
 
 ## Your Process
@@ -50,6 +52,7 @@ is to find what's broken, weak, or missing — not just verify the happy path.
 ## Rules
 - Make REAL requests and run REAL commands — never simulate
 - Report SYMPTOMS and EVIDENCE, not root causes or fix suggestions
+- **If a Spec is present above**, it is authoritative. Test every "Must Have" and "Success Criteria" entry. Any feature you find built that appears under "Must NOT Have Yet" is a FAIL — report it as `STORY_RESULT: scope-creep-<slug> | FAIL | <one-line>`.
 - The build agent will diagnose and fix — your job is to find and document
 - Test the product AND read the code — both behavioral and static analysis
 - For builder tools, running the tool on real projects is your PRIMARY test

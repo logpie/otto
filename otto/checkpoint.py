@@ -19,6 +19,19 @@ logger = logging.getLogger("otto.checkpoint")
 
 CHECKPOINT_FILE = "otto_logs/checkpoint.json"
 POST_INITIAL_BUILD_PHASES = frozenset({"certify", "fix", "round_complete", "complete"})
+# Phases that belong to the new spec-gate pre-build flow. Treated specially
+# for --force / --resume semantics: clearing or overwriting them without
+# explicit user intent loses potentially user-edited spec content.
+SPEC_PHASES = frozenset({"spec", "spec_review", "spec_approved"})
+
+
+def is_spec_phase(phase: str) -> bool:
+    return phase in SPEC_PHASES
+
+
+def spec_phase_completed(phase: str) -> bool:
+    """True if the spec phase has been approved (or we're past it)."""
+    return phase == "spec_approved" or phase in POST_INITIAL_BUILD_PHASES or phase == "build"
 
 
 @dataclass
@@ -41,6 +54,13 @@ class ResumeState:
     current_round: int = 0        # last completed round from the checkpoint
     phase: str = ""               # current phase for split-mode resume
     target: str = ""              # persisted target goal for improve.target resume
+    # Spec-gate fields (new; all empty/None for pre-spec checkpoints)
+    intent: str = ""              # canonical intent (for resume without CLI intent)
+    run_id: str = ""              # outer run scope for spec artifacts
+    spec_path: str = ""           # absolute path to approved/in-review spec.md
+    spec_hash: str = ""           # sha256 of normalized spec content
+    spec_version: int = 0         # regeneration counter (0 = never regenerated)
+    spec_cost: float = 0.0        # cost of spec phase (subset of total_cost)
 
 
 def print_resume_status(console: Any, state: ResumeState, resume_flag: bool, expected_command: str) -> None:
@@ -113,6 +133,12 @@ def resolve_resume(
         current_round=current_round,
         phase=checkpoint.get("phase", "") or "",
         target=checkpoint.get("target", "") or "",
+        intent=checkpoint.get("intent", "") or "",
+        run_id=checkpoint.get("run_id", "") or "",
+        spec_path=checkpoint.get("spec_path", "") or "",
+        spec_hash=checkpoint.get("spec_hash", "") or "",
+        spec_version=int(checkpoint.get("spec_version", 0) or 0),
+        spec_cost=float(checkpoint.get("spec_cost", 0.0) or 0.0),
     )
 
 
@@ -137,10 +163,28 @@ def write_checkpoint(
     current_round: int = 0,
     total_cost: float = 0.0,
     rounds: list[dict[str, Any]] | None = None,
+    # Spec-gate fields (optional, preserved across writes via merge-with-prior)
+    intent: str | None = None,
+    spec_path: str | None = None,
+    spec_hash: str | None = None,
+    spec_version: int | None = None,
+    spec_cost: float | None = None,
 ) -> None:
-    """Write checkpoint to disk. Called after each round."""
+    """Write checkpoint to disk. Called after each round.
+
+    For spec-gate fields (`intent`, `spec_path`, `spec_hash`, `spec_version`,
+    `spec_cost`): `None` preserves the prior checkpoint value (or default);
+    explicit values overwrite. This lets a phase=build write not clobber the
+    spec fields that were set at phase=spec_approved.
+    """
     checkpoint_path = project_dir / CHECKPOINT_FILE
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Merge spec fields with prior on-disk state (preserve across writes).
+    prior = _read_prior(checkpoint_path)
+
+    def _pick(new: object, key: str, default: object) -> object:
+        return default if new is None else new if prior is None else (new if new is not None else prior.get(key, default))
 
     data = {
         "run_id": run_id,
@@ -156,12 +200,28 @@ def write_checkpoint(
         "current_round": current_round,
         "total_cost": round(total_cost, 2),
         "rounds": rounds or [],
+        "intent": intent if intent is not None else (prior.get("intent", "") if prior else ""),
+        "spec_path": spec_path if spec_path is not None else (prior.get("spec_path", "") if prior else ""),
+        "spec_hash": spec_hash if spec_hash is not None else (prior.get("spec_hash", "") if prior else ""),
+        "spec_version": spec_version if spec_version is not None else (prior.get("spec_version", 0) if prior else 0),
+        "spec_cost": round(
+            float(spec_cost) if spec_cost is not None else float(prior.get("spec_cost", 0.0) if prior else 0.0),
+            4,
+        ),
         "started_at": _read_started_at(checkpoint_path),
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
 
     _write_checkpoint_file(checkpoint_path, data)
-    logger.debug("Checkpoint written: round %d, status=%s", current_round, status)
+    logger.debug("Checkpoint written: round %d, status=%s, phase=%s", current_round, status, phase)
+
+
+def _read_prior(checkpoint_path: Path) -> dict[str, Any] | None:
+    """Read current on-disk checkpoint regardless of status. Returns None on error."""
+    try:
+        return json.loads(checkpoint_path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
 
 
 def load_checkpoint(project_dir: Path) -> dict[str, Any] | None:
