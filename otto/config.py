@@ -103,12 +103,7 @@ def get_timeout(config: dict[str, Any], key: str = "agent_timeout") -> int | Non
                 )
                 break
     if raw_value is None:
-        # If DEFAULT_CONFIG has a default for this specific key (e.g. spec_timeout),
-        # honor it; otherwise signal "no cap" via None.
-        if key in DEFAULT_CONFIG:
-            raw_value = DEFAULT_CONFIG[key]
-        else:
-            return None
+        return None
 
     try:
         value = int(raw_value)
@@ -360,11 +355,11 @@ def create_config(project_dir: Path) -> Path:
     lines += "# provider: claude              # claude or codex\n"
     lines += "# model: null                   # override provider model\n"
     lines += "#                               # if unset, Otto uses the provider's local/default model\n"
-    lines += "\n# Product certification:\n"
-    lines += "# spec_timeout: 600             # max seconds for spec generation/review steps\n"
-    lines += "# run_budget_seconds: 3600       # total wall-clock budget for the whole run\n"
-    lines += "# agent_timeout:                 # optional per-call safety cap (rarely needed)\n"
-    lines += "# max_certify_rounds: 8          # max certification rounds (agent stops after this many)\n"
+    lines += "\n# Budget + certification:\n"
+    lines += "# run_budget_seconds: 3600      # total wall-clock for the whole run (primary knob)\n"
+    lines += "# max_certify_rounds: 8         # max certify→fix attempts before giving up\n"
+    lines += "# spec_timeout: 600             # cap on the spec-agent call specifically\n"
+    lines += "# agent_timeout:                # per-call safety cap (expert knob; leave unset)\n"
     config_path.write_text(lines + "\n")
 
     # Update .git/info/exclude for runtime files (use git_meta_dir for linked worktrees)

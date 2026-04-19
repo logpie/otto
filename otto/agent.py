@@ -129,10 +129,8 @@ class AgentCallError(Exception):
     blank the session_id and ``otto build --resume`` would start a fresh
     agent session instead of continuing the existing SDK conversation.
     """
-    def __init__(self, reason: str, text: str = "", cost: float = 0.0, session_id: str = ""):
+    def __init__(self, reason: str, session_id: str = ""):
         self.reason = reason
-        self.text = text
-        self.cost = cost
         self.session_id = session_id
         super().__init__(reason)
 

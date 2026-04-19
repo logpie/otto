@@ -63,6 +63,8 @@ class RunBudget:
         smaller bounds the call.
         """
         remaining = int(self.remaining())
+        # Ignore zero/negative caps — they'd force an immediate timeout even
+        # when budget is plenty. Treat them as "no cap" (user misconfig).
         if safety_cap is not None and safety_cap > 0:
             remaining = min(remaining, safety_cap)
         return remaining

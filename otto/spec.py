@@ -18,8 +18,11 @@ import re
 import sys
 import time
 from dataclasses import dataclass
-from enum import Enum
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from otto.budget import RunBudget
 
 logger = logging.getLogger("otto.spec")
 
@@ -51,14 +54,6 @@ class SpecResult:
     cost: float
     duration_s: float
     version: int = 0
-
-
-class ReviewAction(Enum):
-    APPROVE = "approve"
-    EDIT = "edit"
-    REGENERATE = "regenerate"
-    QUIT = "quit"
-    PAUSE = "pause"          # KeyboardInterrupt / EOF — re-raise to caller
 
 
 # ---------------------------------------------------------------------------
@@ -148,13 +143,9 @@ def spec_hash(content: str) -> str:
     """SHA256 of normalized spec content.
 
     Normalization: CRLF → LF, trailing whitespace stripped per line, UTF-8
-    bytes. Lets user edits that are line-ending-only changes register as
-    mutations (we WANT that — the user actually changed the file), while
-    cross-platform CRLF rewrites don't create noisy mismatches.
-
-    Actually, re-reading: CRLF→LF normalization means a CRLF edit DOESN'T
-    register. That's the intended behavior — git on Windows may rewrite line
-    endings on checkout and we don't want that to trigger a mismatch.
+    bytes. CRLF→LF normalization means a CRLF-only edit DOESN'T register.
+    That's the intended behavior — git on Windows may rewrite line endings
+    on checkout and we don't want that to trigger a mismatch.
     """
     normalized = content.replace("\r\n", "\n").replace("\r", "\n")
     # Strip trailing whitespace per line (catches accidental trailing spaces
@@ -221,7 +212,7 @@ async def run_spec_agent(
     prior_spec: str | None = None,
     user_notes: str | None = None,
     version: int = 0,
-    budget: object = None,
+    budget: "RunBudget | None" = None,
 ) -> SpecResult:
     """Run the spec agent once and return the written spec.
 
@@ -235,7 +226,7 @@ async def run_spec_agent(
     UNWRAPPED — callers write a paused checkpoint. Other failures (invalid
     spec, missing file) still raise `RuntimeError`.
     """
-    from otto.agent import AgentCallError, make_agent_options, run_agent_with_timeout
+    from otto.agent import make_agent_options, run_agent_with_timeout
     from otto.prompts import render_prompt
 
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -266,10 +257,12 @@ async def run_spec_agent(
 
     # Spec-agent timeout: derived from run budget (if provided) with
     # `spec_timeout` as an optional per-call safety cap.
-    spec_cap_raw = config.get("spec_timeout", 600)
-    spec_cap = int(spec_cap_raw) if isinstance(spec_cap_raw, (int, float, str)) else 600
+    try:
+        spec_cap = int(config.get("spec_timeout", 600))
+    except (ValueError, TypeError):
+        spec_cap = 600
     if budget is not None:
-        timeout: int | None = budget.for_call(safety_cap=spec_cap)  # type: ignore[attr-defined]
+        timeout: int | None = budget.for_call(safety_cap=spec_cap)
     else:
         timeout = spec_cap
 
@@ -277,8 +270,6 @@ async def run_spec_agent(
     log_path = run_dir / log_name
 
     start = time.monotonic()
-    # AgentCallError propagates unwrapped — caller (cli._run_spec_phase) writes
-    # paused checkpoint and surfaces the budget-exhaustion message.
     _text, cost, _session = await run_agent_with_timeout(
         prompt, options,
         log_path=log_path,
@@ -367,6 +358,7 @@ async def review_spec(
     *,
     auto_approve: bool,
     initial_regen_count: int = 0,
+    budget: "RunBudget | None" = None,
 ) -> SpecResult:
     """Interactive review gate for a generated spec.
 
@@ -466,6 +458,7 @@ async def review_spec(
                 prior_spec=current.content,
                 user_notes=note,
                 version=regen_count,
+                budget=budget,
             )
             # Combine cost so the caller sees total spec cost
             current = SpecResult(

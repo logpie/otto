@@ -13,6 +13,7 @@ os.environ.pop("CLAUDECODE", None)
 
 import click
 
+from otto.agent import AgentCallError
 from otto.config import create_config, load_config, require_git
 from otto.display import CONTEXT_SETTINGS, console, rich_escape
 from otto.theme import error_console
@@ -230,6 +231,7 @@ async def _run_spec_phase(
             spec_result, project_dir, run_dir, run_id, intent, config,
             auto_approve=auto_approve,
             initial_regen_count=resume_state.spec_version,
+            budget=budget,
         )
         spec_cost = approved.cost
         current_phase = "spec_approved"
@@ -264,14 +266,9 @@ async def _run_spec_phase(
         )
         raise
     except Exception as exc:
-        # AgentCallError from budget exhaustion / timeout during spec: catch
-        # here and write a paused checkpoint so --resume works. Other
-        # RuntimeErrors (invalid spec content, missing file) exit non-zero
-        # without checkpoint munging.
-        from otto.agent import AgentCallError
         if isinstance(exc, AgentCallError):
             prior_cp = load_checkpoint(project_dir) or {}
-            session_id = exc.session_id or prior_cp.get("session_id", "") or ""
+            session_id = exc.session_id or prior_cp.get("session_id", "")
             write_checkpoint(
                 project_dir, run_id=run_id, command="build",
                 status="paused", phase=current_phase,
@@ -451,7 +448,6 @@ def build(intent, no_qa, fast, split, rounds, resume, spec, spec_file, yes, forc
                         "Provide INTENT or create intent.md/README.md.[/error]"
                     )
                     sys.exit(2)
-                    return
         else:
             error_console.print("[error]Intent cannot be empty. Provide a description of what to build.[/error]")
             sys.exit(2)
@@ -567,7 +563,7 @@ def certify(intent, thorough, fast):
     """
     project_dir = Path.cwd()
 
-    # Load config so certifier_timeout and other settings are respected
+    # Load config so run_budget_seconds and other settings are respected
     config_path = project_dir / "otto.yaml"
     config = load_config(config_path) if config_path.exists() else {}
 
@@ -609,7 +605,6 @@ def certify(intent, thorough, fast):
         console.print("\n  Aborted.")
         sys.exit(1)
     except Exception as e:
-        from otto.agent import AgentCallError
         if isinstance(e, AgentCallError):
             error_console.print(
                 f"[error]Run budget exhausted ({e.reason}).[/error]\n"

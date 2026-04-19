@@ -9,7 +9,12 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from otto.agent import AgentCallError
+
+if TYPE_CHECKING:
+    from otto.budget import RunBudget
 
 
 logger = logging.getLogger("otto.pipeline")
@@ -52,7 +57,7 @@ async def build_agentic_v3(
     spec: str | None = None,
     run_id: str | None = None,
     spec_cost: float = 0.0,
-    budget: Any = None,
+    budget: "RunBudget | None" = None,
 ) -> BuildResult:
     """Fully agent-driven session: one agent, certifier as environment.
 
@@ -82,7 +87,7 @@ async def build_agentic_v3(
 
     certifier_mode controls which certifier prompt is pre-filled.
     """
-    from otto.agent import AgentCallError, make_agent_options, run_agent_with_timeout
+    from otto.agent import make_agent_options, run_agent_with_timeout
 
     build_id = f"build-{int(time.time())}-{os.getpid()}"
     checkpoint_run_id = run_id or build_id
@@ -180,7 +185,7 @@ async def build_agentic_v3(
         except Exception as exc:
             logger.warning("Failed to read checkpoint for session resume: %s", exc)
 
-    def _cp(status: str, session_id: str = "", cost: float = 0.0) -> None:
+    def _cp(status: str, session_id: str = "") -> None:
         if not manage_checkpoint:
             return
         try:
@@ -229,8 +234,8 @@ async def build_agentic_v3(
         # Agent mode: preserve session_id from streaming so --resume can
         # continue the SDK conversation instead of starting fresh.
         text = f"BUILD ERROR: {err.reason}"
-        cost = float(err.cost or 0.0)
-        session_id = err.session_id or checkpoint_session_id or ""
+        cost = 0.0
+        session_id = err.session_id or checkpoint_session_id
         if session_id:
             logger.info("Agent failed but session_id preserved (%s) — --resume supported", session_id)
         else:
@@ -242,7 +247,7 @@ async def build_agentic_v3(
     # Mark the run as paused (not completed) on AgentCallError so --resume
     # picks it up. Successful runs still mark as completed.
     final_status = "paused" if text.startswith("BUILD ERROR:") else "completed"
-    _cp(final_status, session_id=session_id, cost=float(cost or 0))
+    _cp(final_status, session_id=session_id)
 
     # Save agent output in two forms:
     # 1. agent-raw.log — full unfiltered output (for deep debugging)
@@ -626,7 +631,7 @@ async def run_certify_fix_loop(
     resume_rounds: list[dict[str, Any]] | None = None,
     command: str = "improve",
     record_intent: bool = True,
-    budget: Any = None,
+    budget: "RunBudget | None" = None,
 ) -> BuildResult:
     """System-driven certify-fix loop.
 
@@ -681,6 +686,18 @@ async def run_certify_fix_loop(
         except Exception as exc:
             logger.warning("Failed to write split-mode checkpoint: %s", exc)
 
+    # --- Certify + fix loop state (declared early so _paused_result can close over it) ---
+    last_stories: list[dict[str, Any]] = []
+
+    def _paused_result(phase: str, *, use_rounds: int = 1) -> BuildResult:
+        logger.warning("Run budget exhausted before %s — pausing", phase)
+        _save_cp(status="paused", phase=phase)
+        return BuildResult(
+            passed=False, build_id=build_id, total_cost=total_cost,
+            rounds=use_rounds,
+            journeys=_stories_to_journeys(last_stories) if last_stories else [],
+        )
+
     # --- Optional initial build ---
     round_id = init_round(project_dir,
                           f"build: {intent[:60]}" if not skip_initial_build
@@ -694,10 +711,7 @@ async def run_certify_fix_loop(
         _save_cp(phase="initial_build")
         # Pre-check budget before initial build.
         if budget is not None and budget.exhausted():
-            logger.warning("Run budget exhausted before initial build — pausing")
-            _save_cp(status="paused", phase="initial_build")
-            return BuildResult(passed=False, build_id=build_id, total_cost=total_cost)
-        from otto.agent import AgentCallError
+            return _paused_result("initial_build")
         try:
             result = await build_agentic_v3(
                 intent, project_dir, build_config,
@@ -712,13 +726,11 @@ async def run_certify_fix_loop(
         record_build(project_dir, round_id, result)
 
     # --- Certify + fix loop ---
-    last_stories: list[dict[str, Any]] = []
     passed = False
     actual_rounds = 0
     previous_attempts: list[dict[str, Any]] = []
     MAX_RETRIES = 2
 
-    from otto.agent import AgentCallError as _AgentCallError
     for round_num in range(start_round, max_rounds + 1):
         try:
             actual_rounds = round_num
@@ -730,13 +742,7 @@ async def run_certify_fix_loop(
 
             # Pre-check budget before entering the certify call.
             if budget is not None and budget.exhausted():
-                logger.warning("Run budget exhausted before round %d certify — pausing", round_num)
-                _save_cp(status="paused", phase="certify")
-                return BuildResult(
-                    passed=False, build_id=build_id, rounds=max(actual_rounds - 1, 1),
-                    total_cost=total_cost,
-                    journeys=_stories_to_journeys(last_stories) if last_stories else [],
-                )
+                return _paused_result("certify", use_rounds=max(actual_rounds - 1, 1))
 
             # --- Certify with retry (AgentCallError re-raises to caller; other errors retry) ---
             report = None
@@ -753,7 +759,7 @@ async def run_certify_fix_loop(
                         budget=budget,
                     )
                     break
-                except _AgentCallError:
+                except AgentCallError:
                     # Budget exhaustion or agent timeout — don't retry.
                     raise
                 except Exception as err:
@@ -895,13 +901,7 @@ async def run_certify_fix_loop(
 
             # Pre-check budget before fix call.
             if budget is not None and budget.exhausted():
-                logger.warning("Run budget exhausted before round %d fix — pausing", round_num)
-                _save_cp(status="paused", phase="fix")
-                return BuildResult(
-                    passed=False, build_id=build_id, rounds=actual_rounds,
-                    total_cost=total_cost,
-                    journeys=_stories_to_journeys(last_stories),
-                )
+                return _paused_result("fix", use_rounds=actual_rounds)
 
             fix_result = None
             for attempt in range(MAX_RETRIES + 1):
@@ -914,7 +914,7 @@ async def run_certify_fix_loop(
                         budget=budget,
                     )
                     break
-                except _AgentCallError:
+                except AgentCallError:
                     # Budget exhaustion / timeout — don't retry.
                     raise
                 except Exception as err:
@@ -954,7 +954,7 @@ async def run_certify_fix_loop(
             last_completed_round = round_num
             _save_cp(phase="round_complete")
 
-        except _AgentCallError as err:
+        except AgentCallError as err:
             # Budget exhausted or agent timed out mid-round. Don't run the
             # trailing complete_checkpoint path — return early with paused.
             logger.warning("Round %d paused (%s)", round_num, err.reason)
@@ -963,7 +963,7 @@ async def run_certify_fix_loop(
             except OSError as exc:
                 logger.warning("Failed to mark checkpoint paused: %s", exc)
             return BuildResult(
-                passed=False, build_id=build_id, rounds=max(actual_rounds - 1, 1),
+                passed=False, build_id=build_id, rounds=actual_rounds,
                 total_cost=total_cost,
                 journeys=_stories_to_journeys(last_stories) if last_stories else [],
             )

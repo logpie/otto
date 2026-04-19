@@ -13,7 +13,10 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from otto.budget import RunBudget
 
 logger = logging.getLogger("otto.certifier")
 
@@ -59,7 +62,7 @@ async def run_agentic_certifier(
     mode: str = "standard",
     focus: str | None = None,
     target: str | None = None,
-    budget: Any = None,
+    budget: "RunBudget | None" = None,
 ) -> "CertificationReport":
     """Agentic certifier: one monolithic agent does everything.
 
@@ -73,7 +76,7 @@ async def run_agentic_certifier(
     decision. Non-timeout errors still return `INFRA_ERROR` (existing
     behavior preserved for split-mode retry logic).
     """
-    from otto.agent import AgentCallError, make_agent_options, run_agent_with_timeout
+    from otto.agent import make_agent_options, run_agent_with_timeout
     from otto.certifier.report import (
         CertificationOutcome,
         CertificationReport,
@@ -117,10 +120,6 @@ async def run_agentic_certifier(
     else:
         timeout = safety_cap if safety_cap is not None else 86400
 
-    # AgentCallError propagates — the outer loop (or cli.certify) decides what
-    # to do (pause the checkpoint, surface a budget-exhaustion message).
-    # Non-AgentCallError exceptions still fall through to INFRA_ERROR below
-    # for split-mode retry compatibility.
     text, cost, _session_id = await run_agent_with_timeout(
         prompt, options,
         log_path=report_dir / "live.log",
