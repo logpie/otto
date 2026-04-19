@@ -707,6 +707,52 @@ class TestResultMsgInit:
         assert result.passed is False
 
 
+class TestSessionIdPreservedOnFailure:
+    """Agent timeout/crash must preserve session_id via AgentCallError so
+    --resume continues the SDK conversation instead of starting fresh."""
+
+    @pytest.mark.asyncio
+    async def test_timeout_captures_streamed_session_id(self, tmp_git_repo):
+        """Timeout mid-stream: session_id must land in checkpoint via
+        err.session_id, not be blanked."""
+        async def streaming_query(prompt, options, *, state=None, **kwargs):
+            # Simulate SDK streaming: a session_id is observed before timeout.
+            if state is not None:
+                state["session_id"] = "streamed-sid-abc123"
+            await asyncio.sleep(10)
+            return "never", 0.0, MagicMock()
+
+        with patch("otto.agent.run_agent_query", side_effect=streaming_query):
+            result = await build_agentic_v3(
+                "test", tmp_git_repo, {"agent_timeout": 1}
+            )
+        assert result.passed is False
+
+        import json
+        cp = json.loads((tmp_git_repo / "otto_logs" / "checkpoint.json").read_text())
+        assert cp["session_id"] == "streamed-sid-abc123", (
+            "timeout must preserve streamed session_id for --resume"
+        )
+        assert cp["status"] == "paused", "failed run must be resumable, not completed"
+
+    @pytest.mark.asyncio
+    async def test_crash_captures_streamed_session_id(self, tmp_git_repo):
+        """Agent crash mid-stream: session_id must survive."""
+        async def crashing_query(prompt, options, *, state=None, **kwargs):
+            if state is not None:
+                state["session_id"] = "pre-crash-sid-xyz"
+            raise RuntimeError("boom")
+
+        with patch("otto.agent.run_agent_query", side_effect=crashing_query):
+            result = await build_agentic_v3("test", tmp_git_repo, {})
+        assert result.passed is False
+
+        import json
+        cp = json.loads((tmp_git_repo / "otto_logs" / "checkpoint.json").read_text())
+        assert cp["session_id"] == "pre-crash-sid-xyz"
+        assert cp["status"] == "paused"
+
+
 # -- Test: _append_intent per-section dedup, not substring --
 
 class TestAppendIntentDedup:
@@ -740,23 +786,39 @@ class TestAppendIntentDedup:
     # gets created on first write.)
 
 
-# -- Test: certifier_timeout validation --
+# -- Test: agent_timeout validation (with deprecated certifier_timeout alias) --
 
 class TestTimeoutValidation:
-    """certifier_timeout validation should fall back to the 900s default
-    for invalid inputs (non-numeric, zero, negative)."""
+    """agent_timeout validation should fall back to the 1800s default
+    for invalid inputs (non-numeric, zero, negative). The legacy
+    `certifier_timeout` key is still honored as a deprecated alias."""
 
     @pytest.mark.parametrize("bad_value", ["abc", 0, -5, None, "", "0"])
-    def test_invalid_timeout_falls_back_to_default(self, bad_value):
-        """get_timeout is the sole source of truth — unit-test it directly
-        rather than spinning up the whole pipeline to assert isinstance."""
+    def test_invalid_agent_timeout_falls_back_to_default(self, bad_value):
         from otto.config import get_timeout
-        assert get_timeout({"certifier_timeout": bad_value}) == 900
+        assert get_timeout({"agent_timeout": bad_value}) == 1800
 
-    def test_valid_timeout_honored(self):
+    @pytest.mark.parametrize("bad_value", ["abc", 0, -5, "", "0"])
+    def test_invalid_certifier_timeout_alias_falls_back(self, bad_value):
+        """Deprecated alias reads the same validation path."""
         from otto.config import get_timeout
-        assert get_timeout({"certifier_timeout": 120}) == 120
-        assert get_timeout({"certifier_timeout": "120"}) == 120
+        assert get_timeout({"certifier_timeout": bad_value}) == 1800
+
+    def test_valid_agent_timeout_honored(self):
+        from otto.config import get_timeout
+        assert get_timeout({"agent_timeout": 120}) == 120
+        assert get_timeout({"agent_timeout": "120"}) == 120
+
+    def test_deprecated_certifier_timeout_honored_with_warning(self, caplog):
+        import logging
+        from otto.config import get_timeout
+        with caplog.at_level(logging.WARNING, logger="otto.config"):
+            assert get_timeout({"certifier_timeout": 120}) == 120
+        assert any("deprecated" in r.message.lower() for r in caplog.records)
+
+    def test_canonical_wins_over_alias(self):
+        from otto.config import get_timeout
+        assert get_timeout({"agent_timeout": 300, "certifier_timeout": 100}) == 300
 
 
 # -- Test: Certifier timeout validation --

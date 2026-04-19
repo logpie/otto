@@ -207,14 +207,23 @@ async def build_agentic_v3(
             capture_tool_output=True,
         )
     except AgentCallError as err:
-        text, cost, session_id = f"BUILD ERROR: {err.reason}", 0.0, ""
+        # Preserve the last-known session_id from streaming so --resume can
+        # continue the SDK conversation instead of starting fresh.
+        text = f"BUILD ERROR: {err.reason}"
+        cost = float(err.cost or 0.0)
+        session_id = err.session_id or checkpoint_session_id or ""
+        if session_id:
+            logger.info("Agent failed but session_id preserved (%s) — --resume supported", session_id)
+        else:
+            logger.warning("Agent failed with no session_id — --resume will start fresh")
     total_run_cost += float(cost or 0)
 
     total_duration = round(time.monotonic() - start_time, 1)
 
-    # Mark the run as completed, carrying forward the session_id so a future
-    # rerun with --resume can continue this SDK session.
-    _cp("completed", session_id=session_id, cost=float(cost or 0))
+    # Mark the run as paused (not completed) on AgentCallError so --resume
+    # picks it up. Successful runs still mark as completed.
+    final_status = "paused" if text.startswith("BUILD ERROR:") else "completed"
+    _cp(final_status, session_id=session_id, cost=float(cost or 0))
 
     # Save agent output in two forms:
     # 1. agent-raw.log — full unfiltered output (for deep debugging)

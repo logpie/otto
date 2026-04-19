@@ -13,9 +13,20 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "model": None,                  # override provider model (e.g. sonnet, gpt-5)
 
     # Product certification
-    "spec_timeout": 600,            # max seconds for spec generation/review steps
-    "certifier_timeout": 900,       # max seconds for entire build+certify session
+    "spec_timeout": 600,            # max seconds for spec generation/review
+    "agent_timeout": 1800,          # max seconds per agent-session call. In
+                                    # agent mode, bounds the whole build+
+                                    # certify+fix loop. In split mode and
+                                    # standalone certify, bounds the certifier
+                                    # call. (`certifier_timeout` is the
+                                    # deprecated alias — still honored.)
     "max_certify_rounds": 8,        # max certification rounds in build loop
+}
+
+# Deprecated config key → canonical name. Read with a warning if user still has
+# these in otto.yaml; overridden by canonical name when both are set.
+_DEPRECATED_ALIASES: dict[str, str] = {
+    "certifier_timeout": "agent_timeout",
 }
 
 SUPPORTED_PROVIDERS = {"claude", "codex"}
@@ -47,15 +58,35 @@ def agent_provider(config: dict[str, Any]) -> str:
 
 
 
-def get_timeout(config: dict[str, Any], key: str = "certifier_timeout") -> int:
-    """Read a timeout value from config with validation and default fallback."""
+def get_timeout(config: dict[str, Any], key: str = "agent_timeout") -> int:
+    """Read a timeout value from config with validation and default fallback.
+
+    Honors deprecated aliases (e.g. ``certifier_timeout`` → ``agent_timeout``).
+    When both canonical name and deprecated alias are set, canonical wins and
+    a warning is logged.
+    """
     import logging
     _logger = logging.getLogger("otto.config")
-    default = int(DEFAULT_CONFIG.get(key, 900))
+    default = int(DEFAULT_CONFIG.get(key, 1800))
+
+    # Resolve value from config, checking canonical then deprecated aliases.
+    raw_value: Any = config.get(key)
+    if raw_value is None:
+        for old_key, new_key in _DEPRECATED_ALIASES.items():
+            if new_key == key and config.get(old_key) is not None:
+                raw_value = config.get(old_key)
+                _logger.warning(
+                    "Config key `%s` is deprecated; use `%s` instead",
+                    old_key, new_key,
+                )
+                break
+    if raw_value is None:
+        raw_value = default
+
     try:
-        value = int(config.get(key, default))
+        value = int(raw_value)
     except (ValueError, TypeError):
-        _logger.warning("Invalid %s, using default %ds", key, default)
+        _logger.warning("Invalid %s (%r), using default %ds", key, raw_value, default)
         return default
     if value <= 0:
         _logger.warning("%s must be positive, using default %ds", key, default)
@@ -304,7 +335,7 @@ def create_config(project_dir: Path) -> Path:
     lines += "#                               # if unset, Otto uses the provider's local/default model\n"
     lines += "\n# Product certification:\n"
     lines += "# spec_timeout: 600             # max seconds for spec generation/review steps\n"
-    lines += "# certifier_timeout: 1800        # max seconds for entire build+certify session\n"
+    lines += "# agent_timeout: 1800            # max seconds per agent-session call\n"
     lines += "# max_certify_rounds: 8          # max certification rounds (agent stops after this many)\n"
     config_path.write_text(lines + "\n")
 

@@ -102,10 +102,12 @@ def _run_improve(
     config = load_config(config_path) if config_path.exists() else {}
     config["max_certify_rounds"] = max(1, rounds)
 
-    # Use longer timeout for improve modes
-    config["certifier_timeout"] = max(
-        int(config.get("certifier_timeout", 900)), 3600
-    )
+    # Use longer timeout for improve modes. Honor canonical `agent_timeout`
+    # and legacy `certifier_timeout` — whichever is set in the user's config.
+    existing = config.get("agent_timeout")
+    if existing is None:
+        existing = config.get("certifier_timeout", 1800)
+    config["agent_timeout"] = max(int(existing), 3600)
 
     # Pass target to config for prompt filling
     if target:

@@ -122,11 +122,18 @@ def make_agent_options(
 
 
 class AgentCallError(Exception):
-    """Raised when an agent call fails (timeout or crash)."""
-    def __init__(self, reason: str, text: str = "", cost: float = 0.0):
+    """Raised when an agent call fails (timeout or crash).
+
+    Carries the best-known ``session_id`` from streamed messages so callers
+    can write a resumable checkpoint. Without this, a build timeout would
+    blank the session_id and ``otto build --resume`` would start a fresh
+    agent session instead of continuing the existing SDK conversation.
+    """
+    def __init__(self, reason: str, text: str = "", cost: float = 0.0, session_id: str = ""):
         self.reason = reason
         self.text = text
         self.cost = cost
+        self.session_id = session_id
         super().__init__(reason)
 
 
@@ -151,20 +158,27 @@ async def run_agent_with_timeout(
     log = logging.getLogger("otto.agent")
     callbacks = make_live_logger(log_path)
     close_fh = callbacks.pop("_close")
+    # Mutable bag — streaming handlers update it so timeout/crash paths can
+    # recover the last-known session_id for a resumable checkpoint.
+    agent_state: dict[str, str] = {"session_id": ""}
     try:
         text, cost, result_msg = await asyncio.wait_for(
             run_agent_query(prompt, options,
                             capture_tool_output=capture_tool_output,
+                            state=agent_state,
                             **callbacks),
             timeout=timeout,
         )
-        session_id = getattr(result_msg, "session_id", "") or ""
+        session_id = getattr(result_msg, "session_id", "") or agent_state.get("session_id", "")
         return text, cost, session_id
     except asyncio.TimeoutError:
         log.error("Agent timed out after %ds", timeout)
         from otto.pipeline import _cleanup_orphan_processes
         _cleanup_orphan_processes(project_dir)
-        raise AgentCallError(f"Timed out after {timeout}s")
+        raise AgentCallError(
+            f"Timed out after {timeout}s",
+            session_id=agent_state.get("session_id", ""),
+        )
     except KeyboardInterrupt:
         from otto.pipeline import _cleanup_orphan_processes
         _cleanup_orphan_processes(project_dir)
@@ -173,7 +187,10 @@ async def run_agent_with_timeout(
         log.exception("Agent crashed")
         from otto.pipeline import _cleanup_orphan_processes
         _cleanup_orphan_processes(project_dir)
-        raise AgentCallError(f"Agent crashed: {exc}")
+        raise AgentCallError(
+            f"Agent crashed: {exc}",
+            session_id=agent_state.get("session_id", ""),
+        )
     finally:
         close_fh()
 
@@ -555,18 +572,32 @@ async def run_agent_query(
     on_tool_result: Callable[[Any], Any] | None = None,
     on_result: Callable[[Any], Any] | None = None,
     capture_tool_output: bool = False,
+    state: dict[str, str] | None = None,
 ) -> tuple[str, float, Any]:
     """Run a provider query, dispatching normalized events to callbacks.
 
     If capture_tool_output=True, tool result content (including subagent output)
     is appended to the returned text. This is useful when the caller needs to
     parse structured markers from subagent output.
+
+    If `state` is provided, the function updates ``state["session_id"]`` as
+    soon as a session_id is seen on any streamed message. This lets callers
+    that cancel the task (e.g. on timeout) still recover the session_id for
+    a resumable checkpoint.
     """
     text_parts: list[str] = []
     cost = 0.0
     result_msg = None
 
     async for message in query(prompt=prompt, options=options):
+        # Capture session_id eagerly. Every SDK message type carries it,
+        # and we need it to build a resumable checkpoint even when the
+        # stream is later cancelled (timeout) or crashes.
+        if state is not None:
+            sid = getattr(message, "session_id", "") or ""
+            if sid:
+                state["session_id"] = sid
+
         if isinstance(message, ResultMessage):
             result_msg = message
             raw_cost = getattr(message, "total_cost_usd", None)
