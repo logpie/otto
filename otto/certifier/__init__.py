@@ -59,6 +59,7 @@ async def run_agentic_certifier(
     mode: str = "standard",
     focus: str | None = None,
     target: str | None = None,
+    budget: Any = None,
 ) -> "CertificationReport":
     """Agentic certifier: one monolithic agent does everything.
 
@@ -67,6 +68,10 @@ async def run_agentic_certifier(
 
     MUST run in the caller's process (not a subprocess) so the Agent tool
     is available for subagent dispatch.
+
+    CONTRACT: `AgentCallError` propagates — callers own the retry/pause
+    decision. Non-timeout errors still return `INFRA_ERROR` (existing
+    behavior preserved for split-mode retry logic).
     """
     from otto.agent import AgentCallError, make_agent_options, run_agent_with_timeout
     from otto.certifier.report import (
@@ -106,20 +111,22 @@ async def run_agentic_certifier(
     logger.info("Running agentic certifier on %s", project_dir)
 
     from otto.config import get_timeout
-    certifier_timeout = get_timeout(config)
-    try:
-        text, cost, _session_id = await run_agent_with_timeout(
-            prompt, options,
-            log_path=report_dir / "live.log",
-            timeout=certifier_timeout,
-            project_dir=project_dir,
-        )
-    except AgentCallError:
-        return CertificationReport(
-            outcome=CertificationOutcome.INFRA_ERROR,
-            cost_usd=0.0,
-            duration_s=round(time.monotonic() - start_time, 1),
-        )
+    safety_cap = get_timeout(config)
+    if budget is not None:
+        timeout = budget.for_call(safety_cap=safety_cap)
+    else:
+        timeout = safety_cap if safety_cap is not None else 86400
+
+    # AgentCallError propagates — the outer loop (or cli.certify) decides what
+    # to do (pause the checkpoint, surface a budget-exhaustion message).
+    # Non-AgentCallError exceptions still fall through to INFRA_ERROR below
+    # for split-mode retry compatibility.
+    text, cost, _session_id = await run_agent_with_timeout(
+        prompt, options,
+        log_path=report_dir / "live.log",
+        timeout=timeout,
+        project_dir=project_dir,
+    )
 
     # Save full agent output for auditability (not truncated)
     try:

@@ -221,6 +221,7 @@ async def run_spec_agent(
     prior_spec: str | None = None,
     user_notes: str | None = None,
     version: int = 0,
+    budget: object = None,
 ) -> SpecResult:
     """Run the spec agent once and return the written spec.
 
@@ -229,6 +230,10 @@ async def run_spec_agent(
 
     Does NOT call `inject_memory()` — memory is about prior certification
     findings, not relevant to product-level spec generation.
+
+    CONTRACT: `AgentCallError` from budget-exhaustion or timeout propagates
+    UNWRAPPED — callers write a paused checkpoint. Other failures (invalid
+    spec, missing file) still raise `RuntimeError`.
     """
     from otto.agent import AgentCallError, make_agent_options, run_agent_with_timeout
     from otto.prompts import render_prompt
@@ -259,25 +264,28 @@ async def run_spec_agent(
 
     options = make_agent_options(project_dir, config)
 
-    # Small timeout for spec generation (default 600s). Spec is short; no
-    # need for certifier-style timeouts.
-    timeout_raw = config.get("spec_timeout", 600)
-    timeout = int(timeout_raw) if isinstance(timeout_raw, (int, float, str)) else 600
+    # Spec-agent timeout: derived from run budget (if provided) with
+    # `spec_timeout` as an optional per-call safety cap.
+    spec_cap_raw = config.get("spec_timeout", 600)
+    spec_cap = int(spec_cap_raw) if isinstance(spec_cap_raw, (int, float, str)) else 600
+    if budget is not None:
+        timeout: int | None = budget.for_call(safety_cap=spec_cap)  # type: ignore[attr-defined]
+    else:
+        timeout = spec_cap
 
     log_name = f"spec-agent{'-v' + str(version) if version else ''}.log"
     log_path = run_dir / log_name
 
     start = time.monotonic()
-    try:
-        _text, cost, _session = await run_agent_with_timeout(
-            prompt, options,
-            log_path=log_path,
-            timeout=timeout,
-            project_dir=project_dir,
-            capture_tool_output=False,
-        )
-    except AgentCallError as err:
-        raise RuntimeError(f"spec agent failed: {err.reason}") from err
+    # AgentCallError propagates unwrapped — caller (cli._run_spec_phase) writes
+    # paused checkpoint and surfaces the budget-exhaustion message.
+    _text, cost, _session = await run_agent_with_timeout(
+        prompt, options,
+        log_path=log_path,
+        timeout=timeout,
+        project_dir=project_dir,
+        capture_tool_output=False,
+    )
 
     duration = round(time.monotonic() - start, 1)
 

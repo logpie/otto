@@ -786,23 +786,21 @@ class TestAppendIntentDedup:
     # gets created on first write.)
 
 
-# -- Test: agent_timeout validation (with deprecated certifier_timeout alias) --
+# -- Test: agent_timeout safety cap (optional; None when unset or invalid) --
 
 class TestTimeoutValidation:
-    """agent_timeout validation should fall back to the 1800s default
-    for invalid inputs (non-numeric, zero, negative). The legacy
-    `certifier_timeout` key is still honored as a deprecated alias."""
-
-    @pytest.mark.parametrize("bad_value", ["abc", 0, -5, None, "", "0"])
-    def test_invalid_agent_timeout_falls_back_to_default(self, bad_value):
-        from otto.config import get_timeout
-        assert get_timeout({"agent_timeout": bad_value}) == 1800
+    """`agent_timeout` is now an optional per-call safety cap. Unset or
+    invalid → returns None (no cap applied). `certifier_timeout` is a
+    deprecated alias."""
 
     @pytest.mark.parametrize("bad_value", ["abc", 0, -5, "", "0"])
-    def test_invalid_certifier_timeout_alias_falls_back(self, bad_value):
-        """Deprecated alias reads the same validation path."""
+    def test_invalid_agent_timeout_returns_none(self, bad_value):
         from otto.config import get_timeout
-        assert get_timeout({"certifier_timeout": bad_value}) == 1800
+        assert get_timeout({"agent_timeout": bad_value}) is None
+
+    def test_unset_returns_none(self):
+        from otto.config import get_timeout
+        assert get_timeout({}) is None
 
     def test_valid_agent_timeout_honored(self):
         from otto.config import get_timeout
@@ -819,6 +817,117 @@ class TestTimeoutValidation:
     def test_canonical_wins_over_alias(self):
         from otto.config import get_timeout
         assert get_timeout({"agent_timeout": 300, "certifier_timeout": 100}) == 300
+
+
+class TestRunBudget:
+    """Total-run budget replaces per-call timeout as primary knob."""
+
+    def test_default_is_3600(self):
+        from otto.config import get_run_budget
+        assert get_run_budget({}) == 3600
+
+    def test_configured_value_honored(self):
+        from otto.config import get_run_budget
+        assert get_run_budget({"run_budget_seconds": 7200}) == 7200
+        assert get_run_budget({"run_budget_seconds": "7200"}) == 7200
+
+    @pytest.mark.parametrize("bad", ["abc", 0, -5, None, ""])
+    def test_invalid_falls_back_to_3600(self, bad):
+        from otto.config import get_run_budget
+        assert get_run_budget({"run_budget_seconds": bad}) == 3600
+
+    def test_remaining_decreases(self):
+        import time as _time
+        from otto.budget import RunBudget
+        b = RunBudget(total=60.0)
+        start_remaining = b.remaining()
+        _time.sleep(0.05)
+        assert b.remaining() < start_remaining
+
+    def test_exhausted(self):
+        from otto.budget import RunBudget
+        import time as _time
+        # Already-expired budget
+        b = RunBudget(total=0.01, start=_time.monotonic() - 1.0)
+        assert b.exhausted()
+
+    def test_for_call_with_safety_cap(self):
+        import time as _time
+        from otto.budget import RunBudget
+        b = RunBudget(total=1000.0, start=_time.monotonic())
+        # safety cap smaller than remaining → cap wins
+        assert b.for_call(safety_cap=60) == 60
+        # no cap → full remaining
+        assert b.for_call() == pytest.approx(1000, abs=1)
+
+    def test_for_call_remaining_wins_when_smaller(self):
+        import time as _time
+        from otto.budget import RunBudget
+        b = RunBudget(total=30.0, start=_time.monotonic())
+        # safety cap larger than remaining → remaining wins
+        assert b.for_call(safety_cap=3600) == pytest.approx(30, abs=1)
+
+
+class TestBudgetExhaustionInPipeline:
+    """Integration: a pre-exhausted budget causes agent-mode timeout and
+    the paused checkpoint is written with the preserved session_id."""
+
+    @pytest.mark.asyncio
+    async def test_exhausted_budget_pauses_agent_mode(self, tmp_git_repo):
+        """Budget that's already expired → timeout immediately via
+        asyncio.wait_for; AgentCallError path fires; checkpoint paused.
+
+        session_id may be empty when the budget is expired at call time
+        (asyncio.wait_for with timeout<=0 never starts the coroutine, so
+        streaming never runs). The important invariant is status=paused.
+        """
+        import time as _time
+        from otto.budget import RunBudget
+
+        async def slow_query(prompt, options, *, state=None, **kwargs):
+            await asyncio.sleep(10)
+            return "never", 0.0, MagicMock()
+
+        expired_budget = RunBudget(total=0.01, start=_time.monotonic() - 5.0)
+        assert expired_budget.exhausted()
+
+        with patch("otto.agent.run_agent_query", side_effect=slow_query):
+            result = await build_agentic_v3(
+                "test", tmp_git_repo, {}, budget=expired_budget,
+            )
+        assert result.passed is False
+
+        import json
+        cp = json.loads((tmp_git_repo / "otto_logs" / "checkpoint.json").read_text())
+        assert cp["status"] == "paused"
+
+    @pytest.mark.asyncio
+    async def test_mid_call_budget_timeout_preserves_session_id(self, tmp_git_repo):
+        """Budget with small-but-positive remaining → stream starts, mid-call
+        session_id captured, then timeout fires. Preserved in checkpoint."""
+        import time as _time
+        from otto.budget import RunBudget
+
+        async def slow_query(prompt, options, *, state=None, **kwargs):
+            if state is not None:
+                state["session_id"] = "mid-stream-sid"
+            await asyncio.sleep(5)
+            return "never", 0.0, MagicMock()
+
+        # Budget large enough for wait_for to actually start the coroutine
+        # (int(remaining) must be > 0 after a few ms of test overhead).
+        short_budget = RunBudget(total=3.0, start=_time.monotonic())
+
+        with patch("otto.agent.run_agent_query", side_effect=slow_query):
+            result = await build_agentic_v3(
+                "test", tmp_git_repo, {}, budget=short_budget,
+            )
+        assert result.passed is False
+
+        import json
+        cp = json.loads((tmp_git_repo / "otto_logs" / "checkpoint.json").read_text())
+        assert cp["status"] == "paused"
+        assert cp["session_id"] == "mid-stream-sid"
 
 
 # -- Test: Certifier timeout validation --

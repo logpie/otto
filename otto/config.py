@@ -12,19 +12,23 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "provider": "claude",           # coding agent provider (claude or codex)
     "model": None,                  # override provider model (e.g. sonnet, gpt-5)
 
-    # Product certification
-    "spec_timeout": 600,            # max seconds for spec generation/review
-    "agent_timeout": 1800,          # max seconds per agent-session call. In
-                                    # agent mode, bounds the whole build+
-                                    # certify+fix loop. In split mode and
-                                    # standalone certify, bounds the certifier
-                                    # call. (`certifier_timeout` is the
-                                    # deprecated alias — still honored.)
+    # Wall-clock budget for the entire invocation (build, certify, or improve).
+    # The single knob users should reason about. Covers all internal agent
+    # calls. 1h default.
+    "run_budget_seconds": 3600,
+
+    # Optional per-agent-call safety caps. Applied as min(remaining_budget,
+    # cap) when set. `run_budget_seconds` is the primary control — these are
+    # belt-and-suspenders for unusual scenarios.
+    "spec_timeout": 600,            # cap on the spec-agent call specifically
+    # "agent_timeout": None,        # cap on build/certify/fix agent calls
+                                    # (`certifier_timeout` is the deprecated
+                                    # alias, still honored with warning)
     "max_certify_rounds": 8,        # max certification rounds in build loop
 }
 
-# Deprecated config key → canonical name. Read with a warning if user still has
-# these in otto.yaml; overridden by canonical name when both are set.
+# Deprecated config keys → canonical name. Logged with a warning if user still
+# has them in otto.yaml; canonical key wins when both are set.
 _DEPRECATED_ALIASES: dict[str, str] = {
     "certifier_timeout": "agent_timeout",
 }
@@ -58,18 +62,36 @@ def agent_provider(config: dict[str, Any]) -> str:
 
 
 
-def get_timeout(config: dict[str, Any], key: str = "agent_timeout") -> int:
-    """Read a timeout value from config with validation and default fallback.
+def get_run_budget(config: dict[str, Any]) -> int:
+    """Read `run_budget_seconds` from config. Default 3600.
 
-    Honors deprecated aliases (e.g. ``certifier_timeout`` → ``agent_timeout``).
-    When both canonical name and deprecated alias are set, canonical wins and
-    a warning is logged.
+    This is the total wall-clock budget for the entire invocation.
     """
     import logging
     _logger = logging.getLogger("otto.config")
-    default = int(DEFAULT_CONFIG.get(key, 1800))
+    default = int(DEFAULT_CONFIG["run_budget_seconds"])
+    raw = config.get("run_budget_seconds", default)
+    try:
+        value = int(raw)
+    except (ValueError, TypeError):
+        _logger.warning("Invalid run_budget_seconds (%r), using default %ds", raw, default)
+        return default
+    if value <= 0:
+        _logger.warning("run_budget_seconds must be positive, using default %ds", default)
+        return default
+    return value
 
-    # Resolve value from config, checking canonical then deprecated aliases.
+
+def get_timeout(config: dict[str, Any], key: str = "agent_timeout") -> int | None:
+    """Read a per-call safety cap from config. Returns None if unset.
+
+    Callers use this as a belt-and-suspenders cap on top of `run_budget_seconds`.
+    When a deprecated alias (``certifier_timeout``) is set and the canonical
+    key is not, the alias is honored with a deprecation warning.
+    """
+    import logging
+    _logger = logging.getLogger("otto.config")
+
     raw_value: Any = config.get(key)
     if raw_value is None:
         for old_key, new_key in _DEPRECATED_ALIASES.items():
@@ -81,16 +103,21 @@ def get_timeout(config: dict[str, Any], key: str = "agent_timeout") -> int:
                 )
                 break
     if raw_value is None:
-        raw_value = default
+        # If DEFAULT_CONFIG has a default for this specific key (e.g. spec_timeout),
+        # honor it; otherwise signal "no cap" via None.
+        if key in DEFAULT_CONFIG:
+            raw_value = DEFAULT_CONFIG[key]
+        else:
+            return None
 
     try:
         value = int(raw_value)
     except (ValueError, TypeError):
-        _logger.warning("Invalid %s (%r), using default %ds", key, raw_value, default)
-        return default
+        _logger.warning("Invalid %s (%r), ignoring", key, raw_value)
+        return None
     if value <= 0:
-        _logger.warning("%s must be positive, using default %ds", key, default)
-        return default
+        _logger.warning("%s must be positive (got %d), ignoring", key, value)
+        return None
     return value
 
 
@@ -335,7 +362,8 @@ def create_config(project_dir: Path) -> Path:
     lines += "#                               # if unset, Otto uses the provider's local/default model\n"
     lines += "\n# Product certification:\n"
     lines += "# spec_timeout: 600             # max seconds for spec generation/review steps\n"
-    lines += "# agent_timeout: 1800            # max seconds per agent-session call\n"
+    lines += "# run_budget_seconds: 3600       # total wall-clock budget for the whole run\n"
+    lines += "# agent_timeout:                 # optional per-call safety cap (rarely needed)\n"
     lines += "# max_certify_rounds: 8          # max certification rounds (agent stops after this many)\n"
     config_path.write_text(lines + "\n")
 

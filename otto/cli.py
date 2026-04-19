@@ -56,6 +56,7 @@ async def _run_spec_phase(
     auto_approve: bool,
     resume_state,
     config: dict,
+    budget=None,
 ) -> tuple[str, str, float]:
     """Drive the spec phase before the main build.
 
@@ -175,7 +176,8 @@ async def _run_spec_phase(
                     intent=intent, spec_cost=spec_cost, spec_version=resume_state.spec_version,
                 )
                 spec_result = await run_spec_agent(
-                    intent, project_dir, run_dir, config, version=resume_state.spec_version
+                    intent, project_dir, run_dir, config,
+                    version=resume_state.spec_version, budget=budget,
                 )
                 spec_cost += spec_result.cost
                 current_phase = "spec_review"
@@ -209,7 +211,9 @@ async def _run_spec_phase(
                 intent=intent, spec_cost=spec_cost, spec_version=resume_state.spec_version,
             )
             console.print("  [bold]Spec phase[/bold] — generating product spec...\n")
-            spec_result = await run_spec_agent(intent, project_dir, run_dir, config)
+            spec_result = await run_spec_agent(
+                intent, project_dir, run_dir, config, budget=budget,
+            )
             spec_cost += spec_result.cost
             current_phase = "spec_review"
             current_spec_path = str(spec_result.path)
@@ -259,8 +263,31 @@ async def _run_spec_phase(
             spec_cost=float(prior_cp.get("spec_cost", spec_cost) or 0.0),
         )
         raise
-    except RuntimeError as exc:
-        # spec agent failed or produced invalid output
+    except Exception as exc:
+        # AgentCallError from budget exhaustion / timeout during spec: catch
+        # here and write a paused checkpoint so --resume works. Other
+        # RuntimeErrors (invalid spec content, missing file) exit non-zero
+        # without checkpoint munging.
+        from otto.agent import AgentCallError
+        if isinstance(exc, AgentCallError):
+            prior_cp = load_checkpoint(project_dir) or {}
+            session_id = exc.session_id or prior_cp.get("session_id", "") or ""
+            write_checkpoint(
+                project_dir, run_id=run_id, command="build",
+                status="paused", phase=current_phase,
+                intent=intent,
+                spec_path=current_spec_path or None,
+                spec_hash=current_spec_hash or None,
+                spec_version=current_spec_version,
+                spec_cost=spec_cost,
+                session_id=session_id,
+            )
+            error_console.print(
+                f"[error]Run budget exhausted during spec ({exc.reason}).[/error]\n"
+                "  Use `otto build --resume` to continue, or raise "
+                "`run_budget_seconds` in otto.yaml."
+            )
+            sys.exit(1)
         error_console.print(f"[error]Spec phase failed: {exc}[/error]")
         sys.exit(1)
 
@@ -447,8 +474,12 @@ def build(intent, no_qa, fast, split, rounds, resume, spec, spec_file, yes, forc
         config["max_certify_rounds"] = rounds
 
     from otto.pipeline import build_agentic_v3, run_certify_fix_loop, BuildResult
+    from otto.budget import RunBudget
+    budget = RunBudget.start_from(config)
 
     # --- Spec phase (if --spec or --spec-file) ---
+    # Start timer BEFORE spec so reported duration matches budget accounting.
+    build_start = time.time()
     spec_content: str | None = None
     run_id: str = resume_state.run_id or ""
     spec_cost_total: float = resume_state.spec_cost or 0.0
@@ -462,12 +493,12 @@ def build(intent, no_qa, fast, split, rounds, resume, spec, spec_file, yes, forc
                 auto_approve=yes,
                 resume_state=resume_state,
                 config=config,
+                budget=budget,
             ))
         except KeyboardInterrupt:
             console.print("\n  [yellow]Paused. Run `otto build --resume` to continue.[/yellow]")
             sys.exit(0)
 
-    build_start = time.time()
     console.print()
 
     certifier_mode = config.pop("_certifier_mode", "thorough")
@@ -487,7 +518,8 @@ def build(intent, no_qa, fast, split, rounds, resume, spec, spec_file, yes, forc
                                      resume_cost=resume_state.total_cost,
                                      resume_rounds=resume_state.rounds,
                                      command="build",
-                                     record_intent=not resume_without_intent)
+                                     record_intent=not resume_without_intent,
+                                     budget=budget)
             )
         else:
             mode_label = "fast smoke test" if certifier_mode == "fast" else "one agent builds, certifies, fixes"
@@ -500,6 +532,7 @@ def build(intent, no_qa, fast, split, rounds, resume, spec, spec_file, yes, forc
                                  resume_existing_session=resume_without_intent,
                                  spec=spec_content,
                                  run_id=run_id or None,
+                                 budget=budget,
                                  spec_cost=spec_cost_total)
             )
     except KeyboardInterrupt:
@@ -560,6 +593,8 @@ def certify(intent, thorough, fast):
     console.print(f"\n  [bold]Certifying[/bold] \u2014 {mode_label}\n")
 
     from otto.certifier import run_agentic_certifier
+    from otto.budget import RunBudget
+    budget = RunBudget.start_from(config)
 
     start = time.time()
     try:
@@ -568,11 +603,20 @@ def certify(intent, thorough, fast):
             project_dir=project_dir,
             config=config,
             mode=_mode,
+            budget=budget,
         ))
     except KeyboardInterrupt:
         console.print("\n  Aborted.")
         sys.exit(1)
     except Exception as e:
+        from otto.agent import AgentCallError
+        if isinstance(e, AgentCallError):
+            error_console.print(
+                f"[error]Run budget exhausted ({e.reason}).[/error]\n"
+                "  Raise `run_budget_seconds` in otto.yaml. Standalone "
+                "certify has no resume — rerun the command."
+            )
+            sys.exit(1)
         error_console.print(f"[error]Certification failed: {rich_escape(str(e))}[/error]")
         sys.exit(1)
 

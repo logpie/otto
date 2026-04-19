@@ -102,12 +102,15 @@ def _run_improve(
     config = load_config(config_path) if config_path.exists() else {}
     config["max_certify_rounds"] = max(1, rounds)
 
-    # Use longer timeout for improve modes. Honor canonical `agent_timeout`
-    # and legacy `certifier_timeout` — whichever is set in the user's config.
-    existing = config.get("agent_timeout")
-    if existing is None:
-        existing = config.get("certifier_timeout", 1800)
-    config["agent_timeout"] = max(int(existing), 3600)
+    # Give improve modes a larger wall-clock budget by default, since
+    # multi-round fix loops legitimately take longer than a single build.
+    # User-set `run_budget_seconds` wins.
+    existing_budget = config.get("run_budget_seconds")
+    if existing_budget is None:
+        config["run_budget_seconds"] = 7200  # 2h default for improve
+
+    from otto.budget import RunBudget
+    budget = RunBudget.start_from(config)
 
     # Pass target to config for prompt filling
     if target:
@@ -136,6 +139,7 @@ def _run_improve(
                 resume_cost=resume_state.total_cost,
                 resume_rounds=resume_state.rounds,
                 command=command_id,
+                budget=budget,
             ))
         else:
             # Agent-driven: one session, agent drives certify→fix loop
@@ -147,6 +151,7 @@ def _run_improve(
                 prompt_mode="improve",
                 resume_session_id=resume_state.session_id or None,
                 command=command_id,
+                budget=budget,
             ))
     except KeyboardInterrupt:
         console.print("\n  [yellow]Paused. Run with --resume to continue.[/yellow]")

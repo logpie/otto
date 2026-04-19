@@ -142,7 +142,7 @@ async def run_agent_with_timeout(
     options: AgentOptions,
     *,
     log_path: Path,
-    timeout: int,
+    timeout: int | None,
     project_dir: Path,
     capture_tool_output: bool = False,
 ) -> tuple[str, float, str]:
