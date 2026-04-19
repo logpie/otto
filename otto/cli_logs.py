@@ -26,7 +26,7 @@ def register_history_command(main: click.Group) -> None:
         history_path = project_dir / HISTORY_FILE
 
         if not history_path.exists():
-            console.print(f"[dim]No build history. Run 'otto build' to get started.[/dim]")
+            console.print("[dim]No build history. Run 'otto build' to get started.[/dim]")
             return
 
         entries = []
@@ -40,11 +40,11 @@ def register_history_command(main: click.Group) -> None:
                 except json.JSONDecodeError:
                     continue
         except OSError:
-            error_console.print(f"Error reading history file", style="error")
+            error_console.print("Error reading history file", style="error")
             sys.exit(1)
 
         if not entries:
-            console.print(f"[dim]No build history.[/dim]")
+            console.print("[dim]No build history.[/dim]")
             return
 
         entries.reverse()

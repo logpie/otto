@@ -27,18 +27,6 @@ class BuildResult:
     tasks_failed: int = 0
 
 
-def _load_build_prompt() -> str:
-    """Load the v3 build prompt (with certification steps)."""
-    from otto.prompts import build_prompt
-    return build_prompt()
-
-
-def _load_code_prompt() -> str:
-    """Load the code-only prompt (no certification knowledge)."""
-    from otto.prompts import code_prompt
-    return code_prompt()
-
-
 def _stories_to_journeys(stories: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Convert story results to journey dicts for BuildResult."""
     return [
@@ -57,6 +45,10 @@ async def build_agentic_v3(
     certifier_mode: str = "thorough",
     prompt_mode: str = "build",
     resume_session_id: str | None = None,
+    command: str = "build",
+    manage_checkpoint: bool = True,
+    record_intent: bool = True,
+    resume_existing_session: bool = False,
 ) -> BuildResult:
     """Fully agent-driven session: one agent, certifier as environment.
 
@@ -67,17 +59,26 @@ async def build_agentic_v3(
 
     resume_session_id: if set, resumes an existing SDK session instead of starting fresh.
 
+    command: value written to the checkpoint's `command` field. Used by the
+      CLI to show a warning when the user resumes with a different subcommand.
+
+    manage_checkpoint: when False, callers (e.g. run_certify_fix_loop) are
+      responsible for the checkpoint lifecycle and this function leaves it
+      alone. Default True — the function writes in_progress before the agent
+      call and updates to completed after.
+
     certifier_mode controls which certifier prompt is pre-filled.
     """
     from otto.agent import AgentCallError, make_agent_options, run_agent_with_timeout
-    from otto.observability import append_text_log
 
     build_id = f"build-{int(time.time())}-{os.getpid()}"
     build_dir = project_dir / "otto_logs" / "builds" / build_id
     build_dir.mkdir(parents=True, exist_ok=True)
 
-    # Append intent to cumulative log
-    _append_intent(project_dir, intent, build_id)
+    # Resumed SDK sessions already carry prior context; avoid polluting
+    # intent.md or stdin when the user resumes without a fresh intent.
+    if record_intent:
+        _append_intent(project_dir, intent, build_id)
     _commit_artifacts(project_dir)
 
     # Record HEAD before build so the improvement report can show only new commits
@@ -88,47 +89,88 @@ async def build_agentic_v3(
     if resume_session_id:
         options.resume = resume_session_id
 
+    evidence_dir_path: Path | None = None
     skip_qa = bool(config.get("skip_product_qa"))
 
-    # Select prompt based on mode
     if skip_qa:
         prompt_mode = "code"
 
-    if prompt_mode == "code":
-        prompt = _load_code_prompt() + f"\n\nBuild this product:\n\n{intent}"
-    elif prompt_mode == "improve":
-        from otto.config import get_max_rounds
-        from otto.prompts import improve_prompt
-        max_certify_rounds = get_max_rounds(config)
-        raw_prompt = improve_prompt().replace("{max_certify_rounds}", str(max_certify_rounds))
-        prompt = raw_prompt + f"\n\nImprove this product:\n\n{intent}"
+    if resume_existing_session and resume_session_id:
+        prompt = ""
     else:
-        # Default: build mode
-        from otto.config import get_max_rounds
-        max_certify_rounds = get_max_rounds(config)
-        raw_prompt = _load_build_prompt().replace("{max_certify_rounds}", str(max_certify_rounds))
-        prompt = raw_prompt + f"\n\nBuild this product:\n\n{intent}"
+        # Select prompt based on mode
+        if prompt_mode == "code":
+            from otto.prompts import code_prompt
+            prompt = code_prompt() + f"\n\nBuild this product:\n\n{intent}"
+        elif prompt_mode == "improve":
+            from otto.config import get_max_rounds
+            from otto.prompts import improve_prompt
+            max_certify_rounds = get_max_rounds(config)
+            raw_prompt = improve_prompt().replace("{max_certify_rounds}", str(max_certify_rounds))
+            prompt = raw_prompt + f"\n\nImprove this product:\n\n{intent}"
+        else:
+            # Default: build mode
+            from otto.config import get_max_rounds
+            from otto.prompts import build_prompt
+            max_certify_rounds = get_max_rounds(config)
+            raw_prompt = build_prompt().replace("{max_certify_rounds}", str(max_certify_rounds))
+            prompt = raw_prompt + f"\n\nBuild this product:\n\n{intent}"
 
-    # Pre-fill certifier prompt for modes that use certification
-    if prompt_mode != "code":
-        from otto.prompts import certifier_prompt
-        evidence_dir = str(project_dir / "otto_logs" / "certifier" / "evidence")
-        safe_intent = intent.replace("</certifier_prompt>", "")
-        format_kwargs: dict[str, str] = {
-            "intent": safe_intent, "evidence_dir": evidence_dir, "focus_section": "",
-            "target": config.get("_target") or "",
-        }
-        filled_certifier = certifier_prompt(mode=certifier_mode).format(**format_kwargs)
-        prompt += (f"\n\n## Pre-filled Certifier Prompt\n"
-                   f"When you dispatch the certifier agent, use this EXACT prompt:\n"
-                   f"<certifier_prompt>\n{filled_certifier}\n</certifier_prompt>")
+        # Pre-fill certifier prompt for modes that use certification
+        if prompt_mode != "code":
+            from otto.prompts import certifier_prompt
+            # Per-run evidence dir so parallel/sequential runs don't clobber each other
+            evidence_dir_path = project_dir / "otto_logs" / "certifier" / "evidence" / build_id
+            evidence_dir = str(evidence_dir_path)
+            safe_intent = intent.replace("</certifier_prompt>", "")
+            format_kwargs: dict[str, str] = {
+                "intent": safe_intent, "evidence_dir": evidence_dir, "focus_section": "",
+                "target": config.get("_target") or "",
+            }
+            filled_certifier = certifier_prompt(mode=certifier_mode).format(**format_kwargs)
+            prompt += (f"\n\n## Pre-filled Certifier Prompt\n"
+                       f"When you dispatch the certifier agent, use this EXACT prompt:\n"
+                       f"<certifier_prompt>\n{filled_certifier}\n</certifier_prompt>")
 
-    # Inject cross-run memory (opt-in via config)
-    from otto.memory import inject_memory
-    prompt = inject_memory(prompt, project_dir, config)
+        # Inject cross-run memory (opt-in via config)
+        from otto.memory import inject_memory
+        prompt = inject_memory(prompt, project_dir, config)
 
     logger.info("Starting agentic v3 build: %s", build_id)
     start_time = time.monotonic()
+
+    from otto.checkpoint import load_checkpoint, write_checkpoint
+
+    checkpoint_session_id = resume_session_id or ""
+    if manage_checkpoint and not checkpoint_session_id:
+        try:
+            checkpoint_session_id = (
+                (load_checkpoint(project_dir) or {}).get("session_id", "") or ""
+            )
+        except Exception as exc:
+            logger.warning("Failed to read checkpoint for session resume: %s", exc)
+
+    def _cp(status: str, session_id: str = "", cost: float = 0.0) -> None:
+        if not manage_checkpoint:
+            return
+        try:
+            write_checkpoint(
+                project_dir,
+                run_id=build_id,
+                command=command,
+                certifier_mode=certifier_mode,
+                prompt_mode=prompt_mode,
+                session_id=session_id,
+                total_cost=float(cost or 0),
+                status=status,
+            )
+        except Exception as exc:
+            logger.warning("Failed to write checkpoint: %s", exc)
+
+    # Pre-write an in_progress checkpoint so Ctrl-C/crash before the agent
+    # returns leaves a resumable marker. On resumed runs, preserve the prior
+    # session_id so a second crash is still resumable.
+    _cp("in_progress", session_id=checkpoint_session_id)
 
     # One agent call — the agent drives everything.
     # capture_tool_output=True so subagent output (certifier results) is included
@@ -148,22 +190,9 @@ async def build_agentic_v3(
 
     total_duration = round(time.monotonic() - start_time, 1)
 
-    # Write checkpoint so this session can be resumed if needed
-    try:
-        from otto.checkpoint import write_checkpoint
-        write_checkpoint(
-            project_dir,
-            run_id=build_id,
-            command="build" if prompt_mode == "build" else "improve",
-            mode=prompt_mode,
-            certifier_mode=certifier_mode,
-            prompt_mode=prompt_mode,
-            session_id=session_id,
-            total_cost=float(cost or 0),
-            status="completed",
-        )
-    except Exception:
-        logger.warning("Failed to write checkpoint")
+    # Mark the run as completed, carrying forward the session_id so a future
+    # rerun with --resume can continue this SDK session.
+    _cp("completed", session_id=session_id, cost=float(cost or 0))
 
     # Save agent output in two forms:
     # 1. agent-raw.log — full unfiltered output (for deep debugging)
@@ -184,14 +213,13 @@ async def build_agentic_v3(
         # Extract structured events from agent text
         if text:
             # Git commits = what was built/fixed
-            import subprocess as _sp
             try:
                 git_log_cmd = ["git", "log", "--oneline"]
                 if _head_before:
                     git_log_cmd.append(f"{_head_before}..HEAD")
                 else:
                     git_log_cmd.append("--max-count=20")
-                git_log = _sp.run(
+                git_log = subprocess.run(
                     git_log_cmd,
                     cwd=str(project_dir), capture_output=True, text=True,
                 ).stdout.strip()
@@ -199,8 +227,8 @@ async def build_agentic_v3(
                     summary_lines.append(f"[{ts}] Git commits:")
                     for line in git_log.split("\n"):
                         summary_lines.append(f"[{ts}]   {line}")
-            except Exception:
-                pass
+            except (OSError, subprocess.SubprocessError) as exc:
+                logger.debug("git log read for agent.log failed: %s", exc)
 
             # Certifier markers + diagnosis + failed story details
             for line in text.split("\n"):
@@ -237,9 +265,10 @@ async def build_agentic_v3(
                     for p in prose_lines[:10]:  # cap at 10 lines
                         summary_lines.append(f"[{ts}]   {p[:200]}")
 
+        from otto.observability import append_text_log
         append_text_log(agent_log_path, summary_lines)
-    except Exception:
-        logger.warning("Failed to write agent log")
+    except Exception as exc:
+        logger.warning("Failed to write agent log: %s", exc)
 
     # Parse certification results from agent output
     from otto.markers import parse_certifier_markers
@@ -296,6 +325,7 @@ async def build_agentic_v3(
             stories_passed, stories_tested,
             diagnosis=overall_diagnosis,
             round_history=round_history,
+            evidence_dir=evidence_dir_path,
         )
     except Exception as exc:
         logger.warning("Failed to write PoW: %s", exc)
@@ -394,10 +424,11 @@ def _write_improvement_report(
 
 
     # Filter out template placeholder rounds (from build prompt examples)
+    from otto.markers import _PLACEHOLDER_IDS
     real_rounds = [
         r for r in certify_rounds
         if r.get("stories") and not all(
-            s.get("story_id") in ("(id)", "<story_id>", "<id>", "id", "")
+            s.get("story_id", "") in _PLACEHOLDER_IDS
             for s in r.get("stories", [])
         )
     ]
@@ -441,8 +472,8 @@ def _write_improvement_report(
                 if stat_lines:
                     lines.append(f"- {stat_lines[-1].strip()}")
             lines.append("")
-    except Exception:
-        pass
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.debug("git summary for improvement report failed: %s", exc)
 
     # === Verification ===
     # Show certifier rounds — what was tested and whether fixes hold
@@ -504,8 +535,8 @@ def _cleanup_orphan_processes(project_dir: Path) -> None:
                         logger.info("Killed orphan process %d", pid)
                 except (ValueError, ProcessLookupError, PermissionError):
                     pass
-    except Exception:
-        pass  # best-effort cleanup
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.debug("Orphan-process cleanup skipped: %s", exc)
 
 
 
@@ -540,6 +571,8 @@ async def run_certify_fix_loop(
     start_round: int = 1,
     resume_cost: float = 0.0,
     resume_rounds: list[dict[str, Any]] | None = None,
+    command: str = "improve",
+    record_intent: bool = True,
 ) -> BuildResult:
     """System-driven certify-fix loop.
 
@@ -561,18 +594,38 @@ async def run_certify_fix_loop(
         update_current_state,
     )
 
-    from otto.agent import AgentCallError
     from otto.checkpoint import write_checkpoint as _write_cp
 
     build_id = f"build-{int(time.time())}-{os.getpid()}"
-    start_time = time.monotonic()
     total_cost = resume_cost
     from otto.config import get_max_rounds
     max_rounds = get_max_rounds(config)
     checkpoint_rounds = list(resume_rounds or [])
+    last_completed_round = max(start_round - 1, 0)
+    checkpoint_phase = "initial_build" if not skip_initial_build else "certify"
 
-    _append_intent(project_dir, intent, build_id)
+    if record_intent:
+        _append_intent(project_dir, intent, build_id)
     _commit_artifacts(project_dir)
+
+    def _save_cp(status: str = "in_progress", *, phase: str | None = None) -> None:
+        """Write checkpoint with current loop state."""
+        nonlocal checkpoint_phase
+        if phase is not None:
+            checkpoint_phase = phase
+        try:
+            _write_cp(
+                project_dir,
+                run_id=build_id, command=command,
+                certifier_mode=certifier_mode,
+                focus=focus, target=target,
+                max_rounds=max_rounds, phase=checkpoint_phase,
+                current_round=last_completed_round,
+                total_cost=total_cost, rounds=checkpoint_rounds,
+                status=status,
+            )
+        except Exception as exc:
+            logger.warning("Failed to write split-mode checkpoint: %s", exc)
 
     # --- Optional initial build ---
     round_id = init_round(project_dir,
@@ -584,7 +637,11 @@ async def run_certify_fix_loop(
         build_config["skip_product_qa"] = True
 
         logger.info("Certify-fix loop: initial build")
-        result = await build_agentic_v3(intent, project_dir, build_config)
+        _save_cp(phase="initial_build")
+        result = await build_agentic_v3(
+            intent, project_dir, build_config,
+            manage_checkpoint=False,
+        )
         total_cost += result.total_cost
         record_build(project_dir, round_id, result)
 
@@ -595,21 +652,6 @@ async def run_certify_fix_loop(
     previous_attempts: list[dict[str, Any]] = []
     MAX_RETRIES = 2
 
-    def _save_cp(status: str = "in_progress") -> None:
-        """Write checkpoint with current loop state."""
-        try:
-            _write_cp(
-                project_dir,
-                run_id=build_id, command="improve", mode=certifier_mode,
-                certifier_mode=certifier_mode,
-                focus=focus, target=target,
-                max_rounds=max_rounds, current_round=actual_rounds,
-                total_cost=total_cost, rounds=checkpoint_rounds,
-                status=status,
-            )
-        except Exception:
-            pass
-
     for round_num in range(start_round, max_rounds + 1):
         try:
             actual_rounds = round_num
@@ -617,7 +659,7 @@ async def run_certify_fix_loop(
             # Each certify round gets its own round_id
             round_id = init_round(project_dir, f"certify round {round_num}")
 
-            _save_cp()
+            _save_cp(phase="certify")
 
             # --- Certify with retry ---
             report = None
@@ -633,7 +675,7 @@ async def run_certify_fix_loop(
                         target=target,
                     )
                     break
-                except (AgentCallError, Exception) as err:
+                except Exception as err:
                     if attempt < MAX_RETRIES:
                         logger.warning("Certify round %d attempt %d failed: %s. Retrying...",
                                        round_num, attempt + 1, err)
@@ -683,34 +725,41 @@ async def run_certify_fix_loop(
             append_journal(project_dir, round_id, f"certify round {round_num}",
                            result_str, report.cost_usd)
 
-            # Record round in checkpoint
-            checkpoint_rounds.append({
+            round_summary = {
                 "round": round_num,
                 "stories_tested": len(stories),
                 "stories_passed": len(stories) - len(failures),
                 "cost": round(report.cost_usd, 2),
-            })
-
-            _save_cp()
+            }
 
             # Determine if we should stop
             if certifier_mode == "target":
                 if metric_met:
+                    checkpoint_rounds.append(round_summary)
+                    last_completed_round = round_num
+                    _save_cp(phase="round_complete")
                     passed = True
                     logger.info("Certify-fix loop: target met on round %d (%s)",
                                 round_num, metric_value)
                     break
             elif not failures:
+                checkpoint_rounds.append(round_summary)
+                last_completed_round = round_num
+                _save_cp(phase="round_complete")
                 passed = True
                 logger.info("Certify-fix loop: PASS on round %d", round_num)
                 break
 
             if round_num >= max_rounds:
+                checkpoint_rounds.append(round_summary)
+                last_completed_round = round_num
+                _save_cp(phase="round_complete")
                 logger.info("Certify-fix loop: max rounds (%d) reached", max_rounds)
                 break
 
             # --- Fix round with retry ---
             round_id = init_round(project_dir, f"fix round {round_num}")
+            _save_cp(phase="fix")
 
             fix_lines = [
                 "Fix these issues found by the certifier.\n",
@@ -755,7 +804,9 @@ async def run_certify_fix_loop(
                     logger.info("Certify-fix loop round %d: fixing %d issues (attempt %d)",
                                 round_num, len(failures), attempt + 1)
                     fix_result = await build_agentic_v3(
-                        "\n".join(fix_lines), project_dir, fix_config)
+                        "\n".join(fix_lines), project_dir, fix_config,
+                        manage_checkpoint=False,
+                    )
                     break
                 except Exception as err:
                     if attempt < MAX_RETRIES:
@@ -790,27 +841,30 @@ async def run_certify_fix_loop(
                 "diff_stat": diff_stat,
                 "still_failing": [f.get("story_id", "?") for f in failures],
             })
+            checkpoint_rounds.append(round_summary)
+            last_completed_round = round_num
+            _save_cp(phase="round_complete")
 
         except KeyboardInterrupt:
             logger.info("Paused at round %d", round_num)
             try:
                 _save_cp(status="paused")
-            except Exception:
-                pass
+            except OSError as exc:
+                logger.warning("Failed to mark checkpoint paused: %s", exc)
             raise
 
-    total_duration = round(time.monotonic() - start_time, 1)
-
-    # Final journal entry
-    append_journal(project_dir, round_id, "build complete",
+    # Final journal entry gets its own round_id so attribution is unambiguous
+    # regardless of which branch above terminated the loop.
+    final_round_id = init_round(project_dir, "loop complete")
+    append_journal(project_dir, final_round_id, "build complete",
                    "PASS" if passed else "FAIL", total_cost)
 
     # Mark checkpoint completed
     try:
         from otto.checkpoint import complete_checkpoint
         complete_checkpoint(project_dir, total_cost)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Failed to mark checkpoint completed: %s", exc)
 
     journeys = _stories_to_journeys(last_stories)
 
@@ -844,5 +898,5 @@ def _commit_artifacts(project_dir: Path) -> None:
                 ["git", "commit", "-q", "-m", "otto: commit artifacts"],
                 cwd=project_dir, capture_output=True, timeout=git_timeout,
             )
-    except Exception:
-        pass
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.debug("_commit_artifacts skipped: %s", exc)

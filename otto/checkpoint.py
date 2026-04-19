@@ -9,13 +9,116 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger("otto.checkpoint")
 
 CHECKPOINT_FILE = "otto_logs/checkpoint.json"
+POST_INITIAL_BUILD_PHASES = frozenset({"certify", "fix", "round_complete", "complete"})
+
+
+@dataclass
+class ResumeState:
+    """Resume state extracted from a checkpoint.
+
+    ``resumed=False`` means a fresh run (either no checkpoint, or user chose
+    not to resume). ``resumed=True`` means pipeline functions should pick up
+    from ``start_round``/``total_cost``/``rounds`` (split mode) or
+    ``session_id`` (agent mode).
+    """
+
+    session_id: str = ""
+    start_round: int = 1
+    total_cost: float = 0.0
+    rounds: list[dict[str, Any]] = field(default_factory=list)
+    resumed: bool = False
+    prior_command: str = ""       # command that wrote the checkpoint (e.g. "build")
+    command_mismatch: bool = False  # True if prior_command differs from expected
+    current_round: int = 0        # last completed round from the checkpoint
+    phase: str = ""               # current phase for split-mode resume
+    target: str = ""              # persisted target goal for improve.target resume
+
+
+def print_resume_status(console: Any, state: ResumeState, resume_flag: bool, expected_command: str) -> None:
+    """Print the banner describing how resume resolved.
+
+    Shared between ``otto build`` and ``otto improve`` — the same three cases
+    need the same wording, and the only reason this lives in checkpoint.py
+    (rather than display.py) is that the caller always wants to print in
+    lockstep with ``resolve_resume()``.
+    """
+    if resume_flag and not state.resumed:
+        console.print("\n  [yellow]No checkpoint found — starting fresh.[/yellow]\n")
+        return
+    if not state.resumed:
+        return
+    if state.command_mismatch:
+        console.print(
+            f"\n  [yellow]\u26a0 Checkpoint is from `{state.prior_command}`, "
+            f"resuming in `{expected_command}`.[/yellow]"
+        )
+    console.print(
+        f"\n  [info]Resuming from round {state.start_round} "
+        f"(${state.total_cost:.2f} spent so far)[/info]\n"
+    )
+
+
+def resolve_resume(
+    project_dir: Path,
+    resume: bool,
+    expected_command: str,
+) -> ResumeState:
+    """Inspect the checkpoint and return resume state for the pipeline.
+
+    - No checkpoint: returns fresh state.
+    - Checkpoint exists but user did NOT pass --resume: clears the stale
+      checkpoint and returns fresh state. Logs a warning.
+    - Checkpoint exists and user passed --resume: extracts state. If the
+      checkpoint's command differs from ``expected_command``, the mismatch is
+      recorded on the state so the caller can warn.
+    - --resume passed but no checkpoint: returns fresh state. Logs a warning.
+
+    Does NOT print to the console — callers format output themselves.
+    """
+    checkpoint = load_checkpoint(project_dir)
+
+    if not checkpoint:
+        if resume:
+            logger.info("No checkpoint found; starting fresh despite --resume")
+        return ResumeState()
+
+    if not resume:
+        cr = checkpoint.get("current_round", 0)
+        cost = checkpoint.get("total_cost", 0)
+        cmd = checkpoint.get("command", "?")
+        logger.info("Clearing stale checkpoint from `%s` (round %s, $%.2f)", cmd, cr, cost)
+        clear_checkpoint(project_dir)
+        return ResumeState()
+
+    # resume=True and checkpoint exists
+    prior_cmd = checkpoint.get("command", "") or ""
+    current_round = checkpoint.get("current_round", 0) or 0
+    return ResumeState(
+        session_id=checkpoint.get("session_id", "") or "",
+        start_round=current_round + 1,
+        total_cost=float(checkpoint.get("total_cost", 0.0) or 0.0),
+        rounds=list(checkpoint.get("rounds", []) or []),
+        resumed=True,
+        prior_command=prior_cmd,
+        command_mismatch=bool(prior_cmd) and prior_cmd != expected_command,
+        current_round=current_round,
+        phase=checkpoint.get("phase", "") or "",
+        target=checkpoint.get("target", "") or "",
+    )
+
+
+def initial_build_completed(phase: str) -> bool:
+    """Return True only for explicit post-initial-build phases."""
+    return phase in POST_INITIAL_BUILD_PHASES
 
 
 def write_checkpoint(
@@ -23,17 +126,15 @@ def write_checkpoint(
     *,
     run_id: str,
     command: str,
-    mode: str,
     certifier_mode: str = "thorough",
     prompt_mode: str = "build",
-    branch: str = "",
     focus: str | None = None,
     target: str | None = None,
     max_rounds: int = 8,
     status: str = "in_progress",
+    phase: str = "",
     session_id: str = "",
     current_round: int = 0,
-    head_sha: str = "",
     total_cost: float = 0.0,
     rounds: list[dict[str, Any]] | None = None,
 ) -> None:
@@ -44,36 +145,32 @@ def write_checkpoint(
     data = {
         "run_id": run_id,
         "command": command,
-        "mode": mode,
         "certifier_mode": certifier_mode,
         "prompt_mode": prompt_mode,
-        "branch": branch,
         "focus": focus,
         "target": target,
         "max_rounds": max_rounds,
         "status": status,
+        "phase": phase,
         "session_id": session_id,
         "current_round": current_round,
-        "head_sha": head_sha,
         "total_cost": round(total_cost, 2),
         "rounds": rounds or [],
         "started_at": _read_started_at(checkpoint_path),
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
 
-    checkpoint_path.write_text(json.dumps(data, indent=2))
+    _write_checkpoint_file(checkpoint_path, data)
     logger.debug("Checkpoint written: round %d, status=%s", current_round, status)
 
 
 def load_checkpoint(project_dir: Path) -> dict[str, Any] | None:
     """Load checkpoint if one exists and is active (in_progress or paused)."""
     checkpoint_path = project_dir / CHECKPOINT_FILE
-    if not checkpoint_path.exists():
-        return None
 
     try:
         data = json.loads(checkpoint_path.read_text())
-    except (json.JSONDecodeError, OSError):
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
         return None
 
     if data.get("status") not in ("in_progress", "paused"):
@@ -101,7 +198,7 @@ def complete_checkpoint(project_dir: Path, total_cost: float = 0.0) -> None:
         data["status"] = "completed"
         data["total_cost"] = round(total_cost, 2)
         data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
-        checkpoint_path.write_text(json.dumps(data, indent=2))
+        _write_checkpoint_file(checkpoint_path, data)
     except (json.JSONDecodeError, OSError):
         pass
 
@@ -115,3 +212,22 @@ def _read_started_at(checkpoint_path: Path) -> str:
         except (json.JSONDecodeError, OSError):
             pass
     return time.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _checkpoint_tmp_path(checkpoint_path: Path) -> Path:
+    return checkpoint_path.with_name(checkpoint_path.name + ".tmp")
+
+
+def _write_checkpoint_file(checkpoint_path: Path, data: dict[str, Any]) -> None:
+    """Atomically replace the checkpoint file on disk."""
+    tmp_path = _checkpoint_tmp_path(checkpoint_path)
+    try:
+        tmp_path.write_text(json.dumps(data, indent=2))
+        os.replace(tmp_path, checkpoint_path)
+    except OSError:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
+        raise

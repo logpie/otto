@@ -18,7 +18,6 @@ _PLACEHOLDER_IDS = {"", "(id)", "<story_id>", "<id>", "id"}
 class ParsedMarkers:
     """Parsed results from certifier agent text output."""
     stories: list[dict[str, Any]] = field(default_factory=list)
-    story_evidence: dict[str, str] = field(default_factory=dict)
     stories_tested: int = 0
     stories_passed: int = 0
     verdict_pass: bool = False
@@ -26,7 +25,6 @@ class ParsedMarkers:
     certify_rounds: list[dict[str, Any]] = field(default_factory=list)
     # Target mode metrics
     metric_value: str = ""
-    metric_target: str = ""
     metric_met: bool | None = None  # None = not a target run
 
 
@@ -176,8 +174,6 @@ def parse_certifier_markers(text: str) -> ParsedMarkers:
 
         elif stripped.startswith("METRIC_VALUE:"):
             current_round["metric_value"] = stripped.split(":", 1)[1].strip()
-        elif stripped.startswith("METRIC_TARGET:"):
-            current_round["metric_target"] = stripped.split(":", 1)[1].strip()
         elif stripped.startswith("METRIC_MET:"):
             current_round["metric_met"] = stripped.split(":", 1)[1].strip().upper() == "YES"
 
@@ -186,7 +182,7 @@ def parse_certifier_markers(text: str) -> ParsedMarkers:
         certify_rounds.append(current_round)
 
     # Determine final results from the last round with stories
-    result = ParsedMarkers(story_evidence=evidence, certify_rounds=certify_rounds)
+    result = ParsedMarkers(certify_rounds=certify_rounds)
 
     final_round = None
     for r in reversed(certify_rounds):
@@ -198,7 +194,6 @@ def parse_certifier_markers(text: str) -> ParsedMarkers:
     for r in reversed(certify_rounds):
         if r.get("metric_value"):
             result.metric_value = r["metric_value"]
-            result.metric_target = r.get("metric_target", "")
             result.metric_met = r.get("metric_met")
             break
 

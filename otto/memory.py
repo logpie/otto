@@ -132,8 +132,6 @@ def format_for_prompt(project_dir: Path) -> str:
         cmd = entry.get("command", "?")
         mode = entry.get("certifier_mode", "?")
         commit = entry.get("commit", "?")
-        tested = entry.get("tested", 0)
-        passed = entry.get("passed", 0)
 
         lines.append(f"### {ts} — {cmd} ({mode}) @ {commit}")
 

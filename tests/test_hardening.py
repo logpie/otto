@@ -456,6 +456,34 @@ class TestImproveCLIHardening:
         # The result should indicate failure
         assert "FAILED" in result.output or "PASSED" not in result.output
 
+    def test_improve_target_resume_rejects_non_target_checkpoint(
+        self, tmp_git_repo, monkeypatch
+    ):
+        """`improve target --resume` must not resume bugs/feature checkpoints."""
+        from click.testing import CliRunner
+        from otto.checkpoint import write_checkpoint
+        from otto.cli import main
+
+        (tmp_git_repo / "intent.md").write_text("test intent")
+        write_checkpoint(
+            tmp_git_repo,
+            run_id="r1",
+            command="improve.bugs",
+            status="in_progress",
+        )
+
+        monkeypatch.chdir(tmp_git_repo)
+        with patch("otto.cli_improve._run_improve") as run_improve:
+            result = CliRunner().invoke(
+                main,
+                ["improve", "target", "latency < 100ms", "--resume"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 2
+        assert "not from `improve target`" in result.output
+        assert run_improve.call_count == 0
+
 
 # -- Test: PoW JSON round_history passed_count computed from stories --
 
@@ -775,3 +803,294 @@ class TestCrossRunMemory:
 
         entries = load_history(tmp_path)
         assert len(entries) == MAX_ENTRIES
+
+
+class TestResolveResume:
+    """resolve_resume handles the four checkpoint states consistently."""
+
+    def test_no_checkpoint_no_resume(self, tmp_path):
+        """Clean slate: no checkpoint, user didn't ask to resume."""
+        from otto.checkpoint import resolve_resume
+        state = resolve_resume(tmp_path, resume=False, expected_command="build")
+        assert not state.resumed
+        assert state.start_round == 1
+        assert state.total_cost == 0.0
+        assert state.session_id == ""
+
+    def test_no_checkpoint_with_resume_flag(self, tmp_path):
+        """User passed --resume but no checkpoint exists → fall back to fresh."""
+        from otto.checkpoint import resolve_resume
+        state = resolve_resume(tmp_path, resume=True, expected_command="build")
+        assert not state.resumed
+        assert state.start_round == 1
+
+    def test_stale_checkpoint_cleared_when_not_resuming(self, tmp_path):
+        """Checkpoint exists but user ran without --resume → it's cleared."""
+        from otto.checkpoint import resolve_resume, write_checkpoint, load_checkpoint
+        write_checkpoint(
+            tmp_path, run_id="r1", command="improve",
+            current_round=3, total_cost=2.50, status="in_progress",
+        )
+        state = resolve_resume(tmp_path, resume=False, expected_command="build")
+        assert not state.resumed
+        assert load_checkpoint(tmp_path) is None  # cleared
+
+    def test_resume_matching_command(self, tmp_path):
+        """Checkpoint matches current command → clean resume, no mismatch flag."""
+        from otto.checkpoint import resolve_resume, write_checkpoint
+        write_checkpoint(
+            tmp_path, run_id="r1", command="build",
+            session_id="sess-abc", current_round=2, total_cost=1.23,
+            rounds=[{"round": 1}, {"round": 2}], status="paused",
+        )
+        state = resolve_resume(tmp_path, resume=True, expected_command="build")
+        assert state.resumed
+        assert state.start_round == 3   # current_round + 1
+        assert state.total_cost == 1.23
+        assert state.session_id == "sess-abc"
+        assert state.prior_command == "build"
+        assert not state.command_mismatch
+        assert len(state.rounds) == 2
+
+    def test_resume_command_mismatch(self, tmp_path):
+        """Checkpoint is from `improve`, user runs `build --resume` → mismatch flag set."""
+        from otto.checkpoint import resolve_resume, write_checkpoint
+        write_checkpoint(
+            tmp_path, run_id="r1", command="improve",
+            current_round=2, total_cost=0.5, status="in_progress",
+        )
+        state = resolve_resume(tmp_path, resume=True, expected_command="build")
+        assert state.resumed
+        assert state.command_mismatch
+        assert state.prior_command == "improve"
+
+    def test_completed_checkpoint_not_resumed(self, tmp_path):
+        """Completed checkpoints should be ignored even with --resume."""
+        from otto.checkpoint import resolve_resume, write_checkpoint
+        write_checkpoint(
+            tmp_path, run_id="r1", command="build",
+            current_round=5, total_cost=3.0, status="completed",
+        )
+        state = resolve_resume(tmp_path, resume=True, expected_command="build")
+        assert not state.resumed
+
+
+class TestCheckpointRegression:
+    """Regression tests for checkpoint/resume edge cases."""
+
+    def test_load_checkpoint_ignores_truncated_json(self, tmp_path):
+        """Partial checkpoint writes should load as None, not crash."""
+        from otto.checkpoint import CHECKPOINT_FILE, load_checkpoint
+
+        checkpoint_path = tmp_path / CHECKPOINT_FILE
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint_path.write_text('{"status": "in_progress", "current_round": ')
+        tmp_file = checkpoint_path.with_name(checkpoint_path.name + ".tmp")
+        tmp_file.write_text('{"stale": true}')
+
+        assert load_checkpoint(tmp_path) is None
+        assert tmp_file.exists()
+
+    def test_load_checkpoint_handles_file_removed_between_checks(self, tmp_path):
+        """Concurrent checkpoint deletion should be treated as no checkpoint."""
+        from otto.checkpoint import load_checkpoint
+
+        with patch("pathlib.Path.read_text", side_effect=FileNotFoundError):
+            assert load_checkpoint(tmp_path) is None
+
+    @pytest.mark.asyncio
+    async def test_agent_resume_preserves_session_id_in_precheckpoint(self, tmp_git_repo):
+        """Interrupted resumed agent runs must keep the resumable session_id."""
+        from otto.checkpoint import load_checkpoint
+
+        async def interrupt_agent(*args, **kwargs):
+            raise KeyboardInterrupt()
+
+        with patch("otto.agent.run_agent_with_timeout", side_effect=interrupt_agent):
+            with pytest.raises(KeyboardInterrupt):
+                await build_agentic_v3(
+                    "resume build",
+                    tmp_git_repo,
+                    {},
+                    resume_session_id="sess-resume-123",
+                )
+
+        checkpoint = load_checkpoint(tmp_git_repo)
+        assert checkpoint is not None
+        assert checkpoint["status"] == "in_progress"
+        assert checkpoint["session_id"] == "sess-resume-123"
+
+    @pytest.mark.asyncio
+    async def test_split_resume_tracks_phase_and_last_completed_round(self, tmp_git_repo):
+        """Split-mode resume must preserve initial-build state and replay interrupted rounds."""
+        from otto.checkpoint import clear_checkpoint, load_checkpoint, resolve_resume
+        from otto.pipeline import run_certify_fix_loop
+
+        async def interrupt_initial_build(*args, **kwargs):
+            raise KeyboardInterrupt()
+
+        with patch("otto.pipeline.build_agentic_v3", side_effect=interrupt_initial_build):
+            with pytest.raises(KeyboardInterrupt):
+                await run_certify_fix_loop(
+                    "split build",
+                    tmp_git_repo,
+                    {},
+                    skip_initial_build=False,
+                    command="build",
+                )
+
+        checkpoint = load_checkpoint(tmp_git_repo)
+        assert checkpoint is not None
+        assert checkpoint["status"] == "in_progress"
+        assert checkpoint["phase"] == "initial_build"
+        assert checkpoint["current_round"] == 0
+
+        state = resolve_resume(tmp_git_repo, resume=True, expected_command="build")
+        assert state.resumed
+        assert state.phase == "initial_build"
+        assert state.start_round == 1
+
+        clear_checkpoint(tmp_git_repo)
+
+        async def interrupt_certifier(*args, **kwargs):
+            raise KeyboardInterrupt()
+
+        with patch("otto.certifier.run_agentic_certifier", side_effect=interrupt_certifier):
+            with pytest.raises(KeyboardInterrupt):
+                await run_certify_fix_loop(
+                    "split improve",
+                    tmp_git_repo,
+                    {},
+                    skip_initial_build=True,
+                    start_round=1,
+                    command="improve.feature",
+                )
+
+        checkpoint = load_checkpoint(tmp_git_repo)
+        assert checkpoint is not None
+        assert checkpoint["status"] == "paused"
+        assert checkpoint["phase"] == "certify"
+        assert checkpoint["current_round"] == 0
+
+        state = resolve_resume(tmp_git_repo, resume=True, expected_command="improve.feature")
+        assert state.resumed
+        assert state.phase == "certify"
+        assert state.start_round == 1
+
+
+class TestBuildResume:
+    """End-to-end: `otto build --resume` picks up split-mode checkpoint."""
+
+    def test_build_cli_exposes_resume_flag(self):
+        """--resume is wired on otto build and intent is optional when resuming."""
+        from click.testing import CliRunner
+        from otto.cli import main
+
+        r = CliRunner().invoke(main, ["build", "--help"])
+        assert r.exit_code == 0
+        assert "--resume" in r.output
+        assert "[INTENT]" in r.output  # intent is optional
+
+    def test_build_without_intent_without_resume_errors(self, tmp_git_repo, monkeypatch):
+        """Missing intent and no checkpoint → exits 2."""
+        from click.testing import CliRunner
+        from otto.cli import main
+
+        monkeypatch.chdir(tmp_git_repo)
+        r = CliRunner().invoke(main, ["build"])
+        assert r.exit_code == 2
+
+    def test_build_without_intent_with_stale_checkpoint_errors(
+        self, tmp_git_repo, monkeypatch
+    ):
+        """--resume with no matching in-progress checkpoint and no intent → exits 2."""
+        from click.testing import CliRunner
+        from otto.cli import main
+
+        monkeypatch.chdir(tmp_git_repo)
+        # No checkpoint written, so --resume falls back to fresh — but then
+        # intent is required.
+        r = CliRunner().invoke(main, ["build", "--resume"])
+        assert r.exit_code == 2
+
+    def test_build_resume_without_intent_skips_placeholder_prompt_and_append(
+        self, tmp_git_repo, monkeypatch
+    ):
+        """Resume without INTENT should not append or leak `(resumed run)`."""
+        from click.testing import CliRunner
+        from otto.checkpoint import write_checkpoint
+        from otto.cli import main
+
+        intent_path = tmp_git_repo / "intent.md"
+        original_intent = "# Build Intents\n\n## 2026-04-13 12:00 (build-1)\nexisting intent\n"
+        intent_path.write_text(original_intent)
+        write_checkpoint(
+            tmp_git_repo,
+            run_id="r1",
+            command="build",
+            session_id="sess-resume-123",
+            status="in_progress",
+        )
+
+        captured_prompts = []
+
+        async def capture_query(prompt, options, **kwargs):
+            captured_prompts.append(prompt)
+            return (
+                "CERTIFY_ROUND: 1\n"
+                "STORIES_TESTED: 1\n"
+                "STORIES_PASSED: 1\n"
+                "STORY_RESULT: smoke | PASS | Works\n"
+                "VERDICT: PASS\n"
+                "DIAGNOSIS: null\n",
+                0.10,
+                MagicMock(session_id="sess-resume-123"),
+            )
+
+        monkeypatch.chdir(tmp_git_repo)
+        with patch("otto.agent.run_agent_query", side_effect=capture_query):
+            result = CliRunner().invoke(main, ["build", "--resume"], catch_exceptions=False)
+
+        assert result.exit_code == 0
+        assert intent_path.read_text() == original_intent
+        assert captured_prompts == [""]
+        assert "(resumed run)" not in "".join(captured_prompts)
+
+    def test_split_resume_with_empty_phase_replays_initial_build(
+        self, tmp_git_repo, monkeypatch
+    ):
+        """Old checkpoints with phase='' must not skip the initial build."""
+        from click.testing import CliRunner
+        from otto.checkpoint import write_checkpoint
+        from otto.cli import main
+
+        write_checkpoint(
+            tmp_git_repo,
+            run_id="r1",
+            command="build",
+            status="in_progress",
+            phase="",
+        )
+
+        captured = {}
+
+        async def capture_loop(intent, project_dir, config, **kwargs):
+            captured["skip_initial_build"] = kwargs["skip_initial_build"]
+            return BuildResult(
+                passed=True,
+                build_id="build-1",
+                total_cost=0.0,
+                tasks_passed=1,
+                tasks_failed=0,
+            )
+
+        monkeypatch.chdir(tmp_git_repo)
+        with patch("otto.pipeline.run_certify_fix_loop", side_effect=capture_loop):
+            result = CliRunner().invoke(
+                main,
+                ["build", "resume build", "--split", "--resume"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0
+        assert captured["skip_initial_build"] is False

@@ -7,13 +7,11 @@ from pathlib import Path
 
 import click
 
-from otto.agent import AssistantMessage, ClaudeAgentOptions, ResultMessage, TextBlock, _subprocess_env, query
+from otto.agent import AssistantMessage, AgentOptions, ResultMessage, TextBlock, _safe_read, query
 from otto.config import create_config, load_config
 from otto.display import CONTEXT_SETTINGS, console
+from otto.testing import _subprocess_env
 from otto.theme import error_console
-
-
-from otto.agent import _safe_read as _read_text_if_possible  # noqa: E402
 
 
 def _build_file_tree(project_dir: Path, limit: int) -> str:
@@ -49,7 +47,7 @@ def _gather_project_context(project_dir: Path) -> list[str]:
                  "Cargo.toml", "go.mod"):
         f = project_dir / name
         if f.exists():
-            content = _read_text_if_possible(f, 2000)
+            content = _safe_read(f, 2000)
             if content is not None:
                 parts.append(f"--- {name} ---\n{content}")
 
@@ -58,7 +56,7 @@ def _gather_project_context(project_dir: Path) -> list[str]:
         matches = sorted(glob.glob(str(project_dir / pattern), recursive=True))
         if matches:
             sample = Path(matches[0])
-            content = _read_text_if_possible(sample, 2000)
+            content = _safe_read(sample, 2000)
             if content is not None:
                 parts.append(f"--- {sample.relative_to(project_dir)} ---\n{content}")
                 break
@@ -67,7 +65,7 @@ def _gather_project_context(project_dir: Path) -> list[str]:
         matches = sorted(glob.glob(str(project_dir / pattern), recursive=True))
         if matches:
             sample = Path(matches[0])
-            content = _read_text_if_possible(sample, 1500)
+            content = _safe_read(sample, 1500)
             if content is not None:
                 parts.append(f"--- {sample.relative_to(project_dir)} (test) ---\n{content}")
                 break
@@ -80,7 +78,7 @@ def _gather_project_context(project_dir: Path) -> list[str]:
 
 async def _run_setup_query(prompt: str, project_dir: Path, config: dict | None = None) -> str:
     """Run a single LLM query for setup and return the text result."""
-    opts = ClaudeAgentOptions(
+    opts = AgentOptions(
         permission_mode="bypassPermissions",
         cwd=str(project_dir),
         setting_sources=[],
@@ -115,14 +113,14 @@ def register_setup_command(main: click.Group) -> None:
         config_path = project_dir / "otto.yaml"
         if not config_path.exists():
             create_config(project_dir)
-            console.print(f"[green]✓[/green] Created otto.yaml")
+            console.print("[success]Created otto.yaml[/success]")
 
         claude_md = project_dir / "CLAUDE.md"
         existing_content = None
         mode = "generate"
 
         if claude_md.exists():
-            existing_content = _read_text_if_possible(claude_md, 5000)
+            existing_content = _safe_read(claude_md, 5000)
             console.print(f"[dim]CLAUDE.md already exists ({claude_md.stat().st_size} bytes)[/dim]")
             console.print("  [bold]1[/bold] Merge (keep your rules, add new conventions)")
             console.print("  [bold]2[/bold] Regenerate (replace entirely)")
@@ -185,7 +183,7 @@ Output ONLY the markdown content."""
         result_text = asyncio.run(_run_setup_query(prompt, project_dir, load_config(config_path)))
 
         if not result_text.strip() and claude_md.exists():
-            result_text = _read_text_if_possible(claude_md, 10000) or ""
+            result_text = _safe_read(claude_md, 10000) or ""
         if not result_text.strip():
             error_console.print("[red]Failed to generate CLAUDE.md content[/red]")
             return
@@ -205,7 +203,7 @@ Output ONLY the markdown content."""
 
         if click.confirm("Write to CLAUDE.md?", default=True):
             claude_md.write_text(content.strip() + "\n")
-            console.print(f"[green]✓[/green] Wrote CLAUDE.md ({len(content)} chars)")
+            console.print(f"[success]Wrote CLAUDE.md ({len(content)} chars)[/success]")
             console.print("[dim]  Commit it so the coding agent can read it.[/dim]")
             if _backup_path and Path(_backup_path).exists():
                 Path(_backup_path).unlink()

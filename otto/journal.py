@@ -174,7 +174,7 @@ def update_current_state(
             lines.append(f"- Round {t['round']}: {t['summary']}")
         lines.append("")
 
-    lines.append(f"## Round Detail")
+    lines.append("## Round Detail")
     lines.append(f"Full evidence: otto_logs/rounds/{round_id}/")
     lines.append("")
 

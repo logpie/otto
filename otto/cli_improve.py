@@ -17,7 +17,7 @@ def _resolve_intent(project_dir: Path) -> str | None:
     from otto.config import resolve_intent
     intent = resolve_intent(project_dir)
     if intent:
-        console.print(f"  [dim]Intent from project files[/dim]")
+        console.print("  [dim]Intent from project files[/dim]")
     return intent
 
 
@@ -66,39 +66,26 @@ def _run_improve(
     certifier_mode: str,
     command_label: str,
     *,
+    subcommand: str,
     target: str | None = None,
     split: bool = False,
     resume: bool = False,
+    resume_state=None,
 ) -> None:
-    """CLI wrapper: branch creation, display, and report around the shared loop."""
-    from otto.checkpoint import clear_checkpoint, load_checkpoint
+    """CLI wrapper: branch creation, display, and report around the shared loop.
+
+    ``subcommand`` is "bugs" | "feature" | "target" — written into the
+    checkpoint as ``command="improve.<subcommand>"`` so resuming preserves the
+    exact intent and the mismatch warning can fire if the user switches modes.
+    """
+    from otto.checkpoint import print_resume_status, resolve_resume
     from otto.config import load_config
     from otto.pipeline import build_agentic_v3, run_certify_fix_loop
 
-    # Check for existing checkpoint
-    checkpoint = load_checkpoint(project_dir)
-    resume_session_id = None
-    start_round = 1
-    resume_cost = 0.0
-    resume_rounds: list = []
-
-    if checkpoint and not resume:
-        cr = checkpoint.get("current_round", 0)
-        cost = checkpoint.get("total_cost", 0)
-        console.print(
-            f"\n  [yellow]Found checkpoint: round {cr}, ${cost:.2f} spent[/yellow]"
-        )
-        console.print(f"  Run with --resume to continue, or starting fresh.\n")
-        clear_checkpoint(project_dir)
-    elif checkpoint and resume:
-        start_round = checkpoint.get("current_round", 1) + 1
-        resume_cost = checkpoint.get("total_cost", 0.0)
-        resume_rounds = checkpoint.get("rounds", [])
-        resume_session_id = checkpoint.get("session_id", "")
-        console.print(
-            f"\n  [info]Resuming from round {start_round} "
-            f"(${resume_cost:.2f} spent so far)[/info]"
-        )
+    command_id = f"improve.{subcommand}"
+    if resume_state is None:
+        resume_state = resolve_resume(project_dir, resume, expected_command=command_id)
+    print_resume_status(console, resume_state, resume, expected_command=command_id)
 
     # Create improvement branch
     branch = _create_improve_branch(project_dir)
@@ -143,9 +130,10 @@ def _run_improve(
                 focus=focus,
                 target=target,
                 skip_initial_build=True,
-                start_round=start_round,
-                resume_cost=resume_cost,
-                resume_rounds=resume_rounds,
+                start_round=resume_state.start_round,
+                resume_cost=resume_state.total_cost,
+                resume_rounds=resume_state.rounds,
+                command=command_id,
             ))
         else:
             # Agent-driven: one session, agent drives certify→fix loop
@@ -155,7 +143,8 @@ def _run_improve(
                 config,
                 certifier_mode=certifier_mode,
                 prompt_mode="improve",
-                resume_session_id=resume_session_id if resume else None,
+                resume_session_id=resume_state.session_id or None,
+                command=command_id,
             ))
     except KeyboardInterrupt:
         console.print("\n  [yellow]Paused. Run with --resume to continue.[/yellow]")
@@ -282,6 +271,7 @@ def register_improve_commands(main: click.Group) -> None:
             focus=focus,
             certifier_mode="thorough",
             command_label="Bug fixing",
+            subcommand="bugs",
             split=split,
             resume=resume,
         )
@@ -312,12 +302,13 @@ def register_improve_commands(main: click.Group) -> None:
             focus=focus,
             certifier_mode="hillclimb",
             command_label="Feature improvement",
+            subcommand="feature",
             split=split,
             resume=resume,
         )
 
     @improve.command(context_settings=CONTEXT_SETTINGS)
-    @click.argument("goal")
+    @click.argument("goal", required=False)
     @click.option("--rounds", "-n", default=5, help="Maximum rounds (default: 5)")
     @click.option("--split", is_flag=True, help="System-controlled loop (vs agent-driven)")
     @click.option("--resume", is_flag=True, help="Resume from last checkpoint")
@@ -335,6 +326,40 @@ def register_improve_commands(main: click.Group) -> None:
             otto improve target "lighthouse score > 95" -n 10
         """
         project_dir = Path.cwd()
+        from otto.checkpoint import resolve_resume
+
+        resume_state = resolve_resume(
+            project_dir, resume, expected_command="improve.target"
+        )
+        checkpoint_goal = (resume_state.target or "").strip()
+        requested_goal = (goal or "").strip()
+
+        if resume and resume_state.resumed:
+            if resume_state.prior_command != "improve.target":
+                error_console.print(
+                    "[error]Checkpoint is not from `improve target`. "
+                    "Run without --resume to start a new target-improvement run.[/error]"
+                )
+                sys.exit(2)
+            if requested_goal:
+                if checkpoint_goal and requested_goal != checkpoint_goal:
+                    error_console.print(
+                        "[error]Checkpoint target does not match the requested goal. "
+                        "Resume without GOAL to inherit the checkpoint target, or run "
+                        "without --resume to start a new target-improvement run.[/error]"
+                    )
+                    sys.exit(2)
+            elif checkpoint_goal:
+                goal = checkpoint_goal
+
+        goal = (goal or "").strip()
+        if not goal:
+            error_console.print(
+                "[error]Goal cannot be empty. Provide a measurable target, or use "
+                "--resume to inherit it from an in-progress checkpoint.[/error]"
+            )
+            sys.exit(2)
+
         intent = _require_intent(project_dir)
         _run_improve(
             project_dir=project_dir,
@@ -343,7 +368,9 @@ def register_improve_commands(main: click.Group) -> None:
             focus=None,
             certifier_mode="target",
             command_label=f"Target: {goal}",
+            subcommand="target",
             target=goal,
             split=split,
             resume=resume,
+            resume_state=resume_state,
         )

@@ -66,17 +66,21 @@ def _print_build_result(intent: str, result, build_duration: float) -> None:
 
 
 @main.command(context_settings=CONTEXT_SETTINGS)
-@click.argument("intent")
+@click.argument("intent", required=False)
 @click.option("--no-qa", is_flag=True, help="Skip product certification after build")
 @click.option("--fast", is_flag=True, help="Fast certification — happy path smoke test only")
 @click.option("--split", is_flag=True, help="Split mode: system-controlled certify loop with build journal")
 @click.option("--rounds", "-n", default=None, type=int, help="Max certification rounds (default: 8)")
-def build(intent, no_qa, fast, split, rounds):
+@click.option("--resume", is_flag=True, help="Resume from last checkpoint (requires an in-progress run)")
+def build(intent, no_qa, fast, split, rounds, resume):
     """Build a product from a natural language intent.
 
     One agent builds, certifies, and fixes autonomously. The certifier
     verifies the product works by running real user stories (HTTP, CLI,
     import, WebSocket — any product type).
+
+    If a prior build was interrupted, pass --resume to continue it. Intent
+    is optional on resume and is inherited from the checkpoint.
 
     Examples:
 
@@ -85,17 +89,41 @@ def build(intent, no_qa, fast, split, rounds):
         otto build "bookmark manager" --fast    # quick smoke test
 
         otto build "CLI tool that converts CSV to JSON" --no-qa
-    """
-    if not intent or not intent.strip():
-        error_console.print("[error]Intent cannot be empty. Provide a description of what to build.[/error]")
-        sys.exit(2)
 
+        otto build --resume                     # continue interrupted run
+    """
     require_git()
     project_dir = Path.cwd()
+
+    from otto.checkpoint import initial_build_completed, print_resume_status, resolve_resume
+    resume_state = resolve_resume(project_dir, resume, expected_command="build")
+
+    intent = (intent or "").strip()
+    resume_without_intent = bool(resume and resume_state.resumed and not intent)
+    display_intent = intent or "(resumed run)"
+
+    if not intent:
+        if resume_without_intent:
+            if split and not no_qa:
+                from otto.config import resolve_intent
+                intent = (resolve_intent(project_dir) or "").strip()
+                if not intent:
+                    error_console.print(
+                        "[error]Resume needs a product description for split mode. "
+                        "Provide INTENT or create intent.md/README.md.[/error]"
+                    )
+                    sys.exit(2)
+                    return
+        else:
+            error_console.print("[error]Intent cannot be empty. Provide a description of what to build.[/error]")
+            sys.exit(2)
+
+    print_resume_status(console, resume_state, resume, expected_command="build")
+
     config_path = project_dir / "otto.yaml"
     if not config_path.exists():
         create_config(project_dir)
-        console.print(f"[yellow]First run \u2014 created otto.yaml[/yellow]")
+        console.print("[yellow]First run \u2014 created otto.yaml[/yellow]")
         console.print()
     config = load_config(config_path)
 
@@ -116,26 +144,39 @@ def build(intent, no_qa, fast, split, rounds):
     try:
         if split and not no_qa:
             console.print("  [bold]Split mode[/bold] \u2014 system-controlled certify loop\n")
+            # Resume skips the initial build only after it has completed.
+            skip_initial_build = resume_state.resumed and initial_build_completed(
+                resume_state.phase
+            )
             result: BuildResult = asyncio.run(
                 run_certify_fix_loop(intent, project_dir, config,
-                                     certifier_mode=certifier_mode)
+                                     certifier_mode=certifier_mode,
+                                     skip_initial_build=skip_initial_build,
+                                     start_round=resume_state.start_round,
+                                     resume_cost=resume_state.total_cost,
+                                     resume_rounds=resume_state.rounds,
+                                     command="build",
+                                     record_intent=not resume_without_intent)
             )
         else:
             mode_label = "fast smoke test" if certifier_mode == "fast" else "one agent builds, certifies, fixes"
             console.print(f"  [bold]Agentic mode[/bold] \u2014 {mode_label}\n")
             result: BuildResult = asyncio.run(
                 build_agentic_v3(intent, project_dir, config,
-                                 certifier_mode=certifier_mode)
+                                 certifier_mode=certifier_mode,
+                                 resume_session_id=resume_state.session_id or None,
+                                 record_intent=not resume_without_intent,
+                                 resume_existing_session=resume_without_intent)
             )
     except KeyboardInterrupt:
-        console.print("\n  Aborted.")
-        sys.exit(1)
+        console.print("\n  [yellow]Paused. Run `otto build --resume` to continue.[/yellow]")
+        sys.exit(0)
     except Exception as e:
         error_console.print(f"[error]Build failed: {rich_escape(str(e))}[/error]")
         sys.exit(1)
 
     build_duration = time.time() - build_start
-    _print_build_result(intent, result, build_duration)
+    _print_build_result(display_intent, result, build_duration)
 
     sys.exit(0 if result.passed else 1)
 
@@ -168,7 +209,7 @@ def certify(intent, thorough, fast):
         from otto.config import resolve_intent
         intent = resolve_intent(project_dir)
         if intent:
-            console.print(f"  [dim]Intent from project files[/dim]")
+            console.print("  [dim]Intent from project files[/dim]")
         else:
             error_console.print("[error]No intent provided. Pass as argument or create intent.md[/error]")
             sys.exit(2)
@@ -237,7 +278,6 @@ register_setup_command(main)
 from otto.cli_logs import register_history_command
 register_history_command(main)
 
-# Fix and improve commands (registered from otto/cli_improve.py)
+# Improve commands (registered from otto/cli_improve.py)
 from otto.cli_improve import register_improve_commands
 register_improve_commands(main)
-

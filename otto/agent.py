@@ -32,8 +32,6 @@ try:
 except (ImportError, AttributeError):
     _SDKThinkingBlock = None
 
-from otto.testing import _subprocess_env  # noqa: F401
-
 
 @dataclass
 class TextBlock:
@@ -108,6 +106,7 @@ def make_agent_options(
     Sets bypassPermissions, project cwd, CC preset prompt, and model from config.
     Pass keyword overrides for system_prompt, setting_sources, etc.
     """
+    from otto.testing import _subprocess_env
     opts = AgentOptions(
         permission_mode="bypassPermissions",
         cwd=str(project_dir),
@@ -146,14 +145,14 @@ async def run_agent_with_timeout(
     Raises AgentCallError on timeout/crash.
     Always closes the live logger and cleans up orphan processes on failure.
     """
-    import asyncio as _asyncio
-    import logging as _logging
+    import asyncio
+    import logging
 
-    _log = _logging.getLogger("otto.agent")
+    log = logging.getLogger("otto.agent")
     callbacks = make_live_logger(log_path)
-    _close = callbacks.pop("_close")
+    close_fh = callbacks.pop("_close")
     try:
-        text, cost, result_msg = await _asyncio.wait_for(
+        text, cost, result_msg = await asyncio.wait_for(
             run_agent_query(prompt, options,
                             capture_tool_output=capture_tool_output,
                             **callbacks),
@@ -161,8 +160,8 @@ async def run_agent_with_timeout(
         )
         session_id = getattr(result_msg, "session_id", "") or ""
         return text, cost, session_id
-    except _asyncio.TimeoutError:
-        _log.error("Agent timed out after %ds", timeout)
+    except asyncio.TimeoutError:
+        log.error("Agent timed out after %ds", timeout)
         from otto.pipeline import _cleanup_orphan_processes
         _cleanup_orphan_processes(project_dir)
         raise AgentCallError(f"Timed out after {timeout}s")
@@ -171,12 +170,12 @@ async def run_agent_with_timeout(
         _cleanup_orphan_processes(project_dir)
         raise
     except Exception as exc:
-        _log.exception("Agent crashed")
+        log.exception("Agent crashed")
         from otto.pipeline import _cleanup_orphan_processes
         _cleanup_orphan_processes(project_dir)
         raise AgentCallError(f"Agent crashed: {exc}")
     finally:
-        _close()
+        close_fh()
 
 
 def _provider_name(options: AgentOptions | None) -> str:
@@ -479,12 +478,16 @@ def tool_use_summary(block) -> str:
 
     inputs = block.input or {}
     name = block.name
-    if name in ("Read", "Glob", "Grep"):
-        return inputs.get("file_path") or inputs.get("path") or inputs.get("pattern") or ""
+    if name == "Read":
+        return inputs.get("file_path", "")
+    if name == "Glob":
+        return inputs.get("pattern") or inputs.get("path", "")
+    if name == "Grep":
+        return inputs.get("pattern", "")
     if name in ("Edit", "Write"):
-        return inputs.get("file_path") or ""
+        return inputs.get("file_path", "")
     if name == "Bash":
-        cmd = _unwrap_shell_command(inputs.get("command") or "")
+        cmd = _unwrap_shell_command(inputs.get("command", ""))
         if len(cmd) <= 120:
             return cmd
         cut = cmd.rfind(" ", 0, 120)
@@ -503,12 +506,12 @@ def make_live_logger(log_path: Path) -> dict[str, Callable]:
     The log is append-mode and flushed after each write, so it can be
     tailed in real time: tail -f otto_logs/certifier/live.log
     """
-    import time as _time
-    _start = _time.monotonic()
+    import time
+    start = time.monotonic()
     _fh = open(log_path, "a")
 
     def _elapsed() -> str:
-        secs = _time.monotonic() - _start
+        secs = time.monotonic() - start
         return f"[{secs:6.1f}s]"
 
     def _on_tool(block: Any) -> None:
