@@ -1,6 +1,5 @@
 """Tests for provider-aware agent execution."""
 
-import asyncio
 
 import pytest
 

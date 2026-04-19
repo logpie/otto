@@ -1,8 +1,6 @@
 """Tests for otto.config module."""
 
 import json
-import subprocess
-from pathlib import Path
 
 import pytest
 import yaml
@@ -19,64 +17,64 @@ from otto.config import (
 
 
 class TestGitMetaDir:
-    def test_returns_dot_git_for_normal_repo(self, tmp_git_repo):
-        result = git_meta_dir(tmp_git_repo)
-        assert result == tmp_git_repo / ".git"
+    def test_returns_dot_git_for_normal_repo(self, tmp_bare_git_repo):
+        result = git_meta_dir(tmp_bare_git_repo)
+        assert result == tmp_bare_git_repo / ".git"
 
-    def test_returns_common_dir_for_linked_worktree(self, tmp_git_repo):
+    def test_returns_common_dir_for_linked_worktree(self, tmp_bare_git_repo):
         """In a linked worktree, git_meta_dir returns the shared .git/ dir."""
         import subprocess
-        wt_path = tmp_git_repo / "worktrees" / "test-wt"
+        wt_path = tmp_bare_git_repo / "worktrees" / "test-wt"
         subprocess.run(
             ["git", "worktree", "add", str(wt_path), "-b", "test-wt-branch"],
-            cwd=tmp_git_repo, capture_output=True, check=True,
+            cwd=tmp_bare_git_repo, capture_output=True, check=True,
         )
         result = git_meta_dir(wt_path)
         # Should point to the main repo's .git, not the worktree's .git file
-        assert result == tmp_git_repo / ".git"
+        assert result == tmp_bare_git_repo / ".git"
         # Clean up
         subprocess.run(
             ["git", "worktree", "remove", str(wt_path)],
-            cwd=tmp_git_repo, capture_output=True,
+            cwd=tmp_bare_git_repo, capture_output=True,
         )
 
 
 class TestLoadConfig:
-    def test_loads_valid_config(self, tmp_git_repo):
-        config_path = tmp_git_repo / "otto.yaml"
+    def test_loads_valid_config(self, tmp_bare_git_repo):
+        config_path = tmp_bare_git_repo / "otto.yaml"
         config_path.write_text(yaml.dump({"test_command": "pytest"}))
         cfg = load_config(config_path)
         assert cfg["test_command"] == "pytest"
 
-    def test_fills_defaults_for_missing_keys(self, tmp_git_repo):
-        config_path = tmp_git_repo / "otto.yaml"
+    def test_fills_defaults_for_missing_keys(self, tmp_bare_git_repo):
+        config_path = tmp_bare_git_repo / "otto.yaml"
         config_path.write_text(yaml.dump({"test_command": "pytest"}))
         cfg = load_config(config_path)
         assert cfg["provider"] == DEFAULT_CONFIG["provider"]
         assert cfg["model"] == DEFAULT_CONFIG["model"]
 
-    def test_returns_defaults_when_file_missing(self, tmp_git_repo):
-        cfg = load_config(tmp_git_repo / "otto.yaml")
+    def test_returns_defaults_when_file_missing(self, tmp_bare_git_repo):
+        cfg = load_config(tmp_bare_git_repo / "otto.yaml")
         assert cfg == DEFAULT_CONFIG
 
-    def test_loads_empty_file(self, tmp_git_repo):
-        config_path = tmp_git_repo / "otto.yaml"
+    def test_loads_empty_file(self, tmp_bare_git_repo):
+        config_path = tmp_bare_git_repo / "otto.yaml"
         config_path.write_text("")
         cfg = load_config(config_path)
         # Auto-detect adds test_command (None for bare repo); rest matches defaults
         expected = {**DEFAULT_CONFIG, "test_command": None}
         assert cfg == expected
 
-    def test_normalizes_provider_fields(self, tmp_git_repo):
-        config_path = tmp_git_repo / "otto.yaml"
+    def test_normalizes_provider_fields(self, tmp_bare_git_repo):
+        config_path = tmp_bare_git_repo / "otto.yaml"
         config_path.write_text(yaml.dump({
             "provider": "CODEX",
         }))
         cfg = load_config(config_path)
         assert cfg["provider"] == "codex"
 
-    def test_rejects_invalid_provider(self, tmp_git_repo):
-        config_path = tmp_git_repo / "otto.yaml"
+    def test_rejects_invalid_provider(self, tmp_bare_git_repo):
+        config_path = tmp_bare_git_repo / "otto.yaml"
         config_path.write_text(yaml.dump({"provider": "not-a-provider"}))
         with pytest.raises(ValueError, match="Invalid provider"):
             load_config(config_path)
@@ -88,126 +86,111 @@ class TestProviderHelpers:
 
 
 class TestDetectTestCommand:
-    def test_detects_pytest(self, tmp_git_repo):
-        (tmp_git_repo / "tests").mkdir()
-        (tmp_git_repo / "tests" / "test_example.py").write_text("def test_x(): pass\n")
-        result = detect_test_command(tmp_git_repo)
+    def test_detects_pytest(self, tmp_bare_git_repo):
+        (tmp_bare_git_repo / "tests").mkdir()
+        (tmp_bare_git_repo / "tests" / "test_example.py").write_text("def test_x(): pass\n")
+        result = detect_test_command(tmp_bare_git_repo)
         assert result == "pytest"
 
-    def test_detects_npm_test(self, tmp_git_repo):
+    def test_detects_npm_test(self, tmp_bare_git_repo):
         pkg = {"scripts": {"test": "jest"}}
-        (tmp_git_repo / "package.json").write_text(json.dumps(pkg))
-        result = detect_test_command(tmp_git_repo)
+        (tmp_bare_git_repo / "package.json").write_text(json.dumps(pkg))
+        result = detect_test_command(tmp_bare_git_repo)
         assert result == "npm test"
 
-    def test_returns_none_when_nothing_found(self, tmp_git_repo):
-        result = detect_test_command(tmp_git_repo)
+    def test_returns_none_when_nothing_found(self, tmp_bare_git_repo):
+        result = detect_test_command(tmp_bare_git_repo)
         assert result is None
 
-    def test_chains_multiple_frameworks(self, tmp_git_repo):
+    def test_chains_multiple_frameworks(self, tmp_bare_git_repo):
         """Mixed-language project: npm test + pytest chained with &&."""
-        (tmp_git_repo / "tests").mkdir()
-        (tmp_git_repo / "tests" / "test_example.py").write_text("def test_x(): pass\n")
+        (tmp_bare_git_repo / "tests").mkdir()
+        (tmp_bare_git_repo / "tests" / "test_example.py").write_text("def test_x(): pass\n")
         pkg = {"scripts": {"test": "jest"}}
-        (tmp_git_repo / "package.json").write_text(json.dumps(pkg))
-        result = detect_test_command(tmp_git_repo)
+        (tmp_bare_git_repo / "package.json").write_text(json.dumps(pkg))
+        result = detect_test_command(tmp_bare_git_repo)
         assert result == "npm test && pytest"
 
-    def test_empty_tests_dir_no_pytest(self, tmp_git_repo):
+    def test_empty_tests_dir_no_pytest(self, tmp_bare_git_repo):
         """tests/ dir with no Python test files shouldn't trigger pytest."""
-        (tmp_git_repo / "tests").mkdir()
-        (tmp_git_repo / "tests" / "helper.js").write_text("module.exports = {}")
-        result = detect_test_command(tmp_git_repo)
+        (tmp_bare_git_repo / "tests").mkdir()
+        (tmp_bare_git_repo / "tests" / "helper.js").write_text("module.exports = {}")
+        result = detect_test_command(tmp_bare_git_repo)
         assert result is None
 
-    def test_skips_npm_placeholder_no_test_specified(self, tmp_git_repo):
-        """npm init placeholder should not produce 'npm test'."""
-        pkg = {"scripts": {"test": 'echo "Error: no test specified" && exit 1'}}
-        (tmp_git_repo / "package.json").write_text(json.dumps(pkg))
-        result = detect_test_command(tmp_git_repo)
-        assert result is None
+    @pytest.mark.parametrize("placeholder", [
+        'echo "Error: no test specified" && exit 1',
+        'echo "Error" && exit 1',
+    ])
+    def test_skips_npm_placeholder(self, tmp_bare_git_repo, placeholder):
+        """npm init placeholders should not produce 'npm test'."""
+        pkg = {"scripts": {"test": placeholder}}
+        (tmp_bare_git_repo / "package.json").write_text(json.dumps(pkg))
+        assert detect_test_command(tmp_bare_git_repo) is None
 
-    def test_skips_npm_placeholder_echo_error(self, tmp_git_repo):
-        pkg = {"scripts": {"test": 'echo "Error" && exit 1'}}
-        (tmp_git_repo / "package.json").write_text(json.dumps(pkg))
-        result = detect_test_command(tmp_git_repo)
-        assert result is None
-
-    def test_detects_pnpm_from_lockfile(self, tmp_git_repo):
+    @pytest.mark.parametrize("lockfile,expected", [
+        ("pnpm-lock.yaml", "pnpm test"),
+        ("yarn.lock", "yarn test"),
+        ("bun.lockb", "bun test"),
+    ])
+    def test_detects_package_manager_from_lockfile(self, tmp_bare_git_repo, lockfile, expected):
         pkg = {"scripts": {"test": "vitest"}}
-        (tmp_git_repo / "package.json").write_text(json.dumps(pkg))
-        (tmp_git_repo / "pnpm-lock.yaml").write_text("lockfileVersion: 5\n")
-        result = detect_test_command(tmp_git_repo)
-        assert result == "pnpm test"
+        (tmp_bare_git_repo / "package.json").write_text(json.dumps(pkg))
+        (tmp_bare_git_repo / lockfile).write_text("")
+        assert detect_test_command(tmp_bare_git_repo) == expected
 
-    def test_detects_yarn_from_lockfile(self, tmp_git_repo):
-        pkg = {"scripts": {"test": "jest"}}
-        (tmp_git_repo / "package.json").write_text(json.dumps(pkg))
-        (tmp_git_repo / "yarn.lock").write_text("")
-        result = detect_test_command(tmp_git_repo)
-        assert result == "yarn test"
+    @pytest.mark.parametrize("config_name", ["deno.json", "deno.jsonc"])
+    def test_detects_deno(self, tmp_bare_git_repo, config_name):
+        (tmp_bare_git_repo / config_name).write_text("{}")
+        assert detect_test_command(tmp_bare_git_repo) == "deno test"
 
-    def test_detects_bun_from_lockfile(self, tmp_git_repo):
-        pkg = {"scripts": {"test": "bun:test"}}
-        (tmp_git_repo / "package.json").write_text(json.dumps(pkg))
-        (tmp_git_repo / "bun.lockb").write_text("")
-        result = detect_test_command(tmp_git_repo)
-        assert result == "bun test"
-
-    def test_detects_deno_test(self, tmp_git_repo):
-        (tmp_git_repo / "deno.json").write_text("{}")
-        result = detect_test_command(tmp_git_repo)
-        assert result == "deno test"
-
-    def test_detects_deno_jsonc(self, tmp_git_repo):
-        (tmp_git_repo / "deno.jsonc").write_text("{}")
-        result = detect_test_command(tmp_git_repo)
-        assert result == "deno test"
-
-    def test_detects_tox(self, tmp_git_repo):
-        (tmp_git_repo / "tests").mkdir()
-        (tmp_git_repo / "tests" / "test_example.py").write_text("def test_x(): pass\n")
-        (tmp_git_repo / "tox.ini").write_text("[tox]\nenvlist = py3\n")
-        result = detect_test_command(tmp_git_repo)
+    def test_detects_tox(self, tmp_bare_git_repo):
+        (tmp_bare_git_repo / "tests").mkdir()
+        (tmp_bare_git_repo / "tests" / "test_example.py").write_text("def test_x(): pass\n")
+        (tmp_bare_git_repo / "tox.ini").write_text("[tox]\nenvlist = py3\n")
+        result = detect_test_command(tmp_bare_git_repo)
         # tox should replace bare pytest
         assert result == "tox"
         assert "pytest" not in result
 
-    def test_detects_nox(self, tmp_git_repo):
-        (tmp_git_repo / "tests").mkdir()
-        (tmp_git_repo / "tests" / "test_example.py").write_text("def test_x(): pass\n")
-        (tmp_git_repo / "noxfile.py").write_text("import nox\n")
-        result = detect_test_command(tmp_git_repo)
+    def test_detects_nox(self, tmp_bare_git_repo):
+        (tmp_bare_git_repo / "tests").mkdir()
+        (tmp_bare_git_repo / "tests" / "test_example.py").write_text("def test_x(): pass\n")
+        (tmp_bare_git_repo / "noxfile.py").write_text("import nox\n")
+        result = detect_test_command(tmp_bare_git_repo)
         assert result == "nox"
         assert "pytest" not in result
 
-    def test_detects_makefile_test_target(self, tmp_git_repo):
-        (tmp_git_repo / "Makefile").write_text("test:\n\tpytest\n")
-        result = detect_test_command(tmp_git_repo)
+    def test_detects_makefile_test_target(self, tmp_bare_git_repo):
+        (tmp_bare_git_repo / "Makefile").write_text("test:\n\tpytest\n")
+        result = detect_test_command(tmp_bare_git_repo)
         assert result == "make test"
 
 
 class TestDetectDefaultBranch:
-    def test_detects_main(self, tmp_git_repo):
-        result = detect_default_branch(tmp_git_repo)
-        # git init creates 'main' by default on modern git
-        assert result in ("main", "master")
+    def test_detects_main(self, tmp_path):
+        """Explicitly init with 'main' so the assertion can be tight."""
+        import subprocess
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        # -b main forces the branch name regardless of git's init.defaultBranch
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+        assert detect_default_branch(repo) == "main"
 
     def test_returns_main_as_fallback(self, tmp_path):
         # Non-git directory
-        result = detect_default_branch(tmp_path)
-        assert result == "main"
+        assert detect_default_branch(tmp_path) == "main"
 
 
 class TestCreateConfig:
-    def test_creates_config_file(self, tmp_git_repo):
-        config_path = create_config(tmp_git_repo)
+    def test_creates_config_file(self, tmp_bare_git_repo):
+        config_path = create_config(tmp_bare_git_repo)
         assert config_path.exists()
         cfg = yaml.safe_load(config_path.read_text())
         assert "default_branch" in cfg
 
-    def test_updates_git_info_exclude(self, tmp_git_repo):
-        create_config(tmp_git_repo)
-        exclude_path = tmp_git_repo / ".git" / "info" / "exclude"
+    def test_updates_git_info_exclude(self, tmp_bare_git_repo):
+        create_config(tmp_bare_git_repo)
+        exclude_path = tmp_bare_git_repo / ".git" / "info" / "exclude"
         content = exclude_path.read_text()
         assert "otto_logs/" in content

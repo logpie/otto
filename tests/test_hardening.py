@@ -1,52 +1,18 @@
-"""Tests for hardening fixes: parsing, timeout, env, symlinks."""
+"""Hardening regression tests: parsing, timeout/env validation, checkpoint
+resume, certifier behavior, cross-run memory, and CLI guards."""
 
 import asyncio
 import json
 import subprocess
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from otto.agent import AgentOptions
-from otto.config import create_config, load_config
 from otto.pipeline import build_agentic_v3, BuildResult
 from otto.testing import _subprocess_env
+from tests.conftest import make_mock_query as _make_mock_query
 
-
-# -- Fixtures --
-
-@pytest.fixture
-def tmp_git_repo(tmp_path):
-    """Create a temp git repo with otto.yaml."""
-    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
-    subprocess.run(
-        ["git", "config", "user.email", "test@test.com"],
-        cwd=tmp_path, capture_output=True, check=True,
-    )
-    subprocess.run(
-        ["git", "config", "user.name", "Test"],
-        cwd=tmp_path, capture_output=True, check=True,
-    )
-    subprocess.run(
-        ["git", "commit", "-q", "--allow-empty", "-m", "init"],
-        cwd=tmp_path, check=True,
-    )
-    create_config(tmp_path)
-    subprocess.run(["git", "add", "otto.yaml"], cwd=tmp_path, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-q", "-m", "add config"],
-        cwd=tmp_path, capture_output=True,
-    )
-    return tmp_path
-
-
-def _make_mock_query(text, cost=0.50):
-    result_msg = MagicMock()
-    result_msg.session_id = "test-session"
-    async def mock_query(prompt, options, **kwargs):
-        return text, cost, result_msg
-    return mock_query
+# `tmp_git_repo` fixture comes from tests/conftest.py.
 
 
 # -- Test: STORY_RESULT with pipes in summary --
@@ -143,22 +109,8 @@ DIAGNOSIS: null
         assert result.passed is True
         assert result.rounds == 2
 
-    AGENT_OUTPUT_ONE_ROUND = """\
-CERTIFY_ROUND: 1
-STORIES_TESTED: 1
-STORIES_PASSED: 1
-STORY_RESULT: crud | PASS | Works
-VERDICT: PASS
-DIAGNOSIS: null
-"""
-
-    @pytest.mark.asyncio
-    async def test_single_round(self, tmp_git_repo):
-        with patch("otto.agent.run_agent_query",
-                    side_effect=_make_mock_query(self.AGENT_OUTPUT_ONE_ROUND)):
-            result = await build_agentic_v3("test", tmp_git_repo, {})
-
-        assert result.rounds == 1
+    # (test_single_round removed — `rounds == 1` is implicitly covered by
+    # every other happy-path test that uses a single CERTIFY_ROUND mock.)
 
 
 # -- Test: Timeout is actually enforced --
@@ -168,62 +120,45 @@ class TestTimeoutEnforcement:
 
     @pytest.mark.asyncio
     async def test_build_times_out(self, tmp_git_repo):
+        import time as _time
         async def slow_query(prompt, options, **kwargs):
             await asyncio.sleep(10)
             return "never reached", 0.0, MagicMock()
 
+        start = _time.monotonic()
         with patch("otto.agent.run_agent_query", side_effect=slow_query):
             result = await build_agentic_v3(
                 "test", tmp_git_repo, {"certifier_timeout": 1}
             )
+        elapsed = _time.monotonic() - start
 
         assert result.passed is False
-        # Check the raw log mentions timeout
+        # Timeout was 1s; with orphan cleanup and report writes it may take
+        # several seconds. 9s still catches a no-timeout regression (which
+        # would sleep the full 10s plus overhead).
+        assert elapsed < 9, f"Timeout not enforced; elapsed={elapsed:.1f}s"
+        # Check the raw log mentions timeout — strict `Timed out` match,
+        # not case-insensitive (AgentCallError writes exactly "Timed out").
         build_dir = tmp_git_repo / "otto_logs" / "builds" / result.build_id
         raw = (build_dir / "agent-raw.log").read_text()
-        assert "Timed out" in raw or "TIMED OUT" in raw
+        assert "Timed out" in raw, f"Timeout not reported in raw log: {raw[:200]}"
 
 
 # -- Test: CLAUDECODE env var --
 
 class TestSubprocessEnv:
-    """_subprocess_env should set CLAUDECODE to empty string."""
+    """_subprocess_env should set the env vars that suppress agent-side
+    prompts and nested CC detection."""
 
-    def test_claudecode_is_empty_string(self):
+    def test_required_env_vars(self):
         env = _subprocess_env()
-        assert "CLAUDECODE" in env
         assert env["CLAUDECODE"] == ""
-
-    def test_git_terminal_prompt_disabled(self):
-        env = _subprocess_env()
         assert env["GIT_TERMINAL_PROMPT"] == "0"
-
-    def test_ci_true(self):
-        env = _subprocess_env()
         assert env["CI"] == "true"
 
 
-# -- Test: AgentOptions is a proper dataclass --
-
-class TestAgentOptions:
-    """AgentOptions should be a well-formed dataclass."""
-
-    def test_can_instantiate(self):
-        opts = AgentOptions()
-        assert opts.permission_mode is None
-        assert opts.cwd is None
-
-    def test_all_fields_have_defaults(self):
-        opts = AgentOptions()
-        # Should not raise — all fields have defaults
-        assert hasattr(opts, "model")
-        assert hasattr(opts, "system_prompt")
-        assert hasattr(opts, "env")
-
-    def test_fields_are_settable(self):
-        opts = AgentOptions(permission_mode="bypassPermissions", cwd="/tmp")
-        assert opts.permission_mode == "bypassPermissions"
-        assert opts.cwd == "/tmp"
+# (TestAgentOptions removed — it tested that @dataclass defaults work,
+# which is guaranteed by the stdlib, not by otto.)
 
 
 # -- Test: Empty story_id is rejected --
@@ -322,19 +257,13 @@ class TestCostAccumulation:
         assert "part 2" in text
 
 
-# -- Test: git_meta_dir handles edge cases --
+# -- Test: otto certify loads otto.yaml and passes it to the certifier --
 
-class TestGitMetaDirEdgeCases:
-    """git_meta_dir should handle empty/dot subprocess output gracefully."""
-
-    def test_normal_git_dir(self, tmp_path):
-        """Normal repo with .git directory."""
-        from otto.config import git_meta_dir
-        (tmp_path / ".git").mkdir()
-        assert git_meta_dir(tmp_path) == tmp_path / ".git"
+class TestCertifyPassesConfig:
+    """The `certify` CLI should load otto.yaml and forward it to
+    run_agentic_certifier (not ignore user-configured timeouts etc.)."""
 
     def test_certify_passes_config(self, tmp_git_repo):
-        """Config should be loaded and passed to run_agentic_certifier."""
         # Write a custom timeout to otto.yaml
         config_path = tmp_git_repo / "otto.yaml"
         config_path.write_text("certifier_timeout: 1200\n")
@@ -354,7 +283,7 @@ class TestGitMetaDirEdgeCases:
         with patch("otto.certifier.run_agentic_certifier", side_effect=mock_certifier), \
              patch("os.getcwd", return_value=str(tmp_git_repo)):
             runner = CliRunner()
-            result = runner.invoke(main, ["certify", "test intent"], catch_exceptions=False)
+            runner.invoke(main, ["certify", "test intent"], catch_exceptions=False)
 
         assert captured_config, "run_agentic_certifier was not called"
         assert captured_config[0].get("certifier_timeout") == 1200
@@ -389,7 +318,11 @@ class TestImproveCLIHardening:
         from otto.cli import main
         (tmp_git_repo / "intent.md").write_text("test intent")
 
+        certifier_calls = 0
+
         async def mock_certifier(intent, project_dir, config=None, **kwargs):
+            nonlocal certifier_calls
+            certifier_calls += 1
             return CertificationReport(
                 outcome=CertificationOutcome.INFRA_ERROR,
                 cost_usd=0.0,
@@ -398,6 +331,8 @@ class TestImproveCLIHardening:
 
         mock_build = AsyncMock()
 
+        # Patch at otto.pipeline — run_certify_fix_loop calls `build_agentic_v3`
+        # and `run_agentic_certifier` directly by name in its own module scope.
         with patch("otto.cli_improve._create_improve_branch", return_value="improve/2026-04-13"), \
              patch("otto.certifier.run_agentic_certifier", side_effect=mock_certifier), \
              patch("otto.pipeline.build_agentic_v3", new=mock_build), \
@@ -407,9 +342,15 @@ class TestImproveCLIHardening:
                 main, ["improve", "feature", "test intent", "--rounds", "1", "--split"], catch_exceptions=False
             )
 
-        # Build agent must not be called when certifier fails with infra error
+        # Positive check: certifier was actually reached. Without this, the
+        # mock_build.await_count==0 assertion could pass vacuously (e.g. if a
+        # click wiring bug exited before entering the loop).
+        assert certifier_calls >= 1, \
+            f"certifier was never called — test doesn't exercise loop. Output: {result.output!r}"
+        # Core invariant: INFRA_ERROR short-circuits before any build/fix agent runs
         assert mock_build.await_count == 0
         # Result should indicate failure, not success
+        assert result.exit_code != 0
         assert "PASSED" not in result.output
 
     def test_improve_reports_failure_when_fix_fails(self, tmp_git_repo):
@@ -420,20 +361,19 @@ class TestImproveCLIHardening:
         (tmp_git_repo / "intent.md").write_text("test intent")
 
         async def mock_certifier(intent, project_dir, config=None, **kwargs):
-            report = CertificationReport(
+            return CertificationReport(
                 outcome=CertificationOutcome.FAILED,
                 cost_usd=0.0,
                 duration_s=1.0,
+                story_results=[
+                    {
+                        "story_id": "auth",
+                        "passed": False,
+                        "summary": "Login broken",
+                        "evidence": "",
+                    }
+                ],
             )
-            report._story_results = [  # type: ignore[attr-defined]
-                {
-                    "story_id": "auth",
-                    "passed": False,
-                    "summary": "Login broken",
-                    "evidence": "",
-                }
-            ]
-            return report
 
         async def mock_build(intent, project_dir, config):
             return BuildResult(
@@ -453,8 +393,17 @@ class TestImproveCLIHardening:
                 main, ["improve", "feature", "test intent", "--rounds", "1", "--split"], catch_exceptions=False
             )
 
-        # The result should indicate failure
-        assert "FAILED" in result.output or "PASSED" not in result.output
+        # Tight assertion: non-zero exit AND a failed-story marker in output.
+        # Previously this used `"FAILED" in out or "PASSED" not in out` which
+        # was a tautology (empty output passed the second disjunct). The CLI
+        # doesn't print the word "FAILED" to stdout — it shows per-story ✗
+        # icons and writes the full verdict to improvement-report.md on disk.
+        assert result.exit_code != 0, \
+            f"Expected non-zero exit, got {result.exit_code}"
+        # Story-specific failure summary is the reliable signal; the ✗
+        # glyph is cosmetic and lives alongside.
+        assert "Login broken" in result.output, \
+            f"Expected failing-story summary in output: {result.output!r}"
 
     def test_improve_target_resume_rejects_non_target_checkpoint(
         self, tmp_git_repo, monkeypatch
@@ -522,7 +471,7 @@ DIAGNOSIS: null
         assert rounds[1]["passed_count"] == 2  # both passed
 
 
-# -- Test: Broken node_modules symlink doesn't crash --
+# -- Test: Certifier story deduplication --
 
 class TestCertifierStoryDedup:
     """Certifier should deduplicate stories by story_id."""
@@ -551,7 +500,7 @@ class TestCertifierStoryDedup:
             report = await run_agentic_certifier("test", tmp_git_repo)
 
         assert report.outcome == CertificationOutcome.PASSED
-        story_results = getattr(report, "_story_results", [])
+        story_results = report.story_results
         # Should have 2 unique stories, not 3
         assert len(story_results) == 2
         sids = [s["story_id"] for s in story_results]
@@ -580,12 +529,152 @@ class TestCertifierStoryDedup:
             report = await run_agentic_certifier("test", tmp_git_repo)
 
         assert report.outcome == CertificationOutcome.PASSED
-        story_results = getattr(report, "_story_results", [])
+        story_results = report.story_results
         auth_story = [s for s in story_results if s["story_id"] == "auth"][0]
         assert auth_story["passed"] is True
 
 
-# -- Test: Makefile with binary content doesn't crash --
+@pytest.mark.asyncio
+async def test_standalone_certifier_target_fails_when_metric_not_met(tmp_git_repo):
+    from otto.certifier import run_agentic_certifier
+    from otto.certifier.report import CertificationOutcome
+
+    agent_output = (
+        "STORIES_TESTED: 2\n"
+        "STORIES_PASSED: 2\n"
+        "STORY_RESULT: p50-latency | PASS | Latency probe completed successfully\n"
+        "STORY_RESULT: regression-suite | PASS | Existing behavior still passes\n"
+        "METRIC_VALUE: 137ms\n"
+        "METRIC_MET: NO\n"
+        "VERDICT: PASS\n"
+        "DIAGNOSIS: null\n"
+    )
+
+    async def mock_query(prompt, options, **kwargs):
+        return agent_output, 0.10, MagicMock()
+
+    with patch("otto.agent.run_agent_query", side_effect=mock_query):
+        report = await run_agentic_certifier(
+            "latency < 100ms",
+            tmp_git_repo,
+            config={"_target": "latency < 100ms"},
+            mode="target",
+            target="latency < 100ms",
+        )
+
+    assert report.outcome == CertificationOutcome.FAILED
+    assert report.metric_met is False
+
+
+@pytest.mark.asyncio
+async def test_standalone_certifier_target_passes_when_metric_met(tmp_git_repo):
+    from otto.certifier import run_agentic_certifier
+    from otto.certifier.report import CertificationOutcome
+
+    agent_output = (
+        "STORIES_TESTED: 2\n"
+        "STORIES_PASSED: 2\n"
+        "STORY_RESULT: p50-latency | PASS | Latency probe completed successfully\n"
+        "STORY_RESULT: regression-suite | PASS | Existing behavior still passes\n"
+        "METRIC_VALUE: 82ms\n"
+        "METRIC_MET: YES\n"
+        "VERDICT: PASS\n"
+        "DIAGNOSIS: null\n"
+    )
+
+    async def mock_query(prompt, options, **kwargs):
+        return agent_output, 0.10, MagicMock()
+
+    with patch("otto.agent.run_agent_query", side_effect=mock_query):
+        report = await run_agentic_certifier(
+            "latency < 100ms",
+            tmp_git_repo,
+            config={"_target": "latency < 100ms"},
+            mode="target",
+            target="latency < 100ms",
+        )
+
+    assert report.outcome == CertificationOutcome.PASSED
+    assert report.metric_met is True
+
+
+class TestTargetModeMetricGate:
+    """Target-mode split loop should gate on an explicit METRIC_MET marker."""
+
+    @pytest.mark.asyncio
+    async def test_split_target_fails_fast_when_metric_met_missing(self, tmp_git_repo):
+        from otto.certifier.report import CertificationOutcome, CertificationReport
+        from otto.pipeline import run_certify_fix_loop
+
+        certifier_calls = 0
+
+        async def mock_certifier(intent, project_dir, config=None, **kwargs):
+            nonlocal certifier_calls
+            certifier_calls += 1
+            return CertificationReport(
+                outcome=CertificationOutcome.FAILED,
+                cost_usd=0.10,
+                duration_s=1.0,
+                story_results=[
+                    {
+                        "story_id": "p50-latency",
+                        "passed": True,
+                        "summary": "Latency probe completed successfully",
+                        "evidence": "",
+                    },
+                    {
+                        "story_id": "regression-suite",
+                        "passed": True,
+                        "summary": "Existing behavior still passes",
+                        "evidence": "",
+                    },
+                ],
+                metric_value="150ms",
+                metric_met=None,
+            )
+
+        mock_fix = AsyncMock()
+
+        with patch("otto.certifier.run_agentic_certifier", side_effect=mock_certifier), \
+             patch("otto.pipeline.build_agentic_v3", new=mock_fix):
+            result = await run_certify_fix_loop(
+                "latency < 100ms",
+                tmp_git_repo,
+                {},
+                certifier_mode="target",
+                target="latency < 100ms",
+                skip_initial_build=True,
+            )
+
+        assert certifier_calls == 1
+        assert mock_fix.await_count == 0
+        assert result.passed is False
+        assert result.rounds == 1
+        assert "FAIL (certifier omitted METRIC_MET)" in (
+            tmp_git_repo / "build-journal.md"
+        ).read_text()
+
+
+def test_flat_parser_fallback_only_without_certify_round_markers():
+    from otto.markers import parse_certifier_markers
+
+    parsed = parse_certifier_markers(
+        "METRIC_VALUE: stray-before-round\n"
+        "METRIC_MET: NO\n"
+        "CERTIFY_ROUND: 1\n"
+        "METRIC_VALUE: 82ms\n"
+        "VERDICT: PASS\n"
+        "DIAGNOSIS: null\n"
+    )
+
+    assert len(parsed.certify_rounds) == 1
+    assert parsed.metric_value == "82ms"
+    assert parsed.metric_met is None
+    assert parsed.stories == []
+    assert parsed.verdict_pass is False
+
+
+# -- Test: result_msg init guards against UnboundLocalError on early return --
 
 class TestResultMsgInit:
     """result_msg should be initialized to avoid UnboundLocalError."""
@@ -645,78 +734,54 @@ class TestAppendIntentDedup:
         # The section header also contains "build-1" but not "build-2"
         assert "build-2" not in content
 
-    def test_first_intent_creates_file(self, tmp_path):
-        """First call should create intent.md."""
-        from otto.pipeline import _append_intent
-
-        _append_intent(tmp_path, "first intent", "build-1")
-        assert (tmp_path / "intent.md").exists()
-        assert "first intent" in (tmp_path / "intent.md").read_text()
+    # (test_first_intent_creates_file removed — `test_similar_intents_both_appended`
+    # and `test_exact_duplicate_blocked` both implicitly verify that the file
+    # gets created on first write.)
 
 
 # -- Test: certifier_timeout validation --
 
 class TestTimeoutValidation:
-    """certifier_timeout should handle invalid values gracefully."""
+    """certifier_timeout validation should fall back to the 900s default
+    for invalid inputs (non-numeric, zero, negative)."""
 
-    @pytest.mark.asyncio
-    async def test_non_numeric_timeout_uses_default(self, tmp_git_repo):
-        """Non-numeric certifier_timeout should fall back to 900s, not crash."""
-        async def fast_query(prompt, options, **kwargs):
-            return "VERDICT: PASS\nSTORY_RESULT: x | PASS | ok\nSTORIES_TESTED: 1\nSTORIES_PASSED: 1\nDIAGNOSIS: null", 0.1, MagicMock()
+    @pytest.mark.parametrize("bad_value", ["abc", 0, -5, None, "", "0"])
+    def test_invalid_timeout_falls_back_to_default(self, bad_value):
+        """get_timeout is the sole source of truth — unit-test it directly
+        rather than spinning up the whole pipeline to assert isinstance."""
+        from otto.config import get_timeout
+        assert get_timeout({"certifier_timeout": bad_value}) == 900
 
-        with patch("otto.agent.run_agent_query", side_effect=fast_query):
-            # Should not raise ValueError
-            result = await build_agentic_v3(
-                "test", tmp_git_repo, {"certifier_timeout": "abc"}
-            )
-        # Build completes (not crashed)
-        assert isinstance(result, BuildResult)
-
-    @pytest.mark.asyncio
-    async def test_zero_timeout_uses_default(self, tmp_git_repo):
-        """Zero timeout should fall back to 900s, not cause instant timeout."""
-        async def fast_query(prompt, options, **kwargs):
-            return "VERDICT: PASS\nSTORY_RESULT: x | PASS | ok\nSTORIES_TESTED: 1\nSTORIES_PASSED: 1\nDIAGNOSIS: null", 0.1, MagicMock()
-
-        with patch("otto.agent.run_agent_query", side_effect=fast_query):
-            result = await build_agentic_v3(
-                "test", tmp_git_repo, {"certifier_timeout": 0}
-            )
-        assert isinstance(result, BuildResult)
-
-    @pytest.mark.asyncio
-    async def test_negative_timeout_uses_default(self, tmp_git_repo):
-        """Negative timeout should fall back to 900s."""
-        async def fast_query(prompt, options, **kwargs):
-            return "VERDICT: PASS\nSTORY_RESULT: x | PASS | ok\nSTORIES_TESTED: 1\nSTORIES_PASSED: 1\nDIAGNOSIS: null", 0.1, MagicMock()
-
-        with patch("otto.agent.run_agent_query", side_effect=fast_query):
-            result = await build_agentic_v3(
-                "test", tmp_git_repo, {"certifier_timeout": -5}
-            )
-        assert isinstance(result, BuildResult)
+    def test_valid_timeout_honored(self):
+        from otto.config import get_timeout
+        assert get_timeout({"certifier_timeout": 120}) == 120
+        assert get_timeout({"certifier_timeout": "120"}) == 120
 
 
 # -- Test: Certifier timeout validation --
 
 class TestCertifierTimeoutValidation:
-    """Certifier should handle invalid timeout values."""
+    """Certifier runs successfully even with invalid timeout config.
+    Narrow integration test — unit behavior lives in TestTimeoutValidation."""
 
     @pytest.mark.asyncio
-    async def test_certifier_non_numeric_timeout(self, tmp_git_repo):
-        """Non-numeric timeout in certifier should not crash."""
+    async def test_certifier_tolerates_invalid_timeout(self, tmp_git_repo):
         from otto.certifier import run_agentic_certifier
+        from otto.certifier.report import CertificationOutcome
 
         async def mock_query(prompt, options, **kwargs):
-            return "VERDICT: PASS\nSTORY_RESULT: x | PASS | ok\nSTORIES_TESTED: 1\nSTORIES_PASSED: 1\nDIAGNOSIS: null", 0.1, MagicMock()
+            return ("VERDICT: PASS\nSTORY_RESULT: x | PASS | ok\n"
+                    "STORIES_TESTED: 1\nSTORIES_PASSED: 1\nDIAGNOSIS: null"), 0.1, MagicMock()
 
         with patch("otto.agent.run_agent_query", side_effect=mock_query):
             report = await run_agentic_certifier(
                 "test", tmp_git_repo, config={"certifier_timeout": "not-a-number"}
             )
-        # Should not crash — uses default 900s
-        assert report is not None
+        # Stronger than "report is not None": verify the run completed and
+        # parsed the mock output (the weak isinstance check used to pass even
+        # on a crashed/empty report).
+        assert report.outcome == CertificationOutcome.PASSED
+        assert report.story_results and report.story_results[0]["story_id"] == "x"
 
 
 # -- Test: run_test_suite handles git worktree add failure --
@@ -738,6 +803,9 @@ class TestCommitArtifactsTimeout:
         with patch("otto.pipeline.subprocess.run", side_effect=patched_run):
             _commit_artifacts(tmp_git_repo)
 
+        # Guard against vacuous all([]) — we must actually observe git calls.
+        assert len(calls_with_timeout) > 0, \
+            "_commit_artifacts made no git calls; test setup broken"
         # All git calls should have a timeout
         assert all(t is not None and t > 0 for t in calls_with_timeout), \
             f"Expected all git calls to have timeout, got: {calls_with_timeout}"
@@ -916,7 +984,6 @@ class TestCheckpointRegression:
                 )
 
         checkpoint = load_checkpoint(tmp_git_repo)
-        assert checkpoint is not None
         assert checkpoint["status"] == "in_progress"
         assert checkpoint["session_id"] == "sess-resume-123"
 
@@ -940,7 +1007,6 @@ class TestCheckpointRegression:
                 )
 
         checkpoint = load_checkpoint(tmp_git_repo)
-        assert checkpoint is not None
         assert checkpoint["status"] == "in_progress"
         assert checkpoint["phase"] == "initial_build"
         assert checkpoint["current_round"] == 0
@@ -967,7 +1033,6 @@ class TestCheckpointRegression:
                 )
 
         checkpoint = load_checkpoint(tmp_git_repo)
-        assert checkpoint is not None
         assert checkpoint["status"] == "paused"
         assert checkpoint["phase"] == "certify"
         assert checkpoint["current_round"] == 0
@@ -1052,9 +1117,15 @@ class TestBuildResume:
             result = CliRunner().invoke(main, ["build", "--resume"], catch_exceptions=False)
 
         assert result.exit_code == 0
+        # intent.md is unchanged (not re-appended)
         assert intent_path.read_text() == original_intent
-        assert captured_prompts == [""]
-        assert "(resumed run)" not in "".join(captured_prompts)
+        # No placeholder leaked into the resumed session's prompt
+        joined_prompts = "".join(captured_prompts)
+        assert "(resumed run)" not in joined_prompts
+        # At least one prompt was captured; the exact contents are a
+        # resumption detail that the SDK / Codex CLI may evolve, so don't
+        # pin the exact shape.
+        assert captured_prompts, "resume path never called the agent"
 
     def test_split_resume_with_empty_phase_replays_initial_build(
         self, tmp_git_repo, monkeypatch

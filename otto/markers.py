@@ -206,7 +206,7 @@ def parse_certifier_markers(text: str) -> ParsedMarkers:
             sum(1 for s in result.stories if s["passed"]))
         result.verdict_pass = bool(final_round.get("verdict", False))
         result.diagnosis = final_round.get("diagnosis", "")
-    else:
+    elif len(certify_rounds) == 0:
         # Fallback: no CERTIFY_ROUND markers — scan flat output
         result.verdict_pass, result.diagnosis = _parse_verdict_from_end(text)
 
@@ -224,6 +224,10 @@ def parse_certifier_markers(text: str) -> ParsedMarkers:
                     result.stories_passed = int(stripped.split(":", 1)[1].strip())
                 except ValueError:
                     pass
+            elif stripped.startswith("METRIC_VALUE:"):
+                result.metric_value = stripped.split(":", 1)[1].strip()
+            elif stripped.startswith("METRIC_MET:"):
+                result.metric_met = stripped.split(":", 1)[1].strip().upper() == "YES"
             elif stripped.startswith("STORY_RESULT:"):
                 story = _parse_story_result(stripped, evidence)
                 if story:

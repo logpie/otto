@@ -279,6 +279,7 @@ async def build_agentic_v3(
     verdict_pass = parsed.verdict_pass
     overall_diagnosis = parsed.diagnosis
     certify_rounds = parsed.certify_rounds
+    target_mode = bool(config.get("_target")) or certifier_mode == "target"
 
     # When QA is skipped (--no-qa), the agent won't produce certification markers.
     # Consider the build passed if the agent completed without error.
@@ -288,6 +289,8 @@ async def build_agentic_v3(
     else:
         # Require at least one story — VERDICT: PASS with no stories is not a real pass
         passed = verdict_pass and bool(story_results) and all(s["passed"] for s in story_results)
+        if target_mode:
+            passed = passed and parsed.metric_met is True
 
     journeys = _stories_to_journeys(story_results)
 
@@ -688,7 +691,7 @@ async def run_certify_fix_loop(
                 break
 
             total_cost += report.cost_usd
-            stories = getattr(report, "_story_results", [])
+            stories = report.story_results
             last_stories = stories
 
             record_certifier(project_dir, round_id, report, stories)
@@ -717,10 +720,15 @@ async def run_certify_fix_loop(
                           f"PASS {len(stories) - len(failures)}/{len(stories)}")
 
             # Target mode: check metric instead of story pass/fail
-            metric_met = getattr(report, "_metric_met", None)
-            metric_value = getattr(report, "_metric_value", "")
-            if certifier_mode == "target" and metric_met is not None:
-                result_str = f"{'MET' if metric_met else 'NOT MET'} ({metric_value})"
+            metric_met = report.metric_met
+            metric_value = report.metric_value
+            if certifier_mode == "target":
+                if metric_met is True:
+                    result_str = f"MET ({metric_value})"
+                elif metric_met is False:
+                    result_str = f"NOT MET ({metric_value})"
+                else:
+                    result_str = "FAIL (certifier omitted METRIC_MET)"
 
             append_journal(project_dir, round_id, f"certify round {round_num}",
                            result_str, report.cost_usd)
@@ -734,13 +742,22 @@ async def run_certify_fix_loop(
 
             # Determine if we should stop
             if certifier_mode == "target":
-                if metric_met:
+                if metric_met is True:
                     checkpoint_rounds.append(round_summary)
                     last_completed_round = round_num
                     _save_cp(phase="round_complete")
                     passed = True
                     logger.info("Certify-fix loop: target met on round %d (%s)",
                                 round_num, metric_value)
+                    break
+                if metric_met is None:
+                    checkpoint_rounds.append(round_summary)
+                    last_completed_round = round_num
+                    _save_cp(phase="round_complete")
+                    logger.warning(
+                        "Certify-fix loop: stopping on round %d because certifier omitted METRIC_MET",
+                        round_num,
+                    )
                     break
             elif not failures:
                 checkpoint_rounds.append(round_summary)

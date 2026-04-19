@@ -243,7 +243,7 @@ def certify(intent, thorough, fast):
         sys.exit(1)
 
     duration = time.time() - start
-    story_results = getattr(report, "_story_results", [])
+    story_results = report.story_results
     passed_count = sum(1 for s in story_results if s.get("passed"))
 
     # Display results

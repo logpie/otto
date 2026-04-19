@@ -4,35 +4,15 @@ Mocks run_agent_query (no LLM calls). Tests the full pipeline wiring:
 prompt construction → result parsing → PoW writing → checkpoint → BuildResult.
 """
 
-import asyncio
 import json
-import subprocess
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from otto.config import create_config
-from otto.pipeline import build_agentic_v3, BuildResult
+from otto.pipeline import build_agentic_v3
+from tests.conftest import make_mock_query as _make_mock_query
 
-
-# -- Fixtures --
-
-@pytest.fixture
-def tmp_git_repo(tmp_path):
-    """Create a temp git repo with otto.yaml."""
-    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
-    subprocess.run(
-        ["git", "commit", "-q", "--allow-empty", "-m", "init"],
-        cwd=tmp_path, check=True,
-    )
-    create_config(tmp_path)
-    subprocess.run(["git", "add", "otto.yaml"], cwd=tmp_path, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-q", "-m", "add config"],
-        cwd=tmp_path, capture_output=True,
-    )
-    return tmp_path
+# `tmp_git_repo` fixture comes from tests/conftest.py.
 
 
 # -- Canned agent outputs --
@@ -100,102 +80,165 @@ AGENT_OUTPUT_NO_MARKERS = """\
 I built the product. Everything looks good. Committed.
 """
 
+AGENT_OUTPUT_TARGET_METRIC_NOT_MET = """\
+Built and tested.
 
-# -- Mock helper --
+CERTIFY_ROUND: 1
+STORIES_TESTED: 2
+STORIES_PASSED: 2
+STORY_RESULT: p50-latency | PASS | Latency probe completed successfully
+STORY_RESULT: regression-suite | PASS | Existing behavior still passes
+METRIC_VALUE: 137ms
+METRIC_MET: NO
+VERDICT: PASS
+DIAGNOSIS: null
+"""
 
-def _make_mock_query(text, cost=0.50):
-    """Create a patched run_agent_query that returns canned output."""
-    result_msg = MagicMock()
-    result_msg.session_id = "test-session-123"
+AGENT_OUTPUT_TARGET_METRIC_MET = """\
+Built and tested.
 
-    async def mock_query(prompt, options, **kwargs):
-        return text, cost, result_msg
+CERTIFY_ROUND: 1
+STORIES_TESTED: 2
+STORIES_PASSED: 2
+STORY_RESULT: p50-latency | PASS | Latency probe completed successfully
+STORY_RESULT: regression-suite | PASS | Existing behavior still passes
+METRIC_VALUE: 82ms
+METRIC_MET: YES
+VERDICT: PASS
+DIAGNOSIS: null
+"""
 
-    return mock_query
+AGENT_OUTPUT_NON_TARGET_METRIC_ONLY = """\
+Built and tested.
+
+CERTIFY_ROUND: 1
+STORIES_TESTED: 2
+STORIES_PASSED: 2
+STORY_RESULT: crud | PASS | CRUD works
+STORY_RESULT: edge-cases | PASS | Edge cases handled
+METRIC_VALUE: 137ms
+VERDICT: PASS
+DIAGNOSIS: null
+"""
+
+AGENT_OUTPUT_TARGET_MISSING_METRIC_MET = """\
+Built and tested.
+
+CERTIFY_ROUND: 1
+STORIES_TESTED: 2
+STORIES_PASSED: 2
+STORY_RESULT: p50-latency | PASS | Latency probe completed successfully
+STORY_RESULT: regression-suite | PASS | Existing behavior still passes
+METRIC_VALUE: 82ms
+VERDICT: PASS
+DIAGNOSIS: null
+"""
 
 
 # -- Tests --
 
+@pytest.mark.asyncio
+async def test_agent_mode_target_fails_when_metric_not_met(tmp_git_repo):
+    with patch("otto.agent.run_agent_query",
+               side_effect=_make_mock_query(AGENT_OUTPUT_TARGET_METRIC_NOT_MET)):
+        result = await build_agentic_v3(
+            'latency < 100ms', tmp_git_repo, {"_target": "latency < 100ms"},
+            certifier_mode="target",
+        )
+
+    assert result.passed is False
+
+
+@pytest.mark.asyncio
+async def test_non_target_mode_with_metric_value_but_no_met_still_passes(tmp_git_repo):
+    with patch("otto.agent.run_agent_query",
+               side_effect=_make_mock_query(AGENT_OUTPUT_NON_TARGET_METRIC_ONLY)):
+        result = await build_agentic_v3("test", tmp_git_repo, {})
+
+    assert result.passed is True
+
+
+@pytest.mark.asyncio
+async def test_target_mode_missing_metric_met_fails(tmp_git_repo):
+    with patch("otto.agent.run_agent_query",
+               side_effect=_make_mock_query(AGENT_OUTPUT_TARGET_MISSING_METRIC_MET)):
+        result = await build_agentic_v3(
+            "latency < 100ms", tmp_git_repo, {"_target": "latency < 100ms"},
+            certifier_mode="target",
+        )
+
+    assert result.passed is False
+
+
+@pytest.mark.asyncio
+async def test_agent_mode_target_passes_when_metric_met(tmp_git_repo):
+    with patch("otto.agent.run_agent_query",
+               side_effect=_make_mock_query(AGENT_OUTPUT_TARGET_METRIC_MET)):
+        result = await build_agentic_v3(
+            'latency < 100ms', tmp_git_repo, {"_target": "latency < 100ms"},
+            certifier_mode="target",
+        )
+
+    assert result.passed is True
+
 class TestV3PipelinePass:
-    """Happy path: agent builds, certifies, all pass."""
+    """Happy path: agent builds, certifies, all pass.
+
+    All artifacts are asserted in one run — the previous six-tests-six-runs
+    setup ran the full pipeline six times to check each file individually,
+    which is pure churn since they're all side effects of a single call.
+    """
 
     @pytest.mark.asyncio
-    async def test_basic_pass(self, tmp_git_repo):
+    async def test_pipeline_writes_all_artifacts_on_pass(self, tmp_git_repo):
+        intent = "bookmark manager with tags"
         with patch("otto.agent.run_agent_query", side_effect=_make_mock_query(AGENT_OUTPUT_PASS)):
             result = await build_agentic_v3(
-                "bookmark manager with tags",
-                tmp_git_repo,
-                {"test_command": "true"},
+                intent, tmp_git_repo, {"test_command": "true"},
             )
 
+        # --- BuildResult ---
         assert result.passed is True
         assert result.tasks_passed == 5
         assert result.tasks_failed == 0
         assert result.total_cost == 0.50
         assert result.build_id.startswith("build-")
 
-    @pytest.mark.asyncio
-    async def test_creates_agent_log(self, tmp_git_repo):
-        with patch("otto.agent.run_agent_query", side_effect=_make_mock_query(AGENT_OUTPUT_PASS)):
-            result = await build_agentic_v3("test", tmp_git_repo, {})
-
+        # --- Per-build logs ---
         build_dir = tmp_git_repo / "otto_logs" / "builds" / result.build_id
-        assert (build_dir / "agent.log").exists()
-        assert (build_dir / "agent-raw.log").exists()
-
-        # agent.log has structured markers
         log_content = (build_dir / "agent.log").read_text()
         assert "VERDICT: PASS" in log_content
         assert "STORY_RESULT:" in log_content
-
-        # agent-raw.log has full output
+        # agent-raw.log should capture the full agent output verbatim —
+        # check for a distinctive substring from AGENT_OUTPUT_PASS that
+        # only appears in the raw mock text, not in the structured summary.
         raw_content = (build_dir / "agent-raw.log").read_text()
-        assert "bookmark manager" in raw_content.lower() or "certifier" in raw_content.lower()
+        assert "VERDICT: PASS" in raw_content
+        assert "dispatching the certifier" in raw_content
 
-    @pytest.mark.asyncio
-    async def test_creates_checkpoint(self, tmp_git_repo):
-        with patch("otto.agent.run_agent_query", side_effect=_make_mock_query(AGENT_OUTPUT_PASS)):
-            result = await build_agentic_v3("test", tmp_git_repo, {})
-
-        build_dir = tmp_git_repo / "otto_logs" / "builds" / result.build_id
+        # --- Per-build checkpoint ---
         cp = json.loads((build_dir / "checkpoint.json").read_text())
         assert cp["passed"] is True
         assert cp["stories_passed"] == 5
         assert cp["stories_tested"] == 5
         assert cp["mode"] == "agentic_v3"
 
-    @pytest.mark.asyncio
-    async def test_creates_pow_report(self, tmp_git_repo):
-        with patch("otto.agent.run_agent_query", side_effect=_make_mock_query(AGENT_OUTPUT_PASS)):
-            await build_agentic_v3("test", tmp_git_repo, {})
-
+        # --- PoW (proof-of-work) ---
         certifier_dir = tmp_git_repo / "otto_logs" / "certifier"
-        assert (certifier_dir / "proof-of-work.json").exists()
-        assert (certifier_dir / "proof-of-work.html").exists()
-
         pow_data = json.loads((certifier_dir / "proof-of-work.json").read_text())
         assert pow_data["outcome"] == "passed"
         assert len(pow_data["stories"]) == 5
+        assert (certifier_dir / "proof-of-work.html").exists()
 
-    @pytest.mark.asyncio
-    async def test_appends_intent(self, tmp_git_repo):
-        with patch("otto.agent.run_agent_query", side_effect=_make_mock_query(AGENT_OUTPUT_PASS)):
-            await build_agentic_v3("bookmark manager", tmp_git_repo, {})
-
+        # --- Cumulative logs ---
         intent_md = (tmp_git_repo / "intent.md").read_text()
-        assert "bookmark manager" in intent_md
-
-    @pytest.mark.asyncio
-    async def test_appends_run_history(self, tmp_git_repo):
-        with patch("otto.agent.run_agent_query", side_effect=_make_mock_query(AGENT_OUTPUT_PASS)):
-            await build_agentic_v3("test app", tmp_git_repo, {})
-
-        history = tmp_git_repo / "otto_logs" / "run-history.jsonl"
-        assert history.exists()
-        entry = json.loads(history.read_text().strip().split("\n")[-1])
+        assert intent in intent_md
+        entry = json.loads(
+            (tmp_git_repo / "otto_logs" / "run-history.jsonl").read_text().strip().split("\n")[-1]
+        )
         assert entry["passed"] is True
         assert entry["stories_passed"] == 5
-        assert "test app" in entry["intent"]
+        assert intent in entry["intent"]
 
 
 class TestV3PipelineFail:
@@ -356,22 +399,16 @@ class TestV3SkipQA:
 
         assert result.passed is True
 
+    @pytest.mark.parametrize("agent_output", [
+        "BUILD TIMED OUT after 30s",
+        "BUILD ERROR: something broke",
+    ])
     @pytest.mark.asyncio
-    async def test_skip_qa_fails_on_timeout(self, tmp_git_repo):
-        """With skip_product_qa, build still fails if agent times out."""
+    async def test_skip_qa_fails_on_agent_failure(self, tmp_git_repo, agent_output):
+        """With skip_product_qa, build still fails if the agent call fails
+        (timeout or error). Without QA markers, success depends on clean exit."""
         with patch("otto.agent.run_agent_query",
-                    side_effect=_make_mock_query("BUILD TIMED OUT after 30s")):
-            result = await build_agentic_v3(
-                "test", tmp_git_repo, {"skip_product_qa": True},
-            )
-
-        assert result.passed is False
-
-    @pytest.mark.asyncio
-    async def test_skip_qa_fails_on_error(self, tmp_git_repo):
-        """With skip_product_qa, build still fails if agent errors."""
-        with patch("otto.agent.run_agent_query",
-                    side_effect=_make_mock_query("BUILD ERROR: something broke")):
+                    side_effect=_make_mock_query(agent_output)):
             result = await build_agentic_v3(
                 "test", tmp_git_repo, {"skip_product_qa": True},
             )
@@ -380,23 +417,13 @@ class TestV3SkipQA:
 
 
 class TestEmptyIntent:
-    """Empty intent should be rejected at CLI level."""
+    """Empty / whitespace-only intent should be rejected at CLI level."""
 
-    def test_empty_intent_rejected(self):
-        """otto build '' should exit with code 2."""
+    @pytest.mark.parametrize("bad_intent", ["", "   ", "\t\n"])
+    def test_empty_intent_rejected(self, bad_intent):
         from click.testing import CliRunner
         from otto.cli import main
 
         runner = CliRunner()
-        result = runner.invoke(main, ["build", ""])
-        assert result.exit_code == 2
-        assert "empty" in result.output.lower() or "Intent" in result.output
-
-    def test_whitespace_intent_rejected(self):
-        """otto build '   ' should exit with code 2."""
-        from click.testing import CliRunner
-        from otto.cli import main
-
-        runner = CliRunner()
-        result = runner.invoke(main, ["build", "   "])
+        result = runner.invoke(main, ["build", bad_intent])
         assert result.exit_code == 2

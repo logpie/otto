@@ -115,17 +115,19 @@ async def run_agentic_certifier(
     # Determine outcome
     has_failures = any(not s["passed"] for s in story_results)
     passed = parsed.verdict_pass and not has_failures and bool(story_results)
+    target_mode = mode == "target" or bool(target) or bool(config.get("_target"))
+    if target_mode:
+        passed = passed and parsed.metric_met is True
     outcome = CertificationOutcome.PASSED if passed else CertificationOutcome.FAILED
 
     report = CertificationReport(
         outcome=outcome,
         cost_usd=float(cost or 0),
         duration_s=total_duration,
+        story_results=story_results,
+        metric_value=parsed.metric_value,
+        metric_met=parsed.metric_met,
     )
-    # Stash story results for upstream extraction (CLI display)
-    report._story_results = story_results  # type: ignore[attr-defined]
-    report._metric_value = parsed.metric_value  # type: ignore[attr-defined]
-    report._metric_met = parsed.metric_met  # type: ignore[attr-defined]
 
     # Write PoW report
     try:

@@ -210,6 +210,10 @@ def _run_improve(
     console.print(f"  Merge:  [info]git merge {branch}[/info]")
     console.print()
 
+    # Exit code mirrors `otto build` — non-zero when the run didn't reach
+    # its goal so CI/wrappers can detect failure.
+    sys.exit(0 if result.passed else 1)
+
 
 def _require_intent(project_dir: Path) -> str:
     """Resolve intent or exit with error."""

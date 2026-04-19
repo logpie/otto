@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any
 
 
 class CertificationOutcome(Enum):
@@ -15,7 +16,15 @@ class CertificationOutcome(Enum):
 
 @dataclass
 class CertificationReport:
-    """Complete certification report."""
+    """Complete certification report.
+
+    story_results / metric_value / metric_met are populated by the certifier
+    after parsing agent output. They're optional so INFRA_ERROR / crash
+    reports can be constructed without them.
+    """
     outcome: CertificationOutcome = CertificationOutcome.FAILED
     cost_usd: float = 0.0
     duration_s: float = 0.0
+    story_results: list[dict[str, Any]] = field(default_factory=list)
+    metric_value: str = ""
+    metric_met: bool | None = None  # None = not a target run
