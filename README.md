@@ -111,8 +111,9 @@ Legend: `✓` documented · `~` partial / different approach · `✗` absent or 
 
 | | Otto | Symphony | Devin 2.2 | Cursor | Factory |
 |---|---|---|---|---|---|
-| Reviewable spec before code (approve / edit / regen) | ✓ | ~ branch `WORKFLOW.md` | ✗ | ~ plan approval | ~ ticket scope |
-| Builder-blind verifier + closed fix loop | ✓ | ~ CI signal | ~ self-review | ✗ | ✓ separate Review Droid |
+| Spec as enforceable contract — verifier flags scope-creep as FAIL | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Builder-blind verifier that tests the product as a user (vs. code review) | ✓ | ~ CI signal | ~ self-review | ✗ | ~ Review Droid reviews code |
+| Closed fix loop (verifier findings → agent → re-verify) | ✓ | ~ PR review feedback | ~ manual iteration | ~ manual iteration | ✓ multi-droid handoff |
 | Hill-climb to a measurable target (`improve target`) | ✓ | ✗ | ✗ | ✗ | ✗ |
 | Crash resume (phase checkpoint + session_id) | ✓ | ✗ | ✗ | ~ session snapshot | ✗ |
 | Unified run budget (pauses gracefully) | ✓ | ✗ | ✗ | ✗ | ✗ |
