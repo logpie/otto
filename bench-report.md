@@ -14,8 +14,8 @@ Real LLM runs against complex products. Each bench builds a base product, queues
 | `P2-todo-sequential-baseline` | 1 | 1/4 done | 11.0m | $3.93 | conflict-resolved (salvage) (+$1.19, +1.5m) | – |
 | `P3-bookmark-parallel-features` | 2 | 1/3 done | 12.8m | $2.24 | success (salvage clean merge) | True |
 | `P4-flask-auth-users-posts` | 3 | 2/4 done | 15.6m | $13.29 | success + conflict-resolved salvage (+$3.79, +2.6m) | True |
+| `P5-markdown-blog-ssg` | 3 | 1/4 done | 15.6m | $16.77 | conflict-resolved (salvage all 3) (+$6.12, +20.4m) | – |
 | `P6-inventory-cli` | 3 | 3/4 done | 28.7m | $12.77 | conflict-resolved (+$2.41, +13.3m) | True |
-| `p5_markdown_ssg` | 3 | 1/4 done | 15.6m | $10.65 | failed | – |
 
 ## Parallel Speedup (P1 vs P2 — same intents, concurrent=3 vs concurrent=1)
 
@@ -36,6 +36,7 @@ These benchmarks build genuinely complex multi-module products and queue 3 paral
 | Bench | Base | Improves done/total | Improve cost (sum) | Improve max-wall | Merge | Cert |
 |---|---|---|---|---|---|---|
 | `P4-flask-auth-users-posts` | 3.1m ($1.14) | 1/3 | $8.37 | 9.3m | success + conflict-resolved salvage (+$3.79) | True |
+| `P5-markdown-blog-ssg` | 2.9m ($1.03) | 0/3 | $9.62 | 12.3m | conflict-resolved (salvage all 3) (+$6.12) | – |
 | `P6-inventory-cli` | 2.1m ($0.62) | 2/3 | $9.73 | 12.6m | conflict-resolved (+$2.41) | True |
 
 **Improve-pass rate** is what tells us whether `-n 2` is enough rounds for complex products. **Conflict agent cost** divided by improve count tells us whether the merge agent is cheaper than a human reviewer (it always is, at $0.20-$1.00 per conflict).
@@ -132,6 +133,30 @@ These benchmarks build genuinely complex multi-module products and queue 3 paral
 - Total merge cost (agent): $3.79 across all 3 merges.
 - Final app.py has auth + user CRUD + posts CRUD + comments + tags + likes all working.
 
+### P5-markdown-blog-ssg
+
+- repo: `/var/folders/xg/dk8wgfy119z44797kyz7w0380000gn/T/bench-p5-xysyr6kn`
+- started: 2026-04-20T13:47:22Z → finished: 2026-04-20T07:02:59Z
+- wall: 15.6m, total cost: $16.77
+- concurrency: 3
+- merge: **conflict-resolved (salvage all 3)** (+$6.12, +20.4m); cert_passed=None
+
+#### Per-task
+| ID | Status | Cost | Duration | Failure |
+|---|---|---|---|---|
+| `base` | done | $1.03 | 2.9m |  |
+| `imp-tag-pages` | failed | $3.67 | 12.3m | exit_code=1 |
+| `imp-rss` | failed | $2.70 | 9.0m | exit_code=1 |
+| `imp-search` | failed | $3.25 | 10.3m | exit_code=1 |
+
+#### Notes
+- rounds_per_improve: 2
+- ALL 3 improves failed cert in -n 2 (build-pipeline products are hard to certify automatically — output is HTML files).
+- Salvage merge via explicit-branch names: 1 clean (tag-pages) + 2 conflict_resolved (rss $2.96, search $3.16).
+- Conflict agent total cost: $6.12; salvage took ~20.4 min.
+- Final blog.py has 22 functions; dist/ contains index.html, posts/, tags/, rss.xml, search.html, search.json + agent-added feed.xml and sitemap.xml.
+- Improves merged successfully: tag-pages + rss + search ALL features functional.
+
 ### P6-inventory-cli
 
 - repo: `/var/folders/xg/dk8wgfy119z44797kyz7w0380000gn/T/bench-p6-qjqc130n`
@@ -163,23 +188,3 @@ These benchmarks build genuinely complex multi-module products and queue 3 paral
 - imp-categories + imp-alerts passed cert; imp-suppliers failed.
 - Merge --all invoked conflict agent on the 2 done improves; conflict resolved + cert PASSED.
 - Final inv.py has base CRUD + categories + alerts working.
-
-### p5_markdown_ssg
-
-- repo: `/var/folders/xg/dk8wgfy119z44797kyz7w0380000gn/T/bench-p5-xysyr6kn`
-- started: 2026-04-20T13:47:22Z → finished: 2026-04-20T07:02:59Z
-- wall: 15.6m, total cost: $10.65
-- concurrency: 3
-- merge: **failed** (+$0.00, +0s); cert_passed=None
-
-#### Per-task
-| ID | Status | Cost | Duration | Failure |
-|---|---|---|---|---|
-| `base` | done | $1.03 | 2.9m |  |
-| `imp-tag-pages` | failed | $3.67 | 12.3m | exit_code=1 |
-| `imp-rss` | failed | $2.70 | 9.0m | exit_code=1 |
-| `imp-search` | failed | $3.25 | 10.3m | exit_code=1 |
-
-#### Notes
-- rounds_per_improve: 2
-- merge_log_tail: Specify branches/task ids, or pass --all to merge all done queue tasks.
