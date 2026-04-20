@@ -1,0 +1,71 @@
+{
+  "name": "F13-P6-consolidated-agent-mode",
+  "purpose": "Validate F13 (agent-mode consolidated conflict resolution): single agent call across all branches, full Bash, no Python retry loop. Compared to baseline sequential mode.",
+  "scenario": "P6 inventory CLI bench. Same intents, fresh LLM-built code. Salvage merge of 2 conflict branches (categories + suppliers) using merge_mode: consolidated.",
+  "config": {
+    "merge_mode": "consolidated",
+    "tool_restrictions": "none (matches build/improve agents)",
+    "retry_loop": "removed (single agent call, single final validation)"
+  },
+  "bench_phases": {
+    "phase_1_2_base_and_improves": {
+      "wall_seconds": 968,
+      "cost_usd": 11.17,
+      "note": "vanilla P6 setup. Cost dominated by improve agents at -n 2. Salvageable via fixture for future tests."
+    },
+    "phase_3_consolidated_salvage": {
+      "wall_seconds": 1080,
+      "wall_minutes": 18.0,
+      "cost_usd": 5.12,
+      "branches_merged": ["improve/imp-categories-2026-04-20", "improve/imp-suppliers-2026-04-20"],
+      "files_resolved": 4,
+      "tools_used": {
+        "Bash": 20,
+        "Read": 7,
+        "Grep": 3,
+        "Write": 5
+      },
+      "agent_used_test_command": true,
+      "note": "Agent extensively used Bash for git diff/show across branches (cross-referencing) and Write for surgical edits. Built /tmp/branches/<name>/ to compare the 3 branches' versions side-by-side."
+    }
+  },
+  "verification": {
+    "markers_remain": false,
+    "tests_pass": true,
+    "test_count_passing": 105,
+    "test_run_time_seconds": 0.64
+  },
+  "comparison_table": {
+    "baseline_sequential_write_allowed_2_branches": {
+      "wall_minutes": 37,
+      "cost_usd": 7.52,
+      "files_resolved": 2
+    },
+    "F12_sequential_edit_only_2_branches": {
+      "wall_minutes": 49,
+      "cost_usd": 19.22,
+      "files_resolved": 2
+    },
+    "F13_consolidated_agent_mode_2_branches_THIS_RUN": {
+      "wall_minutes": 18,
+      "cost_usd": 5.12,
+      "files_resolved": 4,
+      "speedup_vs_baseline": "2.1x faster",
+      "savings_vs_baseline": "32% cheaper",
+      "vs_F12": "2.7x faster, 3.8x cheaper, +verified by tests"
+    }
+  },
+  "key_observations": [
+    "Single agent session with full context handles multi-branch merge dramatically better than per-branch sequential calls.",
+    "Agent used Bash extensively to cross-reference branch contents (diffs, git show) before editing. This is the kind of 'real engineering' that requires shell access.",
+    "Agent ran the project's tests as part of self-verification — 105 tests pass on merged code.",
+    "More files resolved in less time + lower cost: scales well with conflict complexity.",
+    "Same model, same SDK, same defaults — only architectural changes (single session, full tools, single final validation)."
+  ],
+  "remaining_concerns": [
+    "Single trial — LLM variance is real. Multiple runs needed for confidence.",
+    "If agent fails to self-verify (stops with markers remaining), no Python retry safety net. User must manually fix. Not observed yet.",
+    "Bash access enables agent to do destructive things (git reset, rm); orchestrator's HEAD-unchanged + out-of-scope-files checks catch most. Not stress-tested.",
+    "Behind opt-in flag (queue.merge_mode: consolidated) — not the default."
+  ]
+}
