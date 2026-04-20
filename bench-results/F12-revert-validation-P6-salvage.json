@@ -1,0 +1,38 @@
+{
+  "name": "F12-revert-validation-P6-salvage",
+  "purpose": "Validate the revert of F12 (Write re-allowed) actually restores baseline conflict-agent performance, vs the 49min/$19.22 measured under F12.",
+  "scenario": "P6 inventory CLI bench, manual salvage merge of 3 failed-cert improve branches with --no-certify. Same intents as the original P6 baseline.",
+  "config": "Write ALLOWED (revert applied). disallowed_tools = ['Bash'] only. Original merger-conflict.md prompt restored.",
+  "wall_seconds": 2221,
+  "wall_minutes": 37.0,
+  "outcomes": [
+    {"branch": "improve/imp-alerts-2026-04-20", "status": "merged", "agent_cost": 0, "note": "clean merge, no conflict agent"},
+    {"branch": "improve/imp-suppliers-2026-04-20", "status": "conflict_resolved", "agent_cost": 2.53, "retries": 0},
+    {"branch": "improve/imp-categories-2026-04-20", "status": "conflict_resolved", "agent_cost": 4.99, "retries": 0}
+  ],
+  "total_conflict_agent_cost_usd": 7.52,
+  "tool_usage": "agent used 'Write' as primary tool (no Edit calls visible in conflict-agent.log)",
+  "comparison": {
+    "F12_Write_disallowed_P6_salvage": {
+      "branches_with_conflict": 2,
+      "wall_minutes": 49,
+      "cost_usd": 19.22,
+      "per_branch_cost": 9.61,
+      "per_branch_wall_minutes": 24.5
+    },
+    "revert_Write_allowed_P6_salvage_THIS_RUN": {
+      "branches_with_conflict": 2,
+      "wall_minutes": 37,
+      "cost_usd": 7.52,
+      "per_branch_cost": 3.76,
+      "per_branch_wall_minutes": 17,
+      "note": "Excludes 1 clean merge of imp-alerts which took ~5 min; per-conflict-branch numbers normalized."
+    },
+    "verdict": "Write-allowed is 2.6x cheaper per branch and 1.4x faster per branch than F12. Revert validated."
+  },
+  "caveats": [
+    "Different LLM rolls produce different code complexity each run. This is real data but not perfectly controlled.",
+    "Both runs had 0 validation retries, so the 'cold-start retry penalty' hypothesis (about agent-mode helping) wasn't tested either way.",
+    "The improve agent durations (cost~$3.5/improve, ~11min) were similar across runs — improve cost is not the variable here."
+  ]
+}
