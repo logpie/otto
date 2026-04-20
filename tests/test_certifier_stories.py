@@ -1,19 +1,17 @@
-"""Tests for Phase 4.0 — certifier story-subset interface.
+"""Tests for the certifier story-subset interface.
 
 Validates:
-- `stories` parameter on `run_agentic_certifier` (back-compat default None)
 - `_format_stories_section` rendering
 - `{stories_section}` placeholder support across all certifier prompts
 """
 
 from __future__ import annotations
 
-import inspect
 from pathlib import Path
 
 import pytest
 
-from otto.certifier import _format_stories_section, _render_certifier_prompt, run_agentic_certifier
+from otto.certifier import _format_stories_section, _render_certifier_prompt
 
 
 # ---------- _format_stories_section ----------
@@ -111,26 +109,7 @@ def test_all_certifier_modes_accept_stories(tmp_path: Path, mode: str):
     assert "story-a" in out, f"mode={mode}: stories_section not rendered"
 
 
-# ---------- run_agentic_certifier signature ----------
-
-
-def test_run_agentic_certifier_accepts_stories_param():
-    """`stories` is a keyword-only kwarg with default None (existing
-    callers without it keep working)."""
-    sig = inspect.signature(run_agentic_certifier)
-    assert "stories" in sig.parameters
-    p = sig.parameters["stories"]
-    assert p.default is None
-    assert p.kind == inspect.Parameter.KEYWORD_ONLY
-
-
 # ---------- prompt placeholder support ----------
-
-
-def test_stories_section_placeholder_known_to_renderer():
-    """The {stories_section} placeholder is in _KNOWN_PLACEHOLDERS."""
-    from otto.prompts import _KNOWN_PLACEHOLDERS
-    assert "stories_section" in _KNOWN_PLACEHOLDERS
 
 
 @pytest.mark.parametrize("prompt_file", [

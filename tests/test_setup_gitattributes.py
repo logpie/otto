@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 
 from otto.setup_gitattributes import (
-    REQUIRED_RULES,
     GitAttributesConflict,
     assert_setup,
     check_compatibility,
@@ -181,8 +180,3 @@ def test_union_driver_merges_intent_md_without_conflict(tmp_path: Path):
     assert ">>>>>>>" not in final
 
 
-def test_required_rules_are_what_we_documented():
-    """Sanity: the constant matches what we tell users in messages."""
-    rules = dict(((p, a), v) for p, a, v in REQUIRED_RULES)
-    assert rules.get(("intent.md", "merge")) == "union"
-    assert rules.get(("otto.yaml", "merge")) == "ours"

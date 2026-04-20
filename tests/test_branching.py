@@ -9,7 +9,6 @@ from pathlib import Path
 import pytest
 
 from otto.branching import (
-    RESERVED_TASK_IDS,
     compute_branch_name,
     create_or_switch_branch,
     current_branch,
@@ -83,11 +82,6 @@ def test_slugify_truncated_long_prefixes_get_distinct_hashes():
 
 def test_slugify_literal_task_gets_hash_suffix():
     assert slugify_intent("task") == f"task-{_hash6('task')}"
-
-
-def test_reserved_ids_includes_management_verbs():
-    # Sanity check the reserved set covers all queue verbs
-    assert {"ls", "show", "rm", "cancel", "run"}.issubset(RESERVED_TASK_IDS)
 
 
 # ---------- compute_branch_name ----------

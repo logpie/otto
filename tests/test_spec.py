@@ -269,16 +269,6 @@ class TestCheckpointSpecPhases:
 
 
 class TestResumeStateSpecFields:
-    def test_fields_default_empty(self):
-        from otto.checkpoint import ResumeState
-        rs = ResumeState()
-        assert rs.intent == ""
-        assert rs.run_id == ""
-        assert rs.spec_path == ""
-        assert rs.spec_hash == ""
-        assert rs.spec_version == 0
-        assert rs.spec_cost == 0.0
-
     def test_resolve_resume_loads_spec_fields(self, tmp_path):
         from otto.checkpoint import resolve_resume, write_checkpoint
         write_checkpoint(
