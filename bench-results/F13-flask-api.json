@@ -1,0 +1,31 @@
+{
+  "name": "F13-flask-api",
+  "scenario": "Flask todo REST API + 2 parallel improves (tags, priority). Real LLM-built code.",
+  "config": {
+    "merge_mode": "consolidated",
+    "tool_restrictions": "none (matches build/improve agents)"
+  },
+  "phase_3_salvage_wall_seconds": 30,
+  "phase_3_salvage_cost_usd": 0.32,
+  "rc": 0,
+  "outcomes": [
+    {"branch": "improve/imp-tags-2026-04-20", "status": "merged", "note": "clean merge"},
+    {"branch": "improve/imp-priority-2026-04-20", "status": "conflict_resolved", "files": 2, "agent_cost": 0.32}
+  ],
+  "verification": {
+    "markers_remain": false,
+    "tests_pass": true,
+    "test_count_passing": 13,
+    "test_run_time_seconds": 0.10,
+    "final_app_py_routes_or_functions": 6
+  },
+  "fixture_saved_at": "bench-fixtures/flask-api-branches.bundle",
+  "repo_at_test_time": "/var/folders/xg/dk8wgfy119z44797kyz7w0380000gn/T/bench-flask-tbl93eq6",
+  "comparison_with_P6_F13": {
+    "P6_inventory_CLI": {"wall_min": 18, "cost_usd": 5.12, "files_resolved": 4, "regions": 41},
+    "Flask_API_THIS_RUN": {"wall_min": 0.5, "cost_usd": 0.32, "files_resolved": 2, "regions": "small"},
+    "note": "F13 scales correctly with conflict complexity. Flask conflicts were smaller (REST endpoints) than P6's CLI (deep schema/migration coupling) → smaller conflicts → faster + cheaper."
+  },
+  "key_finding": "F13 works on real LLM-built code in a different domain (web API vs CLI). Same architecture, same model, no special tuning. Ships safely.",
+  "earlier_run_failure": "First attempt failed with rc=1 / 0s due to .watcher2.log being untracked (the bench script wrote to a non-standard filename not covered by setup_gitignore). Fixed in script. Re-ran successfully with .watcher.log cleaned up; the salvage merge itself worked correctly."
+}
