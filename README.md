@@ -101,23 +101,40 @@ Timestamped, append-only logs across ~7 artifact types per run. Retries preserve
 
 ### How it compares to other harness frameworks
 
-Researched April 2026. `✓` = documented; `~` = partial or different approach; `✗` = absent or not publicly documented.
+An intent-to-product harness needs to cover five things: **contract** (what are we building?), **execution** (build with verification), **iteration** (fix loop + hill-climb toward a goal), **survival** (crash/budget recovery), and **delivery** (artifact + PR). Otto and its peers prioritize these differently.
 
-| | Otto | [Symphony](https://github.com/openai/symphony) | [Devin 2.2](https://cognition.ai/) | [Cursor bg agents](https://cursor.com/) | [Factory Droid](https://factory.ai/) | [OpenHands](https://github.com/OpenHands/OpenHands) | [SWE-agent](https://github.com/SWE-agent/SWE-agent) |
-|---|---|---|---|---|---|---|---|
-| Independent verifier agent | ✓ builder-blind certifier | ~ self-report via CI | ~ self-review | ✗ | ✓ Review Droid | ✗ | ✗ |
-| Proof-of-work artifact | ✓ HTML + video + JSON | ✓ CI + video + PR review | ✓ screen recording (v2.2) | ✓ video (Feb '26) | ✓ DroidShield report | ~ traces only | ~ trajectories only |
-| Scope / spec gate | ✓ Must-Have / Must-NOT review | ~ `WORKFLOW.md` per branch | ✗ user-guidance only | ~ plan-approval step | ~ ticket → PR | ✗ | ✗ |
-| Crash / pause resume | ✓ phase checkpoints + session_id | ✗ | ✗ | ~ session snapshots | ✗ | ✗ | ✗ |
-| Cross-run memory | ✓ opt-in | ✗ | ~ parent reads child trajectory | ✗ | ~ repo graph (static) | ✗ | ✗ |
-| Open source | ✓ MIT | ✓ Apache-2.0 | ✗ closed | ✗ closed | ✗ closed | ✓ MIT | ✓ MIT |
-| Form factor | one CLI per dev | Elixir/BEAM + Linear | SaaS agent | IDE + cloud VM | enterprise platform | research framework | benchmark harness |
+Peers surveyed (April 2026): [Symphony](https://github.com/openai/symphony) (OpenAI, open), [Devin 2.2](https://cognition.ai/) (Cognition, SaaS), [Cursor background agents](https://cursor.com/) (IDE + cloud VM), [Factory Droid](https://factory.ai/) (enterprise platform). Research harnesses (OpenHands, SWE-agent) and interactive pair-programmers (Aider) are different categories.
 
-**Closest philosophical analog: [Symphony](https://github.com/openai/symphony)** (OpenAI, Mar 2026). Both treat agent runs as contracts requiring evidence: Symphony requires CI + PR review feedback + walkthrough video before landing, with `WORKFLOW.md` versioning agent prompts per branch. The difference: Symphony assumes the repo is already **harness-engineered** (hermetic tests, machine-readable docs). Otto brings the verifier, spec gate, and artifact generator to repos that aren't. Symphony is team/Linear-integrated; otto is one CLI for one developer.
+Legend: `✓` documented · `~` partial / different approach · `✗` absent or not publicly documented.
 
-**Closest verifier analog: [Factory Droid](https://factory.ai/)** — the only closed system here with an explicit separate **Review Droid** alongside the coder. Its repo graph (HyperCode/ByteRank) is static codebase retrieval, not run-to-run memory.
+**Where otto leads:**
 
-Otto's distinctive combination: *spec gate + builder-blind certifier + fix loop + resumable checkpoints + optional cross-run memory*, open source, one process, no backend.
+| | Otto | Symphony | Devin 2.2 | Cursor | Factory |
+|---|---|---|---|---|---|
+| Reviewable spec before code (approve / edit / regen) | ✓ | ~ branch `WORKFLOW.md` | ✗ | ~ plan approval | ~ ticket scope |
+| Builder-blind verifier + closed fix loop | ✓ | ~ CI signal | ~ self-review | ✗ | ✓ separate Review Droid |
+| Hill-climb to a measurable target (`improve target`) | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Crash resume (phase checkpoint + session_id) | ✓ | ✗ | ✗ | ~ session snapshot | ✗ |
+| Unified run budget (pauses gracefully) | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Cross-run certifier memory | ✓ opt-in | ✗ | ~ trajectory reuse | ✗ | ~ static repo graph |
+| Open source | ✓ MIT | ✓ Apache-2.0 | ✗ | ✗ | ✗ |
+
+**Where otto is behind (things peers do well):**
+
+| | Otto | Symphony | Devin 2.2 | Cursor | Factory |
+|---|---|---|---|---|---|
+| Ticket-tracker integration (Linear / Jira) | ✗ | ✓ Linear-native | ✓ | ~ | ✓ |
+| Sandboxed cloud VM / Linux desktop | ✗ local | ✗ local | ✓ Linux desktop | ✓ per-agent VM | ✓ cloud runtime |
+| Team / multi-user workflows (RBAC, shared state) | ✗ | ✓ | ✓ | ✓ | ✓ enterprise |
+| IDE integration | ✗ | ✗ | ~ plugin | ✓ native | ~ plugins |
+| Proof-of-work artifact | ✓ HTML + video + JSON | ✓ CI + video + PR review | ✓ screen recording (v2.2) | ✓ video (Feb '26) | ✓ DroidShield report |
+| Bidirectional PR review feedback (reads reviewer comments) | ~ | ✓ | ~ | ~ | ✓ |
+| Static codebase retrieval (graph / index) | ✗ | ✗ | ✗ | ✗ | ✓ HyperCode |
+| Multi-agent parallel work | ✗ single agent | ✓ | ~ multi-Devin | ✗ | ✓ coordinator |
+
+Proof-of-work is an interesting case: otto did it first in this category, but Cursor (Feb 2026), Devin 2.2, and Symphony have all shipped comparable video/artifact features — it's no longer unique, though otto's HTML + per-story JSON remains more structured than a raw screen recording.
+
+**Form factor**: otto is a **single developer's CLI** — local, one process, no backend, no team story. It trades multi-user operations and cloud infrastructure for inspectable determinism, editable prompts, and a checkout-and-run footprint. The closest philosophical analog is [Symphony](https://github.com/openai/symphony), which shares the "evidence over trust" stance but assumes the repo is already harness-engineered (hermetic tests, machine-readable docs) and targets team/Linear workflows. Otto brings the harness *to* repos that aren't engineered for it.
 
 ## Quick start
 
