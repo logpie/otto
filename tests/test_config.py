@@ -13,6 +13,7 @@ from otto.config import (
     detect_test_command,
     git_meta_dir,
     load_config,
+    resolve_intent_for_enqueue,
 )
 from otto.setup_gitattributes import GitAttributesConflict
 
@@ -156,6 +157,10 @@ class TestProviderHelpers:
 
     def test_default_config_exposes_spec_timeout(self):
         assert DEFAULT_CONFIG["spec_timeout"] == 600
+
+    def test_resolve_intent_for_enqueue_prefers_explicit_value(self, tmp_bare_git_repo):
+        (tmp_bare_git_repo / "intent.md").write_text("from project")
+        assert resolve_intent_for_enqueue(tmp_bare_git_repo, explicit="from cli") == "from cli"
 
 
 class TestDetectTestCommand:

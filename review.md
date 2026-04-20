@@ -62,3 +62,68 @@ Codex returned **APPROVED**. No new findings. The helper is well-factored (no ci
 Files added: `otto/branching.py`, `otto/manifest.py`, `otto/setup_gitattributes.py`, `otto/worktree.py`, `tests/test_branching.py`, `tests/test_env_bypass.py`, `tests/test_manifest.py`, `tests/test_setup_gitattributes.py`, `tests/test_worktree.py`, `plan-parallel.md`, `review.md`.
 
 Files modified: `otto/cli.py`, `otto/cli_improve.py`, `otto/cli_setup.py`, `otto/config.py`, `otto/certifier/__init__.py`, `otto/certifier/report.py`, `tests/test_config.py`.
+
+---
+
+## Phase 2 — Code-Health + Implementation Gate (Codex, 2026-04-19)
+
+### Initial implementation
+- `otto/queue/` package: `schema.py` (file format + atomic I/O), `ids.py` (slug + dedup + cycle detection), `runner.py` (watcher main loop)
+- `otto/cli_queue.py`: CLI commands (build/improve/certify/ls/show/rm/cancel/run)
+- `otto/cli.py`: registered queue command group
+- `pyproject.toml`: added `psutil>=5.9` dependency
+- 86 new tests across 4 test files
+
+### Code-health audit (4 review agents in parallel)
+
+Bug Hunter, Dead Code Hunter, Dedup Hunter, AI Slop Hunter dispatched simultaneously.
+
+**Findings: 3 CRITICAL + 12 IMPORTANT + several MINOR.** All fixed by Codex (workspace-write call):
+- CRITICAL: lock-mismatch race in drain_commands ↔ append_command (data loss); unhandled `_tick` exception orphans children; `_otto_bin` dead nonsense code
+- IMPORTANT: `bookkeeping_files` field unused; `on_status_update` dead hook; `policy=ask` stub; cycle log spam; `os.waitstatus_to_exitcode` dead hasattr; ChildProcessError fake-success; unused dataclasses (TaskChildState/TaskState/WatcherState); `--in-worktree` duplication carried from Phase 1; intent-resolution snapshot timing asymmetric between queue improve vs certify
+
+Test count after cleanup: 339 → 345 (+6 tests added by Codex).
+
+### Implementation Gate (Codex 4 rounds)
+
+**Round 1** (review of cleaned code): REVISE with 4 CRITICAL + 3 IMPORTANT
+- CRITICAL: cancel/remove leaves zombie children (state marked terminal before child exits)
+- CRITICAL: try/except `_tick` enables duplicate-spawn (write_state fail → reload stale → respawn)
+- CRITICAL: queue tasks don't snapshot branch/worktree → collision on same intent
+- CRITICAL: **Phase 2.9 was missing entirely** — `_commit_artifacts` always commits intent.md/otto.yaml even in queue mode, defeating the whole point of bookkeeping skip
+- IMPORTANT: cancel rewrites done tasks; CLI doesn't validate enqueued args; `_resolve_otto_bin` fallback returns single string instead of argv list
+
+**Round 2** (review of round-1 fixes): REVISE with 2 CRITICAL
+- CRITICAL: `terminating` state (introduced in round 1) not reconciled on watcher restart
+- CRITICAL: post-spawn persistence-failure exits but leaves child running untracked
+
+**Round 3** (review of round-2 fixes): REVISE with 1 CRITICAL + 1 NOTE
+- CRITICAL: `on_watcher_restart=resume` for still-alive `running` child broken — `waitpid` raises ECHILD when watcher inherited the child rather than forked it
+- NOTE: missing test for the still-alive-running case at restart
+
+**Round 4** (round-3 fixes applied; final Codex pass): explicit "defer to user" rather than open round 5. Applied the suggested fix as a final patch (extracted `_finalize_task_from_manifest` helper; ECHILD on `running` falls back to `child_is_alive` check; new test for the inherited-running-child restart case).
+
+### Final state
+
+- 357 tests passing (158 baseline + 199 across Phases 1-2 = +95 Phase 1 + +104 Phase 2)
+- All 7 CRITICAL findings + 6 IMPORTANT resolved
+- 1 REFACTOR finding from Phase 1 (cli.py / cli_improve.py --in-worktree dup) was addressed via the `setup_worktree_for_atomic_cli` helper extraction in Phase 2 cleanup
+- Real-LLM E2E deferred to Phase 4 (otto merge), where it has irreducible value. Phase 2's queue mechanics are fully exercised by:
+    - Unit tests with `fake_otto.sh` subprocess (full spawn → manifest → reap lifecycle)
+    - Smoke E2E (CLI surface; no LLM cost) — verified `otto queue build/improve/certify/ls/show/rm/cancel`, schema integrity, OTTO_QUEUE_TASK_ID validation, exclusive lock
+    - Phase 2.9 bookkeeping skip unit-tested in `test_v3_pipeline.py`
+
+### Files added (Phase 2)
+- `otto/queue/__init__.py`, `otto/queue/schema.py`, `otto/queue/ids.py`, `otto/queue/runner.py`
+- `otto/cli_queue.py`
+- `tests/test_queue_schema.py`, `tests/test_queue_ids.py`, `tests/test_queue_runner.py`, `tests/test_cli_queue.py`
+- `RESUMING.md` (compaction-safety bridge)
+
+### Files modified (Phase 2)
+- `otto/cli.py` (registered queue commands; refactored --in-worktree via shared helper)
+- `otto/cli_improve.py` (refactored --in-worktree via shared helper)
+- `otto/config.py` (added `ensure_bookkeeping_setup` shared helper from Phase 1; added `resolve_intent_for_enqueue`)
+- `otto/pipeline.py` (Phase 2.9 — skip bookkeeping commits in queue mode)
+- `otto/worktree.py` (added `setup_worktree_for_atomic_cli` shared helper)
+- `pyproject.toml` (added psutil dependency)
+- `tests/test_config.py`, `tests/test_worktree.py`, `tests/test_v3_pipeline.py`

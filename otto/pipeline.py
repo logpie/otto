@@ -1002,9 +1002,21 @@ async def run_certify_fix_loop(
 def _commit_artifacts(project_dir: Path) -> None:
     """Commit otto artifacts (intent.md, etc.) so agents see them."""
     git_timeout = 30  # seconds — prevent hang on locked repo
+    files_to_stage = ["intent.md", "otto.yaml"]
+    if os.environ.get("OTTO_INTERNAL_QUEUE_RUNNER") == "1":
+        from otto.config import DEFAULT_CONFIG, load_config
+
+        queue_cfg = load_config(project_dir / "otto.yaml").get("queue", {})
+        bookkeeping_files = queue_cfg.get(
+            "bookkeeping_files",
+            DEFAULT_CONFIG["queue"]["bookkeeping_files"],
+        )
+        files_to_stage = [path for path in files_to_stage if path not in set(bookkeeping_files)]
+    if not files_to_stage:
+        return
     try:
         subprocess.run(
-            ["git", "add", "intent.md", "otto.yaml"],
+            ["git", "add", *files_to_stage],
             cwd=project_dir, capture_output=True, timeout=git_timeout,
         )
         # Only commit if there are staged changes

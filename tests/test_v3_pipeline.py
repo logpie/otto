@@ -5,11 +5,12 @@ prompt construction → result parsing → PoW writing → checkpoint → BuildR
 """
 
 import json
+import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from otto.pipeline import build_agentic_v3
+from otto.pipeline import _commit_artifacts, build_agentic_v3
 from tests.conftest import make_mock_query as _make_mock_query
 
 # `tmp_git_repo` fixture comes from tests/conftest.py.
@@ -247,6 +248,34 @@ async def test_build_result_total_cost_includes_spec_cost(tmp_git_repo):
         result = await build_agentic_v3("test", tmp_git_repo, {}, spec_cost=0.25)
 
     assert result.total_cost == 0.75
+
+
+def test_commit_artifacts_skips_bookkeeping_files_in_queue_mode(tmp_bare_git_repo, monkeypatch):
+    (tmp_bare_git_repo / "intent.md").write_text("queued intent\n")
+    (tmp_bare_git_repo / "otto.yaml").write_text("queue:\n  bookkeeping_files:\n    - intent.md\n    - otto.yaml\n")
+
+    monkeypatch.setenv("OTTO_INTERNAL_QUEUE_RUNNER", "1")
+    _commit_artifacts(tmp_bare_git_repo)
+
+    staged = subprocess.run(
+        ["git", "diff", "--cached", "--name-only"],
+        cwd=tmp_bare_git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+    added = subprocess.run(
+        ["git", "log", "--diff-filter=A", "--name-only", "--format="],
+        cwd=tmp_bare_git_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+
+    assert "intent.md" not in staged
+    assert "otto.yaml" not in staged
+    assert "intent.md" not in added
+    assert "otto.yaml" not in added
 
 
 @pytest.mark.asyncio

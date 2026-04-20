@@ -12,15 +12,6 @@ from otto.display import CONTEXT_SETTINGS, console, rich_escape
 from otto.theme import error_console
 
 
-def _resolve_intent(project_dir: Path) -> str | None:
-    """Resolve product description from intent.md or README.md."""
-    from otto.config import resolve_intent
-    intent = resolve_intent(project_dir)
-    if intent:
-        console.print("  [dim]Intent from project files[/dim]")
-    return intent
-
-
 def _create_improve_branch(project_dir: Path) -> str:
     """Create an improvement branch and switch to it. Returns branch name."""
     branch = f"improve/{time.strftime('%Y-%m-%d')}"
@@ -84,6 +75,7 @@ def _run_improve(
     from otto.pipeline import build_agentic_v3, run_certify_fix_loop
 
     command_id = f"improve.{subcommand}"
+    config = load_config(project_dir / "otto.yaml") if (project_dir / "otto.yaml").exists() else {}
     if resume_state is None:
         resume_state = resolve_resume(project_dir, resume, expected_command=command_id)
     print_resume_status(console, resume_state, resume, expected_command=command_id)
@@ -96,20 +88,17 @@ def _run_improve(
                 "  cd into the existing worktree directly to resume."
             )
             sys.exit(2)
-        from otto.config import load_config as _lc
-        cfg = _lc(project_dir / "otto.yaml") if (project_dir / "otto.yaml").exists() else {}
-        wt_dir = cfg.get("queue", {}).get("worktree_dir", ".worktrees")
         from otto.worktree import (
             WorktreeAlreadyCheckedOut,
-            enter_worktree_for_atomic_command,
+            setup_worktree_for_atomic_cli,
         )
         worktree_slug_source = focus or target or intent
         try:
-            wt_path, _ = enter_worktree_for_atomic_command(
+            wt_path, config = setup_worktree_for_atomic_cli(
                 project_dir=project_dir,
-                worktree_dir=wt_dir,
                 mode=f"improve-{subcommand}",
                 intent=intent,
+                config=config,
                 slug_source=worktree_slug_source,
             )
         except WorktreeAlreadyCheckedOut as exc:
@@ -138,8 +127,6 @@ def _run_improve(
     console.print(f"  Rounds: up to {rounds}")
     console.print()
 
-    config_path = project_dir / "otto.yaml"
-    config = load_config(config_path) if config_path.exists() else {}
     config["max_certify_rounds"] = max(1, rounds)
 
     # Give improve modes a larger wall-clock budget by default, since
@@ -295,7 +282,11 @@ def _run_improve(
 
 def _require_intent(project_dir: Path) -> str:
     """Resolve intent or exit with error."""
-    intent = _resolve_intent(project_dir)
+    from otto.config import resolve_intent
+
+    intent = resolve_intent(project_dir)
+    if intent:
+        console.print("  [dim]Intent from project files[/dim]")
     if not intent:
         error_console.print(
             "[error]No product description found. Create intent.md[/error]"

@@ -27,7 +27,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "queue": {
         "concurrent": 3,            # default --concurrent for `otto queue run`
         "worktree_dir": ".worktrees",   # where per-task worktrees live (relative to project)
-        "on_watcher_restart": "resume", # resume | fail | ask
+        "on_watcher_restart": "resume", # resume | fail
         "cleanup_after_merge": False,   # default: keep worktrees + per-task otto_logs/ for inspection
         "bookkeeping_files": [          # files queue tasks should NOT commit to their branches
             "intent.md",
@@ -114,6 +114,22 @@ def resolve_intent(project_dir: Path) -> str | None:
         if intent:
             return intent
     return None
+
+
+def resolve_intent_for_enqueue(
+    project_dir: Path, *, explicit: str | None = None,
+) -> str | None:
+    """Resolve the intent snapshot stored in queue.yml at enqueue time.
+
+    Explicit CLI input wins when provided and non-empty after trimming.
+    Otherwise read the current project files now so queued tasks retain a
+    stable intent snapshot even if intent.md/README.md changes later.
+    """
+    if explicit is not None:
+        trimmed = explicit.strip()
+        if trimmed:
+            return trimmed
+    return resolve_intent(project_dir)
 
 
 def git_meta_dir(project_dir: Path) -> Path:
@@ -215,8 +231,10 @@ def _queue_value_is_valid(key: str, value: Any) -> bool:
     """Return True when a known queue key has the expected type."""
     if key == "concurrent":
         return isinstance(value, int) and not isinstance(value, bool)
-    if key in {"worktree_dir", "on_watcher_restart"}:
+    if key == "worktree_dir":
         return isinstance(value, str)
+    if key == "on_watcher_restart":
+        return isinstance(value, str) and value in {"resume", "fail"}
     if key == "cleanup_after_merge":
         return isinstance(value, bool)
     if key == "bookkeeping_files":
@@ -411,7 +429,7 @@ def create_config(project_dir: Path) -> Path:
     lines += "# queue:\n"
     lines += "#   concurrent: 3               # default --concurrent for `otto queue run`\n"
     lines += "#   worktree_dir: .worktrees    # where per-task worktrees live\n"
-    lines += "#   on_watcher_restart: resume  # resume | fail | ask — when watcher restarts mid-flight\n"
+    lines += "#   on_watcher_restart: resume  # resume | fail — when watcher restarts mid-flight\n"
     lines += "#   cleanup_after_merge: false  # default false; opt-in via flag or `otto queue cleanup`\n"
     lines += "#   bookkeeping_files:          # files queue tasks should NOT commit to their branches\n"
     lines += "#     - intent.md\n"

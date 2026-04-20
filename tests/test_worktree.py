@@ -12,6 +12,7 @@ from otto.worktree import (
     WorktreeAlreadyCheckedOut,
     add_worktree,
     enter_worktree_for_atomic_command,
+    setup_worktree_for_atomic_cli,
     worktree_path_for,
 )
 
@@ -205,5 +206,23 @@ def test_enter_same_intent_collides_with_clear_error(tmp_path: Path):
         )
         # The second call resolves to the SAME worktree (idempotent same-day re-run)
         assert os.getcwd() == str(wt2)
+    finally:
+        os.chdir(saved_cwd)
+
+
+def test_setup_worktree_for_atomic_cli_reloads_config(tmp_path: Path):
+    repo = _init_repo(tmp_path)
+    (repo / "otto.yaml").write_text("queue:\n  worktree_dir: .custom-trees\n")
+    saved_cwd = os.getcwd()
+    try:
+        wt_path, config = setup_worktree_for_atomic_cli(
+            project_dir=repo,
+            mode="build",
+            intent="add csv export",
+            config={"queue": {"worktree_dir": ".custom-trees"}},
+        )
+        assert wt_path.exists()
+        assert os.getcwd() == str(wt_path)
+        assert config["queue"]["worktree_dir"] == ".custom-trees"
     finally:
         os.chdir(saved_cwd)

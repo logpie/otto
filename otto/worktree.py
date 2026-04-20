@@ -140,3 +140,27 @@ def enter_worktree_for_atomic_command(
     add_worktree(project_dir=project_dir, worktree_path=wt_path, branch=branch)
     os.chdir(wt_path)
     return (wt_path, branch)
+
+
+def setup_worktree_for_atomic_cli(
+    *,
+    project_dir: Path,
+    mode: str,
+    intent: str,
+    config: dict,
+    slug_source: str | None = None,
+) -> tuple[Path, dict]:
+    """Create + enter the standard worktree, then reload config from it."""
+    from otto.config import load_config
+
+    wt_dir = config.get("queue", {}).get("worktree_dir", ".worktrees")
+    wt_path, _ = enter_worktree_for_atomic_command(
+        project_dir=project_dir,
+        worktree_dir=wt_dir,
+        mode=mode,
+        intent=intent,
+        slug_source=slug_source,
+    )
+    config_path = wt_path / "otto.yaml"
+    reloaded_config = load_config(config_path) if config_path.exists() else config
+    return (wt_path, reloaded_config)

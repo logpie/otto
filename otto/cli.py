@@ -517,15 +517,14 @@ def build(intent, no_qa, fast, thorough, split, rounds, resume, spec, spec_file,
             sys.exit(2)
         from otto.worktree import (
             WorktreeAlreadyCheckedOut,
-            enter_worktree_for_atomic_command,
+            setup_worktree_for_atomic_cli,
         )
-        wt_dir = config.get("queue", {}).get("worktree_dir", ".worktrees")
         try:
-            wt_path, _ = enter_worktree_for_atomic_command(
+            wt_path, config = setup_worktree_for_atomic_cli(
                 project_dir=project_dir,
-                worktree_dir=wt_dir,
                 mode="build",
                 intent=intent,
+                config=config,
             )
         except WorktreeAlreadyCheckedOut as exc:
             error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
@@ -537,19 +536,14 @@ def build(intent, no_qa, fast, thorough, split, rounds, resume, spec, spec_file,
         # Re-anchor project_dir to the worktree — the rest of the pipeline
         # operates on this isolated checkout.
         project_dir = wt_path
-        # Re-load config from the worktree (it has its own otto.yaml after
-        # the branch is checked out, but values are identical).
-        config_path = project_dir / "otto.yaml"
-        if config_path.exists():
-            config = load_config(config_path)
-            if no_qa:
-                config["skip_product_qa"] = True
-            if fast:
-                config["_certifier_mode"] = "fast"
-            elif thorough:
-                config["_certifier_mode"] = "thorough"
-            if rounds is not None:
-                config["max_certify_rounds"] = rounds
+        if no_qa:
+            config["skip_product_qa"] = True
+        if fast:
+            config["_certifier_mode"] = "fast"
+        elif thorough:
+            config["_certifier_mode"] = "thorough"
+        if rounds is not None:
+            config["max_certify_rounds"] = rounds
 
     # Branch policy (Phase 1.1): if user is on the default branch, create a
     # build/<slug>-<date> branch and switch. If on any other branch, stay put
@@ -823,3 +817,7 @@ register_history_command(main)
 # Improve commands (registered from otto/cli_improve.py)
 from otto.cli_improve import register_improve_commands
 register_improve_commands(main)
+
+# Queue commands (Phase 2 — registered from otto/cli_queue.py)
+from otto.cli_queue import register_queue_commands
+register_queue_commands(main)
