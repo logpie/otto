@@ -19,3 +19,12 @@ otto.egg-info/
 # Scratch
 qkrem*.md
 summary.json
+
+# Otto runtime (auto-managed; safe to edit comments)
+.otto-queue.yml
+.otto-queue.yml.lock
+.otto-queue.lock
+.otto-queue-state.json
+.otto-queue-commands.jsonl
+.otto-queue-commands.jsonl.lock
+.watcher.log

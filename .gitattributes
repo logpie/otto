@@ -1,0 +1,3 @@
+# otto: bookkeeping merge drivers (do not remove)
+intent.md merge=union
+otto.yaml merge=ours
