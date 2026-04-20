@@ -8,6 +8,8 @@ otto build "bookmark manager" --spec              # preview + approve spec first
 otto certify                                      # verify any project works
 otto improve bugs                                 # find and fix bugs
 otto improve target "latency < 100ms"             # optimize toward a metric
+otto queue build "csv export" && otto queue run   # enqueue + run in parallel worktrees
+otto merge --all                                  # land done branches into main
 ```
 
 ## How it works
@@ -56,6 +58,19 @@ otto improve target "test coverage > 90%"
 ```
 
 Each mode creates an improvement branch, runs up to N rounds, and writes a report with merge instructions.
+
+**`otto queue` + `otto merge`** runs multiple `otto build`/`improve`/`certify` jobs in parallel — each in its own git worktree on its own branch — then lands the successful ones back into the target branch.
+
+```bash
+otto queue build "csv export"               # enqueue
+otto queue build "settings redesign"        # enqueue another (parallel-safe)
+otto queue improve bugs --rounds 3          # enqueue an improve run
+otto queue run --concurrent 3               # foreground watcher dispatches up to 3 at a time
+
+otto merge --all                            # land all done tasks into main
+```
+
+The watcher spawns each task in `.worktrees/<task-id>/` so they can build, test, and commit in isolation. `otto merge` does Python-driven `git merge --no-ff`; if a merge conflicts, an LLM conflict-resolution agent is invoked (clean merges burn $0). After all branches land, a triage agent emits a verification plan and the certifier re-runs the must-verify subset.
 
 ## Why Otto
 
@@ -272,6 +287,60 @@ otto improve target "lighthouse score > 95" -n 10    # up to 10 rounds (default:
 otto improve target "latency < 50ms" --resume         # resume interrupted run
 ```
 
+### `otto queue`
+
+Schedule multiple `otto build` / `improve` / `certify` runs as parallel tasks. Each task gets its own git worktree under `.worktrees/<task-id>/` and its own branch (e.g. `build/csv-export-2026-04-20`), so tasks can't stomp on each other's commits.
+
+```bash
+otto queue build "add csv export"            # enqueue (auto-slugs id from intent)
+otto queue build "settings redesign" --as redesign --after csv-export   # depends on csv-export
+otto queue improve bugs --rounds 3            # enqueue an improve run
+otto queue certify --thorough                 # enqueue a certify run
+
+otto queue ls                                 # show all tasks + status
+otto queue show csv-export                    # full details for one task
+otto queue rm csv-export                      # remove a queued task
+otto queue cancel csv-export                  # SIGTERM a running task
+
+otto queue run --concurrent 3                 # start foreground watcher (process up to 3 at a time)
+otto queue cleanup --done                     # remove worktrees of done tasks
+```
+
+The watcher (`otto queue run`) is a foreground process — run it in a tmux pane like a dev server. It picks tasks off `.otto-queue.yml`, spawns one `otto` subprocess per task into the worktree, and reaps results into per-task manifests. It exits cleanly on SIGINT and supports `on_watcher_restart: resume` (default) or `fail` via `otto.yaml`.
+
+| Flag | What it does |
+|---|---|
+| `--concurrent N` / `-j N` | Max concurrent tasks (default from `queue.concurrent`, fallback 3) |
+| `--quiet` | Suppress watcher event lines on stdout |
+
+### `otto merge`
+
+Land queued / built branches into the target branch. Uses Python-driven `git merge --no-ff`; only invokes the LLM conflict-resolution agent when git can't auto-merge — clean merges burn $0.
+
+```bash
+otto merge --all                              # merge all done queue tasks into target
+otto merge build/csv-export build/redesign    # explicit branches
+otto merge --all --target develop             # target other than default_branch
+otto merge --all --no-certify                 # skip post-merge story verification
+otto merge --all --fast                       # pure git merge, bail on first conflict (no LLM)
+otto merge --all --cleanup-on-success         # remove worktrees after successful merge
+```
+
+After all branches are merged, a triage agent computes a verification plan (which stories must be re-run vs. skipped vs. flagged for human review), and the certifier runs the must-verify subset against the post-merge tree. Use `--no-certify` to skip this; `--full-verify` to verify the full union.
+
+| Flag | What it does |
+|---|---|
+| `--all` | Merge all done queue tasks |
+| `--target BRANCH` | Target branch (default from `default_branch` in `otto.yaml`) |
+| `--fast` | Pure git merge; bail on first conflict (no LLM agent) |
+| `--no-certify` | Skip post-merge story verification |
+| `--full-verify` | Verify all stories (no skip-likely-safe optimization) |
+| `--cleanup-on-success` | Remove worktrees of merged tasks after successful merge |
+
+**Conflict resolution.** When `git` can't auto-merge, otto invokes a per-conflict LLM agent (default sequential mode) that resolves conflict markers with full project context. An opt-in **consolidated** mode (set `queue.merge_mode: consolidated` in `otto.yaml`) instead commits all marker-laden merges first, then runs ONE agent session to resolve everything globally — measured ~2× faster on multi-branch conflicts in benchmarks, but with a smaller safety net (no per-branch retry).
+
+**Resume after manual fix.** If a merge conflict requires manual intervention, fix it, run `git merge --continue`, then run a fresh `otto merge` for any remaining branches. (`--resume` is on the roadmap but not yet implemented — the flag prints a deferred-message and exits non-zero.)
+
 ### `otto history`
 
 Show build history with results, cost, and duration.
@@ -310,6 +379,17 @@ certifier_mode: fast                   # fast | standard | thorough
                                        # set this to `standard` or `thorough` for real QA
 max_certify_rounds: 8                  # max certify→fix attempts before giving up
 spec_timeout: 600                      # cap on the spec-agent call specifically
+
+# Queue + merge (otto queue / otto merge)
+queue:
+  concurrent: 3                        # default --concurrent for `otto queue run`
+  worktree_dir: .worktrees             # where per-task worktrees live (relative to project)
+  on_watcher_restart: resume           # resume | fail — when watcher restarts mid-flight
+  task_timeout_s: 1800                 # SIGTERM a queue task after N seconds (null disables)
+  merge_mode: sequential               # sequential (default) | consolidated (opt-in agent-mode)
+  bookkeeping_files:                   # files queue tasks should NOT commit to their branches
+    - intent.md
+    - otto.yaml
 ```
 
 ### Timeout semantics
@@ -399,6 +479,27 @@ otto build --resume              # picks up from the last checkpoint phase
                                  # (spec / spec_review / spec_approved / build / certify / round_complete)
 ```
 
+### Parallel features (queue + merge)
+
+Run several `otto build` jobs concurrently in their own worktrees, then land the successful ones together:
+
+```bash
+# 1. Enqueue (each gets its own .worktrees/<id>/ and build/<id>-<date> branch)
+otto queue build "csv export"
+otto queue build "settings redesign"
+otto queue improve bugs --rounds 3
+
+# 2. Run the watcher in a tmux pane (foreground)
+otto queue run --concurrent 3
+
+# 3. After tasks finish (`otto queue ls` shows status=done), land them
+otto merge --all --cleanup-on-success
+```
+
+The watcher commits artifacts to per-task branches and writes manifests to `otto_logs/queue/<task-id>/`. `otto merge` runs `git merge --no-ff` against the target branch; the LLM conflict agent is only invoked when git can't auto-merge. Use `--fast` for a pure-git merge that bails on the first conflict.
+
+For higher-throughput multi-branch conflict resolution, opt into the **consolidated agent mode** by setting `queue.merge_mode: consolidated` in `otto.yaml`. The orchestrator will commit all marker-laden merges first and then run a single agent session to resolve everything globally — cheaper and faster on dense conflicts, but with no per-branch retry safety net.
+
 ## Logs
 
 ```
@@ -416,28 +517,56 @@ otto_logs/
     proof-of-work.html       Report with embedded screenshots
     proof-of-work.json       Machine-readable results
     evidence/                Screenshots, video recordings
+  queue/<task-id>/
+    manifest.json            Final task manifest (status, cost, branch, paths)
+  merge/
+    merge.log                Orchestrator + conflict-agent + triage-agent events
+    <merge-id>/state.json    Per-merge state with branch outcomes + verification plan
   run-history.jsonl          One line per build (for otto history)
 build-journal.md             Round-by-round tracking (improve mode)
 improvement-report.md        Final improve summary with merge instructions
+
+# Queue bookkeeping (gitignored)
+.otto-queue.yml              Pending/queued tasks (the queue file itself)
+.otto-queue-state.json       Watcher state (per-task status, child PIDs)
+.otto-queue-commands.jsonl   Pending commands (rm/cancel) for the watcher
+.worktrees/<task-id>/        Per-task git worktree
 ```
+
+Otto auto-manages `.gitignore` on first touch — the runtime files above (queue bookkeeping, `.worktrees/`, `otto_logs/`) are added so they don't accidentally get committed. Common build artifacts (`__pycache__/`, `node_modules/`, `.pytest_cache/`, `dist/`, etc.) are also added so the merge orchestrator's "no new untracked files" check doesn't bail when the conflict agent runs project tests.
 
 ## Project structure
 
 ```
-otto/                        ~5,400 lines
-  pipeline.py               Build pipeline, certify-fix loop
-  certifier/__init__.py     Certifier agent
-  spec.py                   Spec-gate: run_spec_agent, review_spec, validate_spec
-  budget.py                 RunBudget — wall-clock budget tracker
-  checkpoint.py             Resume state, phase tracking, atomic writes
-  markers.py                Parse STORY_RESULT/VERDICT/METRIC from agent output
-  prompts/                  Editable prompts (spec, build, certifier modes, code, improve)
-  agent.py                  Agent SDK wrapper, AgentCallError, session_id preservation
-  cli.py                    CLI: build, certify (+ spec orchestration)
-  cli_improve.py            CLI: improve (bugs, feature, target)
-  config.py                 Config, intent resolution, helpers
-  journal.py                Build journal for improve rounds
-tests/                       158 tests
+otto/                        ~11,000 lines
+  pipeline.py                Build pipeline, certify-fix loop
+  certifier/__init__.py      Certifier agent
+  spec.py                    Spec-gate: run_spec_agent, review_spec, validate_spec
+  budget.py                  RunBudget — wall-clock budget tracker
+  checkpoint.py              Resume state, phase tracking, atomic writes
+  markers.py                 Parse STORY_RESULT/VERDICT/METRIC from agent output
+  prompts/                   Editable prompts (spec, build, certifier modes, code, improve, merger-conflict)
+  agent.py                   Agent SDK wrapper, AgentCallError, session_id preservation
+  cli.py                     CLI: build, certify (+ spec orchestration)
+  cli_improve.py             CLI: improve (bugs, feature, target)
+  cli_queue.py               CLI: queue (build, improve, certify, run, ls, show, rm, cancel, cleanup)
+  cli_merge.py               CLI: merge
+  config.py                  Config, intent resolution, helpers
+  journal.py                 Build journal for improve rounds
+  setup_gitignore.py         Auto-manages .gitignore for runtime + build artifacts
+  queue/                     Parallel queue subsystem
+    schema.py                .otto-queue.yml + .otto-queue-state.json read/write
+    runner.py                Foreground watcher (spawn / reap / cancel / timeout)
+    ids.py                   Slug + branch + worktree-path generation
+  merge/                     Multi-branch merge subsystem
+    orchestrator.py          Sequential and consolidated agent-mode merge drivers
+    git_ops.py               Thin git wrappers (merge_no_ff, conflicted_files, …)
+    conflict_agent.py        Per-conflict + consolidated LLM resolvers
+    triage_agent.py          Post-merge verification-plan generator
+    stories.py               Collect stories from merged branches
+    state.py                 BranchOutcome + per-merge state.json
+tests/                       420 tests, ~6,700 lines
+  _helpers.py                Shared init_repo factory used across test files
 ```
 
 ## Requirements

@@ -2,8 +2,9 @@
 
 ## Overview
 
-Otto is ~4,300 lines of Python. It builds, certifies, and improves software
-products using LLM agents.
+Otto is ~11,000 lines of Python. It builds, certifies, and improves software
+products using LLM agents — and runs many such jobs in parallel via a queue +
+merge subsystem.
 
 ```
 otto build "bookmark manager"          # build + certify + fix
@@ -11,7 +12,21 @@ otto certify                           # standalone verification
 otto improve bugs                      # find and fix bugs
 otto improve feature "search UX"       # suggest and implement improvements
 otto improve target "latency < 100ms"  # optimize toward a metric
+otto queue build/improve/certify ...   # enqueue parallel tasks (each in own worktree)
+otto queue run                         # foreground watcher, dispatches up to N at a time
+otto merge --all                       # land done branches into target (with conflict agent + post-merge certify)
 ```
+
+Two subsystems built on top of the core build/certify/improve flows:
+
+- **Queue** (`otto/queue/`): persistent, file-backed task list (`.otto-queue.yml`)
+  + foreground watcher that spawns one `otto` subprocess per task into its own
+  git worktree on its own branch. Crash-safe via PID-reuse-safe child tracking.
+- **Merge** (`otto/merge/`): Python-driven `git merge --no-ff` orchestrator.
+  Clean merges burn $0 (no LLM). Conflicts invoke an LLM resolver (sequential
+  per-branch by default; opt-in consolidated mode resolves all conflicts in
+  one agent session). After merging, a triage agent emits a verification
+  plan and the certifier re-runs the must-verify subset.
 
 ## System Diagram
 
@@ -134,6 +149,147 @@ otto improve bugs "error handling" -n 5
      Agent IS the memory (single session, auto-compact)
 ```
 
+## Queue Subsystem
+
+```
+                         ┌────────────────────┐
+        otto queue build │   otto queue ls    │  otto queue rm
+        otto queue improve│   otto queue show  │  otto queue cancel
+        otto queue certify│                    │  otto queue cleanup
+                         └─────────┬──────────┘
+                                   │  (CLI commands write to file)
+                                   ▼
+              ┌────────────────────────────────────┐
+              │  .otto-queue.yml         (queue)   │
+              │  .otto-queue-state.json  (state)   │
+              │  .otto-queue-commands.jsonl (cmds) │
+              └────────┬───────────────────────────┘
+                       │  (read by watcher every poll)
+                       ▼
+              ┌─────────────────────────┐
+              │  otto queue run         │  ← foreground process (tmux pane)
+              │  Runner._tick():        │
+              │    drain_commands()     │
+              │    load_queue()         │
+              │    apply_command(...)   │
+              │    enforce_timeouts()   │
+              │    reap_children()      │
+              │    dispatch_new()       │
+              └────────┬────────────────┘
+                       │  (Popen with PGID for safe cleanup)
+              ┌────────▼─────────────────────────────────────┐
+              │  Spawned otto subprocesses (concurrent ≤ N)  │
+              │                                              │
+              │  .worktrees/csv-export/    build/csv-...     │
+              │  .worktrees/redesign/      build/redesign... │
+              │  .worktrees/improve-bugs/  improve/...       │
+              │                                              │
+              │  Each writes:                                │
+              │    otto_logs/builds/<id>/...                 │
+              │    otto_logs/queue/<task-id>/manifest.json   │
+              └──────────────────────────────────────────────┘
+```
+
+**Key invariants:**
+
+- `.otto-queue.yml` is the only source of truth for what's enqueued.
+  `state.json` tracks per-task status and child metadata (pid, pgid,
+  start_time_ns, argv, cwd) so PID-reuse can't cause us to signal an
+  unrelated process.
+- Commands (`rm`, `cancel`) go through `.otto-queue-commands.jsonl` rather
+  than mutating state directly — the watcher is the single writer.
+- Each task gets its own git worktree at `.worktrees/<task-id>/` and its own
+  branch (`build/<slug>-<date>` or `improve/...`). Bookkeeping files
+  (`intent.md`, `otto.yaml`) are NOT committed to task branches —
+  they're shared project state, not per-task work.
+- Per-task wall-clock timeout (`queue.task_timeout_s`, default 1800s)
+  SIGTERMs hung children so they free their concurrency slot.
+- On watcher restart, in-flight tasks are either resumed (default,
+  `on_watcher_restart: resume`) by reconciling state.json against live PIDs
+  or marked failed (`fail`).
+
+## Merge Subsystem
+
+```
+                  otto merge --all        otto merge build/x build/y
+                  otto merge --target     otto merge --fast / --no-certify
+                                ▼
+                    ┌──────────────────────┐
+                    │ orchestrator.run_merge│
+                    └──────────┬───────────┘
+                               │
+                ┌──────────────┴──────────────┐
+                ▼                              ▼
+     ┌─────────────────────┐       ┌─────────────────────────────────┐
+     │ Sequential (default)│       │ Consolidated (opt-in)           │
+     │                     │       │ queue.merge_mode: consolidated  │
+     │ for each branch:    │       │                                 │
+     │   git merge --no-ff │       │ Phase 1: sequential merges,     │
+     │   if conflict:      │       │   commit marker-laden files     │
+     │     conflict_agent. │       │   (capture pre-commit diff per  │
+     │     resolve_one(    │       │    branch for agent context)    │
+     │       branch       )│       │                                 │
+     │     validate +     │       │ Phase 2: ONE agent session       │
+     │     stage + commit  │       │   resolves all conflicts        │
+     │                     │       │   globally, runs project tests  │
+     │   2 retries on      │       │                                 │
+     │   validation fail   │       │ Single final validation:        │
+     │                     │       │   no out-of-scope edits,        │
+     │                     │       │   HEAD unchanged, no leftover   │
+     │                     │       │   markers (content scan)        │
+     │                     │       │                                 │
+     │                     │       │ NO retry — agent self-corrects  │
+     │                     │       │ within its session, or merge    │
+     │                     │       │ bails (user resolves manually)  │
+     └─────────┬───────────┘       └────────────┬────────────────────┘
+               └──────────────┬─────────────────┘
+                              ▼
+                  ┌─────────────────────────┐
+                  │ collect_stories_from_   │
+                  │ branches (per task)     │
+                  └────────┬────────────────┘
+                           ▼
+                  ┌─────────────────────────┐
+                  │ triage_agent: emit      │
+                  │ verification plan       │
+                  │   must_verify           │
+                  │   skip_likely_safe      │
+                  │   flag_for_human        │
+                  └────────┬────────────────┘
+                           ▼
+                  ┌─────────────────────────┐
+                  │ certifier (must_verify  │
+                  │ subset, post-merge tree)│
+                  └─────────────────────────┘
+```
+
+**Validation guarantees** (`conflict_agent.validate_post_agent`):
+
+1. Out-of-scope edits — `post_diff − pre_diff ⊆ expected_uu_files`
+2. No new untracked files (build artifacts caught here; otto's
+   `setup_gitignore.py` adds common patterns to keep this from tripping)
+3. No conflict markers remain — `git diff --check` for the sequential
+   path; direct content scan of `expected_uu_files` for the consolidated
+   path (markers may live in committed files where `diff --check` is blind)
+4. HEAD unchanged (agent didn't `commit` or `reset`)
+
+**Branch outcome statuses** (`merge/state.py`):
+
+| Status | Meaning |
+|---|---|
+| `merged` | Clean `git merge --no-ff` |
+| `merged_with_markers` | Marker-laden merge commit (consolidated mode phase 1) |
+| `conflict_resolved` | Agent resolved a conflict and committed the resolution |
+| `agent_giveup` | Agent failed validation after retries (or post-stage git failure) |
+| `skipped` | Skipped per orchestrator policy |
+| `pending` | Pre-flight state; should never appear in final state |
+
+**Bash sandbox.** The sequential conflict agent has `disallowed_tools=["Bash"]`
+to prevent shell escape (the orchestrator owns `git`). The consolidated agent
+ALLOWS Bash — it can run project tests to self-verify — and is checked
+post-hoc by HEAD-unchanged + out-of-scope-edit validation. Codex provider is
+rejected for conflict resolution (it ignores `disallowed_tools`).
+
 ## Certifier Modes
 
 ```
@@ -217,22 +373,44 @@ otto/prompts/
   certifier-thorough.md     Adversarial (edge cases, code review)
   certifier-hillclimb.md    Product improvements (missing features, UX)
   certifier-target.md       Metric measurement (METRIC_VALUE/METRIC_MET)
+  spec-light.md             Spec-gate generator (run_spec_agent)
+  merger-conflict.md        Per-conflict resolver (sequential merge mode)
+  merger-conflict-agentic.md   Consolidated agent-mode resolver
+  merger-triage.md          Post-merge verification-plan generator
 ```
 
 ## Key Modules
 
-| Module | Lines | Purpose |
-|--------|------:|---------|
-| `pipeline.py` | 919 | `build_agentic_v3`, `run_certify_fix_loop`, PoW reports |
-| `agent.py` | 596 | SDK abstraction, `run_agent_with_timeout`, provider switching |
-| `cli_improve.py` | 380 | `improve` command group (bugs/feature/target), exit-code wiring |
-| `certifier/__init__.py` | 350 | Standalone certifier, PoW generation, target-mode gate |
-| `config.py` | 334 | Config loading, auto-detection, helpers |
-| `cli.py` | 283 | `build`, `certify` commands |
-| `journal.py` | 245 | Build journal: round tracking, current state |
-| `markers.py` | 237 | Parse STORY_RESULT/VERDICT/METRIC_MET from agent output |
-| `checkpoint.py` | 233 | Atomic checkpoint read/write/clear, `resolve_resume`, `ResumeState` |
-| `memory.py` | 161 | Cross-run certifier memory (opt-in) |
+Run `find otto/ -name "*.py" -not -path "*__pycache__*" | xargs wc -l | sort -rn | head -20` for current LOC; the list below is a stable inventory by purpose, not a leaderboard.
+
+| Module | Purpose |
+|--------|---------|
+| `pipeline.py` | `build_agentic_v3`, `run_certify_fix_loop`, PoW reports |
+| `agent.py` | SDK abstraction, `run_agent_with_timeout`, provider switching |
+| `cli.py` | `build`, `certify` commands |
+| `cli_improve.py` | `improve` command group (bugs/feature/target), exit-code wiring |
+| `cli_queue.py` | `queue` command group (build, improve, certify, run, ls, show, rm, cancel, cleanup) |
+| `cli_merge.py` | `merge` command (and per-merge logging setup) |
+| `certifier/__init__.py` | Standalone certifier, PoW generation, target-mode gate |
+| `config.py` | Config loading, queue-section validation, auto-detection |
+| `journal.py` | Build journal: round tracking, current state |
+| `markers.py` | Parse STORY_RESULT/VERDICT/METRIC_MET from agent output |
+| `checkpoint.py` | Atomic checkpoint read/write/clear, `resolve_resume`, `ResumeState` |
+| `memory.py` | Cross-run certifier memory (opt-in) |
+| `setup_gitignore.py` | Auto-managed `.gitignore` (queue runtime + common build artifacts) |
+| `setup_gitattributes.py` | Auto-managed `.gitattributes` (merge=union for `intent.md`, merge=ours for `otto.yaml`) |
+| `manifest.py` | Per-run manifest contract (queue or atomic mode) |
+| `branching.py` | Slug + branch-name policy; `ensure_branch_for_atomic_command` |
+| `worktree.py` | `git worktree add/remove` wrappers used by the queue runner |
+| `queue/schema.py` | `.otto-queue.yml` + `state.json` + commands.jsonl read/write (atomic) |
+| `queue/runner.py` | Foreground watcher: spawn / reap / cancel / timeout / lock |
+| `queue/ids.py` | Slug-to-id rules, branch + worktree path generation |
+| `merge/orchestrator.py` | `run_merge`, sequential and consolidated drivers, post-merge verification |
+| `merge/git_ops.py` | Thin git wrappers — `merge_no_ff`, `conflicted_files`, `diff_check`, … |
+| `merge/conflict_agent.py` | Per-conflict and consolidated LLM resolvers + `validate_post_agent` |
+| `merge/triage_agent.py` | Post-merge verification-plan generator (must_verify / skip / flag) |
+| `merge/stories.py` | Collect stories from merged branches (queue manifests + build manifests) |
+| `merge/state.py` | `BranchOutcome`, per-merge `state.json`, status `Literal` |
 
 ## Error Handling
 
@@ -277,6 +455,11 @@ CI wrappers can detect when the run didn't reach its goal.
 | Build history? | `otto history` or `run-history.jsonl` |
 | Improve progress? | `build-journal.md`, `checkpoint.json` |
 | Cost? | `checkpoint.json` → `total_cost` |
+| Queue task status? | `otto queue ls` / `otto queue show <id>` / `.otto-queue-state.json` |
+| Why didn't a queue task start? | `otto_logs/queue/watcher.log` + watcher stdout (spawn / reap / timeout / cancel events) |
+| Per-task manifest? | `otto_logs/queue/<task-id>/manifest.json` |
+| Merge orchestrator events? | `otto_logs/merge/merge.log` |
+| Per-merge state + outcomes? | `otto_logs/merge/<merge-id>/state.json` |
 
 ## Data Flow
 
