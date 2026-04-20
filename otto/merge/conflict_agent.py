@@ -152,6 +152,30 @@ def restore_conflict_files(
             path.unlink(missing_ok=True)
 
 
+def _files_with_markers(project_dir: Path, files: list[str] | set[str]) -> list[str]:
+    """Return the subset of `files` that still contain conflict markers.
+
+    Used by the consolidated path: markers may live in committed files
+    (where `git diff --check` is blind), so we scan content directly.
+    Any column-zero conflict marker line is suspicious in a file that was
+    previously unmerged, including partial or mangled marker triplets.
+    """
+    out: list[str] = []
+    for rel in files:
+        p = project_dir / rel
+        if not p.exists():
+            continue
+        try:
+            with p.open("r", errors="replace") as fh:
+                for line in fh:
+                    if line.startswith(("<<<<<<<", "=======", ">>>>>>>")):
+                        out.append(rel)
+                        break
+        except OSError:
+            continue
+    return sorted(out)
+
+
 def validate_post_agent(
     *,
     project_dir: Path,
@@ -159,18 +183,22 @@ def validate_post_agent(
     expected_uu_files: set[str],
     pre_untracked_files: set[str],
     pre_head: str,
+    scan_files_for_markers: bool = False,
 ) -> tuple[bool, str | None]:
     """Validate orchestrator-side after the agent returns.
 
-    Returns (ok, error_message). Sequence (per Codex round-3 fix):
-    1. Path scope: post_diff - pre_diff must ⊆ expected_uu_files
-       (auto-merged files were in pre_diff so don't count as agent edits)
-    2. No new untracked files were created
-    3. `git diff --check` passes
+    Returns (ok, error_message). Checks:
+    1. Out-of-scope edits — `post_diff - pre_diff` must ⊆ `expected_uu_files`
+    2. No new untracked files
+    3. No conflict markers remain — `git diff --check` for the sequential
+       path; direct content scan of `expected_uu_files` for the consolidated
+       path (markers may live in committed files where `diff --check` is
+       blind). Set `scan_files_for_markers=True` for the consolidated path.
     4. HEAD unchanged
 
-    NOTE: staging happens AFTER this validation. If we fail before staging,
-    the index is still unmerged and retry can restore worktree only.
+    Staging happens AFTER this validation. On failure the index is still
+    unmerged and retry can restore the worktree only (sequential path); the
+    consolidated path has no retry.
     """
     post_diff_files = set(git_ops.changed_files(project_dir))
     delta = post_diff_files - pre_diff_files
@@ -179,17 +207,19 @@ def validate_post_agent(
         return (False, f"agent edited files outside conflict set: {sorted(out_of_scope)!r}")
     new_untracked = set(git_ops.untracked_files(project_dir)) - pre_untracked_files
     if new_untracked:
-        # F14: typically build artifacts from agent test runs (__pycache__/,
-        # node_modules/, etc.). Otto's setup_gitignore adds common patterns
-        # but the user's repo may pre-date the upgrade or have gitignore
-        # gaps. Surface the actionable advice in the error.
+        # Build artifacts from agent test runs (__pycache__/, node_modules/,
+        # etc.) typically trip this. Otto's setup_gitignore adds common
+        # patterns; older project gitignore files may not.
         return (False, (
             f"agent created untracked files: {sorted(new_untracked)!r}. "
             f"These are likely build artifacts from running tests (e.g. "
             f"__pycache__/, node_modules/, dist/). Add them to .gitignore "
-            f"and re-run the merge. See otto/setup_gitignore.py for the "
-            f"common patterns Otto auto-installs."
+            f"and re-run the merge."
         ))
+    if scan_files_for_markers:
+        leftover = _files_with_markers(project_dir, expected_uu_files)
+        if leftover:
+            return (False, f"conflict markers still in files: {leftover!r}")
     dc = git_ops.diff_check(project_dir)
     if not dc.ok:
         return (False, f"git diff --check failed: {dc.stdout.strip()}\n{dc.stderr.strip()}")
@@ -241,18 +271,9 @@ async def resolve_one_conflict(
     for attempt in range(MAX_AGENT_RETRIES + 1):
         prompt = render_conflict_prompt(ctx)
         options = make_agent_options(project_dir, config)
-        # Disallow Bash entirely — agent must use Edit/Write/MultiEdit only.
-        # This blocks any shell-out, including `git`.
-        #
-        # F12 note: we previously also disallowed `Write`, forcing Edit/MultiEdit.
-        # Measured in P6 rerun: that change made conflict resolution 2-3× SLOWER
-        # ($7.80 + $11.42 vs $2.41 baseline) because the agent did multiple
-        # plan→edit→verify cycles, each triggering its own extended-thinking
-        # phase. Reverted; drift prevention is now handled post-agent by
-        # `validate_post_agent` (checks no out-of-scope files were modified
-        # and HEAD unchanged). Write on a conflict file can still reformat
-        # the file — but the orchestrator catches out-of-scope drift via the
-        # delta-files check.
+        # Disallow Bash so the agent can't run `git` and bypass the
+        # orchestrator's commit/HEAD discipline. Edit/Write/MultiEdit OK;
+        # `validate_post_agent` catches any out-of-scope drift.
         options.disallowed_tools = list(set((options.disallowed_tools or []) + ["Bash"]))
         timeout = budget.for_call() if budget is not None else None
 
@@ -305,28 +326,16 @@ async def resolve_one_conflict(
     )
 
 
-# ════════════════════════════════════════════════════════════════════════
-# Agent-mode consolidated resolver (F13)
-# ════════════════════════════════════════════════════════════════════════
+# ----------------------------------------------------------------------
+# Consolidated agent-mode resolver — opt-in via queue.merge_mode = "consolidated"
+# ----------------------------------------------------------------------
 #
-# Design rationale (audit-grounded — see e2e-findings.md F12):
-# - Single agent session for ALL conflicts across all branches (not per-branch)
-# - Bash allowed → agent can run project tests to verify merged code WORKS
-# - No retry loop in Python — agent self-corrects within its session
-# - Single final orchestrator validation (HEAD unchanged + no out-of-scope edits)
-#
-# Why: per-branch agent calls + Python retry loops + Edit-only patching
-# (F12) all measured SLOWER than single-call Write-allowed (revert).
-# This is the next-level architectural change: matches `otto build`'s
-# agent-mode philosophy. Agent gets full context, full tools, full trust.
-#
-# Caveats:
-# - Allows Bash → agent could run destructive git/shell commands.
-#   Mitigation: HEAD-unchanged check catches reset/commit; out-of-scope
-#   edit check catches `rm` outside conflict files. Same guards otto/build
-#   relies on, plus stricter (HEAD must NOT change).
-# - No retry safety net → if agent stops with markers remaining, merge
-#   bails. User must manually fix or re-invoke.
+# Single agent session resolves all conflicts across all branches at once.
+# Full tool access (no Bash restriction) so the agent can run project tests
+# to self-verify. No Python retry loop — orchestrator does ONE final
+# validation (out-of-scope edits caught, HEAD-unchanged enforced, marker
+# scan in `expected_uu_files`). On validation failure the merge bails;
+# user resolves manually or re-invokes.
 
 def render_consolidated_prompt(ctx: ConsolidatedConflictContext) -> str:
     """Render the consolidated agent-mode prompt."""
@@ -413,12 +422,15 @@ async def resolve_all_conflicts(
 
     # Single final validation. No retry-from-snapshot (the whole point of
     # agent mode is that the agent self-corrects within its session).
+    # scan_files_for_markers=True because the consolidated path commits
+    # markers into HEAD, where `git diff --check` can't see them.
     ok, err = validate_post_agent(
         project_dir=project_dir,
         pre_diff_files=pre_diff_files,
         expected_uu_files=expected_uu_files,
         pre_untracked_files=pre_untracked_files,
         pre_head=pre_head,
+        scan_files_for_markers=True,
     )
     if ok:
         return ConflictResolutionAttempt(

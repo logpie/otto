@@ -87,7 +87,10 @@ def load_queue(project_dir: Path) -> list[QueueTask]:
     path = queue_path(project_dir)
     if not path.exists():
         return []
-    raw = yaml.safe_load(path.read_text()) or {}
+    try:
+        raw = yaml.safe_load(path.read_text()) or {}
+    except yaml.YAMLError as exc:
+        raise ValueError(f"queue.yml is malformed: {exc}") from exc
     if not isinstance(raw, dict):
         raise ValueError(f"{path}: expected mapping, got {type(raw).__name__}")
     if raw.get("schema_version") != QUEUE_SCHEMA_VERSION:

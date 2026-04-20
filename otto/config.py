@@ -28,7 +28,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "concurrent": 3,            # default --concurrent for `otto queue run`
         "worktree_dir": ".worktrees",   # where per-task worktrees live (relative to project)
         "on_watcher_restart": "resume", # resume | fail
-        "cleanup_after_merge": False,   # default: keep worktrees + per-task otto_logs/ for inspection
         "bookkeeping_files": [          # files queue tasks should NOT commit to their branches
             "intent.md",
             "otto.yaml",
@@ -235,8 +234,6 @@ def _queue_value_is_valid(key: str, value: Any) -> bool:
         return isinstance(value, str)
     if key == "on_watcher_restart":
         return isinstance(value, str) and value in {"resume", "fail"}
-    if key == "cleanup_after_merge":
-        return isinstance(value, bool)
     if key == "bookkeeping_files":
         return isinstance(value, list) and all(isinstance(item, str) for item in value)
     return True
@@ -526,7 +523,6 @@ def create_config(project_dir: Path) -> Path:
     lines += "#   concurrent: 3               # default --concurrent for `otto queue run`\n"
     lines += "#   worktree_dir: .worktrees    # where per-task worktrees live\n"
     lines += "#   on_watcher_restart: resume  # resume | fail — when watcher restarts mid-flight\n"
-    lines += "#   cleanup_after_merge: false  # default false; opt-in via flag or `otto queue cleanup`\n"
     lines += "#   bookkeeping_files:          # files queue tasks should NOT commit to their branches\n"
     lines += "#     - intent.md\n"
     lines += "#     - otto.yaml\n"

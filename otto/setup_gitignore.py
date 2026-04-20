@@ -57,7 +57,7 @@ OTTO_HEADER = "# Otto runtime (auto-managed; safe to edit comments)"
 # would want gitignored. Otto adds these so the merge orchestrator's
 # "no new untracked files" validator doesn't bail when the conflict agent
 # runs project tests (e.g. pytest creates __pycache__/, npm test creates
-# node_modules/.cache, etc.). See F14 in e2e-findings.md.
+# node_modules/.cache, etc.).
 COMMON_BUILD_ARTIFACT_PATTERNS: tuple[str, ...] = (
     # Python
     "__pycache__/",

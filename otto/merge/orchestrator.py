@@ -77,7 +77,8 @@ def _resolve_branches(
         from otto.queue.schema import load_queue
         try:
             tasks = load_queue(project_dir)
-        except Exception:
+        except (OSError, ValueError) as exc:
+            logger.warning("could not load queue.yml for explicit-id resolution: %s", exc)
             tasks = []
         by_id = {t.id: t for t in tasks}
         for item in explicit_ids_or_branches:
@@ -94,7 +95,8 @@ def _resolve_branches(
         try:
             tasks = load_queue(project_dir)
             state = load_state(project_dir)
-        except Exception:
+        except (OSError, ValueError) as exc:
+            logger.warning("could not load queue state for --all resolution: %s", exc)
             tasks = []
             state = {"tasks": {}}
         done_ids = {
@@ -107,9 +109,9 @@ def _resolve_branches(
                 lookup[t.branch] = t.id
 
     if not branches:
-        # F9: surface the failed-but-has-branch case so the user knows what
-        # they can salvage. Real-world improves often "fail" cert in 1 round
-        # but their branch still has useful commits.
+        # If --all found no done tasks but failed/queued tasks have branches
+        # with commits, list them in the error so the user can salvage via
+        # explicit-branch merge instead of seeing a generic "no branches".
         if all_done_queue_tasks:
             non_done_with_branch = [
                 (tid, ts.get("status"), t.branch)
@@ -211,9 +213,9 @@ async def run_merge(
 
     logger.info("merge %s starting: target=%s, branches=%s", merge_id, options.target, branches)
 
-    # F13 (agent-mode consolidated): if config says so, take a different path.
-    # Sequential merges committing markers, then ONE agent call across the
-    # whole picture. See orchestrator._run_consolidated_agentic_merge.
+    # Opt-in: queue.merge_mode = "consolidated" routes to the agent-mode
+    # path (sequential git merges + commits with markers, then one agent
+    # call resolves all markers globally). Default sequential mode below.
     use_consolidated = (
         not options.fast
         and bool((config.get("queue") or {}).get("merge_mode") == "consolidated")
@@ -522,9 +524,9 @@ async def _run_post_merge_verification(
     )
 
 
-# ════════════════════════════════════════════════════════════════════════
-# F13: Agent-mode consolidated merge
-# ════════════════════════════════════════════════════════════════════════
+# ----------------------------------------------------------------------
+# Consolidated agent-mode merge — opt-in via queue.merge_mode = "consolidated"
+# ----------------------------------------------------------------------
 
 async def _run_consolidated_agentic_merge(
     *,
@@ -560,13 +562,17 @@ async def _run_consolidated_agentic_merge(
     from otto.merge.conflict_agent import (
         ConsolidatedConflictContext,
         resolve_all_conflicts,
-        snapshot_conflict_files,
     )
-    logger.info("merge %s: consolidated agent-mode (branches=%s)", merge_id, branches)
+    logger.info("consolidated agent-mode merge of %d branches", len(branches))
 
-    # Phase 1: sequential merges, accept conflicts by committing markers
+    # Phase 1: sequential merges. Conflicts get staged as marker-laden
+    # commits so the loop can continue to the next branch (we resolve them
+    # all in phase 2). We collect the per-branch conflict diffs BEFORE
+    # committing the markers, because `git diff HEAD` against an
+    # already-committed marker file returns empty.
     accumulated_conflict_files: list[str] = []
-    for index, branch in enumerate(branches):
+    accumulated_diffs: list[str] = []  # per-branch conflict diff (captured pre-commit)
+    for branch in branches:
         result = git_ops.merge_no_ff(project_dir, branch)
         if result.ok:
             state.outcomes.append(BranchOutcome(
@@ -575,9 +581,6 @@ async def _run_consolidated_agentic_merge(
             ))
             write_state(project_dir, state)
             continue
-        # Conflict: stage everything (markers stay in the file content) and
-        # commit the merge anyway. Result: a merge commit whose tree has
-        # marker-laden files. Branch merge bookkeeping is preserved.
         conflicts = git_ops.conflicted_files(project_dir)
         if not conflicts:
             state.outcomes.append(BranchOutcome(
@@ -589,7 +592,15 @@ async def _run_consolidated_agentic_merge(
                 success=False, merge_id=merge_id, state=state,
                 note=f"git merge of {branch!r} failed: {result.stderr.strip()[:200]}",
             )
-        # Stage marker-laden files
+        # Capture the conflict diff BEFORE committing markers (otherwise
+        # `git diff HEAD` returns empty since markers are now in HEAD).
+        branch_diff = git_ops.run_git(
+            project_dir, "diff", "--merge", "--", *conflicts,
+        ).stdout
+        branch_snapshot = _render_conflict_file_snapshots(project_dir, conflicts)
+        branch_sections = [section for section in (branch_diff, branch_snapshot) if section]
+        if branch_sections:
+            accumulated_diffs.append(f"=== {branch} ===\n" + "\n\n".join(branch_sections))
         add_r = git_ops.add_paths(project_dir, conflicts)
         if not add_r.ok:
             state.outcomes.append(BranchOutcome(
@@ -601,7 +612,6 @@ async def _run_consolidated_agentic_merge(
                 success=False, merge_id=merge_id, state=state,
                 note=f"git add failed for {branch!r}",
             )
-        # Commit with markers (we'll resolve them in phase 2)
         commit_r = git_ops.commit_no_edit(project_dir)
         if not commit_r.ok:
             state.outcomes.append(BranchOutcome(
@@ -614,9 +624,9 @@ async def _run_consolidated_agentic_merge(
                 note="git commit failed during marker accumulation",
             )
         state.outcomes.append(BranchOutcome(
-            branch=branch, status="merged",  # merged structurally; markers pending resolution
+            branch=branch, status="merged_with_markers",
             merge_commit=git_ops.head_sha(project_dir),
-            note=f"merged with {len(conflicts)} marker-laden files (deferred)",
+            note=f"{len(conflicts)} files have unresolved markers; consolidated agent will handle",
         ))
         accumulated_conflict_files.extend(conflicts)
         write_state(project_dir, state)
@@ -661,8 +671,10 @@ async def _run_consolidated_agentic_merge(
     stories = collect_stories_from_branches(
         project_dir=project_dir, branches=branches, queue_task_lookup=queue_lookup,
     )
-    # Diff covering all marker files
-    diff = git_ops.run_git(project_dir, "diff", "HEAD", "--", *accumulated_conflict_files).stdout
+    # Use the per-branch conflict diffs we captured before each marker
+    # commit. Concatenating with branch separators preserves the "ours vs
+    # theirs per branch" structure the agent needs.
+    diff = "\n\n".join(accumulated_diffs)
     test_command = config.get("test_command")  # e.g., "pytest -q" or "npm test"
 
     ctx = ConsolidatedConflictContext(
@@ -702,15 +714,27 @@ async def _run_consolidated_agentic_merge(
     # Stage + commit the agent's resolution
     add_r = git_ops.add_paths(project_dir, accumulated_conflict_files)
     if not add_r.ok:
+        state.outcomes.append(BranchOutcome(
+            branch="(consolidated)", status="agent_giveup",
+            agent_invoked=True,
+            note=f"git add failed after agent resolution: {add_r.stderr.strip()}",
+        ))
+        write_state(project_dir, state)
         return MergeRunResult(
             success=False, merge_id=merge_id, state=state,
             note=f"git add failed after agent resolution: {add_r.stderr.strip()}",
         )
-    # Use a fresh commit (not --amend) so the marker-laden merge commits and
-    # the resolution are separate in history (clearer to debug).
+    # Fresh commit (not --amend) so the marker-laden merge commits and the
+    # resolution are separate in history.
     commit_msg = f"resolve {len(accumulated_conflict_files)} files across {len(branches)} branches"
     commit_r = git_ops.run_git(project_dir, "commit", "-m", commit_msg)
     if not commit_r.ok:
+        state.outcomes.append(BranchOutcome(
+            branch="(consolidated)", status="agent_giveup",
+            agent_invoked=True,
+            note=f"git commit failed after resolution: {commit_r.stderr.strip()}",
+        ))
+        write_state(project_dir, state)
         return MergeRunResult(
             success=False, merge_id=merge_id, state=state,
             note=f"git commit failed after resolution: {commit_r.stderr.strip()}",
@@ -769,6 +793,19 @@ def _build_conflict_context(
     )
 
 
+def _render_conflict_file_snapshots(project_dir: Path, conflicts: list[str]) -> str:
+    """Render raw conflicted file contents with markers for agent context."""
+    sections: list[str] = []
+    for rel in conflicts:
+        path = project_dir / rel
+        try:
+            text = path.read_text(errors="replace")
+        except OSError:
+            continue
+        sections.append(f"--- {rel} (worktree with markers) ---\n{text}")
+    return "\n\n".join(sections)
+
+
 def _gather_intents(
     project_dir: Path,
     branches: list[str],
@@ -776,14 +813,14 @@ def _gather_intents(
 ) -> dict[str, str]:
     """Map each branch to its resolved intent (from queue or atomic manifest)."""
     out: dict[str, str] = {}
-    # Queue tasks
+    # Queue tasks (best-effort; missing/corrupt queue.yml is not fatal here)
     try:
         from otto.queue.schema import load_queue
         for t in load_queue(project_dir):
             if t.branch in branches and t.resolved_intent:
                 out[t.branch] = t.resolved_intent
-    except Exception:
-        pass
+    except (OSError, ValueError) as exc:
+        logger.debug("intent gathering: skipping queue.yml: %s", exc)
     # Atomic build manifests
     builds = project_dir / "otto_logs" / "builds"
     if builds.exists():

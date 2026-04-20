@@ -76,6 +76,13 @@ def test_load_rejects_non_mapping_root(tmp_path: Path):
         load_queue(tmp_path)
 
 
+def test_load_rejects_malformed_yaml_with_value_error(tmp_path: Path):
+    p = tmp_path / QUEUE_FILE
+    p.write_text("schema_version: [\n")
+    with pytest.raises(ValueError, match="queue.yml is malformed"):
+        load_queue(tmp_path)
+
+
 def test_load_rejects_malformed_task_entry(tmp_path: Path):
     p = tmp_path / QUEUE_FILE
     p.write_text(yaml.dump({

@@ -703,6 +703,54 @@ def test_run_logs_and_continues_after_tick_exception(tmp_path: Path, caplog):
     assert "tick failed; continuing" in caplog.text
 
 
+def test_tick_logs_malformed_queue_yml_and_continues_after_fix(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+):
+    repo = _make_repo(tmp_path)
+    fake_otto = _make_fake_otto(tmp_path, exit_code=0, sleep=30.0)
+    subprocess.run(["git", "branch", "build/t1"], cwd=repo, check=True)
+    (repo / ".otto-queue.yml").write_text("schema_version: [\n")
+
+    runner = Runner(
+        repo,
+        RunnerConfig(concurrent=1, poll_interval_s=0.1, heartbeat_interval_s=0.5),
+        otto_bin=str(fake_otto),
+    )
+
+    try:
+        with caplog.at_level("ERROR", logger="otto.queue.runner"):
+            runner._tick()
+        assert "failed to load queue.yml: queue.yml is malformed" in caplog.text
+        assert load_state(repo)["tasks"] == {}
+
+        (repo / ".otto-queue.yml").unlink()
+        append_task(repo, QueueTask(
+            id="t1",
+            command_argv=["build", "test"],
+            branch="build/t1",
+            worktree=".worktrees/t1",
+        ))
+        runner._tick()
+
+        state = load_state(repo)
+        assert state["tasks"]["t1"]["status"] == "running"
+    finally:
+        child = load_state(repo)["tasks"].get("t1", {}).get("child") or {}
+        pid = child.get("pid")
+        pgid = child.get("pgid")
+        if isinstance(pgid, int):
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except (PermissionError, ProcessLookupError):
+                pass
+        if isinstance(pid, int):
+            try:
+                os.waitpid(pid, 0)
+            except (ChildProcessError, ProcessLookupError):
+                pass
+
+
 def test_run_exits_on_state_persistence_failure_after_spawn(
     tmp_path: Path,
     monkeypatch,
@@ -808,7 +856,7 @@ def test_cancel_running_task_stays_terminating_until_reaped(tmp_path: Path):
         state = load_state(repo)
         runner._spawn(load_queue(repo)[0], state)
         child = state["tasks"]["t1"]["child"]
-        runner._apply_command({"cmd": "cancel", "id": "t1"}, state, load_queue(repo))
+        runner._apply_command({"cmd": "cancel", "id": "t1"}, state)
         assert state["tasks"]["t1"]["status"] == "terminating"
         assert state["tasks"]["t1"]["child"] == child
 
@@ -845,7 +893,7 @@ def test_cancel_done_task_is_noop_with_warning(tmp_path: Path, caplog):
         "cost_usd": 0.42,
     }
     with caplog.at_level("WARNING", logger="otto.queue.runner"):
-        runner._apply_command({"cmd": "cancel", "id": "done1"}, state, [])
+        runner._apply_command({"cmd": "cancel", "id": "done1"}, state)
     assert state["tasks"]["done1"]["status"] == "done"
     assert state["tasks"]["done1"]["manifest_path"] == "/tmp/manifest.json"
     assert "cancel ignored for done1 in status=done" in caplog.text

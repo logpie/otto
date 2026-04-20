@@ -60,9 +60,9 @@ class RunnerConfig:
     on_watcher_restart: str = "resume"   # resume | fail
     poll_interval_s: float = 2.0
     heartbeat_interval_s: float = 5.0
-    # F10: per-task wall-clock timeout. A hung child (agent stuck in a bash
-    # `wait` for an unkilled background process, infinite loop, etc.) would
-    # otherwise occupy its concurrency slot forever. None disables.
+    # Per-task wall-clock timeout. A hung child (agent stuck in a bash
+    # `wait` for an unkilled background process, infinite loop, etc.)
+    # would otherwise occupy its concurrency slot forever. None disables.
     # Default: 30 minutes — generous for thorough builds, fatal for hangs.
     task_timeout_s: float | None = 1800.0
 
@@ -292,14 +292,20 @@ class Runner:
         """One main-loop iteration: drain commands, reap children, dispatch new."""
         try:
             commands = drain_commands(self.project_dir)
-        except Exception as exc:
-            logger.warning("failed to drain commands: %s", exc)
+        except (OSError, ValueError) as exc:
+            # IO failures or malformed JSONL — log loudly so user sees it.
+            # A real bug (e.g. import error) is a different exception type
+            # and will crash the runner, which is correct.
+            logger.error("failed to drain commands: %s — user commands may be lost", exc)
             commands = []
 
         try:
             tasks = load_queue(self.project_dir)
-        except Exception as exc:
-            logger.warning("failed to load queue.yml: %s", exc)
+        except (OSError, ValueError) as exc:
+            # Same: IO/parse failure → log at ERROR (not WARN) so the user
+            # notices their queue.yml is unreadable. Continue with empty
+            # task list so reap-existing-children still runs.
+            logger.error("failed to load queue.yml: %s — no tasks will dispatch", exc)
             tasks = []
 
         # Re-validate dependency graph for cycles introduced by editing
@@ -317,7 +323,7 @@ class Runner:
         state = load_state(self.project_dir)
         cycle_ids = {tid for cycle in cycles for tid in cycle}
         for cmd in commands:
-            self._apply_command(cmd, state, tasks)
+            self._apply_command(cmd, state)
 
         # Reap finished children
         self._reap_children(state)
@@ -412,7 +418,7 @@ class Runner:
     # ---- command application ----
 
     def _apply_command(
-        self, cmd: dict[str, Any], state: dict[str, Any], tasks: list[QueueTask],
+        self, cmd: dict[str, Any], state: dict[str, Any],
     ) -> None:
         kind = cmd.get("cmd")
         tid = cmd.get("id")
@@ -459,7 +465,7 @@ class Runner:
         else:
             logger.warning("unknown command kind: %r", kind)
 
-    # ---- timeout enforcement (F10) ----
+    # ---- timeout enforcement ----
 
     def _enforce_task_timeouts(self, in_flight: list[tuple[str, dict[str, Any]]]) -> None:
         """SIGTERM any task whose wall-clock exceeds task_timeout_s.
@@ -511,7 +517,7 @@ class Runner:
             (tid, ts) for tid, ts in state["tasks"].items()
             if ts.get("status") in IN_FLIGHT_STATUSES
         ]
-        # F10: enforce per-task wall-clock timeout. SIGTERM hung tasks so they
+        # Enforce per-task wall-clock timeout. SIGTERM hung tasks so they
         # transition to "terminating" and free their concurrency slot.
         if self.config.task_timeout_s is not None:
             self._enforce_task_timeouts(in_flight)

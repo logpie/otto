@@ -28,9 +28,8 @@ logger = logging.getLogger("otto.cli_merge")
 
 def _install_merge_logging(project_dir: Path) -> None:
     """Attach a file handler to the `otto.merge` logger tree so the
-    orchestrator, conflict-agent, and triage-agent events get persisted.
-    Without this, all those `logger.info(...)` events vanish — see F7 in
-    e2e-findings.md.
+    orchestrator, conflict-agent, and triage-agent events get persisted
+    to otto_logs/merge/merge.log. Without this they vanish.
 
     Idempotent: removes any prior `_otto_merge_handler` we added.
     """
@@ -157,9 +156,8 @@ def register_merge_command(main: click.Group) -> None:
         if full_verify:
             console.print("  [dim]Mode:[/dim] [yellow]--full-verify[/yellow]")
 
-        # F7 (extension): merge orchestrator + conflict-agent + triage-agent
-        # all log via `logging` but had no handler. Persist to a per-merge file
-        # so users can debug after the run.
+        # Wire up merge logger so orchestrator/conflict/triage agent events
+        # land in otto_logs/merge/merge.log.
         _install_merge_logging(project_dir)
 
         try:
@@ -188,6 +186,7 @@ def register_merge_command(main: click.Group) -> None:
         for o in outcomes:
             icon = {
                 "merged": "[success]✓[/success]",
+                "merged_with_markers": "[yellow]⚠[/yellow]",
                 "conflict_resolved": "[success]✓[/success]",
                 "agent_giveup": "[red]✗[/red]",
                 "skipped": "[dim]–[/dim]",

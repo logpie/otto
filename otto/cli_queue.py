@@ -628,11 +628,8 @@ def register_queue_commands(main: click.Group) -> None:
             rcfg.concurrent = max(1, concurrent)
         otto_bin = _resolve_otto_bin()
 
-        # F7: install logging handlers so watcher events are visible. Without
-        # this, the user sees only the spawned otto's stdout — no spawn / reap
-        # / heartbeat / cancel events from the runner itself, making it
-        # impossible to debug "why didn't my task dispatch?" or "did the cancel
-        # actually take effect?".
+        # Install handlers so watcher's spawn/reap/cancel/heartbeat events
+        # appear on stdout (and persist to otto_logs/queue/watcher.log).
         _install_runner_logging(project_dir, quiet=quiet)
 
         try:

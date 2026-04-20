@@ -17,17 +17,34 @@ import os
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 
 MERGE_STATE_SCHEMA_VERSION = 1
+BranchStatus = Literal[
+    "merged",
+    "merged_with_markers",
+    "skipped",
+    "conflict_resolved",
+    "agent_giveup",
+    "pending",
+]
 
 
 @dataclass
 class BranchOutcome:
-    """Result of merging one branch into target."""
+    """Result of merging one branch into target.
+
+    Valid statuses:
+    - `merged`
+    - `merged_with_markers`
+    - `skipped`
+    - `conflict_resolved`
+    - `agent_giveup`
+    - `pending`
+    """
     branch: str
-    status: str          # "merged" | "skipped" | "conflict_resolved" | "agent_giveup" | "pending"
+    status: BranchStatus
     merge_commit: str | None = None   # SHA of the merge commit, when applicable
     agent_invoked: bool = False
     note: str | None = None

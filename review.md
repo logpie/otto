@@ -185,3 +185,27 @@ Phase 5 mode flags (`--full-verify`, `--no-certify`, `--fast`) were implemented 
 - `otto merge --resume` Mode A/B/C dispatch (CLI prints helpful workaround)
 
 Test count: 408 (no new tests — both new commands are exercised through smoke E2E).
+
+---
+
+## Implementation Gate — 2026-04-20 — Code-health audit (parallel-otto F1-F14 cleanup)
+
+Audited the parallel-otto branch against main. Four review agents (bug, dead-code,
+dedup, AI slop) flagged findings; fixed all CRITICAL/IMPORTANT items inline.
+Then ran 3 rounds of Codex implementation review.
+
+### Round 1 — Codex
+- [IMPORTANT] `_files_with_markers` too coarse (any single marker line) — fixed by Codex (round 2 over-tightened to triplet-only; round 3 reverted to "any marker" with rationale)
+- [IMPORTANT] `accumulated_diffs` used plain `git diff` not merge-aware — fixed by Codex (now uses `git diff --merge` + raw file snapshots)
+- [IMPORTANT] Narrowed `(OSError, ValueError)` handlers missed `yaml.YAMLError` — fixed by Codex (normalized at `load_queue` source)
+- [NOTE] `merged_with_markers` status not in CLI icon map / state.py — fixed by Codex (added to icon dict, BranchStatus Literal, docstring)
+- [REFACTOR] Duplicated post-agent finalize bookkeeping — DEFERRED (sequential vs consolidated paths have structurally different bookkeeping)
+
+### Round 2 — Codex re-reviewed fixes
+- [IMPORTANT] Size guard in `_files_with_markers` failed open (>10MB files silently treated as clean) — fixed by Codex (round 3 streams line-by-line, no size cap)
+- [IMPORTANT] Triplet-only detection missed partial markers (only `<<<<<<<`, or `<<<<<<<` + `=======`) — fixed by Codex (round 3 reverted to "any marker line" with defense-in-depth rationale; the original docstring false-positive concern doesn't apply because the function is only called with files in the conflict set)
+
+### Round 3 — Codex re-reviewed fixes
+- APPROVED. No new issues. Round-3 changes fail closed for both large files and partial marker remnants.
+
+Test count: 408 → 421 (round 1) → 428 (round 2) → 430 (round 3). All passing.

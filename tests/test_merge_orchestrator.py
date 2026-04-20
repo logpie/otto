@@ -224,6 +224,40 @@ def test_conflict_agent_rejects_new_untracked_files(tmp_path: Path, monkeypatch:
     git_ops.merge_abort(repo)
 
 
+def test_consolidated_merge_captures_merge_aware_diff_with_both_sides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    repo = _init_repo(tmp_path)
+    _make_branch(repo, "feat-a", "f.txt", "A\n")
+    _make_branch(repo, "feat-b", "f.txt", "B\n")
+
+    captured: dict[str, str] = {}
+
+    async def fake_resolve_all_conflicts(*, project_dir: Path, config: dict[str, Any], ctx, **kwargs):
+        captured["diff"] = ctx.conflict_diff
+        return conflict_agent.ConflictResolutionAttempt(
+            success=False,
+            note="stop after capturing diff",
+        )
+
+    monkeypatch.setattr(conflict_agent, "resolve_all_conflicts", fake_resolve_all_conflicts)
+
+    result = asyncio.run(run_merge(
+        project_dir=repo,
+        config={
+            "provider": "claude",
+            "default_branch": "main",
+            "queue": {"bookkeeping_files": [], "merge_mode": "consolidated"},
+        },
+        options=MergeOptions(target="main", no_certify=True),
+        explicit_ids_or_branches=["feat-a", "feat-b"],
+    ))
+
+    assert result.success is False
+    assert "<<<<<<<" in captured["diff"]
+    assert ">>>>>>>" in captured["diff"]
+
+
 # ---------- bookkeeping precondition ----------
 
 

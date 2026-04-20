@@ -66,7 +66,6 @@ class TestLoadConfig:
         assert q["concurrent"] == 3
         assert q["worktree_dir"] == ".worktrees"
         assert q["on_watcher_restart"] == "resume"
-        assert q["cleanup_after_merge"] is False
         assert "intent.md" in q["bookkeeping_files"]
         assert "otto.yaml" in q["bookkeeping_files"]
 
@@ -79,7 +78,6 @@ class TestLoadConfig:
         assert cfg["queue"]["concurrent"] == 5
         assert cfg["queue"]["worktree_dir"] == ".worktrees"   # preserved
         assert cfg["queue"]["on_watcher_restart"] == "resume" # preserved
-        assert cfg["queue"]["cleanup_after_merge"] is False   # preserved
         assert "intent.md" in cfg["queue"]["bookkeeping_files"]
 
     def test_queue_section_user_extra_keys_preserved(self, tmp_bare_git_repo):
