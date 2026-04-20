@@ -21,6 +21,39 @@ if TYPE_CHECKING:
 logger = logging.getLogger("otto.certifier")
 
 
+def _format_stories_section(stories: list[dict[str, Any]] | None) -> str:
+    """Format the optional must-verify story list (Phase 4.0).
+
+    When None or empty, returns "". When provided, renders an explicit
+    "## Stories to Verify" block listing each story by name + description,
+    plus an instruction that constrains the certifier to ONLY these stories
+    (skipping its usual checklist-driven planning).
+
+    Used by `otto merge`'s post-merge cert phase to verify the union of
+    merged branches' stories without redoing exploratory test discovery.
+    """
+    if not stories:
+        return ""
+    lines = ["## Stories to Verify (REQUIRED)",
+             "",
+             "Run ONLY these stories. Do NOT plan additional ones from "
+             "the standard checklist; the union of these stories is the "
+             "complete contract for this run.",
+             ""]
+    for i, story in enumerate(stories, 1):
+        name = story.get("name") or story.get("summary") or story.get("story_id") or f"story-{i}"
+        desc = story.get("description") or ""
+        src = story.get("source_branch")
+        header = f"{i}. **{name}**"
+        if src:
+            header += f"  _(from `{src}`)_"
+        lines.append(header)
+        if desc:
+            lines.append(f"   {desc}")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def _render_certifier_prompt(
     *,
     mode: str,
@@ -28,11 +61,13 @@ def _render_certifier_prompt(
     evidence_dir: Path,
     focus: str | None = None,
     target: str | None = None,
+    stories: list[dict[str, Any]] | None = None,
 ) -> str:
     """Render a standalone certifier prompt with safe placeholder defaults."""
     from otto.prompts import render_prompt
 
     focus_section = f"## Improvement Focus\n{focus}" if focus else ""
+    stories_section = _format_stories_section(stories)
     prompt_name = {
         "standard": "certifier.md",
         "fast": "certifier-fast.md",
@@ -45,6 +80,7 @@ def _render_certifier_prompt(
         intent=intent,
         evidence_dir=str(evidence_dir),
         focus_section=focus_section,
+        stories_section=stories_section,
         spec_section="",
         target=target or "",
     )
@@ -63,6 +99,7 @@ async def run_agentic_certifier(
     focus: str | None = None,
     target: str | None = None,
     budget: "RunBudget | None" = None,
+    stories: list[dict[str, Any]] | None = None,
 ) -> "CertificationReport":
     """Agentic certifier: one monolithic agent does everything.
 
@@ -103,6 +140,7 @@ async def run_agentic_certifier(
         evidence_dir=evidence_dir,
         focus=focus,
         target=target,
+        stories=stories,
     )
 
     # Inject cross-run memory (opt-in via config)

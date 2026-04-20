@@ -8,6 +8,8 @@ it doesn't meet the target, identify what to change.
 ## Target
 {target}
 
+{stories_section}
+
 ## Your Process
 
 1. **Read the project** — understand architecture, key modules, dependencies.

@@ -7,6 +7,8 @@ would make this product significantly more useful for real users.
 
 {focus_section}
 
+{stories_section}
+
 ## Your Process
 
 1. **Understand the product** — read the code, run it, understand what it does

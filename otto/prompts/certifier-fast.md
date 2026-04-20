@@ -6,6 +6,8 @@ path works — nothing more. No edge cases, no error handling, no security.
 
 {spec_section}
 
+{stories_section}
+
 {focus_section}
 
 ## Your Process

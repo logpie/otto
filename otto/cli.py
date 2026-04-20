@@ -821,3 +821,7 @@ register_improve_commands(main)
 # Queue commands (Phase 2 — registered from otto/cli_queue.py)
 from otto.cli_queue import register_queue_commands
 register_queue_commands(main)
+
+# Merge command (Phase 4 — registered from otto/cli_merge.py)
+from otto.cli_merge import register_merge_command
+register_merge_command(main)

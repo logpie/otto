@@ -6,6 +6,8 @@ is to find what's broken, weak, or missing — not just verify the happy path.
 
 {spec_section}
 
+{stories_section}
+
 {focus_section}
 
 ## Your Process
