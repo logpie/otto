@@ -1,10 +1,9 @@
-"""Tests for otto/queue/runner.py — Phase 2.7-2.8.
+"""Tests for otto/queue/runner.py.
 
-Strategy: where possible, exercise the real Runner against a tiny shell
-command (`/bin/sh -c "exit 0"`) instead of full otto subprocesses, so
-tests stay fast and deterministic. PID-reuse safety + reconciliation are
-tested via direct state.json edits to simulate edge cases per Codex
-round 4 finding (no flaky real-PID-recycling tests).
+Uses tiny shell commands (`/bin/sh -c "exit 0"`) instead of full otto
+subprocesses to keep tests fast and deterministic. PID-reuse safety +
+reconciliation are tested via direct state.json edits — real-PID-recycling
+tests are inherently flaky.
 """
 
 from __future__ import annotations
@@ -37,6 +36,7 @@ from otto.queue.schema import (
     load_state,
     write_state,
 )
+from tests._helpers import init_repo
 
 
 # ---------- acquire_lock ----------
@@ -179,18 +179,6 @@ def test_kill_child_safely_refuses_dead_child(tmp_path: Path):
 # ---------- end-to-end runner: dispatch + reap ----------
 
 
-def _make_repo(tmp_path: Path) -> Path:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-b", "main"], cwd=repo, capture_output=True, check=True)
-    subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=repo, check=True)
-    subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True)
-    (repo / "f.txt").write_text("x")
-    subprocess.run(["git", "add", "f.txt"], cwd=repo, check=True)
-    subprocess.run(["git", "commit", "-q", "-m", "i"], cwd=repo, check=True)
-    return repo
-
-
 def _make_fake_otto(tmp_path: Path, *, exit_code: int = 0, sleep: float = 0.1, write_manifest: bool = True) -> Path:
     """Write a tiny shell script that mimics otto: sleeps, optionally writes
     a manifest at the queue path, and exits with `exit_code`."""
@@ -311,7 +299,7 @@ print(json.dumps({
 
 
 def test_runner_dispatches_and_reaps_a_simple_task(tmp_path: Path):
-    repo = _make_repo(tmp_path)
+    repo = init_repo(tmp_path)
     fake_otto = _make_fake_otto(tmp_path, exit_code=0, sleep=0.1)
     # The runner sets OTTO_QUEUE_PROJECT_DIR on spawn — fake_otto reads it.
     # Enqueue one task
@@ -342,7 +330,7 @@ def test_runner_dispatches_and_reaps_a_simple_task(tmp_path: Path):
 
 
 def test_runner_marks_failed_when_no_manifest(tmp_path: Path):
-    repo = _make_repo(tmp_path)
+    repo = init_repo(tmp_path)
     fake_otto = _make_fake_otto(tmp_path, exit_code=0, sleep=0.1, write_manifest=False)
     append_task(repo, QueueTask(
         id="t1", command_argv=["build", "test"],
@@ -363,7 +351,7 @@ def test_runner_marks_failed_when_no_manifest(tmp_path: Path):
 
 
 def test_runner_marks_failed_on_nonzero_exit(tmp_path: Path):
-    repo = _make_repo(tmp_path)
+    repo = init_repo(tmp_path)
     fake_otto = _make_fake_otto(tmp_path, exit_code=1, sleep=0.1, write_manifest=False)
     append_task(repo, QueueTask(
         id="t1", command_argv=["build", "test"],
@@ -384,7 +372,7 @@ def test_runner_marks_failed_on_nonzero_exit(tmp_path: Path):
 
 
 def test_runner_respects_concurrent_cap(tmp_path: Path):
-    repo = _make_repo(tmp_path)
+    repo = init_repo(tmp_path)
     fake_otto = _make_fake_otto(tmp_path, exit_code=0, sleep=0.5)
     for i in range(3):
         append_task(repo, QueueTask(
@@ -420,7 +408,7 @@ def test_runner_respects_concurrent_cap(tmp_path: Path):
 def test_runner_cascades_failure_through_after_chain(tmp_path: Path):
     """Phase 3.2 verify: A fails → B (after A) cascades failed → C (after B) cascades failed.
     Verifies transitive cascade across a 3-deep chain."""
-    repo = _make_repo(tmp_path)
+    repo = init_repo(tmp_path)
     # Fake otto that exits non-zero (no manifest written)
     failing_otto = _make_fake_otto(tmp_path, exit_code=1, sleep=0.05, write_manifest=False)
     append_task(repo, QueueTask(
@@ -463,7 +451,7 @@ def test_runner_cascades_failure_through_after_chain(tmp_path: Path):
 
 
 def test_runner_blocks_task_with_unsatisfied_after(tmp_path: Path):
-    repo = _make_repo(tmp_path)
+    repo = init_repo(tmp_path)
     fake_otto = _make_fake_otto(tmp_path, sleep=0.1)
     append_task(repo, QueueTask(
         id="a", command_argv=["build", "a"],
@@ -495,15 +483,15 @@ def test_runner_blocks_task_with_unsatisfied_after(tmp_path: Path):
         runner._lock_fh.close()
 
 
-# ---------- regression: F10 per-task timeout ----------
+# ---------- regression: per-task timeout ----------
 
 
 def test_runner_kills_task_exceeding_timeout(tmp_path: Path):
-    """F10: a child that runs longer than task_timeout_s gets SIGTERM and
+    """A child that runs longer than task_timeout_s gets SIGTERM and
     transitions to status=failed with a 'timed out' reason. Without this,
-    a hung agent (e.g. pkill bash bug like P3 base build) would occupy its
-    concurrency slot indefinitely."""
-    repo = _make_repo(tmp_path)
+    a hung agent (e.g. blocked on `wait` for a backgrounded process) would
+    occupy its concurrency slot indefinitely."""
+    repo = init_repo(tmp_path)
     # `trap '' TERM` ignores SIGTERM so our timeout enforcement must SIGKILL
     # eventually — but for the test we only verify SIGTERM was sent + status
     # transitions to terminating/failed within a reasonable poll cycle.
@@ -549,7 +537,7 @@ exit 0
 
 def test_runner_does_not_timeout_task_under_limit(tmp_path: Path):
     """A short-lived task must NOT be killed if it finishes before timeout."""
-    repo = _make_repo(tmp_path)
+    repo = init_repo(tmp_path)
     fake = _make_fake_otto(tmp_path, exit_code=0, sleep=0.2)
     append_task(repo, QueueTask(
         id="quick", command_argv=["build", "x"],
@@ -575,7 +563,7 @@ def test_runner_does_not_timeout_task_under_limit(tmp_path: Path):
 
 def test_runner_task_timeout_disabled_when_none(tmp_path: Path):
     """task_timeout_s=None disables the enforcement entirely (escape hatch)."""
-    repo = _make_repo(tmp_path)
+    repo = init_repo(tmp_path)
     fake = _make_fake_otto(tmp_path, exit_code=0, sleep=0.2)
     append_task(repo, QueueTask(
         id="t", command_argv=["build", "x"],
@@ -609,15 +597,15 @@ def test_runner_config_loads_task_timeout_from_yaml():
     assert cfg4.task_timeout_s is None  # 0 is also "off"
 
 
-# ---------- regression: F1 manifest path env-var contract ----------
+# ---------- regression: manifest path env-var contract ----------
 
 
 def test_runner_sets_queue_project_dir_env_on_spawn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Regression for F1: the runner MUST set OTTO_QUEUE_PROJECT_DIR so the
-    spawned otto (whose cwd is the worktree) writes its manifest where the
-    watcher (cwd = main project) will look for it. Without this, every queue
+    """The runner MUST set OTTO_QUEUE_PROJECT_DIR so the spawned otto
+    (whose cwd is the worktree) writes its manifest where the watcher
+    (cwd = main project) will look for it. Without this, every queue
     run would be marked failed with `no manifest`."""
-    repo = _make_repo(tmp_path)
+    repo = init_repo(tmp_path)
 
     captured_env: dict[str, str] = {}
 
@@ -650,7 +638,6 @@ def test_runner_sets_queue_project_dir_env_on_spawn(tmp_path: Path, monkeypatch:
         # Use a side-step: monkeypatch add_worktree to do nothing.
         from otto import worktree as wt_mod
         monkeypatch.setattr(wt_mod, "add_worktree", lambda **k: None)
-        from otto.queue.schema import load_state as _load
         runner._tick()
         # Verify both env vars are set
         assert captured_env.get("OTTO_QUEUE_TASK_ID") == "t1"
@@ -685,7 +672,7 @@ def test_runner_config_falls_back_to_defaults_with_empty_queue():
 
 
 def test_run_logs_and_continues_after_tick_exception(tmp_path: Path, caplog):
-    repo = _make_repo(tmp_path)
+    repo = init_repo(tmp_path)
     cfg = RunnerConfig(poll_interval_s=0.01, heartbeat_interval_s=10.0)
     runner = Runner(repo, cfg, otto_bin="/bin/true")
     seen = {"count": 0}
@@ -707,7 +694,7 @@ def test_tick_logs_malformed_queue_yml_and_continues_after_fix(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ):
-    repo = _make_repo(tmp_path)
+    repo = init_repo(tmp_path)
     fake_otto = _make_fake_otto(tmp_path, exit_code=0, sleep=30.0)
     subprocess.run(["git", "branch", "build/t1"], cwd=repo, check=True)
     (repo / ".otto-queue.yml").write_text("schema_version: [\n")
@@ -756,7 +743,7 @@ def test_run_exits_on_state_persistence_failure_after_spawn(
     monkeypatch,
     caplog,
 ):
-    repo = _make_repo(tmp_path)
+    repo = init_repo(tmp_path)
     fake_otto = _make_fake_otto(tmp_path, sleep=30.0, write_manifest=False)
     append_task(repo, QueueTask(
         id="t1",
@@ -804,7 +791,7 @@ def test_reap_children_keeps_running_task_when_echild_child_is_still_alive(
     monkeypatch,
     caplog,
 ):
-    repo = _make_repo(tmp_path)
+    repo = init_repo(tmp_path)
     runner = Runner(repo, RunnerConfig(), otto_bin="/bin/true")
     state = load_state(repo)
     state["tasks"]["t1"] = {
@@ -825,7 +812,7 @@ def test_reap_children_keeps_running_task_when_echild_child_is_still_alive(
 
 
 def test_tick_logs_same_cycle_only_once(tmp_path: Path, caplog):
-    repo = _make_repo(tmp_path)
+    repo = init_repo(tmp_path)
     append_task(repo, QueueTask(
         id="a", command_argv=["build", "a"], after=["b"],
     ))
@@ -843,7 +830,7 @@ def test_tick_logs_same_cycle_only_once(tmp_path: Path, caplog):
 
 
 def test_cancel_running_task_stays_terminating_until_reaped(tmp_path: Path):
-    repo = _make_repo(tmp_path)
+    repo = init_repo(tmp_path)
     append_task(repo, QueueTask(
         id="t1",
         command_argv=["-c", "trap '' TERM; sleep 1"],
@@ -883,7 +870,7 @@ def test_cancel_running_task_stays_terminating_until_reaped(tmp_path: Path):
 
 
 def test_cancel_done_task_is_noop_with_warning(tmp_path: Path, caplog):
-    repo = _make_repo(tmp_path)
+    repo = init_repo(tmp_path)
     runner = Runner(repo, RunnerConfig(), otto_bin="/bin/true")
     state = load_state(repo)
     state["tasks"]["done1"] = {
@@ -900,7 +887,7 @@ def test_cancel_done_task_is_noop_with_warning(tmp_path: Path, caplog):
 
 
 def test_spawn_uses_snapshotted_branch_when_intent_matches(tmp_path: Path, monkeypatch):
-    repo = _make_repo(tmp_path)
+    repo = init_repo(tmp_path)
     task1 = QueueTask(
         id="same-intent",
         command_argv=["build", "same intent"],
@@ -950,7 +937,7 @@ def test_spawn_uses_snapshotted_branch_when_intent_matches(tmp_path: Path, monke
 
 def test_reconcile_marks_certify_failed_when_child_gone(tmp_path: Path):
     """certify is not resumable; on restart with dead child, mark failed."""
-    repo = _make_repo(tmp_path)
+    repo = init_repo(tmp_path)
     append_task(repo, QueueTask(
         id="cert1", command_argv=["certify"], resumable=False,
         branch="certify/x", worktree=".worktrees/cert1",
@@ -980,7 +967,7 @@ def test_reconcile_marks_certify_failed_when_child_gone(tmp_path: Path):
 
 def test_reconcile_marks_failed_when_no_checkpoint(tmp_path: Path):
     """Resumable task but no checkpoint → marked failed."""
-    repo = _make_repo(tmp_path)
+    repo = init_repo(tmp_path)
     append_task(repo, QueueTask(
         id="b1", command_argv=["build", "x"], resumable=True,
         branch="build/b1", worktree=".worktrees/b1",
@@ -1006,7 +993,7 @@ def test_reconcile_marks_failed_when_no_checkpoint(tmp_path: Path):
 
 def test_reconcile_requeues_when_checkpoint_exists(tmp_path: Path):
     """Resumable task + checkpoint + policy=resume → re-queue (will respawn with --resume)."""
-    repo = _make_repo(tmp_path)
+    repo = init_repo(tmp_path)
     append_task(repo, QueueTask(
         id="b2", command_argv=["build", "x"], resumable=True,
         branch="build/b2", worktree=".worktrees/b2",
@@ -1035,7 +1022,7 @@ def test_reconcile_requeues_when_checkpoint_exists(tmp_path: Path):
 
 
 def test_reconcile_keeps_terminating_task_when_child_still_alive(tmp_path: Path):
-    repo = _make_repo(tmp_path)
+    repo = init_repo(tmp_path)
     append_task(repo, QueueTask(
         id="t1",
         command_argv=["build", "x"],
@@ -1089,7 +1076,7 @@ def test_reconcile_keeps_terminating_task_when_child_still_alive(tmp_path: Path)
 
 
 def test_reconcile_finishes_terminating_task_when_child_is_gone(tmp_path: Path):
-    repo = _make_repo(tmp_path)
+    repo = init_repo(tmp_path)
     append_task(repo, QueueTask(
         id="t1",
         command_argv=["build", "x"],
@@ -1135,7 +1122,7 @@ def test_reconcile_finishes_terminating_task_when_child_is_gone(tmp_path: Path):
 
 
 def test_reconcile_and_tick_preserve_running_orphaned_child_until_manifest_finalizes(tmp_path: Path):
-    repo = _make_repo(tmp_path)
+    repo = init_repo(tmp_path)
     append_task(repo, QueueTask(
         id="t1",
         command_argv=["build", "x"],
@@ -1162,9 +1149,9 @@ def test_reconcile_and_tick_preserve_running_orphaned_child_until_manifest_final
 
     runner = Runner(
         repo,
-        # task_timeout_s=None disables F10 — test asserts behavior of reconcile,
-        # not of timeout enforcement (the hardcoded started_at is intentionally
-        # stale to simulate watcher crash recovery).
+        # task_timeout_s=None disables timeout enforcement — this test
+        # asserts reconcile behavior (the hardcoded started_at is
+        # intentionally stale to simulate watcher crash recovery).
         RunnerConfig(on_watcher_restart="resume", poll_interval_s=0.01, task_timeout_s=None),
         otto_bin="/bin/true",
     )

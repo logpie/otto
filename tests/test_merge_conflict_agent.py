@@ -11,9 +11,7 @@ import pytest
 from otto.merge.conflict_agent import (
     ConflictContext,
     ConflictResolutionAttempt,
-    ConsolidatedConflictContext,
     _files_with_markers,
-    resolve_all_conflicts,
     resolve_one_conflict,
     validate_post_agent,
 )
@@ -28,15 +26,10 @@ class _StubOptions:
 def test_conflict_agent_disallows_bash_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ):
-    """conflict agent MUST disallow 'Bash' to prevent shell escape. F12
-    previously also disallowed 'Write' but the P6 rerun showed that
-    making the agent use Edit-only made conflict resolution 2-3× slower
-    (multiple plan→edit→verify cycles, each with extended-thinking phase).
-    Reverted: drift prevention is post-agent (validate_post_agent checks
-    no out-of-scope files modified, HEAD unchanged).
-
-    If you re-add 'Write' to disallowed_tools, also re-tune the prompt to
-    avoid multi-pass loops, or measure to confirm net benefit."""
+    """`disallowed_tools` must contain 'Bash' but NOT 'Write'. Disallowing
+    Write was measured 2-3× slower because Edit-only forced multi-pass
+    plan→edit→verify cycles. Drift is caught post-agent by
+    `validate_post_agent` instead."""
     # Minimal git repo so head_sha/changed_files don't crash
     import subprocess
     subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True)
@@ -82,13 +75,8 @@ def test_conflict_agent_disallows_bash_only(
     assert "Bash" in captured["disallowed_tools"], (
         f"Bash must be disallowed (no shell escape); got {captured['disallowed_tools']!r}"
     )
-    # Write must NOT be disallowed — measured 2-3× slower in P6 rerun
-    # because forcing Edit-only triggered multi-pass plan→edit→verify
-    # cycles, each with its own extended-thinking phase. Don't re-add
-    # without re-measuring; if you do, also re-tune merger-conflict.md
-    # to discourage the multi-pass loop.
     assert "Write" not in captured["disallowed_tools"], (
-        f"Write must remain allowed in conflict agent. "
+        f"Write must remain allowed (Edit-only is 2-3x slower). "
         f"Got: {captured['disallowed_tools']!r}"
     )
 

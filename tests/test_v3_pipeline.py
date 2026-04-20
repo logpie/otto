@@ -296,31 +296,24 @@ async def test_completed_checkpoint_total_cost_and_run_id_match_build_result(tmp
 
 
 class TestV3PipelineFail:
-    """Agent builds, certifier finds bugs, build fails."""
+    """Agent builds, certifier finds bugs, build fails. All artifacts asserted in one run."""
 
     @pytest.mark.asyncio
-    async def test_basic_fail(self, tmp_git_repo):
+    async def test_pipeline_writes_all_artifacts_on_fail(self, tmp_git_repo):
         with patch("otto.agent.run_agent_query", side_effect=_make_mock_query(AGENT_OUTPUT_FAIL)):
             result = await build_agentic_v3("test", tmp_git_repo, {})
 
+        # --- BuildResult ---
         assert result.passed is False
         assert result.tasks_passed == 2
         assert result.tasks_failed == 2
 
-    @pytest.mark.asyncio
-    async def test_fail_checkpoint(self, tmp_git_repo):
-        with patch("otto.agent.run_agent_query", side_effect=_make_mock_query(AGENT_OUTPUT_FAIL)):
-            result = await build_agentic_v3("test", tmp_git_repo, {})
-
+        # --- Per-build checkpoint ---
         build_dir = tmp_git_repo / "otto_logs" / "builds" / result.build_id
         cp = json.loads((build_dir / "checkpoint.json").read_text())
         assert cp["passed"] is False
 
-    @pytest.mark.asyncio
-    async def test_fail_pow_shows_failures(self, tmp_git_repo):
-        with patch("otto.agent.run_agent_query", side_effect=_make_mock_query(AGENT_OUTPUT_FAIL)):
-            await build_agentic_v3("test", tmp_git_repo, {})
-
+        # --- PoW ---
         pow_data = json.loads(
             (tmp_git_repo / "otto_logs" / "certifier" / "proof-of-work.json").read_text()
         )
@@ -328,11 +321,7 @@ class TestV3PipelineFail:
         failed = [s for s in pow_data["stories"] if not s["passed"]]
         assert len(failed) == 2
 
-    @pytest.mark.asyncio
-    async def test_fail_history_entry(self, tmp_git_repo):
-        with patch("otto.agent.run_agent_query", side_effect=_make_mock_query(AGENT_OUTPUT_FAIL)):
-            await build_agentic_v3("test", tmp_git_repo, {})
-
+        # --- Cumulative logs ---
         entry = json.loads(
             (tmp_git_repo / "otto_logs" / "run-history.jsonl").read_text().strip()
         )
@@ -432,23 +421,17 @@ class TestV3SkipQA:
     """--no-qa (skip_product_qa) should pass when agent completes successfully."""
 
     @pytest.mark.asyncio
-    async def test_skip_qa_passes_without_markers(self, tmp_git_repo):
-        """With skip_product_qa, build passes even without certification markers."""
+    @pytest.mark.parametrize("agent_output", [
+        AGENT_OUTPUT_NO_MARKERS,
+        AGENT_OUTPUT_PASS,
+    ])
+    async def test_skip_qa_passes_regardless_of_markers(self, tmp_git_repo, agent_output):
+        """With skip_product_qa, the build passes whether or not the agent
+        emits certification markers (the markers are ignored)."""
         with patch("otto.agent.run_agent_query",
-                    side_effect=_make_mock_query(AGENT_OUTPUT_NO_MARKERS)):
+                    side_effect=_make_mock_query(agent_output)):
             result = await build_agentic_v3(
                 "test lib", tmp_git_repo, {"skip_product_qa": True},
-            )
-
-        assert result.passed is True
-
-    @pytest.mark.asyncio
-    async def test_skip_qa_passes_with_real_output(self, tmp_git_repo):
-        """With skip_product_qa, agent output with markers still passes."""
-        with patch("otto.agent.run_agent_query",
-                    side_effect=_make_mock_query(AGENT_OUTPUT_PASS)):
-            result = await build_agentic_v3(
-                "test app", tmp_git_repo, {"skip_product_qa": True},
             )
 
         assert result.passed is True

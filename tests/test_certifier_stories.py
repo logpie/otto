@@ -40,8 +40,8 @@ def test_format_stories_section_handles_missing_fields():
     out = _format_stories_section([
         {"name": "minimal story"},
     ])
-    assert "minimal story" in out
-    assert out.count("\n") >= 3  # has structure
+    assert "Stories to Verify (REQUIRED)" in out
+    assert "1. **minimal story**" in out
 
 
 def test_format_stories_section_falls_back_to_summary_or_id():
@@ -115,20 +115,13 @@ def test_all_certifier_modes_accept_stories(tmp_path: Path, mode: str):
 
 
 def test_run_agentic_certifier_accepts_stories_param():
-    """Phase 4.0: function signature includes `stories` kwarg with default None."""
+    """`stories` is a keyword-only kwarg with default None (existing
+    callers without it keep working)."""
     sig = inspect.signature(run_agentic_certifier)
     assert "stories" in sig.parameters
     p = sig.parameters["stories"]
     assert p.default is None
-    # Must be keyword-only (after *)
     assert p.kind == inspect.Parameter.KEYWORD_ONLY
-
-
-def test_run_agentic_certifier_back_compat_no_stories():
-    """Existing callers without `stories` should still work (default None)."""
-    sig = inspect.signature(run_agentic_certifier)
-    # Verify the param has a default (call sites without it succeed)
-    assert sig.parameters["stories"].default is None
 
 
 # ---------- prompt placeholder support ----------

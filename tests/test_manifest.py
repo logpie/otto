@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -18,6 +16,7 @@ from otto.manifest import (
     now_iso,
     write_manifest,
 )
+from tests._helpers import init_repo
 
 
 # ---------- manifest_path_for ----------
@@ -141,20 +140,8 @@ def test_write_manifest_atomic_via_rename(tmp_path: Path):
 # ---------- current_head_sha ----------
 
 
-def _init_repo(tmp_path: Path) -> Path:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-b", "main"], cwd=repo, capture_output=True, check=True)
-    subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=repo, check=True)
-    subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True)
-    (repo / "f.txt").write_text("x")
-    subprocess.run(["git", "add", "f.txt"], cwd=repo, check=True)
-    subprocess.run(["git", "commit", "-q", "-m", "i"], cwd=repo, check=True)
-    return repo
-
-
 def test_current_head_sha_returns_real_sha(tmp_path: Path):
-    repo = _init_repo(tmp_path)
+    repo = init_repo(tmp_path)
     sha = current_head_sha(repo)
     assert sha is not None
     assert len(sha) == 40

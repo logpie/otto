@@ -15,27 +15,21 @@ from otto.setup_gitattributes import (
     install,
     is_setup,
 )
-
-
-def _init_repo(tmp_path: Path) -> Path:
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-b", "main"], cwd=repo, capture_output=True, check=True)
-    return repo
+from tests._helpers import init_repo
 
 
 # ---------- check_compatibility ----------
 
 
 def test_compat_clean_repo_is_compatible(tmp_path: Path):
-    repo = _init_repo(tmp_path)
+    repo = init_repo(tmp_path, initial_commit=False)
     ok, conflicts = check_compatibility(repo)
     assert ok is True
     assert conflicts == []
 
 
 def test_compat_existing_compatible_rules_pass(tmp_path: Path):
-    repo = _init_repo(tmp_path)
+    repo = init_repo(tmp_path, initial_commit=False)
     (repo / ".gitattributes").write_text(
         "intent.md merge=union\n"
         "otto.yaml merge=ours\n"
@@ -45,7 +39,7 @@ def test_compat_existing_compatible_rules_pass(tmp_path: Path):
 
 
 def test_compat_conflicting_rule_blocks(tmp_path: Path):
-    repo = _init_repo(tmp_path)
+    repo = init_repo(tmp_path, initial_commit=False)
     (repo / ".gitattributes").write_text("intent.md merge=binary\n")
     ok, conflicts = check_compatibility(repo)
     assert ok is False
@@ -53,7 +47,7 @@ def test_compat_conflicting_rule_blocks(tmp_path: Path):
 
 
 def test_compat_unrelated_rules_dont_interfere(tmp_path: Path):
-    repo = _init_repo(tmp_path)
+    repo = init_repo(tmp_path, initial_commit=False)
     (repo / ".gitattributes").write_text("*.png binary\n*.jpg binary\n")
     ok, _ = check_compatibility(repo)
     assert ok is True
@@ -63,7 +57,7 @@ def test_compat_unrelated_rules_dont_interfere(tmp_path: Path):
 
 
 def test_install_creates_gitattributes_when_missing(tmp_path: Path):
-    repo = _init_repo(tmp_path)
+    repo = init_repo(tmp_path, initial_commit=False)
     changed = install(repo, register_ours_driver=False)
     assert changed is True
     content = (repo / ".gitattributes").read_text()
@@ -72,7 +66,7 @@ def test_install_creates_gitattributes_when_missing(tmp_path: Path):
 
 
 def test_install_appends_to_existing_gitattributes(tmp_path: Path):
-    repo = _init_repo(tmp_path)
+    repo = init_repo(tmp_path, initial_commit=False)
     (repo / ".gitattributes").write_text("*.png binary\n")
     changed = install(repo, register_ours_driver=False)
     assert changed is True
@@ -82,7 +76,7 @@ def test_install_appends_to_existing_gitattributes(tmp_path: Path):
 
 
 def test_install_idempotent(tmp_path: Path):
-    repo = _init_repo(tmp_path)
+    repo = init_repo(tmp_path, initial_commit=False)
     install(repo, register_ours_driver=False)
     content_before = (repo / ".gitattributes").read_text()
     changed = install(repo, register_ours_driver=False)
@@ -92,7 +86,7 @@ def test_install_idempotent(tmp_path: Path):
 
 
 def test_install_raises_on_conflict(tmp_path: Path):
-    repo = _init_repo(tmp_path)
+    repo = init_repo(tmp_path, initial_commit=False)
     (repo / ".gitattributes").write_text("intent.md merge=binary\n")
     with pytest.raises(GitAttributesConflict, match="intent.md"):
         install(repo, register_ours_driver=False)
@@ -100,7 +94,7 @@ def test_install_raises_on_conflict(tmp_path: Path):
 
 def test_install_partial_existing_completes_setup(tmp_path: Path):
     """If only one of the two required rules is present, install adds the missing one."""
-    repo = _init_repo(tmp_path)
+    repo = init_repo(tmp_path, initial_commit=False)
     (repo / ".gitattributes").write_text("intent.md merge=union\n")
     changed = install(repo, register_ours_driver=False)
     assert changed is True
@@ -113,33 +107,32 @@ def test_install_partial_existing_completes_setup(tmp_path: Path):
 
 
 def test_is_setup_false_when_missing(tmp_path: Path):
-    repo = _init_repo(tmp_path)
+    repo = init_repo(tmp_path, initial_commit=False)
     assert is_setup(repo) is False
 
 
 def test_is_setup_true_after_install(tmp_path: Path):
-    repo = _init_repo(tmp_path)
+    repo = init_repo(tmp_path, initial_commit=False)
     install(repo, register_ours_driver=False)
     assert is_setup(repo) is True
 
 
 def test_assert_setup_raises_when_missing(tmp_path: Path):
-    repo = _init_repo(tmp_path)
+    repo = init_repo(tmp_path, initial_commit=False)
     with pytest.raises(GitAttributesConflict, match="Missing required"):
         assert_setup(repo)
 
 
 def test_assert_setup_raises_on_conflict(tmp_path: Path):
-    repo = _init_repo(tmp_path)
+    repo = init_repo(tmp_path, initial_commit=False)
     (repo / ".gitattributes").write_text("intent.md merge=binary\n")
     with pytest.raises(GitAttributesConflict, match="intent.md"):
         assert_setup(repo)
 
 
 def test_assert_setup_passes_after_install(tmp_path: Path):
-    repo = _init_repo(tmp_path)
+    repo = init_repo(tmp_path, initial_commit=False)
     install(repo, register_ours_driver=False)
-    # No exception
     assert_setup(repo)
 
 
@@ -148,7 +141,7 @@ def test_assert_setup_passes_after_install(tmp_path: Path):
 
 def test_union_driver_merges_intent_md_without_conflict(tmp_path: Path):
     """E2E: setup → make two parallel branches that both modify intent.md → merge → no conflict."""
-    repo = _init_repo(tmp_path)
+    repo = init_repo(tmp_path, initial_commit=False)
     subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True)
 

@@ -14,12 +14,10 @@ After it returns, the orchestrator validates:
 3. HEAD unchanged (agent didn't commit/reset)
 Then orchestrator stages + commits.
 
-Codex round 4 finding: argv check is too weak; Bash is disabled at the
-SDK level; Codex provider is rejected (it ignores disallowed_tools).
-
-Per CLAUDE.md: `disallowed_tools=["Bash"]` is the strongest constraint we
-have. Combined with post-call diff-name-only validation, agent escape is
-caught and triggers retry-from-snapshot.
+Bash is disabled at the SDK level via `disallowed_tools=["Bash"]` (the
+strongest constraint we have). Combined with post-call diff-name-only
+validation, agent escape is caught and triggers retry-from-snapshot.
+Codex provider is rejected outright — it ignores `disallowed_tools`.
 """
 
 from __future__ import annotations

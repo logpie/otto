@@ -1,4 +1,4 @@
-"""Tests for otto.setup_gitignore — F4 fix."""
+"""Tests for otto.setup_gitignore."""
 
 from __future__ import annotations
 
@@ -22,16 +22,15 @@ def test_ensure_gitignore_creates_new_file(tmp_path: Path):
     assert OTTO_HEADER in text
 
 
-def test_ensure_gitignore_adds_common_build_artifacts_F14(tmp_path: Path):
-    """F14: common build artifacts (__pycache__, node_modules, etc.) must
-    land in .gitignore so the merge validator doesn't bail when the agent
-    runs project tests and produces artifacts."""
+def test_ensure_gitignore_adds_common_build_artifacts(tmp_path: Path):
+    """Common build artifacts (__pycache__, node_modules, etc.) must land
+    in .gitignore so the merge validator doesn't bail when the agent runs
+    project tests and produces artifacts."""
     ensure_gitignore(tmp_path)
     text = (tmp_path / ".gitignore").read_text()
     for pat in COMMON_BUILD_ARTIFACT_PATTERNS:
-        assert pat in text, f"F14: missing common artifact {pat!r}\n{text}"
+        assert pat in text, f"missing common artifact {pat!r}\n{text}"
     assert COMMON_HEADER in text
-    # Concrete high-signal patterns
     assert "__pycache__/" in text
     assert "node_modules/" in text
     assert ".pytest_cache/" in text

@@ -209,3 +209,29 @@ Then ran 3 rounds of Codex implementation review.
 - APPROVED. No new issues. Round-3 changes fail closed for both large files and partial marker remnants.
 
 Test count: 408 → 421 (round 1) → 428 (round 2) → 430 (round 3). All passing.
+
+---
+
+## Implementation Gate — 2026-04-20 — Test-suite code-health audit
+
+Audited `tests/` (6,811 LOC, 430 tests) against the same 4-agent code-health protocol.
+Tests are real code and accumulate the same slop as production.
+
+### Round 1 — Codex
+- APPROVED. One NOTE-level finding about midnight-rollover race in test_cli_queue
+  being reduced but not eliminated (true freeze would require monkeypatching the
+  clock source `otto.branching.compute_branch_name` calls). Acceptable for now.
+
+### Audit results
+- 8 unused imports + 1 stale local import removed
+- 1 real bug: `tests/conftest.py` `tmp_git_repo` was missing `check=True` (silent failure)
+- 4 redundant `TestV3PipelineFail` tests (each ran the same pipeline) merged to 1
+- 2 redundant `TestV3SkipQA` tests merged to 1 parametrized
+- 1 duplicate signature-only test in `test_certifier_stories.py` deleted
+- 1 weak assertion (`out.count("\n") >= 3`) strengthened to specific structural elements
+- F-number / Codex-round / P6 cruft removed from 6 test files (mirrors production cleanup)
+- 3 "removed because" gravestone comments + 1 12-line bug-archeology block deleted
+- 1 apologetic 6-line comment in test_branching replaced with explicit assertion
+- New `tests/_helpers.py` factory replacing duplicated `_init_repo`/`_make_repo` across 9 files
+
+Test count: 430 → 426 (−4 from merging redundant tests, +1 parametrize). LOC: 6,811 → 6,704 (−107).

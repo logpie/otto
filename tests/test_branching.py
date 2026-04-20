@@ -1,15 +1,4 @@
-"""Tests for otto/branching.py — slug + branch policy logic.
-
-Covers:
-- slugify_intent edge cases
-- compute_branch_name composition
-- should_auto_branch policy (only auto-branch from default_branch)
-- create_or_switch_branch git interaction (creates new + switches to existing)
-- ensure_branch_for_atomic_command integration:
-    * on default_branch: creates new branch
-    * on non-default branch: stays put
-    * greenfield (no commits): no-op
-"""
+"""Tests for otto/branching.py — slug + branch policy."""
 
 from __future__ import annotations
 
@@ -29,6 +18,7 @@ from otto.branching import (
     should_auto_branch,
     slugify_intent,
 )
+from tests._helpers import init_repo
 
 
 # ---------- slugify_intent ----------
@@ -154,19 +144,6 @@ def test_should_not_auto_branch_when_detached_or_empty():
 # ---------- git-interacting tests (use real tmp git repo) ----------
 
 
-def _init_repo(tmp_path: Path) -> Path:
-    """Create a git repo with one commit on main."""
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", "-b", "main"], cwd=repo, capture_output=True, check=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
-    subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
-    (repo / "README.md").write_text("hello\n")
-    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
-    subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=repo, check=True)
-    return repo
-
-
 def _empty_repo(tmp_path: Path) -> Path:
     """Create a git repo with NO commits (greenfield)."""
     repo = tmp_path / "repo"
@@ -176,7 +153,7 @@ def _empty_repo(tmp_path: Path) -> Path:
 
 
 def test_current_branch_returns_main_after_init(tmp_path):
-    repo = _init_repo(tmp_path)
+    repo = init_repo(tmp_path, commit_file="README.md", commit_content="hello\n", commit_msg="initial")
     assert current_branch(repo) == "main"
 
 
@@ -189,7 +166,7 @@ def test_current_branch_returns_init_branch_even_without_commits(tmp_path):
 
 
 def test_repo_has_commits_true_after_init(tmp_path):
-    repo = _init_repo(tmp_path)
+    repo = init_repo(tmp_path, commit_file="README.md", commit_content="hello\n", commit_msg="initial")
     assert repo_has_commits(repo) is True
 
 
@@ -199,14 +176,14 @@ def test_repo_has_commits_false_for_empty(tmp_path):
 
 
 def test_create_or_switch_branch_creates_new(tmp_path):
-    repo = _init_repo(tmp_path)
+    repo = init_repo(tmp_path, commit_file="README.md", commit_content="hello\n", commit_msg="initial")
     out = create_or_switch_branch(repo, "build/test-1")
     assert out == "build/test-1"
     assert current_branch(repo) == "build/test-1"
 
 
 def test_create_or_switch_branch_switches_to_existing(tmp_path):
-    repo = _init_repo(tmp_path)
+    repo = init_repo(tmp_path, commit_file="README.md", commit_content="hello\n", commit_msg="initial")
     # Create the branch first, switch back to main
     subprocess.run(["git", "checkout", "-b", "build/preexists"], cwd=repo, check=True, capture_output=True)
     subprocess.run(["git", "checkout", "main"], cwd=repo, check=True, capture_output=True)
@@ -217,7 +194,7 @@ def test_create_or_switch_branch_switches_to_existing(tmp_path):
 
 
 def test_ensure_branch_creates_when_on_default(tmp_path):
-    repo = _init_repo(tmp_path)
+    repo = init_repo(tmp_path, commit_file="README.md", commit_content="hello\n", commit_msg="initial")
     branch, created = ensure_branch_for_atomic_command(
         mode="build",
         intent="add csv export",
@@ -230,7 +207,7 @@ def test_ensure_branch_creates_when_on_default(tmp_path):
 
 
 def test_ensure_branch_stays_on_feature_branch(tmp_path):
-    repo = _init_repo(tmp_path)
+    repo = init_repo(tmp_path, commit_file="README.md", commit_content="hello\n", commit_msg="initial")
     # User is on a feature branch
     subprocess.run(["git", "checkout", "-b", "feature/auth"], cwd=repo, check=True, capture_output=True)
     branch, created = ensure_branch_for_atomic_command(
@@ -258,7 +235,7 @@ def test_ensure_branch_noop_in_greenfield(tmp_path):
 
 def test_ensure_branch_idempotent_same_intent_same_day(tmp_path):
     """Re-running same intent same day should switch to existing branch, not error."""
-    repo = _init_repo(tmp_path)
+    repo = init_repo(tmp_path, commit_file="README.md", commit_content="hello\n", commit_msg="initial")
     branch1, created1 = ensure_branch_for_atomic_command(
         mode="build", intent="add csv", project_dir=repo, default_branch="main"
     )
@@ -269,8 +246,5 @@ def test_ensure_branch_idempotent_same_intent_same_day(tmp_path):
         mode="build", intent="add csv", project_dir=repo, default_branch="main"
     )
     assert branch2 == branch1
-    # On second run, the branch already exists; create returns rc!=0 and we
-    # fall through to switch, so created_new is True from our function's view
-    # (we don't distinguish "I created it" from "I found it"). That's fine —
-    # the user-visible outcome is the same: they're on the right branch.
+    assert created2 is True  # function reports "switched-to" the same way as "created"
     assert current_branch(repo) == branch2

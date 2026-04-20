@@ -1,5 +1,4 @@
-"""Hardening regression tests: parsing, timeout/env validation, checkpoint
-resume, certifier behavior, cross-run memory, and CLI guards."""
+"""Hardening regression tests for the v3 pipeline."""
 
 import asyncio
 import json
@@ -110,9 +109,6 @@ DIAGNOSIS: null
         assert result.passed is True
         assert result.rounds == 2
 
-    # (test_single_round removed — `rounds == 1` is implicitly covered by
-    # every other happy-path test that uses a single CERTIFY_ROUND mock.)
-
 
 # -- Test: Timeout is actually enforced --
 
@@ -158,10 +154,6 @@ class TestSubprocessEnv:
         assert env["CLAUDECODE"] == ""
         assert env["GIT_TERMINAL_PROMPT"] == "0"
         assert env["CI"] == "true"
-
-
-# (TestAgentOptions removed — it tested that @dataclass defaults work,
-# which is guaranteed by the stdlib, not by otto.)
 
 
 # -- Test: Empty story_id is rejected --
@@ -396,15 +388,9 @@ class TestImproveCLIHardening:
                 main, ["improve", "feature", "test intent", "--rounds", "1", "--split"], catch_exceptions=False
             )
 
-        # Tight assertion: non-zero exit AND a failed-story marker in output.
-        # Previously this used `"FAILED" in out or "PASSED" not in out` which
-        # was a tautology (empty output passed the second disjunct). The CLI
-        # doesn't print the word "FAILED" to stdout — it shows per-story ✗
-        # icons and writes the full verdict to improvement-report.md on disk.
+        # Failing-story summary is the reliable signal; the ✗ glyph is cosmetic.
         assert result.exit_code != 0, \
             f"Expected non-zero exit, got {result.exit_code}"
-        # Story-specific failure summary is the reliable signal; the ✗
-        # glyph is cosmetic and lives alongside.
         assert "Login broken" in result.output, \
             f"Expected failing-story summary in output: {result.output!r}"
 
@@ -790,10 +776,6 @@ class TestAppendIntentDedup:
         # "build X" appears once in the intent body (deduped)
         # The section header also contains "build-1" but not "build-2"
         assert "build-2" not in content
-
-    # (test_first_intent_creates_file removed — `test_similar_intents_both_appended`
-    # and `test_exact_duplicate_blocked` both implicitly verify that the file
-    # gets created on first write.)
 
 
 class TestRunBudget:

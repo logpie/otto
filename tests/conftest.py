@@ -91,9 +91,9 @@ def tmp_git_repo(tmp_path):
         cwd=tmp_path, check=True,
     )
     create_config(tmp_path)
-    subprocess.run(["git", "add", "otto.yaml"], cwd=tmp_path, capture_output=True)
+    subprocess.run(["git", "add", "otto.yaml"], cwd=tmp_path, capture_output=True, check=True)
     subprocess.run(
         ["git", "commit", "-q", "-m", "add config"],
-        cwd=tmp_path, capture_output=True,
+        cwd=tmp_path, capture_output=True, check=True,
     )
     return tmp_path
