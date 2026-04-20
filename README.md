@@ -140,6 +140,41 @@ Legend: `✓` documented · `~` partial or different approach · `✗` absent or
 
 **Form factor**: otto is a **single developer's CLI** — local, one process, no backend. The six items in the first table are the reliability primitives you buy by giving up the cloud/team surface area. Closest philosophical analog is [Symphony](https://github.com/openai/symphony) (OSS, proof-of-work gate, per-branch agent config) — but Symphony is team/Linear-oriented and assumes the repo is already harness-engineered with hermetic tests and machine-readable docs. Otto brings the harness *to* repos that aren't.
 
+### Certifier deep-dive — how verification mechanics compare
+
+Closed fix-loops are table stakes, but **what runs inside the verify step** varies sharply. The certifier is where otto diverges most from peers. Key mechanics:
+
+| | Otto certifier | [Devin 2.2](https://cognition.ai/blog/introducing-devin-2-2) self-review | [Cursor bg agent](https://cursor.com/blog/agent-computer-use) (CU, Feb '26) | [Symphony](https://github.com/openai/symphony) proof-of-work | [Factory Review Droid](https://docs.factory.ai/guides/droid-exec/code-review) | [Replit Agent 3](https://blog.replit.com/introducing-agent-3-our-most-autonomous-agent-yet) self-test | [Copilot coding agent](https://github.blog/news-insights/product-news/github-copilot-meet-the-new-coding-agent/) / Amazon Q |
+|---|---|---|---|---|---|---|---|
+| Separate process, builder-blind (no access to build agent's code/reasoning) | ✓ | ✗ same agent | ✗ same agent | ✗ same agent | ✓ but reviews code, not product | ✗ same agent | ✗ same agent |
+| Drives the running product as a user (browser / curl / subprocess) | ✓ Playwright + curl + shell | ✓ Linux-desktop computer use | ✓ browser + VM | ? video mechanism not documented | ✗ static diff review only | ✓ real browser | ✗ runs existing tests only |
+| Generates test stories from the intent / spec | ✓ | ✗ uses task description | ✗ uses user prompt | ✗ | ✗ | ✗ | ✗ |
+| Adversarial mode (XSS, SQLi, auth bypass, edge inputs) | ✓ `--thorough` | ✗ not documented | ✗ | ✗ | ~ flags bugs in diff, no runtime probes | ✗ | ✗ |
+| Spec-aware scope-creep detection (FAILs out-of-scope features) | ✓ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| Runs standalone on any project (incl. ones it didn't build) | ✓ `otto certify` | ✗ | ✗ | ✗ | ~ can review any PR | ✗ | ✗ |
+| Per-story structured output (JSON + evidence paths) | ✓ | screen recording card | video / screenshots / logs | CI logs + video + PR comments | inline PR comments | test summary in chat | PR + CI |
+| Cross-run regression memory with commit citations | ✓ opt-in | ~ parent reads child trajectories | ✗ | ✗ | ✗ | ✗ | ✗ |
+
+**Per-system notes:**
+
+- **Devin 2.2 "Let me test it"** — closest in spirit. Devin drives the running app via full computer use on a Linux desktop and produces polished screen recordings with pass/fail cards. Not builder-blind (same agent self-verifies), no explicit adversarial mode, no scope gate.
+- **Cursor background agents (Feb 2026 Cloud Agents with Computer Use)** — the browser + VM + artifacts infrastructure is comparable, but verification goals come from the user's prompt ("navigate to localhost:3000 and verify X"). No independent verifier, no built-in scope or security probing.
+- **Symphony proof-of-work** — a bundle (CI + PR review feedback + complexity analysis + walkthrough video). Who generates the walkthrough video isn't documented in the README. CI is the primary correctness gate.
+- **Factory Review Droid** — **reviews the code diff only**, posts inline PR comments. It does not run the product. Separate tool DroidShield is a secret scanner (pattern-matching on commit/push), also not a product tester.
+- **Replit Agent 3** — most aligned on "LLM drives a real browser like a user," and its "Potemkin interfaces" framing echoes otto's motivation. Same-agent self-test; no spec/adversarial gate.
+- **Copilot coding agent / Amazon Q `/test`** — verification ≈ "run the repo's tests in CI or a sandbox." No product-driving agent.
+
+**What's distinctive about otto's certifier**, across this peer set:
+
+1. **Process isolation** — runs as a separate LLM agent with no access to the build agent's code changes or reasoning. Prevents the build agent from rationalizing its own failures.
+2. **Story-from-intent generation** — the certifier reads the intent/spec and decides what to test. Peers test what the user tells them to, or whatever the repo's test suite covers.
+3. **Spec-aware scope-creep FAIL** — a feature built outside the approved Must-Have set is flagged as a failure, not silently accepted.
+4. **Explicit adversarial mode** — `--thorough` tries XSS, SQLi, auth bypass, broken inputs, edge cases. Not found as a documented mode in any peer.
+5. **Standalone verification** — `otto certify` works on any project, regardless of how it was built. The closest peer capability is Factory's Review Droid on an arbitrary PR (code review, not product test).
+6. **Cross-run regression memory** — opt-in memory tracks what was tested, what was found, and what was fixed, with commit citations so stale memory is verifiable.
+
+Replit Agent 3's self-test is the **closest peer on LLM-driving-browser**; Devin 2.2 is the closest on **polished visual evidence**; Factory Review Droid is the closest on **independent-reviewer process** (but reviews code, not product). No peer combines all the above.
+
 ## Quick start
 
 ```bash
