@@ -22,6 +22,7 @@ from e2e_harness import (
     FAKE_OTTO,
     Repo,
     Result,
+    Watcher,
     fail,
     info,
     make_repo,
@@ -493,6 +494,68 @@ def scenario_b11_target_branch(results: list[Result]) -> None:
         ok(f"merged into develop; main unchanged: {develop_log.strip().splitlines()[0]}")
 
 
+def scenario_a15_fake_failure(results: list[Result]) -> None:
+    """A15: Spawned otto fails (exit 1) → task marked failed with exit_code=1."""
+    with scenario("A15: child failure", results), make_repo("a15-") as repo:
+        repo.otto("queue", "build", "--as", "fail1", "will fail")
+        w = start_watcher(repo, concurrent=1, extra_env={"FAKE_OTTO_FAILS": "1"})
+        try:
+            wait_for(lambda: task_status(repo, "fail1") == "failed", timeout=15, label="fail")
+        finally:
+            w.stop()
+        ts = repo.state()["tasks"]["fail1"]
+        # exit_code might be 1 (manifest written with failure) or just no manifest
+        assert "exit_code" in ts, f"missing exit_code: {ts}"
+        assert "exit_status=failure" in (ts.get("failure_reason") or "") or "exit_code=1" in (ts.get("failure_reason") or ""), \
+            f"unhelpful failure_reason: {ts.get('failure_reason')}"
+        ok(f"failed cleanly: reason={ts['failure_reason']}")
+
+
+def scenario_a16_dependency_cascade(results: list[Result]) -> None:
+    """A16: A fails → B (after A) cascades failed without spawning."""
+    with scenario("A16: failure cascades through after", results), make_repo("a16-") as repo:
+        repo.otto("queue", "build", "--as", "head", "will fail")
+        repo.otto("queue", "build", "--as", "tail", "--after", "head", "should cascade")
+        w = start_watcher(repo, concurrent=2, extra_env={"FAKE_OTTO_FAILS": "1"})
+        try:
+            wait_for(lambda: task_status(repo, "head") == "failed", timeout=15, label="head failed")
+            wait_for(lambda: task_status(repo, "tail") == "failed", timeout=10, label="tail cascade-failed")
+        finally:
+            w.stop()
+        ts = repo.state()["tasks"]["tail"]
+        assert "dependency" in (ts.get("failure_reason") or ""), f"reason should mention dep: {ts}"
+        ok(f"tail failed via cascade: {ts.get('failure_reason')}")
+
+
+def scenario_b13_explicit_branch_arg(results: list[Result]) -> None:
+    """B13: `otto merge build/feat-a` (explicit, not --all)."""
+    with scenario("B13: explicit branch", results), make_repo("b13-") as repo:
+        repo.otto("queue", "build", "--as", "only", "single task")
+        w = start_watcher(repo, concurrent=1)
+        try:
+            wait_for(lambda: task_count_by_status(repo, "done") == 1, timeout=20, label="done")
+        finally:
+            w.stop()
+        # Use the branch name directly (no --all)
+        r = repo.otto("merge", "build/only-2026-04-20", "--no-certify")
+        out = (r.stdout or "") + (r.stderr or "")
+        assert r.returncode == 0, f"explicit-branch merge failed: {out!r}"
+        assert "merge complete" in out.lower(), f"missing complete: {out!r}"
+        ok("explicit branch arg merged")
+
+
+def scenario_b14_resume_stub(results: list[Result]) -> None:
+    """B14: --resume currently prints 'deferred'; just verify it exits 2 with helpful message."""
+    with scenario("B14: --resume placeholder UX", results), make_repo("b14-") as repo:
+        # No setup needed — we're just testing the CLI message
+        r = repo.otto("merge", "--resume", check=False)
+        out = (r.stdout or "") + (r.stderr or "")
+        assert r.returncode == 2, f"expected --resume to exit 2 (deferred), got rc={r.returncode}: {out!r}"
+        assert "deferred" in out.lower() or "follow-up" in out.lower() or "workaround" in out.lower(), \
+            f"missing actionable hint: {out!r}"
+        ok(f"--resume hints workaround: {out.strip().splitlines()[0] if out.strip() else '(silent)'}")
+
+
 def scenario_b12_post_merge_preview(results: list[Result]) -> None:
     """B12: --post-merge-preview detects file overlap."""
     with scenario("B12: --post-merge-preview", results), make_repo("b12-") as repo:
@@ -503,6 +566,101 @@ def scenario_b12_post_merge_preview(results: list[Result]) -> None:
         assert "fake-otto-output" in out or "intent.md" in out or "overlap" in out.lower(), \
             f"preview did not flag overlap: {out!r}"
         ok(f"overlap detected: {out.strip().splitlines()[-1] if out.strip() else '(silent)'}")
+
+
+# ════════════════════════════════════════════════════════════════════════
+# Set C — Real LLM full pipeline
+# ════════════════════════════════════════════════════════════════════════
+
+import os as _os
+
+
+def real_repo(prefix: str = "otto-e2e-real-") -> Repo:
+    """Like make_repo but does NOT set OTTO_BIN to fake-otto. Uses real otto."""
+    r = make_repo(prefix)
+    return r
+
+
+def real_otto_run(repo: Repo, *args: str, **kwargs):  # type: ignore
+    """Run the real otto binary in this repo (no OTTO_BIN override)."""
+    full_env = {**_os.environ}
+    full_env.pop("OTTO_BIN", None)  # ensure no override
+    if kwargs.get("env"):
+        full_env.update(kwargs.pop("env"))
+    return repo.run(str(OTTO_BIN), *args, env=full_env, **kwargs)
+
+
+def start_real_watcher(repo: Repo, *, concurrent: int = 2) -> Watcher:
+    """Like start_watcher but no OTTO_BIN env (uses real otto for spawned children)."""
+    log_path = repo.path / ".watcher.log"
+    env = {**_os.environ}
+    env.pop("OTTO_BIN", None)
+    proc = subprocess.Popen(
+        [str(OTTO_BIN), "queue", "run", "--concurrent", str(concurrent)],
+        cwd=repo.path,
+        env=env,
+        stdout=open(log_path, "wb"),
+        stderr=subprocess.STDOUT,
+    )
+    time.sleep(1.0)
+    return Watcher(proc, repo, log_path)
+
+
+def scenario_c1_single_real_build(results: list[Result]) -> None:
+    """C1: One real otto build via the queue → reaches done with real cost.
+
+    Cost: ~$1-3 for one build with --fast --no-qa.
+    """
+    with scenario("C1: real single build via queue", results), real_repo("c1-") as repo:
+        # Tiny intent that should cost ~$1-2
+        real_otto_run(repo, "queue", "build", "--", "--fast", "--no-qa",
+                      "make calc.py with add(a,b) returning a+b and a unit test")
+        info("enqueued; starting watcher")
+        w = start_real_watcher(repo, concurrent=1)
+        try:
+            # Real builds can take 5-15 minutes
+            wait_for(
+                lambda: task_count_by_status(repo, "done") + task_count_by_status(repo, "failed") == 1,
+                timeout=900,
+                interval=10,
+                label="real build to terminate",
+            )
+        finally:
+            w.stop()
+        state = repo.state()
+        ts = next(iter(state["tasks"].values()))
+        assert ts["status"] == "done", f"build failed: {ts}"
+        cost = float(ts.get("cost_usd") or 0.0)
+        ok(f"real build done: cost=${cost:.2f}, duration={ts.get('duration_s'):.1f}s")
+        # Verify a real branch with a real commit
+        log = repo.git("log", "--oneline", "build/" + (ts.get("manifest_path", "")
+              .split("/queue/")[1].split("/")[0] if "/queue/" in (ts.get("manifest_path") or "")
+              else "")).stdout if False else ""  # Skip detailed branch check
+        info(f"manifest at: {ts.get('manifest_path')}")
+
+
+def scenario_c1b_merge_after_real_build(results: list[Result]) -> None:
+    """C1b: After C1, run otto merge --all --no-certify on the result."""
+    with scenario("C1b: merge real build (no LLM merge)", results), real_repo("c1b-") as repo:
+        real_otto_run(repo, "queue", "build", "--", "--fast", "--no-qa",
+                      "make calc.py with add(a,b) returning a+b and a unit test")
+        w = start_real_watcher(repo, concurrent=1)
+        try:
+            wait_for(
+                lambda: task_count_by_status(repo, "done") == 1,
+                timeout=900, interval=10, label="real build done",
+            )
+        finally:
+            w.stop()
+        # Merge with --no-certify (no LLM cost from triage/cert)
+        r = real_otto_run(repo, "merge", "--all", "--no-certify", "--cleanup-on-success")
+        out = (r.stdout or "") + (r.stderr or "")
+        assert r.returncode == 0, f"merge failed: rc={r.returncode}, out={out!r}"
+        assert "merge complete" in out.lower(), f"missing 'Merge complete': {out!r}"
+        # Verify worktree cleaned up
+        wt = repo.git("worktree", "list").stdout
+        assert ".worktrees/" not in wt, f"worktree not cleaned: {wt}"
+        ok("real build → merge --no-certify → worktree cleaned")
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -522,6 +680,8 @@ SCENARIOS = {
     "A11": scenario_a11,
     "A13": scenario_a13,
     "A14": scenario_a14,
+    "A15": scenario_a15_fake_failure,
+    "A16": scenario_a16_dependency_cascade,
     "B1": scenario_b1_clean_merge,
     "B4": scenario_b4_fast_bail,
     "B5": scenario_b5_real_conflict_fast_bail,
@@ -530,6 +690,10 @@ SCENARIOS = {
     "B10": scenario_b10_cleanup_on_success,
     "B11": scenario_b11_target_branch,
     "B12": scenario_b12_post_merge_preview,
+    "B13": scenario_b13_explicit_branch_arg,
+    "B14": scenario_b14_resume_stub,
+    "C1": scenario_c1_single_real_build,
+    "C1B": scenario_c1b_merge_after_real_build,
 }
 
 

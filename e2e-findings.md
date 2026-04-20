@@ -173,6 +173,112 @@ result the user already saw succeed.
 worktrees for [<task-ids>]` at INFO; per-task failures log WARNING with
 the git error.
 
+---
+
+### [F7] Watcher logger had no handlers — spawn/reap events invisible to user — observed during real LLM C1 run
+
+**Symptom**: Running `otto queue run` shows the spawned otto's stdout
+interleaved but no information about the watcher itself: when it dispatched
+each task, when it reaped, what cost it observed, how long it took. The
+`logger.info(...)` calls in `runner.py` (and there are many: spawn, reap,
+cancel, terminate, reconcile, ECHILD-deferred reap) all go nowhere because
+no handler is attached to `otto.queue.runner`.
+
+User-impact: a user who runs `otto queue run` and sees their task seemingly
+hang has no way to tell whether the watcher spawned it (vs. silently
+queued it). When investigating a stuck task, they see only the spawned
+otto's output — no watcher metadata. Debugging is guesswork.
+
+**Diagnosis**: `cli_queue.run` never called `logging.basicConfig` or
+attached any handler. Library convention is to leave that to the application
+entry point — but the entry point forgot.
+
+**Fix**: New `_install_runner_logging(project_dir, *, quiet)` in cli_queue.
+Always installs a file handler at `otto_logs/queue/watcher.log` (append,
+ISO-8601 timestamps, INFO level). Unless `--quiet`, also installs a stdout
+handler with short `[HH:MM:SS] message` format so events stream live.
+Stamped events:
+
+    [02:32:26] spawned add-a-calculator: pid=2241, branch=build/add-...
+    [02:32:28] reaped add-a-calculator: done (cost=$0.42, duration=1.0s)
+    [02:32:28] SIGTERM: immediate shutdown
+
+The file handler in `otto_logs/queue/watcher.log` survives across watcher
+restarts (append mode) — useful for diagnosing "what happened during last
+night's run" without scrollback.
+
+**Verification**: A1 with `OTTO_E2E_KEEP=1` shows both files populated
+correctly. New `--quiet` flag gives users an opt-out.
+
+---
+
+### [F8] Merge orchestrator + agents had no log handler — same bug as F7, different namespace — observed during real LLM C2/C3 runs
+
+**Symptom**: After F7 fixed the queue runner, the merge orchestrator,
+conflict-agent, and triage-agent all still logged into the void. The user
+sees the high-level "Merging..." → "Merge complete" CLI banners but no
+record of:
+- which branches the orchestrator started/completed
+- conflict-agent attempts, retries, validation failures
+- triage-agent reasoning / story coverage decisions
+
+**Diagnosis**: `otto.merge.*` and `otto.cli_merge` loggers had no handlers
+attached.
+
+**Fix**: New `_install_merge_logging(project_dir)` in cli_merge.py. Attaches
+a single FileHandler to the parent `otto.merge` logger (which the children
+inherit) and to `otto.cli_merge`. Output goes to
+`otto_logs/merge/merge.log` (append, ISO-8601, INFO+). Idempotent across
+reruns in the same Python process.
+
+**Verification**: real merge run in /tmp/otto-real-cert wrote
+"merge merge-... starting: target=main, branches=[...]" to the log file.
+
+---
+
+## Real-LLM Set C results
+
+Three real-LLM scenarios run ad-hoc (not yet automated since the harness
+still depends on capturing live cost; the underlying CLI paths work):
+
+**C1 - single real build via queue → merge --no-certify --cleanup-on-success**
+- Cost: $0.47 build + $0 merge = $0.47 total
+- Time: 75s build + ~3s merge
+- Result: calc.py with add(a,b) committed; branch merged into main; worktree
+  cleaned up; first-touch bookkeeping (.gitignore, .gitattributes) auto-
+  committed cleanly.
+
+**C2 - 2 parallel real builds → merge --all (with conflict agent)**
+- Cost: 2×$0.19 builds + $0.24 conflict agent = $0.62 total
+- Time: ~30s/build + ~15s conflict resolution
+- Setup: Both builds touch math.py with different functions
+- Result: branch `add` merged clean; branch `mul` triggered conflict agent;
+  agent merged both functions correctly into math.py with both
+  `add(a,b)` and `multiply(a,b)`. Validation passed (no scope creep, no
+  diff --check failures, HEAD unchanged). Commit landed cleanly.
+- conflict-agent.log captured the agent's Read/Write tool calls per file.
+
+**C3 - 2 parallel real builds → merge --all (with triage + cert)**
+- Cost: 2×$0.15 builds + $0 triage (trivial — no stories yet) = $0.29 total
+- Result: clean merge; triage emitted "no stories collected; nothing to
+  verify" plan; cert skipped because plan was empty. This is correct — the
+  fast/no-qa builds didn't produce STORY_RESULT lines, so there's nothing
+  to verify. Triage cost $0 because it short-circuited on empty input.
+
+**Total real-LLM cost**: ~$1.40 across 5 builds + 1 conflict resolution +
+1 triage.
+
+**End-to-end coverage**:
+- ✅ queue dispatch → real `otto build` → manifest → reap (F1 path)
+- ✅ first-touch bookkeeping auto-commit (F4, F5)
+- ✅ clean merge → cleanup-on-success (F6)
+- ✅ real conflict → real conflict agent → validation → commit
+- ✅ post-merge triage agent (trivial input edge)
+- ✅ watcher logging visible (F7)
+- ✅ merge logging visible (F8)
+
+
+
 
 
 

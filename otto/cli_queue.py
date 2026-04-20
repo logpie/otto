@@ -93,6 +93,44 @@ def _project_dir() -> Path:
     return Path.cwd()
 
 
+def _install_runner_logging(project_dir: Path, *, quiet: bool) -> None:
+    """Configure handlers for `otto.queue.runner` logger.
+
+    - Always: file handler at otto_logs/queue/watcher.log (append mode,
+      ISO-8601 timestamps, INFO level). Survives across watcher restarts.
+    - Stdout: short one-line format "[HH:MM:SS] message" unless --quiet.
+      INFO-level only; skips DEBUG noise.
+
+    Idempotent: if handlers were already attached (e.g. from a prior call
+    in the same process), they are removed first.
+    """
+    import logging
+    runner_log = logging.getLogger("otto.queue.runner")
+    # Avoid duplicate handlers if this is somehow called twice
+    for h in list(runner_log.handlers):
+        runner_log.removeHandler(h)
+    runner_log.setLevel(logging.INFO)
+
+    log_dir = project_dir / "otto_logs" / "queue"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    file_handler = logging.FileHandler(log_dir / "watcher.log", mode="a")
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%SZ",
+    ))
+    runner_log.addHandler(file_handler)
+
+    if not quiet:
+        stdout_handler = logging.StreamHandler(sys.stdout)
+        stdout_handler.setLevel(logging.INFO)
+        stdout_handler.setFormatter(logging.Formatter(
+            "  [%(asctime)s] %(message)s",
+            datefmt="%H:%M:%S",
+        ))
+        runner_log.addHandler(stdout_handler)
+
+
 def _resolve_otto_bin() -> list[str]:
     # Test/E2E override: $OTTO_BIN may name an alternative executable. Used
     # by the e2e harness to point the watcher at a stubbed `otto`.
@@ -569,7 +607,9 @@ def register_queue_commands(main: click.Group) -> None:
     @queue.command(context_settings=CONTEXT_SETTINGS)
     @click.option("--concurrent", "-j", default=None, type=int,
                   help="Max concurrent tasks (default from otto.yaml queue.concurrent)")
-    def run(concurrent: int | None) -> None:
+    @click.option("--quiet", is_flag=True,
+                  help="Suppress watcher event lines (spawn/reap/cancel) on stdout")
+    def run(concurrent: int | None, quiet: bool) -> None:
         """Start the foreground queue watcher. Run in a tmux pane like `vite dev`."""
         from otto.config import load_config
         from otto.queue.runner import (
@@ -587,6 +627,14 @@ def register_queue_commands(main: click.Group) -> None:
         if concurrent is not None:
             rcfg.concurrent = max(1, concurrent)
         otto_bin = _resolve_otto_bin()
+
+        # F7: install logging handlers so watcher events are visible. Without
+        # this, the user sees only the spawned otto's stdout — no spawn / reap
+        # / heartbeat / cancel events from the runner itself, making it
+        # impossible to debug "why didn't my task dispatch?" or "did the cancel
+        # actually take effect?".
+        _install_runner_logging(project_dir, quiet=quiet)
+
         try:
             runner = Runner(project_dir, rcfg, otto_bin=otto_bin)
         except Exception as exc:
@@ -597,6 +645,7 @@ def register_queue_commands(main: click.Group) -> None:
             f"  [bold]Queue worker[/bold] — "
             f"concurrent={rcfg.concurrent}, project={project_dir.name}"
         )
+        console.print(f"  [dim]Event log: otto_logs/queue/watcher.log[/dim]")
         console.print("  Press Ctrl-C to stop gracefully (twice for immediate)\n")
 
         try:

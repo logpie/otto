@@ -26,6 +26,41 @@ from otto.theme import error_console
 logger = logging.getLogger("otto.cli_merge")
 
 
+def _install_merge_logging(project_dir: Path) -> None:
+    """Attach a file handler to the `otto.merge` logger tree so the
+    orchestrator, conflict-agent, and triage-agent events get persisted.
+    Without this, all those `logger.info(...)` events vanish — see F7 in
+    e2e-findings.md.
+
+    Idempotent: removes any prior `_otto_merge_handler` we added.
+    """
+    log_dir = project_dir / "otto_logs" / "merge"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    parent = logging.getLogger("otto.merge")
+    parent.setLevel(logging.INFO)
+    # Remove our previously-installed handler if any (re-runs in same process)
+    for h in list(parent.handlers):
+        if getattr(h, "_otto_merge_handler", False):
+            parent.removeHandler(h)
+    handler = logging.FileHandler(log_dir / "merge.log", mode="a")
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(name)s %(levelname)s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%SZ",
+    ))
+    handler._otto_merge_handler = True  # type: ignore[attr-defined]
+    parent.addHandler(handler)
+    # Also wire the CLI logger (different namespace)
+    cli_log = logging.getLogger("otto.cli_merge")
+    cli_log.setLevel(logging.INFO)
+    if not any(getattr(h, "_otto_merge_handler", False) for h in cli_log.handlers):
+        cli_handler = logging.FileHandler(log_dir / "merge.log", mode="a")
+        cli_handler.setLevel(logging.INFO)
+        cli_handler.setFormatter(handler.formatter)
+        cli_handler._otto_merge_handler = True  # type: ignore[attr-defined]
+        cli_log.addHandler(cli_handler)
+
+
 def register_merge_command(main: click.Group) -> None:
     """Register `otto merge` on the main CLI group."""
 
@@ -121,6 +156,11 @@ def register_merge_command(main: click.Group) -> None:
             console.print("  [dim]Mode:[/dim] [yellow]--no-certify[/yellow]")
         if full_verify:
             console.print("  [dim]Mode:[/dim] [yellow]--full-verify[/yellow]")
+
+        # F7 (extension): merge orchestrator + conflict-agent + triage-agent
+        # all log via `logging` but had no handler. Persist to a per-merge file
+        # so users can debug after the run.
+        _install_merge_logging(project_dir)
 
         try:
             result = asyncio.run(run_merge(
