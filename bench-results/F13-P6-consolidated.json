@@ -1,0 +1,55 @@
+{
+  "name": "F13-P6-consolidated",
+  "started_at": "2026-04-20T18:32:57Z",
+  "finished_at": "2026-04-20T11:51:05Z",
+  "wall_seconds": 1087.9610562324524,
+  "total_cost_usd": 11.173377249999998,
+  "queue_concurrency": 3,
+  "tasks": [
+    {
+      "id": "base",
+      "status": "done",
+      "cost_usd": 0.55676725,
+      "duration_s": 118.44504117965698,
+      "branch": null,
+      "failure_reason": null
+    },
+    {
+      "id": "imp-categories",
+      "status": "failed",
+      "cost_usd": 4.539391749999998,
+      "duration_s": 838.3499388694763,
+      "branch": null,
+      "failure_reason": "exit_code=1"
+    },
+    {
+      "id": "imp-suppliers",
+      "status": "failed",
+      "cost_usd": 2.8781085,
+      "duration_s": 589.881110906601,
+      "branch": null,
+      "failure_reason": "exit_code=1"
+    },
+    {
+      "id": "imp-alerts",
+      "status": "done",
+      "cost_usd": 3.19910975,
+      "duration_s": 674.8924736976624,
+      "branch": null,
+      "failure_reason": null
+    }
+  ],
+  "merge_outcome": "failed",
+  "merge_cost_usd": 0.0,
+  "merge_seconds": 0.3825371265411377,
+  "cert_passed": null,
+  "notes": [
+    "F13 consolidated agent-mode merge",
+    "Branches merged: ['improve/imp-categories-2026-04-20', 'improve/imp-suppliers-2026-04-20', 'improve/imp-alerts-2026-04-20']",
+    "Phase 1+2 cost (base + improves): $11.17",
+    "Phase 3 cost (consolidated agent merge): $0.00",
+    "Phase 3 wall: 0s (0.0min)",
+    "Merge log tail: r\" % token.id, token.start_mark)\nyaml.parser.ParserError: while parsing a block mapping\n  in \"<unicode string>\", line 1, column 1:\n    default_branch: main\n    ^\nexpected <block end>, but found '<block mapping start>'\n  in \"<unicode string>\", line 16, column 3:\n      merge_mode: consolidated\n      ^"
+  ],
+  "repo_path": "/var/folders/xg/dk8wgfy119z44797kyz7w0380000gn/T/bench-p6-08503fvi"
+}

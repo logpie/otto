@@ -1,0 +1,51 @@
+{
+  "name": "p6_inventory_cli",
+  "started_at": "2026-04-20T17:09:35Z",
+  "finished_at": "2026-04-20T10:24:14Z",
+  "wall_seconds": 878.8638019561768,
+  "total_cost_usd": 11.576986250000001,
+  "queue_concurrency": 3,
+  "tasks": [
+    {
+      "id": "base",
+      "status": "done",
+      "cost_usd": 0.8755364999999998,
+      "duration_s": 162.04978609085083,
+      "branch": null,
+      "failure_reason": null
+    },
+    {
+      "id": "imp-categories",
+      "status": "failed",
+      "cost_usd": 3.8771395,
+      "duration_s": 681.7743539810181,
+      "branch": null,
+      "failure_reason": "exit_code=1"
+    },
+    {
+      "id": "imp-suppliers",
+      "status": "failed",
+      "cost_usd": 3.4315040000000003,
+      "duration_s": 670.2955632209778,
+      "branch": null,
+      "failure_reason": "exit_code=1"
+    },
+    {
+      "id": "imp-alerts",
+      "status": "failed",
+      "cost_usd": 3.3928062500000005,
+      "duration_s": 631.6001789569855,
+      "branch": null,
+      "failure_reason": "exit_code=1"
+    }
+  ],
+  "merge_outcome": "failed",
+  "merge_cost_usd": 0.0,
+  "merge_seconds": 0.47717785835266113,
+  "cert_passed": null,
+  "notes": [
+    "rounds_per_improve: 2",
+    "merge_log_tail: Specify branches/task ids, or pass --all to merge all done queue tasks."
+  ],
+  "repo_path": "/var/folders/xg/dk8wgfy119z44797kyz7w0380000gn/T/bench-p6-004dkgzy"
+}
