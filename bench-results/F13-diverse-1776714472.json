@@ -1,0 +1,128 @@
+[
+  {
+    "name": "S1-web-app",
+    "n_branches": 2,
+    "n_files_with_conflicts": 0,
+    "expected_regions": 2,
+    "wall_seconds": 48.7247588634491,
+    "cost_usd": 0.24,
+    "rc": 0,
+    "tool_counts": {
+      "Bash": 1,
+      "Read": 3,
+      "Edit": 2
+    },
+    "markers_remain": false,
+    "notes": [],
+    "repo": "/var/folders/xg/dk8wgfy119z44797kyz7w0380000gn/T/bench-s1-web-vkei8mw4",
+    "merge_log_tail": [
+      "    \u2713 feat/categories (merged)",
+      "    \u2713 feat/persistence-darkmode (merged)",
+      "      merged with 2 marker-laden files (deferred)",
+      "    \u2713 (consolidated) (conflict_resolved)",
+      "      resolved 2 files (cost $0.24)",
+      "",
+      "  Merge complete (id: merge-1776714339-51386)"
+    ]
+  },
+  {
+    "name": "S2-four-branches",
+    "n_branches": 4,
+    "n_files_with_conflicts": 0,
+    "expected_regions": 6,
+    "wall_seconds": 16.010319232940674,
+    "cost_usd": 0.13,
+    "rc": 0,
+    "tool_counts": {
+      "Read": 1,
+      "Write": 1,
+      "Bash": 1
+    },
+    "markers_remain": false,
+    "notes": [],
+    "repo": "/var/folders/xg/dk8wgfy119z44797kyz7w0380000gn/T/bench-s2-four-sf7j2ats",
+    "merge_log_tail": [
+      "      merged with 1 marker-laden files (deferred)",
+      "    \u2713 feat/hola (merged)",
+      "      merged with 1 marker-laden files (deferred)",
+      "    \u2713 (consolidated) (conflict_resolved)",
+      "      resolved 1 files (cost $0.13)",
+      "",
+      "  Merge complete (id: merge-1776714389-57785)"
+    ]
+  },
+  {
+    "name": "S3-rename-modify",
+    "n_branches": 2,
+    "n_files_with_conflicts": 0,
+    "expected_regions": 0,
+    "wall_seconds": 0.5697488784790039,
+    "cost_usd": 0.0,
+    "rc": 0,
+    "tool_counts": {},
+    "markers_remain": false,
+    "notes": [],
+    "repo": "/var/folders/xg/dk8wgfy119z44797kyz7w0380000gn/T/bench-s3-rename-4m8k25ne",
+    "merge_log_tail": [
+      "Merging into main",
+      "  Mode: --no-certify",
+      "",
+      "    \u2713 feat/rename (merged)",
+      "    \u2713 feat/modify (merged)",
+      "",
+      "  Merge complete (id: merge-1776714405-60058)"
+    ]
+  },
+  {
+    "name": "S4-add-add",
+    "n_branches": 2,
+    "n_files_with_conflicts": 0,
+    "expected_regions": 1,
+    "wall_seconds": 15.887777090072632,
+    "cost_usd": 0.11,
+    "rc": 0,
+    "tool_counts": {
+      "Read": 1,
+      "Write": 1
+    },
+    "markers_remain": false,
+    "notes": [],
+    "repo": "/var/folders/xg/dk8wgfy119z44797kyz7w0380000gn/T/bench-s4-addadd-81js3yzu",
+    "merge_log_tail": [
+      "    \u2713 feat/test-config (merged)",
+      "    \u2713 feat/build-config (merged)",
+      "      merged with 1 marker-laden files (deferred)",
+      "    \u2713 (consolidated) (conflict_resolved)",
+      "      resolved 1 files (cost $0.11)",
+      "",
+      "  Merge complete (id: merge-1776714406-60231)"
+    ]
+  },
+  {
+    "name": "S5-large-file",
+    "n_branches": 2,
+    "n_files_with_conflicts": 0,
+    "expected_regions": 3,
+    "wall_seconds": 50.41933083534241,
+    "cost_usd": 0.3,
+    "rc": 0,
+    "tool_counts": {
+      "Bash": 2,
+      "Grep": 2,
+      "Read": 3,
+      "Edit": 3
+    },
+    "markers_remain": false,
+    "notes": [],
+    "repo": "/var/folders/xg/dk8wgfy119z44797kyz7w0380000gn/T/bench-s5-large-j9nuu_lw",
+    "merge_log_tail": [
+      "    \u2713 feat/branch-a (merged)",
+      "    \u2713 feat/branch-b (merged)",
+      "      merged with 1 marker-laden files (deferred)",
+      "    \u2713 (consolidated) (conflict_resolved)",
+      "      resolved 1 files (cost $0.30)",
+      "",
+      "  Merge complete (id: merge-1776714422-62587)"
+    ]
+  }
+]
