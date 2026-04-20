@@ -422,7 +422,52 @@ def test_runner_respects_concurrent_cap(tmp_path: Path):
         os.environ.pop("OTTO_PROJECT_DIR", None)
 
 
-# ---------- dependencies (Phase 3 will exercise more) ----------
+# ---------- dependencies (Phase 3) ----------
+
+
+def test_runner_cascades_failure_through_after_chain(tmp_path: Path):
+    """Phase 3.2 verify: A fails → B (after A) cascades failed → C (after B) cascades failed.
+    Verifies transitive cascade across a 3-deep chain."""
+    repo = _make_repo(tmp_path)
+    # Fake otto that exits non-zero (no manifest written)
+    failing_otto = _make_fake_otto(tmp_path, exit_code=1, sleep=0.05, write_manifest=False)
+    append_task(repo, QueueTask(
+        id="a", command_argv=["build", "a"],
+        branch="build/a-x", worktree=".worktrees/a",
+    ))
+    append_task(repo, QueueTask(
+        id="b", command_argv=["build", "b"],
+        after=["a"],
+        branch="build/b-x", worktree=".worktrees/b",
+    ))
+    append_task(repo, QueueTask(
+        id="c", command_argv=["build", "c"],
+        after=["b"],
+        branch="build/c-x", worktree=".worktrees/c",
+    ))
+    cfg = RunnerConfig(concurrent=3, poll_interval_s=0.05, heartbeat_interval_s=10.0)
+    runner = Runner(repo, cfg, otto_bin=str(failing_otto))
+    runner._lock_fh = acquire_lock(repo)
+    try:
+        # Tick 1: dispatch a (only ready task; b/c blocked on deps)
+        runner._tick()
+        state = load_state(repo)
+        assert state["tasks"]["a"]["status"] == "running"
+        # Wait for a to die
+        time.sleep(0.5)
+        # Tick 2: reap a (failed); cascade-fail b (since a failed)
+        runner._tick()
+        state = load_state(repo)
+        assert state["tasks"]["a"]["status"] == "failed"
+        assert state["tasks"]["b"]["status"] == "failed"
+        assert "dependency 'a'" in state["tasks"]["b"]["failure_reason"]
+        # Tick 3: cascade-fail c (since b failed)
+        runner._tick()
+        state = load_state(repo)
+        assert state["tasks"]["c"]["status"] == "failed"
+        assert "dependency 'b'" in state["tasks"]["c"]["failure_reason"]
+    finally:
+        runner._lock_fh.close()
 
 
 def test_runner_blocks_task_with_unsatisfied_after(tmp_path: Path):
