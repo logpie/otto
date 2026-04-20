@@ -59,6 +59,23 @@ class ConflictContext:
     conflict_diff: str               # `git diff --merge` output
 
 
+@dataclass
+class ConsolidatedConflictContext:
+    """Global context for agent-mode consolidated resolution.
+
+    Used when the orchestrator has attempted all branch merges sequentially
+    (committing-with-markers on conflicts) and now invokes the agent ONCE on
+    the union of all unresolved files.
+    """
+    target: str
+    all_branches: list[str]                  # every branch the merge attempted
+    all_intents: dict[str, str]              # branch → resolved intent
+    all_stories: list[dict[str, Any]]        # union with source_branch tag
+    conflict_files: list[str]                # ALL files with markers
+    conflict_diff: str                       # full diff covering every conflict
+    test_command: str | None = None          # project's test command (from config)
+
+
 def _format_branch_intents(intents: dict[str, str]) -> str:
     if not intents:
         return "(no intent metadata available for these branches)"
@@ -275,4 +292,130 @@ async def resolve_one_conflict(
         cost_usd=total_cost,
         retries_used=MAX_AGENT_RETRIES,
         note=f"gave up after {MAX_AGENT_RETRIES + 1} attempts; last error: {last_note}",
+    )
+
+
+# ════════════════════════════════════════════════════════════════════════
+# Agent-mode consolidated resolver (F13)
+# ════════════════════════════════════════════════════════════════════════
+#
+# Design rationale (audit-grounded — see e2e-findings.md F12):
+# - Single agent session for ALL conflicts across all branches (not per-branch)
+# - Bash allowed → agent can run project tests to verify merged code WORKS
+# - No retry loop in Python — agent self-corrects within its session
+# - Single final orchestrator validation (HEAD unchanged + no out-of-scope edits)
+#
+# Why: per-branch agent calls + Python retry loops + Edit-only patching
+# (F12) all measured SLOWER than single-call Write-allowed (revert).
+# This is the next-level architectural change: matches `otto build`'s
+# agent-mode philosophy. Agent gets full context, full tools, full trust.
+#
+# Caveats:
+# - Allows Bash → agent could run destructive git/shell commands.
+#   Mitigation: HEAD-unchanged check catches reset/commit; out-of-scope
+#   edit check catches `rm` outside conflict files. Same guards otto/build
+#   relies on, plus stricter (HEAD must NOT change).
+# - No retry safety net → if agent stops with markers remaining, merge
+#   bails. User must manually fix or re-invoke.
+
+def render_consolidated_prompt(ctx: ConsolidatedConflictContext) -> str:
+    """Render the consolidated agent-mode prompt."""
+    from otto.prompts import _PROMPTS_DIR
+    template = (_PROMPTS_DIR / "merger-conflict-agentic.md").read_text()
+    files_listing = "\n".join(f"- {f}" for f in ctx.conflict_files)
+    branches_listing = "\n".join(f"- {b}" for b in ctx.all_branches)
+    test_section = (
+        f"After resolving, verify with `{ctx.test_command}`."
+        if ctx.test_command
+        else "(No project test command detected — verify code reasonableness yourself.)"
+    )
+    return (
+        template
+        .replace("{target}", ctx.target)
+        .replace("{branches_listing}", branches_listing)
+        .replace("{branch_intents_section}", _format_branch_intents(ctx.all_intents))
+        .replace("{stories_section}", _format_stories(ctx.all_stories))
+        .replace("{conflict_files_listing}", files_listing or "(none)")
+        .replace("{conflict_diff}", ctx.conflict_diff[:80000])
+        .replace("{test_command_section}", test_section)
+    )
+
+
+async def resolve_all_conflicts(
+    *,
+    project_dir: Path,
+    config: dict[str, Any],
+    ctx: ConsolidatedConflictContext,
+    pre_head: str,
+    expected_uu_files: set[str],
+    pre_untracked_files: set[str],
+    pre_diff_files: set[str],
+    budget: Any | None = None,
+) -> ConflictResolutionAttempt:
+    """Agent-mode consolidated resolver. ONE Claude session, full tools.
+
+    Caller (orchestrator) is responsible for:
+    - Capturing pre_head, pre_diff_files, pre_untracked_files, expected_uu_files
+      BEFORE calling this function.
+    - Calling validate_post_agent ONCE after this returns (no retry-from-snapshot).
+
+    The agent has Bash to run tests, Read/Edit/MultiEdit/Write/Grep/Glob.
+    No tool restrictions beyond what build/improve agents have.
+    """
+    from otto.config import agent_provider
+    from otto.agent import (
+        AgentCallError,
+        make_agent_options,
+        run_agent_with_timeout,
+    )
+    provider = agent_provider(config)
+    if provider != "claude":
+        return ConflictResolutionAttempt(
+            success=False,
+            agent_invoked=False,
+            note=(
+                f"agent-mode conflict resolution requires the 'claude' provider "
+                f"(got '{provider}'). Codex ignores tool restrictions, which "
+                f"would break the orchestrator's safety guards."
+            ),
+        )
+
+    prompt = render_consolidated_prompt(ctx)
+    options = make_agent_options(project_dir, config)
+    # NO disallowed_tools — match build/improve. Agent has full Bash, Edit,
+    # Write, MultiEdit, Read, Grep, Glob. Orchestrator's HEAD-unchanged and
+    # out-of-scope-files checks catch the dangerous things.
+    timeout = budget.for_call() if budget is not None else None
+
+    try:
+        text, cost, _session = await run_agent_with_timeout(
+            prompt,
+            options,
+            log_path=project_dir / "otto_logs" / "merge" / "conflict-agent-agentic.log",
+            timeout=timeout,
+            project_dir=project_dir,
+        )
+    except AgentCallError as exc:
+        return ConflictResolutionAttempt(
+            success=False, cost_usd=0.0, retries_used=0,
+            note=f"agent call error: {exc.reason}",
+        )
+
+    # Single final validation. No retry-from-snapshot (the whole point of
+    # agent mode is that the agent self-corrects within its session).
+    ok, err = validate_post_agent(
+        project_dir=project_dir,
+        pre_diff_files=pre_diff_files,
+        expected_uu_files=expected_uu_files,
+        pre_untracked_files=pre_untracked_files,
+        pre_head=pre_head,
+    )
+    if ok:
+        return ConflictResolutionAttempt(
+            success=True, cost_usd=float(cost or 0), retries_used=0,
+            note="resolved by agent-mode consolidated resolver",
+        )
+    return ConflictResolutionAttempt(
+        success=False, cost_usd=float(cost or 0), retries_used=0,
+        note=f"agent finished but validation failed: {err}",
     )

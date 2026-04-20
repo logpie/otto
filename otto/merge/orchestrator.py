@@ -211,7 +211,27 @@ async def run_merge(
 
     logger.info("merge %s starting: target=%s, branches=%s", merge_id, options.target, branches)
 
-    # Per-branch loop
+    # F13 (agent-mode consolidated): if config says so, take a different path.
+    # Sequential merges committing markers, then ONE agent call across the
+    # whole picture. See orchestrator._run_consolidated_agentic_merge.
+    use_consolidated = (
+        not options.fast
+        and bool((config.get("queue") or {}).get("merge_mode") == "consolidated")
+    )
+    if use_consolidated:
+        return await _run_consolidated_agentic_merge(
+            project_dir=project_dir,
+            config=config,
+            options=options,
+            state=state,
+            merge_id=merge_id,
+            branches=branches,
+            queue_lookup=queue_lookup,
+            target_head_before=target_head_before,
+            budget=budget,
+        )
+
+    # Per-branch loop (default sequential mode)
     for index, branch in enumerate(branches):
         branch_head_at_pause = git_ops.resolve_branch(project_dir, branch)
         result = git_ops.merge_no_ff(project_dir, branch)
@@ -500,6 +520,226 @@ async def _run_post_merge_verification(
             f"({cert_report.outcome.value}); see otto_logs/certifier/{cert_report.run_id}/proof-of-work.html"
         ),
     )
+
+
+# ════════════════════════════════════════════════════════════════════════
+# F13: Agent-mode consolidated merge
+# ════════════════════════════════════════════════════════════════════════
+
+async def _run_consolidated_agentic_merge(
+    *,
+    project_dir: Path,
+    config: dict[str, Any],
+    options: MergeOptions,
+    state: MergeState,
+    merge_id: str,
+    branches: list[str],
+    queue_lookup: dict[str, str],
+    target_head_before: str,
+    budget: Any | None = None,
+) -> MergeRunResult:
+    """Consolidated agent-mode merge.
+
+    Strategy:
+    1. Sequential `git merge --no-ff <branch>` for each branch.
+       - On clean merge: commit normally.
+       - On conflict: stage marker-laden files (`git add -u`) and commit
+         (markers retained in the commit). This is intentionally weird —
+         it lets us continue to the next branch's merge without stopping.
+    2. After all branches attempted, accumulate the union of marker-laden
+       files into one ConsolidatedConflictContext.
+    3. ONE agent call (full Bash, no retry loop) to resolve all markers.
+       The agent runs project tests to verify.
+    4. Validate (HEAD unchanged, no out-of-scope edits, no markers remain)
+       and commit the cleanup as a "resolve all conflicts" commit.
+
+    On any unrecoverable failure (e.g., agent leaves markers, edits out
+    of scope), the merge bails. State.json captures the partial outcome
+    for `--resume` (deferred) or manual fix.
+    """
+    from otto.merge.conflict_agent import (
+        ConsolidatedConflictContext,
+        resolve_all_conflicts,
+        snapshot_conflict_files,
+    )
+    logger.info("merge %s: consolidated agent-mode (branches=%s)", merge_id, branches)
+
+    # Phase 1: sequential merges, accept conflicts by committing markers
+    accumulated_conflict_files: list[str] = []
+    for index, branch in enumerate(branches):
+        result = git_ops.merge_no_ff(project_dir, branch)
+        if result.ok:
+            state.outcomes.append(BranchOutcome(
+                branch=branch, status="merged",
+                merge_commit=git_ops.head_sha(project_dir),
+            ))
+            write_state(project_dir, state)
+            continue
+        # Conflict: stage everything (markers stay in the file content) and
+        # commit the merge anyway. Result: a merge commit whose tree has
+        # marker-laden files. Branch merge bookkeeping is preserved.
+        conflicts = git_ops.conflicted_files(project_dir)
+        if not conflicts:
+            state.outcomes.append(BranchOutcome(
+                branch=branch, status="agent_giveup",
+                note=f"git merge failed without UU files: {result.stderr.strip()[:200]}",
+            ))
+            write_state(project_dir, state)
+            return MergeRunResult(
+                success=False, merge_id=merge_id, state=state,
+                note=f"git merge of {branch!r} failed: {result.stderr.strip()[:200]}",
+            )
+        # Stage marker-laden files
+        add_r = git_ops.add_paths(project_dir, conflicts)
+        if not add_r.ok:
+            state.outcomes.append(BranchOutcome(
+                branch=branch, status="agent_giveup",
+                note=f"git add failed: {add_r.stderr.strip()}",
+            ))
+            write_state(project_dir, state)
+            return MergeRunResult(
+                success=False, merge_id=merge_id, state=state,
+                note=f"git add failed for {branch!r}",
+            )
+        # Commit with markers (we'll resolve them in phase 2)
+        commit_r = git_ops.commit_no_edit(project_dir)
+        if not commit_r.ok:
+            state.outcomes.append(BranchOutcome(
+                branch=branch, status="agent_giveup",
+                note=f"git commit (with markers) failed: {commit_r.stderr.strip()}",
+            ))
+            write_state(project_dir, state)
+            return MergeRunResult(
+                success=False, merge_id=merge_id, state=state,
+                note="git commit failed during marker accumulation",
+            )
+        state.outcomes.append(BranchOutcome(
+            branch=branch, status="merged",  # merged structurally; markers pending resolution
+            merge_commit=git_ops.head_sha(project_dir),
+            note=f"merged with {len(conflicts)} marker-laden files (deferred)",
+        ))
+        accumulated_conflict_files.extend(conflicts)
+        write_state(project_dir, state)
+
+    # Phase 2: if no conflicts accumulated, we're done with merging
+    accumulated_conflict_files = sorted(set(accumulated_conflict_files))
+    if not accumulated_conflict_files:
+        logger.info("merge %s: all branches merged clean, no agent call needed", merge_id)
+        # Continue to triage + cert if not --no-certify
+        if options.no_certify:
+            if options.cleanup_on_success:
+                _cleanup_worktrees_for_merged_tasks(project_dir, queue_lookup)
+            return MergeRunResult(
+                success=True, merge_id=merge_id, state=state,
+                note="all clean merges, cert skipped per --no-certify",
+            )
+        # Run cert phase
+        result = await _run_post_merge_verification(
+            project_dir=project_dir, config=config, options=options,
+            state=state, merge_id=merge_id, branches=branches,
+            queue_lookup=queue_lookup, target_head_before=target_head_before,
+            budget=budget,
+        )
+        if result.success and options.cleanup_on_success:
+            _cleanup_worktrees_for_merged_tasks(project_dir, queue_lookup)
+        return result
+
+    # Phase 3: ONE agent call to resolve all accumulated markers
+    logger.info(
+        "merge %s: invoking agent on %d files across %d branches",
+        merge_id, len(accumulated_conflict_files), len(branches),
+    )
+
+    # Capture pre-state for orchestrator's single final validation
+    pre_head = git_ops.head_sha(project_dir)
+    pre_diff_files = set(git_ops.changed_files(project_dir))
+    pre_untracked_files = set(git_ops.untracked_files(project_dir))
+    expected_uu = set(accumulated_conflict_files)
+
+    # Build context: ALL branches' intents + stories, full diff
+    intents = _gather_intents(project_dir, branches, queue_lookup)
+    stories = collect_stories_from_branches(
+        project_dir=project_dir, branches=branches, queue_task_lookup=queue_lookup,
+    )
+    # Diff covering all marker files
+    diff = git_ops.run_git(project_dir, "diff", "HEAD", "--", *accumulated_conflict_files).stdout
+    test_command = config.get("test_command")  # e.g., "pytest -q" or "npm test"
+
+    ctx = ConsolidatedConflictContext(
+        target=options.target,
+        all_branches=list(branches),
+        all_intents=intents,
+        all_stories=stories,
+        conflict_files=accumulated_conflict_files,
+        conflict_diff=diff,
+        test_command=test_command,
+    )
+    attempt = await resolve_all_conflicts(
+        project_dir=project_dir, config=config, ctx=ctx,
+        pre_head=pre_head,
+        expected_uu_files=expected_uu,
+        pre_untracked_files=pre_untracked_files,
+        pre_diff_files=pre_diff_files,
+        budget=budget,
+    )
+    if not attempt.success:
+        state.outcomes.append(BranchOutcome(
+            branch="(consolidated)", status="agent_giveup",
+            agent_invoked=attempt.agent_invoked,
+            note=attempt.note,
+        ))
+        state.paused_stage = "agent_giveup"
+        write_state(project_dir, state)
+        return MergeRunResult(
+            success=False, merge_id=merge_id, state=state,
+            note=(
+                f"consolidated agent-mode resolver gave up: {attempt.note}\n"
+                f"  Files with markers: {accumulated_conflict_files}\n"
+                f"  Resolve manually: edit files, `git add`, `git commit --amend`."
+            ),
+        )
+
+    # Stage + commit the agent's resolution
+    add_r = git_ops.add_paths(project_dir, accumulated_conflict_files)
+    if not add_r.ok:
+        return MergeRunResult(
+            success=False, merge_id=merge_id, state=state,
+            note=f"git add failed after agent resolution: {add_r.stderr.strip()}",
+        )
+    # Use a fresh commit (not --amend) so the marker-laden merge commits and
+    # the resolution are separate in history (clearer to debug).
+    commit_msg = f"resolve {len(accumulated_conflict_files)} files across {len(branches)} branches"
+    commit_r = git_ops.run_git(project_dir, "commit", "-m", commit_msg)
+    if not commit_r.ok:
+        return MergeRunResult(
+            success=False, merge_id=merge_id, state=state,
+            note=f"git commit failed after resolution: {commit_r.stderr.strip()}",
+        )
+    state.outcomes.append(BranchOutcome(
+        branch="(consolidated)", status="conflict_resolved",
+        merge_commit=git_ops.head_sha(project_dir),
+        agent_invoked=True,
+        note=f"resolved {len(accumulated_conflict_files)} files (cost ${attempt.cost_usd:.2f})",
+    ))
+    write_state(project_dir, state)
+
+    # Phase 4: triage + cert (unless --no-certify)
+    if options.no_certify:
+        if options.cleanup_on_success:
+            _cleanup_worktrees_for_merged_tasks(project_dir, queue_lookup)
+        return MergeRunResult(
+            success=True, merge_id=merge_id, state=state,
+            note="cert skipped per --no-certify",
+        )
+    result = await _run_post_merge_verification(
+        project_dir=project_dir, config=config, options=options,
+        state=state, merge_id=merge_id, branches=branches,
+        queue_lookup=queue_lookup, target_head_before=target_head_before,
+        budget=budget,
+    )
+    if result.success and options.cleanup_on_success:
+        _cleanup_worktrees_for_merged_tasks(project_dir, queue_lookup)
+    return result
 
 
 def _build_conflict_context(
