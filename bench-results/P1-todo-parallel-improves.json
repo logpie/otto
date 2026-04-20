@@ -1,0 +1,53 @@
+{
+  "name": "P1-todo-parallel-improves",
+  "started_at": "2026-04-20T10:18:04Z",
+  "finished_at": "2026-04-20T03:28:04Z",
+  "wall_seconds": 600.0003418922424,
+  "total_cost_usd": 3.9795035,
+  "queue_concurrency": 3,
+  "tasks": [
+    {
+      "id": "base",
+      "status": "done",
+      "cost_usd": 0.38141349999999996,
+      "duration_s": 69.48575615882874,
+      "branch": null,
+      "failure_reason": null
+    },
+    {
+      "id": "imp-priority",
+      "status": "failed",
+      "cost_usd": 0.765455,
+      "duration_s": 177.95208501815796,
+      "branch": null,
+      "failure_reason": "exit_code=1"
+    },
+    {
+      "id": "imp-duedate",
+      "status": "failed",
+      "cost_usd": 0.7358372499999999,
+      "duration_s": 169.9836540222168,
+      "branch": null,
+      "failure_reason": "exit_code=1"
+    },
+    {
+      "id": "imp-tags",
+      "status": "failed",
+      "cost_usd": 0.7467977499999999,
+      "duration_s": 168.52507901191711,
+      "branch": null,
+      "failure_reason": "exit_code=1"
+    }
+  ],
+  "merge_outcome": "conflict-resolved",
+  "merge_cost_usd": 1.35,
+  "merge_seconds": 140,
+  "cert_passed": null,
+  "notes": [
+    "improves all hit -n=1 limit before passing cert; branches still had real work",
+    "Salvaged via explicit-branch merge: 1 clean + 2 conflict_resolved by agent",
+    "Final todo.py has 9 commands: add/list/done/delete/priority/due/tag/filter",
+    "Conflict agent successfully merged contributions from priority/duedate/tags into one file"
+  ],
+  "repo_path": "/var/folders/xg/dk8wgfy119z44797kyz7w0380000gn/T/bench-p1-poh9vxro"
+}

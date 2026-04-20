@@ -297,6 +297,49 @@ with all 9 commands. Total merge cost: $1.35.
 **Verification**: working `todo.py` post-salvage at
 `/var/folders/.../bench-p1-poh9vxro/todo.py` (now 145 lines, all features).
 
+---
+
+### [F10] Watcher has no per-task timeout — hung child blocks queue indefinitely — observed during P3 base build
+
+**Symptom**: P3 base build (Flask bookmark API) completed its commit at
+178s but the otto build subprocess hung for 8+ more minutes with 0% CPU
+and no log output. Watcher kept it as "running" (heartbeat alive). I
+manually killed an orphan Flask process and the build immediately
+completed normally.
+
+**Root cause**: The build agent had executed an inline shell script that
+ended with `pkill -f "python3 app.py"; wait 2>/dev/null; echo "done"`.
+The Flask server was launched via `/opt/homebrew/.../Python app.py`
+(capital P, no "3"), so `pkill -f "python3 app.py"` didn't match it.
+The Flask child stayed alive, so `wait` blocked forever, so the bash
+command never returned to the SDK, so the SDK never returned to otto
+build, so the watcher kept polling status=running indefinitely.
+
+**Two distinct issues**:
+
+1. **Otto's coding-agent prompt doesn't instruct the agent to use robust
+   process kill patterns.** The fix is in the agent's system prompt
+   (warn about pkill -f matching by full command line, recommend
+   killing by PID captured at launch time). NOT a parallel-otto bug;
+   pre-existing.
+
+2. **Queue watcher has no per-task timeout.** A hung subprocess can
+   block its slot forever. Recommendation: add `queue.task_timeout_s`
+   config (default e.g. 30 min for build, 60 min for improve) and have
+   the reaper SIGTERM tasks that exceed it. Mark them `failed` with
+   `reason="timed out after Xm"`.
+
+**Workaround used**: I killed the orphan Flask process manually
+(`kill 41341`); the build then completed successfully with status=done,
+cost=$0.81. P3 then advanced into phase 2 normally.
+
+**Recommendation**: implement per-task timeout. Defer instructing the
+agent on shell scripting (separate concern, not parallel-otto's domain).
+
+**Verification**: After my manual kill, P3 base reached `done` and phase
+2 dispatched. P3 phase 2 (parallel improves) running normally.
+
+
 
 **End-to-end coverage**:
 - ✅ queue dispatch → real `otto build` → manifest → reap (F1 path)

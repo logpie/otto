@@ -1,0 +1,53 @@
+{
+  "name": "P2-todo-sequential-baseline",
+  "started_at": "2026-04-20T10:28:22Z",
+  "finished_at": "2026-04-20T03:39:20Z",
+  "wall_seconds": 657.9130408763885,
+  "total_cost_usd": 3.9301730000000004,
+  "queue_concurrency": 1,
+  "tasks": [
+    {
+      "id": "base",
+      "status": "done",
+      "cost_usd": 0.38964175,
+      "duration_s": 70.13214492797852,
+      "branch": null,
+      "failure_reason": null
+    },
+    {
+      "id": "imp-priority",
+      "status": "failed",
+      "cost_usd": 0.8144052500000002,
+      "duration_s": 204.00294303894043,
+      "branch": null,
+      "failure_reason": "exit_code=1"
+    },
+    {
+      "id": "imp-duedate",
+      "status": "failed",
+      "cost_usd": 0.7490169999999999,
+      "duration_s": 162.3748219013214,
+      "branch": null,
+      "failure_reason": "exit_code=1"
+    },
+    {
+      "id": "imp-tags",
+      "status": "failed",
+      "cost_usd": 0.7871090000000001,
+      "duration_s": 173.357097864151,
+      "branch": null,
+      "failure_reason": "exit_code=1"
+    }
+  ],
+  "merge_outcome": "conflict-resolved (salvage)",
+  "merge_cost_usd": 1.19,
+  "merge_seconds": 90,
+  "cert_passed": null,
+  "notes": [
+    "Same intents as P1 but concurrent=1 (sequential).",
+    "Wall-clock for 3 sequential improves: 539s vs P1 parallel 178s (~3.0x speedup).",
+    "Salvaged via explicit-branch merge: 1 clean + 2 conflict_resolved by agent ($1.19).",
+    "Final todo.py has all 9 commands working (verified post-merge)."
+  ],
+  "repo_path": "/var/folders/xg/dk8wgfy119z44797kyz7w0380000gn/T/bench-p2-b0yb8aco"
+}

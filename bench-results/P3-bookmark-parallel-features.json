@@ -1,0 +1,45 @@
+{
+  "name": "P3-bookmark-parallel-features",
+  "started_at": "2026-04-20T10:29:11Z",
+  "finished_at": "2026-04-20T03:41:57Z",
+  "wall_seconds": 765.8059179782867,
+  "total_cost_usd": 2.2444060000000006,
+  "queue_concurrency": 2,
+  "tasks": [
+    {
+      "id": "base",
+      "status": "done",
+      "cost_usd": 0.8082230000000001,
+      "duration_s": 570.0853540897369,
+      "branch": null,
+      "failure_reason": null
+    },
+    {
+      "id": "imp-tags",
+      "status": "failed",
+      "cost_usd": 0.7174145000000002,
+      "duration_s": 176.97405195236206,
+      "branch": null,
+      "failure_reason": "exit_code=1"
+    },
+    {
+      "id": "imp-search",
+      "status": "failed",
+      "cost_usd": 0.7187685,
+      "duration_s": 162.9974913597107,
+      "branch": null,
+      "failure_reason": "exit_code=1"
+    }
+  ],
+  "merge_outcome": "success (salvage clean merge)",
+  "merge_cost_usd": 0.0,
+  "merge_seconds": 5,
+  "cert_passed": true,
+  "notes": [
+    "Flask bookmark API (more complex than TODO CLI).",
+    "Base build hit a real-world hang: agent's pkill -f \"python3 app.py\" failed to match \"/opt/.../Python app.py\" (capital P), so wait blocked indefinitely. Fixed by manual kill of orphan Flask. F10 in findings.",
+    "Both improves \"failed\" cert (per usual -n 1 behavior) but their work merged CLEAN (no conflict \u2014 tags + search touched different routes).",
+    "Final app.py has 7 routes including normalize_tags helper for tags feature."
+  ],
+  "repo_path": "/var/folders/xg/dk8wgfy119z44797kyz7w0380000gn/T/bench-p3-2_3wtgbm"
+}
