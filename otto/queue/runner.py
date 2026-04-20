@@ -60,6 +60,11 @@ class RunnerConfig:
     on_watcher_restart: str = "resume"   # resume | fail
     poll_interval_s: float = 2.0
     heartbeat_interval_s: float = 5.0
+    # F10: per-task wall-clock timeout. A hung child (agent stuck in a bash
+    # `wait` for an unkilled background process, infinite loop, etc.) would
+    # otherwise occupy its concurrency slot forever. None disables.
+    # Default: 30 minutes — generous for thorough builds, fatal for hangs.
+    task_timeout_s: float | None = 1800.0
 
 
 class WatcherAlreadyRunning(RuntimeError):
@@ -454,6 +459,49 @@ class Runner:
         else:
             logger.warning("unknown command kind: %r", kind)
 
+    # ---- timeout enforcement (F10) ----
+
+    def _enforce_task_timeouts(self, in_flight: list[tuple[str, dict[str, Any]]]) -> None:
+        """SIGTERM any task whose wall-clock exceeds task_timeout_s.
+
+        Marks the task as `terminating` with `terminal_status="failed"` and
+        reason `timed out after Xs`. The next reap tick observes the dead
+        child (via waitpid or ECHILD fallback) and finalizes via
+        `_finish_terminating` → status="failed".
+
+        Skip already-terminating tasks and tasks without a parseable
+        started_at timestamp (defensive — should never happen).
+        """
+        timeout = self.config.task_timeout_s
+        if timeout is None:
+            return
+        from datetime import datetime, timezone
+        now = datetime.now(tz=timezone.utc)
+        for tid, ts in in_flight:
+            if ts.get("status") != "running":
+                continue
+            started = ts.get("started_at")
+            if not isinstance(started, str):
+                continue
+            try:
+                t0 = datetime.strptime(started, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+            elapsed = (now - t0).total_seconds()
+            if elapsed < timeout:
+                continue
+            child = ts.get("child") or {}
+            logger.warning(
+                "task %s exceeded timeout (%.0fs > %.0fs); SIGTERM",
+                tid, elapsed, timeout,
+            )
+            kill_child_safely(child, signal.SIGTERM)
+            self._mark_terminating(
+                ts,
+                final_status="failed",
+                reason=f"timed out after {elapsed:.0f}s (limit {timeout:.0f}s)",
+            )
+
     # ---- reap finished children ----
 
     def _reap_children(self, state: dict[str, Any]) -> None:
@@ -463,6 +511,10 @@ class Runner:
             (tid, ts) for tid, ts in state["tasks"].items()
             if ts.get("status") in IN_FLIGHT_STATUSES
         ]
+        # F10: enforce per-task wall-clock timeout. SIGTERM hung tasks so they
+        # transition to "terminating" and free their concurrency slot.
+        if self.config.task_timeout_s is not None:
+            self._enforce_task_timeouts(in_flight)
         for tid, ts in in_flight:
             status = ts.get("status")
             child = ts.get("child") or {}
@@ -784,8 +836,15 @@ class Runner:
 def runner_config_from_otto_config(config: dict[str, Any]) -> RunnerConfig:
     """Build a RunnerConfig from the parsed otto.yaml dict."""
     q = config.get("queue") or {}
+    raw_timeout = q.get("task_timeout_s", 1800.0)
+    task_timeout: float | None
+    if raw_timeout is None or raw_timeout == 0 or raw_timeout is False:
+        task_timeout = None  # explicit opt-out
+    else:
+        task_timeout = float(raw_timeout)
     return RunnerConfig(
         concurrent=int(q.get("concurrent", 3)),
         worktree_dir=str(q.get("worktree_dir", ".worktrees")),
         on_watcher_restart=str(q.get("on_watcher_restart", "resume")),
+        task_timeout_s=task_timeout,
     )

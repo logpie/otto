@@ -495,6 +495,120 @@ def test_runner_blocks_task_with_unsatisfied_after(tmp_path: Path):
         runner._lock_fh.close()
 
 
+# ---------- regression: F10 per-task timeout ----------
+
+
+def test_runner_kills_task_exceeding_timeout(tmp_path: Path):
+    """F10: a child that runs longer than task_timeout_s gets SIGTERM and
+    transitions to status=failed with a 'timed out' reason. Without this,
+    a hung agent (e.g. pkill bash bug like P3 base build) would occupy its
+    concurrency slot indefinitely."""
+    repo = _make_repo(tmp_path)
+    # `trap '' TERM` ignores SIGTERM so our timeout enforcement must SIGKILL
+    # eventually — but for the test we only verify SIGTERM was sent + status
+    # transitions to terminating/failed within a reasonable poll cycle.
+    fake = tmp_path / "slow_otto.sh"
+    fake.write_text("""#!/bin/sh
+sleep 60
+exit 0
+""")
+    fake.chmod(0o755)
+    append_task(repo, QueueTask(
+        id="hang", command_argv=["build", "x"],
+        branch="build/hang-x", worktree=".worktrees/hang",
+    ))
+    cfg = RunnerConfig(
+        concurrent=1,
+        poll_interval_s=0.1,
+        heartbeat_interval_s=0.5,
+        task_timeout_s=2.0,  # 2 second timeout — well under the 60s sleep
+    )
+    runner = Runner(repo, cfg, otto_bin=str(fake))
+    runner._lock_fh = acquire_lock(repo)
+    try:
+        runner._tick()
+        # Task should be running
+        assert load_state(repo)["tasks"]["hang"]["status"] == "running"
+        # Wait past the 2s timeout
+        time.sleep(3.0)
+        runner._tick()  # should observe the timeout and SIGTERM the child
+        ts = load_state(repo)["tasks"]["hang"]
+        # Status should have transitioned to terminating (or already past it)
+        assert ts["status"] in ("terminating", "failed", "cancelled"), \
+            f"expected transition from running, got {ts['status']!r}"
+        assert "timed out" in (ts.get("failure_reason") or ""), \
+            f"expected 'timed out' in reason, got {ts.get('failure_reason')!r}"
+        # Wait for child to die + reaper to finalize
+        time.sleep(3.0)
+        runner._tick()
+        ts2 = load_state(repo)["tasks"]["hang"]
+        assert ts2["status"] == "failed", f"expected failed, got {ts2['status']!r}"
+    finally:
+        runner._lock_fh.close()
+
+
+def test_runner_does_not_timeout_task_under_limit(tmp_path: Path):
+    """A short-lived task must NOT be killed if it finishes before timeout."""
+    repo = _make_repo(tmp_path)
+    fake = _make_fake_otto(tmp_path, exit_code=0, sleep=0.2)
+    append_task(repo, QueueTask(
+        id="quick", command_argv=["build", "x"],
+        branch="build/q-x", worktree=".worktrees/quick",
+    ))
+    # Generous 30s timeout, but the fake completes in 0.2s
+    cfg = RunnerConfig(
+        concurrent=1, poll_interval_s=0.1, heartbeat_interval_s=0.5,
+        task_timeout_s=30.0,
+    )
+    runner = Runner(repo, cfg, otto_bin=str(fake))
+    runner._lock_fh = acquire_lock(repo)
+    try:
+        runner._tick()
+        time.sleep(1.5)
+        runner._tick()
+        ts = load_state(repo)["tasks"]["quick"]
+        assert ts["status"] == "done", f"expected done, got {ts['status']!r}"
+        assert "timed out" not in (ts.get("failure_reason") or "")
+    finally:
+        runner._lock_fh.close()
+
+
+def test_runner_task_timeout_disabled_when_none(tmp_path: Path):
+    """task_timeout_s=None disables the enforcement entirely (escape hatch)."""
+    repo = _make_repo(tmp_path)
+    fake = _make_fake_otto(tmp_path, exit_code=0, sleep=0.2)
+    append_task(repo, QueueTask(
+        id="t", command_argv=["build", "x"],
+        branch="build/t-x", worktree=".worktrees/t",
+    ))
+    cfg = RunnerConfig(
+        concurrent=1, poll_interval_s=0.1, heartbeat_interval_s=0.5,
+        task_timeout_s=None,
+    )
+    runner = Runner(repo, cfg, otto_bin=str(fake))
+    runner._lock_fh = acquire_lock(repo)
+    try:
+        runner._tick()
+        time.sleep(1.5)
+        runner._tick()
+        ts = load_state(repo)["tasks"]["t"]
+        assert ts["status"] == "done"
+    finally:
+        runner._lock_fh.close()
+
+
+def test_runner_config_loads_task_timeout_from_yaml():
+    """`queue.task_timeout_s` in otto.yaml is honored; absent → 1800 default."""
+    cfg = runner_config_from_otto_config({"queue": {"task_timeout_s": 600}})
+    assert cfg.task_timeout_s == 600.0
+    cfg2 = runner_config_from_otto_config({"queue": {}})
+    assert cfg2.task_timeout_s == 1800.0
+    cfg3 = runner_config_from_otto_config({"queue": {"task_timeout_s": None}})
+    assert cfg3.task_timeout_s is None
+    cfg4 = runner_config_from_otto_config({"queue": {"task_timeout_s": 0}})
+    assert cfg4.task_timeout_s is None  # 0 is also "off"
+
+
 # ---------- regression: F1 manifest path env-var contract ----------
 
 
@@ -1000,7 +1114,10 @@ def test_reconcile_and_tick_preserve_running_orphaned_child_until_manifest_final
 
     runner = Runner(
         repo,
-        RunnerConfig(on_watcher_restart="resume", poll_interval_s=0.01),
+        # task_timeout_s=None disables F10 — test asserts behavior of reconcile,
+        # not of timeout enforcement (the hardcoded started_at is intentionally
+        # stale to simulate watcher crash recovery).
+        RunnerConfig(on_watcher_restart="resume", poll_interval_s=0.01, task_timeout_s=None),
         otto_bin="/bin/true",
     )
     runner._lock_fh = acquire_lock(repo)

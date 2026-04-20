@@ -478,10 +478,232 @@ def bench_p3_bookmark_parallel_features(name: str = "P3-bookmark-parallel-featur
         return res
 
 
+def _run_complex_bench(
+    *,
+    name: str,
+    prefix: str,
+    base_intent: str,
+    improves: list[tuple[str, str]],
+    concurrent: int = 3,
+    rounds: int = 2,
+) -> BenchResult:
+    """Shared driver for complex multi-feature product benchmarks.
+
+    Designed for products with real domain logic (multi-module APIs, build
+    pipelines, etc.) where improves SHOULD touch shared files and produce
+    genuine merge conflicts. Uses `improve feature -n <rounds>` so the agent
+    has multiple cert rounds to actually pass — at `-n 1` improves on
+    complex products always 'fail' because the cert identifies more gaps
+    than fit in one round.
+    """
+    hr(f"BENCH {name}")
+    repo = make_repo(prefix)
+    log(f"repo: {repo}")
+    t0 = time.time()
+    try:
+        log("phase 1: build base")
+        otto_run(repo, "queue", "build", "--as", "base", "--",
+                 "--fast", "--no-qa", base_intent)
+        w = start_watcher(repo, concurrent=1)
+        try:
+            wait_for_all_done(repo, timeout=1800, interval=20)
+        finally:
+            stop_watcher(w)
+        if queue_state(repo)["tasks"]["base"]["status"] != "done":
+            res = collect_metrics(repo, name, t0, concurrency=concurrent)
+            res.notes.append("base build failed")
+            res.write(RESULTS_DIR / f"{name}.json")
+            return res
+        otto_run(repo, "merge", "--all", "--no-certify", "--cleanup-on-success")
+        log(f"base merged. queueing {len(improves)} parallel improves (concurrent={concurrent}, -n {rounds}).")
+
+        for tid, intent in improves:
+            otto_run(repo, "queue", "improve", "feature", "--as", tid, "--",
+                     "-n", str(rounds), intent)
+        w = start_watcher(repo, concurrent=concurrent)
+        try:
+            wait_for_all_done(repo, timeout=3600, interval=30)
+        finally:
+            stop_watcher(w)
+        statuses = {tid: ts.get("status") for tid, ts in queue_state(repo)["tasks"].items()}
+        log(f"phase 2 done: {statuses}")
+
+        # Phase 3: merge — try --all first, fall back to explicit branches
+        log("phase 3: merge")
+        merge_t0 = time.time()
+        all_branches = [t.get("branch") for t in queue_state(repo)["tasks"].values() if t.get("branch")]
+        improve_branches = [b for b in all_branches if b and b.startswith("improve/")]
+        any_done_improve = any(
+            ts.get("status") == "done" for tid, ts in queue_state(repo)["tasks"].items()
+            if tid != "base"
+        )
+        if any_done_improve:
+            merge_args = ["merge", "--all"]
+        else:
+            log("  improves did not pass cert; merging by branch name (best-effort)")
+            merge_args = ["merge", *improve_branches, "--no-certify"]
+        merge_r = otto_run(repo, *merge_args, check=False, timeout=900)
+        merge_seconds = time.time() - merge_t0
+        merge_out = (merge_r.stdout or "") + (merge_r.stderr or "")
+        merge_outcome = "success" if merge_r.returncode == 0 else "failed"
+        if "conflict_resolved" in merge_out.lower():
+            merge_outcome = "conflict-resolved"
+        log(f"merge: rc={merge_r.returncode}, outcome={merge_outcome}, seconds={merge_seconds:.0f}")
+
+        merge_cost = _sum_merge_agent_cost(repo)
+        res = collect_metrics(repo, name, t0, concurrency=concurrent)
+        res.merge_outcome = merge_outcome
+        res.merge_cost_usd = merge_cost
+        res.merge_seconds = merge_seconds
+        res.total_cost_usd += merge_cost
+        merge_state_files = list((repo / "otto_logs" / "merge").glob("merge-*/state.json"))
+        if merge_state_files:
+            ms = json.loads(sorted(merge_state_files)[-1].read_text())
+            res.cert_passed = ms.get("cert_passed")
+        res.notes.append(f"rounds_per_improve: {rounds}")
+        res.notes.append(f"merge_log_tail: {merge_out.strip()[-300:]}")
+        res.write(RESULTS_DIR / f"{name}.json")
+        return res
+    except Exception as exc:
+        log(f"FAILED: {exc}")
+        res = collect_metrics(repo, name, t0, concurrency=concurrent)
+        res.notes.append(f"exception: {exc}")
+        res.write(RESULTS_DIR / f"{name}.json")
+        return res
+
+
+def bench_p4_flask_multi_module(name: str = "P4-flask-auth-users-posts") -> BenchResult:
+    """P4: Flask REST API with auth + users + posts. Improves all touch
+    posts.py and the data layer — should produce real conflicts.
+    """
+    return _run_complex_bench(
+        name=name,
+        prefix="bench-p4-",
+        base_intent=(
+            "Build a Flask REST API in app.py with SQLite persistence "
+            "(no SQLAlchemy — use the sqlite3 stdlib module) and JWT auth. "
+            "Endpoints: POST /register {username, password}, POST /login -> {token}, "
+            "GET/PATCH/DELETE /users/me (auth required), "
+            "POST /posts {title, body} (auth required, sets author_id), "
+            "GET /posts (public, list all with author username), "
+            "GET /posts/<id>, PATCH /posts/<id> (author only), DELETE /posts/<id> (author only). "
+            "Use PyJWT. Hash passwords with hashlib.sha256+salt. "
+            "Schema: users(id, username, password_hash, salt, created_at), "
+            "posts(id, author_id, title, body, created_at). "
+            "README.md with curl examples for each endpoint."
+        ),
+        improves=[
+            ("imp-comments",
+             "Add comments to posts. New table comments(id, post_id, author_id, body, created_at). "
+             "POST /posts/<id>/comments {body} (auth required). "
+             "GET /posts/<id>/comments lists comments with author username. "
+             "DELETE /comments/<id> (author only)."),
+            ("imp-tags",
+             "Add tags to posts. New columns: posts.tags (JSON array of strings). "
+             "POST/PATCH /posts now accept a tags field. "
+             "GET /posts?tag=<x> filters by tag. "
+             "New endpoint GET /tags returns all unique tags with post counts."),
+            ("imp-likes",
+             "Add likes to posts. New table likes(post_id, user_id, created_at, PRIMARY KEY(post_id, user_id)). "
+             "POST /posts/<id>/like toggles a like by the authenticated user (returns {liked: bool, count: N}). "
+             "GET /posts and GET /posts/<id> include `like_count` and (when authed) `liked_by_me`."),
+        ],
+        concurrent=3,
+        rounds=2,
+    )
+
+
+def bench_p5_markdown_ssg(name: str = "P5-markdown-blog-ssg") -> BenchResult:
+    """P5: Markdown static-site generator (multi-file pipeline).
+
+    Improves all touch the build pipeline + shared template/index logic.
+    Realistic conflicts on the build orchestration code.
+    """
+    return _run_complex_bench(
+        name=name,
+        prefix="bench-p5-",
+        base_intent=(
+            "Build a Python static site generator 'blog.py' that reads .md files from "
+            "posts/<slug>.md (each with YAML front-matter: title, date, tags) and "
+            "generates an HTML site under dist/. "
+            "Use python-markdown and jinja2 (assume installed). "
+            "Outputs: dist/index.html (list of posts by date desc, with title/date/excerpt) "
+            "and dist/posts/<slug>.html for each post. "
+            "Templates in templates/base.html, templates/index.html, templates/post.html. "
+            "Include 2 example posts in posts/ for testing. "
+            "README.md explains how to run."
+        ),
+        improves=[
+            ("imp-tag-pages",
+             "Add tag pages. For each unique tag across all posts, generate "
+             "dist/tags/<tag>.html listing every post with that tag (sorted by date desc). "
+             "Add a tags index at dist/tags/index.html with all tags and counts. "
+             "Link tags from each post page to the corresponding tag page."),
+            ("imp-rss",
+             "Add an RSS 2.0 feed at dist/rss.xml with the most recent 20 posts. "
+             "Each entry: title, link to the post page, pubDate, description (the first 200 "
+             "chars of the rendered post body, plain text). "
+             "Channel info: title='My Blog', link, description, lastBuildDate."),
+            ("imp-search",
+             "Add full-text client-side search. Generate dist/search.json — an array of "
+             "{slug, title, date, tags, plain_text_body}. "
+             "Generate dist/search.html — a static page with a search input that, via "
+             "vanilla JS, fetches search.json once and filters live as the user types. "
+             "Result links go to the matching post page. Link from index.html."),
+        ],
+        concurrent=3,
+        rounds=2,
+    )
+
+
+def bench_p6_inventory_cli(name: str = "P6-inventory-cli") -> BenchResult:
+    """P6: Inventory management CLI with SQLite + multi-domain features.
+
+    Improves add categories, suppliers, alerts — all touching the schema and
+    shared CLI dispatch. Real conflicts likely on the schema migration path.
+    """
+    return _run_complex_bench(
+        name=name,
+        prefix="bench-p6-",
+        base_intent=(
+            "Build a Python CLI 'inv.py' for inventory management with SQLite (sqlite3 stdlib). "
+            "Commands: add <name> <qty> <price> (creates an item), list (table of all items), "
+            "update <id> [--name X] [--qty N] [--price P], delete <id>, "
+            "stock <id> +N|-N (adjusts qty, logs the change in stock_log). "
+            "Schema: items(id, name UNIQUE, qty, price, created_at), "
+            "stock_log(id, item_id, delta, reason, ts). "
+            "Show colored table output (use shutil.get_terminal_size for width). "
+            "README.md with example session."
+        ),
+        improves=[
+            ("imp-categories",
+             "Add categories. New table categories(id, name UNIQUE) and column items.category_id. "
+             "Commands: category-add <name>, category-list, category-rm <id>, "
+             "list --category <name> filters items. update gains --category <name>. "
+             "On 'add', --category <name> creates the category if missing."),
+            ("imp-suppliers",
+             "Add suppliers. New table suppliers(id, name UNIQUE, contact) and "
+             "column items.supplier_id. Commands: supplier-add <name> [--contact <s>], "
+             "supplier-list, supplier-rm <id>. update gains --supplier <name>. "
+             "list --supplier <name> filters items."),
+            ("imp-alerts",
+             "Add stock alerts. New column items.min_qty (default 0). "
+             "Commands: alerts (lists all items where qty <= min_qty, sorted by qty asc), "
+             "set-min <id> <n> (sets min_qty). After every 'stock' command, if the new "
+             "qty drops to/below min_qty, print a colored ALERT line below the success line."),
+        ],
+        concurrent=3,
+        rounds=2,
+    )
+
+
 BENCHES = {
     "P1": bench_p1_todo_parallel_improves,
     "P2": bench_p2_sequential_baseline,
     "P3": bench_p3_bookmark_parallel_features,
+    "P4": bench_p4_flask_multi_module,
+    "P5": bench_p5_markdown_ssg,
+    "P6": bench_p6_inventory_cli,
 }
 
 
