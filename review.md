@@ -127,3 +127,61 @@ Test count after cleanup: 339 → 345 (+6 tests added by Codex).
 - `otto/worktree.py` (added `setup_worktree_for_atomic_cli` shared helper)
 - `pyproject.toml` (added psutil dependency)
 - `tests/test_config.py`, `tests/test_worktree.py`, `tests/test_v3_pipeline.py`
+
+---
+
+## Phase 3 — `--after` dependencies (2026-04-19)
+
+Phase 3 was structurally implemented as part of Phase 2 (the queue runner needed dep handling for dispatch logic). This phase added the missing transitive cascade test (Phase 3.2 verify): A→B→C → all fail when A fails. Test count: 357 → 358. Commit `78a44181`.
+
+---
+
+## Phase 4 — `otto merge` MVP (2026-04-19)
+
+### What ships
+- `otto merge --all|<ids>` — Python-driven git merge loop
+- `otto merge --target <branch>` — non-default target
+- `otto merge --no-certify --full-verify --fast --cleanup-on-success` — mode flags (Phase 5 effectively shipped here)
+- 2 prompt files: `merger-conflict.md`, `merger-triage.md`
+- Step 4.0: certifier API extended with `stories` parameter; `{stories_section}` placeholder added to all 5 certifier prompts
+- Step 4.1: orchestrator with provider gate (codex requires --fast)
+- Step 4.2: per-conflict agent with Bash disallowed + path-scope validation + untracked-file detection + content snapshot for retry
+- Step 4.3: triage agent with story-coverage validation (every input must be covered)
+- Step 4.4: cert phase invokes `run_agentic_certifier(stories=must_verify)`
+- Step 4.5: bookkeeping handled by Phase 1.6 `.gitattributes` (no Python normalization)
+- Step 4.6: `--resume` DEFERRED to follow-up (CLI prints workaround)
+
+### Implementation Gate
+1 round → 2 CRITICAL + 2 IMPORTANT findings, all fixed by Codex:
+- Triage accepted incomplete output → now validates story coverage by name
+- Codex provider gate fired too late → now refuses BEFORE merge starts (unless --fast)
+- Conflict agent ignored untracked files → now snapshotted + cleaned up
+- `_extract_json` non-greedy regex → now greedy + DOTALL
+
+Test count: 358 → 408 (+50 for Phase 4).
+
+E2E smoke: clean merges work (no LLM cost), --fast bails correctly on conflict, bookkeeping union driver auto-merges intent.md.
+
+---
+
+## Phase 5 — Merge mode variants (2026-04-19)
+
+Phase 5 mode flags (`--full-verify`, `--no-certify`, `--fast`) were implemented as part of Phase 4's CLI surface. No additional code or commit needed.
+
+---
+
+## Phase 6 — Polish (2026-04-19)
+
+### What ships
+- **`otto queue cleanup [--done|--all|<ids>...]`** — explicit worktree cleanup. Branches preserved. Manifests preserved at `otto_logs/queue/<task-id>/`. Default scope: done tasks only. `--force` overrides dirty-worktree check.
+- **`otto queue ls --post-merge-preview`** — pairwise file-overlap detection across done branches. Highlights collision risk before user runs `otto merge`.
+
+### What's deferred to v2 (per plan §7 explicit out-of-scope)
+- Auto-merge to main as default (opt-in only)
+- Remote/server queue
+- Web dashboard
+- `otto history --queue` filter (the existing `otto history` works; queue runs are visible there too)
+- Log-archival-then-cleanup integration (`cleanup_after_merge: true` semantics) — current cleanup is opt-in only
+- `otto merge --resume` Mode A/B/C dispatch (CLI prints helpful workaround)
+
+Test count: 408 (no new tests — both new commands are exercised through smoke E2E).

@@ -18,15 +18,72 @@ The watcher (`otto queue run`) is the SOLE writer of state.json.
 
 from __future__ import annotations
 
+import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import click
 from rich.table import Table
 
 from otto.display import CONTEXT_SETTINGS, console, rich_escape
 from otto.theme import error_console
+
+
+def _git_worktree_remove(project_dir: Path, wt_path: Path, *, force: bool) -> subprocess.CompletedProcess:
+    """Run `git worktree remove [-f] <path>`."""
+    args = ["git", "worktree", "remove"]
+    if force:
+        args.append("--force")
+    args.append(str(wt_path))
+    return subprocess.run(args, cwd=project_dir, capture_output=True, text=True)
+
+
+def _print_post_merge_preview(project_dir: Path, tasks, state) -> None:
+    """Print file-overlap warnings between done-status branches.
+
+    For each pair of done tasks, compute the intersection of files they
+    each touched relative to default_branch. Overlapping files = collision
+    risk at merge time.
+    """
+    from otto.merge import git_ops
+    from otto.config import load_config
+    cfg = load_config(project_dir / "otto.yaml") if (project_dir / "otto.yaml").exists() else {}
+    target = str(cfg.get("default_branch", "main"))
+
+    done_tasks = [
+        t for t in tasks
+        if state.get("tasks", {}).get(t.id, {}).get("status") == "done" and t.branch
+    ]
+    if len(done_tasks) < 2:
+        console.print("\n  [dim]Post-merge preview: need 2+ done tasks to compare.[/dim]")
+        return
+
+    # Compute file sets per branch
+    files_by_id: dict[str, set[str]] = {}
+    for t in done_tasks:
+        files_by_id[t.id] = set(git_ops.files_in_branch_diff(project_dir, t.branch, target))
+
+    # Pairwise intersections
+    overlaps: list[tuple[str, str, set[str]]] = []
+    ids = [t.id for t in done_tasks]
+    for i in range(len(ids)):
+        for j in range(i + 1, len(ids)):
+            common = files_by_id[ids[i]] & files_by_id[ids[j]]
+            if common:
+                overlaps.append((ids[i], ids[j], common))
+
+    console.print("\n  [bold]Post-merge collision preview[/bold] "
+                  f"(target: [info]{target}[/info])")
+    if not overlaps:
+        console.print("  [success]No file overlaps among done branches.[/success]")
+        return
+    for a, b, common in overlaps:
+        files_str = ", ".join(sorted(common)[:5])
+        if len(common) > 5:
+            files_str += f" (+{len(common) - 5} more)"
+        console.print(f"  [yellow]⚠[/yellow] [info]{a}[/info] vs [info]{b}[/info]: {files_str}")
 
 
 # ---------- helpers ----------
@@ -288,7 +345,9 @@ def register_queue_commands(main: click.Group) -> None:
     @queue.command(context_settings=CONTEXT_SETTINGS)
     @click.option("--all", "show_all", is_flag=True,
                   help="Include removed tasks (hidden by default)")
-    def ls(show_all: bool) -> None:
+    @click.option("--post-merge-preview", is_flag=True,
+                  help="Show file-overlap preview between done branches (collision risk)")
+    def ls(show_all: bool, post_merge_preview: bool) -> None:
         """List tasks in the queue with their current state."""
         from otto.queue.schema import load_queue, load_state
         project_dir = _project_dir()
@@ -329,6 +388,9 @@ def register_queue_commands(main: click.Group) -> None:
         if not _watcher_alive(state):
             console.print("\n  [yellow]Worker is not running.[/yellow] "
                           "Start with: [info]otto queue run --concurrent N[/info]")
+
+        if post_merge_preview:
+            _print_post_merge_preview(project_dir, tasks, state)
 
     # ---- show ----
     @queue.command(context_settings=CONTEXT_SETTINGS)
@@ -412,6 +474,80 @@ def register_queue_commands(main: click.Group) -> None:
             "id": task_id,
         })
         console.print(f"  Cancel requested for [info]{task_id}[/info].")
+
+    # ---- cleanup (Phase 6.4) ----
+    @queue.command(context_settings=CONTEXT_SETTINGS)
+    @click.argument("task_ids", nargs=-1)
+    @click.option("--done", "scope_done", is_flag=True,
+                  help="Remove worktrees for tasks with status=done (default)")
+    @click.option("--all", "scope_all", is_flag=True,
+                  help="Also include failed/cancelled/removed tasks")
+    @click.option("--force", is_flag=True, help="Remove even if worktree is dirty")
+    def cleanup(task_ids: tuple[str, ...], scope_done: bool, scope_all: bool, force: bool) -> None:
+        """Explicitly remove worktrees for done/failed tasks.
+
+        Branches and manifests are preserved. Only the working tree directory
+        is removed (`git worktree remove <path>`). To remove the branch as
+        well, use `git branch -d <branch>` afterward.
+
+        \b
+        Examples:
+            otto queue cleanup --done       # remove done-task worktrees
+            otto queue cleanup --all        # also failed/cancelled/removed
+            otto queue cleanup t1 t2        # specific tasks
+        """
+        from otto.queue.schema import load_queue, load_state
+        project_dir = _project_dir()
+        try:
+            tasks = load_queue(project_dir)
+            state = load_state(project_dir)
+        except Exception as exc:
+            error_console.print(f"[error]Failed to load queue: {rich_escape(str(exc))}[/error]")
+            sys.exit(1)
+
+        # Decide which tasks to clean
+        targets: list[Any] = []
+        statuses_in_scope = {"done"}
+        if scope_all:
+            statuses_in_scope = {"done", "failed", "cancelled", "removed"}
+        if task_ids:
+            for tid in task_ids:
+                t = next((t for t in tasks if t.id == tid), None)
+                if t is None:
+                    error_console.print(f"[error]No such task: {tid!r}[/error]")
+                    sys.exit(2)
+                targets.append(t)
+        else:
+            # Default: tasks matching the scope filter
+            for t in tasks:
+                ts = state.get("tasks", {}).get(t.id, {})
+                if ts.get("status") in statuses_in_scope:
+                    targets.append(t)
+
+        if not targets:
+            console.print("  No worktrees to clean up.")
+            return
+
+        cleaned = 0
+        skipped = 0
+        for t in targets:
+            if not t.worktree:
+                continue
+            wt_path = project_dir / t.worktree
+            if not wt_path.exists():
+                continue
+            r = _git_worktree_remove(project_dir, wt_path, force=force)
+            if r.returncode == 0:
+                console.print(f"  [success]✓[/success] removed [info]{t.worktree}[/info] (task: {t.id})")
+                cleaned += 1
+            else:
+                console.print(f"  [yellow]✗[/yellow] could not remove {t.worktree}: "
+                              f"{rich_escape(r.stderr.strip())}")
+                skipped += 1
+        console.print(
+            f"\n  Done. Cleaned {cleaned}, skipped {skipped}. "
+            f"Manifests preserved at otto_logs/queue/<task-id>/."
+        )
 
     # ---- run (the watcher) ----
     @queue.command(context_settings=CONTEXT_SETTINGS)
