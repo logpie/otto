@@ -20,12 +20,18 @@ class _StubOptions:
         self.model: str | None = None
 
 
-def test_conflict_agent_disallows_write_and_bash(
+def test_conflict_agent_disallows_bash_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ):
-    """F12: conflict agent MUST pass both 'Write' and 'Bash' in
-    disallowed_tools. Write rewrites the whole file (slow + drift risk);
-    Bash allows shell escape (including git)."""
+    """conflict agent MUST disallow 'Bash' to prevent shell escape. F12
+    previously also disallowed 'Write' but the P6 rerun showed that
+    making the agent use Edit-only made conflict resolution 2-3× slower
+    (multiple plan→edit→verify cycles, each with extended-thinking phase).
+    Reverted: drift prevention is post-agent (validate_post_agent checks
+    no out-of-scope files modified, HEAD unchanged).
+
+    If you re-add 'Write' to disallowed_tools, also re-tune the prompt to
+    avoid multi-pass loops, or measure to confirm net benefit."""
     # Minimal git repo so head_sha/changed_files don't crash
     import subprocess
     subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True)
@@ -71,7 +77,10 @@ def test_conflict_agent_disallows_write_and_bash(
     assert "Bash" in captured["disallowed_tools"], (
         f"Bash must be disallowed (no shell escape); got {captured['disallowed_tools']!r}"
     )
-    assert "Write" in captured["disallowed_tools"], (
-        f"F12: Write must be disallowed (force Edit/MultiEdit for patch-style merges); "
-        f"got {captured['disallowed_tools']!r}"
+    # Write should NOT be in the disallowed list — F12 was reverted because
+    # forcing Edit-only triggered multi-pass thinking and 2-3× slowdown.
+    assert "Write" not in captured["disallowed_tools"], (
+        f"Write should be allowed (F12 reverted — see findings F12). "
+        f"If you re-disallow Write, retune merger-conflict.md to avoid "
+        f"multi-pass loops, and re-measure. Got: {captured['disallowed_tools']!r}"
     )

@@ -427,6 +427,152 @@ to pass reliably (P4: 1/3 passed; P5: 0/3; P6: 2/3). Either tune `-n`
 higher (more cost per improve) or accept the salvage-merge pattern as
 standard (cheap explicit-branch merge captures the work).
 
+---
+
+### [F12] Conflict agent: disallowed `Write` to force patch-style `Edit` — COUNTERINTUITIVE RESULT
+
+**Motivation**: P5 bench showed the conflict agent generating a single
+`Write` call that regenerated entire files — measured ~10 min per branch,
+86% of which was streaming unchanged bytes. Expected `Edit`-only to be
+3-5× faster.
+
+**Implementation** (commit 58568078):
+1. Added `"Write"` to `disallowed_tools` alongside `"Bash"` in
+   `conflict_agent.py`.
+2. Rewrote `otto/prompts/merger-conflict.md` with explicit "Patch regions,
+   don't rewrite files" framing + tool discipline section.
+3. Regression test in `tests/test_merge_conflict_agent.py`.
+
+**Actual measured impact (P6 rerun salvage, 2 branches × 3 conflict files)**:
+
+| | Baseline (Write) | F12 (Edit only) |
+|---|---|---|
+| Tools used per branch | 1 Write + 3-5 Reads | 2-4 Edits + 4-6 Greps + 6-8 Reads |
+| Branch 1 wall time | ~10 min | ~22 min |
+| Wall time per tool call | Write ≈ 10 min (token stream) | Edit ≈ 30-60s; Read/Grep ≈ 5s |
+| Total round trips | 1 big | 12-18 small |
+| Drift risk on unchanged code | real | near-zero |
+| Final diff reviewability | entire file re-written | hunk-level patches |
+
+**Counterintuitive outcome**: F12 is **SLOWER per branch**, not faster.
+Reason: each Edit is a separate LLM round-trip with its own "thinking"
+phase. 12 small round-trips with 30-60s thinking each beats 1 big
+round-trip with 5 min of thinking + 5 min of token-streaming in wall
+time terms. The agent also "verifies" between edits (Grep to check no
+markers remain) — caution adds calls.
+
+**Trade-offs**:
+- F12 pro: safety (no drift), patch-level git diffs, human-reviewable
+  merges, smaller API output tokens per call (maybe lower cost per token
+  but more calls)
+- F12 con: ~2× slower wall time per branch
+- Cost: roughly comparable (more calls × smaller payload vs fewer calls
+  × larger payload) — need more data to be confident
+
+**Recommendation**: keep F12 despite the speed regression. Safety and
+diff-quality are worth the wall-time cost. For a single conflict on a
+small file, Edit is fast. For complex multi-file merges, neither
+approach is "fast" — both take 10-25 min. The real wins would come from:
+- Running conflict resolution per-file in parallel (N agents for N
+  conflict files)
+- Disabling extended thinking for the conflict agent (this is a
+  mechanical task; extended reasoning is overkill)
+
+Deferred both as F13/F14 for future investigation.
+
+---
+
+### [F12.REVERT] F12 reverted after measured 2-3× regression on P6 rerun
+
+**Decision**: revert F12 (`Write` re-allowed in conflict agent, prompt
+restored to original Edit/Write/MultiEdit framing). Drift prevention
+remains via post-agent `validate_post_agent` (out-of-scope file modify
+detection + HEAD-unchanged check).
+
+**Why revert** (from real audit of conflict-agent.log):
+- Per-branch wall time: F12 22-26 min vs baseline ~10 min (2-3× slower)
+- Per-branch cost: F12 $7-11 vs baseline $2-3 (3-4× more expensive)
+- Root cause **is not** "tool-call overhead per round-trip" (my initial
+  guess). Audit of branch-2 timeline:
+  - 583s (9.7 min) gap of pure thinking before first Edit
+  - 117s + 82s additional thinking gaps mid-execution
+  - Edit bursts themselves were fast (5-15s/call)
+- The pattern: F12 prompt's "verify each edit" instruction made the agent
+  enter a **plan→execute batch→verify→re-plan** loop. Each "re-plan"
+  triggered another extended-thinking phase. Write-based agent does
+  one plan + one execute, with no re-planning loop.
+
+**Audit-verified vs guessed**:
+- I guessed: "many small Edit round-trips, each with thinking overhead"
+- Actual: "few large thinking phases regardless of edit count" — the
+  prompt design caused multiple re-planning cycles, not the tool choice
+
+**Better directions identified, but not implemented now**:
+1. Post-Write structural drift check in orchestrator: compare unchanged
+   regions of the agent's output to the pre-merge content; flag any
+   drift outside the conflict markers. Gets safety without the
+   round-trip cost.
+2. Per-file parallel conflict agents: N concurrent agents, one per
+   conflict file. Could 2-3× speed up multi-file conflicts. More
+   orchestrator complexity.
+3. Different prompt framing: "plan ALL edits upfront, do one MultiEdit
+   per file, single final verification grep" — try to keep Edit
+   semantics but force a single planning phase. Risky (model may not
+   comply).
+
+Reverted in a single commit; tests/test_merge_conflict_agent.py asserts
+`Write` is NOT in disallowed_tools (with comment explaining the history
+to prevent re-introduction).
+
+**Lesson**: I predicted the F12 speedup based on a model of "Edit is
+small, Write is big, smaller is faster." Real data showed thinking time
+dominates, and the prompt's caution instructions amplified it. Always
+audit real logs before claiming an optimization works.
+
+---
+
+## Build/improve vs conflict vs triage vs certifier — agent runtime audit
+
+User question: "what are the differences besides prompts?" Comprehensive
+audit:
+
+ALL four agent types route through the same code path:
+```
+caller → make_agent_options(project_dir, config) → run_agent_with_timeout
+       → _query_claude → claude_agent_sdk.query
+       → spawns bundled `claude` CLI subprocess
+```
+
+Same factory, same model, same effort default (None → CLI default),
+same permission_mode (bypassPermissions), same setting_sources
+(["project"]), same env, same Claude Code system prompt preset.
+
+The ONLY runtime differences:
+
+| Agent | Disallowed tools | capture_tool_output | Resume | Retry |
+|---|---|---|---|---|
+| build | none | **True** | yes | inner certify-loop (in-session) |
+| improve | none | **True** | yes | inner certify-loop (in-session) |
+| certifier | none | False | no | none (caller decides) |
+| triage | none | False | no | up to N (orchestrator) |
+| conflict | **["Bash"]** | False | no | up to 2 (orchestrator) |
+
+`capture_tool_output=True` for build/improve so the parent can parse
+`STORY_RESULT:` lines emitted by the certifier subagent. Other agents
+parse the agent's text output directly.
+
+`disallowed_tools=["Bash"]` on the conflict agent is the only structural
+isolation — prevents the agent from running `git` or other shell
+commands that could escape the orchestrator's commit control.
+
+**Conclusion**: the conflict agent IS NOT slower because of any runtime
+difference vs build/improve. Same model, same SDK, same CLI, same
+defaults. The slowness is entirely from prompt design + workload
+characteristics (multi-file 3-way merge requires deep reasoning per
+file, regardless of tool choice).
+
+
+
 
 
 

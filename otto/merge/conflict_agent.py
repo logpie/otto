@@ -214,16 +214,19 @@ async def resolve_one_conflict(
     for attempt in range(MAX_AGENT_RETRIES + 1):
         prompt = render_conflict_prompt(ctx)
         options = make_agent_options(project_dir, config)
-        # F12: disallow Write too — the agent must patch conflict regions via
-        # Edit/MultiEdit only. Rationale: `Write` rewrites the whole file,
-        # which is 5-20× slower (the agent regenerates unchanged lines) and
-        # risks accidentally reformatting / "improving" code outside the
-        # conflict region. Measured in P5 bench: a single `Write` call took
-        # ~10 min to generate; `Edit` on the conflict block finishes in secs.
-        # Bash is also disabled — agent must not run `git` or shell commands.
-        options.disallowed_tools = list(set(
-            (options.disallowed_tools or []) + ["Bash", "Write"]
-        ))
+        # Disallow Bash entirely — agent must use Edit/Write/MultiEdit only.
+        # This blocks any shell-out, including `git`.
+        #
+        # F12 note: we previously also disallowed `Write`, forcing Edit/MultiEdit.
+        # Measured in P6 rerun: that change made conflict resolution 2-3× SLOWER
+        # ($7.80 + $11.42 vs $2.41 baseline) because the agent did multiple
+        # plan→edit→verify cycles, each triggering its own extended-thinking
+        # phase. Reverted; drift prevention is now handled post-agent by
+        # `validate_post_agent` (checks no out-of-scope files were modified
+        # and HEAD unchanged). Write on a conflict file can still reformat
+        # the file — but the orchestrator catches out-of-scope drift via the
+        # delta-files check.
+        options.disallowed_tools = list(set((options.disallowed_tools or []) + ["Bash"]))
         timeout = budget.for_call() if budget is not None else None
 
         try:
