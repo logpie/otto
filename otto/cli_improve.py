@@ -71,6 +71,7 @@ def _run_improve(
     split: bool = False,
     resume: bool = False,
     resume_state=None,
+    in_worktree: bool = False,
 ) -> None:
     """CLI wrapper: branch creation, display, and report around the shared loop.
 
@@ -87,8 +88,47 @@ def _run_improve(
         resume_state = resolve_resume(project_dir, resume, expected_command=command_id)
     print_resume_status(console, resume_state, resume, expected_command=command_id)
 
-    # Create improvement branch
-    branch = _create_improve_branch(project_dir)
+    # Phase 1.2: --in-worktree creates an isolated worktree before branching.
+    if in_worktree:
+        if resume:
+            error_console.print(
+                "[error]--in-worktree is not compatible with --resume.[/error]\n"
+                "  cd into the existing worktree directly to resume."
+            )
+            sys.exit(2)
+        from otto.config import load_config as _lc
+        cfg = _lc(project_dir / "otto.yaml") if (project_dir / "otto.yaml").exists() else {}
+        wt_dir = cfg.get("queue", {}).get("worktree_dir", ".worktrees")
+        from otto.worktree import (
+            WorktreeAlreadyCheckedOut,
+            enter_worktree_for_atomic_command,
+        )
+        worktree_slug_source = focus or target or intent
+        try:
+            wt_path, _ = enter_worktree_for_atomic_command(
+                project_dir=project_dir,
+                worktree_dir=wt_dir,
+                mode=f"improve-{subcommand}",
+                intent=intent,
+                slug_source=worktree_slug_source,
+            )
+        except WorktreeAlreadyCheckedOut as exc:
+            error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
+            sys.exit(1)
+        except (RuntimeError, ValueError) as exc:
+            error_console.print(f"[error]Worktree setup failed: {rich_escape(str(exc))}[/error]")
+            sys.exit(1)
+        console.print(f"  [dim]Worktree:[/dim] [info]{wt_path}[/info]")
+        project_dir = wt_path
+
+    # Create improvement branch (skipped if --in-worktree already created one)
+    if in_worktree:
+        # Branch was created by enter_worktree (named improve-<sub>/<slug>-<date>);
+        # query the actual current branch since we just chdir'd
+        from otto.branching import current_branch as _cb
+        branch = _cb(project_dir)
+    else:
+        branch = _create_improve_branch(project_dir)
     mode_label = "split" if split else "agentic"
     console.print(f"\n  [bold]{command_label}[/bold] ({mode_label}) — branch: [info]{branch}[/info]")
     if focus:
@@ -201,6 +241,37 @@ def _run_improve(
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text("\n".join(report_lines))
 
+    # Phase 1.4: write per-run manifest. improve uses the build_dir
+    # naming scheme (otto_logs/builds/<build_id>/) since it routes through
+    # build_agentic_v3 / run_certify_fix_loop.
+    try:
+        from otto.manifest import (
+            current_head_sha,
+            make_manifest,
+            write_manifest,
+        )
+        build_dir = project_dir / "otto_logs" / "builds" / result.build_id
+        manifest = make_manifest(
+            command="improve",
+            argv=list(sys.argv[1:]),
+            run_id=result.build_id,
+            branch=branch,
+            checkpoint_path=build_dir / "checkpoint.json",
+            proof_of_work_path=project_dir / "otto_logs" / "certifier" / "proof-of-work.json",
+            cost_usd=result.total_cost,
+            duration_s=duration,
+            started_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(start)),
+            head_sha=None,  # filled below
+            resolved_intent=intent,
+            focus=focus,
+            target=target,
+            exit_status="success" if result.passed else "failure",
+        )
+        manifest.head_sha = current_head_sha(project_dir)
+        write_manifest(manifest, project_dir=project_dir, fallback_dir=build_dir)
+    except Exception as exc:
+        error_console.print(f"[yellow]warning: manifest write failed: {exc}[/yellow]")
+
     # --- Summary ---
     console.print()
     console.print(f"  [bold]{command_label} complete[/bold]")
@@ -260,7 +331,9 @@ def register_improve_commands(main: click.Group) -> None:
     @click.option("--rounds", "-n", default=3, help="Maximum rounds (default: 3)")
     @click.option("--split", is_flag=True, help="System-controlled loop (vs agent-driven)")
     @click.option("--resume", is_flag=True, help="Resume from last checkpoint")
-    def bugs(focus, rounds, split, resume):
+    @click.option("--in-worktree", "in_worktree", is_flag=True,
+                  help="Run in an isolated git worktree (./.worktrees/improve-bugs-<slug>-<date>/)")
+    def bugs(focus, rounds, split, resume, in_worktree):
         """Find and fix bugs, edge cases, and error handling gaps.
 
         One agent certifies, reads findings, fixes, and re-certifies
@@ -285,6 +358,7 @@ def register_improve_commands(main: click.Group) -> None:
             subcommand="bugs",
             split=split,
             resume=resume,
+            in_worktree=in_worktree,
         )
 
     @improve.command(context_settings=CONTEXT_SETTINGS)
@@ -292,7 +366,9 @@ def register_improve_commands(main: click.Group) -> None:
     @click.option("--rounds", "-n", default=3, help="Maximum rounds (default: 3)")
     @click.option("--split", is_flag=True, help="System-controlled loop (vs agent-driven)")
     @click.option("--resume", is_flag=True, help="Resume from last checkpoint")
-    def feature(focus, rounds, split, resume):
+    @click.option("--in-worktree", "in_worktree", is_flag=True,
+                  help="Run in an isolated git worktree (./.worktrees/improve-feature-<slug>-<date>/)")
+    def feature(focus, rounds, split, resume, in_worktree):
         """Suggest and implement product improvements.
 
         One agent evaluates the product, identifies improvements, implements
@@ -316,6 +392,7 @@ def register_improve_commands(main: click.Group) -> None:
             subcommand="feature",
             split=split,
             resume=resume,
+            in_worktree=in_worktree,
         )
 
     @improve.command(context_settings=CONTEXT_SETTINGS)
@@ -323,7 +400,9 @@ def register_improve_commands(main: click.Group) -> None:
     @click.option("--rounds", "-n", default=5, help="Maximum rounds (default: 5)")
     @click.option("--split", is_flag=True, help="System-controlled loop (vs agent-driven)")
     @click.option("--resume", is_flag=True, help="Resume from last checkpoint")
-    def target(goal, rounds, split, resume):
+    @click.option("--in-worktree", "in_worktree", is_flag=True,
+                  help="Run in an isolated git worktree (./.worktrees/improve-target-<slug>-<date>/)")
+    def target(goal, rounds, split, resume, in_worktree):
         """Optimize toward a measurable target.
 
         Measures a metric, compares to the target, and iterates until met.
@@ -384,4 +463,5 @@ def register_improve_commands(main: click.Group) -> None:
             split=split,
             resume=resume,
             resume_state=resume_state,
+            in_worktree=in_worktree,
         )

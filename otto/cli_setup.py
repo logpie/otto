@@ -8,7 +8,7 @@ from pathlib import Path
 import click
 
 from otto.agent import AssistantMessage, AgentOptions, ResultMessage, TextBlock, _safe_read, query
-from otto.config import create_config, load_config
+from otto.config import create_config, ensure_bookkeeping_setup, load_config
 from otto.display import CONTEXT_SETTINGS, console
 from otto.testing import _subprocess_env
 from otto.theme import error_console
@@ -114,6 +114,8 @@ def register_setup_command(main: click.Group) -> None:
         if not config_path.exists():
             create_config(project_dir)
             console.print("[success]Created otto.yaml[/success]")
+        config = load_config(config_path)
+        ensure_bookkeeping_setup(project_dir, config)
 
         claude_md = project_dir / "CLAUDE.md"
         existing_content = None
@@ -180,7 +182,7 @@ Guidelines:
 Output ONLY the markdown content."""
 
         console.print("[dim]Generating CLAUDE.md...[/dim]")
-        result_text = asyncio.run(_run_setup_query(prompt, project_dir, load_config(config_path)))
+        result_text = asyncio.run(_run_setup_query(prompt, project_dir, config))
 
         if not result_text.strip() and claude_md.exists():
             result_text = _safe_read(claude_md, 10000) or ""

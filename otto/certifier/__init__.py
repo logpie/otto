@@ -156,6 +156,7 @@ async def run_agentic_certifier(
         story_results=story_results,
         metric_value=parsed.metric_value,
         metric_met=parsed.metric_met,
+        run_id=run_id,
     )
 
     # Write PoW report

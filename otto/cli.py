@@ -19,25 +19,55 @@ from otto.display import CONTEXT_SETTINGS, console, rich_escape
 from otto.theme import error_console
 
 
+def _check_venv_guard(
+    *,
+    cwd: str,
+    otto_src: str,
+    queue_runner_env: str | None,
+) -> tuple[bool, str | None]:
+    """Pure logic for the worktree-venv guard. Returns (should_block, error_message).
+
+    Catches the shared-venv bug where a user runs otto from inside a worktree
+    but the otto package is loaded from the main repo's venv. Bypassed by
+    OTTO_INTERNAL_QUEUE_RUNNER=1 for queue-runner-spawned child processes.
+
+    Extracted for testability — see tests/test_env_bypass.py.
+    """
+    in_worktree_cwd = "worktree" in cwd
+    otto_from_worktree = "worktree" in otto_src
+    if in_worktree_cwd and not otto_from_worktree:
+        if queue_runner_env != "1":
+            return (True, (
+                f"ERROR: otto loaded from {otto_src}\n"
+                f"  but cwd is a worktree ({cwd}).\n"
+                f"  Use the worktree's own venv: .venv/bin/otto\n"
+                f"  (or set OTTO_INTERNAL_QUEUE_RUNNER=1 if you are the queue runner)"
+            ))
+    return (False, None)
+
+
 @click.group(context_settings=CONTEXT_SETTINGS)
 def main():
     """Otto — build and certify software products.
 
     Run 'otto COMMAND -h' for command-specific options.
     """
-    # Fail early if otto is loaded from a different source than expected.
-    # This catches the shared-venv bug where worktree otto runs main repo code.
+    # Phase 1.5: scoped venv guard. See _check_venv_guard() for the logic.
+    # After accepting the bypass, POP the env var so any nested subprocess
+    # (Claude SDK spawn, codex subprocess, agent tools) does NOT inherit it
+    # — the bypass is one-level-deep by design.
     import otto as _otto_pkg
-    _otto_src = str(Path(_otto_pkg.__file__).resolve().parent)
-    _cwd = str(Path.cwd().resolve())
-    if "worktree" in _cwd and "worktree" not in _otto_src:
-        click.echo(
-            f"ERROR: otto loaded from {_otto_src}\n"
-            f"  but cwd is a worktree ({_cwd}).\n"
-            f"  Use the worktree's own venv: .venv/bin/otto",
-            err=True,
-        )
+    should_block, msg = _check_venv_guard(
+        cwd=str(Path.cwd().resolve()),
+        otto_src=str(Path(_otto_pkg.__file__).resolve().parent),
+        queue_runner_env=os.environ.get("OTTO_INTERNAL_QUEUE_RUNNER"),
+    )
+    if should_block:
+        click.echo(msg, err=True)
         sys.exit(1)
+    # Scope the bypass to ONE level — strip from env now so nested subprocesses
+    # do not inherit it. Safe to do unconditionally (no-op if not set).
+    os.environ.pop("OTTO_INTERNAL_QUEUE_RUNNER", None)
 
 
 def _new_run_id() -> str:
@@ -328,7 +358,10 @@ def _print_build_result(intent: str, result, build_duration: float) -> None:
               default=None, help="Use a pre-written spec file (implies --yes)")
 @click.option("--yes", is_flag=True, help="Auto-approve the generated spec (for CI/scripts)")
 @click.option("--force", is_flag=True, help="Discard an active paused spec run and start fresh")
-def build(intent, no_qa, fast, thorough, split, rounds, resume, spec, spec_file, yes, force):
+@click.option("--in-worktree", "in_worktree", is_flag=True,
+              help="Run in an isolated git worktree (./.worktrees/build-<slug>-<date>/) "
+                   "instead of modifying the current working tree")
+def build(intent, no_qa, fast, thorough, split, rounds, resume, spec, spec_file, yes, force, in_worktree):
     """Build a product from a natural language intent.
 
     One agent builds, certifies, and fixes autonomously. The certifier
@@ -471,6 +504,77 @@ def build(intent, no_qa, fast, thorough, split, rounds, resume, spec, spec_file,
     if rounds is not None:
         config["max_certify_rounds"] = rounds
 
+    # Phase 1.2: --in-worktree creates an isolated worktree (in-process chdir,
+    # no subprocess re-entry) and runs the rest of the pipeline from there.
+    # The branch policy below then runs from the new cwd.
+    if in_worktree:
+        if resume and resume_state.resumed:
+            error_console.print(
+                "[error]--in-worktree is not compatible with --resume.[/error]\n"
+                "  Resume continues an existing run in its original cwd. To resume "
+                "a worktree run, cd into the worktree directly and run `otto build --resume`."
+            )
+            sys.exit(2)
+        from otto.worktree import (
+            WorktreeAlreadyCheckedOut,
+            enter_worktree_for_atomic_command,
+        )
+        wt_dir = config.get("queue", {}).get("worktree_dir", ".worktrees")
+        try:
+            wt_path, _ = enter_worktree_for_atomic_command(
+                project_dir=project_dir,
+                worktree_dir=wt_dir,
+                mode="build",
+                intent=intent,
+            )
+        except WorktreeAlreadyCheckedOut as exc:
+            error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
+            sys.exit(1)
+        except (RuntimeError, ValueError) as exc:
+            error_console.print(f"[error]Worktree setup failed: {rich_escape(str(exc))}[/error]")
+            sys.exit(1)
+        console.print(f"  [dim]Worktree:[/dim] [info]{wt_path}[/info]")
+        # Re-anchor project_dir to the worktree — the rest of the pipeline
+        # operates on this isolated checkout.
+        project_dir = wt_path
+        # Re-load config from the worktree (it has its own otto.yaml after
+        # the branch is checked out, but values are identical).
+        config_path = project_dir / "otto.yaml"
+        if config_path.exists():
+            config = load_config(config_path)
+            if no_qa:
+                config["skip_product_qa"] = True
+            if fast:
+                config["_certifier_mode"] = "fast"
+            elif thorough:
+                config["_certifier_mode"] = "thorough"
+            if rounds is not None:
+                config["max_certify_rounds"] = rounds
+
+    # Branch policy (Phase 1.1): if user is on the default branch, create a
+    # build/<slug>-<date> branch and switch. If on any other branch, stay put
+    # (mirrors `otto improve`'s long-standing pattern). Resume reuses the
+    # current branch — never re-branches mid-flight. With --in-worktree, the
+    # branch was already created by enter_worktree_for_atomic_command.
+    if not (resume and resume_state.resumed) and not in_worktree:
+        from otto.branching import ensure_branch_for_atomic_command
+        try:
+            branch_name, created_new = ensure_branch_for_atomic_command(
+                mode="build",
+                intent=intent,
+                project_dir=project_dir,
+                default_branch=config.get("default_branch", "main"),
+            )
+            if created_new:
+                console.print(f"  [dim]Branch:[/dim] [info]{branch_name}[/info] (created)")
+            elif branch_name:
+                console.print(f"  [dim]Branch:[/dim] [info]{branch_name}[/info] (current)")
+            else:
+                console.print("  [dim]Branch:[/dim] (greenfield — no commits yet)")
+        except RuntimeError as exc:
+            error_console.print(f"[error]Branch setup failed: {rich_escape(str(exc))}[/error]")
+            sys.exit(1)
+
     from otto.pipeline import build_agentic_v3, run_certify_fix_loop, BuildResult
     from otto.budget import RunBudget
     budget = RunBudget.start_from(config)
@@ -545,6 +649,37 @@ def build(intent, no_qa, fast, thorough, split, rounds, resume, spec, spec_file,
 
     build_duration = time.time() - build_start
     _print_build_result(display_intent, result, build_duration)
+
+    # Phase 1.4: write per-run manifest. Path is per-task when
+    # OTTO_QUEUE_TASK_ID is set, otherwise alongside the build's checkpoint.
+    try:
+        from otto.manifest import (
+            current_head_sha,
+            make_manifest,
+            now_iso,
+            write_manifest,
+        )
+        from otto.branching import current_branch
+        build_dir = project_dir / "otto_logs" / "builds" / result.build_id
+        manifest = make_manifest(
+            command="build",
+            argv=list(sys.argv[1:]),
+            run_id=result.build_id,
+            branch=(current_branch(project_dir) or None),
+            checkpoint_path=build_dir / "checkpoint.json",
+            proof_of_work_path=project_dir / "otto_logs" / "certifier" / "proof-of-work.json",
+            cost_usd=result.total_cost,
+            duration_s=build_duration,
+            started_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(build_start)),
+            head_sha=current_head_sha(project_dir),
+            resolved_intent=intent,
+            exit_status="success" if result.passed else "failure",
+        )
+        write_manifest(manifest, project_dir=project_dir, fallback_dir=build_dir)
+    except Exception as exc:
+        # Manifest writing is observability — never let it crash the user
+        from otto.theme import error_console as _err
+        _err.print(f"[yellow]warning: manifest write failed: {exc}[/yellow]")
 
     sys.exit(0 if result.passed else 1)
 
@@ -643,6 +778,35 @@ def certify(intent, thorough, fast):
     pow_dir = project_dir / "otto_logs" / "certifier" / "latest"
     if (pow_dir / "proof-of-work.html").exists():
         console.print(f"  Report: {pow_dir / 'proof-of-work.html'}")
+
+    # Phase 1.4: write per-run manifest for queue/merge consumption
+    try:
+        from otto.manifest import (
+            current_head_sha,
+            make_manifest,
+            write_manifest,
+        )
+        from otto.branching import current_branch
+        cert_run_id = report.run_id or "unknown"
+        cert_dir = project_dir / "otto_logs" / "certifier" / cert_run_id
+        manifest = make_manifest(
+            command="certify",
+            argv=list(sys.argv[1:]),
+            run_id=cert_run_id,
+            branch=(current_branch(project_dir) or None),
+            checkpoint_path=None,  # certify doesn't write a checkpoint.json
+            proof_of_work_path=cert_dir / "proof-of-work.json",
+            cost_usd=float(report.cost_usd),
+            duration_s=duration,
+            started_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(start)),
+            head_sha=current_head_sha(project_dir),
+            resolved_intent=intent,
+            exit_status="success" if outcome == "passed" else "failure",
+        )
+        write_manifest(manifest, project_dir=project_dir, fallback_dir=cert_dir)
+    except Exception as exc:
+        from otto.theme import error_console as _err
+        _err.print(f"[yellow]warning: manifest write failed: {exc}[/yellow]")
 
     console.print()
     sys.exit(0 if outcome == "passed" else 1)

@@ -14,6 +14,7 @@ from otto.config import (
     git_meta_dir,
     load_config,
 )
+from otto.setup_gitattributes import GitAttributesConflict
 
 
 class TestGitMetaDir:
@@ -56,6 +57,75 @@ class TestLoadConfig:
     def test_returns_defaults_when_file_missing(self, tmp_bare_git_repo):
         cfg = load_config(tmp_bare_git_repo / "otto.yaml")
         assert cfg == DEFAULT_CONFIG
+
+    def test_queue_section_defaults_present(self, tmp_bare_git_repo):
+        """Phase 1.3: queue: section with all expected keys + correct defaults."""
+        cfg = load_config(tmp_bare_git_repo / "otto.yaml")
+        q = cfg["queue"]
+        assert q["concurrent"] == 3
+        assert q["worktree_dir"] == ".worktrees"
+        assert q["on_watcher_restart"] == "resume"
+        assert q["cleanup_after_merge"] is False
+        assert "intent.md" in q["bookkeeping_files"]
+        assert "otto.yaml" in q["bookkeeping_files"]
+
+    def test_queue_partial_override_preserves_other_defaults(self, tmp_bare_git_repo):
+        """Deep-merge: user setting `queue.concurrent: 5` must not drop
+        other queue defaults like `worktree_dir`."""
+        config_path = tmp_bare_git_repo / "otto.yaml"
+        config_path.write_text(yaml.dump({"queue": {"concurrent": 5}}))
+        cfg = load_config(config_path)
+        assert cfg["queue"]["concurrent"] == 5
+        assert cfg["queue"]["worktree_dir"] == ".worktrees"   # preserved
+        assert cfg["queue"]["on_watcher_restart"] == "resume" # preserved
+        assert cfg["queue"]["cleanup_after_merge"] is False   # preserved
+        assert "intent.md" in cfg["queue"]["bookkeeping_files"]
+
+    def test_queue_section_user_extra_keys_preserved(self, tmp_bare_git_repo):
+        """Forward-compat: unknown queue keys round-trip cleanly."""
+        config_path = tmp_bare_git_repo / "otto.yaml"
+        config_path.write_text(yaml.dump({"queue": {"future_key": "x"}}))
+        cfg = load_config(config_path)
+        assert cfg["queue"]["future_key"] == "x"
+        assert cfg["queue"]["concurrent"] == 3  # default still present
+
+    def test_warns_when_queue_section_is_not_a_dict(self, tmp_bare_git_repo, caplog):
+        config_path = tmp_bare_git_repo / "otto.yaml"
+        config_path.write_text(yaml.dump({"queue": "not-a-dict"}))
+
+        with caplog.at_level("WARNING", logger="otto.config"):
+            cfg = load_config(config_path)
+
+        assert cfg["queue"] == DEFAULT_CONFIG["queue"]
+        assert "Invalid queue config" in caplog.text
+
+    def test_warns_and_falls_back_for_invalid_queue_key_types(
+        self, tmp_bare_git_repo, caplog
+    ):
+        config_path = tmp_bare_git_repo / "otto.yaml"
+        config_path.write_text(yaml.dump({
+            "queue": {
+                "concurrent": "many",
+                "bookkeeping_files": "intent.md",
+            }
+        }))
+
+        with caplog.at_level("WARNING", logger="otto.config"):
+            cfg = load_config(config_path)
+
+        assert cfg["queue"]["concurrent"] == DEFAULT_CONFIG["queue"]["concurrent"]
+        assert cfg["queue"]["bookkeeping_files"] == DEFAULT_CONFIG["queue"]["bookkeeping_files"]
+        assert "Invalid queue.concurrent" in caplog.text
+        assert "Invalid queue.bookkeeping_files" in caplog.text
+
+    def test_load_config_does_not_mutate_default_queue(self, tmp_bare_git_repo):
+        """Loading + mutating a config must not leak into DEFAULT_CONFIG."""
+        cfg = load_config(tmp_bare_git_repo / "otto.yaml")
+        cfg["queue"]["concurrent"] = 99
+        # Re-load: should still see the original default
+        cfg2 = load_config(tmp_bare_git_repo / "otto.yaml")
+        assert cfg2["queue"]["concurrent"] == 3
+        assert DEFAULT_CONFIG["queue"]["concurrent"] == 3
 
     def test_loads_empty_file(self, tmp_bare_git_repo):
         config_path = tmp_bare_git_repo / "otto.yaml"
@@ -184,6 +254,25 @@ class TestDetectDefaultBranch:
         # Non-git directory
         assert detect_default_branch(tmp_path) == "main"
 
+    def test_ignores_current_feature_branch_when_no_remote(self, tmp_path):
+        import subprocess
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=repo, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
+        (repo / "README.md").write_text("hello\n")
+        subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "checkout", "-q", "-b", "feature/x"],
+            cwd=repo,
+            check=True,
+        )
+
+        assert detect_default_branch(repo) == "main"
+
 
 class TestCreateConfig:
     def test_creates_config_file(self, tmp_bare_git_repo):
@@ -201,3 +290,103 @@ class TestCreateConfig:
         exclude_path = tmp_bare_git_repo / ".git" / "info" / "exclude"
         content = exclude_path.read_text()
         assert "otto_logs/" in content
+
+    def test_skips_gitattributes_install_when_bookkeeping_opted_out(
+        self, tmp_bare_git_repo, monkeypatch
+    ):
+        import otto.config as config_module
+        import otto.setup_gitattributes as setup_gitattributes
+
+        original_load_config = config_module.load_config
+        install_calls: list[object] = []
+
+        def fake_load_config(config_path):
+            cfg = original_load_config(config_path)
+            cfg["queue"]["bookkeeping_files"] = []
+            return cfg
+
+        def fake_install(project_dir):
+            install_calls.append(project_dir)
+            return True
+
+        monkeypatch.setattr(config_module, "load_config", fake_load_config)
+        monkeypatch.setattr(setup_gitattributes, "install", fake_install)
+
+        create_config(tmp_bare_git_repo)
+
+        assert install_calls == []
+
+    def test_create_config_propagates_gitattributes_conflict(self, tmp_bare_git_repo):
+        (tmp_bare_git_repo / ".gitattributes").write_text("intent.md merge=binary\n")
+
+        with pytest.raises(GitAttributesConflict, match="intent.md"):
+            create_config(tmp_bare_git_repo)
+
+
+class TestSetupCommandExistingConfig:
+    def test_setup_installs_gitattributes_for_existing_config(
+        self, tmp_bare_git_repo, monkeypatch
+    ):
+        from click.testing import CliRunner
+
+        import otto.cli_setup as cli_setup
+        from otto.cli import main
+
+        async def fake_run_setup_query(prompt, project_dir, config=None):
+            return "# CLAUDE\n"
+
+        create_config(tmp_bare_git_repo)
+        gitattributes_path = tmp_bare_git_repo / ".gitattributes"
+        gitattributes_path.unlink()
+
+        monkeypatch.chdir(tmp_bare_git_repo)
+        monkeypatch.setattr(cli_setup, "_run_setup_query", fake_run_setup_query)
+
+        result = CliRunner().invoke(main, ["setup"], input="\n", catch_exceptions=False)
+
+        assert result.exit_code == 0
+        assert "intent.md merge=union" in gitattributes_path.read_text()
+        assert "otto.yaml merge=ours" in gitattributes_path.read_text()
+
+    def test_setup_propagates_gitattributes_conflict_for_existing_config(
+        self, tmp_bare_git_repo, monkeypatch
+    ):
+        from click.testing import CliRunner
+
+        from otto.cli import main
+
+        create_config(tmp_bare_git_repo)
+        (tmp_bare_git_repo / ".gitattributes").write_text("intent.md merge=binary\n")
+
+        monkeypatch.chdir(tmp_bare_git_repo)
+
+        with pytest.raises(GitAttributesConflict, match="intent.md"):
+            CliRunner().invoke(main, ["setup"], catch_exceptions=False)
+
+    def test_setup_skips_gitattributes_install_when_existing_config_opted_out(
+        self, tmp_bare_git_repo, monkeypatch
+    ):
+        from click.testing import CliRunner
+
+        import otto.cli_setup as cli_setup
+        from otto.cli import main
+
+        async def fake_run_setup_query(prompt, project_dir, config=None):
+            return "# CLAUDE\n"
+
+        config_path = tmp_bare_git_repo / "otto.yaml"
+        config_path.write_text(yaml.safe_dump({
+            "default_branch": "main",
+            "queue": {"bookkeeping_files": []},
+        }))
+        gitattributes_path = tmp_bare_git_repo / ".gitattributes"
+        if gitattributes_path.exists():
+            gitattributes_path.unlink()
+
+        monkeypatch.chdir(tmp_bare_git_repo)
+        monkeypatch.setattr(cli_setup, "_run_setup_query", fake_run_setup_query)
+
+        result = CliRunner().invoke(main, ["setup"], input="\n", catch_exceptions=False)
+
+        assert result.exit_code == 0
+        assert not gitattributes_path.exists()
