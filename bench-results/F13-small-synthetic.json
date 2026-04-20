@@ -1,0 +1,24 @@
+{
+  "name": "F13-small-synthetic",
+  "scenario": "calc.py + README.md, 2 branches each adding 2 functions and changing existing ones",
+  "n_branches": 2,
+  "expected_conflict_regions": 3,
+  "wall_seconds": 30.399439096450806,
+  "cost_usd": 0.18,
+  "rc": 0,
+  "tool_counts": {
+    "Read": 1,
+    "Write": 1,
+    "Bash": 1
+  },
+  "markers_remain": false,
+  "final_calc_lines": 68,
+  "repo": "/var/folders/xg/dk8wgfy119z44797kyz7w0380000gn/T/bench-small-ubo4r7iy",
+  "merge_log_tail": [
+    "      merged with 1 marker-laden files (deferred)",
+    "    \u2713 (consolidated) (conflict_resolved)",
+    "      resolved 1 files (cost $0.18)",
+    "",
+    "  Merge complete (id: merge-1776713352-30937)"
+  ]
+}
