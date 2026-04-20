@@ -57,6 +57,68 @@ otto improve target "test coverage > 90%"
 
 Each mode creates an improvement branch, runs up to N rounds, and writes a report with merge instructions.
 
+## Why Otto
+
+Not an editor, not an IDE agent. A **reliability harness** around Claude Code (or Codex) for autonomous product building — the scaffolding that turns "run an agent" into "run an agent you can leave unattended and trust the result."
+
+### Evidence-based trust — proof-of-work, not just green checks
+
+Every certification produces a **proof-of-work** artifact: an HTML report with embedded screenshots, a browser-walkthrough video, and per-story JSON. You can audit a 30-minute autonomous run by opening one HTML file. Evidence a human can verify, not just "all tests pass."
+
+### Build → Certify → Fix loop (independent verification)
+
+The certifier is a **builder-blind** agent that tests the product as a real user would — it never sees the build agent's code or reasoning. If certification fails, its findings feed back to a fix pass and re-certify. This is the core trust primitive: generation alone is never enough; you need independent verification with a feedback loop.
+
+### Scope accountability (spec-gate)
+
+Most autonomous tools silently cut scope to finish. Otto makes scope explicit and enforces it:
+- `--spec` generates a reviewable `spec.md` (Must Have / **Must NOT Have Yet** / Success Criteria / Open Questions).
+- You `[a]pprove / [e]dit / [r]egenerate / [q]uit` before any code is written.
+- The approved spec is handed to both the builder **and** the certifier. Features in "Must NOT Have Yet" get flagged `STORY_RESULT: scope-creep-<slug> | FAIL` — you can't hide scope creep in a passing test suite.
+
+### Autonomous but resumable
+
+- **Checkpoint/resume**: every phase writes atomic checkpoints (`spec → spec_review → spec_approved → build → certify → round_complete`). Crashes, Ctrl-C, or budget exhaustion leave a resumable state — `otto build --resume` picks up exactly where it left off.
+- **Session preservation**: the agent's `session_id` is captured on timeout/crash, so resumed runs continue the same conversation rather than starting cold.
+- **Graceful budget**: `run_budget_seconds` pauses (not fails) when exhausted; partial work is preserved.
+
+### Hill-climb improvement
+
+`otto improve` turns iteration into a measurable loop on an isolated branch:
+- **bugs** — adversarial certifier finds issues → fix → re-certify (N rounds)
+- **feature** — product advisor identifies gaps → implement → re-evaluate
+- **target** — measure metric → compare to goal → optimize → re-measure (stops when target met)
+
+Each run writes a round-by-round journal (action, result, cost) and a final report with merge instructions.
+
+### Cross-run memory (opt-in)
+
+With `memory: true` in `otto.yaml`, the certifier records what it tested and what it found across **every** run — build, certify, improve. Future runs read this to regression-check previously fixed issues, focus on untested areas, and cite specific commits/files. Capped to prevent bloat. Off by default — dev-loop runs don't need it.
+
+### Honest observability
+
+Timestamped, append-only logs across ~7 artifact types per run. Retries preserve prior attempts (no silent overwrite). Errors are logged honestly (no "success" without checking return codes). You can debug a failed autonomous run from logs alone.
+
+### How it compares to other harness frameworks
+
+Researched April 2026. `✓` = documented; `~` = partial or different approach; `✗` = absent or not publicly documented.
+
+| | Otto | [Symphony](https://github.com/openai/symphony) | [Devin 2.2](https://cognition.ai/) | [Cursor bg agents](https://cursor.com/) | [Factory Droid](https://factory.ai/) | [OpenHands](https://github.com/OpenHands/OpenHands) | [SWE-agent](https://github.com/SWE-agent/SWE-agent) |
+|---|---|---|---|---|---|---|---|
+| Independent verifier agent | ✓ builder-blind certifier | ~ self-report via CI | ~ self-review | ✗ | ✓ Review Droid | ✗ | ✗ |
+| Proof-of-work artifact | ✓ HTML + video + JSON | ✓ CI + video + PR review | ✓ screen recording (v2.2) | ✓ video (Feb '26) | ✓ DroidShield report | ~ traces only | ~ trajectories only |
+| Scope / spec gate | ✓ Must-Have / Must-NOT review | ~ `WORKFLOW.md` per branch | ✗ user-guidance only | ~ plan-approval step | ~ ticket → PR | ✗ | ✗ |
+| Crash / pause resume | ✓ phase checkpoints + session_id | ✗ | ✗ | ~ session snapshots | ✗ | ✗ | ✗ |
+| Cross-run memory | ✓ opt-in | ✗ | ~ parent reads child trajectory | ✗ | ~ repo graph (static) | ✗ | ✗ |
+| Open source | ✓ MIT | ✓ Apache-2.0 | ✗ closed | ✗ closed | ✗ closed | ✓ MIT | ✓ MIT |
+| Form factor | one CLI per dev | Elixir/BEAM + Linear | SaaS agent | IDE + cloud VM | enterprise platform | research framework | benchmark harness |
+
+**Closest philosophical analog: [Symphony](https://github.com/openai/symphony)** (OpenAI, Mar 2026). Both treat agent runs as contracts requiring evidence: Symphony requires CI + PR review feedback + walkthrough video before landing, with `WORKFLOW.md` versioning agent prompts per branch. The difference: Symphony assumes the repo is already **harness-engineered** (hermetic tests, machine-readable docs). Otto brings the verifier, spec gate, and artifact generator to repos that aren't. Symphony is team/Linear-integrated; otto is one CLI for one developer.
+
+**Closest verifier analog: [Factory Droid](https://factory.ai/)** — the only closed system here with an explicit separate **Review Droid** alongside the coder. Its repo graph (HyperCode/ByteRank) is static codebase retrieval, not run-to-run memory.
+
+Otto's distinctive combination: *spec gate + builder-blind certifier + fix loop + resumable checkpoints + optional cross-run memory*, open source, one process, no backend.
+
 ## Quick start
 
 ```bash
