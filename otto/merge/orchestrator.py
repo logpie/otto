@@ -107,6 +107,28 @@ def _resolve_branches(
                 lookup[t.branch] = t.id
 
     if not branches:
+        # F9: surface the failed-but-has-branch case so the user knows what
+        # they can salvage. Real-world improves often "fail" cert in 1 round
+        # but their branch still has useful commits.
+        if all_done_queue_tasks:
+            non_done_with_branch = [
+                (tid, ts.get("status"), t.branch)
+                for tid, ts in state.get("tasks", {}).items()
+                if ts.get("status") not in ("done", "queued")
+                for t in tasks if t.id == tid and t.branch
+            ]
+            if non_done_with_branch:
+                hint_lines = [
+                    "no DONE branches to merge, but the following queued "
+                    "tasks have branches with commits:",
+                ]
+                for tid, status, branch in non_done_with_branch[:10]:
+                    hint_lines.append(f"  - {tid} ({status}): {branch}")
+                hint_lines.append(
+                    "Merge them explicitly if you've reviewed the work: "
+                    f"  otto merge {' '.join(b for _,_,b in non_done_with_branch[:3])}"
+                )
+                raise ValueError("\n".join(hint_lines))
         raise ValueError(
             "no branches to merge (queue has no done tasks; pass explicit "
             "task ids or branch names)"

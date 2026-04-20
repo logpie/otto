@@ -250,10 +250,28 @@ def bench_p1_todo_parallel_improves(name: str = "P1-todo-parallel-improves") -> 
         statuses = {tid: ts.get("status") for tid, ts in queue_state(repo)["tasks"].items()}
         log(f"phase 2 done: {statuses}")
 
-        # Phase 3: merge --all with triage + cert
-        log("phase 3: merge --all (with cert)")
+        # Phase 3: merge — try --all first (only "done" tasks); if nothing
+        # qualifies, fall back to merging all task branches by name (best
+        # effort: improves often "fail" cert in 1 round but their commits
+        # are still useful). Use --no-certify when falling back since the
+        # branches haven't passed cert individually.
+        log("phase 3: merge")
         merge_t0 = time.time()
-        merge_r = otto_run(repo, "merge", "--all", check=False, timeout=600)
+        all_branches = [
+            t.get("branch") for t in queue_state(repo)["tasks"].values()
+            if t.get("branch")
+        ]
+        improve_branches = [b for b in all_branches if b and b.startswith("improve/")]
+        statuses = {tid: ts.get("status") for tid, ts in queue_state(repo)["tasks"].items()}
+        any_done_improve = any(
+            statuses.get(tid) == "done" for tid in statuses if tid != "base"
+        )
+        if any_done_improve:
+            merge_args = ["merge", "--all"]
+        else:
+            log(f"  improves did not pass cert; merging by branch name (best-effort)")
+            merge_args = ["merge", *improve_branches, "--no-certify"]
+        merge_r = otto_run(repo, *merge_args, check=False, timeout=600)
         merge_seconds = time.time() - merge_t0
         merge_out = (merge_r.stdout or "") + (merge_r.stderr or "")
         merge_outcome = "success" if merge_r.returncode == 0 else "failed"
@@ -262,17 +280,7 @@ def bench_p1_todo_parallel_improves(name: str = "P1-todo-parallel-improves") -> 
         log(f"merge: rc={merge_r.returncode}, outcome={merge_outcome}, seconds={merge_seconds:.0f}")
 
         # Pull merge cost from merge.log if present
-        merge_log = repo / "otto_logs" / "merge" / "merge.log"
-        merge_cost = 0.0
-        if merge_log.exists():
-            for line in merge_log.read_text().splitlines():
-                # cost shows up in "resolved by agent (cost $0.24, retries 0)" etc
-                if "cost $" in line:
-                    try:
-                        bit = line.split("cost $")[1].split(",")[0].split(")")[0]
-                        merge_cost += float(bit)
-                    except (IndexError, ValueError):
-                        pass
+        merge_cost = _sum_merge_agent_cost(repo)
 
         res = collect_metrics(repo, name, t0, concurrency=3)
         res.merge_outcome = merge_outcome
@@ -345,16 +353,7 @@ def bench_p2_sequential_baseline(name: str = "P2-todo-sequential-baseline") -> B
         merge_seconds = time.time() - merge_t0
         merge_outcome = "success" if merge_r.returncode == 0 else "failed"
 
-        merge_log = repo / "otto_logs" / "merge" / "merge.log"
-        merge_cost = 0.0
-        if merge_log.exists():
-            for line in merge_log.read_text().splitlines():
-                if "cost $" in line:
-                    try:
-                        bit = line.split("cost $")[1].split(",")[0].split(")")[0]
-                        merge_cost += float(bit)
-                    except (IndexError, ValueError):
-                        pass
+        merge_cost = _sum_merge_agent_cost(repo)
 
         res = collect_metrics(repo, name, t0, concurrency=1)
         res.merge_outcome = merge_outcome
@@ -372,6 +371,29 @@ def bench_p2_sequential_baseline(name: str = "P2-todo-sequential-baseline") -> B
 
 
 # ------------------- driver -------------------
+
+def _sum_merge_agent_cost(repo: Path) -> float:
+    """Sum the conflict-agent cost across ALL merge runs in this repo.
+
+    Reads `otto_logs/merge/merge-*/state.json` and parses BranchOutcome.note
+    strings of the form `resolved by agent (cost $X.YZ, retries N)`.
+    """
+    total = 0.0
+    for state_file in (repo / "otto_logs" / "merge").glob("merge-*/state.json"):
+        try:
+            d = json.loads(state_file.read_text())
+        except Exception:
+            continue
+        for o in d.get("outcomes", []):
+            note = o.get("note") or ""
+            if "cost $" in note:
+                try:
+                    bit = note.split("cost $")[1].split(",")[0].split(")")[0]
+                    total += float(bit)
+                except (IndexError, ValueError):
+                    continue
+    return total
+
 
 def bench_p3_bookmark_parallel_features(name: str = "P3-bookmark-parallel-features") -> BenchResult:
     """P3: Build a Flask bookmark API, then queue 2 parallel feature improves.
@@ -434,16 +456,7 @@ def bench_p3_bookmark_parallel_features(name: str = "P3-bookmark-parallel-featur
             merge_outcome = "conflict-resolved"
         log(f"merge: rc={merge_r.returncode}, outcome={merge_outcome}, seconds={merge_seconds:.0f}")
 
-        merge_log = repo / "otto_logs" / "merge" / "merge.log"
-        merge_cost = 0.0
-        if merge_log.exists():
-            for line in merge_log.read_text().splitlines():
-                if "cost $" in line:
-                    try:
-                        bit = line.split("cost $")[1].split(",")[0].split(")")[0]
-                        merge_cost += float(bit)
-                    except (IndexError, ValueError):
-                        pass
+        merge_cost = _sum_merge_agent_cost(repo)
 
         res = collect_metrics(repo, name, t0, concurrency=2)
         res.merge_outcome = merge_outcome

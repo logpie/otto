@@ -268,6 +268,36 @@ still depends on capturing live cost; the underlying CLI paths work):
 **Total real-LLM cost**: ~$1.40 across 5 builds + 1 conflict resolution +
 1 triage.
 
+---
+
+### [F9] `otto merge --all` silently skips improves that "failed" cert — observed during P1 benchmark
+
+**Symptom**: P1 benchmark queues 3 parallel `otto improve feature -n 1`
+runs against the same TODO CLI. Each improve makes real commits adding
+its feature (priority/duedate/tags), but the certifier finds 7 unrelated
+gaps and exits status="failure" because cert didn't pass within the round
+limit. `otto merge --all` then sees 0 done tasks and silently merges only
+the base build — the user's 3 improves' work is invisible to `--all`.
+
+**Diagnosis**: `_resolve_branches(all_done_queue_tasks=True)` filters by
+`status == "done"` only. There's no facility for "merge anything queued
+that has a branch with commits" (the realistic improves-fail-cert case).
+
+**Workaround**: pass branch names explicitly. The conflict agent merged
+all 3 cleanly (1 clean + 2 conflict_resolved), producing a working CLI
+with all 9 commands. Total merge cost: $1.35.
+
+**Recommendations** (deferred — would be follow-up work):
+1. `otto merge --all-with-branches` (or `--include-failed`) opt-in flag
+   that merges any task whose branch has commits, regardless of status.
+2. When `--all` finds 0 done tasks but N failed tasks have branches,
+   print: `0 done tasks to merge; 3 failed tasks have branches with
+   commits — use 'otto merge <branch> ...' to merge them.`
+
+**Verification**: working `todo.py` post-salvage at
+`/var/folders/.../bench-p1-poh9vxro/todo.py` (now 145 lines, all features).
+
+
 **End-to-end coverage**:
 - ✅ queue dispatch → real `otto build` → manifest → reap (F1 path)
 - ✅ first-touch bookkeeping auto-commit (F4, F5)

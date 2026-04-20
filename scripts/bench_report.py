@@ -24,9 +24,17 @@ def gen_report() -> str:
         return "No bench results found.\n"
     out: list[str] = []
     out.append("# parallel-otto Real Product Benchmarks\n")
-    out.append("Real LLM runs against complex products. Each bench builds a base "
-               "product, queues feature improves, and merges. See bench-results/ "
-               "for raw json per bench.\n")
+    out.append(
+        "Real LLM runs against complex products. Each bench builds a base product, "
+        "queues feature improves in parallel (or sequential for P2), and merges. "
+        "See `bench-results/*.json` for raw per-bench data; `scripts/bench_runner.py` "
+        "for the bench definitions; `scripts/bench_report.py` regenerates this file.\n"
+    )
+    out.append("**What gets measured**: per-task wall time, cost (USD), exit status, "
+               "merge agent cost, cert outcome.\n")
+    out.append("**Why it matters**: parallel-otto's value lies in (a) wall-time speedup "
+               "from concurrent execution and (b) LLM-driven conflict resolution that "
+               "salvages branches whose individual cert passes fall short.\n")
 
     # Summary table
     out.append("## Summary\n")
