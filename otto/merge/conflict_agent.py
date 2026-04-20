@@ -214,9 +214,16 @@ async def resolve_one_conflict(
     for attempt in range(MAX_AGENT_RETRIES + 1):
         prompt = render_conflict_prompt(ctx)
         options = make_agent_options(project_dir, config)
-        # Disallow Bash entirely — agent must use Edit/Write/MultiEdit only.
-        # This blocks any shell-out, including `git`.
-        options.disallowed_tools = list(set((options.disallowed_tools or []) + ["Bash"]))
+        # F12: disallow Write too — the agent must patch conflict regions via
+        # Edit/MultiEdit only. Rationale: `Write` rewrites the whole file,
+        # which is 5-20× slower (the agent regenerates unchanged lines) and
+        # risks accidentally reformatting / "improving" code outside the
+        # conflict region. Measured in P5 bench: a single `Write` call took
+        # ~10 min to generate; `Edit` on the conflict block finishes in secs.
+        # Bash is also disabled — agent must not run `git` or shell commands.
+        options.disallowed_tools = list(set(
+            (options.disallowed_tools or []) + ["Bash", "Write"]
+        ))
         timeout = budget.for_call() if budget is not None else None
 
         try:
