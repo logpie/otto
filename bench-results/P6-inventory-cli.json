@@ -1,0 +1,55 @@
+{
+  "name": "P6-inventory-cli",
+  "started_at": "2026-04-20T13:47:22Z",
+  "finished_at": "2026-04-20T07:16:05Z",
+  "wall_seconds": 1722.612762928009,
+  "total_cost_usd": 12.76596225,
+  "queue_concurrency": 3,
+  "tasks": [
+    {
+      "id": "base",
+      "status": "done",
+      "cost_usd": 0.6246517500000001,
+      "duration_s": 124.4977810382843,
+      "branch": null,
+      "failure_reason": null
+    },
+    {
+      "id": "imp-categories",
+      "status": "done",
+      "cost_usd": 3.6478802500000005,
+      "duration_s": 757.2946557998657,
+      "branch": null,
+      "failure_reason": null
+    },
+    {
+      "id": "imp-suppliers",
+      "status": "failed",
+      "cost_usd": 2.8657125,
+      "duration_s": 671.9123418331146,
+      "branch": null,
+      "failure_reason": "exit_code=1"
+    },
+    {
+      "id": "imp-alerts",
+      "status": "done",
+      "cost_usd": 3.217717749999999,
+      "duration_s": 620.3804638385773,
+      "branch": null,
+      "failure_reason": null
+    }
+  ],
+  "merge_outcome": "conflict-resolved",
+  "merge_cost_usd": 2.41,
+  "merge_seconds": 795.747978925705,
+  "cert_passed": true,
+  "notes": [
+    "rounds_per_improve: 2",
+    "merge_log_tail: in\n\n    \u2713 build/base-2026-04-20 (merged)\n    \u2713 improve/imp-categories-2026-04-20 (merged)\n    \u2713 improve/imp-alerts-2026-04-20 (conflict_resolved)\n      resolved by agent (cost $2.41, retries 0)\n\n  Merge complete (id: merge-1776693769-13221)\n  Verification: 14 verified, 0 skipped, 0 flagged for human",
+    "rounds_per_improve: 2",
+    "imp-categories + imp-alerts passed cert; imp-suppliers failed.",
+    "Merge --all invoked conflict agent on the 2 done improves; conflict resolved + cert PASSED.",
+    "Final inv.py has base CRUD + categories + alerts working."
+  ],
+  "repo_path": "/var/folders/xg/dk8wgfy119z44797kyz7w0380000gn/T/bench-p6-qjqc130n"
+}

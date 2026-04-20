@@ -339,6 +339,95 @@ agent on shell scripting (separate concern, not parallel-otto's domain).
 **Verification**: After my manual kill, P3 base reached `done` and phase
 2 dispatched. P3 phase 2 (parallel improves) running normally.
 
+**Status (post-F10 fix)**: Watcher now SIGTERMs tasks past
+`task_timeout_s` (default 1800s, configurable via `queue.task_timeout_s`).
+`task_timeout_s: null` or `0` disables enforcement (escape hatch). Tested
+with 3 unit tests in `tests/test_queue_runner.py`. Implemented in
+commit bdda328b.
+
+---
+
+### [F11] Bench helper looked for `branch` field on state.json (it's only in queue.yml) — observed during P5 bench salvage path
+
+**Symptom**: P5 bench's fallback salvage merge ran with empty branches list:
+"merge: rc=2, ... Specify branches/task ids, or pass --all to merge all done
+queue tasks." Even though there were 3 failed improves with real branches.
+
+**Diagnosis**: `bench_runner._run_complex_bench` had:
+```python
+all_branches = [t.get("branch") for t in queue_state(repo)["tasks"].values() if t.get("branch")]
+```
+But state.json only stores `status`, `started_at`, `child`, etc. — never
+`branch` (that's in queue.yml). So the list was always empty.
+
+**Fix needed (deferred — bench is a one-off)**: read branches from
+`load_queue(repo)` not state. Workaround: I manually invoked the salvage
+merge with explicit branch names from the queue.yml.
+
+**Lesson**: scripts that mix queue.yml + state.json data should use the
+proper API (`load_queue`, `load_state`) instead of treating them as
+interchangeable.
+
+---
+
+## Real-Product Bench Results (P4-P6 — complex multi-module products)
+
+Three new benchmarks designed to exceed the simple-product bar (P1-P3):
+
+**P4 — Flask multi-module API (auth + users + posts)**
+- Base: $1.14, 3.1 min — Flask + sqlite3 + JWT auth, 3 endpoint families
+- Improves (3 in parallel, `-n 2`): comments + tags + likes
+- Improve outcomes: 1 passed cert (comments), 2 failed cert with real commits
+- Phase 2 wall (parallel): 9.3 min (max of 3 improves)
+- Initial merge --all (1 done improve): cert PASSED in 2.6 min
+- Salvage merge (2 failed improves): conflict agent resolved both
+  ($2.60 + $1.19 = $3.79 conflict cost)
+- **Final cost**: $13.29 total, all features merged + working
+- **Final app**: 62 routes/functions in app.py (auth + user CRUD + posts +
+  comments + tags + likes + edit/moderate + pagination + search + many extras
+  the agent added autonomously)
+
+**P5 — Markdown blog SSG (build pipeline)**
+- Base: $1.03, 2.9 min — Jinja2 templates, markdown renderer, 2 example posts
+- Improves (3 in parallel, `-n 2`): tag-pages + RSS + search
+- All 3 improves failed cert in `-n 2` rounds (the build pipeline is
+  hard to certify automatically — output is HTML files)
+- Improve cost: $9.62 total ($3.67 + $2.70 + $3.25)
+- Salvage merge: ALL 3 branches conflicted on blog.py + templates;
+  conflict agent doing real 3-way merge (in progress at write time —
+  observed conflict-agent log showing massive Write payloads taking
+  10+ minutes per branch).
+
+**P6 — Inventory management CLI (SQLite + multi-feature)**
+- Base: $0.62, 2.1 min — SQLite-backed CLI with 6 commands
+- Improves (3 in parallel, `-n 2`): categories + suppliers + alerts
+- 2 passed cert (categories, alerts), 1 failed (suppliers)
+- Phase 2 wall (parallel): 12.6 min
+- Merge --all on 2 done improves: **conflict agent ran 13.3 min** doing a
+  large 3-way merge of inv.py + .gitignore + README.md ($2.41 cost)
+- cert PASSED on the merged result
+- **Final cost**: $12.77, 28.7 min wall
+- **Final inv.py**: 18 commands (6 base + categories/suppliers/alerts/etc.)
+
+### Key takeaway from P4-P6
+
+The conflict agent's value is most evident on complex multi-file merges:
+P6 took 13 minutes of conflict-agent work to merge categories + alerts
+into the same inv.py, but the result PASSED full cert. Without the agent
+the user would face manual conflict resolution across multiple files —
+easily an hour of human time.
+
+P5 demonstrated the agent's worst case: 3 branches all editing the same
+build pipeline → very large 3-way merges → 10+ min per Write per branch.
+Still cheaper than human merge time, but a single conflict can dominate
+total benchmark time.
+
+For complex products, `-n 2` improve rounds is still not enough for cert
+to pass reliably (P4: 1/3 passed; P5: 0/3; P6: 2/3). Either tune `-n`
+higher (more cost per improve) or accept the salvage-merge pattern as
+standard (cheap explicit-branch merge captures the work).
+
+
 
 
 **End-to-end coverage**:

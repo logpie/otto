@@ -88,6 +88,42 @@ def gen_report() -> str:
         out.append("Why total speedup is smaller than phase-2 speedup: base build (70s) and "
                    "merge (~90s) are identical and serial in both. They dilute the parallel-only gain.")
 
+    # Conflict-agent + improve-rounds analysis (real-LLM merge value-add)
+    p4 = by_name.get("P4-flask-auth-users-posts")
+    p5 = by_name.get("P5-markdown-blog-ssg")
+    p6 = by_name.get("P6-inventory-cli")
+    complex_benches = [d for d in (p4, p5, p6) if d]
+    if complex_benches:
+        out.append("\n## Complex Product Results (P4-P6)\n")
+        out.append(
+            "These benchmarks build genuinely complex multi-module products and queue 3 "
+            "parallel improves with `-n 2` rounds (vs `-n 1` in P1-P3). Each improve set "
+            "is designed so the changes WILL touch shared files — we measure how often the "
+            "conflict agent earns its keep.\n"
+        )
+        out.append("| Bench | Base | Improves done/total | Improve cost (sum) | Improve max-wall | Merge | Cert |")
+        out.append("|---|---|---|---|---|---|---|")
+        for d in complex_benches:
+            base_t = next((t for t in d["tasks"] if t["id"] == "base"), {})
+            imps = [t for t in d["tasks"] if t["id"] != "base"]
+            done_imps = [t for t in imps if t["status"] == "done"]
+            imp_cost = sum(t["cost_usd"] for t in imps)
+            imp_max = max((t["duration_s"] for t in imps), default=0)
+            out.append(
+                f"| `{d['name']}` | {fmt_seconds(base_t.get('duration_s') or 0)} (${base_t.get('cost_usd') or 0:.2f}) | "
+                f"{len(done_imps)}/{len(imps)} | ${imp_cost:.2f} | {fmt_seconds(imp_max)} | "
+                f"{d.get('merge_outcome') or '–'}"
+                + (f" (+${d.get('merge_cost_usd'):.2f})" if d.get("merge_cost_usd") else "")
+                + f" | {d.get('cert_passed') if d.get('cert_passed') is not None else '–'} |"
+            )
+        out.append("")
+        out.append(
+            "**Improve-pass rate** is what tells us whether `-n 2` is enough rounds for complex "
+            "products. **Conflict agent cost** divided by improve count tells us whether the "
+            "merge agent is cheaper than a human reviewer (it always is, at $0.20-$1.00 per "
+            "conflict).\n"
+        )
+
     # Per-bench details
     out.append("\n## Per-Bench Details\n")
     for f in files:

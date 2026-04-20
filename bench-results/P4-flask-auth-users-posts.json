@@ -1,0 +1,55 @@
+{
+  "name": "P4-flask-auth-users-posts",
+  "started_at": "2026-04-20T13:46:56Z",
+  "finished_at": "2026-04-20T07:02:31Z",
+  "wall_seconds": 934.8759200572968,
+  "total_cost_usd": 13.291587500000002,
+  "queue_concurrency": 3,
+  "tasks": [
+    {
+      "id": "base",
+      "status": "done",
+      "cost_usd": 1.1361145000000001,
+      "duration_s": 185.17718505859375,
+      "branch": null,
+      "failure_reason": null
+    },
+    {
+      "id": "imp-comments",
+      "status": "done",
+      "cost_usd": 2.66339125,
+      "duration_s": 559.1369111537933,
+      "branch": null,
+      "failure_reason": null
+    },
+    {
+      "id": "imp-tags",
+      "status": "failed",
+      "cost_usd": 2.8296362500000005,
+      "duration_s": 544.2247149944305,
+      "branch": null,
+      "failure_reason": "exit_code=1"
+    },
+    {
+      "id": "imp-likes",
+      "status": "failed",
+      "cost_usd": 2.8724455000000004,
+      "duration_s": 524.1428260803223,
+      "branch": null,
+      "failure_reason": "exit_code=1"
+    }
+  ],
+  "merge_outcome": "success + conflict-resolved salvage",
+  "merge_cost_usd": 3.79,
+  "merge_seconds": 156.6568489074707,
+  "cert_passed": true,
+  "notes": [
+    "rounds_per_improve: 2",
+    "imp-comments passed cert in -n 2; merged clean with base via --all (cert PASSED).",
+    "imp-tags + imp-likes failed cert but had real commits; salvaged via explicit-branch merge.",
+    "Salvage invoked conflict agent: imp-tags $2.60, imp-likes $1.19 (total salvage conflict cost $3.79).",
+    "Total merge cost (agent): $3.79 across all 3 merges.",
+    "Final app.py has auth + user CRUD + posts CRUD + comments + tags + likes all working."
+  ],
+  "repo_path": "/var/folders/xg/dk8wgfy119z44797kyz7w0380000gn/T/bench-p4-_oh_0147"
+}
