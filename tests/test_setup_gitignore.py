@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from otto.setup_gitignore import OTTO_HEADER, OTTO_PATTERNS, ensure_gitignore
+from otto.setup_gitignore import (
+    COMMON_BUILD_ARTIFACT_PATTERNS,
+    COMMON_HEADER,
+    OTTO_HEADER,
+    OTTO_PATTERNS,
+    ensure_gitignore,
+)
 
 
 def test_ensure_gitignore_creates_new_file(tmp_path: Path):
@@ -14,6 +20,21 @@ def test_ensure_gitignore_creates_new_file(tmp_path: Path):
     for pat in OTTO_PATTERNS:
         assert pat in text, f"missing pattern in fresh file: {pat!r}\n{text}"
     assert OTTO_HEADER in text
+
+
+def test_ensure_gitignore_adds_common_build_artifacts_F14(tmp_path: Path):
+    """F14: common build artifacts (__pycache__, node_modules, etc.) must
+    land in .gitignore so the merge validator doesn't bail when the agent
+    runs project tests and produces artifacts."""
+    ensure_gitignore(tmp_path)
+    text = (tmp_path / ".gitignore").read_text()
+    for pat in COMMON_BUILD_ARTIFACT_PATTERNS:
+        assert pat in text, f"F14: missing common artifact {pat!r}\n{text}"
+    assert COMMON_HEADER in text
+    # Concrete high-signal patterns
+    assert "__pycache__/" in text
+    assert "node_modules/" in text
+    assert ".pytest_cache/" in text
 
 
 def test_ensure_gitignore_preserves_existing(tmp_path: Path):

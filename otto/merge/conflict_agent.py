@@ -179,7 +179,17 @@ def validate_post_agent(
         return (False, f"agent edited files outside conflict set: {sorted(out_of_scope)!r}")
     new_untracked = set(git_ops.untracked_files(project_dir)) - pre_untracked_files
     if new_untracked:
-        return (False, f"agent created untracked files: {sorted(new_untracked)!r}")
+        # F14: typically build artifacts from agent test runs (__pycache__/,
+        # node_modules/, etc.). Otto's setup_gitignore adds common patterns
+        # but the user's repo may pre-date the upgrade or have gitignore
+        # gaps. Surface the actionable advice in the error.
+        return (False, (
+            f"agent created untracked files: {sorted(new_untracked)!r}. "
+            f"These are likely build artifacts from running tests (e.g. "
+            f"__pycache__/, node_modules/, dist/). Add them to .gitignore "
+            f"and re-run the merge. See otto/setup_gitignore.py for the "
+            f"common patterns Otto auto-installs."
+        ))
     dc = git_ops.diff_check(project_dir)
     if not dc.ok:
         return (False, f"git diff --check failed: {dc.stdout.strip()}\n{dc.stderr.strip()}")

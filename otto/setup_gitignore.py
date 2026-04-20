@@ -53,6 +53,32 @@ OTTO_PATTERNS: tuple[str, ...] = (
 
 OTTO_HEADER = "# Otto runtime (auto-managed; safe to edit comments)"
 
+# Common language/framework build artifacts that any reasonable project
+# would want gitignored. Otto adds these so the merge orchestrator's
+# "no new untracked files" validator doesn't bail when the conflict agent
+# runs project tests (e.g. pytest creates __pycache__/, npm test creates
+# node_modules/.cache, etc.). See F14 in e2e-findings.md.
+COMMON_BUILD_ARTIFACT_PATTERNS: tuple[str, ...] = (
+    # Python
+    "__pycache__/",
+    "*.pyc",
+    "*.pyo",
+    ".pytest_cache/",
+    ".mypy_cache/",
+    ".ruff_cache/",
+    # Node
+    "node_modules/",
+    ".npm/",
+    # General build output
+    "dist/",
+    "build/",
+    ".cache/",
+    # IDE noise
+    ".vscode/",
+    ".idea/",
+)
+COMMON_HEADER = "# Common build artifacts (added by Otto so merge agent test runs don't trip validators)"
+
 
 def ensure_gitignore(project_dir: Path, *, auto_commit: bool = True) -> bool:
     """Append any missing otto patterns to ``.gitignore`` and (by default)
@@ -70,17 +96,26 @@ def ensure_gitignore(project_dir: Path, *, auto_commit: bool = True) -> bool:
     existing_lines = existing_text.splitlines()
     existing_set = {line.strip() for line in existing_lines}
 
-    missing = [p for p in OTTO_PATTERNS if p not in existing_set]
-    if not missing:
+    missing_otto = [p for p in OTTO_PATTERNS if p not in existing_set]
+    missing_common = [p for p in COMMON_BUILD_ARTIFACT_PATTERNS if p not in existing_set]
+    if not missing_otto and not missing_common:
         return False
 
     out_lines = list(existing_lines)
     if out_lines and out_lines[-1].strip() != "":
         out_lines.append("")
-    if OTTO_HEADER not in existing_set:
-        out_lines.append(OTTO_HEADER)
-    out_lines.extend(missing)
+    if missing_otto:
+        if OTTO_HEADER not in existing_set:
+            out_lines.append(OTTO_HEADER)
+        out_lines.extend(missing_otto)
+    if missing_common:
+        if out_lines and out_lines[-1].strip() != "":
+            out_lines.append("")
+        if COMMON_HEADER not in existing_set:
+            out_lines.append(COMMON_HEADER)
+        out_lines.extend(missing_common)
     out_lines.append("")  # trailing newline
+    missing = missing_otto + missing_common
 
     new_text = "\n".join(out_lines)
     try:
