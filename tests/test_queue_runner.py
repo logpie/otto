@@ -200,7 +200,7 @@ def _make_fake_otto(tmp_path: Path, *, exit_code: int = 0, sleep: float = 0.1, w
         manifest_block = '''
 TASK_ID="${OTTO_QUEUE_TASK_ID:-}"
 if [ -n "$TASK_ID" ]; then
-  MANIFEST_DIR="${OTTO_PROJECT_DIR}/otto_logs/queue/${TASK_ID}"
+  MANIFEST_DIR="${OTTO_QUEUE_PROJECT_DIR}/otto_logs/queue/${TASK_ID}"
   mkdir -p "$MANIFEST_DIR"
   cat > "$MANIFEST_DIR/manifest.json" <<EOF
 {
@@ -313,36 +313,32 @@ print(json.dumps({
 def test_runner_dispatches_and_reaps_a_simple_task(tmp_path: Path):
     repo = _make_repo(tmp_path)
     fake_otto = _make_fake_otto(tmp_path, exit_code=0, sleep=0.1)
-    # Set OTTO_PROJECT_DIR for the fake_otto manifest write
-    os.environ["OTTO_PROJECT_DIR"] = str(repo)
+    # The runner sets OTTO_QUEUE_PROJECT_DIR on spawn — fake_otto reads it.
+    # Enqueue one task
+    append_task(repo, QueueTask(
+        id="t1", command_argv=["build", "test"],
+        resolved_intent="test", added_at="2026-04-19T00:00:00Z",
+        branch="build/t1-test", worktree=".worktrees/t1",
+    ))
+    cfg = RunnerConfig(concurrent=1, poll_interval_s=0.1, heartbeat_interval_s=0.5)
+    runner = Runner(repo, cfg, otto_bin=str(fake_otto))
+    # Run a single tick by hand to dispatch + (after waiting) reap
+    runner._lock_fh = acquire_lock(repo)
     try:
-        # Enqueue one task
-        append_task(repo, QueueTask(
-            id="t1", command_argv=["build", "test"],
-            resolved_intent="test", added_at="2026-04-19T00:00:00Z",
-            branch="build/t1-test", worktree=".worktrees/t1",
-        ))
-        cfg = RunnerConfig(concurrent=1, poll_interval_s=0.1, heartbeat_interval_s=0.5)
-        runner = Runner(repo, cfg, otto_bin=str(fake_otto))
-        # Run a single tick by hand to dispatch + (after waiting) reap
-        runner._lock_fh = acquire_lock(repo)
-        try:
-            runner._tick()
-            # Task should be running now
-            state = load_state(repo)
-            assert state["tasks"]["t1"]["status"] == "running"
-            # Wait for the fake to finish (sleep 0.1)
-            time.sleep(1.5)
-            runner._tick()
-            state = load_state(repo)
-            assert state["tasks"]["t1"]["status"] == "done", \
-                f"expected done, got {state['tasks']['t1']!r}"
-            assert state["tasks"]["t1"]["cost_usd"] == 0.42
-            assert state["tasks"]["t1"]["exit_code"] == 0
-        finally:
-            runner._lock_fh.close()
+        runner._tick()
+        # Task should be running now
+        state = load_state(repo)
+        assert state["tasks"]["t1"]["status"] == "running"
+        # Wait for the fake to finish (sleep 0.1)
+        time.sleep(1.5)
+        runner._tick()
+        state = load_state(repo)
+        assert state["tasks"]["t1"]["status"] == "done", \
+            f"expected done, got {state['tasks']['t1']!r}"
+        assert state["tasks"]["t1"]["cost_usd"] == 0.42
+        assert state["tasks"]["t1"]["exit_code"] == 0
     finally:
-        os.environ.pop("OTTO_PROJECT_DIR", None)
+        runner._lock_fh.close()
 
 
 def test_runner_marks_failed_when_no_manifest(tmp_path: Path):
@@ -390,36 +386,32 @@ def test_runner_marks_failed_on_nonzero_exit(tmp_path: Path):
 def test_runner_respects_concurrent_cap(tmp_path: Path):
     repo = _make_repo(tmp_path)
     fake_otto = _make_fake_otto(tmp_path, exit_code=0, sleep=0.5)
-    os.environ["OTTO_PROJECT_DIR"] = str(repo)
+    for i in range(3):
+        append_task(repo, QueueTask(
+            id=f"t{i}", command_argv=["build", str(i)],
+            branch=f"build/t{i}-x", worktree=f".worktrees/t{i}",
+        ))
+    cfg = RunnerConfig(concurrent=2, poll_interval_s=0.1, heartbeat_interval_s=0.5)
+    runner = Runner(repo, cfg, otto_bin=str(fake_otto))
+    runner._lock_fh = acquire_lock(repo)
     try:
-        for i in range(3):
-            append_task(repo, QueueTask(
-                id=f"t{i}", command_argv=["build", str(i)],
-                branch=f"build/t{i}-x", worktree=f".worktrees/t{i}",
-            ))
-        cfg = RunnerConfig(concurrent=2, poll_interval_s=0.1, heartbeat_interval_s=0.5)
-        runner = Runner(repo, cfg, otto_bin=str(fake_otto))
-        runner._lock_fh = acquire_lock(repo)
-        try:
-            runner._tick()
-            state = load_state(repo)
-            running = sum(1 for ts in state["tasks"].values() if ts.get("status") == "running")
-            assert running == 2, f"expected 2 running, got {running}: {state['tasks']!r}"
-            # Untouched tasks aren't in state.json yet — they're "queued" by absence.
-            assert len(state["tasks"]) == 2, \
-                f"expected only 2 tasks in state (dispatched), got {len(state['tasks'])}"
-            time.sleep(2.0)
-            runner._tick()
-            runner._tick()
-            time.sleep(2.0)
-            runner._tick()
-            state = load_state(repo)
-            done = sum(1 for ts in state["tasks"].values() if ts.get("status") == "done")
-            assert done == 3, f"expected all done, got: {state['tasks']!r}"
-        finally:
-            runner._lock_fh.close()
+        runner._tick()
+        state = load_state(repo)
+        running = sum(1 for ts in state["tasks"].values() if ts.get("status") == "running")
+        assert running == 2, f"expected 2 running, got {running}: {state['tasks']!r}"
+        # Untouched tasks aren't in state.json yet — they're "queued" by absence.
+        assert len(state["tasks"]) == 2, \
+            f"expected only 2 tasks in state (dispatched), got {len(state['tasks'])}"
+        time.sleep(2.0)
+        runner._tick()
+        runner._tick()
+        time.sleep(2.0)
+        runner._tick()
+        state = load_state(repo)
+        done = sum(1 for ts in state["tasks"].values() if ts.get("status") == "done")
+        assert done == 3, f"expected all done, got: {state['tasks']!r}"
     finally:
-        os.environ.pop("OTTO_PROJECT_DIR", None)
+        runner._lock_fh.close()
 
 
 # ---------- dependencies (Phase 3) ----------
@@ -473,38 +465,86 @@ def test_runner_cascades_failure_through_after_chain(tmp_path: Path):
 def test_runner_blocks_task_with_unsatisfied_after(tmp_path: Path):
     repo = _make_repo(tmp_path)
     fake_otto = _make_fake_otto(tmp_path, sleep=0.1)
-    os.environ["OTTO_PROJECT_DIR"] = str(repo)
+    append_task(repo, QueueTask(
+        id="a", command_argv=["build", "a"],
+        branch="build/a-x", worktree=".worktrees/a",
+    ))
+    append_task(repo, QueueTask(
+        id="b", command_argv=["build", "b"],
+        after=["a"],
+        branch="build/b-x", worktree=".worktrees/b",
+    ))
+    cfg = RunnerConfig(concurrent=2, poll_interval_s=0.1, heartbeat_interval_s=0.5)
+    runner = Runner(repo, cfg, otto_bin=str(fake_otto))
+    runner._lock_fh = acquire_lock(repo)
     try:
-        append_task(repo, QueueTask(
-            id="a", command_argv=["build", "a"],
-            branch="build/a-x", worktree=".worktrees/a",
-        ))
-        append_task(repo, QueueTask(
-            id="b", command_argv=["build", "b"],
-            after=["a"],
-            branch="build/b-x", worktree=".worktrees/b",
-        ))
-        cfg = RunnerConfig(concurrent=2, poll_interval_s=0.1, heartbeat_interval_s=0.5)
-        runner = Runner(repo, cfg, otto_bin=str(fake_otto))
-        runner._lock_fh = acquire_lock(repo)
-        try:
-            runner._tick()
-            state = load_state(repo)
-            assert state["tasks"]["a"]["status"] == "running"
-            # b not yet dispatched → not in state.json yet
-            assert "b" not in state["tasks"]
-            time.sleep(1.5)
-            runner._tick()
-            state = load_state(repo)
-            assert state["tasks"]["a"]["status"] == "done"
-            # Now b should dispatch
-            runner._tick()
-            state = load_state(repo)
-            assert state["tasks"]["b"]["status"] == "running"
-        finally:
-            runner._lock_fh.close()
+        runner._tick()
+        state = load_state(repo)
+        assert state["tasks"]["a"]["status"] == "running"
+        # b not yet dispatched → not in state.json yet
+        assert "b" not in state["tasks"]
+        time.sleep(1.5)
+        runner._tick()
+        state = load_state(repo)
+        assert state["tasks"]["a"]["status"] == "done"
+        # Now b should dispatch
+        runner._tick()
+        state = load_state(repo)
+        assert state["tasks"]["b"]["status"] == "running"
     finally:
-        os.environ.pop("OTTO_PROJECT_DIR", None)
+        runner._lock_fh.close()
+
+
+# ---------- regression: F1 manifest path env-var contract ----------
+
+
+def test_runner_sets_queue_project_dir_env_on_spawn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Regression for F1: the runner MUST set OTTO_QUEUE_PROJECT_DIR so the
+    spawned otto (whose cwd is the worktree) writes its manifest where the
+    watcher (cwd = main project) will look for it. Without this, every queue
+    run would be marked failed with `no manifest`."""
+    repo = _make_repo(tmp_path)
+
+    captured_env: dict[str, str] = {}
+
+    def fake_popen(argv: list[str], *, cwd: str, env: dict[str, str], preexec_fn: Any):  # type: ignore[no-untyped-def]
+        captured_env.update(env)
+
+        class _StubProc:
+            def __init__(self) -> None:
+                self.pid = os.getpid()  # any pid, we never wait on it
+
+        return _StubProc()
+
+    monkeypatch.setattr(runner_module.subprocess, "Popen", fake_popen)
+
+    # Stub psutil so start_time_ns capture doesn't try to read our pid
+    class _StubPsutilProc:
+        def create_time(self) -> float:
+            return time.time()
+    monkeypatch.setattr(runner_module, "psutil", type("M", (), {"Process": lambda _self=None, *a, **k: _StubPsutilProc()}), raising=False)
+
+    append_task(repo, QueueTask(
+        id="t1", command_argv=["build", "test"],
+        branch="build/t1-test", worktree=".worktrees/t1",
+    ))
+    cfg = RunnerConfig(concurrent=1, poll_interval_s=0.1, heartbeat_interval_s=0.5)
+    runner = Runner(repo, cfg, otto_bin="/bin/true")
+    runner._lock_fh = acquire_lock(repo)
+    try:
+        # Manually create the worktree so add_worktree call inside _spawn succeeds.
+        # Use a side-step: monkeypatch add_worktree to do nothing.
+        from otto import worktree as wt_mod
+        monkeypatch.setattr(wt_mod, "add_worktree", lambda **k: None)
+        from otto.queue.schema import load_state as _load
+        runner._tick()
+        # Verify both env vars are set
+        assert captured_env.get("OTTO_QUEUE_TASK_ID") == "t1"
+        assert captured_env.get("OTTO_QUEUE_PROJECT_DIR") == str(repo), \
+            f"runner must set OTTO_QUEUE_PROJECT_DIR; got: {captured_env.get('OTTO_QUEUE_PROJECT_DIR')!r}"
+        assert captured_env.get("OTTO_INTERNAL_QUEUE_RUNNER") == "1"
+    finally:
+        runner._lock_fh.close()
 
 
 # ---------- runner_config_from_otto_config ----------

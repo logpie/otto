@@ -74,13 +74,18 @@ def register_merge_command(main: click.Group) -> None:
         from otto.merge.orchestrator import MergeOptions, run_merge
 
         project_dir = Path.cwd()
-        config_path = project_dir / "otto.yaml"
-        if not config_path.exists():
-            error_console.print(
-                "[error]otto.yaml not found. Run `otto setup` first.[/error]"
-            )
-            sys.exit(2)
-        config = load_config(config_path)
+        # `load_config` returns DEFAULT_CONFIG when otto.yaml is absent — be
+        # consistent with `otto queue build|run`, which also tolerate it.
+        config = load_config(project_dir / "otto.yaml")
+        # Defensive: if a user upgraded otto without re-running `otto setup`,
+        # their .gitignore / .gitattributes may not be configured, making
+        # working_tree_clean and the bookkeeping-driver precondition fail.
+        # Idempotent — no-op on repos that already have them.
+        try:
+            from otto.config import first_touch_bookkeeping
+            first_touch_bookkeeping(project_dir, config)
+        except Exception:
+            pass  # non-fatal; downstream precondition checks will surface a clearer error
 
         if resume:
             # TODO Phase 4.6: full resume support (Mode A/B/C dispatch)

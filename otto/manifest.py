@@ -33,6 +33,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 QUEUE_TASK_ENV = "OTTO_QUEUE_TASK_ID"
+QUEUE_PROJECT_DIR_ENV = "OTTO_QUEUE_PROJECT_DIR"
 QUEUE_TASK_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*(?:-\d+)?$")
 
 
@@ -78,7 +79,13 @@ def manifest_path_for(
     else:
         queue_task_id = _validate_queue_task_id(queue_task_id)
     if queue_task_id:
-        return project_dir / "otto_logs" / "queue" / queue_task_id / "manifest.json"
+        # Queue runner sets OTTO_QUEUE_PROJECT_DIR to the main project so the
+        # spawned otto (whose cwd is the worktree) and the watcher (cwd =
+        # main project) resolve to the SAME manifest path. Without this, the
+        # watcher would never find the spawned child's manifest.
+        env_dir = os.environ.get(QUEUE_PROJECT_DIR_ENV)
+        anchor = Path(env_dir) if env_dir else project_dir
+        return anchor / "otto_logs" / "queue" / queue_task_id / "manifest.json"
     return fallback_dir / "manifest.json"
 
 

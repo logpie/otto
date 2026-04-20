@@ -267,6 +267,102 @@ def ensure_bookkeeping_setup(project_dir: Path, config: dict[str, Any]) -> None:
         )
 
 
+def first_touch_bookkeeping(project_dir: Path, config: dict[str, Any]) -> None:
+    """First-touch helper called from `otto queue build|run` and `otto merge`.
+
+    Idempotent. Performs the minimum needed for the queue/merge precondition
+    checks to pass for users who skipped `otto setup`:
+
+    1. Adds otto's runtime artifacts to ``.gitignore`` (queue.yml, otto_logs/,
+       .worktrees/, etc.). Without this, the merge orchestrator's
+       working_tree_clean check fails on every freshly-queued task.
+    2. Installs the ``.gitattributes`` bookkeeping merge drivers (intent.md
+       merge=union, otto.yaml merge=ours). Without this, ``otto merge``
+       hard-fails its precondition.
+    3. Auto-commits any new/changed bookkeeping files in a single
+       ``chore(otto): …`` commit so the working tree stays clean.
+
+    Skips silently in non-git directories or if no changes are needed.
+    Failures are logged but never raised — better to let the user hit the
+    explicit precondition error downstream than to crash here.
+    """
+    import logging
+    import subprocess as _sp
+
+    log = logging.getLogger("otto.config")
+
+    # Quick sanity: are we in a git working tree?
+    try:
+        check = _sp.run(
+            ["git", "rev-parse", "--git-dir"],
+            cwd=project_dir, capture_output=True, text=True, check=False,
+        )
+        if check.returncode != 0:
+            return
+    except FileNotFoundError:
+        return
+
+    changed_paths: list[str] = []
+
+    # 1. .gitignore
+    try:
+        from otto.setup_gitignore import ensure_gitignore
+        if ensure_gitignore(project_dir, auto_commit=False):
+            changed_paths.append(".gitignore")
+    except Exception as exc:
+        log.warning("first-touch .gitignore setup failed: %s", exc)
+
+    # 2. .gitattributes (only if bookkeeping enabled)
+    bookkeeping_files = (config.get("queue") or {}).get("bookkeeping_files") or []
+    if bookkeeping_files:
+        try:
+            from otto.setup_gitattributes import GitAttributesConflict, install as install_gitattributes
+            if install_gitattributes(project_dir):
+                changed_paths.append(".gitattributes")
+        except GitAttributesConflict as exc:
+            # Don't crash — let the downstream precondition check surface
+            # the real, actionable error.
+            log.warning("first-touch .gitattributes setup hit conflict: %s", exc)
+        except (FileNotFoundError, PermissionError) as exc:
+            log.warning("first-touch .gitattributes setup failed: %s", exc)
+
+    if not changed_paths:
+        return
+
+    # 3. Auto-commit, only if no other staged work would get bundled in.
+    try:
+        diff_cached = _sp.run(
+            ["git", "diff", "--cached", "--name-only"],
+            cwd=project_dir, capture_output=True, text=True, check=False,
+        )
+        staged_other = [
+            n for n in (diff_cached.stdout or "").splitlines()
+            if n and n not in changed_paths
+        ]
+        if staged_other:
+            log.warning(
+                "skipped auto-commit of %s: other staged files present (%s); "
+                "commit them yourself, then re-run otto",
+                changed_paths, staged_other,
+            )
+            return
+        _sp.run(
+            ["git", "add", "--", *changed_paths],
+            cwd=project_dir, capture_output=True, check=True,
+        )
+        msg = "chore(otto): set up runtime bookkeeping (" + ", ".join(changed_paths) + ")"
+        _sp.run(
+            ["git", "commit", "-q", "-m", msg, "--", *changed_paths],
+            cwd=project_dir, capture_output=True, check=True,
+        )
+        log.info("auto-committed %s: %s", changed_paths, msg)
+    except _sp.CalledProcessError as exc:
+        log.warning(
+            "auto-commit of %s failed (rc=%d): %s",
+            changed_paths, exc.returncode, (exc.stderr or b"").strip().decode(errors="replace"),
+        )
+
+
 def detect_test_command(project_dir: Path) -> str | None:
     """Auto-detect the project's test command.
 

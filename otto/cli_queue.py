@@ -18,6 +18,7 @@ The watcher (`otto queue run`) is the SOLE writer of state.json.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import time
@@ -93,6 +94,11 @@ def _project_dir() -> Path:
 
 
 def _resolve_otto_bin() -> list[str]:
+    # Test/E2E override: $OTTO_BIN may name an alternative executable. Used
+    # by the e2e harness to point the watcher at a stubbed `otto`.
+    override = os.environ.get("OTTO_BIN")
+    if override:
+        return [override]
     # Prefer the entry-point script next to the python executable
     py_dir = Path(sys.executable).parent
     candidate = py_dir / "otto"
@@ -185,6 +191,17 @@ def _enqueue(
         )
         sys.exit(2)
 
+    # First-touch init: idempotent setup of .gitignore + .gitattributes for
+    # users who skipped `otto setup`. Without this, `otto merge` later fails
+    # its working_tree_clean and bookkeeping-driver preconditions.
+    config = load_config(project_dir / "otto.yaml")
+    try:
+        from otto.config import first_touch_bookkeeping
+        first_touch_bookkeeping(project_dir, config)
+    except Exception as exc:
+        from otto.theme import error_console as _err
+        _err.print(f"[yellow]warning: bookkeeping setup skipped: {exc}[/yellow]")
+
     existing = load_queue(project_dir)
     existing_ids = [t.id for t in existing]
 
@@ -203,7 +220,6 @@ def _enqueue(
 
     # Compose full argv: [<command>, ...raw_args]
     argv = [command, *raw_args]
-    config = load_config(project_dir / "otto.yaml")
     worktree_dir = str(config.get("queue", {}).get("worktree_dir", ".worktrees"))
     branch = compute_branch_name(command, task_id)
     worktree = str(Path(worktree_dir) / task_id)
@@ -562,13 +578,11 @@ def register_queue_commands(main: click.Group) -> None:
             runner_config_from_otto_config,
         )
         project_dir = _project_dir()
-        config_path = project_dir / "otto.yaml"
-        if not config_path.exists():
-            error_console.print(
-                "[error]otto.yaml not found. Run `otto setup` first.[/error]"
-            )
-            sys.exit(2)
-        cfg = load_config(config_path)
+        # `otto queue build/improve/certify` work without otto.yaml using
+        # defaults (see _enqueue → `load_config(project_dir / "otto.yaml")`
+        # which returns DEFAULT_CONFIG when absent). Be consistent: the
+        # watcher uses defaults too if otto.yaml is missing.
+        cfg = load_config(project_dir / "otto.yaml")
         rcfg = runner_config_from_otto_config(cfg)
         if concurrent is not None:
             rcfg.concurrent = max(1, concurrent)

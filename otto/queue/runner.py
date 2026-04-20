@@ -610,6 +610,11 @@ class Runner:
             **os.environ,
             "OTTO_INTERNAL_QUEUE_RUNNER": "1",
             "OTTO_QUEUE_TASK_ID": task.id,
+            # Anchor manifest writes to the MAIN project so the watcher (whose
+            # cwd is the main project) and the child (whose cwd is the
+            # worktree) resolve to the same path. See otto/manifest.py
+            # `manifest_path_for`.
+            "OTTO_QUEUE_PROJECT_DIR": str(self.project_dir),
         }
         proc = subprocess.Popen(
             argv,
@@ -733,9 +738,9 @@ class Runner:
         )
         if not manifest_p.exists():
             if exit_code is None:
-                reason = "child exited but no manifest written"
+                reason = f"child exited but no manifest at {manifest_p}"
             elif exit_code == 0:
-                reason = "exited 0 but no manifest written"
+                reason = f"exited 0 but no manifest at {manifest_p}"
             else:
                 reason = f"exit_code={exit_code}"
             _mark_failed(ts, reason)

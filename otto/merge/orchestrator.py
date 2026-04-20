@@ -322,12 +322,14 @@ async def run_merge(
 
     # All branches merged. Run triage + cert phase (unless --no-certify).
     if options.no_certify:
+        if options.cleanup_on_success:
+            _cleanup_worktrees_for_merged_tasks(project_dir, queue_lookup)
         return MergeRunResult(
             success=True, merge_id=merge_id, state=state,
             note="cert skipped per --no-certify; verify manually with `otto certify`",
         )
 
-    return await _run_post_merge_verification(
+    result = await _run_post_merge_verification(
         project_dir=project_dir,
         config=config,
         options=options,
@@ -338,6 +340,56 @@ async def run_merge(
         target_head_before=target_head_before,
         budget=budget,
     )
+    if result.success and options.cleanup_on_success:
+        _cleanup_worktrees_for_merged_tasks(project_dir, queue_lookup)
+    return result
+
+
+def _cleanup_worktrees_for_merged_tasks(
+    project_dir: Path, queue_lookup: dict[str, str],
+) -> None:
+    """Remove the worktrees of queue tasks whose branches just merged.
+
+    Best-effort: failures are logged but never raised — by this point the
+    merge succeeded and we don't want to surface errors that would make the
+    user think their merge didn't land.
+
+    Branches are preserved (`git worktree remove` only removes the worktree
+    directory + admin files; the underlying branch still exists and is now
+    pointed-at by the merge commit on target).
+    """
+    if not queue_lookup:
+        return
+    try:
+        from otto.queue.schema import load_queue
+    except ImportError:
+        return
+    tasks_by_id = {t.id: t for t in load_queue(project_dir)}
+    cleaned: list[str] = []
+    for task_id in set(queue_lookup.values()):
+        task = tasks_by_id.get(task_id)
+        if not task or not task.worktree:
+            continue
+        wt_path = project_dir / task.worktree
+        if not wt_path.exists():
+            continue
+        try:
+            import subprocess as _sp
+            r = _sp.run(
+                ["git", "worktree", "remove", "--force", str(wt_path)],
+                cwd=project_dir, capture_output=True, text=True, check=False,
+            )
+            if r.returncode == 0:
+                cleaned.append(task_id)
+            else:
+                logger.warning(
+                    "cleanup-on-success: git worktree remove failed for %s: %s",
+                    task_id, (r.stderr or "").strip(),
+                )
+        except Exception as exc:
+            logger.warning("cleanup-on-success: worktree remove crashed for %s: %s", task_id, exc)
+    if cleaned:
+        logger.info("cleanup-on-success: removed worktrees for %s", cleaned)
 
 
 async def _run_post_merge_verification(
