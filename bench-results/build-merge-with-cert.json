@@ -1,0 +1,20 @@
+{
+  "name": "build-merge-with-cert",
+  "started_at": "2026-04-21T02:57:33Z",
+  "finished_at": "2026-04-20T20:00:05Z",
+  "wall_seconds": 151.70311188697815,
+  "total_cost_usd": 1.20878625,
+  "queue_concurrency": 2,
+  "tasks": [],
+  "merge_outcome": "success",
+  "merge_cost_usd": 0.2,
+  "merge_seconds": 48.12377405166626,
+  "cert_passed": true,
+  "notes": [
+    "cert_run_id: certify-1776740380-72993",
+    "verdict counts: {'PASS': 7}",
+    "merged task ids: ['add', 'sub']",
+    "merge log tail: Merging into main\n\n    \u2713 build/add-2026-04-20 (merged)\n    \u2713 build/sub-2026-04-20 (conflict_resolved)\n      resolved by consolidated agent in one shared call (total cost $0.20 across\n1 conflicted branches)\n\n  Merge complete (id: merge-1776740357-72993)\n  Verification: 7 passed, 0 failed, 0 skipped, 0 flagged for human"
+  ],
+  "repo_path": "/var/folders/xg/dk8wgfy119z44797kyz7w0380000gn/T/bench-build-merge-cert-xfs1555d"
+}

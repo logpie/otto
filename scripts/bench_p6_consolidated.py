@@ -39,8 +39,13 @@ from bench_runner import (
 
 
 def main() -> int:
-    name = "F13-P6-consolidated"
-    log("Running P6 with consolidated agent-mode merge")
+    # Env-controlled: WITH_CERT=1 runs the post-merge cert phase (exercises
+    # the merge_context preamble path that replaced triage). Default is
+    # --no-certify (just measures merge wall + cost).
+    with_cert = os.environ.get("WITH_CERT") == "1"
+    suffix = "-with-cert" if with_cert else ""
+    name = f"F13-P6-consolidated{suffix}"
+    log(f"Running P6 with consolidated agent-mode merge (cert={'on' if with_cert else 'off'})")
     # Run base + improves via existing P6 bench (gives us a completed set of
     # branches in a tmp dir).
     log("Phase 1+2: build base + queue 3 parallel improves (vanilla P6 bench)")
@@ -69,12 +74,14 @@ def main() -> int:
 
     # Consolidated agent-mode is now the only merge path — no config flip needed.
 
-    # Manual salvage-style merge with the consolidated path. Use --no-certify
-    # to focus measurement on the conflict-resolution wall time.
-    log(f"Phase 3: consolidated merge of {len(failed_branches)} branches (with --no-certify)")
+    merge_args = [str(OTTO_BIN), "merge", *failed_branches]
+    if not with_cert:
+        merge_args.append("--no-certify")
+    cert_label = "with cert" if with_cert else "with --no-certify"
+    log(f"Phase 3: consolidated merge of {len(failed_branches)} branches ({cert_label})")
     merge_t0 = time.time()
     r = subprocess.run(
-        [str(OTTO_BIN), "merge", *failed_branches, "--no-certify"],
+        merge_args,
         cwd=repo, capture_output=True, text=True, timeout=3600,
         env={**os.environ},
     )

@@ -1,9 +1,9 @@
 {
-  "name": "F13-P6-phases-1-2",
+  "name": "F13-P6-consolidated-with-cert",
   "started_at": "2026-04-21T02:18:20Z",
-  "finished_at": "2026-04-20T19:32:07Z",
-  "wall_seconds": 827.0573608875275,
-  "total_cost_usd": 9.17921125,
+  "finished_at": "2026-04-20T19:43:02Z",
+  "wall_seconds": 1482.7978439331055,
+  "total_cost_usd": 13.93921125,
   "queue_concurrency": 3,
   "tasks": [
     {
@@ -39,13 +39,17 @@
       "failure_reason": "exit_code=1"
     }
   ],
-  "merge_outcome": "failed",
-  "merge_cost_usd": 0.0,
-  "merge_seconds": 0.4379119873046875,
+  "merge_outcome": "success",
+  "merge_cost_usd": 4.76,
+  "merge_seconds": 655.740483045578,
   "cert_passed": null,
   "notes": [
-    "rounds_per_improve: 2",
-    "merge_log_tail: Specify branches/task ids, or pass --all to merge all done queue tasks."
+    "F13 consolidated agent-mode merge",
+    "Branches merged: ['improve/imp-categories-2026-04-20', 'improve/imp-suppliers-2026-04-20', 'improve/imp-alerts-2026-04-20']",
+    "Phase 1+2 cost (base + improves): $9.18",
+    "Phase 3 cost (consolidated agent merge): $4.76",
+    "Phase 3 wall: 656s (10.9min)",
+    "Merge log tail: olved by consolidated agent in one shared call (total cost $4.76 across\n2 conflicted branches)\n    \u2713 improve/imp-alerts-2026-04-20 (conflict_resolved)\n      resolved by consolidated agent in one shared call (total cost $4.76 across\n2 conflicted branches)\n\n  Merge complete (id: merge-1776738727-3893)"
   ],
   "repo_path": "/var/folders/xg/dk8wgfy119z44797kyz7w0380000gn/T/bench-p6-807s7tgo"
 }

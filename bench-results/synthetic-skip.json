@@ -1,0 +1,23 @@
+{
+  "name": "synthetic-skip",
+  "started_at": "2026-04-21T03:21:09Z",
+  "finished_at": "2026-04-20T20:22:20Z",
+  "wall_seconds": 70.24039483070374,
+  "total_cost_usd": 0.23,
+  "queue_concurrency": 0,
+  "tasks": [],
+  "merge_outcome": "success",
+  "merge_cost_usd": 0.23,
+  "merge_seconds": 55.92552971839905,
+  "cert_passed": true,
+  "notes": [
+    "BENCH OUTCOME: PASSED",
+    "cert_run_id: certify-1776741712-96166",
+    "verdict counts: {'PASS': 2, 'SKIPPED': 4}",
+    "SKIPPED stories: ['format-note-default-prefix', 'find-returns-matches', 'format-note-custom-prefix', 'find-on-empty-list']",
+    "all stories (6): ['logout-returns-goodbye-message', 'format-note-default-prefix', 'find-returns-matches', 'signup-returns-expected-dict', 'format-note-custom-prefix', 'find-on-empty-list']",
+    "merge diff files: ['auth.py', 'test_auth.py']",
+    "merge log tail: Merging into main\n\n    \u2713 build/logout-synth (merged)\n    \u2713 build/signup-synth (conflict_resolved)\n      resolved by consolidated agent in one shared call (total cost $0.23 across\n1 conflicted branches)\n\n  Merge complete (id: merge-1776741684-96166)\n  Verification: 2 passed, 0 failed, 4 skipped, 0 flagged for human"
+  ],
+  "repo_path": "/var/folders/xg/dk8wgfy119z44797kyz7w0380000gn/T/bench-synthetic-skip-twovwcv3"
+}
