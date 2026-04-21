@@ -78,14 +78,14 @@ def _record_run_impl(
         })
 
     entry = {
-        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "command": command,
         "certifier_mode": certifier_mode,
         "commit": head_sha,
         "findings": findings,
         "tested": len(stories),
         "passed": sum(1 for s in stories if s.get("passed")),
-        "cost": round(cost, 2),
+        "cost": float(cost),
     }
 
     with open(history_path, "a") as f:

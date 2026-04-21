@@ -208,6 +208,7 @@ def write_checkpoint(
     # Merge spec fields with prior on-disk state (preserve across writes).
     prior = _read_prior(checkpoint_path)
 
+    # Cost fields stored at full precision — rounding only at display time.
     data = {
         "run_id": run_id,
         "command": command,
@@ -220,18 +221,18 @@ def write_checkpoint(
         "phase": phase,
         "session_id": session_id,
         "current_round": current_round,
-        "total_cost": round(total_cost, 2),
+        "total_cost": float(total_cost),
         "rounds": rounds or [],
         "intent": intent if intent is not None else (prior.get("intent", "") if prior else ""),
         "spec_path": spec_path if spec_path is not None else (prior.get("spec_path", "") if prior else ""),
         "spec_hash": spec_hash if spec_hash is not None else (prior.get("spec_hash", "") if prior else ""),
         "spec_version": spec_version if spec_version is not None else (prior.get("spec_version", 0) if prior else 0),
-        "spec_cost": round(
-            float(spec_cost) if spec_cost is not None else float(prior.get("spec_cost", 0.0) if prior else 0.0),
-            4,
+        "spec_cost": float(
+            spec_cost if spec_cost is not None
+            else (prior.get("spec_cost", 0.0) if prior else 0.0)
         ),
         "started_at": _read_started_at(checkpoint_path),
-        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
 
     _write_checkpoint_file(checkpoint_path, data)
@@ -324,21 +325,39 @@ def clear_checkpoint(project_dir: Path) -> None:
     logger.debug("Checkpoint cleared")
 
 
-def complete_checkpoint(project_dir: Path, total_cost: float = 0.0) -> None:
+def complete_checkpoint(
+    project_dir: Path,
+    total_cost: float = 0.0,
+    *,
+    current_round: int | None = None,
+    rounds: list[dict[str, Any]] | None = None,
+) -> None:
     """Mark checkpoint as completed (new layout) and clear the `paused` pointer.
+
+    ``current_round`` / ``rounds``, when provided, populate the matching
+    fields on the completed checkpoint so forensic reads reflect real
+    history. Previously agentic_v3 runs left these as ``0`` / ``[]`` even
+    after multiple certify rounds. ``None`` preserves whatever was on disk.
 
     For legacy-layout checkpoints, updates the legacy file in place (the
     caller owns deletion).
     """
+    def _apply(data: dict[str, Any]) -> None:
+        data["status"] = "completed"
+        data["total_cost"] = float(total_cost)
+        if current_round is not None:
+            data["current_round"] = current_round
+        if rounds is not None:
+            data["rounds"] = list(rounds)
+        data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
     session_path = paths.resolve_pointer(project_dir, paths.PAUSED_POINTER)
     if session_path is not None:
         cp_path = session_path / "checkpoint.json"
         if cp_path.exists():
             try:
                 data = json.loads(cp_path.read_text())
-                data["status"] = "completed"
-                data["total_cost"] = round(total_cost, 2)
-                data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+                _apply(data)
                 _write_checkpoint_file(cp_path, data)
             except (json.JSONDecodeError, OSError):
                 pass
@@ -351,9 +370,7 @@ def complete_checkpoint(project_dir: Path, total_cost: float = 0.0) -> None:
         return
     try:
         data = json.loads(legacy_path.read_text())
-        data["status"] = "completed"
-        data["total_cost"] = round(total_cost, 2)
-        data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+        _apply(data)
         _write_checkpoint_file(legacy_path, data)
     except (json.JSONDecodeError, OSError):
         pass
@@ -361,13 +378,14 @@ def complete_checkpoint(project_dir: Path, total_cost: float = 0.0) -> None:
 
 def _read_started_at(checkpoint_path: Path) -> str:
     """Preserve original started_at from existing checkpoint."""
+    now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     if checkpoint_path.exists():
         try:
             data = json.loads(checkpoint_path.read_text())
-            return data.get("started_at", time.strftime("%Y-%m-%dT%H:%M:%SZ"))
+            return data.get("started_at", now_iso)
         except (json.JSONDecodeError, OSError):
             pass
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return now_iso
 
 
 def _checkpoint_tmp_path(checkpoint_path: Path) -> Path:

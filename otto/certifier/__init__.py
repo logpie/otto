@@ -156,29 +156,33 @@ async def run_agentic_certifier(
     # Write PoW report
     try:
         from otto.observability import write_json_file as _write_json
+        # Standalone certify: "total" equals certifier cost (no build agent).
+        certifier_cost = float(cost or 0)
         pow_data = {
-            "generated": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "generated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "outcome": outcome.value,
             "duration_s": total_duration,
-            "cost_usd": float(cost or 0),
+            "certifier_cost_usd": certifier_cost,
+            "total_cost_usd": certifier_cost,
             "stories": story_results,
         }
         _write_json(report_dir / "proof-of-work.json", pow_data)
 
         # HTML PoW
         _generate_agentic_html_pow(report_dir, story_results, outcome.value,
-                                    total_duration, float(cost or 0),
+                                    total_duration, certifier_cost,
                                     parsed.stories_passed, parsed.stories_tested,
-                                    diagnosis=parsed.diagnosis)
+                                    diagnosis=parsed.diagnosis,
+                                    certifier_cost=certifier_cost)
 
-        # Markdown PoW
+        # Markdown PoW — certifier-only here, so total == certifier.
         md_lines = [
             "# Proof-of-Work Certification Report",
             "",
-            f"> **Generated:** {time.strftime('%Y-%m-%d %H:%M:%S')}",
+            f"> **Generated:** {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
             f"> **Outcome:** {outcome.value}",
             f"> **Duration:** {total_duration:.0f}s",
-            f"> **Cost:** ${float(cost or 0):.2f}",
+            f"> **Cost:** ${certifier_cost:.2f}",
             f"> **Stories:** {parsed.stories_passed}/{parsed.stories_tested}",
             "",
         ]
@@ -238,12 +242,21 @@ def _generate_agentic_html_pow(
     diagnosis: str = "",
     round_history: list[dict] | None = None,
     evidence_dir: Path | None = None,
+    certifier_cost: float | None = None,
 ) -> None:
-    """Generate HTML PoW report for the agentic certifier."""
+    """Generate HTML PoW report for the agentic certifier.
+
+    `cost` is the authoritative total cost (spec + agent + certifier where
+    applicable) — displayed to the user. `certifier_cost`, when different
+    from `cost`, is shown as an additional breakdown.
+    """
     import html as _html
 
-    outcome_color = "#22c55e" if outcome == "passed" else "#ef4444"
     num_rounds = len(round_history) if round_history else 1
+    # Qualified selectors (.outcome-banner.pass / .outcome-banner.fail) avoid
+    # the previous duplicate-selector CSS-cascade bug where the FAIL variant
+    # silently inherited PASS colors.
+    banner_class = "pass" if outcome == "passed" else "fail"
     html = [
         "<!DOCTYPE html><html><head><meta charset='utf-8'>",
         "<title>Certification Report</title>",
@@ -252,7 +265,8 @@ def _generate_agentic_html_pow(
         "body { font-family: system-ui, -apple-system, sans-serif; max-width: 960px; margin: 0 auto; padding: 2em 1.5em; color: #1a1a2e; background: #fafafa; }",
         "h1 { border-bottom: 3px solid #1a1a2e; padding-bottom: 0.5em; margin-bottom: 0.3em; }",
         ".outcome-banner { padding: 0.8em 1.2em; border-radius: 8px; margin-bottom: 1.5em; font-size: 1.1em; font-weight: 600; }",
-        f".outcome-banner {{ background: {outcome_color}18; border: 2px solid {outcome_color}; color: {outcome_color}; }}",
+        ".outcome-banner.pass { background: #22c55e18; border: 2px solid #22c55e; color: #22c55e; }",
+        ".outcome-banner.fail { background: #ef444418; border: 2px solid #ef4444; color: #ef4444; }",
         ".meta { display: flex; gap: 2em; flex-wrap: wrap; color: #555; margin-bottom: 2em; font-size: 0.95em; }",
         ".meta-item { display: flex; flex-direction: column; }",
         ".meta-label { font-size: 0.75em; text-transform: uppercase; letter-spacing: 0.05em; color: #888; }",
@@ -283,6 +297,7 @@ def _generate_agentic_html_pow(
         ".diagnosis { margin-top: 1.5em; padding: 1em; background: #fff7ed; border: 1px solid #fed7aa; border-radius: 8px; }",
         ".diagnosis h3 { margin: 0 0 0.5em; color: #9a3412; font-size: 0.95em; }",
         ".diagnosis p { margin: 0; color: #7c2d12; line-height: 1.5; }",
+        ".note { margin: 0.5em 0; padding: 0.6em 1em; background: #f7f7f9; border: 1px dashed #c7c7cc; border-radius: 6px; color: #555; font-size: 0.9em; }",
         "footer { margin-top: 2em; padding-top: 1em; border-top: 1px solid #e0e0e0; color: #999; font-size: 0.8em; }",
         "</style>",
         "<script>",
@@ -293,13 +308,26 @@ def _generate_agentic_html_pow(
         "</script>",
         "</head><body>",
         "<h1>Certification Report</h1>",
-        f"<div class='outcome-banner'>{outcome.upper()} &mdash; {passed}/{total} stories passed"
+        f"<div class='outcome-banner {banner_class}'>{outcome.upper()} &mdash; {passed}/{total} stories passed"
         f"{f' (after {num_rounds} rounds)' if num_rounds > 1 else ''}</div>",
         "<div class='meta'>",
         f"<div class='meta-item'><span class='meta-label'>Duration</span><span class='meta-value'>{duration:.0f}s</span></div>",
-        f"<div class='meta-item'><span class='meta-label'>Cost</span><span class='meta-value'>${cost:.2f}</span></div>",
+    ]
+    # Cost display: if we have a distinct certifier cost, show both lines for transparency.
+    if certifier_cost is not None and abs(certifier_cost - cost) > 1e-9:
+        html.append(
+            "<div class='meta-item'><span class='meta-label'>Cost</span>"
+            f"<span class='meta-value'>${cost:.2f} total "
+            f"(certifier ${certifier_cost:.2f})</span></div>"
+        )
+    else:
+        html.append(
+            "<div class='meta-item'><span class='meta-label'>Cost</span>"
+            f"<span class='meta-value'>${cost:.2f}</span></div>"
+        )
+    html += [
         f"<div class='meta-item'><span class='meta-label'>Rounds</span><span class='meta-value'>{num_rounds}</span></div>",
-        f"<div class='meta-item'><span class='meta-label'>Generated</span><span class='meta-value'>{time.strftime('%Y-%m-%d %H:%M:%S')}</span></div>",
+        f"<div class='meta-item'><span class='meta-label'>Generated</span><span class='meta-value'>{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}</span></div>",
         "</div>",
     ]
 
@@ -389,6 +417,15 @@ def _generate_agentic_html_pow(
                 html.append("</div>")
 
             html.append("</div>")
+        else:
+            # Dir exists but has no screenshots/video — e.g. fast mode.
+            # Surface the gap explicitly so viewers don't wonder whether
+            # the section silently failed.
+            html.append(
+                "<div class='evidence-section'><h2>Visual Evidence</h2>"
+                "<p class='note'>Fast mode — no browser evidence collected.</p>"
+                "</div>"
+            )
 
     html.append("<footer>Generated by otto certifier</footer>")
     html.append("</body></html>")

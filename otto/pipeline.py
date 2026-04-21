@@ -66,19 +66,20 @@ def _write_session_summary(
     from otto import paths
     from otto.observability import write_json_file
 
+    # Full precision preserved in JSON; round at display time only.
     summary = {
         "session_id": session_id,
         "command": command,
         "intent": intent,
         "verdict": verdict,
         "passed": passed,
-        "cost_usd": round(cost, 2),
+        "cost_usd": float(cost),
         "duration_s": duration,
         "stories_passed": stories_passed,
         "stories_tested": stories_tested,
         "status": status,
         "rounds": rounds,
-        "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     write_json_file(paths.session_summary(project_dir, session_id), summary)
 
@@ -238,7 +239,13 @@ async def build_agentic_v3(
         except Exception as exc:
             logger.warning("Failed to read checkpoint for session resume: %s", exc)
 
-    def _cp(status: str, session_id: str = "", phase: str = "build") -> None:
+    def _cp(
+        status: str,
+        session_id: str = "",
+        phase: str = "build",
+        current_round: int = 0,
+        rounds: list[dict[str, Any]] | None = None,
+    ) -> None:
         if not manage_checkpoint:
             return
         try:
@@ -252,6 +259,8 @@ async def build_agentic_v3(
                 total_cost=total_run_cost,
                 status=status,
                 phase=phase,
+                current_round=current_round,
+                rounds=rounds or [],
                 spec_cost=float(spec_cost or 0.0),
             )
         except Exception as exc:
@@ -295,10 +304,9 @@ async def build_agentic_v3(
 
     total_duration = round(time.monotonic() - start_time, 1)
 
-    # Mark the run as paused (not completed) on AgentCallError so --resume
-    # picks it up. Successful runs still mark as completed.
+    # Determine final status. Actual checkpoint write happens after we parse
+    # certification markers so round history is captured in the checkpoint.
     final_status = "paused" if text.startswith("BUILD ERROR:") else "completed"
-    _cp(final_status, session_id=session_id)
 
     # Session logs (messages.jsonl, narrative.log) streamed during the run
     # and were closed by run_agent_with_timeout. Nothing to write here —
@@ -315,6 +323,27 @@ async def build_agentic_v3(
     overall_diagnosis = parsed.diagnosis
     certify_rounds = parsed.certify_rounds
     target_mode = bool(config.get("_target")) or certifier_mode == "target"
+
+    # Summarize certify rounds for the checkpoint so forensic reads see real
+    # history instead of `current_round: 0, rounds: []`.
+    _checkpoint_rounds = [
+        {
+            "round": r.get("round", i + 1),
+            "verdict": r.get("verdict"),
+            "stories_tested": len(r.get("stories", [])),
+            "stories_passed": r.get(
+                "passed_count",
+                sum(1 for s in r.get("stories", []) if s.get("passed")),
+            ),
+        }
+        for i, r in enumerate(certify_rounds)
+    ]
+    _cp(
+        final_status,
+        session_id=session_id,
+        current_round=len(certify_rounds),
+        rounds=_checkpoint_rounds,
+    )
 
     # When QA is skipped (--no-qa), the agent won't produce certification markers.
     # Consider the build passed if the agent completed without error.
@@ -337,11 +366,15 @@ async def build_agentic_v3(
         report_dir = paths.certify_dir(project_dir, build_id)
         report_dir.mkdir(parents=True, exist_ok=True)
 
+        certifier_cost = float(cost or 0)
         pow_data = {
-            "generated": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "generated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "outcome": "passed" if passed else "failed",
             "duration_s": total_duration,
-            "cost_usd": float(cost or 0),
+            # certifier-only cost — the cost of the agent call that drove certification.
+            "certifier_cost_usd": certifier_cost,
+            # total run cost — full precision (spec + agent).
+            "total_cost_usd": total_run_cost,
             "stories": story_results,
             "certify_rounds": len(certify_rounds),
             "mode": "agentic_v3",
@@ -361,21 +394,30 @@ async def build_agentic_v3(
         _generate_agentic_html_pow(
             report_dir, story_results,
             "passed" if passed else "failed",
-            total_duration, float(cost or 0),
+            total_duration, total_run_cost,
             stories_passed, stories_tested,
             diagnosis=overall_diagnosis,
             round_history=round_history,
             evidence_dir=evidence_dir_path,
+            certifier_cost=certifier_cost,
         )
 
         # Markdown PoW — complements .html/.json with a text-only summary.
+        costs_differ = abs(total_run_cost - certifier_cost) > 1e-9
+        if costs_differ:
+            cost_line = (
+                f"> **Cost:** Certifier ${certifier_cost:.2f}, "
+                f"Total ${total_run_cost:.2f}"
+            )
+        else:
+            cost_line = f"> **Cost:** ${total_run_cost:.2f}"
         md_lines = [
             "# Proof-of-Work Certification Report",
             "",
-            f"> **Generated:** {time.strftime('%Y-%m-%d %H:%M:%S')}",
+            f"> **Generated:** {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
             f"> **Outcome:** {'passed' if passed else 'failed'}",
             f"> **Duration:** {total_duration:.0f}s",
-            f"> **Cost:** ${float(cost or 0):.2f}",
+            cost_line,
             f"> **Stories:** {stories_passed}/{stories_tested}",
             f"> **Rounds:** {len(certify_rounds) or 1}",
             "",
@@ -389,16 +431,18 @@ async def build_agentic_v3(
     except Exception as exc:
         logger.warning("Failed to write PoW: %s", exc)
 
-    # Checkpoint
+    # Checkpoint — full precision, ISO-Z timestamp.
+    # `cost_usd` kept as alias of `total_cost_usd` for one release (back-compat).
     checkpoint = {
         "build_id": build_id,
         "mode": "agentic_v3",
         "passed": passed,
         "duration_s": total_duration,
+        "total_cost_usd": total_run_cost,
         "cost_usd": total_run_cost,
         "stories_tested": stories_tested,
         "stories_passed": stories_passed,
-        "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     from otto.observability import write_json_file
     write_json_file(build_dir / "checkpoint.json", checkpoint)
@@ -449,9 +493,9 @@ async def build_agentic_v3(
         "stories_passed": stories_passed,
         "stories_tested": stories_tested,
         "certify_rounds": len(certify_rounds),
-        "cost_usd": round(total_run_cost, 2),
+        "cost_usd": float(total_run_cost),
         "duration_s": total_duration,
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     })
     append_text_log(history_path, [history_entry])
 
@@ -860,7 +904,7 @@ async def run_certify_fix_loop(
                 "round": round_num,
                 "stories_tested": len(stories),
                 "stories_passed": len(stories) - len(failures),
-                "cost": round(report.cost_usd, 2),
+                "cost": float(report.cost_usd),
             }
 
             # Determine if we should stop
@@ -1022,10 +1066,17 @@ async def run_certify_fix_loop(
     append_journal(project_dir, final_round_id, "build complete",
                    "PASS" if passed else "FAIL", total_cost, session_id=build_id)
 
-    # Mark checkpoint completed
+    # Mark checkpoint completed. Plumb the round history + current round so
+    # forensic reads of the completed checkpoint reflect real history
+    # (otherwise the checkpoint shows `current_round: 0, rounds: []` even
+    # after multiple rounds actually ran).
     try:
         from otto.checkpoint import complete_checkpoint
-        complete_checkpoint(project_dir, total_cost)
+        complete_checkpoint(
+            project_dir, total_cost,
+            current_round=last_completed_round,
+            rounds=list(checkpoint_rounds),
+        )
     except Exception as exc:
         logger.warning("Failed to mark checkpoint completed: %s", exc)
 

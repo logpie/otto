@@ -37,7 +37,13 @@ def _parse_diagnosis(raw: str) -> str:
 
 
 def _parse_story_result(stripped: str, evidence: dict[str, str]) -> dict[str, Any] | None:
-    """Parse a single STORY_RESULT: line. Returns None if placeholder."""
+    """Parse a single STORY_RESULT: line. Returns None if placeholder.
+
+    Only emits the `evidence` key when the agent actually produced a
+    STORY_EVIDENCE block for this story — otherwise the field is omitted so
+    consumers that check ``story.get("evidence")`` get ``None`` (missing),
+    not an empty string that reads like intentional absence.
+    """
     parts = stripped[len("STORY_RESULT:"):].strip().split("|", 2)
     if len(parts) < 2:
         return None
@@ -48,13 +54,16 @@ def _parse_story_result(stripped: str, evidence: dict[str, str]) -> dict[str, An
     is_warn = "WARN" in verdict_raw
     passed = "PASS" in verdict_raw or is_warn
     summary = parts[2].strip() if len(parts) > 2 else ""
-    return {
+    story: dict[str, Any] = {
         "story_id": sid,
         "passed": passed,
         "warn": is_warn,
         "summary": summary,
-        "evidence": evidence.get(sid, ""),
     }
+    ev = evidence.get(sid, "")
+    if ev:
+        story["evidence"] = ev
+    return story
 
 
 def _is_template_verdict(verdict_text: str) -> bool:

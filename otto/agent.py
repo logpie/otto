@@ -28,6 +28,11 @@ except ImportError:
     _SDKToolUseBlock = None
 
 try:
+    from claude_agent_sdk.types import UserMessage as _SDKUserMessage
+except (ImportError, AttributeError):
+    _SDKUserMessage = None
+
+try:
     from claude_agent_sdk.types import ThinkingBlock as _SDKThinkingBlock
 except (ImportError, AttributeError):
     _SDKThinkingBlock = None
@@ -60,6 +65,20 @@ class ToolResultBlock:
 @dataclass
 class AssistantMessage:
     content: list[Any] = field(default_factory=list)
+    session_id: str = ""
+
+
+@dataclass
+class UserMessage:
+    """Tool-result-only messages returning tool outputs to the model.
+
+    The SDK tags these as "user" because tool_result blocks are passed
+    back as user input on the next turn. Kept separate from
+    AssistantMessage so messages.jsonl can record them with the correct
+    ``type: "user"`` tag.
+    """
+    content: list[Any] = field(default_factory=list)
+    session_id: str = ""
 
 
 @dataclass
@@ -355,15 +374,46 @@ def _normalize_message(message: Any) -> Any | None:
             usage=getattr(message, "usage", None),
             structured_output=getattr(message, "structured_output", None),
         )
+    if isinstance(message, UserMessage):
+        return message
     if isinstance(message, AssistantMessage):
         return message
+
+    session_id = str(getattr(message, "session_id", "") or "")
+
+    # SDK UserMessage — tool_result-only payload returned to the model.
+    if _SDKUserMessage and isinstance(message, _SDKUserMessage):
+        content = []
+        raw_content = getattr(message, "content", []) or []
+        # SDK UserMessage.content may be a bare string — wrap as TextBlock.
+        if isinstance(raw_content, str):
+            if raw_content:
+                content.append(TextBlock(text=raw_content))
+        else:
+            for block in raw_content:
+                normalized = _normalize_block(block)
+                if normalized is not None:
+                    content.append(normalized)
+        return UserMessage(content=content, session_id=session_id)
+
     if (_SDKAssistantMessage and isinstance(message, _SDKAssistantMessage)) or hasattr(message, "content"):
         content = []
-        for block in getattr(message, "content", []) or []:
-            normalized = _normalize_block(block)
-            if normalized is not None:
-                content.append(normalized)
-        return AssistantMessage(content=content)
+        raw_content = getattr(message, "content", []) or []
+        if isinstance(raw_content, str):
+            if raw_content:
+                content.append(TextBlock(text=raw_content))
+        else:
+            for block in raw_content:
+                normalized = _normalize_block(block)
+                if normalized is not None:
+                    content.append(normalized)
+        # If the message contains ONLY tool_result blocks (no text /
+        # thinking / tool_use), it is semantically a user turn — tool
+        # outputs fed back into the model. Tag as UserMessage so
+        # messages.jsonl records type="user" correctly.
+        if content and all(isinstance(b, ToolResultBlock) for b in content):
+            return UserMessage(content=content, session_id=session_id)
+        return AssistantMessage(content=content, session_id=session_id)
     return None
 
 
@@ -521,24 +571,39 @@ def tool_use_summary(block) -> str:
                 return match.group("body")
         return cmd
 
+    def _collapse(s: str) -> str:
+        # Collapse embedded newlines (e.g. HEREDOC bodies) so the
+        # narrative's single-line writer doesn't get multi-row output.
+        return s.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+
     inputs = block.input or {}
     name = block.name
     if name == "Read":
-        return inputs.get("file_path", "")
+        return _collapse(inputs.get("file_path", ""))
     if name == "Glob":
-        return inputs.get("pattern") or inputs.get("path", "")
+        return _collapse(inputs.get("pattern") or inputs.get("path", ""))
     if name == "Grep":
-        return inputs.get("pattern", "")
+        return _collapse(inputs.get("pattern", ""))
     if name in ("Edit", "Write"):
-        return inputs.get("file_path", "")
+        return _collapse(inputs.get("file_path", ""))
     if name == "Bash":
         cmd = _unwrap_shell_command(inputs.get("command", ""))
+        cmd = _collapse(cmd)
         if len(cmd) <= 120:
             return cmd
         cut = cmd.rfind(" ", 0, 120)
         if cut <= 0:
             cut = 120
         return cmd[:cut] + "..."
+    if name == "Agent":
+        subagent_type = str(inputs.get("subagent_type", "") or "").strip()
+        prompt = _collapse(str(inputs.get("prompt", "") or "")).strip()
+        preview = prompt[:80]
+        if len(prompt) > 80:
+            preview = preview.rstrip() + "..."
+        if subagent_type:
+            return f'subagent={subagent_type} "{preview}"'
+        return f'"{preview}"' if preview else ""
     return ""
 
 
@@ -597,7 +662,7 @@ async def run_agent_query(
                 cost += float(raw_cost)
             if on_result:
                 on_result(message)
-        elif isinstance(message, AssistantMessage):
+        elif isinstance(message, (AssistantMessage, UserMessage)):
             for block in message.content:
                 if isinstance(block, ToolResultBlock):
                     if capture_tool_output and block.content:
