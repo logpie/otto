@@ -163,3 +163,40 @@ def register_history_command(main: click.Group) -> None:
         console.print()
         console.print(table)
         console.print()
+
+
+def register_replay_command(main: click.Group) -> None:
+    """Register `otto replay <session-id>` — regenerate narrative.log
+    from messages.jsonl via the current formatter. Use after upgrading
+    otto to re-render old sessions with the new layout/glyphs.
+    """
+
+    @main.command(context_settings=CONTEXT_SETTINGS)
+    @click.argument("session_id", required=False)
+    def replay(session_id):
+        """Regenerate narrative.log for a session from messages.jsonl.
+
+        Without an argument, replays the most recent session. Writes
+        narrative.regenerated.log alongside each messages.jsonl.
+        """
+        project_dir = Path.cwd()
+        from otto import paths as _paths
+        from otto.replay import replay_session
+
+        if not session_id:
+            latest = _paths.resolve_pointer(project_dir, _paths.LATEST_POINTER)
+            if latest is None:
+                console.print("[yellow]No recent session found.[/yellow]")
+                sys.exit(1)
+            session_id = latest.name
+
+        console.print(f"\n  [bold]Replaying session[/bold] {session_id}\n")
+        try:
+            written = replay_session(project_dir, session_id)
+        except FileNotFoundError as exc:
+            console.print(f"[red]Error:[/red] {exc}")
+            sys.exit(1)
+        console.print(
+            f"\n  Regenerated {len(written)} narrative file(s). "
+            f"Open them alongside the original narrative.log to compare.\n"
+        )

@@ -916,8 +916,9 @@ from otto.cli_setup import register_setup_command
 register_setup_command(main)
 
 # History command (registered from otto/cli_logs.py)
-from otto.cli_logs import register_history_command
+from otto.cli_logs import register_history_command, register_replay_command
 register_history_command(main)
+register_replay_command(main)
 
 # Improve commands (registered from otto/cli_improve.py)
 from otto.cli_improve import register_improve_commands
