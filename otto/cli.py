@@ -14,7 +14,7 @@ os.environ.pop("CLAUDECODE", None)
 import click
 
 from otto.agent import AgentCallError
-from otto.config import create_config, load_config, require_git
+from otto.config import load_config, require_git
 from otto.display import CONTEXT_SETTINGS, console, rich_escape
 from otto.theme import error_console
 
@@ -573,11 +573,10 @@ def _build_locked(
     display_intent = intent or display_intent
     print_resume_status(console, resume_state, resume, expected_command="build")
 
+    # No auto-create: `otto.yaml` only exists if the user ran `otto setup`.
+    # `load_config` returns built-in defaults + auto-detected project values
+    # when the yaml is absent.
     config_path = project_dir / "otto.yaml"
-    if not config_path.exists():
-        create_config(project_dir)
-        console.print("[yellow]First run \u2014 created otto.yaml[/yellow]")
-        console.print()
     config = load_config(config_path)
 
     if no_qa:

@@ -116,7 +116,7 @@ async def run_agentic_certifier(
     from otto.memory import inject_memory
     prompt = inject_memory(prompt, project_dir, config)
 
-    options = make_agent_options(project_dir, config)
+    options = make_agent_options(project_dir, config, agent_type="certifier")
 
     logger.info("Running agentic certifier on %s", project_dir)
 

@@ -254,7 +254,7 @@ async def run_spec_agent(
         prior_spec_section=prior_block,
     )
 
-    options = make_agent_options(project_dir, config)
+    options = make_agent_options(project_dir, config, agent_type="spec")
 
     # Spec-agent timeout: `spec_timeout` caps this specific phase (spec is
     # expected to be fast — 1-3 min in practice). With a run budget active,

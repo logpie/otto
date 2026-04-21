@@ -153,7 +153,10 @@ async def build_agentic_v3(
     from otto.journal import _get_head_sha
     _head_before = _get_head_sha(project_dir)
 
-    options = make_agent_options(project_dir, config)
+    # "code" prompt_mode = split-mode surgical fix; treat as the "fix" agent.
+    # Everything else (build, improve) is the "build" agent.
+    _agent_type = "fix" if prompt_mode == "code" else "build"
+    options = make_agent_options(project_dir, config, agent_type=_agent_type)
     if resume_session_id:
         options.resume = resume_session_id
 

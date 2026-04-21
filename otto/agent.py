@@ -99,14 +99,21 @@ ClaudeAgentOptions = AgentOptions
 def make_agent_options(
     project_dir: Path,
     config: dict[str, Any] | None = None,
+    *,
+    agent_type: str | None = None,
     **overrides: Any,
 ) -> AgentOptions:
-    """Create standard agent options for build/certify agents.
+    """Create standard agent options for a named otto agent.
 
-    Sets bypassPermissions, project cwd, CC preset prompt, and model from config.
+    ``agent_type`` is one of ``"build" | "certifier" | "spec" | "fix"``.
+    Per-agent provider/model/effort overrides (from ``otto.yaml``'s
+    ``agents.<name>`` block) take precedence over the global values.
+    When ``agent_type`` is ``None``, only global values are used.
+
     Pass keyword overrides for system_prompt, setting_sources, etc.
     """
     from otto.testing import _subprocess_env
+    from otto.config import agent_provider, agent_model, agent_effort
     opts = AgentOptions(
         permission_mode="bypassPermissions",
         cwd=str(project_dir),
@@ -115,9 +122,14 @@ def make_agent_options(
         setting_sources=["project"],
         **overrides,
     )
-    model = (config or {}).get("model")
+    cfg = config or {}
+    opts.provider = agent_provider(cfg, agent_type)
+    model = agent_model(cfg, agent_type)
     if model:
         opts.model = str(model)
+    effort = agent_effort(cfg, agent_type)
+    if effort:
+        opts.effort = str(effort)
     return opts
 
 
