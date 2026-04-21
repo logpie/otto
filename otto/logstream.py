@@ -181,6 +181,7 @@ class NarrativeFormatter:
     # Glyphs — referenced from multiple methods.
     _GLYPH_MARKER = "\u2726"     # ✦ elevated certifier marker
     _GLYPH_SUBAGENT = "\u21d0"   # ⇐ subagent tool result
+    _GLYPH_PHASE = "\u2501" * 3  # ━━━ phase begin/end banner
 
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -191,6 +192,12 @@ class NarrativeFormatter:
         # tailor output (Glob=>"(N files)", Read=>"(N lines)", Agent=>
         # subagent glyph).
         self._tool_by_id: dict[str, str] = {}
+        # Counter for subagent dispatches, used to label certify rounds
+        # (each Agent-tool dispatch that looks like a certifier prompt
+        # begins a new "round"). Tracked separately from total Agent
+        # dispatches in case other subagents are dispatched.
+        self._agent_dispatch_count: int = 0
+        self._agent_round_by_id: dict[str, int] = {}
 
     def _elapsed_fmt(self) -> str:
         secs = int(time.monotonic() - self._start)
@@ -226,6 +233,18 @@ class NarrativeFormatter:
             # up the originator by tool_use_id.
             if block.id:
                 self._tool_by_id[block.id] = block.name or ""
+            # Certify-phase banners — Agent dispatches with a
+            # certifier-shaped prompt open a new round.
+            if block.name == "Agent" and _looks_like_certifier_prompt(block.input):
+                self._agent_dispatch_count += 1
+                round_n = self._agent_dispatch_count
+                if block.id:
+                    self._agent_round_by_id[block.id] = round_n
+                self._write(
+                    f"{ts} {self._GLYPH_PHASE} CERTIFY ROUND {round_n} "
+                    f"starting {self._GLYPH_PHASE}"
+                )
+                return
             summary = tool_use_summary(block) or ""
             line = f"{ts} \u25cf {block.name} {summary}".rstrip()
             self._write(_truncate_at_word(line))
@@ -252,6 +271,22 @@ class NarrativeFormatter:
             flood_summary = _prompt_flood_summary(text)
             if flood_summary is not None:
                 self._write(f"{ts} \u25b8 {flood_summary}")
+                return
+            # Suppress redundant final-summary re-emission: when the
+            # agent's closing text contains CERTIFY_ROUND marker blocks
+            # from already-completed rounds, we've already streamed those
+            # markers live via subagent results. Render just the prose;
+            # drop the re-emitted markers.
+            certify_round_count = text.count("CERTIFY_ROUND:")
+            if (self._agent_dispatch_count >= 1
+                    and certify_round_count >= 1
+                    and certify_round_count <= self._agent_dispatch_count):
+                prose_lines = [
+                    l.strip() for l in text.split("\n")
+                    if l.strip() and not _is_marker(l.strip())
+                ]
+                for s in prose_lines:
+                    self._write(f"{ts} \u25b8 {_truncate_at_word(s)}")
                 return
             for line in text.split("\n"):
                 s = line.strip()
@@ -313,6 +348,16 @@ class NarrativeFormatter:
                     )
             for s in marker_lines:
                 self._write(f"{ts} {self._GLYPH_MARKER} {s}")
+            # Round-end banner when we can correlate to a round start.
+            if is_subagent and block.tool_use_id:
+                round_n = self._agent_round_by_id.get(block.tool_use_id)
+                if round_n is not None:
+                    verdict, passed, tested = _summarize_round(marker_lines)
+                    stats = f" ({passed}/{tested})" if tested else ""
+                    self._write(
+                        f"{ts} {self._GLYPH_PHASE} CERTIFY ROUND {round_n} "
+                        f"→ {verdict}{stats} {self._GLYPH_PHASE}"
+                    )
             return
 
         # Detect git-commit in Bash output, elevate to a distinct glyph.
@@ -447,6 +492,48 @@ def _maybe_extract_subagent_text(content: Any) -> str | None:
             return None
         texts.append(str(item.get("text", "")))
     return "\n".join(texts)
+
+
+def _looks_like_certifier_prompt(tool_input: Any) -> bool:
+    """Heuristic: does this Agent tool_input look like a certifier dispatch?
+
+    Otto's certifier prompts always contain the literal ``## Verdict Format``
+    heading — that uniquely identifies them. Bare ``STORY_RESULT`` mentions
+    are too common (ordinary prose might mention it) so we don't key off that.
+    """
+    if not isinstance(tool_input, dict):
+        return False
+    prompt = tool_input.get("prompt") or ""
+    if not isinstance(prompt, str):
+        return False
+    return "## Verdict Format" in prompt
+
+
+def _summarize_round(marker_lines: list[str]) -> tuple[str, int, int]:
+    """Extract (verdict, passed_count, tested_count) from marker lines."""
+    verdict = "?"
+    passed = 0
+    tested = 0
+    for line in marker_lines:
+        if line.startswith("VERDICT:"):
+            v = line.split(":", 1)[1].strip().upper()
+            if "PASS" in v:
+                verdict = "PASS"
+            elif "FAIL" in v:
+                verdict = "FAIL"
+            elif "WARN" in v:
+                verdict = "WARN"
+        elif line.startswith("STORIES_PASSED:"):
+            try:
+                passed = int(line.split(":", 1)[1].strip())
+            except (ValueError, IndexError):
+                pass
+        elif line.startswith("STORIES_TESTED:"):
+            try:
+                tested = int(line.split(":", 1)[1].strip())
+            except (ValueError, IndexError):
+                pass
+    return verdict, passed, tested
 
 
 def _first_meaningful_line(content: str) -> str:
