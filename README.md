@@ -36,7 +36,7 @@ $ otto certify "notes API with auth, CRUD, and search"
 
   PASSED — 5/5 stories
   Cost: $1.10  Duration: 164s
-  Report: otto_logs/certifier/proof-of-work.html
+  Report: otto_logs/latest/certify/proof-of-work.html
 ```
 
 **`otto improve`** iterates on existing code with three modes:
@@ -218,7 +218,7 @@ otto build "add dark mode toggle to the settings page"   # incremental
 
 **Certifier mode selection**: CLI flag > `otto.yaml` > `fast` fallback. No flag + no yaml setting → `fast`. Projects that want real verification by default set `certifier_mode: standard` (or `thorough`) in `otto.yaml`.
 
-**Spec gate**: `--spec` generates `otto_logs/runs/<run-id>/spec.md` with sections _Intent / What It Does / Core User Journey / Must Have / Must NOT Have Yet / Success Criteria / Open Questions_. Pauses for `[a]pprove / [e]dit / [r]egenerate / [q]uit`. Approved spec flows into build.md + the certifier prompt — the certifier flags features found in "Must NOT Have Yet" as scope-creep FAILures.
+**Spec gate**: `--spec` generates `otto_logs/sessions/<session-id>/spec/spec.md` with sections _Intent / What It Does / Core User Journey / Must Have / Must NOT Have Yet / Success Criteria / Open Questions_. Pauses for `[a]pprove / [e]dit / [r]egenerate / [q]uit`. Approved spec flows into build.md + the certifier prompt — the certifier flags features found in "Must NOT Have Yet" as scope-creep WARNings (non-failing).
 
 ### `otto certify`
 
@@ -366,7 +366,7 @@ otto build --resume                               # if interrupted
 
 ```bash
 otto build "bookmark manager with tags and share links" --spec
-# → spec agent writes otto_logs/runs/<id>/spec.md
+# → spec agent writes otto_logs/sessions/<id>/spec/spec.md
 # → summary printed: Intent / Must-Have / Must-NOT-Have / Open questions
 # → [a]pprove / [e]dit / [r]egenerate / [q]uit
 # approve → build runs with spec-aware certifier
@@ -401,25 +401,47 @@ otto build --resume              # picks up from the last checkpoint phase
 
 ## Logs
 
+One session = one directory. `latest` and `paused` symlinks give O(1) access
+to the most recent run and the resumable run respectively.
+
 ```
 otto_logs/
-  checkpoint.json            Current run state (run_id, phase, cost, session_id)
-  runs/<run-id>/
-    spec.md                  Approved or in-review spec (spec-gate)
-    spec-v1.md, spec-v2.md   Prior versions after regen
-    spec-agent.log           Spec agent trace
-  builds/<build-id>/
-    agent.log                Structured: commits, certifier rounds, verdict
-    agent-raw.log            Full agent output
-    checkpoint.json          Cost, duration, stories tested/passed
-  certifier/<cert-id>/
-    proof-of-work.html       Report with embedded screenshots
-    proof-of-work.json       Machine-readable results
-    evidence/                Screenshots, video recordings
-  run-history.jsonl          One line per build (for otto history)
-build-journal.md             Round-by-round tracking (improve mode)
-improvement-report.md        Final improve summary with merge instructions
+  latest → sessions/<id>                    symlink — most recent session
+  paused → sessions/<id>                    symlink — resumable session (if any)
+  sessions/
+    2026-04-20-170200-9045bc/               <yyyy-mm-dd>-<HHMMSS>-<6hex>
+      summary.json                          Verdict, cost, duration, stories, status
+      checkpoint.json                       Resume state (only while running/paused)
+      intent.txt                            Archival copy of the intent
+      spec/                                 Only for --spec runs
+        spec.md                             Approved spec
+        spec-v1.md, spec-v2.md              Regen history
+        agent.log                           Spec agent trace
+      build/                                Coding agent artifacts
+        live.log                            Streamed tool/thinking activity
+        agent.log                           Post-run summary: commits, verdict
+        agent-raw.log                       Full agent output (streamed)
+      certify/                              Verification artifacts
+        proof-of-work.{html,json,md}        Human + machine-readable reports
+        evidence/                           Screenshots, recordings, transcripts
+      improve/                              Only for otto improve runs
+        session-report.md                   Final summary + merge instructions
+        build-journal.md                    Round-by-round index
+        current-state.md                    Latest findings (handoff to fix agent)
+        rounds/<round-id>/                  Per-round evidence
+  cross-sessions/
+    history.jsonl                           One line per completed session
+    certifier-memory.jsonl                  One line per cert (for memory)
+  .lock                                     Single-invocation lock (auto-released)
+
+intent.md                                   Project root — canonical product
+                                            description (git-tracked)
 ```
+
+Legacy `otto_logs/runs/`, `otto_logs/builds/`, `otto_logs/certifier/`,
+`otto_logs/run-history.jsonl`, and root `checkpoint.json` remain readable
+from older projects (no migration needed) — `otto history` merges legacy
++ new entries chronologically.
 
 ## Project structure
 

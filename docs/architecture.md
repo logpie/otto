@@ -157,8 +157,11 @@ otto improve bugs "error handling" -n 5
 
 ## Checkpoint & Resume
 
-Both modes write `otto_logs/checkpoint.json`. Agent mode uses `session_id`
-for SDK-level resume; split mode replays from the last completed round.
+Both modes write `otto_logs/sessions/<session-id>/checkpoint.json`, with
+`otto_logs/paused → sessions/<session-id>` symlink for O(1) lookup. Agent
+mode uses `session_id` for SDK-level resume; split mode replays from the
+last completed round. Legacy `otto_logs/checkpoint.json` (pre-restructure)
+is still honored as a fallback.
 
 ```
 otto improve bugs --split -n 50
@@ -268,15 +271,24 @@ CI wrappers can detect when the run didn't reach its goal.
 
 ## Observability
 
+All artifacts from one invocation live under `otto_logs/sessions/<id>/`.
+`otto_logs/latest → sessions/<id>` always points at the most recent run.
+
 | Question | Where to look |
 |----------|---------------|
-| What was built/fixed? | `otto_logs/builds/<id>/agent.log` |
-| Full agent trace? | `agent-raw.log` |
-| Live tool calls? | `live.log` (timestamped) |
-| Certifier results? | `otto_logs/certifier/*/proof-of-work.{json,html}` |
-| Build history? | `otto history` or `run-history.jsonl` |
-| Improve progress? | `build-journal.md`, `checkpoint.json` |
-| Cost? | `checkpoint.json` → `total_cost` |
+| What was built/fixed? | `otto_logs/latest/build/agent.log` |
+| Full agent trace? | `otto_logs/latest/build/agent-raw.log` |
+| Live tool calls? | `otto_logs/latest/build/live.log` (timestamped) |
+| Certifier results? | `otto_logs/latest/certify/proof-of-work.{json,html}` |
+| Build history? | `otto history` or `otto_logs/cross-sessions/history.jsonl` |
+| Improve progress? | `otto_logs/latest/improve/{build-journal.md,current-state.md}` |
+| Cost (final)? | `otto_logs/latest/summary.json` → `cost_usd` |
+| Cost (in-flight)? | `otto_logs/latest/checkpoint.json` → `total_cost` |
+
+All path construction goes through `otto/paths.py`. Legacy pre-restructure
+layouts (`otto_logs/builds/<build-id>/`, `otto_logs/certifier/<cert-id>/`,
+`otto_logs/run-history.jsonl`, root `checkpoint.json`) remain readable
+indefinitely — history/memory/resume all handle both layouts.
 
 ## Data Flow
 

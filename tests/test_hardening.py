@@ -1093,6 +1093,95 @@ class TestResolveResume:
         assert not state.resumed
 
 
+class TestLegacyLayoutResume:
+    """Upgrade-safety: legacy otto_logs/checkpoint.json (pre-restructure
+    layout) must still be loadable via resolve_resume without running any
+    migration. Exercises the fallback path in checkpoint.load_checkpoint.
+    """
+
+    def test_resolve_resume_reads_legacy_paused_checkpoint(self, tmp_path):
+        """Simulate an old-layout project where a build was paused with
+        otto_logs/checkpoint.json at status=paused. resolve_resume must
+        honor it on the first post-upgrade invocation — no sessions/ dir,
+        no paused pointer."""
+        import json
+        from otto import paths
+        from otto.checkpoint import resolve_resume
+
+        logs = paths.logs_dir(tmp_path)
+        logs.mkdir(parents=True, exist_ok=True)
+        legacy = paths.legacy_checkpoint(tmp_path)
+        legacy.write_text(json.dumps({
+            "run_id": "legacy-run-42",
+            "command": "build",
+            "status": "paused",
+            "phase": "build",
+            "session_id": "sdk-legacy-xyz",
+            "current_round": 2,
+            "total_cost": 1.75,
+            "rounds": [{"round": 1}, {"round": 2}],
+            "intent": "legacy intent",
+            "started_at": "2026-03-01T10:00:00Z",
+            "updated_at": "2026-03-01T10:05:00Z",
+        }))
+
+        # Sanity: no new-layout state.
+        assert not (logs / "sessions").exists()
+        assert not (logs / paths.PAUSED_POINTER).exists()
+        assert not (logs / f"{paths.PAUSED_POINTER}.txt").exists()
+
+        state = resolve_resume(tmp_path, resume=True, expected_command="build")
+        assert state.resumed
+        assert state.prior_command == "build"
+        assert state.session_id == "sdk-legacy-xyz"
+        assert state.run_id == "legacy-run-42"
+        assert state.start_round == 3  # current_round + 1
+        assert state.total_cost == 1.75
+        assert state.phase == "build"
+        assert state.intent == "legacy intent"
+
+    def test_resolve_resume_legacy_completed_ignored(self, tmp_path):
+        """A legacy checkpoint in status=completed must not resume."""
+        import json
+        from otto import paths
+        from otto.checkpoint import resolve_resume
+
+        paths.logs_dir(tmp_path).mkdir(parents=True, exist_ok=True)
+        paths.legacy_checkpoint(tmp_path).write_text(json.dumps({
+            "run_id": "r", "command": "build",
+            "status": "completed", "current_round": 5, "total_cost": 2.0,
+        }))
+        state = resolve_resume(tmp_path, resume=True, expected_command="build")
+        assert not state.resumed
+
+    def test_new_layout_wins_over_legacy_when_both_present(self, tmp_path):
+        """If both a new session checkpoint and legacy checkpoint.json exist,
+        the new layout takes precedence (legacy is fallback only)."""
+        import json
+        from otto import paths
+        from otto.checkpoint import resolve_resume, write_checkpoint
+
+        # Write a new-layout paused checkpoint.
+        write_checkpoint(
+            tmp_path, run_id="2026-04-20-170200-abcdef", command="build",
+            session_id="sdk-new", phase="build",
+            current_round=4, total_cost=3.33, status="paused",
+        )
+        # Write a stale legacy checkpoint with different data.
+        paths.legacy_checkpoint(tmp_path).write_text(json.dumps({
+            "run_id": "legacy-stale", "command": "build",
+            "session_id": "sdk-legacy",
+            "current_round": 99, "total_cost": 99.0, "status": "paused",
+        }))
+
+        state = resolve_resume(tmp_path, resume=True, expected_command="build")
+        assert state.resumed
+        # New layout wins.
+        assert state.session_id == "sdk-new"
+        assert state.run_id == "2026-04-20-170200-abcdef"
+        assert state.total_cost == 3.33
+
+
 class TestPhaseBuildResumeFix:
     """Regression: spec-approved → build resume must skip spec regeneration.
 
