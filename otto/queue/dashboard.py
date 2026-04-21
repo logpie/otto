@@ -10,6 +10,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shutil
+import subprocess
+import sys
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -130,6 +133,8 @@ class TaskView:
     cost_display: str
     event: str
     narrative_path: Path | None
+    manifest_path: Path | None
+    session_id: str | None
     state: dict[str, Any] = field(default_factory=dict)
     manifest: dict[str, Any] | None = None
 
@@ -161,9 +166,12 @@ class QueueModel:
         self.project_dir = project_dir
         self._queue_mtime_ns: int | None = None
         self._queue_cache: list[QueueTask] = []
+        self._state_cache: dict[str, Any] = {"tasks": {}, "watcher": None}
         self._manifest_cache: dict[str, _ManifestCacheEntry] = {}
         self._narrative_cache: dict[Path, _NarrativeCacheEntry] = {}
         self._launched_at = launched_at or _now_utc()
+        self.queue_warning: str | None = None
+        self.state_warning: str | None = None
 
     def snapshot(self) -> QueueSnapshot:
         tasks = self._load_queue_cached()
@@ -178,6 +186,8 @@ class QueueModel:
             status = str(task_state.get("status") or "queued")
             manifest = self._read_manifest(task.id) if status != "running" else None
             narrative_path = self.resolve_narrative_path(task, task_state, manifest)
+            manifest_path = self.resolve_manifest_path(task.id, task_state, manifest)
+            session_id = self.resolve_session_id(manifest, narrative_path, manifest_path)
             phase_default = _command_phase(task)
             phase = phase_default
             event = "-"
@@ -199,6 +209,8 @@ class QueueModel:
                     cost_display=_format_cost(cost, pending=status == "running"),
                     event=_truncate(event or "-", 96),
                     narrative_path=narrative_path,
+                    manifest_path=manifest_path,
+                    session_id=session_id,
                     state=task_state,
                     manifest=manifest,
                 )
@@ -221,6 +233,12 @@ class QueueModel:
 
     def resolve_task(self, task_id: str) -> TaskView | None:
         return self.snapshot().by_id.get(task_id)
+
+    def overview_banner(self) -> str | None:
+        warnings = [warning for warning in (self.state_warning, self.queue_warning) if warning]
+        if not warnings:
+            return None
+        return " | ".join(warnings)
 
     def resolve_narrative_path(
         self,
@@ -291,6 +309,7 @@ class QueueModel:
         except OSError:
             self._queue_cache = []
             self._queue_mtime_ns = None
+            self.queue_warning = None
             return []
         if self._queue_mtime_ns == stat.st_mtime_ns:
             return self._queue_cache
@@ -298,17 +317,85 @@ class QueueModel:
             tasks = load_queue(self.project_dir)
         except Exception as exc:
             logger.warning("failed to load queue.yml for dashboard: %s", exc)
+            self.queue_warning = self._load_warning_message(
+                "queue.yml",
+                exc,
+                fallback="using last good cache",
+            )
             return self._queue_cache
         self._queue_cache = tasks
         self._queue_mtime_ns = stat.st_mtime_ns
+        self.queue_warning = None
         return tasks
 
     def _load_state_safe(self) -> dict[str, Any]:
         try:
-            return load_state(self.project_dir)
+            state = load_state(self.project_dir)
         except Exception as exc:
             logger.warning("failed to load queue state for dashboard: %s", exc)
-            return {"tasks": {}, "watcher": None}
+            self.state_warning = self._load_warning_message(
+                "state.json",
+                exc,
+                fallback="using last good cache",
+            )
+            return self._state_cache
+        self._state_cache = state
+        self.state_warning = None
+        return state
+
+    def resolve_manifest_path(
+        self,
+        task_id: str,
+        task_state: dict[str, Any] | None = None,
+        manifest: dict[str, Any] | None = None,
+    ) -> Path | None:
+        if manifest:
+            mirror_of = manifest.get("mirror_of")
+            if isinstance(mirror_of, str) and mirror_of:
+                return Path(mirror_of).expanduser().resolve(strict=False)
+        if isinstance(task_state, dict):
+            manifest_path = task_state.get("manifest_path")
+            if isinstance(manifest_path, str) and manifest_path:
+                return Path(manifest_path).expanduser().resolve(strict=False)
+        queue_manifest = queue_index_path_for(self.project_dir, task_id)
+        if queue_manifest is None:
+            return None
+        return queue_manifest.resolve(strict=False)
+
+    def resolve_session_id(
+        self,
+        manifest: dict[str, Any] | None,
+        narrative_path: Path | None,
+        manifest_path: Path | None,
+    ) -> str | None:
+        if manifest:
+            run_id = manifest.get("run_id")
+            if isinstance(run_id, str) and run_id:
+                return run_id
+        for path in (narrative_path, manifest_path):
+            session_id = self._session_id_from_path(path)
+            if session_id is not None:
+                return session_id
+        return None
+
+    @staticmethod
+    def _load_warning_message(path_label: str, exc: Exception, *, fallback: str) -> str:
+        error_kind = "parse error" if isinstance(exc, ValueError) else "read error"
+        return f"⚠ {path_label} {error_kind} ({fallback})"
+
+    @staticmethod
+    def _session_id_from_path(path: Path | None) -> str | None:
+        if path is None:
+            return None
+        parts = path.parts
+        try:
+            index = parts.index("sessions")
+        except ValueError:
+            return None
+        if index + 1 >= len(parts):
+            return None
+        session_id = parts[index + 1]
+        return session_id or None
 
     def _read_manifest(self, task_id: str) -> dict[str, Any] | None:
         path = queue_index_path_for(self.project_dir, task_id)
@@ -473,6 +560,7 @@ class OverviewScreen(Screen[None]):
         Binding("k", "cursor_up", "Up", show=False),
         Binding("up", "cursor_up", "Up", show=False),
         Binding("enter", "open_task", "Open", show=False),
+        Binding("y", "yank_to_clipboard", "Yank", show=False),
         Binding("c", "cancel_task", "Cancel", show=False),
         Binding("?", "show_help", "Help", show=False),
         Binding("q", "quit_dashboard", "Quit", show=False),
@@ -484,6 +572,7 @@ class OverviewScreen(Screen[None]):
         self._refresh_timer = None
 
     def compose(self) -> ComposeResult:
+        yield Static(id="overview-banner")
         yield Static(id="overview-header")
         yield DataTable(id="overview-table")
         yield Static(id="overview-status")
@@ -505,6 +594,8 @@ class OverviewScreen(Screen[None]):
     def _refresh(self) -> None:
         snapshot = self.app.model.snapshot()
         self.app.last_snapshot = snapshot
+        banner = self.query_one("#overview-banner", Static)
+        banner.update(Text(self.app.model.overview_banner() or ""))
         header = self.query_one("#overview-header", Static)
         header.update(
             f"[bold]otto queue[/bold] · concurrent={self.app.concurrent} · "
@@ -514,7 +605,7 @@ class OverviewScreen(Screen[None]):
         footer.update(
             f"{snapshot.running_count} running · {snapshot.queued_count} queued · "
             f"{snapshot.done_count} done · {snapshot.total_count} total · "
-            "enter open · c cancel · ? help · q quit"
+            "enter open · y yank · c cancel · ? help · q quit/drain"
         )
         self._sync_rows(snapshot.tasks)
 
@@ -580,6 +671,39 @@ class OverviewScreen(Screen[None]):
             return
         self.app.cancel_task(task_id)
 
+    def action_yank_to_clipboard(self) -> None:
+        task_id = self._selected_task_id()
+        if task_id is None:
+            return
+        task = self.app.last_snapshot.by_id.get(task_id)
+        if task is None:
+            return
+        payload = "\n".join(
+            [
+                "\t".join(
+                    [
+                        task.task.id,
+                        task.status,
+                        task.phase,
+                        task.branch,
+                        task.elapsed_display,
+                        task.cost_display,
+                        task.event,
+                    ]
+                ),
+                "\t".join(
+                    [
+                        task.session_id or "-",
+                        str(task.manifest_path) if task.manifest_path is not None else "-",
+                    ]
+                ),
+            ]
+        )
+        if _copy_to_clipboard(payload):
+            self.notify(f"copied {task.task.id} to clipboard")
+            return
+        self.notify("clipboard not available", severity="warning")
+
     def action_show_help(self) -> None:
         self.app.push_screen(
             HelpModal(
@@ -588,8 +712,9 @@ class OverviewScreen(Screen[None]):
                     "j / Down: move to next row",
                     "k / Up: move to previous row",
                     "Enter: open task detail",
+                    "y: yank selected row to clipboard",
                     "c: queue cancel for selected running task",
-                    "q: quit dashboard and stop watcher",
+                    "q: quit dashboard; watcher drains running tasks, then exits",
                 ],
             )
         )
@@ -608,6 +733,7 @@ class TaskDetailScreen(Screen[None]):
         Binding("pageup", "page_up", "Page Up", show=False),
         Binding("end", "follow_tail", "Tail", show=False),
         Binding("home", "top", "Top", show=False),
+        Binding("y", "yank_to_clipboard", "Yank", show=False),
         Binding("c", "cancel_task", "Cancel", show=False),
         Binding("?", "show_help", "Help", show=False),
     ]
@@ -620,8 +746,9 @@ class TaskDetailScreen(Screen[None]):
 
     def compose(self) -> ComposeResult:
         yield Static(id="detail-header")
+        yield Static(id="detail-info")
         yield RichLog(id="detail-log", max_lines=_NARRATIVE_MAX_LINES, markup=True, highlight=True)
-        yield Static("[esc/q back · j/k scroll · pgup/pgdn · c cancel · end follow]", id="detail-status")
+        yield Static("[esc/q back · y yank · j/k scroll · pgup/pgdn · c cancel · end follow]", id="detail-status")
 
     def on_mount(self) -> None:
         self.query_one("#detail-log", RichLog).focus()
@@ -637,6 +764,7 @@ class TaskDetailScreen(Screen[None]):
     def _refresh(self) -> None:
         current = self.app.model.resolve_task(self.task_id)
         self._update_header(current)
+        self._update_info(current)
         log = self.query_one("#detail-log", RichLog)
         clear, lines = self._tailer.poll()
         if clear:
@@ -655,6 +783,21 @@ class TaskDetailScreen(Screen[None]):
             f"[bold]otto queue ▸ {self.task_id}[/bold] · "
             f"{current.phase} · {current.elapsed_display} · {current.cost_display}"
         )
+
+    def _update_info(self, current: TaskView | None) -> None:
+        info = self.query_one("#detail-info", Static)
+        if current is None:
+            info.update(Text("branch: -\nlog: -\nmanifest: -"))
+            return
+        lines = [
+            f"branch: {current.branch}",
+            f"log: {current.narrative_path if current.narrative_path is not None else '-'}",
+            f"manifest: {current.manifest_path if current.manifest_path is not None else '-'}",
+        ]
+        failure_reason = current.state.get("failure_reason")
+        if current.status == "failed" and isinstance(failure_reason, str) and failure_reason:
+            lines.append(f"failure: {failure_reason}")
+        info.update(Text("\n".join(lines)))
 
     def action_back(self) -> None:
         self.app.pop_screen()
@@ -686,12 +829,27 @@ class TaskDetailScreen(Screen[None]):
     def action_cancel_task(self) -> None:
         self.app.cancel_task(self.task_id)
 
+    def action_yank_to_clipboard(self) -> None:
+        narrative_path = self._resolve_narrative_path()
+        if narrative_path is None:
+            self.notify("narrative log unavailable", severity="warning")
+            return
+        text = _read_text_file(narrative_path)
+        if text is None:
+            self.notify("narrative log unavailable", severity="warning")
+            return
+        if _copy_to_clipboard(text):
+            self.notify(f"copied {self.task_id} to clipboard")
+            return
+        self.notify("clipboard not available", severity="warning")
+
     def action_show_help(self) -> None:
         self.app.push_screen(
             HelpModal(
                 f"Task detail bindings ({self.task_id})",
                 [
                     "Esc / q: return to overview",
+                    "y: yank full narrative log to clipboard",
                     "j / k: scroll one line",
                     "PgUp / PgDn: scroll one page",
                     "Home: jump to top",
@@ -708,6 +866,11 @@ class QueueApp(App[int]):
         layout: vertical;
     }
 
+    #overview-banner {
+        padding: 0 1;
+        color: yellow;
+    }
+
     #overview-header, #detail-header {
         height: 1;
         padding: 0 1;
@@ -718,6 +881,11 @@ class QueueApp(App[int]):
         height: 1;
         padding: 0 1;
         color: green;
+    }
+
+    #detail-info {
+        padding: 0 1;
+        color: $text-muted;
     }
 
     #overview-table, #detail-log {
@@ -785,9 +953,39 @@ def _append_cancel_command(project_dir: Path, task_id: str) -> None:
     )
 
 
+def _read_text_file(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        logger.warning("failed to read %s for clipboard copy: %s", path, exc)
+        return None
+
+
+def _copy_to_clipboard(text: str) -> bool:
+    encoded = text.encode()
+    try:
+        if sys.platform == "darwin":
+            result = subprocess.run(["pbcopy"], input=encoded, check=False)
+            return result.returncode == 0
+        if sys.platform.startswith("linux"):
+            if shutil.which("xclip"):
+                result = subprocess.run(["xclip", "-selection", "clipboard"], input=encoded, check=False)
+                return result.returncode == 0
+            if shutil.which("wl-copy"):
+                result = subprocess.run(["wl-copy"], input=encoded, check=False)
+                return result.returncode == 0
+            logger.warning("clipboard helper unavailable: neither xclip nor wl-copy found")
+            return False
+    except OSError as exc:
+        logger.warning("clipboard copy failed: %s", exc)
+        return False
+    logger.warning("clipboard copy unsupported on platform %s", sys.platform)
+    return False
+
+
 async def _run_dashboard_async(app: QueueApp, runner: Runner, *, quiet: bool) -> int:
     runner_task = asyncio.create_task(runner.run_async())
-    app_task = asyncio.create_task(app.run_async())
+    app_task = asyncio.create_task(app.run_async(mouse=False))
 
     while True:
         done, _pending = await asyncio.wait(

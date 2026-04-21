@@ -8,6 +8,7 @@ from click.testing import CliRunner
 from textual.widgets import DataTable, RichLog, Static
 
 import otto.cli_queue as cli_queue_module
+import otto.queue.dashboard as dashboard_module
 from otto.cli import main
 from otto.queue.dashboard import (
     HelpModal,
@@ -35,6 +36,24 @@ def _write_narrative(repo: Path, task_id: str, text: str, *, phase_dir: str = "b
     path = repo / ".worktrees" / task_id / "otto_logs" / "sessions" / f"session-{task_id}" / phase_dir / "narrative.log"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
+
+
+def _write_queue_manifest(repo: Path, task_id: str, *, session_id: str) -> Path:
+    session_root = repo / ".worktrees" / task_id / "otto_logs" / "sessions" / session_id
+    manifest_path = session_root / "manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_payload = {
+        "run_id": session_id,
+        "mirror_of": str(manifest_path.resolve()),
+        "cost_usd": 1.25,
+        "duration_s": 5.0,
+    }
+    manifest_path.write_text(json.dumps(manifest_payload))
+
+    queue_manifest = repo / "otto_logs" / "queue" / task_id / "manifest.json"
+    queue_manifest.parent.mkdir(parents=True, exist_ok=True)
+    queue_manifest.write_text(json.dumps(manifest_payload))
+    return manifest_path.resolve()
 
 
 def _write_queue_state(repo: Path, tasks: dict[str, dict]) -> None:
@@ -190,6 +209,96 @@ async def test_cancel_key_calls_callback_for_selected_task(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_overview_yank_copies_selected_row_to_clipboard(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    repo = init_repo(tmp_path)
+    append_task(repo, _queue_task("alpha", branch="build/alpha", worktree=".worktrees/alpha"))
+    _write_narrative(repo, "alpha", "[+0:00] BUILD starting\n[+0:05] finished alpha.\n")
+    manifest_path = _write_queue_manifest(repo, "alpha", session_id="session-alpha")
+    _write_queue_state(
+        repo,
+        {
+            "alpha": {
+                "status": "done",
+                "started_at": "2026-04-21T20:00:00Z",
+                "finished_at": "2026-04-21T20:00:05Z",
+                "cost_usd": 1.25,
+                "duration_s": 5.0,
+            },
+        },
+    )
+
+    calls: list[tuple[list[str], bytes, bool]] = []
+
+    def _fake_run(argv: list[str], *, input: bytes, check: bool):
+        calls.append((argv, input, check))
+
+        class _Result:
+            returncode = 0
+
+        return _Result()
+
+    monkeypatch.setattr(dashboard_module.sys, "platform", "darwin", raising=False)
+    monkeypatch.setattr(dashboard_module.subprocess, "run", _fake_run)
+
+    app = _build_app(repo)
+    async with app.run_test(notifications=True) as pilot:
+        await pilot.pause()
+        await pilot.press("y")
+        await pilot.pause()
+
+    assert calls == [
+        (
+            ["pbcopy"],
+            (
+                "alpha\tdone\tBUILD\tbuild/alpha\t0:05\t$1.25\t[+0:05] finished alpha.\n"
+                f"session-alpha\t{manifest_path}"
+            ).encode(),
+            False,
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_detail_yank_copies_full_narrative_log(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    repo = init_repo(tmp_path)
+    append_task(repo, _queue_task("alpha", branch="build/alpha", worktree=".worktrees/alpha"))
+    narrative_text = "[+0:00] BUILD starting\n[+0:01] line one\n[+0:02] line two\n"
+    _write_narrative(repo, "alpha", narrative_text)
+    _write_queue_state(
+        repo,
+        {
+            "alpha": {
+                "status": "running",
+                "started_at": "2026-04-21T20:00:01Z",
+            },
+        },
+    )
+
+    calls: list[tuple[list[str], bytes, bool]] = []
+
+    def _fake_run(argv: list[str], *, input: bytes, check: bool):
+        calls.append((argv, input, check))
+
+        class _Result:
+            returncode = 0
+
+        return _Result()
+
+    monkeypatch.setattr(dashboard_module.sys, "platform", "darwin", raising=False)
+    monkeypatch.setattr(dashboard_module.subprocess, "run", _fake_run)
+
+    app = _build_app(repo)
+    async with app.run_test(notifications=True) as pilot:
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.press("y")
+        await pilot.pause()
+
+    assert calls == [(["pbcopy"], narrative_text.encode(), False)]
+
+
+@pytest.mark.asyncio
 async def test_help_overlay_appears(tmp_path: Path):
     repo = init_repo(tmp_path)
     append_task(repo, _queue_task("alpha", branch="build/alpha", worktree=".worktrees/alpha"))
@@ -202,6 +311,26 @@ async def test_help_overlay_appears(tmp_path: Path):
         await pilot.press("?")
         await pilot.pause()
         assert isinstance(app.screen, HelpModal)
+
+
+@pytest.mark.asyncio
+async def test_state_parse_error_banner_appears_and_clears(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    append_task(repo, _queue_task("alpha", branch="build/alpha", worktree=".worktrees/alpha"))
+    _write_narrative(repo, "alpha", "[+0:00] BUILD starting\n")
+    (repo / ".otto-queue-state.json").write_text('{"schema_version": 1,')
+
+    app = _build_app(repo)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        banner = app.screen.query_one("#overview-banner", Static)
+        assert "state.json parse error" in str(banner.content)
+
+        _write_queue_state(repo, {"alpha": {"status": "queued"}})
+        await pilot.pause(0.6)
+
+        banner = app.screen.query_one("#overview-banner", Static)
+        assert "state.json parse error" not in str(banner.content)
 
 
 def test_queue_run_skips_dashboard_when_disabled(monkeypatch, tmp_path: Path):
