@@ -339,23 +339,24 @@ def _run_improve_locked(
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text("\n".join(report_lines))
 
-    # Phase 1.4: write per-run manifest. improve uses the build_dir
-    # naming scheme (otto_logs/builds/<build_id>/) since it routes through
-    # build_agentic_v3 / run_certify_fix_loop.
+    # Per-run manifest. Lands at sessions/<id>/manifest.json (atomic)
+    # or otto_logs/queue/<task-id>/manifest.json (queue mode).
     try:
+        from otto import paths as _paths
         from otto.manifest import (
             current_head_sha,
             make_manifest,
             write_manifest,
         )
-        build_dir = project_dir / "otto_logs" / "builds" / result.build_id
+        session_dir_path = _paths.session_dir(project_dir, result.build_id)
+        certify_dir_path = _paths.certify_dir(project_dir, result.build_id)
         manifest = make_manifest(
             command="improve",
             argv=list(sys.argv[1:]),
             run_id=result.build_id,
             branch=branch,
-            checkpoint_path=build_dir / "checkpoint.json",
-            proof_of_work_path=project_dir / "otto_logs" / "certifier" / "proof-of-work.json",
+            checkpoint_path=session_dir_path / "checkpoint.json",
+            proof_of_work_path=certify_dir_path / "proof-of-work.json",
             cost_usd=result.total_cost,
             duration_s=duration,
             started_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(start)),
@@ -366,7 +367,7 @@ def _run_improve_locked(
             exit_status="success" if result.passed else "failure",
         )
         manifest.head_sha = current_head_sha(project_dir)
-        write_manifest(manifest, project_dir=project_dir, fallback_dir=build_dir)
+        write_manifest(manifest, project_dir=project_dir, fallback_dir=session_dir_path)
     except Exception as exc:
         error_console.print(f"[yellow]warning: manifest write failed: {exc}[/yellow]")
 

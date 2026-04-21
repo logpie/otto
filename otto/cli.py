@@ -1103,8 +1103,9 @@ def _build_locked(
     )
 
     # Per-run manifest for queue/merge subsystems. Path is per-task when
-    # OTTO_QUEUE_TASK_ID is set, otherwise alongside the build's checkpoint.
+    # OTTO_QUEUE_TASK_ID is set, otherwise at the session root.
     # Uses the new per-session paths from otto/paths.py.
+    session_dir = _paths.session_dir(project_dir, result.build_id)
     build_dir = _paths.build_dir(project_dir, result.build_id)
     certify_dir = _paths.certify_dir(project_dir, result.build_id)
     try:
@@ -1119,7 +1120,7 @@ def _build_locked(
             argv=list(sys.argv[1:]),
             run_id=result.build_id,
             branch=(current_branch(project_dir) or None),
-            checkpoint_path=build_dir / "checkpoint.json",
+            checkpoint_path=session_dir / "checkpoint.json",
             proof_of_work_path=certify_dir / "proof-of-work.json",
             cost_usd=result.total_cost,
             duration_s=build_duration,
@@ -1128,7 +1129,7 @@ def _build_locked(
             resolved_intent=intent,
             exit_status="success" if result.passed else "failure",
         )
-        write_manifest(manifest, project_dir=project_dir, fallback_dir=build_dir)
+        write_manifest(manifest, project_dir=project_dir, fallback_dir=session_dir)
     except Exception as exc:
         # Manifest writing is observability — never let it crash the user
         from otto.theme import error_console as _err
@@ -1332,7 +1333,7 @@ def _certify_locked(
         if legacy_pow.exists():
             console.print(f"  Report: {legacy_pow}")
 
-    # Phase 1.4: write per-run manifest for queue/merge consumption
+    # Per-run manifest for queue/merge consumption.
     try:
         from otto.manifest import (
             current_head_sha,
@@ -1341,14 +1342,15 @@ def _certify_locked(
         )
         from otto.branching import current_branch
         cert_run_id = report.run_id or "unknown"
-        cert_dir = project_dir / "otto_logs" / "certifier" / cert_run_id
+        cert_session_dir = _paths.session_dir(project_dir, cert_run_id)
+        cert_certify_dir = _paths.certify_dir(project_dir, cert_run_id)
         manifest = make_manifest(
             command="certify",
             argv=list(sys.argv[1:]),
             run_id=cert_run_id,
             branch=(current_branch(project_dir) or None),
             checkpoint_path=None,  # certify doesn't write a checkpoint.json
-            proof_of_work_path=cert_dir / "proof-of-work.json",
+            proof_of_work_path=cert_certify_dir / "proof-of-work.json",
             cost_usd=float(report.cost_usd),
             duration_s=duration,
             started_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(start)),
@@ -1356,7 +1358,7 @@ def _certify_locked(
             resolved_intent=intent,
             exit_status="success" if outcome == "passed" else "failure",
         )
-        write_manifest(manifest, project_dir=project_dir, fallback_dir=cert_dir)
+        write_manifest(manifest, project_dir=project_dir, fallback_dir=cert_session_dir)
     except Exception as exc:
         from otto.theme import error_console as _err
         _err.print(f"[yellow]warning: manifest write failed: {exc}[/yellow]")
