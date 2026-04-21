@@ -430,42 +430,52 @@ Touch only the WRITE side. Readers still accept both.
 - Certifier memory across legacy and new files — the certifier prompt
   injection still loads the last 5 entries in order.
 
-### Phase 3 — Remove legacy writer paths; legacy reader fallbacks stay
+### Phase 3 — Remove legacy writer paths (audit only)
 
-- Delete old path literals from writers (they're gone already if Phase 1 is
-  thorough, but audit).
-- Keep legacy read fallbacks for one release (gives users a grace period).
-- Emit a one-time warning on CLI startup when legacy paths are detected,
-  pointing to `--migrate-logs`.
+**Subsumed into Phase 1 in practice:** grep confirms no writer still emits
+legacy paths. Legacy readers (fallback for upgrade safety) remain live
+indefinitely — there is no value in forcibly deprecating them. Old
+`otto_logs/` directories keep working as read-only history; new runs write
+the new layout.
+
+**Dropped sub-tasks (rationale):**
+- ~~Startup warning pointing at `--migrate-logs`~~: Phase 4 (migration
+  command) is dropped, so a warning with no remediation action is noise.
+  Users with old `otto_logs/` incur zero functional cost — nothing to warn
+  about.
 
 **Verify:**
 - `grep -rn '"runs"\|"builds"\|"run-history"\|"certifier-memory"' otto/
-  --include="*.py"` returns only fallback-reader references, none in writers.
-- `otto build` in a fresh dir produces zero top-level files in `otto_logs/`
-  other than `sessions/`, `latest`, `cross-sessions/` (and optionally
-  `paused`).
+  --include="*.py"` returns only fallback-reader references. (done)
 
-### Phase 4 — Add `--migrate-logs` and deprecation warnings
+### Phase 4 — DROPPED
 
-- `otto migrate-logs` (or `otto build --migrate-logs`) moves existing old-
-  layout files to `otto_logs/.pre-restructure/` and creates an empty new
-  layout.
-- Warn on the first `otto` run in an unmigrated project. One-time warning
-  via a `.migration-warned` stamp.
+Originally proposed `otto migrate-logs` + `.pre-restructure/` archive
++ deprecation warning. Removed from scope:
 
-**Verify:**
-- Run `otto migrate-logs` on a project with old-layout data → old files
-  under `.pre-restructure/`, new layout initialized, `history` command
-  still shows pre-migration entries (read from archive).
-- Unit test: before/after paths for each file type.
+- **No pain point.** Legacy paths stay readable via Phase 1 fallbacks —
+  history, memory, and resume all work on old `otto_logs/` dirs.
+- **Migration is risky for no benefit.** Codex flagged: atomic rename into
+  own child is impossible; allowlist can miss files; mid-run upgrade can
+  strand paused checkpoints. Every one of these risks disappears if we
+  never migrate.
+- **Users who want cleanup can `rm` legacy subdirs themselves** — simpler
+  and safer than a command that pretends to know what's safe.
+- **Far future:** if legacy readers ever need to go, a CHANGELOG note +
+  one commit that deletes the fallback paths is cleaner than shipping a
+  migration command today.
 
-### Phase 5 — Tests and docs (layout)
+### Phase 5 — Tests and docs (layout) — reduced scope
 
-- Update `tests/` to reference new paths. Keep at least one test covering the
-  legacy-reader fallback.
-- Update `README.md`, `CLAUDE.md` log-interpretation tables to the new layout
-  (but still describe old log formats — those are retired in Phase 6).
-- Update the `reference_otto_cli.md` memory entry.
+Because Phase 2/3 folded into Phase 1, what's left here is purely
+documentation + one end-to-end test.
+
+- Update `README.md` log-layout section to new structure.
+- Update `CLAUDE.md` log-interpretation table for per-session paths.
+- Update `docs/architecture.md` diagrams/references.
+- Update `reference_otto_cli.md` memory entry.
+- Add one end-to-end test: start a run with legacy-layout otto_logs/,
+  Ctrl+C mid-spec, `--resume` — should succeed without migration.
 
 **Verify:**
 - `pytest tests/ -q` — full suite green.
@@ -630,26 +640,24 @@ CHANGELOG."
   (`progress.jsonl` appended per round)? Default: no, journal.py's
   per-round dirs are sufficient.]
 
-## Estimated effort
+## Estimated effort (revised after Phase 1 landed)
 
-- Phase 1: 4-6 hours (paths.py + writer migration, largest phase)
-- Phase 2: 2-3 hours (reader migration, smaller surface)
-- Phase 3: 1-2 hours (cleanup, audit, warnings)
-- Phase 4: 2-3 hours (migration command + stamp)
-- Phase 5: 1-2 hours (tests + docs for layout)
-- Phase 6: 5-8 hours (narrative formatters are real design work — multiple
-  event types, edge cases, golden-file tests; JSONL writer is trivial)
-- Phase 7: 1-2 hours (docs + memory for new formats)
-- Total: 16-26 hours focused work.
+- Phase 1: ~2h actual (paths.py + writer migration + regression tests) — **DONE**
+- Phase 2: absorbed into Phase 1's legacy fallbacks — effectively **DONE**
+- Phase 3: audit only, no active work — effectively **DONE**
+- Phase 4: **DROPPED** (see rationale above)
+- Phase 5: ~1-2 hours (docs sweep + one cross-layout resume test)
+- Phase 6: ~3-5 hours (formatters + JSONL writer + golden-file tests)
+- Phase 7: folded into Phase 6
 
-Suggest splitting across 3-4 sessions:
-- Session 1: Phases 1-2 (paths + reader migration)
-- Session 2: Phases 3-5 (cleanup + migration + doc pass 1)
-- Session 3: Phase 6 (formatters — hardest)
-- Session 4: Phase 7 (final doc + memory pass)
+**Remaining work: ~4-7 hours across 1-2 sessions.**
 
-`/codex-gate` Plan Gate before Phase 1. `/codex-gate` Implementation Gate
-before merging Phase 6 (highest risk, user-visible format change).
+Suggested session split:
+- Next session: Phase 5 (docs sweep, quick) → Phase 6 (log format redesign,
+  the bigger piece with real user-visible payoff).
+
+`/codex-gate` Implementation Gate before merging Phase 6 to main (highest
+risk and most user-visible change).
 
 ## Plan Review
 
