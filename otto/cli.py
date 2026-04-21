@@ -757,8 +757,12 @@ def _build_locked(
 @click.option("--thorough", is_flag=True, help="Thorough mode — adversarial edge cases + code review")
 @click.option("--fast", is_flag=True, help="Fast mode — happy path smoke test only")
 @click.option("--standard", "standard_", is_flag=True, help="Standard mode — Must-Have + generic CRUD/edge/access checklist (default when no flag given)")
+@click.option("--budget", default=None, type=int, help="Total wall-clock budget in seconds (default from otto.yaml or 3600)")
+@click.option("--model", default=None, help="Override model for every agent (e.g. sonnet, haiku, gpt-5)")
+@click.option("--provider", default=None, help="Override provider for every agent: claude | codex")
+@click.option("--effort", default=None, help="Override effort level for every agent: low | medium | high | max")
 @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
-def certify(intent, thorough, fast, standard_, break_lock):
+def certify(intent, thorough, fast, standard_, budget, model, provider, effort, break_lock):
     """Certify a product — independent, builder-blind verification.
 
     Tests the product in the current directory as a real user. Works on
@@ -783,16 +787,43 @@ def certify(intent, thorough, fast, standard_, break_lock):
     try:
         with _paths.project_lock(project_dir, "certify", break_lock=break_lock):
             session_id = _new_run_id(project_dir)
-            _certify_locked(intent, thorough, fast, standard_, project_dir, session_id)
+            _certify_locked(
+                intent, thorough, fast, standard_,
+                budget, model, provider, effort,
+                project_dir, session_id,
+            )
     except _paths.LockBusy as exc:
         _exit_for_lock_busy(exc)
 
 
-def _certify_locked(intent, thorough, fast, standard_, project_dir: Path, session_id: str):
+def _certify_locked(
+    intent, thorough, fast, standard_,
+    budget, model, provider, effort,
+    project_dir: Path, session_id: str,
+):
 
     # Load config so run_budget_seconds and other settings are respected
     config_path = project_dir / "otto.yaml"
-    config = load_config(config_path) if config_path.exists() else {}
+    config = load_config(config_path)
+
+    sources: dict[str, str] = {}
+    if budget is not None:
+        config["run_budget_seconds"] = budget
+        sources["run_budget_seconds"] = "cli"
+    if model:
+        config["model"] = model
+        sources["model"] = "cli"
+    if provider:
+        config["provider"] = provider
+        sources["provider"] = "cli"
+    if effort:
+        config["effort"] = effort
+        sources["effort"] = "cli"
+    mode_flag = "fast" if fast else ("standard" if standard_ else ("thorough" if thorough else None))
+    if mode_flag:
+        config["certifier_mode"] = mode_flag
+        sources["certifier_mode"] = "cli"
+    _print_config_banner(console, config, sources, config_path)
 
     # Resolve intent: argument > intent.md > README.md
     if not intent:

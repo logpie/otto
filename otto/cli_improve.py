@@ -84,6 +84,7 @@ def _run_improve(
     resume: bool = False,
     resume_state=None,
     break_lock: bool = False,
+    cli_overrides: dict | None = None,
 ) -> None:
     """CLI wrapper: branch creation, display, and report around the shared loop.
 
@@ -118,6 +119,7 @@ def _run_improve(
                 resume=resume,
                 resume_state=resume_state,
                 run_id=run_id,
+                cli_overrides=cli_overrides or {},
             )
     except _paths.LockBusy as exc:
         _exit_for_lock_busy(exc)
@@ -138,6 +140,7 @@ def _run_improve_locked(
     resume: bool,
     resume_state,
     run_id: str,
+    cli_overrides: dict | None = None,
 ) -> None:
     from otto import paths as _paths
     from otto.config import load_config
@@ -155,15 +158,43 @@ def _run_improve_locked(
     console.print()
 
     config_path = project_dir / "otto.yaml"
-    config = load_config(config_path) if config_path.exists() else {}
+    config = load_config(config_path)
     config["max_certify_rounds"] = max(1, rounds)
+
+    # Apply CLI overrides to the loaded config.
+    overrides = cli_overrides or {}
+    sources: dict[str, str] = {}
+    if overrides.get("budget") is not None:
+        config["run_budget_seconds"] = overrides["budget"]
+        sources["run_budget_seconds"] = "cli"
+    if overrides.get("model"):
+        config["model"] = overrides["model"]
+        sources["model"] = "cli"
+    if overrides.get("provider"):
+        config["provider"] = overrides["provider"]
+        sources["provider"] = "cli"
+    if overrides.get("effort"):
+        config["effort"] = overrides["effort"]
+        sources["effort"] = "cli"
 
     # Give improve modes a larger wall-clock budget by default, since
     # multi-round fix loops legitimately take longer than a single build.
     # User-set `run_budget_seconds` wins.
-    existing_budget = config.get("run_budget_seconds")
-    if existing_budget is None:
-        config["run_budget_seconds"] = 7200  # 2h default for improve
+    if not config.get("run_budget_seconds") or config["run_budget_seconds"] == 3600:
+        if "run_budget_seconds" not in sources:
+            # No CLI --budget and no explicit yaml override → use improve default.
+            import yaml as _yaml
+            raw = {}
+            if config_path.exists():
+                try:
+                    raw = _yaml.safe_load(config_path.read_text()) or {}
+                except Exception:
+                    pass
+            if "run_budget_seconds" not in raw:
+                config["run_budget_seconds"] = 7200  # 2h default for improve
+
+    from otto.cli import _print_config_banner
+    _print_config_banner(console, config, sources, config_path)
 
     from otto.budget import RunBudget
     budget = RunBudget.start_from(config)
@@ -319,8 +350,12 @@ def register_improve_commands(main: click.Group) -> None:
     @click.option("--rounds", "-n", default=3, help="Maximum rounds (default: 3)")
     @click.option("--split", is_flag=True, help="System-controlled loop (vs agent-driven)")
     @click.option("--resume", is_flag=True, help="Resume from last checkpoint")
+    @click.option("--budget", default=None, type=int, help="Total wall-clock budget in seconds (default from otto.yaml or 7200 for improve)")
+    @click.option("--model", default=None, help="Override model for every agent (e.g. sonnet, haiku, gpt-5)")
+    @click.option("--provider", default=None, help="Override provider for every agent: claude | codex")
+    @click.option("--effort", default=None, help="Override effort level for every agent: low | medium | high | max")
     @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
-    def bugs(focus, rounds, split, resume, break_lock):
+    def bugs(focus, rounds, split, resume, budget, model, provider, effort, break_lock):
         """Find and fix bugs, edge cases, and error handling gaps.
 
         One agent certifies, reads findings, fixes, and re-certifies
@@ -346,6 +381,7 @@ def register_improve_commands(main: click.Group) -> None:
             split=split,
             resume=resume,
             break_lock=break_lock,
+            cli_overrides={"budget": budget, "model": model, "provider": provider, "effort": effort},
         )
 
     @improve.command(context_settings=CONTEXT_SETTINGS)
@@ -353,8 +389,12 @@ def register_improve_commands(main: click.Group) -> None:
     @click.option("--rounds", "-n", default=3, help="Maximum rounds (default: 3)")
     @click.option("--split", is_flag=True, help="System-controlled loop (vs agent-driven)")
     @click.option("--resume", is_flag=True, help="Resume from last checkpoint")
+    @click.option("--budget", default=None, type=int, help="Total wall-clock budget in seconds (default from otto.yaml or 7200 for improve)")
+    @click.option("--model", default=None, help="Override model for every agent (e.g. sonnet, haiku, gpt-5)")
+    @click.option("--provider", default=None, help="Override provider for every agent: claude | codex")
+    @click.option("--effort", default=None, help="Override effort level for every agent: low | medium | high | max")
     @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
-    def feature(focus, rounds, split, resume, break_lock):
+    def feature(focus, rounds, split, resume, budget, model, provider, effort, break_lock):
         """Suggest and implement product improvements.
 
         One agent evaluates the product, identifies improvements, implements
@@ -379,6 +419,7 @@ def register_improve_commands(main: click.Group) -> None:
             split=split,
             resume=resume,
             break_lock=break_lock,
+            cli_overrides={"budget": budget, "model": model, "provider": provider, "effort": effort},
         )
 
     @improve.command(context_settings=CONTEXT_SETTINGS)
@@ -386,8 +427,12 @@ def register_improve_commands(main: click.Group) -> None:
     @click.option("--rounds", "-n", default=5, help="Maximum rounds (default: 5)")
     @click.option("--split", is_flag=True, help="System-controlled loop (vs agent-driven)")
     @click.option("--resume", is_flag=True, help="Resume from last checkpoint")
+    @click.option("--budget", default=None, type=int, help="Total wall-clock budget in seconds (default from otto.yaml or 7200 for improve)")
+    @click.option("--model", default=None, help="Override model for every agent (e.g. sonnet, haiku, gpt-5)")
+    @click.option("--provider", default=None, help="Override provider for every agent: claude | codex")
+    @click.option("--effort", default=None, help="Override effort level for every agent: low | medium | high | max")
     @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
-    def target(goal, rounds, split, resume, break_lock):
+    def target(goal, rounds, split, resume, budget, model, provider, effort, break_lock):
         """Optimize toward a measurable target.
 
         Measures a metric, compares to the target, and iterates until met.
@@ -449,4 +494,5 @@ def register_improve_commands(main: click.Group) -> None:
             resume=resume,
             resume_state=resume_state,
             break_lock=break_lock,
+            cli_overrides={"budget": budget, "model": model, "provider": provider, "effort": effort},
         )
