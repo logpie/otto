@@ -348,12 +348,16 @@ class NarrativeFormatter:
             self._write(f"{ts} \u2190 {_truncate_at_word(stripped_first)} ({total_lines} lines)")
             return
 
-        # Default rendering: word-safe truncation on the first line,
-        # suffix line-count if multi-line. Do NOT pre-cut the line —
-        # _truncate_at_word handles boundary-safe trimming.
-        first = content.split("\n", 1)[0]
+        # Default rendering: scan forward for the first meaningful line
+        # (skip leading blank lines, lone punctuation like `}` or `)`, and
+        # one-char noise) so multi-line bash output doesn't show `} (8 lines)`.
+        # Word-safe truncation; suffix line-count if multi-line.
+        first = _first_meaningful_line(content)
         line_count = content.count("\n") + 1
         suffix = f" ({line_count} lines)" if line_count > 2 else ""
+        if not first:
+            self._write(f"{ts} \u2190 ({line_count} lines)")
+            return
         self._write(f"{ts} \u2190 {_truncate_at_word(first)}{suffix}")
 
     def _write_result(self, message: ResultMessage) -> None:
@@ -443,6 +447,26 @@ def _maybe_extract_subagent_text(content: Any) -> str | None:
             return None
         texts.append(str(item.get("text", "")))
     return "\n".join(texts)
+
+
+def _first_meaningful_line(content: str) -> str:
+    """Return the first line with meaningful content.
+
+    Skips blank lines and lines that are only whitespace + a single
+    bracket/punctuation char (e.g. `}`, `)`, `]`, `{`, `(`, `[`).
+    Those are typically tail-end of JSON or code-block closers with
+    no information value on their own.
+
+    Returns "" if no meaningful line found.
+    """
+    for line in content.split("\n"):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if len(stripped) == 1 and stripped in "{}()[]":
+            continue
+        return stripped
+    return ""
 
 
 def _extract_commit_line(content: str) -> str | None:
