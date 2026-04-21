@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -20,11 +21,15 @@ from otto.certifier.report import CertificationOutcome, CertificationReport
 from otto.merge import conflict_agent
 from otto.merge.orchestrator import (
     MergeOptions,
+    MergeAlreadyRunning,
     _run_post_merge_verification,
+    _graduate_merged_task_sessions,
+    merge_lock,
     run_merge,
 )
 from otto.merge import git_ops
 from otto.merge.state import MergeState, find_latest_merge_id, load_state
+from otto.queue.schema import QueueTask, append_task
 from tests._helpers import init_repo
 
 
@@ -44,6 +49,29 @@ def _make_branch(repo: Path, name: str, file: str, content: str):
     subprocess.run(["git", "add", "--", file], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-q", "-m", f"{name}: change"], cwd=repo, check=True)
     subprocess.run(["git", "checkout", "main"], cwd=repo, capture_output=True, check=True)
+
+
+def _create_worktree(repo: Path, name: str) -> Path:
+    worktree = repo / ".worktrees" / name
+    worktree.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "worktree", "add", "-b", f"build/{name}", str(worktree)],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return worktree
+
+
+def _seed_queue_task(repo: Path, *, task_id: str, worktree: Path) -> None:
+    append_task(repo, QueueTask(
+        id=task_id,
+        command_argv=["build", task_id],
+        added_at="2026-04-21T00:00:00Z",
+        branch=f"build/{task_id}",
+        worktree=str(worktree.relative_to(repo)),
+    ))
 
 
 def _config_codex_provider() -> dict[str, Any]:
@@ -453,6 +481,147 @@ def test_find_latest_merge_id(tmp_path: Path):
     assert result1.success
     latest = find_latest_merge_id(repo)
     assert latest == result1.merge_id
+
+
+# ---------- session graduation + merge lock ----------
+
+
+def test_graduate_merged_task_session_end_to_end(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    worktree = _create_worktree(repo, "task-1")
+    _seed_queue_task(repo, task_id="task-1", worktree=worktree)
+
+    run_id = "2026-04-21-010203-abcdef"
+    src_session = worktree / "otto_logs" / "sessions" / run_id
+    src_session.mkdir(parents=True, exist_ok=True)
+    (src_session / "checkpoint.json").write_text("{}\n")
+    certify_dir = src_session / "certify"
+    certify_dir.mkdir(parents=True, exist_ok=True)
+    (certify_dir / "proof-of-work.json").write_text("{\"stories\": []}\n")
+    (src_session / "summary.json").write_text(json.dumps({
+        "run_id": run_id,
+        "command": "build",
+        "verdict": "passed",
+    }, indent=2))
+    canonical_manifest = {
+        "command": "build",
+        "argv": ["build", "task-1"],
+        "queue_task_id": "task-1",
+        "run_id": run_id,
+        "branch": "build/task-1",
+        "checkpoint_path": str((src_session / "checkpoint.json").resolve()),
+        "proof_of_work_path": str((certify_dir / "proof-of-work.json").resolve()),
+        "cost_usd": 1.0,
+        "duration_s": 2.0,
+        "started_at": "2026-04-21T00:00:00Z",
+        "finished_at": "2026-04-21T00:01:00Z",
+        "head_sha": "abc123",
+        "resolved_intent": "test",
+        "exit_status": "success",
+        "schema_version": 1,
+        "extra": {},
+    }
+    (src_session / "manifest.json").write_text(json.dumps(canonical_manifest, indent=2))
+
+    queue_manifest = repo / "otto_logs" / "queue" / "task-1" / "manifest.json"
+    queue_manifest.parent.mkdir(parents=True, exist_ok=True)
+    queue_manifest.write_text(json.dumps({
+        **canonical_manifest,
+        "mirror_of": str((src_session / "manifest.json").resolve()),
+    }, indent=2))
+
+    expected_merge_sha = git_ops.head_sha(repo)
+    _graduate_merged_task_sessions(repo, {"build/task-1": "task-1"})
+
+    dst_session = repo / "otto_logs" / "sessions" / run_id
+    assert dst_session.exists()
+    assert not src_session.exists()
+    assert not worktree.exists()
+
+    summary = json.loads((dst_session / "summary.json").read_text())
+    assert summary["merge_commit_sha"] == expected_merge_sha
+    assert summary["merged_at"].endswith("Z")
+
+    manifest = json.loads((dst_session / "manifest.json").read_text())
+    assert manifest["checkpoint_path"] == str((dst_session / "checkpoint.json").resolve())
+    assert manifest["proof_of_work_path"] == str((dst_session / "certify" / "proof-of-work.json").resolve())
+    assert manifest["extra"]["merge_commit_sha"] == expected_merge_sha
+    assert manifest["extra"]["merged_at"].endswith("Z")
+
+    mirror = json.loads(queue_manifest.read_text())
+    assert mirror["mirror_of"] == str((dst_session / "manifest.json").resolve())
+    assert mirror["checkpoint_path"] == manifest["checkpoint_path"]
+    assert mirror["proof_of_work_path"] == manifest["proof_of_work_path"]
+    assert mirror["extra"]["merge_commit_sha"] == expected_merge_sha
+
+
+def test_graduate_skips_collision_and_preserves_worktree(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    worktree = _create_worktree(repo, "task-2")
+    _seed_queue_task(repo, task_id="task-2", worktree=worktree)
+
+    run_id = "2026-04-21-020304-bcd123"
+    src_session = worktree / "otto_logs" / "sessions" / run_id
+    src_session.mkdir(parents=True, exist_ok=True)
+    (src_session / "manifest.json").write_text(json.dumps({
+        "run_id": run_id,
+        "queue_task_id": "task-2",
+        "checkpoint_path": None,
+        "proof_of_work_path": None,
+        "extra": {},
+    }, indent=2))
+    (repo / "otto_logs" / "queue" / "task-2").mkdir(parents=True, exist_ok=True)
+    (repo / "otto_logs" / "queue" / "task-2" / "manifest.json").write_text(json.dumps({
+        "run_id": run_id,
+        "queue_task_id": "task-2",
+        "checkpoint_path": None,
+        "proof_of_work_path": None,
+        "extra": {},
+        "mirror_of": str((src_session / "manifest.json").resolve()),
+    }, indent=2))
+
+    dst_session = repo / "otto_logs" / "sessions" / run_id
+    dst_session.mkdir(parents=True, exist_ok=True)
+    (dst_session / "sentinel.txt").write_text("keep\n")
+
+    _graduate_merged_task_sessions(repo, {"build/task-2": "task-2"})
+
+    assert src_session.exists()
+    assert worktree.exists()
+    assert (dst_session / "sentinel.txt").read_text() == "keep\n"
+
+    subprocess.run(["git", "worktree", "remove", "--force", str(worktree)], cwd=repo, check=True)
+
+
+def test_merge_lock_refuses_second_holder(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    script = """
+from pathlib import Path
+import sys
+import time
+
+from otto.merge.orchestrator import merge_lock
+
+with merge_lock(Path(sys.argv[1])):
+    print("locked", flush=True)
+    time.sleep(3)
+"""
+    proc = subprocess.Popen(
+        [sys.executable, "-c", script, str(repo)],
+        cwd=repo,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert proc.stdout is not None
+        assert proc.stdout.readline().strip() == "locked"
+        with pytest.raises(MergeAlreadyRunning, match="another otto merge is in progress"):
+            with merge_lock(repo):
+                pass
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
 
 
 # ---------- bookkeeping union driver E2E ----------

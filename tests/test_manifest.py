@@ -1,4 +1,4 @@
-"""Tests for otto/manifest.py — Phase 1.4 manifest contract."""
+"""Tests for otto/manifest.py."""
 
 from __future__ import annotations
 
@@ -8,136 +8,139 @@ from pathlib import Path
 import pytest
 
 from otto.manifest import (
+    QUEUE_PROJECT_DIR_ENV,
     QUEUE_TASK_ENV,
-    Manifest,
     current_head_sha,
     make_manifest,
     manifest_path_for,
     now_iso,
+    queue_index_path_for,
     write_manifest,
 )
 from tests._helpers import init_repo
 
 
-# ---------- manifest_path_for ----------
-
-
-def test_path_atomic_mode_uses_fallback(tmp_path: Path):
-    fallback = tmp_path / "otto_logs" / "builds" / "build-1"
-    p = manifest_path_for(
-        project_dir=tmp_path,
-        fallback_dir=fallback,
-        queue_task_id=None,
-    )
-    assert p == fallback / "manifest.json"
-
-
-def test_path_queue_mode_uses_deterministic_path(tmp_path: Path):
-    fallback = tmp_path / "otto_logs" / "builds" / "build-1"
-    p = manifest_path_for(
-        project_dir=tmp_path,
-        fallback_dir=fallback,
-        queue_task_id="add-csv-export",
-    )
-    assert p == tmp_path / "otto_logs" / "queue" / "add-csv-export" / "manifest.json"
-
-
-def test_path_queue_mode_reads_env_var_by_default(tmp_path: Path, monkeypatch):
-    fallback = tmp_path / "otto_logs" / "builds" / "x"
+def test_manifest_path_always_uses_session_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    fallback = tmp_path / "otto_logs" / "sessions" / "run-1"
     monkeypatch.setenv(QUEUE_TASK_ENV, "from-env")
-    p = manifest_path_for(project_dir=tmp_path, fallback_dir=fallback)
-    assert p == tmp_path / "otto_logs" / "queue" / "from-env" / "manifest.json"
-
-
-def test_path_queue_mode_explicit_overrides_env(tmp_path: Path, monkeypatch):
-    fallback = tmp_path / "otto_logs" / "builds" / "x"
-    monkeypatch.setenv(QUEUE_TASK_ENV, "from-env")
-    p = manifest_path_for(
+    path = manifest_path_for(
         project_dir=tmp_path,
         fallback_dir=fallback,
         queue_task_id="explicit-task",
     )
-    assert p == tmp_path / "otto_logs" / "queue" / "explicit-task" / "manifest.json"
+    assert path == fallback / "manifest.json"
 
 
-@pytest.mark.parametrize("bad_value", ["../", "foo/bar", "..", "", "UPPER", "foo..bar"])
-def test_path_queue_mode_rejects_invalid_task_ids(tmp_path: Path, monkeypatch, bad_value: str):
-    fallback = tmp_path / "otto_logs" / "builds" / "x"
-    monkeypatch.setenv(QUEUE_TASK_ENV, bad_value)
+def test_queue_index_path_for_uses_queue_namespace(tmp_path: Path):
+    assert queue_index_path_for(tmp_path, "add-csv-export") == (
+        tmp_path / "otto_logs" / "queue" / "add-csv-export" / "manifest.json"
+    )
 
+
+def test_queue_index_path_for_returns_none_without_task_id(tmp_path: Path):
+    assert queue_index_path_for(tmp_path, None) is None
+
+
+@pytest.mark.parametrize("bad_value", ["../", "foo/bar", "..", "UPPER", "foo..bar"])
+def test_queue_index_path_for_rejects_invalid_task_ids(tmp_path: Path, bad_value: str):
     with pytest.raises(ValueError, match=QUEUE_TASK_ENV):
-        manifest_path_for(project_dir=tmp_path, fallback_dir=fallback)
+        queue_index_path_for(tmp_path, bad_value)
 
 
-# ---------- write_manifest ----------
-
-
-def test_write_manifest_creates_file_atomic_mode(tmp_path: Path):
-    fallback = tmp_path / "otto_logs" / "builds" / "build-1"
-    m = make_manifest(
-        command="build", argv=["build", "test"], run_id="build-1",
+def test_write_manifest_creates_canonical_file_only_for_atomic_run(tmp_path: Path):
+    fallback = tmp_path / "otto_logs" / "sessions" / "build-1"
+    manifest = make_manifest(
+        command="build",
+        argv=["build", "test"],
+        run_id="build-1",
         branch="build/test-2026-04-19",
         checkpoint_path=fallback / "checkpoint.json",
-        proof_of_work_path=tmp_path / "otto_logs" / "certifier" / "proof-of-work.json",
-        cost_usd=1.23, duration_s=45.6,
-        started_at=now_iso(), head_sha="abc123",
+        proof_of_work_path=fallback / "certify" / "proof-of-work.json",
+        cost_usd=1.23,
+        duration_s=45.6,
+        started_at=now_iso(),
+        head_sha="abc123",
         resolved_intent="test",
     )
-    out = write_manifest(m, project_dir=tmp_path, fallback_dir=fallback)
+
+    out = write_manifest(manifest, project_dir=tmp_path, fallback_dir=fallback)
+
     assert out == fallback / "manifest.json"
     assert out.exists()
+    assert not (tmp_path / "otto_logs" / "queue").exists()
     data = json.loads(out.read_text())
     assert data["command"] == "build"
-    assert data["argv"] == ["build", "test"]
     assert data["run_id"] == "build-1"
-    assert data["branch"] == "build/test-2026-04-19"
-    assert data["cost_usd"] == 1.23
     assert data["queue_task_id"] is None
-    assert data["exit_status"] == "success"
-    assert data["schema_version"] == 1
+    assert "mirror_of" not in data
 
 
-def test_write_manifest_queue_mode_via_env(tmp_path: Path, monkeypatch):
+def test_write_manifest_queue_mode_writes_canonical_and_mirror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    session_dir = tmp_path / "worktree" / "otto_logs" / "sessions" / "build-1"
+    anchor_repo = tmp_path / "anchor"
     monkeypatch.setenv(QUEUE_TASK_ENV, "csv-export")
-    fallback = tmp_path / "otto_logs" / "builds" / "build-1"
-    m = make_manifest(
-        command="build", argv=["build", "test"], run_id="build-1",
-        branch="build/test", checkpoint_path=None, proof_of_work_path=None,
-        cost_usd=0, duration_s=1, started_at=now_iso(), head_sha=None, resolved_intent="t",
+    monkeypatch.setenv(QUEUE_PROJECT_DIR_ENV, str(anchor_repo))
+    manifest = make_manifest(
+        command="build",
+        argv=["build", "test"],
+        run_id="build-1",
+        branch="build/test",
+        checkpoint_path=session_dir / "checkpoint.json",
+        proof_of_work_path=session_dir / "certify" / "proof-of-work.json",
+        cost_usd=0.5,
+        duration_s=1.0,
+        started_at=now_iso(),
+        head_sha=None,
+        resolved_intent="t",
     )
-    out = write_manifest(m, project_dir=tmp_path, fallback_dir=fallback)
-    assert out == tmp_path / "otto_logs" / "queue" / "csv-export" / "manifest.json"
-    data = json.loads(out.read_text())
-    assert data["queue_task_id"] == "csv-export"
 
-
-def test_write_manifest_failure_exit_status(tmp_path: Path):
-    fallback = tmp_path / "otto_logs" / "builds" / "build-1"
-    m = make_manifest(
-        command="build", argv=["build", "test"], run_id="build-1",
-        branch=None, checkpoint_path=None, proof_of_work_path=None,
-        cost_usd=0, duration_s=0, started_at=now_iso(), head_sha=None, resolved_intent=None,
-        exit_status="failure",
+    canonical = write_manifest(
+        manifest,
+        project_dir=tmp_path / "worktree",
+        fallback_dir=session_dir,
     )
-    out = write_manifest(m, project_dir=tmp_path, fallback_dir=fallback)
-    data = json.loads(out.read_text())
-    assert data["exit_status"] == "failure"
+
+    mirror = anchor_repo / "otto_logs" / "queue" / "csv-export" / "manifest.json"
+    assert canonical == session_dir / "manifest.json"
+    assert canonical.exists()
+    assert mirror.exists()
+
+    canonical_data = json.loads(canonical.read_text())
+    mirror_data = json.loads(mirror.read_text())
+    assert canonical_data["queue_task_id"] == "csv-export"
+    assert "mirror_of" not in canonical_data
+    assert mirror_data["queue_task_id"] == "csv-export"
+    assert mirror_data["mirror_of"] == str(canonical.resolve())
+    assert {k: v for k, v in mirror_data.items() if k != "mirror_of"} == canonical_data
 
 
-def test_write_manifest_atomic_via_rename(tmp_path: Path):
-    """Smoke test: writing creates no leftover .tmp file."""
-    fallback = tmp_path / "otto_logs" / "x" / "y"
-    m = make_manifest(
-        command="certify", argv=["certify"], run_id="cert-1",
-        branch=None, checkpoint_path=None, proof_of_work_path=None,
-        cost_usd=0, duration_s=0, started_at=now_iso(), head_sha=None, resolved_intent=None,
+def test_write_manifest_atomic_via_rename_for_canonical_and_queue_mirror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    fallback = tmp_path / "otto_logs" / "sessions" / "cert-1"
+    monkeypatch.setenv(QUEUE_TASK_ENV, "queue-task")
+    manifest = make_manifest(
+        command="certify",
+        argv=["certify"],
+        run_id="cert-1",
+        queue_task_id="queue-task",
+        branch=None,
+        checkpoint_path=None,
+        proof_of_work_path=None,
+        cost_usd=0,
+        duration_s=0,
+        started_at=now_iso(),
+        head_sha=None,
+        resolved_intent=None,
     )
-    out = write_manifest(m, project_dir=tmp_path, fallback_dir=fallback)
-    tmp_files = list(out.parent.glob("*.tmp"))
-    assert tmp_files == [], f"leftover tmp files: {tmp_files}"
 
+    out = write_manifest(manifest, project_dir=tmp_path, fallback_dir=fallback)
 
-# ---------- current_head_sha ----------
+    mirror = tmp_path / "otto_logs" / "queue" / "queue-task" / "manifest.json"
+    assert list(out.parent.glob("*.tmp")) == []
+    assert list(mirror.parent.glob("*.tmp")) == []
 
 
 def test_current_head_sha_returns_real_sha(tmp_path: Path):
@@ -149,5 +152,4 @@ def test_current_head_sha_returns_real_sha(tmp_path: Path):
 
 
 def test_current_head_sha_returns_none_for_non_git(tmp_path: Path):
-    sha = current_head_sha(tmp_path)
-    assert sha is None
+    assert current_head_sha(tmp_path) is None

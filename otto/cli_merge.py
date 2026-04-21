@@ -105,7 +105,12 @@ def register_merge_command(main: click.Group) -> None:
             otto merge --all --fast        # pure git, bail on conflict
         """
         from otto.config import load_config
-        from otto.merge.orchestrator import MergeOptions, run_merge
+        from otto.merge.orchestrator import (
+            MergeAlreadyRunning,
+            MergeOptions,
+            merge_lock,
+            run_merge,
+        )
 
         project_dir = Path.cwd()
         # `load_config` returns DEFAULT_CONFIG when otto.yaml is absent — be
@@ -160,14 +165,18 @@ def register_merge_command(main: click.Group) -> None:
         _install_merge_logging(project_dir)
 
         try:
-            result = asyncio.run(run_merge(
-                project_dir=project_dir,
-                config=config,
-                options=opts,
-                explicit_ids_or_branches=list(ids_or_branches) or None,
-                all_done_queue_tasks=all_done,
-                budget=budget,
-            ))
+            with merge_lock(project_dir):
+                result = asyncio.run(run_merge(
+                    project_dir=project_dir,
+                    config=config,
+                    options=opts,
+                    explicit_ids_or_branches=list(ids_or_branches) or None,
+                    all_done_queue_tasks=all_done,
+                    budget=budget,
+                ))
+        except MergeAlreadyRunning as exc:
+            error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
+            sys.exit(1)
         except ValueError as exc:
             error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
             sys.exit(2)

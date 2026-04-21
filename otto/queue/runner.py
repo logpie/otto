@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from otto.manifest import manifest_path_for
+from otto.manifest import queue_index_path_for
 from otto.queue.schema import (
     QueueTask,
     drain_commands,
@@ -798,11 +798,10 @@ class Runner:
         ts["finished_at"] = now_iso()
         ts["child"] = None
 
-        manifest_p = manifest_path_for(
-            project_dir=self.project_dir,
-            fallback_dir=self.project_dir,  # never used for queue tasks
-            queue_task_id=task_id,
-        )
+        manifest_p = queue_index_path_for(self.project_dir, task_id)
+        if manifest_p is None:
+            _mark_failed(ts, f"missing queue task id for manifest lookup: {task_id!r}")
+            return
         if not manifest_p.exists():
             if exit_code is None:
                 reason = f"child exited but no manifest at {manifest_p}"

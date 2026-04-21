@@ -262,10 +262,10 @@ def phase2_parallel_merge() -> float:
     _check(len(done_task_ids) >= 2,
            f"at least 2 done task IDs for merge (got {done_task_ids})")
 
-    log(f"merging {len(done_task_ids)} branches: {done_task_ids}")
+    log(f"merging {len(done_task_ids)} branches with --cleanup-on-success: {done_task_ids}")
     merge_t0 = time.time()
     merge_r = subprocess.run(
-        [str(OTTO_BIN), "merge", *done_task_ids, "--no-certify"],
+        [str(OTTO_BIN), "merge", *done_task_ids, "--no-certify", "--cleanup-on-success"],
         cwd=repo, capture_output=True, text=True, timeout=900,
         env={**os.environ},
     )
@@ -294,9 +294,58 @@ def phase2_parallel_merge() -> float:
     _check("merge" in log_out.lower() or "add" in log_out.lower() or "mul" in log_out.lower(),
            "git log contains evidence of merged work")
 
+    # === GRADUATION CHECKS (--cleanup-on-success path) ===
+    # After cleanup-on-success, the .worktrees/ should be empty AND each
+    # task's session should be relocated to main_repo/otto_logs/sessions/<id>/
+    # with merge_commit_sha + merged_at fields amended.
+    log("verifying graduation outcome")
+    remaining_wts = [p for p in (repo / ".worktrees").iterdir() if p.is_dir()]
+    _check(remaining_wts == [],
+           f".worktrees/ empty after cleanup-on-success (got {[p.name for p in remaining_wts]})")
+
+    main_sessions_dir = repo / "otto_logs" / "sessions"
+    _check(main_sessions_dir.exists(), "main repo otto_logs/sessions/ exists post-graduation")
+    main_sessions = [p for p in main_sessions_dir.iterdir() if p.is_dir()]
+    _check(len(main_sessions) >= 2,
+           f"at least 2 graduated sessions on main (got {len(main_sessions)})")
+
+    expected_session_ids = {s.name for _, s in task_sessions}
+    found_session_ids = {p.name for p in main_sessions}
+    missing = expected_session_ids - found_session_ids
+    _check(not missing,
+           f"all task session ids present on main "
+           f"(expected={expected_session_ids}, found={found_session_ids})")
+
+    # Pick one graduated session and verify its summary.json was amended
+    sample = next(iter(main_sessions))
+    summary = json.loads((sample / "summary.json").read_text())
+    _check("merge_commit_sha" in summary,
+           f"graduated summary.json has merge_commit_sha (sample={sample.name})")
+    _check("merged_at" in summary,
+           f"graduated summary.json has merged_at (sample={sample.name})")
+    _check(summary.get("queue_task_id") in {"add", "mul"},
+           f"graduated summary.json has queue_task_id (got {summary.get('queue_task_id')!r})")
+    log(f"  sample graduated session: {sample.name} "
+        f"queue_task_id={summary['queue_task_id']} "
+        f"merge_commit_sha={summary['merge_commit_sha'][:10]}")
+
+    # Verify graduated session retains build/narrative.log + certify/proof-of-work.json
+    _check((sample / "build" / "narrative.log").exists(),
+           f"graduated build/narrative.log preserved")
+    _check((sample / "certify" / "proof-of-work.json").exists(),
+           f"graduated certify/proof-of-work.json preserved")
+
+    # Verify queue manifest now points at graduated paths (not deleted worktree)
+    queue_manifest = json.loads(
+        (repo / "otto_logs" / "queue" / summary["queue_task_id"] / "manifest.json").read_text()
+    )
+    qm_pow = Path(queue_manifest.get("proof_of_work_path", ""))
+    _check(qm_pow.exists() and "/.worktrees/" not in str(qm_pow),
+           f"queue manifest proof_of_work_path points at live graduated file (got {qm_pow})")
+
     total_elapsed = time.time() - t0
     log("")
-    log(f"PHASE 2 PASSED — parallel + merge works end-to-end ({total_elapsed:.0f}s total)")
+    log(f"PHASE 2 PASSED — parallel + merge + graduation works end-to-end ({total_elapsed:.0f}s total)")
     log("")
     return total_elapsed
 

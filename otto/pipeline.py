@@ -83,6 +83,15 @@ def _write_session_summary(
         "rounds": rounds,
         "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+    queue_task_id = os.environ.get("OTTO_QUEUE_TASK_ID")
+    if queue_task_id:
+        summary["queue_task_id"] = queue_task_id
+    branch = _current_branch_name(project_dir)
+    if branch:
+        summary["branch"] = branch
+    head_sha = _current_head_sha(project_dir)
+    if head_sha:
+        summary["head_sha"] = head_sha
     if breakdown is not None:
         summary["breakdown"] = breakdown
     write_json_file(paths.session_summary(project_dir, session_id), summary)
@@ -90,6 +99,38 @@ def _write_session_summary(
 
 def _round_cost(value: float) -> float:
     return round(float(value), 4)
+
+
+def _current_branch_name(project_dir: Path) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return None
+    if result.returncode != 0:
+        return None
+    branch = result.stdout.strip()
+    return branch or None
+
+
+def _current_head_sha(project_dir: Path) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return None
+    if result.returncode != 0:
+        return None
+    sha = result.stdout.strip()
+    return sha or None
 
 
 def _strict_mode_guidance(strict_mode: bool) -> str:

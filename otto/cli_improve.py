@@ -1,6 +1,7 @@
 """Otto CLI — improve command group (bugs, feature, target)."""
 
 import asyncio
+import os
 import subprocess
 import sys
 import time
@@ -339,11 +340,12 @@ def _run_improve_locked(
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text("\n".join(report_lines))
 
-    # Per-run manifest. Lands at sessions/<id>/manifest.json (atomic)
-    # or otto_logs/queue/<task-id>/manifest.json (queue mode).
+    # Per-run manifest. The canonical record always lives at the session root;
+    # queue-backed runs also mirror it into otto_logs/queue/<task-id>/.
     try:
         from otto import paths as _paths
         from otto.manifest import (
+            QUEUE_TASK_ENV,
             current_head_sha,
             make_manifest,
             write_manifest,
@@ -353,6 +355,7 @@ def _run_improve_locked(
         manifest = make_manifest(
             command="improve",
             argv=list(sys.argv[1:]),
+            queue_task_id=os.environ.get(QUEUE_TASK_ENV),
             run_id=result.build_id,
             branch=branch,
             checkpoint_path=session_dir_path / "checkpoint.json",

@@ -14,8 +14,17 @@ bookkeeping rather than an active continuation contract.
 
 from __future__ import annotations
 
+import errno
+import fcntl
+import json
 import logging
+import os
+import shutil
+import subprocess
+import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +38,20 @@ from otto.merge.state import (
 from otto.merge.stories import collect_stories_from_branches, dedupe_stories
 
 logger = logging.getLogger("otto.merge.orchestrator")
+
+MERGE_LOCK_FILE = ".merge.lock"
+
+
+class MergeAlreadyRunning(RuntimeError):
+    """Raised when another `otto merge` process holds the merge lock."""
+
+    def __init__(self, holder_pid: int | None):
+        self.holder_pid = holder_pid
+        super().__init__(
+            "another otto merge is in progress "
+            f"(holder PID={holder_pid if holder_pid is not None else '?'}); "
+            "retry when it completes."
+        )
 
 
 @dataclass
@@ -48,6 +71,44 @@ class MergeOptions:
     full_verify: bool = False
     fast: bool = False                  # pure git, bail on first conflict
     cleanup_on_success: bool = False    # remove worktrees after merge
+
+
+@contextmanager
+def merge_lock(project_dir: Path):
+    """Hold the per-project merge lock for the entire `otto merge` run."""
+    path = project_dir / "otto_logs" / MERGE_LOCK_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, "a+", encoding="utf-8")
+    try:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            holder_pid = None
+            if exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                try:
+                    handle.seek(0)
+                    raw = handle.read().strip()
+                    if raw:
+                        holder = json.loads(raw)
+                        if isinstance(holder, dict):
+                            holder_pid = int(holder.get("pid")) if holder.get("pid") is not None else None
+                except (OSError, ValueError, json.JSONDecodeError, TypeError):
+                    holder_pid = None
+                raise MergeAlreadyRunning(holder_pid) from exc
+            raise
+
+        handle.seek(0)
+        handle.truncate()
+        handle.write(json.dumps({"pid": os.getpid(), "started_at": _now_iso()}))
+        handle.flush()
+        os.fsync(handle.fileno())
+        yield
+    finally:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        handle.close()
 
 
 def _resolve_branches(
@@ -239,51 +300,111 @@ def _update_consolidated_conflict_outcomes(
     return updated_branches
 
 
-def _cleanup_worktrees_for_merged_tasks(
+def _graduate_merged_task_sessions(
     project_dir: Path, queue_lookup: dict[str, str],
 ) -> None:
-    """Remove the worktrees of queue tasks whose branches just merged.
-
-    Best-effort: failures are logged but never raised — by this point the
-    merge succeeded and we don't want to surface errors that would make the
-    user think their merge didn't land.
-
-    Branches are preserved (`git worktree remove` only removes the worktree
-    directory + admin files; the underlying branch still exists and is now
-    pointed-at by the merge commit on target).
-    """
+    """Graduate merged queue sessions into the main repo, then remove worktrees."""
     if not queue_lookup:
         return
     try:
+        from otto import paths
+        from otto.manifest import queue_index_path_for
         from otto.queue.schema import load_queue
     except ImportError:
         return
-    tasks_by_id = {t.id: t for t in load_queue(project_dir)}
-    cleaned: list[str] = []
+
+    try:
+        tasks_by_id = {t.id: t for t in load_queue(project_dir)}
+    except (OSError, ValueError) as exc:
+        logger.warning("cleanup-on-success: could not load queue metadata: %s", exc)
+        return
+
+    try:
+        merge_commit_sha = git_ops.head_sha(project_dir)
+    except Exception as exc:
+        logger.warning("cleanup-on-success: could not resolve merge head: %s", exc)
+        return
+    merged_at = _now_iso()
+    graduated: list[str] = []
     for task_id in set(queue_lookup.values()):
         task = tasks_by_id.get(task_id)
         if not task or not task.worktree:
             continue
-        wt_path = project_dir / task.worktree
+        wt_path = Path(task.worktree)
+        if not wt_path.is_absolute():
+            wt_path = project_dir / wt_path
         if not wt_path.exists():
             continue
+        step = "queue manifest lookup"
         try:
-            import subprocess as _sp
-            r = _sp.run(
+            queue_manifest_path = queue_index_path_for(project_dir, task_id)
+            if queue_manifest_path is None:
+                raise ValueError("queue task id missing")
+            queue_manifest = _read_json(queue_manifest_path)
+            run_id = str(queue_manifest.get("run_id") or "").strip()
+            if not run_id:
+                raise ValueError("queue manifest missing run_id")
+
+            step = "locate session"
+            src_session_dir = paths.session_dir(wt_path, run_id)
+            dst_session_dir = paths.session_dir(project_dir, run_id)
+            if dst_session_dir.exists():
+                logger.warning(
+                    "cleanup-on-success: graduation skipped for %s; destination exists: %s -> %s",
+                    task_id, src_session_dir, dst_session_dir,
+                )
+                continue
+            if not src_session_dir.exists():
+                raise FileNotFoundError(src_session_dir)
+
+            step = "move session"
+            dst_session_dir.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src_session_dir), str(dst_session_dir))
+
+            step = "rewrite summary"
+            summary_path = dst_session_dir / "summary.json"
+            if summary_path.exists():
+                summary = _read_json(summary_path)
+                summary["merge_commit_sha"] = merge_commit_sha
+                summary["merged_at"] = merged_at
+                _atomic_write_json(summary_path, summary)
+
+            step = "rewrite canonical manifest"
+            canonical_manifest_path = dst_session_dir / "manifest.json"
+            canonical_manifest = _read_json(canonical_manifest_path)
+            _rewrite_manifest_after_graduation(
+                canonical_manifest,
+                old_session_dir=src_session_dir,
+                new_session_dir=dst_session_dir,
+                merge_commit_sha=merge_commit_sha,
+                merged_at=merged_at,
+            )
+            _atomic_write_json(canonical_manifest_path, canonical_manifest)
+
+            step = "rewrite queue index"
+            queue_manifest = dict(canonical_manifest)
+            queue_manifest["mirror_of"] = str(canonical_manifest_path.resolve())
+            _atomic_write_json(queue_manifest_path, queue_manifest)
+
+            step = "remove worktree"
+            r = subprocess.run(
                 ["git", "worktree", "remove", "--force", str(wt_path)],
                 cwd=project_dir, capture_output=True, text=True, check=False,
             )
-            if r.returncode == 0:
-                cleaned.append(task_id)
-            else:
+            if r.returncode != 0:
                 logger.warning(
                     "cleanup-on-success: git worktree remove failed for %s: %s",
                     task_id, (r.stderr or "").strip(),
                 )
+                continue
+            graduated.append(task_id)
         except Exception as exc:
-            logger.warning("cleanup-on-success: worktree remove crashed for %s: %s", task_id, exc)
-    if cleaned:
-        logger.info("cleanup-on-success: removed worktrees for %s", cleaned)
+            logger.warning(
+                "cleanup-on-success: graduation failed for %s at step=%s: %s",
+                task_id, step, exc,
+            )
+    if graduated:
+        logger.info("cleanup-on-success: graduated and removed worktrees for %s", graduated)
 
 
 async def _run_post_merge_verification(
@@ -507,7 +628,7 @@ async def _run_consolidated_agentic_merge(
         # Continue to post-merge certification if not --no-certify
         if options.no_certify:
             if options.cleanup_on_success:
-                _cleanup_worktrees_for_merged_tasks(project_dir, queue_lookup)
+                _graduate_merged_task_sessions(project_dir, queue_lookup)
             return MergeRunResult(
                 success=True, merge_id=merge_id, state=state,
                 note="all clean merges, cert skipped per --no-certify",
@@ -520,7 +641,7 @@ async def _run_consolidated_agentic_merge(
             budget=budget,
         )
         if result.success and options.cleanup_on_success:
-            _cleanup_worktrees_for_merged_tasks(project_dir, queue_lookup)
+            _graduate_merged_task_sessions(project_dir, queue_lookup)
         return result
 
     # Phase 3: ONE agent call to resolve all accumulated markers
@@ -665,7 +786,7 @@ async def _run_consolidated_agentic_merge(
     # Phase 4: post-merge certification (unless --no-certify)
     if options.no_certify:
         if options.cleanup_on_success:
-            _cleanup_worktrees_for_merged_tasks(project_dir, queue_lookup)
+            _graduate_merged_task_sessions(project_dir, queue_lookup)
         return MergeRunResult(
             success=True, merge_id=merge_id, state=state,
             note="cert skipped per --no-certify",
@@ -677,7 +798,7 @@ async def _run_consolidated_agentic_merge(
         budget=budget,
     )
     if result.success and options.cleanup_on_success:
-        _cleanup_worktrees_for_merged_tasks(project_dir, queue_lookup)
+        _graduate_merged_task_sessions(project_dir, queue_lookup)
     return result
 
 
@@ -709,11 +830,9 @@ def _gather_intents(
                 out[t.branch] = t.resolved_intent
     except (OSError, ValueError) as exc:
         logger.debug("intent gathering: skipping queue.yml: %s", exc)
-    # Atomic build manifests
-    builds = project_dir / "otto_logs" / "builds"
-    if builds.exists():
-        import json
-        for run_dir in builds.iterdir():
+    sessions = project_dir / "otto_logs" / "sessions"
+    if sessions.exists():
+        for run_dir in sessions.iterdir():
             mp = run_dir / "manifest.json"
             if not mp.exists():
                 continue
@@ -728,5 +847,72 @@ def _gather_intents(
 
 
 def _now_iso() -> str:
-    import time
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    data = json.loads(path.read_text())
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} did not contain a JSON object")
+    return data
+
+
+def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, indent=2, sort_keys=False))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _rewrite_manifest_after_graduation(
+    manifest: dict[str, Any],
+    *,
+    old_session_dir: Path,
+    new_session_dir: Path,
+    merge_commit_sha: str,
+    merged_at: str,
+) -> None:
+    manifest["checkpoint_path"] = _relocate_session_path(
+        manifest.get("checkpoint_path"),
+        old_session_dir=old_session_dir,
+        new_session_dir=new_session_dir,
+    )
+    manifest["proof_of_work_path"] = _relocate_session_path(
+        manifest.get("proof_of_work_path"),
+        old_session_dir=old_session_dir,
+        new_session_dir=new_session_dir,
+    )
+    extra = manifest.get("extra")
+    if not isinstance(extra, dict):
+        extra = {}
+    extra["merge_commit_sha"] = merge_commit_sha
+    extra["merged_at"] = merged_at
+    manifest["extra"] = extra
+
+
+def _relocate_session_path(
+    value: Any,
+    *,
+    old_session_dir: Path,
+    new_session_dir: Path,
+) -> str | None:
+    if not value:
+        return None
+    src_path = Path(str(value))
+    if src_path.is_absolute():
+        try:
+            rel = src_path.relative_to(old_session_dir)
+        except ValueError:
+            return str(src_path)
+        return str((new_session_dir / rel).resolve())
+    return str((new_session_dir / src_path).resolve())

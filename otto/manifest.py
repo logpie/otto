@@ -1,25 +1,16 @@
-"""Manifest contract for otto runs (Phase 1.4).
+"""Manifest contract for otto runs.
 
-At the end of every successful otto invocation (`otto build`, `otto improve`,
-`otto certify`), we write a `manifest.json` recording the artifact paths,
-cost, duration, branch, and metadata. This is the contract the queue runner
-and merge orchestrator rely on to find each task's output without inferring
-paths.
+Every run writes its canonical manifest at the session root:
 
-**Path policy:**
-- If `OTTO_QUEUE_TASK_ID` env var is set (queue runner spawned us):
-    `<project>/otto_logs/queue/<task-id>/manifest.json`  (deterministic)
-- Else (atomic mode):
-    `<fallback_dir>/manifest.json`  (alongside the run's checkpoint)
+    otto_logs/sessions/<run-id>/manifest.json
 
-**Why two paths:** atomic mode preserves the existing per-run directory
-layout; queue mode needs a deterministic path the watcher can find by
-task id (the watcher doesn't know the internal `build_id`).
+Queue-backed runs additionally mirror that manifest to the queue index:
 
-Manifests are written atomically (`tempfile + rename`).
+    otto_logs/queue/<task-id>/manifest.json
 
-See plan-parallel.md §3.2, §5 Step 1.4, §4 decision log entry on
-"Manifests at deterministic per-task path".
+The queue copy is a control-plane index keyed by task slug. It is never the
+authoritative record; it mirrors the canonical session-root manifest and adds
+`mirror_of` pointing at it.
 """
 
 from __future__ import annotations
@@ -28,6 +19,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -70,23 +62,19 @@ def manifest_path_for(
     fallback_dir: Path,
     queue_task_id: str | None = None,
 ) -> Path:
-    """Compute where the manifest should be written.
-
-    `queue_task_id` defaults to the value of $OTTO_QUEUE_TASK_ID.
-    """
-    if queue_task_id is None:
-        queue_task_id = _queue_task_id_from_env()
-    else:
+    """Return the canonical session-root manifest path for a run."""
+    del project_dir
+    if queue_task_id is not None:
         queue_task_id = _validate_queue_task_id(queue_task_id)
-    if queue_task_id:
-        # Queue runner sets OTTO_QUEUE_PROJECT_DIR to the main project so the
-        # spawned otto (whose cwd is the worktree) and the watcher (cwd =
-        # main project) resolve to the SAME manifest path. Without this, the
-        # watcher would never find the spawned child's manifest.
-        env_dir = os.environ.get(QUEUE_PROJECT_DIR_ENV)
-        anchor = Path(env_dir) if env_dir else project_dir
-        return anchor / "otto_logs" / "queue" / queue_task_id / "manifest.json"
     return fallback_dir / "manifest.json"
+
+
+def queue_index_path_for(project_dir: Path, task_id: str | None) -> Path | None:
+    """Return the queue manifest index path for a task slug."""
+    if not task_id:
+        return None
+    task_id = _validate_queue_task_id(task_id)
+    return project_dir / "otto_logs" / "queue" / task_id / "manifest.json"
 
 
 def _validate_queue_task_id(queue_task_id: str) -> str:
@@ -145,11 +133,15 @@ def write_manifest(
         fallback_dir=fallback_dir,
         queue_task_id=manifest.queue_task_id,
     )
-    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = asdict(manifest)
+    _atomic_write_json(path, payload)
 
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(asdict(manifest), indent=2, sort_keys=False))
-    tmp.replace(path)
+    anchor_project_dir = Path(os.environ.get(QUEUE_PROJECT_DIR_ENV) or project_dir)
+    queue_path = queue_index_path_for(anchor_project_dir, manifest.queue_task_id)
+    if queue_path is not None:
+        mirror_payload = dict(payload)
+        mirror_payload["mirror_of"] = str(path.resolve())
+        _atomic_write_json(queue_path, mirror_payload)
     return path
 
 
@@ -157,6 +149,7 @@ def make_manifest(
     *,
     command: str,
     argv: list[str],
+    queue_task_id: str | None = None,
     run_id: str,
     branch: str | None,
     checkpoint_path: Path | None,
@@ -171,10 +164,14 @@ def make_manifest(
     exit_status: str = "success",
 ) -> Manifest:
     """Construct a Manifest with `finished_at` set to now and `argv` shallow-copied."""
+    if queue_task_id:
+        queue_task_id = _validate_queue_task_id(queue_task_id)
+    else:
+        queue_task_id = None
     return Manifest(
         command=command,
         argv=list(argv),
-        queue_task_id=None,            # filled by write_manifest()
+        queue_task_id=queue_task_id,
         run_id=run_id,
         branch=branch,
         checkpoint_path=str(checkpoint_path) if checkpoint_path else None,
@@ -194,3 +191,20 @@ def make_manifest(
 def now_iso() -> str:
     """Helper for callers that want a started_at timestamp at run start."""
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _atomic_write_json(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, indent=2, sort_keys=False))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise

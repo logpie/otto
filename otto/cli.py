@@ -1102,14 +1102,14 @@ def _build_locked(
         strict_mode=bool(config.get("strict_mode")),
     )
 
-    # Per-run manifest for queue/merge subsystems. Path is per-task when
-    # OTTO_QUEUE_TASK_ID is set, otherwise at the session root.
-    # Uses the new per-session paths from otto/paths.py.
+    # Per-run manifest for queue/merge subsystems. The canonical record lives
+    # at the session root; queue-backed runs also mirror it by task slug.
     session_dir = _paths.session_dir(project_dir, result.build_id)
     build_dir = _paths.build_dir(project_dir, result.build_id)
     certify_dir = _paths.certify_dir(project_dir, result.build_id)
     try:
         from otto.manifest import (
+            QUEUE_TASK_ENV,
             current_head_sha,
             make_manifest,
             write_manifest,
@@ -1118,6 +1118,7 @@ def _build_locked(
         manifest = make_manifest(
             command="build",
             argv=list(sys.argv[1:]),
+            queue_task_id=os.environ.get(QUEUE_TASK_ENV),
             run_id=result.build_id,
             branch=(current_branch(project_dir) or None),
             checkpoint_path=session_dir / "checkpoint.json",
@@ -1333,9 +1334,11 @@ def _certify_locked(
         if legacy_pow.exists():
             console.print(f"  Report: {legacy_pow}")
 
-    # Per-run manifest for queue/merge consumption.
+    # Per-run manifest for queue/merge consumption. Canonical at session root,
+    # with a queue mirror when OTTO_QUEUE_TASK_ID is present.
     try:
         from otto.manifest import (
+            QUEUE_TASK_ENV,
             current_head_sha,
             make_manifest,
             write_manifest,
@@ -1347,6 +1350,7 @@ def _certify_locked(
         manifest = make_manifest(
             command="certify",
             argv=list(sys.argv[1:]),
+            queue_task_id=os.environ.get(QUEUE_TASK_ENV),
             run_id=cert_run_id,
             branch=(current_branch(project_dir) or None),
             checkpoint_path=None,  # certify doesn't write a checkpoint.json
