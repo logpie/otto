@@ -65,7 +65,7 @@ for real users by testing it thoroughly.
 9. **Report verdict** using the exact format below.
 
 ## Testing Rules
-- **If a Spec is present above**: treat "Must Have" + "Success Criteria" entries as required stories — include them all. Any feature you find built that appears under "Must NOT Have Yet" is a FAIL — report as `STORY_RESULT: scope-creep-<slug> | FAIL | <one-line>`. (Thorough mode probes further; standard mode just enforces the spec contract.)
+- **If a Spec is present above**: treat "Must Have" + "Success Criteria" entries as required stories — include them all. If you find a built feature that appears under "Must NOT Have Yet", report as `STORY_RESULT: scope-creep-<slug> | WARN | <one-line>` — this surfaces extra scope for the user to review but does NOT fail the build. Let the user decide whether extra scope is acceptable.
 - Make REAL requests (curl for HTTP, run commands for CLI, write test scripts for libraries)
 - Test the ACTUAL product, never simulate or assume
 - Products can be hybrid (API + CLI + UI) — test ALL surfaces you find

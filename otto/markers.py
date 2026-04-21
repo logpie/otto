@@ -39,14 +39,23 @@ def _parse_diagnosis(raw: str) -> str:
 def _parse_story_result(stripped: str, evidence: dict[str, str]) -> dict[str, Any] | None:
     """Parse a single STORY_RESULT: line. Returns None if placeholder.
 
-    Verdict tokens: PASS, FAIL, SKIPPED, FLAG_FOR_HUMAN. The first two are
-    the standard pass/fail signal. SKIPPED and FLAG_FOR_HUMAN are emitted
-    by the merge cert path when a story has no overlap with the merge
-    diff (skipped) or is genuinely contradicted by another merged branch
-    (flagged). Neither counts as a regression.
+    Verdict tokens: PASS, FAIL, WARN, SKIPPED, FLAG_FOR_HUMAN.
+      - PASS / FAIL — standard pass/fail signal.
+      - WARN — non-blocking advisory (e.g. scope-creep during build). Sets
+        ``passed=True`` and surfaces ``warn=True`` so the UI can flag it.
+      - SKIPPED — merge cert path when a story has no overlap with the
+        merge diff.
+      - FLAG_FOR_HUMAN — merge cert path when a story is genuinely
+        contradicted across merged branches.
+    Neither SKIPPED nor FLAG_FOR_HUMAN counts as a regression.
 
-    `passed` stays as backward-compat boolean (True only for PASS).
-    Callers that need to distinguish skip/flag from fail should read `verdict`.
+    `passed` stays as a backward-compat boolean (True for PASS or WARN).
+    Callers that need the full picture should read `verdict` and `warn`.
+
+    Only emits the `evidence` key when the agent actually produced a
+    STORY_EVIDENCE block for this story — otherwise the field is omitted
+    so consumers that check ``story.get("evidence")`` get ``None``
+    (missing), not an empty string that reads like intentional absence.
     """
     parts = stripped[len("STORY_RESULT:"):].strip().split("|", 2)
     if len(parts) < 2:
@@ -59,18 +68,41 @@ def _parse_story_result(stripped: str, evidence: dict[str, str]) -> dict[str, An
         verdict = "FLAG_FOR_HUMAN"
     elif "SKIPPED" in verdict_text:
         verdict = "SKIPPED"
+    elif "WARN" in verdict_text:
+        verdict = "WARN"
     elif "PASS" in verdict_text:
         verdict = "PASS"
     else:
         verdict = "FAIL"
     summary = parts[2].strip() if len(parts) > 2 else ""
-    return {
+    # `passed` = backward-compat boolean. WARN counts as passed (non-blocking).
+    story: dict[str, Any] = {
         "story_id": sid,
         "verdict": verdict,
-        "passed": verdict == "PASS",
+        "passed": verdict in ("PASS", "WARN"),
         "summary": summary,
-        "evidence": evidence.get(sid, ""),
     }
+    if verdict == "WARN":
+        story["warn"] = True
+    ev = evidence.get(sid, "")
+    if ev:
+        story["evidence"] = ev
+    return story
+
+
+def compact_story_result(story: dict[str, Any]) -> dict[str, Any]:
+    """Drop default-valued optional fields from serialized story payloads."""
+    compact = dict(story)
+    if not compact.get("warn"):
+        compact.pop("warn", None)
+    if not compact.get("evidence"):
+        compact.pop("evidence", None)
+    return compact
+
+
+def compact_story_results(stories: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Apply ``compact_story_result`` across a story list."""
+    return [compact_story_result(story) for story in stories]
 
 
 def _is_template_verdict(verdict_text: str) -> bool:

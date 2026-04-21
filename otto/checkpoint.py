@@ -2,7 +2,15 @@
 
 Writes checkpoint after each round so runs can survive crashes,
 pause/resume, and recover from errors. Works for both agent mode
-(stores session_id for SDK resume) and split mode (stores round number).
+(stores agent_session_id for SDK resume) and split mode (stores round number).
+
+Layout:
+  otto_logs/sessions/<session_id>/checkpoint.json  — new location
+  otto_logs/checkpoint.json                        — legacy (read-only fallback)
+
+`run_id` is the same thing as `session_id` in the new layout (unified session
+id: `<yyyy-mm-dd>-<HHMMSS>-<6hex>`). The CLI entrypoint allocates it once and
+threads it through.
 """
 
 from __future__ import annotations
@@ -15,9 +23,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from otto import paths
+
 logger = logging.getLogger("otto.checkpoint")
 
-CHECKPOINT_FILE = "otto_logs/checkpoint.json"
+# Legacy top-level checkpoint path. Still READ (for upgrade safety). Never
+# written by new code.
+LEGACY_CHECKPOINT_FILE = "otto_logs/checkpoint.json"
+
 POST_INITIAL_BUILD_PHASES = frozenset({"certify", "fix", "round_complete", "complete"})
 # Phases that belong to the new spec-gate pre-build flow. Treated specially
 # for --force / --resume semantics: clearing or overwriting them without
@@ -41,10 +54,10 @@ class ResumeState:
     ``resumed=False`` means a fresh run (either no checkpoint, or user chose
     not to resume). ``resumed=True`` means pipeline functions should pick up
     from ``start_round``/``total_cost``/``rounds`` (split mode) or
-    ``session_id`` (agent mode).
+    ``agent_session_id`` (agent mode).
     """
 
-    session_id: str = ""
+    agent_session_id: str = ""
     start_round: int = 1
     total_cost: float = 0.0
     rounds: list[dict[str, Any]] = field(default_factory=list)
@@ -56,11 +69,51 @@ class ResumeState:
     target: str = ""              # persisted target goal for improve.target resume
     # Spec-gate fields (new; all empty/None for pre-spec checkpoints)
     intent: str = ""              # canonical intent (for resume without CLI intent)
-    run_id: str = ""              # outer run scope for spec artifacts
+    run_id: str = ""              # session_id in the new layout (kept as run_id for compat)
     spec_path: str = ""           # absolute path to approved/in-review spec.md
     spec_hash: str = ""           # sha256 of normalized spec content
     spec_version: int = 0         # regeneration counter (0 = never regenerated)
     spec_cost: float = 0.0        # cost of spec phase (subset of total_cost)
+
+    @property
+    def session_id(self) -> str:
+        """Backward-compatible alias for one release."""
+        return self.agent_session_id
+
+    @session_id.setter
+    def session_id(self, value: str) -> None:
+        self.agent_session_id = value
+
+
+def _checkpoint_agent_session_id(data: dict[str, Any]) -> str:
+    """Read the SDK resume id from new or legacy checkpoint keys."""
+    return data.get("agent_session_id") or data.get("session_id", "") or ""
+
+
+def _checkpoint_run_id(data: dict[str, Any]) -> str:
+    """Read the otto run id from new or legacy checkpoint keys."""
+    return data.get("run_id") or data.get("build_id", "") or ""
+
+
+def _normalize_checkpoint_data(data: dict[str, Any]) -> dict[str, Any]:
+    """Fill upgrade-safe aliases on checkpoint reads."""
+    normalized = dict(data)
+    normalized["agent_session_id"] = _checkpoint_agent_session_id(data)
+    normalized["run_id"] = _checkpoint_run_id(data)
+    return normalized
+
+
+def _prune_checkpoint_defaults(data: dict[str, Any]) -> dict[str, Any]:
+    """Drop default-valued optional fields from serialized checkpoints."""
+    if data.get("focus") is None:
+        data.pop("focus", None)
+    if data.get("target") is None:
+        data.pop("target", None)
+    if data.get("current_round", 0) == 0:
+        data.pop("current_round", None)
+    if not data.get("rounds"):
+        data.pop("rounds", None)
+    return data
 
 
 def print_resume_status(console: Any, state: ResumeState, resume_flag: bool, expected_command: str) -> None:
@@ -81,8 +134,19 @@ def print_resume_status(console: Any, state: ResumeState, resume_flag: bool, exp
             f"\n  [yellow]\u26a0 Checkpoint is from `{state.prior_command}`, "
             f"resuming in `{expected_command}`.[/yellow]"
         )
+    phase = state.phase or ""
+    if phase in {"spec", "spec_review"}:
+        status = "Resuming spec review"
+    elif phase in {"spec_approved", "build"}:
+        status = "Resuming build agent (after spec approval)"
+    elif phase == "certify":
+        status = f"Resuming after certify round {state.current_round}"
+    elif phase == "fix":
+        status = f"Resuming after fix round {state.current_round}"
+    else:
+        status = f"Resuming from round {state.start_round} (phase={phase or 'unknown'})"
     console.print(
-        f"\n  [info]Resuming from round {state.start_round} "
+        f"\n  [info]{status} "
         f"(${state.total_cost:.2f} spent so far)[/info]\n"
     )
 
@@ -123,7 +187,7 @@ def resolve_resume(
     prior_cmd = checkpoint.get("command", "") or ""
     current_round = checkpoint.get("current_round", 0) or 0
     return ResumeState(
-        session_id=checkpoint.get("session_id", "") or "",
+        agent_session_id=_checkpoint_agent_session_id(checkpoint),
         start_round=current_round + 1,
         total_cost=float(checkpoint.get("total_cost", 0.0) or 0.0),
         rounds=list(checkpoint.get("rounds", []) or []),
@@ -134,7 +198,7 @@ def resolve_resume(
         phase=checkpoint.get("phase", "") or "",
         target=checkpoint.get("target", "") or "",
         intent=checkpoint.get("intent", "") or "",
-        run_id=checkpoint.get("run_id", "") or "",
+        run_id=_checkpoint_run_id(checkpoint),
         spec_path=checkpoint.get("spec_path", "") or "",
         spec_hash=checkpoint.get("spec_hash", "") or "",
         spec_version=int(checkpoint.get("spec_version", 0) or 0),
@@ -145,6 +209,11 @@ def resolve_resume(
 def initial_build_completed(phase: str) -> bool:
     """Return True only for explicit post-initial-build phases."""
     return phase in POST_INITIAL_BUILD_PHASES
+
+
+def _checkpoint_path_for(project_dir: Path, run_id: str) -> Path:
+    """Return the session-scoped checkpoint path for a run/session id."""
+    return paths.session_checkpoint(project_dir, run_id)
 
 
 def write_checkpoint(
@@ -172,17 +241,25 @@ def write_checkpoint(
 ) -> None:
     """Write checkpoint to disk. Called after each round.
 
+    `run_id` is the session_id in the new layout — the checkpoint lives at
+    `otto_logs/sessions/<run_id>/checkpoint.json`. A "paused" pointer is
+    set for `status in {paused, in_progress}` so `--resume` can find it.
+
     For spec-gate fields (`intent`, `spec_path`, `spec_hash`, `spec_version`,
     `spec_cost`): `None` preserves the prior checkpoint value (or default);
     explicit values overwrite. This lets a phase=build write not clobber the
     spec fields that were set at phase=spec_approved.
     """
-    checkpoint_path = project_dir / CHECKPOINT_FILE
-    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    if not run_id:
+        raise ValueError("write_checkpoint requires a non-empty run_id (session_id)")
+
+    paths.ensure_session_scaffold(project_dir, run_id)
+    checkpoint_path = _checkpoint_path_for(project_dir, run_id)
 
     # Merge spec fields with prior on-disk state (preserve across writes).
     prior = _read_prior(checkpoint_path)
 
+    # Cost fields stored at full precision — rounding only at display time.
     data = {
         "run_id": run_id,
         "command": command,
@@ -193,23 +270,33 @@ def write_checkpoint(
         "max_rounds": max_rounds,
         "status": status,
         "phase": phase,
-        "session_id": session_id,
+        "agent_session_id": session_id,
         "current_round": current_round,
-        "total_cost": round(total_cost, 2),
+        "total_cost": float(total_cost),
         "rounds": rounds or [],
         "intent": intent if intent is not None else (prior.get("intent", "") if prior else ""),
         "spec_path": spec_path if spec_path is not None else (prior.get("spec_path", "") if prior else ""),
         "spec_hash": spec_hash if spec_hash is not None else (prior.get("spec_hash", "") if prior else ""),
         "spec_version": spec_version if spec_version is not None else (prior.get("spec_version", 0) if prior else 0),
-        "spec_cost": round(
-            float(spec_cost) if spec_cost is not None else float(prior.get("spec_cost", 0.0) if prior else 0.0),
-            4,
+        "spec_cost": float(
+            spec_cost if spec_cost is not None
+            else (prior.get("spec_cost", 0.0) if prior else 0.0)
         ),
         "started_at": _read_started_at(checkpoint_path),
-        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+    if status == "completed":
+        data = _prune_checkpoint_defaults(data)
 
     _write_checkpoint_file(checkpoint_path, data)
+    # Update the `paused` pointer so --resume can locate the session.
+    # We point at in_progress sessions too — a hard crash leaves status=in_progress
+    # without a clean transition, and resolve_pointer preferentially returns
+    # paused over in_progress when scanning.
+    if status in ("in_progress", "paused"):
+        paths.set_pointer(project_dir, paths.PAUSED_POINTER, run_id)
+    elif status == "completed":
+        paths.clear_pointer(project_dir, paths.PAUSED_POINTER)
     logger.debug("Checkpoint written: round %d, status=%s, phase=%s", current_round, status, phase)
 
 
@@ -221,54 +308,139 @@ def _read_prior(checkpoint_path: Path) -> dict[str, Any] | None:
         return None
 
 
-def load_checkpoint(project_dir: Path) -> dict[str, Any] | None:
-    """Load checkpoint if one exists and is active (in_progress or paused)."""
-    checkpoint_path = project_dir / CHECKPOINT_FILE
+def _load_legacy_checkpoint(project_dir: Path) -> dict[str, Any] | None:
+    """Read legacy top-level checkpoint.json (pre-restructure layout).
 
+    Still readable so upgrades don't strand an active legacy paused run.
+    Returns None on any error or when status is not active.
+    """
+    legacy_path = paths.legacy_checkpoint(project_dir)
     try:
-        data = json.loads(checkpoint_path.read_text())
+        data = json.loads(legacy_path.read_text())
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return None
-
     if data.get("status") not in ("in_progress", "paused"):
         return None
-
     return data
 
 
+def load_checkpoint(project_dir: Path) -> dict[str, Any] | None:
+    """Load checkpoint if one exists and is active (in_progress or paused).
+
+    Tries in order:
+      1. `paused` pointer → session_dir/checkpoint.json
+      2. Scan fallback (built into resolve_pointer) over sessions/
+      3. Legacy otto_logs/checkpoint.json (for upgrade safety)
+    """
+    # 1 & 2: new layout via pointer + scan fallback.
+    session_path = paths.resolve_pointer(project_dir, paths.PAUSED_POINTER)
+    if session_path is not None:
+        cp_path = session_path / "checkpoint.json"
+        try:
+            data = json.loads(cp_path.read_text())
+            if data.get("status") in ("in_progress", "paused"):
+                return _normalize_checkpoint_data(data)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            pass
+
+    # 3: legacy fallback.
+    legacy = _load_legacy_checkpoint(project_dir)
+    if legacy is not None:
+        return _normalize_checkpoint_data(legacy)
+
+    return None
+
+
 def clear_checkpoint(project_dir: Path) -> None:
-    """Remove checkpoint file (run completed or user chose fresh start)."""
-    checkpoint_path = project_dir / CHECKPOINT_FILE
-    if checkpoint_path.exists():
-        checkpoint_path.unlink()
-        logger.debug("Checkpoint cleared")
+    """Remove checkpoint file and the `paused` pointer.
+
+    Also removes the legacy checkpoint file for complete upgrade-clean state.
+    """
+    # New layout: locate the active session checkpoint and remove it.
+    session_path = paths.resolve_pointer(project_dir, paths.PAUSED_POINTER)
+    if session_path is not None:
+        cp_path = session_path / "checkpoint.json"
+        if cp_path.exists():
+            try:
+                cp_path.unlink()
+            except OSError as exc:
+                logger.warning("Failed to unlink %s: %s", cp_path, exc)
+    paths.clear_pointer(project_dir, paths.PAUSED_POINTER)
+
+    # Legacy file, if still present (upgrade path).
+    legacy_path = paths.legacy_checkpoint(project_dir)
+    if legacy_path.exists():
+        try:
+            legacy_path.unlink()
+        except OSError as exc:
+            logger.warning("Failed to unlink legacy checkpoint: %s", exc)
+
+    logger.debug("Checkpoint cleared")
 
 
-def complete_checkpoint(project_dir: Path, total_cost: float = 0.0) -> None:
-    """Mark checkpoint as completed."""
-    checkpoint_path = project_dir / CHECKPOINT_FILE
-    if not checkpoint_path.exists():
+def complete_checkpoint(
+    project_dir: Path,
+    total_cost: float = 0.0,
+    *,
+    current_round: int | None = None,
+    rounds: list[dict[str, Any]] | None = None,
+) -> None:
+    """Mark checkpoint as completed (new layout) and clear the `paused` pointer.
+
+    ``current_round`` / ``rounds``, when provided, populate the matching
+    fields on the completed checkpoint so forensic reads reflect real
+    history. Previously agentic_v3 runs left these as ``0`` / ``[]`` even
+    after multiple certify rounds. ``None`` preserves whatever was on disk.
+
+    For legacy-layout checkpoints, updates the legacy file in place (the
+    caller owns deletion).
+    """
+    def _apply(data: dict[str, Any]) -> None:
+        data.update(_normalize_checkpoint_data(data))
+        data["status"] = "completed"
+        data["total_cost"] = float(total_cost)
+        if current_round is not None:
+            data["current_round"] = current_round
+        if rounds is not None:
+            data["rounds"] = list(rounds)
+        data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        _prune_checkpoint_defaults(data)
+
+    session_path = paths.resolve_pointer(project_dir, paths.PAUSED_POINTER)
+    if session_path is not None:
+        cp_path = session_path / "checkpoint.json"
+        if cp_path.exists():
+            try:
+                data = _normalize_checkpoint_data(json.loads(cp_path.read_text()))
+                _apply(data)
+                _write_checkpoint_file(cp_path, data)
+            except (json.JSONDecodeError, OSError):
+                pass
+        paths.clear_pointer(project_dir, paths.PAUSED_POINTER)
         return
 
+    # Legacy fallback: update the legacy file in place.
+    legacy_path = paths.legacy_checkpoint(project_dir)
+    if not legacy_path.exists():
+        return
     try:
-        data = json.loads(checkpoint_path.read_text())
-        data["status"] = "completed"
-        data["total_cost"] = round(total_cost, 2)
-        data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
-        _write_checkpoint_file(checkpoint_path, data)
+        data = _normalize_checkpoint_data(json.loads(legacy_path.read_text()))
+        _apply(data)
+        _write_checkpoint_file(legacy_path, data)
     except (json.JSONDecodeError, OSError):
         pass
 
 
 def _read_started_at(checkpoint_path: Path) -> str:
     """Preserve original started_at from existing checkpoint."""
+    now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     if checkpoint_path.exists():
         try:
             data = json.loads(checkpoint_path.read_text())
-            return data.get("started_at", time.strftime("%Y-%m-%dT%H:%M:%SZ"))
+            return data.get("started_at", now_iso)
         except (json.JSONDecodeError, OSError):
             pass
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return now_iso
 
 
 def _checkpoint_tmp_path(checkpoint_path: Path) -> Path:

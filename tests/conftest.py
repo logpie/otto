@@ -6,17 +6,38 @@ from unittest.mock import MagicMock
 import pytest
 
 
-def make_mock_query(text, cost=0.50, session_id="test-session"):
+def make_mock_query(text, cost=0.50, session_id="test-session", assistant_messages=None):
     """Build a drop-in replacement for `otto.agent.run_agent_query`.
 
     Returns an async callable that yields canned text/cost/ResultMessage.
     Used by tests that patch ``otto.agent.run_agent_query`` to exercise the
     pipeline without hitting the real SDK.
+
+    Invokes the caller-supplied ``on_message`` callback with synthetic
+    assistant messages plus a ResultMessage so the session logger
+    populates narrative.log and messages.jsonl realistically.
     """
     result_msg = MagicMock()
     result_msg.session_id = session_id
+    result_msg.subtype = "success"
+    result_msg.is_error = False
+    result_msg.result = None
+    result_msg.total_cost_usd = cost
+    result_msg.usage = None
 
     async def mock_query(prompt, options, **kwargs):
+        from otto.agent import AssistantMessage, ResultMessage, TextBlock
+        on_message = kwargs.get("on_message")
+        emitted_assistant_messages = assistant_messages
+        if emitted_assistant_messages is None:
+            emitted_assistant_messages = [AssistantMessage(content=[TextBlock(text=text)])]
+        if on_message is not None:
+            for message in emitted_assistant_messages:
+                on_message(message)
+            on_message(ResultMessage(
+                subtype="success", is_error=False, session_id=session_id,
+                result=None, total_cost_usd=cost, usage=None,
+            ))
         return text, cost, result_msg
 
     return mock_query

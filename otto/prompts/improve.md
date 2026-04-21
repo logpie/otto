@@ -13,15 +13,9 @@ You are a senior developer improving an existing project. Work autonomously.
    - If FAIL: read each finding's diagnosis, fix the root causes in your
      code, run tests, commit the fix, and re-dispatch the certifier. Add the
      failed stories to the re-dispatch prompt so the certifier re-tests them.
-   - If PASS after fixing issues: the certifier verified your fixes work, but
-     it may not have probed NEW areas. Re-dispatch at least once more so it
-     can find issues it missed while focused on re-testing your fixes.
-   - If PASS on the very FIRST round (no fixes needed): re-dispatch — the
-     certifier was likely too lenient.
-   - Keep certifying until you get two consecutive PASSes, or until you've
-     fixed everything the certifier finds. Two consecutive PASSes means the
-     certifier ran out of things to find — that's when you stop.
-   - Stop after {max_certify_rounds} certification rounds maximum �� if issues
+   - If PASS: stop as soon as you get a PASS verdict.
+{strict_mode}
+   - Stop after {max_certify_rounds} certification rounds maximum — if issues
      remain, report what's still failing and move on.
 
 4. **For each fix round:**

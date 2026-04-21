@@ -83,10 +83,12 @@ def _find_manifest_for_branch(
                 return json.loads(p.read_text())
             except json.JSONDecodeError:
                 pass
-    # Atomic mode: scan otto_logs/builds/*/manifest.json for matching branch
-    builds = project_dir / "otto_logs" / "builds"
-    if builds.exists():
-        for run_dir in builds.iterdir():
+    # Atomic mode (new per-session layout): scan otto_logs/sessions/*/manifest.json
+    sessions = project_dir / "otto_logs" / "sessions"
+    if sessions.exists():
+        for run_dir in sessions.iterdir():
+            if not run_dir.is_dir():
+                continue
             mp = run_dir / "manifest.json"
             if not mp.exists():
                 continue
@@ -96,10 +98,12 @@ def _find_manifest_for_branch(
                 continue
             if m.get("branch") == branch:
                 return m
-    # Atomic certify mode: scan otto_logs/certifier/*/manifest.json
-    certs = project_dir / "otto_logs" / "certifier"
-    if certs.exists():
-        for run_dir in certs.iterdir():
+    # Legacy atomic mode: scan otto_logs/builds/*/manifest.json + certifier/*
+    for legacy in (project_dir / "otto_logs" / "builds",
+                   project_dir / "otto_logs" / "certifier"):
+        if not legacy.exists():
+            continue
+        for run_dir in legacy.iterdir():
             if not run_dir.is_dir():
                 continue
             mp = run_dir / "manifest.json"

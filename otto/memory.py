@@ -19,16 +19,23 @@ import json
 import logging
 import subprocess
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from otto import paths
+
+logger = logging.getLogger("otto.memory")
 MAX_ENTRIES = 5
-HISTORY_FILE = "otto_logs/certifier-memory.jsonl"
+# Legacy path still READ as a fallback; new writes go to
+# otto_logs/cross-sessions/certifier-memory.jsonl via paths.py.
+LEGACY_HISTORY_FILE = "otto_logs/certifier-memory.jsonl"
 
 
 def record_run(
     project_dir: Path,
     *,
+    run_id: str,
     command: str,
     certifier_mode: str,
     stories: list[dict[str, Any]],
@@ -36,8 +43,14 @@ def record_run(
 ) -> None:
     """Append one entry after a run completes. Best-effort — never raises."""
     try:
-        _record_run_impl(project_dir, command=command, certifier_mode=certifier_mode,
-                         stories=stories, cost=cost)
+        _record_run_impl(
+            project_dir,
+            run_id=run_id,
+            command=command,
+            certifier_mode=certifier_mode,
+            stories=stories,
+            cost=cost,
+        )
     except Exception:
         logging.getLogger("otto.memory").warning("Failed to record certifier memory")
 
@@ -45,12 +58,13 @@ def record_run(
 def _record_run_impl(
     project_dir: Path,
     *,
+    run_id: str,
     command: str,
     certifier_mode: str,
     stories: list[dict[str, Any]],
     cost: float,
 ) -> None:
-    history_path = project_dir / HISTORY_FILE
+    history_path = paths.certifier_memory_jsonl(project_dir)
     history_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Collect git info for citations
@@ -72,14 +86,15 @@ def _record_run_impl(
         })
 
     entry = {
-        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "run_id": run_id,
         "command": command,
         "certifier_mode": certifier_mode,
         "commit": head_sha,
         "findings": findings,
         "tested": len(stories),
         "passed": sum(1 for s in stories if s.get("passed")),
-        "cost": round(cost, 2),
+        "cost": float(cost),
     }
 
     with open(history_path, "a") as f:
@@ -87,24 +102,70 @@ def _record_run_impl(
 
 
 def load_history(project_dir: Path) -> list[dict[str, Any]]:
-    """Read last N entries from certifier memory."""
-    history_path = project_dir / HISTORY_FILE
-    if not history_path.exists():
-        return []
+    """Read last N entries from certifier memory.
 
-    entries = []
-    try:
-        for line in history_path.read_text().splitlines():
-            line = line.strip()
-            if line:
-                try:
-                    entries.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-    except OSError:
-        return []
+    Reads from (in order, merged): new cross-sessions path, legacy top-level
+    path, and any pre-restructure archive siblings. Preserves append order.
+    """
+    candidates: list[Path] = [
+        paths.certifier_memory_jsonl(project_dir),
+        project_dir / LEGACY_HISTORY_FILE,
+    ]
+    for archive in paths.archived_pre_restructure_dirs(project_dir):
+        candidates.append(archive / paths.LEGACY_CERTIFIER_MEMORY)
 
-    return entries[-MAX_ENTRIES:]
+    entries: list[tuple[tuple[float, int, int], dict[str, Any]]] = []
+    for source_index, path in enumerate(candidates):
+        if not path.exists():
+            continue
+        try:
+            fallback_ts = path.stat().st_mtime
+        except OSError:
+            fallback_ts = 0.0
+        try:
+            for line_index, line in enumerate(path.read_text().splitlines()):
+                line = line.strip()
+                if line:
+                    try:
+                        entry = json.loads(line)
+                        entries.append((
+                            _history_sort_key(
+                                entry,
+                                fallback_ts=fallback_ts,
+                                source_index=source_index,
+                                line_index=line_index,
+                            ),
+                            entry,
+                        ))
+                    except json.JSONDecodeError:
+                        continue
+        except OSError:
+            continue
+
+    entries.sort(key=lambda item: item[0])
+    return [entry for _, entry in entries[-MAX_ENTRIES:]]
+
+
+def _history_sort_key(
+    entry: dict[str, Any],
+    *,
+    fallback_ts: float,
+    source_index: int,
+    line_index: int,
+) -> tuple[float, int, int]:
+    ts = entry.get("ts") or entry.get("started_at") or entry.get("updated_at")
+    if isinstance(ts, str) and ts:
+        try:
+            return (
+                datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp(),
+                source_index,
+                line_index,
+            )
+        except ValueError:
+            logger.warning("Unparseable memory timestamp %r; falling back to file mtime", ts)
+    else:
+        logger.warning("Missing memory timestamp; falling back to file mtime")
+    return (fallback_ts, source_index, line_index)
 
 
 def format_for_prompt(project_dir: Path) -> str:

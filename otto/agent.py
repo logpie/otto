@@ -28,6 +28,11 @@ except ImportError:
     _SDKToolUseBlock = None
 
 try:
+    from claude_agent_sdk.types import UserMessage as _SDKUserMessage
+except (ImportError, AttributeError):
+    _SDKUserMessage = None
+
+try:
     from claude_agent_sdk.types import ThinkingBlock as _SDKThinkingBlock
 except (ImportError, AttributeError):
     _SDKThinkingBlock = None
@@ -60,6 +65,22 @@ class ToolResultBlock:
 @dataclass
 class AssistantMessage:
     content: list[Any] = field(default_factory=list)
+    session_id: str = ""
+    usage: dict[str, Any] | None = None
+
+
+@dataclass
+class UserMessage:
+    """Tool-result-only messages returning tool outputs to the model.
+
+    The SDK tags these as "user" because tool_result blocks are passed
+    back as user input on the next turn. Kept separate from
+    AssistantMessage so messages.jsonl can record them with the correct
+    ``type: "user"`` tag.
+    """
+    content: list[Any] = field(default_factory=list)
+    session_id: str = ""
+    usage: dict[str, Any] | None = None
 
 
 @dataclass
@@ -99,14 +120,21 @@ ClaudeAgentOptions = AgentOptions
 def make_agent_options(
     project_dir: Path,
     config: dict[str, Any] | None = None,
+    *,
+    agent_type: str | None = None,
     **overrides: Any,
 ) -> AgentOptions:
-    """Create standard agent options for build/certify agents.
+    """Create standard agent options for a named otto agent.
 
-    Sets bypassPermissions, project cwd, CC preset prompt, and model from config.
+    ``agent_type`` is one of ``"build" | "certifier" | "spec" | "fix"``.
+    Per-agent provider/model/effort overrides (from ``otto.yaml``'s
+    ``agents.<name>`` block) take precedence over the global values.
+    When ``agent_type`` is ``None``, only global values are used.
+
     Pass keyword overrides for system_prompt, setting_sources, etc.
     """
     from otto.testing import _subprocess_env
+    from otto.config import agent_provider, agent_model, agent_effort
     opts = AgentOptions(
         permission_mode="bypassPermissions",
         cwd=str(project_dir),
@@ -115,9 +143,14 @@ def make_agent_options(
         setting_sources=["project"],
         **overrides,
     )
-    model = (config or {}).get("model")
+    cfg = config or {}
+    opts.provider = agent_provider(cfg, agent_type)
+    model = agent_model(cfg, agent_type)
     if model:
         opts.model = str(model)
+    effort = agent_effort(cfg, agent_type)
+    if effort:
+        opts.effort = str(effort)
     return opts
 
 
@@ -139,26 +172,79 @@ async def run_agent_with_timeout(
     prompt: str,
     options: AgentOptions,
     *,
-    log_path: Path,
+    log_dir: Path,
+    phase_name: str = "BUILD",
     timeout: int | None,
     project_dir: Path,
     capture_tool_output: bool = False,
-) -> tuple[str, float, str]:
-    """Run an agent query with live logging, timeout, and orphan cleanup.
+    on_terminal_event: Callable[[str], None] | None = None,
+    verbose: bool = False,
+    strict_mode: bool = False,
+) -> tuple[str, float, str, dict[str, Any]]:
+    """Run an agent query with streaming session logs, timeout, and orphan cleanup.
 
-    Returns (text, cost, session_id) on success.
+    Returns (text, cost, session_id, breakdown_data) on success.
     Raises AgentCallError on timeout/crash.
-    Always closes the live logger and cleans up orphan processes on failure.
+    Always closes the session loggers and cleans up orphan processes on failure.
+
+    Writes ``log_dir/messages.jsonl`` (lossless normalized SDK event stream)
+    and ``log_dir/narrative.log`` (human-readable stream). A ``live.log``
+    symlink -> ``narrative.log`` is also created for back-compat.
     """
     import asyncio
     import logging
 
+    from otto.logstream import estimate_phase_costs, make_session_logger
+
     log = logging.getLogger("otto.agent")
-    callbacks = make_live_logger(log_path)
+    callbacks = make_session_logger(
+        log_dir,
+        phase_name=phase_name,
+        stdout_callback=on_terminal_event,
+        verbose=verbose,
+        strict_mode=strict_mode,
+        project_dir=project_dir,
+    )
     close_fh = callbacks.pop("_close")
+    narrative = callbacks.pop("_narrative")
     # Mutable bag — streaming handlers update it so timeout/crash paths can
     # recover the last-known session_id for a resumable checkpoint.
     agent_state: dict[str, str] = {"session_id": ""}
+
+    def _append_narrative(line: str) -> None:
+        """Append a terminal-error marker to narrative.log for human debugging."""
+        try:
+            with open(log_dir / "narrative.log", "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+        except OSError:
+            pass
+
+    def _fmt_elapsed(elapsed_s: float) -> str:
+        secs = max(0, int(elapsed_s))
+        if secs < 60:
+            return f"{secs}s"
+        if secs < 3600:
+            mins, rem = divmod(secs, 60)
+            return f"{mins}m {rem:02d}s"
+        hours, rem = divmod(secs, 3600)
+        mins, seconds = divmod(rem, 60)
+        if mins:
+            return f"{hours}h {mins:02d}m {seconds:02d}s"
+        return f"{hours}h 00m {seconds:02d}s"
+
+    heartbeat_task: asyncio.Task[None] | None = None
+    if on_terminal_event is not None:
+        async def _heartbeat() -> None:
+            interval_s = 20
+            while True:
+                await asyncio.sleep(interval_s)
+                if (asyncio.get_running_loop().time()
+                        - narrative.last_terminal_event_monotonic()) < interval_s:
+                    continue
+                narrative.write_heartbeat(_fmt_elapsed(narrative.phase_elapsed_seconds()))
+
+        heartbeat_task = asyncio.create_task(_heartbeat())
+
     try:
         text, cost, result_msg = await asyncio.wait_for(
             run_agent_query(prompt, options,
@@ -168,9 +254,61 @@ async def run_agent_with_timeout(
             timeout=timeout,
         )
         session_id = getattr(result_msg, "session_id", "") or agent_state.get("session_id", "")
-        return text, cost, session_id
+        breakdown_data = {
+            "round_timings": narrative.round_timings(),
+            "build_duration_s": narrative.build_duration_or_none(),
+            "recovered_tool_errors": 0,
+        }
+        phase = (phase_name or "").lower()
+        finalize_breakdown: dict[str, dict[str, float | int]] | None = None
+        if phase == "build":
+            rounds = len(breakdown_data["round_timings"])
+            if rounds > 0:
+                certify_duration = sum(
+                    end - start for start, end in breakdown_data["round_timings"]
+                )
+                build_duration = breakdown_data["build_duration_s"]
+                if build_duration is None:
+                    build_duration = max(narrative.elapsed_seconds() - certify_duration, 0.0)
+                if build_duration is not None:
+                    finalize_breakdown = {
+                        "build": {"duration_s": build_duration},
+                        "certify": {
+                            "duration_s": certify_duration,
+                            "rounds": rounds,
+                        },
+                    }
+            else:
+                finalize_breakdown = {"build": {"duration_s": narrative.elapsed_seconds()}}
+        elif phase == "certify":
+            rounds = len(breakdown_data["round_timings"]) or 1
+            finalize_breakdown = {
+                "certify": {
+                    "duration_s": narrative.elapsed_seconds(),
+                    "rounds": rounds,
+                }
+            }
+        elif phase == "spec":
+            finalize_breakdown = {
+                "spec": {
+                    "duration_s": narrative.elapsed_seconds(),
+                    "cost_usd": float(cost or 0.0),
+                }
+            }
+        if phase == "build" and finalize_breakdown is not None:
+            estimated_costs = estimate_phase_costs(log_dir / "messages.jsonl", float(cost or 0.0))
+            if estimated_costs:
+                for phase_name, phase_costs in estimated_costs.items():
+                    if phase_name in finalize_breakdown:
+                        finalize_breakdown[phase_name].update(phase_costs)
+        finalize_stats = narrative.finalize(finalize_breakdown)
+        breakdown_data["recovered_tool_errors"] = int(
+            finalize_stats.get("recovered_tool_errors", 0)
+        )
+        return text, cost, session_id, breakdown_data
     except asyncio.TimeoutError:
         log.error("Agent timed out after %ds", timeout)
+        _append_narrative(f"\u2501\u2501\u2501 Timed out after {timeout}s")
         from otto.pipeline import _cleanup_orphan_processes
         _cleanup_orphan_processes(project_dir)
         raise AgentCallError(
@@ -178,11 +316,13 @@ async def run_agent_with_timeout(
             session_id=agent_state.get("session_id", ""),
         )
     except KeyboardInterrupt:
+        _append_narrative("\u2501\u2501\u2501 KeyboardInterrupt")
         from otto.pipeline import _cleanup_orphan_processes
         _cleanup_orphan_processes(project_dir)
         raise
     except Exception as exc:
         log.exception("Agent crashed")
+        _append_narrative(f"\u2501\u2501\u2501 Agent crashed: {exc}")
         from otto.pipeline import _cleanup_orphan_processes
         _cleanup_orphan_processes(project_dir)
         raise AgentCallError(
@@ -190,6 +330,12 @@ async def run_agent_with_timeout(
             session_id=agent_state.get("session_id", ""),
         )
     finally:
+        if heartbeat_task is not None:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
         close_fh()
 
 
@@ -325,15 +471,58 @@ def _normalize_message(message: Any) -> Any | None:
             usage=getattr(message, "usage", None),
             structured_output=getattr(message, "structured_output", None),
         )
+    if isinstance(message, UserMessage):
+        return message
     if isinstance(message, AssistantMessage):
         return message
+
+    session_id = str(getattr(message, "session_id", "") or "")
+
+    # SDK UserMessage — tool_result-only payload returned to the model.
+    if _SDKUserMessage and isinstance(message, _SDKUserMessage):
+        content = []
+        raw_content = getattr(message, "content", []) or []
+        # SDK UserMessage.content may be a bare string — wrap as TextBlock.
+        if isinstance(raw_content, str):
+            if raw_content:
+                content.append(TextBlock(text=raw_content))
+        else:
+            for block in raw_content:
+                normalized = _normalize_block(block)
+                if normalized is not None:
+                    content.append(normalized)
+        return UserMessage(
+            content=content,
+            session_id=session_id,
+            usage=getattr(message, "usage", None),
+        )
+
     if (_SDKAssistantMessage and isinstance(message, _SDKAssistantMessage)) or hasattr(message, "content"):
         content = []
-        for block in getattr(message, "content", []) or []:
-            normalized = _normalize_block(block)
-            if normalized is not None:
-                content.append(normalized)
-        return AssistantMessage(content=content)
+        raw_content = getattr(message, "content", []) or []
+        if isinstance(raw_content, str):
+            if raw_content:
+                content.append(TextBlock(text=raw_content))
+        else:
+            for block in raw_content:
+                normalized = _normalize_block(block)
+                if normalized is not None:
+                    content.append(normalized)
+        # If the message contains ONLY tool_result blocks (no text /
+        # thinking / tool_use), it is semantically a user turn — tool
+        # outputs fed back into the model. Tag as UserMessage so
+        # messages.jsonl records type="user" correctly.
+        if content and all(isinstance(b, ToolResultBlock) for b in content):
+            return UserMessage(
+                content=content,
+                session_id=session_id,
+                usage=getattr(message, "usage", None),
+            )
+        return AssistantMessage(
+            content=content,
+            session_id=session_id,
+            usage=getattr(message, "usage", None),
+        )
     return None
 
 
@@ -491,74 +680,40 @@ def tool_use_summary(block) -> str:
                 return match.group("body")
         return cmd
 
+    def _collapse(s: str) -> str:
+        # Collapse embedded newlines (e.g. HEREDOC bodies) so the
+        # narrative's single-line writer doesn't get multi-row output.
+        return s.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+
     inputs = block.input or {}
     name = block.name
     if name == "Read":
-        return inputs.get("file_path", "")
+        return _collapse(inputs.get("file_path", ""))
     if name == "Glob":
-        return inputs.get("pattern") or inputs.get("path", "")
+        return _collapse(inputs.get("pattern") or inputs.get("path", ""))
     if name == "Grep":
-        return inputs.get("pattern", "")
+        return _collapse(inputs.get("pattern", ""))
     if name in ("Edit", "Write"):
-        return inputs.get("file_path", "")
+        return _collapse(inputs.get("file_path", ""))
     if name == "Bash":
         cmd = _unwrap_shell_command(inputs.get("command", ""))
+        cmd = _collapse(cmd)
         if len(cmd) <= 120:
             return cmd
         cut = cmd.rfind(" ", 0, 120)
         if cut <= 0:
             cut = 120
         return cmd[:cut] + "..."
+    if name == "Agent":
+        subagent_type = str(inputs.get("subagent_type", "") or "").strip()
+        prompt = _collapse(str(inputs.get("prompt", "") or "")).strip()
+        preview = prompt[:80]
+        if len(prompt) > 80:
+            preview = preview.rstrip() + "..."
+        if subagent_type:
+            return f'subagent={subagent_type} "{preview}"'
+        return f'"{preview}"' if preview else ""
     return ""
-
-
-def make_live_logger(log_path: Path) -> dict[str, Callable]:
-    """Create callback functions that write agent activity to a live log file.
-
-    Returns a dict with on_text, on_tool, on_tool_result keys suitable for
-    passing to run_agent_query as **kwargs.
-
-    The log is append-mode and flushed after each write, so it can be
-    tailed in real time: tail -f otto_logs/certifier/live.log
-    """
-    import time
-    start = time.monotonic()
-    _fh = open(log_path, "a")
-
-    def _elapsed() -> str:
-        secs = time.monotonic() - start
-        return f"[{secs:6.1f}s]"
-
-    def _on_tool(block: Any) -> None:
-        name = getattr(block, "name", "?")
-        summary = tool_use_summary(block)
-        _fh.write(f"{_elapsed()} \u25cf {name}  {summary}\n")
-        _fh.flush()
-
-    def _on_tool_result(block: Any) -> None:
-        content = str(getattr(block, "content", "") or "")
-        is_error = getattr(block, "is_error", False)
-        prefix = "\u2717 error" if is_error else "\u2190 result"
-        # Truncate to first meaningful line
-        first_line = content.split("\n")[0][:200] if content else "(empty)"
-        _fh.write(f"{_elapsed()} {prefix}: {first_line}\n")
-        _fh.flush()
-
-    def _on_text(text: str) -> None:
-        # Only log thinking blocks and short text (skip large agent output)
-        if text.startswith("[thinking]"):
-            _fh.write(f"{_elapsed()} \u2192 {text[:150]}\n")
-            _fh.flush()
-
-    def _close() -> None:
-        _fh.close()
-
-    return {
-        "on_tool": _on_tool,
-        "on_tool_result": _on_tool_result,
-        "on_text": _on_text,
-        "_close": _close,
-    }
 
 
 async def run_agent_query(
@@ -569,6 +724,7 @@ async def run_agent_query(
     on_tool: Callable[[Any], Any] | None = None,
     on_tool_result: Callable[[Any], Any] | None = None,
     on_result: Callable[[Any], Any] | None = None,
+    on_message: Callable[[Any], Any] | None = None,
     capture_tool_output: bool = False,
     state: dict[str, str] | None = None,
 ) -> tuple[str, float, Any]:
@@ -577,6 +733,10 @@ async def run_agent_query(
     If capture_tool_output=True, tool result content (including subagent output)
     is appended to the returned text. This is useful when the caller needs to
     parse structured markers from subagent output.
+
+    If `on_message` is provided, it receives every normalized message before
+    block-level dispatch. This is the hook session loggers use to stream
+    both messages.jsonl and narrative.log.
 
     If `state` is provided, the function updates ``state["session_id"]`` as
     soon as a session_id is seen on any streamed message. This lets callers
@@ -596,6 +756,14 @@ async def run_agent_query(
             if sid:
                 state["session_id"] = sid
 
+        if on_message is not None:
+            try:
+                on_message(message)
+            except Exception:
+                # Log writers must never kill the run.
+                import logging
+                logging.getLogger("otto.agent").exception("on_message handler failed")
+
         if isinstance(message, ResultMessage):
             result_msg = message
             raw_cost = getattr(message, "total_cost_usd", None)
@@ -603,7 +771,7 @@ async def run_agent_query(
                 cost += float(raw_cost)
             if on_result:
                 on_result(message)
-        elif isinstance(message, AssistantMessage):
+        elif isinstance(message, (AssistantMessage, UserMessage)):
             for block in message.content:
                 if isinstance(block, ToolResultBlock):
                     if capture_tool_output and block.content:

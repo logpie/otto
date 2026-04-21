@@ -214,6 +214,9 @@ async def run_agentic_certifier(
     budget: "RunBudget | None" = None,
     stories: list[dict[str, Any]] | None = None,
     merge_context: dict[str, Any] | None = None,
+    session_id: str | None = None,
+    write_session_summary: bool = True,
+    verbose: bool = False,
 ) -> "CertificationReport":
     """Agentic certifier: one monolithic agent does everything.
 
@@ -232,16 +235,22 @@ async def run_agentic_certifier(
         CertificationOutcome,
         CertificationReport,
     )
+    from otto.display import console
 
     config = config or {}
     start_time = time.monotonic()
 
-    # Each certifier run gets a unique directory to prevent overwrites.
-    # Also write to the "latest" dir for tools that expect a fixed path.
-    run_id = f"certify-{int(time.time())}-{os.getpid()}"
-    report_dir = project_dir / "otto_logs" / "certifier" / run_id
+    # Each certifier run goes under a session dir. When called standalone
+    # (no session_id), allocate one.
+    from otto import paths
+    if session_id is None:
+        session_id = paths.new_session_id(project_dir)
+    paths.ensure_session_scaffold(project_dir, session_id)
+    paths.set_pointer(project_dir, paths.LATEST_POINTER, session_id)
+    run_id = session_id  # kept for downstream log mentions
+    report_dir = paths.certify_dir(project_dir, session_id)
     report_dir.mkdir(parents=True, exist_ok=True)
-    latest_dir = project_dir / "otto_logs" / "certifier" / "latest"
+    latest_dir: Path | None = None  # `latest` pointer is now managed by paths.set_pointer
 
     # Evidence stays inside the run-specific directory so concurrent runs do
     # not clobber each other's screenshots or recordings.
@@ -262,37 +271,31 @@ async def run_agentic_certifier(
     from otto.memory import inject_memory
     prompt = inject_memory(prompt, project_dir, config)
 
-    options = make_agent_options(project_dir, config)
+    options = make_agent_options(project_dir, config, agent_type="certifier")
 
     logger.info("Running agentic certifier on %s", project_dir)
 
     # Timeout derives from the run budget (None = no timeout).
     timeout = budget.for_call() if budget is not None else None
 
-    text, cost, _session_id = await run_agent_with_timeout(
+    text, cost, _session_id, _breakdown = await run_agent_with_timeout(
         prompt, options,
-        log_path=report_dir / "live.log",
+        log_dir=report_dir,
+        phase_name="CERTIFY",
         timeout=timeout,
         project_dir=project_dir,
+        on_terminal_event=console.print,
+        verbose=verbose,
     )
-
-    # Save full agent output for auditability (not truncated)
-    try:
-        agent_log = report_dir / "certifier-agent.log"
-        agent_log.write_text(
-            f"# Certifier agent output — {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-            f"# Cost: ${float(cost or 0):.3f}\n"
-            f"# Text length: {len(text or '')} chars\n\n"
-            f"{text or '(no output)'}\n"
-        )
-    except Exception as exc:
-        logger.warning("Failed to write certifier agent log: %s", exc)
 
     # Parse results from agent output
     total_duration = round(time.monotonic() - start_time, 1)
     from otto.markers import parse_certifier_markers
     parsed = parse_certifier_markers(text or "")
-    story_results = [_normalize_story_result(s) for s in parsed.stories]
+    from otto.markers import compact_story_results
+    # Compact first (drops empty evidence / absent warn fields),
+    # then normalize (guarantees an explicit `verdict` on every story).
+    story_results = [_normalize_story_result(s) for s in compact_story_results(parsed.stories)]
 
     # Determine outcome. SKIPPED and FLAG_FOR_HUMAN are not regressions —
     # only an explicit FAIL counts against the cert. Stories without an
@@ -318,22 +321,26 @@ async def run_agentic_certifier(
     # Write PoW report
     try:
         from otto.observability import write_json_file as _write_json
+        # Standalone certify: "total" equals certifier cost (no build agent).
+        certifier_cost = float(cost or 0)
         pow_data = {
-            "generated": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "generated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "outcome": outcome.value,
             "duration_s": total_duration,
-            "cost_usd": float(cost or 0),
+            "certifier_cost_usd": certifier_cost,
+            "total_cost_usd": certifier_cost,
             "stories": story_results,
         }
         _write_json(report_dir / "proof-of-work.json", pow_data)
 
         # HTML PoW
         _generate_agentic_html_pow(report_dir, story_results, outcome.value,
-                                    total_duration, float(cost or 0),
+                                    total_duration, certifier_cost,
                                     parsed.stories_passed, parsed.stories_tested,
-                                    diagnosis=parsed.diagnosis)
+                                    diagnosis=parsed.diagnosis,
+                                    certifier_cost=certifier_cost)
 
-        # Markdown PoW
+        # Markdown PoW — verdict-aware (PASS/FAIL/WARN/SKIPPED/FLAG_FOR_HUMAN).
         (report_dir / "proof-of-work.md").write_text(
             _render_pow_markdown(
                 story_results,
@@ -347,16 +354,9 @@ async def run_agentic_certifier(
     except Exception as exc:
         logger.warning("Failed to write PoW report: %s", exc)
 
-    # Update "latest" symlink to point to this run
-    try:
-        if latest_dir.is_symlink():
-            latest_dir.unlink()
-        elif latest_dir.exists():
-            import shutil
-            shutil.rmtree(latest_dir)
-        latest_dir.symlink_to(report_dir.name)
-    except Exception:
-        pass
+    # `latest` pointer (session-scoped) is set by paths.set_pointer above;
+    # the old top-level certifier/latest symlink is retired. Callers that
+    # want the newest PoW should use paths.resolve_pointer("latest").
 
     logger.info(
         "Agentic certifier done: %s, %d/%d stories, %.1fs, $%.3f",
@@ -365,8 +365,42 @@ async def run_agentic_certifier(
 
     # Record cross-run memory
     from otto.memory import record_run
-    record_run(project_dir, command="certify", certifier_mode=mode,
-               stories=story_results, cost=float(cost or 0))
+    record_run(
+        project_dir,
+        run_id=run_id,
+        command="certify",
+        certifier_mode=mode,
+        stories=story_results,
+        cost=float(cost or 0),
+    )
+
+    if write_session_summary:
+        try:
+            from otto.pipeline import _write_session_summary
+            certify_rounds_count = len(parsed.certify_rounds) or 1
+            breakdown = {
+                "certify": {
+                    "duration_s": total_duration,
+                    "cost_usd": float(cost or 0.0),
+                    "rounds": certify_rounds_count,
+                }
+            }
+            _write_session_summary(
+                project_dir,
+                run_id,
+                verdict=outcome.value,
+                passed=passed,
+                cost=float(cost or 0),
+                duration=total_duration,
+                stories_passed=parsed.stories_passed,
+                stories_tested=parsed.stories_tested,
+                rounds=certify_rounds_count,
+                intent=intent,
+                command="certify",
+                breakdown=breakdown,
+            )
+        except Exception as exc:
+            logger.warning("Failed to write session summary: %s", exc)
 
     return report
 
@@ -383,12 +417,21 @@ def _generate_agentic_html_pow(
     diagnosis: str = "",
     round_history: list[dict] | None = None,
     evidence_dir: Path | None = None,
+    certifier_cost: float | None = None,
 ) -> None:
-    """Generate HTML PoW report for the agentic certifier."""
+    """Generate HTML PoW report for the agentic certifier.
+
+    `cost` is the authoritative total cost (spec + agent + certifier where
+    applicable) — displayed to the user. `certifier_cost`, when different
+    from `cost`, is shown as an additional breakdown.
+    """
     import html as _html
 
-    outcome_color = "#22c55e" if outcome == "passed" else "#ef4444"
     num_rounds = len(round_history) if round_history else 1
+    # Qualified selectors (.outcome-banner.pass / .outcome-banner.fail) avoid
+    # the previous duplicate-selector CSS-cascade bug where the FAIL variant
+    # silently inherited PASS colors.
+    banner_class = "pass" if outcome == "passed" else "fail"
     html = [
         "<!DOCTYPE html><html><head><meta charset='utf-8'>",
         "<title>Certification Report</title>",
@@ -397,7 +440,8 @@ def _generate_agentic_html_pow(
         "body { font-family: system-ui, -apple-system, sans-serif; max-width: 960px; margin: 0 auto; padding: 2em 1.5em; color: #1a1a2e; background: #fafafa; }",
         "h1 { border-bottom: 3px solid #1a1a2e; padding-bottom: 0.5em; margin-bottom: 0.3em; }",
         ".outcome-banner { padding: 0.8em 1.2em; border-radius: 8px; margin-bottom: 1.5em; font-size: 1.1em; font-weight: 600; }",
-        f".outcome-banner {{ background: {outcome_color}18; border: 2px solid {outcome_color}; color: {outcome_color}; }}",
+        ".outcome-banner.pass { background: #22c55e18; border: 2px solid #22c55e; color: #22c55e; }",
+        ".outcome-banner.fail { background: #ef444418; border: 2px solid #ef4444; color: #ef4444; }",
         ".meta { display: flex; gap: 2em; flex-wrap: wrap; color: #555; margin-bottom: 2em; font-size: 0.95em; }",
         ".meta-item { display: flex; flex-direction: column; }",
         ".meta-label { font-size: 0.75em; text-transform: uppercase; letter-spacing: 0.05em; color: #888; }",
@@ -415,6 +459,7 @@ def _generate_agentic_html_pow(
         ".story.fail { border-left: 5px solid #ef4444; }",
         ".story.skipped { border-left: 5px solid #64748b; }",
         ".story.flag { border-left: 5px solid #f59e0b; }",
+        ".story.warn { border-left: 5px solid #eab308; }",
         ".story.unknown { border-left: 5px solid #6b7280; }",
         ".story-header { display: flex; align-items: center; gap: 0.8em; }",
         ".badge { display: inline-block; padding: 3px 10px; border-radius: 5px; font-weight: 700; font-size: 0.8em; letter-spacing: 0.03em; }",
@@ -422,6 +467,7 @@ def _generate_agentic_html_pow(
         ".badge.fail { background: #fee2e2; color: #991b1b; }",
         ".badge.skipped { background: #e2e8f0; color: #334155; }",
         ".badge.flag { background: #fef3c7; color: #92400e; }",
+        ".badge.warn { background: #fef3c7; color: #92400e; }",
         ".badge.unknown { background: #e5e7eb; color: #374151; }",
         ".story-id { font-weight: 600; font-size: 1.05em; }",
         ".summary { margin-top: 0.5em; color: #444; line-height: 1.5; }",
@@ -432,6 +478,7 @@ def _generate_agentic_html_pow(
         ".diagnosis { margin-top: 1.5em; padding: 1em; background: #fff7ed; border: 1px solid #fed7aa; border-radius: 8px; }",
         ".diagnosis h3 { margin: 0 0 0.5em; color: #9a3412; font-size: 0.95em; }",
         ".diagnosis p { margin: 0; color: #7c2d12; line-height: 1.5; }",
+        ".note { margin: 0.5em 0; padding: 0.6em 1em; background: #f7f7f9; border: 1px dashed #c7c7cc; border-radius: 6px; color: #555; font-size: 0.9em; }",
         "footer { margin-top: 2em; padding-top: 1em; border-top: 1px solid #e0e0e0; color: #999; font-size: 0.8em; }",
         "</style>",
         "<script>",
@@ -442,13 +489,26 @@ def _generate_agentic_html_pow(
         "</script>",
         "</head><body>",
         "<h1>Certification Report</h1>",
-        f"<div class='outcome-banner'>{outcome.upper()} &mdash; {passed}/{total} stories passed"
+        f"<div class='outcome-banner {banner_class}'>{outcome.upper()} &mdash; {passed}/{total} stories passed"
         f"{f' (after {num_rounds} rounds)' if num_rounds > 1 else ''}</div>",
         "<div class='meta'>",
         f"<div class='meta-item'><span class='meta-label'>Duration</span><span class='meta-value'>{duration:.0f}s</span></div>",
-        f"<div class='meta-item'><span class='meta-label'>Cost</span><span class='meta-value'>${cost:.2f}</span></div>",
+    ]
+    # Cost display: if we have a distinct certifier cost, show both lines for transparency.
+    if certifier_cost is not None and abs(certifier_cost - cost) > 1e-9:
+        html.append(
+            "<div class='meta-item'><span class='meta-label'>Cost</span>"
+            f"<span class='meta-value'>${cost:.2f} total "
+            f"(certifier ${certifier_cost:.2f})</span></div>"
+        )
+    else:
+        html.append(
+            "<div class='meta-item'><span class='meta-label'>Cost</span>"
+            f"<span class='meta-value'>${cost:.2f}</span></div>"
+        )
+    html += [
         f"<div class='meta-item'><span class='meta-label'>Rounds</span><span class='meta-value'>{num_rounds}</span></div>",
-        f"<div class='meta-item'><span class='meta-label'>Generated</span><span class='meta-value'>{time.strftime('%Y-%m-%d %H:%M:%S')}</span></div>",
+        f"<div class='meta-item'><span class='meta-label'>Generated</span><span class='meta-value'>{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}</span></div>",
         "</div>",
     ]
 
@@ -495,8 +555,11 @@ def _generate_agentic_html_pow(
 
         html.append("</div>")
 
-    if diagnosis:
-        html.append(f"<div class='diagnosis'><h3>Overall Diagnosis</h3><p>{_html.escape(diagnosis)}</p></div>")
+    diagnosis_text = (diagnosis or "").strip()
+    if diagnosis_text:
+        html.append(
+            f"<div class='diagnosis'><h3>Overall Diagnosis</h3><p>{_html.escape(diagnosis_text)}</p></div>"
+        )
 
     # Embed screenshots from evidence directory
     evidence_dir = evidence_dir or (output_dir / "evidence")

@@ -1,0 +1,672 @@
+"""Otto log paths — single choke point for all `otto_logs/` writes and reads.
+
+New layout (one dir per invocation):
+
+    otto_logs/
+    ├── sessions/<session_id>/
+    │   ├── intent.txt
+    │   ├── summary.json             # only for completed sessions
+    │   ├── checkpoint.json          # only while in-flight/paused
+    │   ├── spec/                    # only if --spec used
+    │   ├── build/                   # coding-agent artifacts
+    │   ├── certify/                 # verification artifacts
+    │   └── improve/                 # only for `otto improve`
+    ├── latest                       # symlink → sessions/<id>
+    ├── paused                       # symlink → sessions/<id> (or missing)
+    ├── .lock                        # project lock
+    └── cross-sessions/
+        ├── history.jsonl
+        └── certifier-memory.jsonl
+
+Legacy layout (pre-restructure) is still readable. Writers go through this
+module exclusively — no `otto_logs/...` literals elsewhere.
+
+Project locking uses a kernel `flock` on Unix for correctness. On Windows,
+locking is best-effort; `release()` has an unavoidable TOCTOU. Use flock
+(Unix) for full correctness.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import secrets
+import uuid
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Iterator
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+
+logger = logging.getLogger("otto.paths")
+_BEST_EFFORT_LOCK_WARNING_EMITTED = False
+
+# ---------------------------------------------------------------------------
+# Path constants and layout helpers
+# ---------------------------------------------------------------------------
+
+LOGS_ROOT_NAME = "otto_logs"
+SESSIONS_DIR_NAME = "sessions"
+CROSS_SESSIONS_DIR_NAME = "cross-sessions"
+LOCK_FILE_NAME = ".lock"
+LATEST_POINTER = "latest"
+PAUSED_POINTER = "paused"
+HISTORY_FILE_NAME = "history.jsonl"
+CERTIFIER_MEMORY_FILE_NAME = "certifier-memory.jsonl"
+
+# Legacy (pre-restructure) path constants — reader fallback only.
+LEGACY_CHECKPOINT = "checkpoint.json"
+LEGACY_RUN_HISTORY = "run-history.jsonl"
+LEGACY_CERTIFIER_MEMORY = "certifier-memory.jsonl"
+LEGACY_RUNS_DIR = "runs"
+LEGACY_BUILDS_DIR = "builds"
+LEGACY_CERTIFIER_DIR = "certifier"
+LEGACY_IMPROVE_DIR = "improve"
+LEGACY_ROUNDS_DIR = "rounds"
+LEGACY_IMPROVEMENT_REPORT = "improvement-report.md"
+
+
+def logs_dir(project_dir: Path) -> Path:
+    """Return the otto_logs directory for a project."""
+    return Path(project_dir) / LOGS_ROOT_NAME
+
+
+def sessions_root(project_dir: Path) -> Path:
+    return logs_dir(project_dir) / SESSIONS_DIR_NAME
+
+
+def session_dir(project_dir: Path, session_id: str) -> Path:
+    return sessions_root(project_dir) / session_id
+
+
+def spec_dir(project_dir: Path, session_id: str) -> Path:
+    return session_dir(project_dir, session_id) / "spec"
+
+
+def build_dir(project_dir: Path, session_id: str) -> Path:
+    return session_dir(project_dir, session_id) / "build"
+
+
+def certify_dir(project_dir: Path, session_id: str) -> Path:
+    return session_dir(project_dir, session_id) / "certify"
+
+
+def improve_dir(project_dir: Path, session_id: str) -> Path:
+    return session_dir(project_dir, session_id) / "improve"
+
+
+def cross_sessions_dir(project_dir: Path) -> Path:
+    return logs_dir(project_dir) / CROSS_SESSIONS_DIR_NAME
+
+
+def history_jsonl(project_dir: Path) -> Path:
+    """New cross-session history path."""
+    return cross_sessions_dir(project_dir) / HISTORY_FILE_NAME
+
+
+def certifier_memory_jsonl(project_dir: Path) -> Path:
+    """New cross-session certifier memory path."""
+    return cross_sessions_dir(project_dir) / CERTIFIER_MEMORY_FILE_NAME
+
+
+def session_checkpoint(project_dir: Path, session_id: str) -> Path:
+    """Per-session resume checkpoint (only exists while in-flight/paused)."""
+    return session_dir(project_dir, session_id) / "checkpoint.json"
+
+
+def session_summary(project_dir: Path, session_id: str) -> Path:
+    """Post-run summary for completed sessions (permanent final record)."""
+    return session_dir(project_dir, session_id) / "summary.json"
+
+
+def session_intent(project_dir: Path, session_id: str) -> Path:
+    """Archival copy of the intent at session start (project-root
+    intent.md is the runtime contract)."""
+    return session_dir(project_dir, session_id) / "intent.txt"
+
+
+def legacy_checkpoint(project_dir: Path) -> Path:
+    return logs_dir(project_dir) / LEGACY_CHECKPOINT
+
+
+def legacy_run_history(project_dir: Path) -> Path:
+    return logs_dir(project_dir) / LEGACY_RUN_HISTORY
+
+
+def legacy_certifier_memory(project_dir: Path) -> Path:
+    return logs_dir(project_dir) / LEGACY_CERTIFIER_MEMORY
+
+
+def ensure_session_scaffold(project_dir: Path, session_id: str) -> Path:
+    """Create the session dir and its phase subdirs. Idempotent."""
+    sess = session_dir(project_dir, session_id)
+    for sub in (sess, sess / "spec", sess / "build", sess / "certify", sess / "improve"):
+        sub.mkdir(parents=True, exist_ok=True)
+    return sess
+
+
+def archived_pre_restructure_dirs(project_dir: Path) -> list[Path]:
+    """Return any existing otto_logs.pre-restructure.<ts>/ sibling archives.
+
+    Used by readers to fall back onto archived history/memory post-migration.
+    """
+    project = Path(project_dir)
+    prefix = f"{LOGS_ROOT_NAME}.pre-restructure."
+    return sorted(
+        p for p in project.iterdir()
+        if p.is_dir() and p.name.startswith(prefix)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Session ID
+# ---------------------------------------------------------------------------
+
+_SESSION_ID_MAX_ATTEMPTS = 16
+
+
+def new_session_id(project_dir: Path) -> str:
+    """Allocate a fresh session_id of form `<yyyy-mm-dd>-<HHMMSS>-<6hex>`.
+
+    Retries up to 16 times on directory collision. Caller MUST hold the
+    project lock; this function doesn't re-enter the lock.
+    """
+    root = sessions_root(project_dir)
+    for _ in range(_SESSION_ID_MAX_ATTEMPTS):
+        now = datetime.now(timezone.utc)
+        sid = f"{now:%Y-%m-%d-%H%M%S}-{secrets.token_hex(3)}"
+        if not (root / sid).exists():
+            return sid
+    raise RuntimeError(
+        f"could not allocate unique session_id after {_SESSION_ID_MAX_ATTEMPTS} tries"
+    )
+
+
+def is_session_id(candidate: str) -> bool:
+    """Best-effort validation that a string looks like a session_id."""
+    if not candidate or len(candidate) != len("YYYY-MM-DD-HHMMSS-abcdef"):
+        return False
+    return candidate[4] == "-" and candidate[7] == "-" and candidate[10] == "-" and candidate[17] == "-"
+
+
+# ---------------------------------------------------------------------------
+# Pointer files (latest, paused)
+# ---------------------------------------------------------------------------
+
+def _pointer_text_file(logs_root: Path, name: str) -> Path:
+    return logs_root / f"{name}.txt"
+
+
+def _pointer_link(logs_root: Path, name: str) -> Path:
+    return logs_root / name
+
+
+def set_pointer(project_dir: Path, name: str, session_id: str) -> None:
+    """Atomically point `name` at sessions/<session_id>.
+
+    Prefers an OS symlink. Falls back to a `.txt` pointer file if symlinks
+    are unsupported (Windows without admin, some CI volumes). Never raises
+    — a failure logs at WARNING and leaves the previous pointer (if any)
+    intact for the non-fallback path; the fallback path explicitly removes
+    any stale symlink before writing the `.txt`.
+    """
+    root = logs_dir(project_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    target = f"{SESSIONS_DIR_NAME}/{session_id}"
+    link = _pointer_link(root, name)
+    tmp_link = root / f".{name}.link.tmp"
+
+    try:
+        # Clean any stale temp from a prior crash.
+        try:
+            if tmp_link.is_symlink() or tmp_link.exists():
+                tmp_link.unlink()
+        except OSError:
+            pass
+        os.symlink(target, tmp_link)
+        os.replace(tmp_link, link)
+        # If a stale .txt fallback existed, remove it now that symlink is live.
+        try:
+            _pointer_text_file(root, name).unlink(missing_ok=True)
+        except OSError:
+            pass
+        return
+    except (OSError, NotImplementedError) as exc:
+        logger.warning("symlink pointer %s failed (%s); using .txt fallback", name, exc)
+
+    # Fallback: atomic write of .txt. First remove any stale symlink at
+    # `link` — otherwise resolve_pointer (symlink-first) returns pre-failure
+    # target.
+    try:
+        if link.is_symlink() or link.exists():
+            link.unlink()
+    except OSError:
+        pass
+
+    tmp_txt = root / f".{name}.txt.tmp"
+    try:
+        tmp_txt.write_text(session_id)
+        os.replace(tmp_txt, _pointer_text_file(root, name))
+    except OSError as exc:
+        logger.warning("pointer .txt fallback also failed for %s: %s", name, exc)
+
+
+def resolve_pointer(project_dir: Path, name: str) -> Path | None:
+    """Resolve `name` pointer to an absolute session directory.
+
+    Try in order:
+      1. symlink at otto_logs/<name>
+      2. pointer file at otto_logs/<name>.txt
+      3. (paused only) scan sessions/*/checkpoint.json for resumable state.
+
+    Returns absolute session dir path, or None if no pointer resolves.
+    """
+    root = logs_dir(project_dir)
+    if not root.exists():
+        return None
+
+    link = _pointer_link(root, name)
+    try:
+        if link.is_symlink():
+            return link.resolve(strict=False)
+    except OSError:
+        pass
+
+    txt = _pointer_text_file(root, name)
+    if txt.exists():
+        try:
+            sid = txt.read_text().strip()
+            if sid:
+                sess = session_dir(project_dir, sid)
+                if sess.exists():
+                    return sess
+        except OSError:
+            pass
+
+    # Scan fallback — only for `paused` because it must never strand a
+    # resumable run. Covers both clean-pause (status=paused) and hard-crash
+    # (status=in_progress). Prefer paused; tie-break by newest updated_at.
+    if name == PAUSED_POINTER:
+        candidates: list[tuple[int, float, Path]] = []
+        for cp in sessions_root(project_dir).glob("*/checkpoint.json"):
+            try:
+                data = json.loads(cp.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            status = data.get("status", "")
+            if status not in ("paused", "in_progress"):
+                continue
+            updated = data.get("updated_at", "") or data.get("started_at", "")
+            if updated:
+                try:
+                    updated_ts = datetime.fromisoformat(
+                        updated.replace("Z", "+00:00")
+                    ).timestamp()
+                except ValueError:
+                    updated_ts = cp.stat().st_mtime
+            else:
+                try:
+                    updated_ts = cp.stat().st_mtime
+                except OSError:
+                    updated_ts = 0.0
+            # Sort key: 0 for paused (higher priority), 1 for in_progress;
+            # then newest updated_ts (negative so smaller sorts first).
+            priority = 0 if status == "paused" else 1
+            candidates.append((priority, -updated_ts, cp.parent))
+        if candidates:
+            candidates.sort()
+            return candidates[0][2]
+
+    return None
+
+
+def clear_pointer(project_dir: Path, name: str) -> None:
+    """Remove the named pointer (symlink and/or .txt). Never raises."""
+    root = logs_dir(project_dir)
+    for p in (_pointer_link(root, name), _pointer_text_file(root, name)):
+        try:
+            if p.is_symlink() or p.exists():
+                p.unlink()
+        except OSError as exc:
+            logger.warning("clear_pointer(%s): %s", p.name, exc)
+
+
+# ---------------------------------------------------------------------------
+# Project lock — one invocation per project at a time
+# ---------------------------------------------------------------------------
+
+class LockBusy(Exception):
+    """Raised when another live PID holds the project lock."""
+
+    def __init__(self, holder: dict):
+        self.holder = holder
+        super().__init__(
+            f"project lock held by pid={holder.get('pid')!r} "
+            f"command={holder.get('command')!r} "
+            f"started_at={holder.get('started_at')!r}"
+        )
+
+
+@dataclass
+class LockHandle:
+    """Returned by acquire_project_lock. Use as a context manager."""
+
+    _path: Path
+    _fd: int | None
+    _pid: int
+    _started_at: str
+    _command: str
+    _nonce: str
+    _session_id: str | None = None
+    _released: bool = False
+
+    def set_session_id(self, session_id: str) -> None:
+        """Remember the bound session_id without mutating the lock record."""
+        self._session_id = session_id
+        logger.info("lock now bound to session %s", session_id)
+
+    def release(self) -> None:
+        """Release the kernel lock and unlink the lock path if it is still ours."""
+        if self._released:
+            return
+        self._released = True
+
+        if self._fd is not None:
+            try:
+                fd_stat = os.fstat(self._fd)
+            except OSError:
+                fd_stat = None
+
+            try:
+                path_stat = os.stat(self._path)
+            except FileNotFoundError:
+                logger.warning("lock record no longer ours (broken?)")
+                path_stat = None
+            except OSError as exc:
+                logger.warning("lock release failed: %s", exc)
+                path_stat = None
+
+            try:
+                if (
+                    fd_stat is not None
+                    and path_stat is not None
+                    and fd_stat.st_ino == path_stat.st_ino
+                    and fd_stat.st_dev == path_stat.st_dev
+                ):
+                    os.unlink(self._path)
+                elif path_stat is not None:
+                    logger.warning("lock record no longer ours (broken?)")
+            except FileNotFoundError:
+                logger.warning("lock record no longer ours (broken?)")
+            except OSError as exc:
+                logger.warning("lock release failed: %s", exc)
+            finally:
+                try:
+                    os.close(self._fd)
+                except OSError:
+                    pass
+            return
+
+        try:
+            holder = json.loads(self._path.read_text())
+        except FileNotFoundError:
+            logger.warning("lock record no longer ours (broken?)")
+            return
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("lock release failed: %s", exc)
+            return
+
+        if holder.get("nonce") != self._nonce:
+            logger.warning("lock record no longer ours (broken?)")
+            return
+
+        try:
+            # Windows fallback: release-time TOCTOU is inherent here.
+            # Between the nonce check and the unlink, another process could
+            # replace `.lock` (e.g., via `otto --break-lock`). We accept this
+            # because (a) the window is microseconds, (b) the `--break-lock`
+            # operator knows they're forcing things, and (c) a spurious
+            # unlink just means the next acquire creates a fresh lock. Full
+            # correctness would require fcntl/flock which Windows does not
+            # provide.
+            os.unlink(self._path)
+        except FileNotFoundError:
+            logger.warning("lock record no longer ours (broken?)")
+        except OSError as exc:
+            logger.warning("lock release failed: %s", exc)
+
+    def __enter__(self) -> LockHandle:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.release()
+
+
+def _pid_alive(pid: int) -> bool:
+    """Best-effort alive check. On POSIX, signal 0 to the pid."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Another user's process — treat as alive (don't steal their lock).
+        return True
+    except OSError:
+        return False
+
+
+def _read_lock_record_fd(fd: int) -> dict[str, object]:
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+        raw = os.read(fd, 65536)
+    except OSError:
+        return {}
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+
+
+def _write_lock_record_fd(fd: int, record: dict[str, object]) -> None:
+    payload = json.dumps(record).encode("utf-8")
+    os.ftruncate(fd, 0)
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.write(fd, payload)
+    os.fsync(fd)
+
+
+def _path_points_to_fd(path: Path, fd: int | None) -> bool:
+    if fd is None:
+        return False
+    try:
+        path_stat = os.stat(path)
+        fd_stat = os.fstat(fd)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+    return path_stat.st_ino == fd_stat.st_ino and path_stat.st_dev == fd_stat.st_dev
+
+
+def _warn_best_effort_lock_once() -> None:
+    global _BEST_EFFORT_LOCK_WARNING_EMITTED
+    if _BEST_EFFORT_LOCK_WARNING_EMITTED:
+        return
+    logger.warning(
+        "kernel-level lock unavailable on this platform; using best-effort file lock with PID check"
+    )
+    _BEST_EFFORT_LOCK_WARNING_EMITTED = True
+
+
+def acquire_project_lock(
+    project_dir: Path,
+    command: str,
+    *,
+    break_stale: bool = True,
+) -> LockHandle:
+    """Acquire exclusive project lock. Returns a LockHandle (context manager).
+
+    Raises LockBusy if another process holds the project lock. On Unix this is
+    backed by a kernel flock. On platforms without `fcntl`, it falls back to a
+    best-effort PID check around `O_EXCL`; that path has a check-then-act race.
+    """
+    root = logs_dir(project_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    lock_path = root / LOCK_FILE_NAME
+    has_kernel_lock = fcntl is not None
+    if not has_kernel_lock:
+        _warn_best_effort_lock_once()
+
+    holder: dict = {}
+    for attempt in range(8):
+        fd: int | None = None
+        try:
+            fd = os.open(
+                lock_path,
+                os.O_CREAT | os.O_EXCL | os.O_RDWR,
+                0o644,
+            )
+        except FileExistsError:
+            try:
+                fd = os.open(lock_path, os.O_RDWR)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                holder = {}
+                raise LockBusy(holder)
+
+            if has_kernel_lock:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    holder = _read_lock_record_fd(fd)
+                    os.close(fd)
+                    raise LockBusy(holder)
+                except OSError:
+                    holder = _read_lock_record_fd(fd)
+                    os.close(fd)
+                    raise LockBusy(holder)
+
+            holder = _read_lock_record_fd(fd)
+            holder_pid = int(holder.get("pid", 0) or 0)
+            if not break_stale:
+                os.close(fd)
+                raise LockBusy(holder)
+
+            if has_kernel_lock:
+                logger.warning("stale lock from pid=%s (flock released) — breaking", holder_pid)
+                try:
+                    if _path_points_to_fd(lock_path, fd):
+                        os.unlink(lock_path)
+                finally:
+                    os.close(fd)
+                continue
+
+            if _pid_alive(holder_pid):
+                os.close(fd)
+                raise LockBusy(holder)
+
+            logger.warning(
+                "stale lock from pid=%s (best-effort pid check) — breaking",
+                holder_pid,
+            )
+            os.close(fd)
+            try:
+                os.unlink(lock_path)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                raise LockBusy(holder)
+            continue
+
+        if has_kernel_lock:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                try:
+                    os.close(fd)
+                finally:
+                    try:
+                        lock_path.unlink()
+                    except OSError:
+                        pass
+                raise
+
+        handle = LockHandle(
+            _path=lock_path,
+            _fd=fd,
+            _pid=os.getpid(),
+            _started_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            _command=command,
+            _nonce=uuid.uuid4().hex,
+        )
+        try:
+            _write_lock_record_fd(fd, {
+                "pid": handle._pid,
+                "started_at": handle._started_at,
+                "command": handle._command,
+                "nonce": handle._nonce,
+                "session_id": None,
+            })
+            if not has_kernel_lock:
+                os.close(fd)
+                handle._fd = None
+        except OSError:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            try:
+                lock_path.unlink()
+            except OSError:
+                pass
+            raise
+        return handle
+
+    raise LockBusy(holder)
+
+
+def break_project_lock(project_dir: Path) -> dict[str, object]:
+    """Force-remove the project lock and return the prior holder record."""
+    lock_path = logs_dir(project_dir) / LOCK_FILE_NAME
+    try:
+        holder = json.loads(lock_path.read_text()) if lock_path.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        holder = {}
+    try:
+        if lock_path.exists():
+            lock_path.unlink()
+    except OSError as exc:
+        logger.warning("manual lock break failed: %s", exc)
+        raise
+    return holder
+
+
+@contextmanager
+def project_lock(
+    project_dir: Path,
+    command: str,
+    *,
+    break_lock: bool = False,
+) -> Iterator[LockHandle]:
+    """Context-manager convenience wrapper around acquire_project_lock."""
+    if break_lock:
+        holder = break_project_lock(project_dir)
+        logger.warning("project lock manually cleared for %s: %s", command, holder)
+    handle = acquire_project_lock(project_dir, command)
+    try:
+        yield handle
+    finally:
+        handle.release()

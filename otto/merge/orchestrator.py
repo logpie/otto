@@ -371,7 +371,7 @@ async def _run_post_merge_verification(
         cert_story_results=list(cert_report.story_results),
         note=(
             f"cert {'PASSED' if cert_passed else 'FAILED'} "
-            f"({cert_report.outcome.value}); see otto_logs/certifier/{cert_report.run_id}/proof-of-work.html"
+            f"({cert_report.outcome.value}); see otto_logs/sessions/{cert_report.run_id}/certify/proof-of-work.html"
         ),
     )
 

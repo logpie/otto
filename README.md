@@ -38,7 +38,7 @@ $ otto certify "notes API with auth, CRUD, and search"
 
   PASSED — 5/5 stories
   Cost: $1.10  Duration: 164s
-  Report: otto_logs/certifier/proof-of-work.html
+  Report: otto_logs/latest/certify/proof-of-work.html
 ```
 
 **`otto improve`** iterates on existing code with three modes:
@@ -225,15 +225,24 @@ otto build "add dark mode toggle to the settings page"   # incremental
 | `--yes` | Auto-approve the generated spec (CI/scripts) |
 | `--force` | Discard an active paused spec run and start fresh |
 | `--fast` | Fast certification — happy-path smoke test only (the default) |
+| `--standard` | Standard certification — subagents + screenshots, no adversarial probing |
 | `--thorough` | Thorough certification — adversarial edge cases + code review |
 | `--no-qa` | Skip certification entirely (just build) |
 | `--split` | Python-driven certify→fix loop (vs. single agent session) |
+| `--strict` | Require two consecutive PASSes (re-verify for consistency). Default stops at first PASS |
 | `--rounds N` / `-n N` | Max certification rounds (default 8) |
+| `--budget SECONDS` | Total wall-clock budget for the run (default 3600) |
+| `--model MODEL` | Override the coding model for this run (e.g. `sonnet`, `opus`) |
+| `--provider {claude\|codex}` | Override the agent provider for this run |
+| `--effort {low\|medium\|high}` | Provider-specific reasoning effort hint |
+| `--verbose` | Show tool-call counts in heartbeat + extra detail in terminal |
 | `--resume` | Resume from last checkpoint; intent inherited from checkpoint |
 
 **Certifier mode selection**: CLI flag > `otto.yaml` > `fast` fallback. No flag + no yaml setting → `fast`. Projects that want real verification by default set `certifier_mode: standard` (or `thorough`) in `otto.yaml`.
 
-**Spec gate**: `--spec` generates `otto_logs/runs/<run-id>/spec.md` with sections _Intent / What It Does / Core User Journey / Must Have / Must NOT Have Yet / Success Criteria / Open Questions_. Pauses for `[a]pprove / [e]dit / [r]egenerate / [q]uit`. Approved spec flows into build.md + the certifier prompt — the certifier flags features found in "Must NOT Have Yet" as scope-creep FAILures.
+**Precedence**: CLI flag > `otto.yaml` > built-in `DEFAULTS`. Everything is optional — run without any config at all and you get sane defaults for a quick dev loop.
+
+**Spec gate**: `--spec` generates `otto_logs/sessions/<session-id>/spec/spec.md` with sections _Intent / What It Does / Core User Journey / Must Have / Must NOT Have Yet / Success Criteria / Open Questions_. Pauses for `[a]pprove / [e]dit / [r]egenerate / [q]uit`. Approved spec flows into build.md + the certifier prompt — the certifier flags features found in "Must NOT Have Yet" as scope-creep WARNings (non-failing).
 
 ### `otto certify`
 
@@ -242,11 +251,13 @@ Certify any project — independent, builder-blind verification. Tests the produ
 The intent describes what the product should do. The certifier generates test stories from it.
 
 ```bash
-otto certify                                            # reads intent.md or README.md
+otto certify                                            # reads intent.md or README.md — fast mode
 otto certify "notes API with auth, CRUD, and search"    # explicit intent
-otto certify --fast                                     # quick smoke test (~30s)
+otto certify --standard                                 # subagents + screenshots, no adversarial probing
 otto certify --thorough                                 # adversarial: edge cases, code review
 ```
+
+Same override flags as `otto build`: `--model`, `--provider`, `--effort`, `--budget`, `--verbose`, `--strict`.
 
 ### `otto improve`
 
@@ -350,17 +361,34 @@ otto history             # show recent builds
 otto history -n 20       # show last 20 builds
 ```
 
+### `otto replay`
+
+Regenerate `narrative.log` from a session's lossless `messages.jsonl`. Useful after upgrading otto: the narrative format may have improved, but the raw event stream in `messages.jsonl` is preserved — replay rebuilds the human-readable log with the current formatter.
+
+```bash
+otto replay                              # replay the latest session
+otto replay 2026-04-21-181130-a2cabf     # replay a specific session
+```
+
+Writes `narrative.regenerated.log` alongside the original (never overwrites).
+
 ### `otto setup`
 
-Generate a `CLAUDE.md` file with project conventions for the coding agent. Reads the project structure and creates instructions automatically.
+Generate a `CLAUDE.md` file with project conventions for the coding agent, plus an `otto.yaml` with all control knobs commented. Reads the project structure and detects test frameworks automatically.
 
 ```bash
 otto setup
 ```
 
+### `otto --version`
+
+Print the installed otto version, git commit, branch, and source path. Useful when multiple otto installs exist (dev venv vs system) — confirms which one is being invoked.
+
 ## Configuration (`otto.yaml`)
 
-`otto.yaml` is auto-created on first run (`otto build` or `otto setup`). All settings are optional — otto auto-detects what it can, and the CLI fallback is sane for quick iteration.
+`otto.yaml` is **opt-in** — created by running `otto setup`. Without it, otto uses built-in `DEFAULTS` plus auto-detected project values (test command, default branch). Only create one when you want to persist overrides.
+
+**Precedence**: CLI flag > `otto.yaml` > `DEFAULTS`.
 
 ```yaml
 # Auto-detected (you usually don't need to set these)
@@ -369,16 +397,31 @@ test_command: pytest                   # auto-detected from project files
 
 # Provider — which coding agent to use
 provider: claude                       # "claude" (default) or "codex"
-model: null                            # override model (e.g. "sonnet", "gpt-5")
+model: null                            # override model (e.g. "sonnet", "opus", "gpt-5")
                                        # if null, uses the provider's default
+effort: medium                         # low | medium | high (provider reasoning effort)
+
+# Per-agent overrides — YAML-only (no CLI flags). Each falls back to the
+# top-level provider/model/effort above when unset.
+build:
+  provider: claude
+  model: opus
+certifier:
+  provider: claude
+  model: sonnet
+  effort: low                          # certifier doesn't need deep reasoning
+spec:
+  provider: claude
+  model: sonnet
 
 # Budget + certification
-run_budget_seconds: 3600               # total wall-clock for the whole invocation (primary knob)
+run_budget_seconds: 3600               # total wall-clock for the whole invocation
 certifier_mode: fast                   # fast | standard | thorough
-                                       # CLI no-flag default is `fast` (cheap dev loop);
-                                       # set this to `standard` or `thorough` for real QA
+                                       # CLI no-flag default is `fast` (cheap dev loop)
 max_certify_rounds: 8                  # max certify→fix attempts before giving up
+strict_mode: false                     # true = require two consecutive PASSes (opt-in via --strict)
 spec_timeout: 600                      # cap on the spec-agent call specifically
+# memory: true                         # cross-run certifier memory (opt-in)
 
 # Queue + merge (otto queue / otto merge)
 queue:
@@ -445,7 +488,7 @@ otto build --resume                               # if interrupted
 
 ```bash
 otto build "bookmark manager with tags and share links" --spec
-# → spec agent writes otto_logs/runs/<id>/spec.md
+# → spec agent writes otto_logs/sessions/<id>/spec/spec.md
 # → summary printed: Intent / Must-Have / Must-NOT-Have / Open questions
 # → [a]pprove / [e]dit / [r]egenerate / [q]uit
 # approve → build runs with spec-aware certifier
@@ -499,44 +542,78 @@ The watcher commits artifacts to per-task branches and writes manifests to `otto
 
 ## Logs
 
+One session = one directory. `latest` and `paused` symlinks give O(1) access
+to the most recent run and the resumable run respectively.
+
 ```
 otto_logs/
-  checkpoint.json            Current run state (run_id, phase, cost, session_id)
-  runs/<run-id>/
-    spec.md                  Approved or in-review spec (spec-gate)
-    spec-v1.md, spec-v2.md   Prior versions after regen
-    spec-agent.log           Spec agent trace
-  builds/<build-id>/
-    agent.log                Structured: commits, certifier rounds, verdict
-    agent-raw.log            Full agent output
-    checkpoint.json          Cost, duration, stories tested/passed
-  certifier/<cert-id>/
-    proof-of-work.html       Report with embedded screenshots
-    proof-of-work.json       Machine-readable results
-    evidence/                Screenshots, video recordings
-  queue/<task-id>/
-    manifest.json            Final task manifest (status, cost, branch, paths)
-  merge/
-    merge.log                Orchestrator + conflict-agent events
-    <merge-id>/state.json    Per-merge state with branch outcomes + cert status
-  run-history.jsonl          One line per build (for otto history)
-build-journal.md             Round-by-round tracking (improve mode)
-improvement-report.md        Final improve summary with merge instructions
+  latest → sessions/<id>                    symlink — most recent session
+  paused → sessions/<id>                    symlink — resumable session (if any)
+  sessions/
+    2026-04-20-170200-9045bc/               <yyyy-mm-dd>-<HHMMSS>-<6hex>
+      summary.json                          Verdict, cost, duration, stories, status
+      checkpoint.json                       Resume state (only while running/paused)
+      intent.txt                            Archival copy of the intent
+      manifest.json                         Per-run manifest (queue/merge consumers)
+      spec/                                 Only for --spec runs
+        spec.md                             Approved spec
+        spec-v1.md, spec-v2.md              Regen history
+        agent.log                           Spec agent trace
+      build/                                Coding agent artifacts
+        narrative.log                       Human-readable streamed event log
+        messages.jsonl                      Lossless SDK event stream (JSON)
+        live.log                            Symlink -> narrative.log (back-compat)
+      certify/                              Verification artifacts
+        proof-of-work.{html,json,md}        Human + machine-readable reports
+        evidence/                           Screenshots, recordings, transcripts
+      improve/                              Only for otto improve runs
+        session-report.md                   Final summary + merge instructions
+        build-journal.md                    Round-by-round index
+        current-state.md                    Latest findings (handoff to fix agent)
+        rounds/<round-id>/                  Per-round evidence
+  cross-sessions/
+    history.jsonl                           One line per completed session
+    certifier-memory.jsonl                  One line per cert (for memory)
+  merge/<merge-id>/                         Multi-branch merges
+    state.json                              Per-merge state, branch outcomes, cert status
+    merge.log                               Orchestrator + conflict-agent events
+  .lock                                     Single-invocation lock (auto-released)
 
-# Queue bookkeeping (gitignored)
-.otto-queue.yml              Pending/queued tasks (the queue file itself)
-.otto-queue-state.json       Watcher state (per-task status, child PIDs)
-.otto-queue-commands.jsonl   Pending commands (rm/cancel) for the watcher
-.worktrees/<task-id>/        Per-task git worktree
+intent.md                                   Project root — canonical product
+                                            description (git-tracked)
+
+# Queue bookkeeping (project root, gitignored)
+.otto-queue.yml                             Pending/queued tasks (the queue file itself)
+.otto-queue-state.json                      Watcher state (per-task status, child PIDs)
+.otto-queue-commands.jsonl                  Pending commands (rm/cancel) for the watcher
+.worktrees/<task-id>/                       Per-task git worktree (one session per task inside)
 ```
 
-Otto auto-manages `.gitignore` on first touch — the runtime files above (queue bookkeeping, `.worktrees/`, `otto_logs/`) are added so they don't accidentally get committed. Common build artifacts (`__pycache__/`, `node_modules/`, `.pytest_cache/`, `dist/`, etc.) are also added so the merge orchestrator's "no new untracked files" check doesn't bail when the conflict agent runs project tests.
+Each queued task runs in its own worktree with its own `otto_logs/sessions/<id>/`
+directory, so parallel runs never collide. The `manifest.json` written next to
+each session's `summary.json` is what `otto merge` reads to find a task's
+completed work + cert PoW.
+
+Legacy `otto_logs/runs/`, `otto_logs/builds/`, `otto_logs/certifier/`,
+`otto_logs/run-history.jsonl`, and root `checkpoint.json` remain readable
+from older projects (no migration needed) — `otto history` merges legacy
++ new entries chronologically.
+
+Otto auto-manages `.gitignore` on first touch — the runtime files above
+(queue bookkeeping, `.worktrees/`, `otto_logs/`) are added so they don't
+accidentally get committed. Common build artifacts (`__pycache__/`,
+`node_modules/`, `.pytest_cache/`, `dist/`, etc.) are also added so the
+merge orchestrator's "no new untracked files" check doesn't bail when
+the conflict agent runs project tests.
 
 ## Project structure
 
 ```
-otto/                        ~11,000 lines
+otto/                        ~10,600 lines
   pipeline.py                Build pipeline, certify-fix loop
+  paths.py                   Single choke point for all otto_logs/ paths + project lock
+  logstream.py               Streaming SDK event normalizer → narrative.log + messages.jsonl
+  replay.py                  Regenerate narrative.log from messages.jsonl
   certifier/__init__.py      Certifier agent
   spec.py                    Spec-gate: run_spec_agent, review_spec, validate_spec
   budget.py                  RunBudget — wall-clock budget tracker
@@ -548,20 +625,23 @@ otto/                        ~11,000 lines
   cli_improve.py             CLI: improve (bugs, feature, target)
   cli_queue.py               CLI: queue (build, improve, certify, run, ls, show, rm, cancel, cleanup)
   cli_merge.py               CLI: merge
-  config.py                  Config, intent resolution, helpers
+  cli_logs.py                CLI: history / replay
+  config.py                  DEFAULTS source of truth + per-agent overrides + load/normalize
   journal.py                 Build journal for improve rounds
+  manifest.py                Per-run manifest writer (queue/merge consumer)
   setup_gitignore.py         Auto-manages .gitignore for runtime + build artifacts
   queue/                     Parallel queue subsystem
     schema.py                .otto-queue.yml + .otto-queue-state.json read/write
     runner.py                Foreground watcher (spawn / reap / cancel / timeout)
     ids.py                   Slug + branch + worktree-path generation
   merge/                     Multi-branch merge subsystem
-    orchestrator.py          Sequential and consolidated agent-mode merge drivers
+    orchestrator.py          Consolidated agent-mode merge driver
     git_ops.py               Thin git wrappers (merge_no_ff, conflicted_files, …)
-    conflict_agent.py        Per-conflict + consolidated LLM resolvers
+    conflict_agent.py        Consolidated LLM conflict resolver + post-agent validator
     stories.py               Collect stories from merged branches + manifests
     state.py                 BranchOutcome + per-merge state.json
-tests/                       420 tests, ~6,700 lines
+  worktree.py                Atomic-CLI worktree setup (--in-worktree path)
+tests/                       430+ tests, ~7,000 lines
   _helpers.py                Shared init_repo factory used across test files
 ```
 

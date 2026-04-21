@@ -136,11 +136,12 @@ class TestTimeoutEnforcement:
         # several seconds. 9s still catches a no-timeout regression (which
         # would sleep the full 10s plus overhead).
         assert elapsed < 9, f"Timeout not enforced; elapsed={elapsed:.1f}s"
-        # Check the raw log mentions timeout — strict `Timed out` match,
-        # not case-insensitive (AgentCallError writes exactly "Timed out").
-        build_dir = tmp_git_repo / "otto_logs" / "builds" / result.build_id
-        raw = (build_dir / "agent-raw.log").read_text()
-        assert "Timed out" in raw, f"Timeout not reported in raw log: {raw[:200]}"
+        # Check narrative.log mentions timeout — strict `Timed out` match,
+        # written by run_agent_with_timeout on asyncio.TimeoutError.
+        from otto import paths
+        build_dir = paths.build_dir(tmp_git_repo, result.build_id)
+        narr = (build_dir / "narrative.log").read_text()
+        assert "Timed out" in narr, f"Timeout not reported in narrative.log: {narr[:200]}"
 
 
 # -- Test: CLAUDECODE env var --
@@ -449,9 +450,10 @@ DIAGNOSIS: null
         """When STORIES_PASSED marker is missing, compute from story results."""
         with patch("otto.agent.run_agent_query",
                     side_effect=_make_mock_query(self.AGENT_OUTPUT_NO_PASSED_MARKER)):
-            await build_agentic_v3("test", tmp_git_repo, {})
+            result = await build_agentic_v3("test", tmp_git_repo, {})
 
-        pow_path = tmp_git_repo / "otto_logs" / "certifier" / "proof-of-work.json"
+        from otto import paths as _paths
+        pow_path = _paths.certify_dir(tmp_git_repo, result.build_id) / "proof-of-work.json"
         pow_data = json.loads(pow_path.read_text())
         # Round history should show correct passed counts
         rounds = pow_data.get("round_history", [])
@@ -639,8 +641,9 @@ class TestTargetModeMetricGate:
         assert mock_fix.await_count == 0
         assert result.passed is False
         assert result.rounds == 1
+        from otto import paths as _paths
         assert "FAIL (certifier omitted METRIC_MET)" in (
-            tmp_git_repo / "build-journal.md"
+            _paths.improve_dir(tmp_git_repo, result.build_id) / "build-journal.md"
         ).read_text()
 
 
@@ -725,8 +728,11 @@ class TestSessionIdPreservedOnFailure:
         assert result.passed is False
 
         import json
-        cp = json.loads((tmp_git_repo / "otto_logs" / "checkpoint.json").read_text())
-        assert cp["session_id"] == "streamed-sid-abc123", (
+        from otto import paths as _paths
+        sess = _paths.resolve_pointer(tmp_git_repo, _paths.PAUSED_POINTER)
+        assert sess is not None, "expected paused pointer after failure"
+        cp = json.loads((sess / "checkpoint.json").read_text())
+        assert cp["agent_session_id"] == "streamed-sid-abc123", (
             "timeout must preserve streamed session_id for --resume"
         )
         assert cp["status"] == "paused", "failed run must be resumable, not completed"
@@ -744,8 +750,11 @@ class TestSessionIdPreservedOnFailure:
         assert result.passed is False
 
         import json
-        cp = json.loads((tmp_git_repo / "otto_logs" / "checkpoint.json").read_text())
-        assert cp["session_id"] == "pre-crash-sid-xyz"
+        from otto import paths as _paths
+        sess = _paths.resolve_pointer(tmp_git_repo, _paths.PAUSED_POINTER)
+        assert sess is not None, "expected paused pointer after failure"
+        cp = json.loads((sess / "checkpoint.json").read_text())
+        assert cp["agent_session_id"] == "pre-crash-sid-xyz"
         assert cp["status"] == "paused"
 
 
@@ -847,7 +856,10 @@ class TestBudgetExhaustionInPipeline:
         assert result.passed is False
 
         import json
-        cp = json.loads((tmp_git_repo / "otto_logs" / "checkpoint.json").read_text())
+        from otto import paths as _paths
+        sess = _paths.resolve_pointer(tmp_git_repo, _paths.PAUSED_POINTER)
+        assert sess is not None, "expected paused pointer after failure"
+        cp = json.loads((sess / "checkpoint.json").read_text())
         assert cp["status"] == "paused"
 
     @pytest.mark.asyncio
@@ -874,9 +886,12 @@ class TestBudgetExhaustionInPipeline:
         assert result.passed is False
 
         import json
-        cp = json.loads((tmp_git_repo / "otto_logs" / "checkpoint.json").read_text())
+        from otto import paths as _paths
+        sess = _paths.resolve_pointer(tmp_git_repo, _paths.PAUSED_POINTER)
+        assert sess is not None, "expected paused pointer after failure"
+        cp = json.loads((sess / "checkpoint.json").read_text())
         assert cp["status"] == "paused"
-        assert cp["session_id"] == "mid-stream-sid"
+        assert cp["agent_session_id"] == "mid-stream-sid"
 
 
 # -- Test: invalid spec_timeout in config is tolerated --
@@ -900,6 +915,30 @@ class TestSpecTimeoutTolerance:
             )
         assert report.outcome == CertificationOutcome.PASSED
         assert report.story_results and report.story_results[0]["story_id"] == "x"
+
+
+class TestProofOfWorkRendering:
+    def test_html_omits_empty_visual_evidence_and_diagnosis_sections(self, tmp_path):
+        from otto.certifier import _generate_agentic_html_pow
+
+        evidence_dir = tmp_path / "evidence"
+        evidence_dir.mkdir()
+
+        _generate_agentic_html_pow(
+            tmp_path,
+            [{"story_id": "smoke", "passed": True, "summary": "ok"}],
+            "passed",
+            1.0,
+            0.1,
+            1,
+            1,
+            diagnosis="",
+            evidence_dir=evidence_dir,
+        )
+
+        html = (tmp_path / "proof-of-work.html").read_text()
+        assert "Visual Evidence" not in html
+        assert "Overall Diagnosis" not in html
 
 
 # -- Test: run_test_suite handles git worktree add failure --
@@ -940,6 +979,7 @@ class TestCrossRunMemory:
 
         record_run(
             tmp_path,
+            run_id="run-1",
             command="build",
             certifier_mode="thorough",
             stories=[
@@ -951,6 +991,7 @@ class TestCrossRunMemory:
 
         entries = load_history(tmp_path)
         assert len(entries) == 1
+        assert entries[0]["run_id"] == "run-1"
         assert entries[0]["command"] == "build"
         assert entries[0]["tested"] == 2
         assert entries[0]["passed"] == 1
@@ -966,7 +1007,7 @@ class TestCrossRunMemory:
         from otto.memory import format_for_prompt, record_run
 
         record_run(
-            tmp_path, command="certify", certifier_mode="fast",
+            tmp_path, run_id="run-2", command="certify", certifier_mode="fast",
             stories=[{"story_id": "smoke", "passed": True, "summary": "Works"}],
             cost=0.14,
         )
@@ -982,13 +1023,87 @@ class TestCrossRunMemory:
 
         for i in range(MAX_ENTRIES + 3):
             record_run(
-                tmp_path, command="build", certifier_mode="fast",
+                tmp_path, run_id=f"run-{i}", command="build", certifier_mode="fast",
                 stories=[{"story_id": f"s{i}", "passed": True, "summary": f"Story {i}"}],
                 cost=0.1,
             )
 
         entries = load_history(tmp_path)
         assert len(entries) == MAX_ENTRIES
+
+    def test_load_history_sorts_by_timestamp_across_sources(self, tmp_path):
+        """New, legacy, and archived memory entries should merge chronologically."""
+        from otto.memory import load_history
+        from otto import paths
+
+        new_path = paths.certifier_memory_jsonl(tmp_path)
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        new_path.write_text(json.dumps({
+            "ts": "2026-04-20T12:00:00Z",
+            "command": "build",
+            "certifier_mode": "fast",
+            "findings": [],
+        }) + "\n")
+
+        legacy_path = tmp_path / "otto_logs" / "certifier-memory.jsonl"
+        legacy_path.parent.mkdir(parents=True, exist_ok=True)
+        legacy_path.write_text(json.dumps({
+            "ts": "2026-04-20T11:00:00Z",
+            "command": "legacy",
+            "certifier_mode": "fast",
+            "findings": [],
+        }) + "\n")
+
+        archive_dir = tmp_path / "otto_logs.pre-restructure.2026-04-19T000000Z"
+        archive_dir.mkdir()
+        (archive_dir / paths.LEGACY_CERTIFIER_MEMORY).write_text(json.dumps({
+            "ts": "2026-04-20T10:00:00Z",
+            "command": "archive",
+            "certifier_mode": "fast",
+            "findings": [],
+        }) + "\n")
+
+        entries = load_history(tmp_path)
+        assert [entry["command"] for entry in entries] == ["archive", "legacy", "build"]
+
+
+class TestHistoryOrdering:
+    """History merges should sort by timestamps, not source precedence."""
+
+    def test_load_history_entries_sorts_chronologically(self, tmp_path):
+        from otto.cli_logs import _load_history_entries
+        from otto import paths
+
+        new_path = paths.history_jsonl(tmp_path)
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        new_path.write_text(json.dumps({
+            "build_id": "new-run",
+            "timestamp": "2026-04-20T12:00:00Z",
+            "intent": "new",
+        }) + "\n")
+
+        legacy_path = tmp_path / "otto_logs" / "run-history.jsonl"
+        legacy_path.parent.mkdir(parents=True, exist_ok=True)
+        legacy_path.write_text(json.dumps({
+            "build_id": "legacy-run",
+            "timestamp": "2026-04-20T11:00:00Z",
+            "intent": "legacy",
+        }) + "\n")
+
+        archive_dir = tmp_path / "otto_logs.pre-restructure.2026-04-19T000000Z"
+        archive_dir.mkdir()
+        (archive_dir / paths.LEGACY_RUN_HISTORY).write_text(json.dumps({
+            "build_id": "archive-run",
+            "timestamp": "2026-04-20T10:00:00Z",
+            "intent": "archive",
+        }) + "\n")
+
+        entries = _load_history_entries(tmp_path)
+        assert [entry["build_id"] for entry in entries] == [
+            "archive-run",
+            "legacy-run",
+            "new-run",
+        ]
 
 
 class TestResolveResume:
@@ -1001,7 +1116,7 @@ class TestResolveResume:
         assert not state.resumed
         assert state.start_round == 1
         assert state.total_cost == 0.0
-        assert state.session_id == ""
+        assert state.agent_session_id == ""
 
     def test_no_checkpoint_with_resume_flag(self, tmp_path):
         """User passed --resume but no checkpoint exists → fall back to fresh."""
@@ -1033,7 +1148,7 @@ class TestResolveResume:
         assert state.resumed
         assert state.start_round == 3   # current_round + 1
         assert state.total_cost == 1.23
-        assert state.session_id == "sess-abc"
+        assert state.agent_session_id == "sess-abc"
         assert state.prior_command == "build"
         assert not state.command_mismatch
         assert len(state.rounds) == 2
@@ -1061,14 +1176,159 @@ class TestResolveResume:
         assert not state.resumed
 
 
+class TestLegacyLayoutResume:
+    """Upgrade-safety: legacy otto_logs/checkpoint.json (pre-restructure
+    layout) must still be loadable via resolve_resume without running any
+    migration. Exercises the fallback path in checkpoint.load_checkpoint.
+    """
+
+    def test_resolve_resume_reads_legacy_paused_checkpoint(self, tmp_path):
+        """Simulate an old-layout project where a build was paused with
+        otto_logs/checkpoint.json at status=paused. resolve_resume must
+        honor it on the first post-upgrade invocation — no sessions/ dir,
+        no paused pointer."""
+        import json
+        from otto import paths
+        from otto.checkpoint import resolve_resume
+
+        logs = paths.logs_dir(tmp_path)
+        logs.mkdir(parents=True, exist_ok=True)
+        legacy = paths.legacy_checkpoint(tmp_path)
+        legacy.write_text(json.dumps({
+            "run_id": "legacy-run-42",
+            "command": "build",
+            "status": "paused",
+            "phase": "build",
+            "session_id": "sdk-legacy-xyz",
+            "current_round": 2,
+            "total_cost": 1.75,
+            "rounds": [{"round": 1}, {"round": 2}],
+            "intent": "legacy intent",
+            "started_at": "2026-03-01T10:00:00Z",
+            "updated_at": "2026-03-01T10:05:00Z",
+        }))
+
+        # Sanity: no new-layout state.
+        assert not (logs / "sessions").exists()
+        assert not (logs / paths.PAUSED_POINTER).exists()
+        assert not (logs / f"{paths.PAUSED_POINTER}.txt").exists()
+
+        state = resolve_resume(tmp_path, resume=True, expected_command="build")
+        assert state.resumed
+        assert state.prior_command == "build"
+        assert state.agent_session_id == "sdk-legacy-xyz"
+        assert state.run_id == "legacy-run-42"
+        assert state.start_round == 3  # current_round + 1
+        assert state.total_cost == 1.75
+        assert state.phase == "build"
+        assert state.intent == "legacy intent"
+
+    def test_resolve_resume_legacy_completed_ignored(self, tmp_path):
+        """A legacy checkpoint in status=completed must not resume."""
+        import json
+        from otto import paths
+        from otto.checkpoint import resolve_resume
+
+        paths.logs_dir(tmp_path).mkdir(parents=True, exist_ok=True)
+        paths.legacy_checkpoint(tmp_path).write_text(json.dumps({
+            "run_id": "r", "command": "build",
+            "status": "completed", "current_round": 5, "total_cost": 2.0,
+        }))
+        state = resolve_resume(tmp_path, resume=True, expected_command="build")
+        assert not state.resumed
+
+    def test_new_layout_wins_over_legacy_when_both_present(self, tmp_path):
+        """If both a new session checkpoint and legacy checkpoint.json exist,
+        the new layout takes precedence (legacy is fallback only)."""
+        import json
+        from otto import paths
+        from otto.checkpoint import resolve_resume, write_checkpoint
+
+        # Write a new-layout paused checkpoint.
+        write_checkpoint(
+            tmp_path, run_id="2026-04-20-170200-abcdef", command="build",
+            session_id="sdk-new", phase="build",
+            current_round=4, total_cost=3.33, status="paused",
+        )
+        # Write a stale legacy checkpoint with different data.
+        paths.legacy_checkpoint(tmp_path).write_text(json.dumps({
+            "run_id": "legacy-stale", "command": "build",
+            "session_id": "sdk-legacy",
+            "current_round": 99, "total_cost": 99.0, "status": "paused",
+        }))
+
+        state = resolve_resume(tmp_path, resume=True, expected_command="build")
+        assert state.resumed
+        # New layout wins.
+        assert state.agent_session_id == "sdk-new"
+        assert state.run_id == "2026-04-20-170200-abcdef"
+        assert state.total_cost == 3.33
+
+
+class TestPhaseBuildResumeFix:
+    """Regression: spec-approved → build resume must skip spec regeneration.
+
+    Reproduces Codex Plan Gate Round 1 HIGH #4: before the fix, the build
+    agent's checkpoint lacked an explicit `phase` field, so a kill-mid-build
+    followed by `--resume` re-entered the spec phase and regenerated the
+    spec. The fix writes `phase="build"` on every build-phase checkpoint.
+    """
+
+    @pytest.mark.asyncio
+    async def test_build_checkpoint_has_phase_build(self, tmp_git_repo):
+        """After a successful build, the session checkpoint should carry
+        phase='build' so resume treats it as past spec_approved."""
+        from otto import paths as _paths
+
+        async def ok_agent(prompt, options, **kwargs):
+            return (
+                "CERTIFY_ROUND: 1\nSTORIES_TESTED: 1\nSTORIES_PASSED: 1\n"
+                "STORY_RESULT: s1 | PASS | fine\nVERDICT: PASS\nDIAGNOSIS: null\n",
+                0.1,
+                MagicMock(session_id="sdk-sid-abc"),
+            )
+
+        with patch("otto.agent.run_agent_query", side_effect=ok_agent):
+            result = await build_agentic_v3("test", tmp_git_repo, {})
+        assert result.passed
+
+        # The session dir exists; checkpoint was marked completed and
+        # removed, but the summary.json in build/ records the session.
+        build_dir = _paths.build_dir(tmp_git_repo, result.build_id)
+        assert build_dir.exists(), "session build dir should exist"
+
+    @pytest.mark.asyncio
+    async def test_paused_build_checkpoint_has_phase_build(self, tmp_git_repo):
+        """Kill mid-build → paused checkpoint has phase='build', not 'spec'."""
+        from otto import paths as _paths
+
+        async def crashing(prompt, options, **kwargs):
+            raise RuntimeError("mid-build crash")
+
+        with patch("otto.agent.run_agent_query", side_effect=crashing):
+            await build_agentic_v3("test", tmp_git_repo, {})
+
+        sess = _paths.resolve_pointer(tmp_git_repo, _paths.PAUSED_POINTER)
+        assert sess is not None, "paused pointer must be set after build crash"
+        cp = json.loads((sess / "checkpoint.json").read_text())
+        assert cp.get("phase") == "build", (
+            f"crash-paused checkpoint must record phase='build' so --resume "
+            f"does not regenerate spec; got phase={cp.get('phase')!r}"
+        )
+
+
 class TestCheckpointRegression:
     """Regression tests for checkpoint/resume edge cases."""
 
     def test_load_checkpoint_ignores_truncated_json(self, tmp_path):
-        """Partial checkpoint writes should load as None, not crash."""
-        from otto.checkpoint import CHECKPOINT_FILE, load_checkpoint
+        """Partial checkpoint writes should load as None, not crash.
 
-        checkpoint_path = tmp_path / CHECKPOINT_FILE
+        Writes a truncated *legacy* checkpoint (new layout requires a valid
+        session_id path, so legacy exercises the same code path)."""
+        from otto.checkpoint import load_checkpoint
+        from otto.paths import LEGACY_CHECKPOINT, LOGS_ROOT_NAME
+
+        checkpoint_path = tmp_path / LOGS_ROOT_NAME / LEGACY_CHECKPOINT
         checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         checkpoint_path.write_text('{"status": "in_progress", "current_round": ')
         tmp_file = checkpoint_path.with_name(checkpoint_path.name + ".tmp")
@@ -1103,7 +1363,7 @@ class TestCheckpointRegression:
 
         checkpoint = load_checkpoint(tmp_git_repo)
         assert checkpoint["status"] == "in_progress"
-        assert checkpoint["session_id"] == "sess-resume-123"
+        assert checkpoint["agent_session_id"] == "sess-resume-123"
 
     @pytest.mark.asyncio
     async def test_split_resume_tracks_phase_and_last_completed_round(self, tmp_git_repo):
@@ -1172,7 +1432,100 @@ class TestBuildResume:
         r = CliRunner().invoke(main, ["build", "--help"])
         assert r.exit_code == 0
         assert "--resume" in r.output
+        assert "--break-lock" in r.output
         assert "[INTENT]" in r.output  # intent is optional
+
+    def test_certify_cli_exposes_break_lock_flag(self):
+        """Standalone certify should expose the manual lock escape hatch."""
+        from click.testing import CliRunner
+        from otto.cli import main
+
+        r = CliRunner().invoke(main, ["certify", "--help"])
+        assert r.exit_code == 0
+        assert "--break-lock" in r.output
+
+    def test_build_cli_normalizes_multiline_intent(self, tmp_git_repo, monkeypatch):
+        from click.testing import CliRunner
+        from otto.cli import main
+
+        captured = {}
+
+        async def fake_build(intent, project_dir, config, **kwargs):
+            captured["intent"] = intent
+            return BuildResult(
+                passed=True,
+                build_id="run-1",
+                total_cost=0.0,
+                tasks_passed=1,
+                tasks_failed=0,
+            )
+
+        monkeypatch.chdir(tmp_git_repo)
+        with patch("otto.pipeline.build_agentic_v3", side_effect=fake_build):
+            result = CliRunner().invoke(
+                main,
+                ["build", "a kanban board:\n  localStorage"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0
+        assert captured["intent"] == "a kanban board: localStorage"
+
+    def test_certify_cli_normalizes_multiline_intent(self, tmp_git_repo, monkeypatch):
+        from click.testing import CliRunner
+        from otto.certifier.report import CertificationOutcome, CertificationReport
+        from otto.cli import main
+
+        captured = {}
+
+        async def fake_certify(intent, project_dir, config=None, **kwargs):
+            captured["intent"] = intent
+            return CertificationReport(
+                outcome=CertificationOutcome.PASSED,
+                cost_usd=0.0,
+                duration_s=1.0,
+                story_results=[{"story_id": "smoke", "passed": True, "summary": "ok"}],
+            )
+
+        monkeypatch.chdir(tmp_git_repo)
+        with patch("otto.certifier.run_agentic_certifier", side_effect=fake_certify):
+            result = CliRunner().invoke(
+                main,
+                ["certify", "a kanban board:\n  localStorage"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0
+        assert captured["intent"] == "a kanban board: localStorage"
+
+    def test_improve_normalizes_resolved_intent(self, tmp_git_repo, monkeypatch):
+        from click.testing import CliRunner
+        from otto.cli import main
+
+        (tmp_git_repo / "intent.md").write_text("a kanban board:\n  localStorage")
+        captured = {}
+
+        async def fake_build(intent, project_dir, config, **kwargs):
+            captured["intent"] = intent
+            return BuildResult(
+                passed=True,
+                build_id="run-2",
+                total_cost=0.0,
+                tasks_passed=1,
+                tasks_failed=0,
+            )
+
+        monkeypatch.chdir(tmp_git_repo)
+        with patch("otto.cli_improve._create_improve_branch", return_value="improve/2026-04-21"), \
+             patch("otto.pipeline.build_agentic_v3", side_effect=fake_build):
+            result = CliRunner().invoke(
+                main,
+                ["improve", "bugs"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0
+        assert captured["intent"] == "a kanban board: localStorage"
 
     def test_build_without_intent_without_resume_errors(self, tmp_git_repo, monkeypatch):
         """Missing intent and no checkpoint → exits 2."""
@@ -1315,3 +1668,237 @@ class TestBuildResume:
 
         assert result.exit_code == 0
         assert captured["skip_initial_build"] is False
+
+    def test_split_build_threads_run_id_and_spec_into_pipeline(
+        self, tmp_git_repo, monkeypatch
+    ):
+        """Split build should preserve the spec phase session and cost."""
+        from click.testing import CliRunner
+        from otto.cli import main
+
+        captured = {}
+
+        async def fake_spec_phase(**kwargs):
+            return "run-spec-123", "# Approved Spec", 1.25, 12.0
+
+        async def fake_loop(intent, project_dir, config, **kwargs):
+            captured.update(kwargs)
+            return BuildResult(
+                passed=True,
+                build_id="run-spec-123",
+                total_cost=1.25,
+                tasks_passed=1,
+                tasks_failed=0,
+            )
+
+        monkeypatch.chdir(tmp_git_repo)
+        with patch("otto.cli._run_spec_phase", side_effect=fake_spec_phase), \
+             patch("otto.pipeline.run_certify_fix_loop", side_effect=fake_loop):
+            result = CliRunner().invoke(
+                main,
+                ["build", "spec build", "--split", "--spec", "--yes"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0
+        assert captured["session_id"] == "run-spec-123"
+        assert captured["spec"] == "# Approved Spec"
+        assert captured["spec_cost"] == 1.25
+        assert captured["spec_duration"] == 12.0
+
+    def test_build_cli_certification_failure_prints_report_and_narrative(
+        self, tmp_git_repo, monkeypatch
+    ):
+        from click.testing import CliRunner
+        from otto import paths as _paths
+        from otto.cli import main
+
+        run_id = "run-fail-123"
+        _paths.ensure_session_scaffold(tmp_git_repo, run_id)
+        build_dir = _paths.build_dir(tmp_git_repo, run_id)
+        certify_dir = _paths.certify_dir(tmp_git_repo, run_id)
+        (build_dir / "narrative.log").write_text("build narrative\n")
+        (certify_dir / "proof-of-work.html").write_text("<html>fail</html>")
+
+        async def fake_build(intent, project_dir, config, **kwargs):
+            return BuildResult(
+                passed=False,
+                build_id=run_id,
+                total_cost=0.5,
+                tasks_passed=2,
+                tasks_failed=3,
+                journeys=[
+                    {"name": "story 1", "passed": True},
+                    {"name": "story 2", "passed": False},
+                ],
+            )
+
+        monkeypatch.chdir(tmp_git_repo)
+        with patch("otto.pipeline.build_agentic_v3", side_effect=fake_build):
+            result = CliRunner().invoke(
+                main,
+                ["build", "failing app"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 1
+        assert "Build did not pass certification (2/5 stories passed)." in result.output
+        assert "run-fail-123/certify" in result.output
+        assert "proof-of-work.html" in result.output
+        assert "run-fail-123/build" in result.output
+        assert "narrative.log" in result.output
+
+    def test_build_cli_success_summary_shows_open_hint_and_spent_breakdown(
+        self, tmp_bare_git_repo, monkeypatch
+    ):
+        from click.testing import CliRunner
+        from otto import paths as _paths
+        from otto.cli import main
+
+        run_id = "run-pass-123"
+        _paths.ensure_session_scaffold(tmp_bare_git_repo, run_id)
+        (tmp_bare_git_repo / "index.html").write_text("<!doctype html><title>app</title>")
+        (_paths.certify_dir(tmp_bare_git_repo, run_id) / "proof-of-work.html").write_text("<html>pass</html>")
+
+        async def fake_build(intent, project_dir, config, **kwargs):
+            return BuildResult(
+                passed=True,
+                build_id=run_id,
+                rounds=2,
+                total_cost=0.94,
+                tasks_passed=2,
+                tasks_failed=0,
+                journeys=[
+                    {"name": "Page serves over HTTP with 200 status and full content", "passed": True},
+                    {"name": "Board has exactly 3 columns: To Do, In Progress, Done", "passed": True},
+                ],
+                breakdown={
+                    "build": {"duration_s": 120.0, "cost_usd": 0.25, "estimated": True},
+                    "certify": {"duration_s": 178.0, "cost_usd": 0.70, "estimated": True, "rounds": 2},
+                },
+            )
+
+        monkeypatch.chdir(tmp_bare_git_repo)
+        with patch("otto.pipeline.build_agentic_v3", side_effect=fake_build):
+            result = CliRunner().invoke(
+                main,
+                ["build", "kanban board"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0
+        assert "Time budget" in result.output
+        assert "60m" in result.output
+        assert "Max build rounds" in result.output
+        assert "(all defaults — override with --model, --budget, --rounds, etc.)" in result.output
+        assert "Working on:" in result.output
+        assert "Project:" in result.output
+        assert "Session:" in result.output
+        assert "otto_logs/sessions" in result.output
+        assert "run-pass-123" in result.output
+        assert "Live log:" in result.output
+        assert "otto_logs/latest/build/narrative.log" in result.output
+        assert "Verifying core requirements after each build." in result.output
+        assert "Open it:  open index.html" in result.output
+        assert "Built: kanban board" in result.output
+        assert "Verification passed" in result.output
+        assert "Full evidence" in result.output
+        assert "otto_logs/latest/certify/proof-of-work.html" in result.output
+        assert "Build Summary  ·  Run ID: run-pass-123" in result.output
+        assert "Spent: 2:00 building, 2:58 verifying  (~$0.25 / ~$0.70 estimated, total $0.94)" in result.output
+        assert "View report:  otto_logs/latest/certify/proof-of-work.html" in result.output
+        assert "Tail live log:  otto_logs/latest/build/narrative.log" in result.output
+        assert "See past runs:  otto history" in result.output
+
+    def test_build_cli_threads_strict_and_verbose_flags(self, tmp_git_repo, monkeypatch):
+        from click.testing import CliRunner
+        from otto.cli import main
+
+        captured = {}
+
+        async def fake_build(intent, project_dir, config, **kwargs):
+            captured.update(kwargs)
+            return BuildResult(
+                passed=True,
+                build_id="run-flags-123",
+                total_cost=0.0,
+                tasks_passed=0,
+                tasks_failed=0,
+            )
+
+        monkeypatch.chdir(tmp_git_repo)
+        with patch("otto.pipeline.build_agentic_v3", side_effect=fake_build):
+            result = CliRunner().invoke(
+                main,
+                ["build", "flagged app", "--strict", "--verbose"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0
+        assert captured["strict_mode"] is True
+        assert captured["verbose"] is True
+
+    def test_improve_resume_threads_run_id_into_split_and_agentic(
+        self, tmp_git_repo, monkeypatch
+    ):
+        """Improve resume should keep using the existing Otto session dir."""
+        from click.testing import CliRunner
+        from otto.checkpoint import write_checkpoint
+        from otto.cli import main
+
+        (tmp_git_repo / "intent.md").write_text("test intent")
+        write_checkpoint(
+            tmp_git_repo,
+            run_id="improve-run-123",
+            command="improve.bugs",
+            status="paused",
+            phase="certify",
+            current_round=1,
+            total_cost=2.5,
+            session_id="sdk-resume-1",
+        )
+
+        split_captured = {}
+        agentic_captured = {}
+
+        async def fake_loop(intent, project_dir, config, **kwargs):
+            split_captured.update(kwargs)
+            return BuildResult(
+                passed=True,
+                build_id="improve-run-123",
+                total_cost=2.5,
+                tasks_passed=1,
+                tasks_failed=0,
+            )
+
+        async def fake_build(intent, project_dir, config, **kwargs):
+            agentic_captured.update(kwargs)
+            return BuildResult(
+                passed=True,
+                build_id="improve-run-123",
+                total_cost=2.5,
+                tasks_passed=1,
+                tasks_failed=0,
+            )
+
+        monkeypatch.chdir(tmp_git_repo)
+        with patch("otto.cli_improve._create_improve_branch", return_value="improve/2026-04-20"), \
+             patch("otto.pipeline.run_certify_fix_loop", side_effect=fake_loop):
+            result = CliRunner().invoke(
+                main,
+                ["improve", "bugs", "--split", "--resume"],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 0
+        assert split_captured["session_id"] == "improve-run-123"
+
+        monkeypatch.chdir(tmp_git_repo)
+        with patch("otto.cli_improve._create_improve_branch", return_value="improve/2026-04-20"), \
+             patch("otto.pipeline.build_agentic_v3", side_effect=fake_build):
+            result = CliRunner().invoke(
+                main,
+                ["improve", "bugs", "--resume"],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 0
+        assert agentic_captured["run_id"] == "improve-run-123"

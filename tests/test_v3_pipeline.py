@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from otto.agent import AssistantMessage, TextBlock, ToolResultBlock, ToolUseBlock
 from otto.pipeline import _commit_artifacts, build_agentic_v3
 from tests.conftest import make_mock_query as _make_mock_query
 
@@ -73,6 +74,28 @@ STORIES_PASSED: 3
 STORY_RESULT: crud | PASS | Works
 STORY_RESULT: auth | PASS | Auth check added
 STORY_RESULT: edge | PASS | Edge cases handled
+VERDICT: PASS
+DIAGNOSIS: null
+"""
+
+AGENT_OUTPUT_TWO_PASS = """\
+Built and tested.
+
+CERTIFY_ROUND: 1
+STORIES_TESTED: 2
+STORIES_PASSED: 2
+STORY_RESULT: crud | PASS | Works
+STORY_RESULT: auth | PASS | Works
+VERDICT: PASS
+DIAGNOSIS: null
+
+Re-running verification.
+
+CERTIFY_ROUND: 2
+STORIES_TESTED: 2
+STORIES_PASSED: 2
+STORY_RESULT: crud | PASS | Still works
+STORY_RESULT: auth | PASS | Still works
 VERDICT: PASS
 DIAGNOSIS: null
 """
@@ -203,39 +226,58 @@ class TestV3PipelinePass:
         assert result.tasks_passed == 5
         assert result.tasks_failed == 0
         assert result.total_cost == 0.50
-        assert result.build_id.startswith("build-")
+        # build_id in the new layout is the unified session_id
+        # (<date>-<HHMMSS>-<6hex>). Just check it's non-empty.
+        assert result.build_id
 
-        # --- Per-build logs ---
-        build_dir = tmp_git_repo / "otto_logs" / "builds" / result.build_id
-        log_content = (build_dir / "agent.log").read_text()
-        assert "VERDICT: PASS" in log_content
-        assert "STORY_RESULT:" in log_content
-        # agent-raw.log should capture the full agent output verbatim —
-        # check for a distinctive substring from AGENT_OUTPUT_PASS that
-        # only appears in the raw mock text, not in the structured summary.
-        raw_content = (build_dir / "agent-raw.log").read_text()
-        assert "VERDICT: PASS" in raw_content
-        assert "dispatching the certifier" in raw_content
+        from otto import paths as _paths
 
-        # --- Per-build checkpoint ---
+        # --- Per-build session logs (Phase 6 layout) ---
+        build_dir = _paths.build_dir(tmp_git_repo, result.build_id)
+        # narrative.log — human-readable streamed event log. VERDICT and
+        # STORY_RESULT markers are elevated as marker lines.
+        narr = (build_dir / "narrative.log").read_text()
+        assert "VERDICT: PASS" in narr
+        assert "STORY_RESULT:" in narr
+        # messages.jsonl — lossless normalized SDK event stream. Contains
+        # full text blocks including agent prose like "dispatching the
+        # certifier" that the narrative might compress.
+        jsonl = (build_dir / "messages.jsonl").read_text()
+        assert "VERDICT: PASS" in jsonl
+        assert "dispatching the certifier" in jsonl
+
+        # --- Per-build checkpoint (summary of the run) ---
         cp = json.loads((build_dir / "checkpoint.json").read_text())
+        assert cp["run_id"] == result.build_id
+        assert cp["build_id"] == result.build_id
         assert cp["passed"] is True
         assert cp["stories_passed"] == 5
         assert cp["stories_tested"] == 5
         assert cp["mode"] == "agentic_v3"
 
+        summary = json.loads(_paths.session_summary(tmp_git_repo, result.build_id).read_text())
+        assert summary["run_id"] == result.build_id
+        assert summary["verdict"] == "passed"
+        assert summary["status"] == "completed"
+        assert summary["stories_passed"] == 5
+        assert summary["stories_tested"] == 5
+        assert summary["breakdown"]["build"]["duration_s"] >= 0
+        assert summary["breakdown"].get("certify", {}).get("rounds", 0) == 0
+
         # --- PoW (proof-of-work) ---
-        certifier_dir = tmp_git_repo / "otto_logs" / "certifier"
+        certifier_dir = _paths.certify_dir(tmp_git_repo, result.build_id)
         pow_data = json.loads((certifier_dir / "proof-of-work.json").read_text())
         assert pow_data["outcome"] == "passed"
         assert len(pow_data["stories"]) == 5
+        assert all("warn" not in story for story in pow_data["stories"])
+        assert all("evidence" not in story for story in pow_data["stories"])
         assert (certifier_dir / "proof-of-work.html").exists()
 
         # --- Cumulative logs ---
         intent_md = (tmp_git_repo / "intent.md").read_text()
         assert intent in intent_md
         entry = json.loads(
-            (tmp_git_repo / "otto_logs" / "run-history.jsonl").read_text().strip().split("\n")[-1]
+            _paths.history_jsonl(tmp_git_repo).read_text().strip().split("\n")[-1]
         )
         assert entry["passed"] is True
         assert entry["stories_passed"] == 5
@@ -289,10 +331,91 @@ async def test_completed_checkpoint_total_cost_and_run_id_match_build_result(tmp
             run_id="run-123",
         )
 
-    checkpoint = json.loads((tmp_git_repo / "otto_logs" / "checkpoint.json").read_text())
+    # run_id="run-123" is the session_id in the new layout.
+    from otto import paths as _paths
+    checkpoint_path = _paths.session_dir(tmp_git_repo, "run-123") / "checkpoint.json"
+    checkpoint = json.loads(checkpoint_path.read_text())
     assert checkpoint["run_id"] == "run-123"
+    assert checkpoint["agent_session_id"] == "test-session"
     assert checkpoint["total_cost"] == pytest.approx(0.75)
     assert result.total_cost == pytest.approx(0.75)
+    assert _paths.resolve_pointer(tmp_git_repo, _paths.PAUSED_POINTER) is None
+
+
+@pytest.mark.asyncio
+async def test_agent_mode_summary_includes_estimated_phase_costs_when_usage_is_logged(tmp_git_repo):
+    assistant_messages = [
+        AssistantMessage(
+            content=[TextBlock(text="I'll build this product. Now dispatching the certifier.")],
+            usage={"output_tokens": 40},
+        ),
+        AssistantMessage(
+            content=[ToolUseBlock(
+                name="Agent",
+                id="cert-1",
+                input={"prompt": "Quick smoke test\n## Verdict Format\nReturn PASS/FAIL."},
+            )],
+            usage={"output_tokens": 10},
+        ),
+        AssistantMessage(
+            content=[TextBlock(text="Certifier is running.")],
+            usage={"output_tokens": 25},
+        ),
+        AssistantMessage(
+            content=[ToolResultBlock(
+                tool_use_id="cert-1",
+                content=(
+                    "STORIES_TESTED: 5\n"
+                    "STORIES_PASSED: 5\n"
+                    "STORY_RESULT: smoke | PASS | core flow works\n"
+                    "VERDICT: PASS\n"
+                    "DIAGNOSIS: null"
+                ),
+            )],
+            usage={"output_tokens": 15},
+        ),
+        AssistantMessage(
+            content=[TextBlock(text=AGENT_OUTPUT_PASS)],
+            usage={"output_tokens": 30},
+        ),
+    ]
+    with patch(
+        "otto.agent.run_agent_query",
+        side_effect=_make_mock_query(AGENT_OUTPUT_PASS, assistant_messages=assistant_messages),
+    ):
+        result = await build_agentic_v3("test", tmp_git_repo, {})
+
+    from otto import paths as _paths
+
+    summary = json.loads(_paths.session_summary(tmp_git_repo, result.build_id).read_text())
+    build_entry = summary["breakdown"]["build"]
+    certify_entry = summary["breakdown"]["certify"]
+    assert build_entry["cost_usd"] >= 0
+    assert build_entry["estimated"] is True
+    assert certify_entry["cost_usd"] >= 0
+    assert certify_entry["estimated"] is True
+    assert certify_entry["rounds"] == 1
+
+
+@pytest.mark.asyncio
+async def test_paused_build_does_not_write_summary_json(tmp_git_repo):
+    async def crashing_query(*_args, **_kwargs):
+        raise RuntimeError("agent crashed mid-build")
+
+    with patch("otto.agent.run_agent_query", side_effect=crashing_query):
+        result = await build_agentic_v3("test", tmp_git_repo, {})
+
+    from otto import paths as _paths
+
+    paused_sess = _paths.resolve_pointer(tmp_git_repo, _paths.PAUSED_POINTER)
+    assert paused_sess is not None
+    assert paused_sess.name == result.build_id
+    assert not _paths.session_summary(tmp_git_repo, result.build_id).exists()
+
+    checkpoint = json.loads(
+        _paths.session_checkpoint(tmp_git_repo, result.build_id).read_text()
+    )
+    assert checkpoint["status"] == "paused"
 
 
 class TestV3PipelineFail:
@@ -308,22 +431,37 @@ class TestV3PipelineFail:
         assert result.tasks_passed == 2
         assert result.tasks_failed == 2
 
-        # --- Per-build checkpoint ---
-        build_dir = tmp_git_repo / "otto_logs" / "builds" / result.build_id
+    @pytest.mark.asyncio
+    async def test_fail_checkpoint(self, tmp_git_repo):
+        with patch("otto.agent.run_agent_query", side_effect=_make_mock_query(AGENT_OUTPUT_FAIL)):
+            result = await build_agentic_v3("test", tmp_git_repo, {})
+
+        from otto import paths as _paths
+        build_dir = _paths.build_dir(tmp_git_repo, result.build_id)
         cp = json.loads((build_dir / "checkpoint.json").read_text())
         assert cp["passed"] is False
 
-        # --- PoW ---
+    @pytest.mark.asyncio
+    async def test_fail_pow_shows_failures(self, tmp_git_repo):
+        with patch("otto.agent.run_agent_query", side_effect=_make_mock_query(AGENT_OUTPUT_FAIL)):
+            result = await build_agentic_v3("test", tmp_git_repo, {})
+
+        from otto import paths as _paths
         pow_data = json.loads(
-            (tmp_git_repo / "otto_logs" / "certifier" / "proof-of-work.json").read_text()
+            (_paths.certify_dir(tmp_git_repo, result.build_id) / "proof-of-work.json").read_text()
         )
         assert pow_data["outcome"] == "failed"
         failed = [s for s in pow_data["stories"] if not s["passed"]]
         assert len(failed) == 2
 
-        # --- Cumulative logs ---
+    @pytest.mark.asyncio
+    async def test_fail_history_entry(self, tmp_git_repo):
+        with patch("otto.agent.run_agent_query", side_effect=_make_mock_query(AGENT_OUTPUT_FAIL)):
+            await build_agentic_v3("test", tmp_git_repo, {})
+
+        from otto import paths as _paths
         entry = json.loads(
-            (tmp_git_repo / "otto_logs" / "run-history.jsonl").read_text().strip()
+            _paths.history_jsonl(tmp_git_repo).read_text().strip()
         )
         assert entry["passed"] is False
         assert entry["stories_passed"] == 2
@@ -346,14 +484,44 @@ class TestV3FixLoop:
     async def test_multi_round_pow_shows_rounds(self, tmp_git_repo):
         with patch("otto.agent.run_agent_query",
                     side_effect=_make_mock_query(AGENT_OUTPUT_FAIL_THEN_PASS)):
-            await build_agentic_v3("test", tmp_git_repo, {})
+            result = await build_agentic_v3("test", tmp_git_repo, {})
 
+        from otto import paths as _paths
         pow_data = json.loads(
-            (tmp_git_repo / "otto_logs" / "certifier" / "proof-of-work.json").read_text()
+            (_paths.certify_dir(tmp_git_repo, result.build_id) / "proof-of-work.json").read_text()
         )
         assert pow_data["outcome"] == "passed"
         # Should have round history
         assert pow_data.get("certify_rounds", 0) >= 2
+
+    @pytest.mark.asyncio
+    async def test_strict_mode_requires_two_consecutive_passes(self, tmp_git_repo):
+        with patch("otto.agent.run_agent_query",
+                    side_effect=_make_mock_query(AGENT_OUTPUT_PASS)):
+            result = await build_agentic_v3("test", tmp_git_repo, {}, strict_mode=True)
+
+        assert result.passed is False
+
+    @pytest.mark.asyncio
+    async def test_strict_mode_passes_after_two_consecutive_passes(self, tmp_git_repo):
+        with patch("otto.agent.run_agent_query",
+                    side_effect=_make_mock_query(AGENT_OUTPUT_TWO_PASS)):
+            result = await build_agentic_v3("test", tmp_git_repo, {}, strict_mode=True)
+
+        assert result.passed is True
+
+    @pytest.mark.asyncio
+    async def test_strict_mode_prompt_includes_reverification_instruction(self, tmp_git_repo):
+        captured_prompts = []
+
+        async def capture_query(prompt, options, **kwargs):
+            captured_prompts.append(prompt)
+            return AGENT_OUTPUT_TWO_PASS, 0.50, MagicMock(session_id="s2")
+
+        with patch("otto.agent.run_agent_query", side_effect=capture_query):
+            await build_agentic_v3("test", tmp_git_repo, {}, strict_mode=True)
+
+        assert "STRICT MODE: after the first PASS, run the certifier one more time." in captured_prompts[0]
 
 
 class TestV3EdgeCases:

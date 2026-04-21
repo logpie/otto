@@ -320,8 +320,11 @@ Conflict resolution requires `provider: claude` in `otto.yaml`.
 
 ## Checkpoint & Resume
 
-Both modes write `otto_logs/checkpoint.json`. Agent mode uses `session_id`
-for SDK-level resume; split mode replays from the last completed round.
+Both modes write `otto_logs/sessions/<session-id>/checkpoint.json`, with
+`otto_logs/paused → sessions/<session-id>` symlink for O(1) lookup. Agent
+mode uses `session_id` for SDK-level resume; split mode replays from the
+last completed round. Legacy `otto_logs/checkpoint.json` (pre-restructure)
+is still honored as a fallback.
 
 ```
 otto improve bugs --split -n 50
@@ -451,20 +454,29 @@ CI wrappers can detect when the run didn't reach its goal.
 
 ## Observability
 
+All artifacts from one invocation live under `otto_logs/sessions/<id>/`.
+`otto_logs/latest → sessions/<id>` always points at the most recent run.
+
 | Question | Where to look |
 |----------|---------------|
-| What was built/fixed? | `otto_logs/builds/<id>/agent.log` |
-| Full agent trace? | `agent-raw.log` |
-| Live tool calls? | `live.log` (timestamped) |
-| Certifier results? | `otto_logs/certifier/*/proof-of-work.{json,html}` |
-| Build history? | `otto history` or `run-history.jsonl` |
-| Improve progress? | `build-journal.md`, `checkpoint.json` |
-| Cost? | `checkpoint.json` → `total_cost` |
+| What was built/fixed? | `otto_logs/latest/build/narrative.log` (human) or `messages.jsonl` (machine) |
+| Live tool calls? | `tail -f otto_logs/latest/build/narrative.log` |
+| Full lossless replay? | `jq . otto_logs/latest/build/messages.jsonl` (or `otto replay <session>`) |
+| Certifier results? | `otto_logs/latest/certify/proof-of-work.{json,html}` |
+| Build history? | `otto history` or `otto_logs/cross-sessions/history.jsonl` |
+| Improve progress? | `otto_logs/latest/improve/{build-journal.md,current-state.md}` |
+| Cost (final)? | `otto_logs/latest/summary.json` → `cost_usd` |
+| Cost (in-flight)? | `otto_logs/latest/checkpoint.json` → `total_cost` |
 | Queue task status? | `otto queue ls` / `otto queue show <id>` / `.otto-queue-state.json` |
-| Why didn't a queue task start? | `otto_logs/queue/watcher.log` + watcher stdout (spawn / reap / timeout / cancel events) |
-| Per-task manifest? | `otto_logs/queue/<task-id>/manifest.json` |
-| Merge orchestrator events? | `otto_logs/merge/merge.log` |
+| Why didn't a queue task start? | watcher stdout (spawn / reap / timeout / cancel events) |
+| Per-task manifest? | `<worktree>/otto_logs/sessions/<id>/manifest.json` |
+| Merge orchestrator events? | `otto_logs/merge/<merge-id>/merge.log` |
 | Per-merge state + outcomes? | `otto_logs/merge/<merge-id>/state.json` |
+
+All path construction goes through `otto/paths.py`. Legacy pre-restructure
+layouts (`otto_logs/builds/<build-id>/`, `otto_logs/certifier/<cert-id>/`,
+`otto_logs/run-history.jsonl`, root `checkpoint.json`) remain readable
+indefinitely — history/memory/resume all handle both layouts.
 
 ## Data Flow
 

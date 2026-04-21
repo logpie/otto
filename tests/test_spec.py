@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 from otto.spec import (
-    MAX_SPEC_LINES,
     SpecResult,
     count_open_questions,
     format_spec_section,
@@ -67,11 +66,6 @@ class TestValidateSpec:
         content = MINIMAL_VALID.replace("## Must NOT Have Yet", "## Not Actually")
         errs = validate_spec(content)
         assert any("Must NOT Have Yet" in e for e in errs)
-
-    def test_size_cap(self):
-        content = MINIMAL_VALID + ("\nextra line" * (MAX_SPEC_LINES + 10))
-        errs = validate_spec(content)
-        assert any("lines" in e for e in errs)
 
     def test_accepts_minimal_valid(self):
         assert validate_spec(MINIMAL_VALID) == []
@@ -285,6 +279,30 @@ class TestResumeStateSpecFields:
         assert rs.spec_cost == 0.25
 
 
+class TestCheckpointArtifactShape:
+    def test_completed_checkpoint_omits_default_optional_fields(self, tmp_path):
+        import json
+
+        from otto import paths
+        from otto.checkpoint import complete_checkpoint, write_checkpoint
+
+        write_checkpoint(
+            tmp_path,
+            run_id="r1",
+            command="build",
+            status="paused",
+            current_round=0,
+            rounds=[],
+        )
+        complete_checkpoint(tmp_path, total_cost=1.0, current_round=0, rounds=[])
+
+        checkpoint = json.loads(paths.session_checkpoint(tmp_path, "r1").read_text())
+        assert "focus" not in checkpoint
+        assert "target" not in checkpoint
+        assert "current_round" not in checkpoint
+        assert "rounds" not in checkpoint
+
+
 class TestBuildPromptSpecIntegration:
     """Spec content must actually reach build.md and certifier-thorough.md."""
 
@@ -385,3 +403,48 @@ class TestReviewSpecResumeState:
         assert recorded["version"] == 3
         assert result.version == 3
         assert result.cost == 1.25
+
+    @pytest.mark.asyncio
+    async def test_regenerate_prints_acknowledgement(self, tmp_path, monkeypatch, capsys):
+        from otto.spec import review_spec
+
+        project_dir = tmp_path
+        run_dir = tmp_path / "otto_logs" / "runs" / "run-2"
+        run_dir.mkdir(parents=True)
+        spec_path = run_dir / "spec.md"
+        spec_path.write_text(MINIMAL_VALID)
+
+        async def fake_run_spec_agent(intent, project_dir, run_dir, config, **kwargs):
+            return SpecResult(
+                path=spec_path,
+                content=MINIMAL_VALID,
+                open_questions=0,
+                cost=0.1,
+                duration_s=1.0,
+                version=kwargs["version"],
+            )
+
+        answers = iter(["r", "tighten the success criteria", "a"])
+        monkeypatch.setattr("otto.spec._is_tty", lambda: True)
+        monkeypatch.setattr("otto.spec.run_spec_agent", fake_run_spec_agent)
+        monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+
+        await review_spec(
+            SpecResult(
+                path=spec_path,
+                content=MINIMAL_VALID,
+                open_questions=0,
+                cost=1.0,
+                duration_s=2.0,
+                version=0,
+            ),
+            project_dir,
+            run_dir,
+            "run-2",
+            "counter app",
+            {},
+            auto_approve=False,
+        )
+
+        out = capsys.readouterr().out
+        assert "Regenerating spec from your note" in out

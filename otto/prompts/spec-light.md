@@ -30,7 +30,7 @@ One primary flow in Given/When/Then form:
 1–3 bullets. Each is something a user would notice missing within a minute of trying the product. Order by importance.
 
 ## Must NOT Have Yet
-Up to 5 bullets. Features the user might EXPECT but that are explicitly deferred. One-line reason each (speed, complexity, dependency).
+0–3 bullets. Features the user might EXPECT but that are explicitly deferred. Use only when the intent is ambiguous enough that a reasonable agent would drift (e.g., a one-word intent, or a feature area with many obvious extensions). For tight, well-specified intents, write exactly `None.` under the heading (keep the heading — downstream tooling requires it). One-line reason each (speed, complexity, dependency).
 
 Examples:
 - No login — single-user MVP.
@@ -52,7 +52,7 @@ If industry defaults apply, USE THEM — don't ask. Only surface ambiguity that 
 
 ## Rules
 - Keep the spec under 60 lines total. Tight > exhaustive.
-- Must-NOT-Have is mandatory — it's the primary scope-control device. Never skip it.
+- Must-NOT-Have is optional — use only when the intent invites real scope drift. A clear intent (like "kanban with columns X/Y/Z, drag-drop, add/delete, localStorage") needs none — write `None.` under the heading. Do NOT pad.
 - Every Success Criterion must be testable by a certifier who has not read the rest of the spec.
 - Trivial intents (short, unambiguous: "todo app," "counter") → produce a minimal spec (1 Must-Have, 1 Success Criterion, 0 Open Questions). Don't pad.
 - No tech-stack choices in the spec. Product-level only.

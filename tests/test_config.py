@@ -7,6 +7,7 @@ import yaml
 
 from otto.config import (
     DEFAULT_CONFIG,
+    _normalize_intent,
     agent_provider,
     create_config,
     detect_default_branch,
@@ -57,7 +58,10 @@ class TestLoadConfig:
 
     def test_returns_defaults_when_file_missing(self, tmp_bare_git_repo):
         cfg = load_config(tmp_bare_git_repo / "otto.yaml")
-        assert cfg == DEFAULT_CONFIG
+        # load_config fills in auto-detected project values even without a
+        # yaml — default_branch comes from git.
+        expected = {**DEFAULT_CONFIG, "default_branch": "main"}
+        assert cfg == expected
 
     def test_queue_section_defaults_present(self, tmp_bare_git_repo):
         """Phase 1.3: queue: section with all expected keys + correct defaults."""
@@ -130,8 +134,9 @@ class TestLoadConfig:
         config_path = tmp_bare_git_repo / "otto.yaml"
         config_path.write_text("")
         cfg = load_config(config_path)
-        # Auto-detect adds test_command (None for bare repo); rest matches defaults
-        expected = {**DEFAULT_CONFIG, "test_command": None}
+        # Auto-detect adds default_branch=main (from git) and leaves
+        # test_command=None for bare repos with no test framework.
+        expected = {**DEFAULT_CONFIG, "default_branch": "main", "test_command": None}
         assert cfg == expected
 
     def test_normalizes_provider_fields(self, tmp_bare_git_repo):
@@ -156,6 +161,9 @@ class TestProviderHelpers:
     def test_resolve_intent_for_enqueue_prefers_explicit_value(self, tmp_bare_git_repo):
         (tmp_bare_git_repo / "intent.md").write_text("from project")
         assert resolve_intent_for_enqueue(tmp_bare_git_repo, explicit="from cli") == "from cli"
+
+    def test_normalize_intent_collapses_multiline_whitespace(self):
+        assert _normalize_intent("a kanban board:\n  localStorage") == "a kanban board: localStorage"
 
 
 class TestDetectTestCommand:

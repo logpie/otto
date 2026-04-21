@@ -400,7 +400,16 @@ class Runner:
             if task is None or not task.resumable:
                 _mark_failed(ts, "watcher restart: child gone, command not resumable")
                 continue
-            checkpoint_path = self._worktree_for(task) / "otto_logs" / "checkpoint.json"
+            # New per-session layout: paused pointer → sessions/<id>/checkpoint.json.
+            # Falls back to scanning sessions/*/checkpoint.json if pointer is stale,
+            # and to the legacy otto_logs/checkpoint.json for back-compat.
+            from otto import paths as _paths
+            wt = self._worktree_for(task)
+            paused_session = _paths.resolve_pointer(wt, _paths.PAUSED_POINTER)
+            if paused_session is not None:
+                checkpoint_path = paused_session / "checkpoint.json"
+            else:
+                checkpoint_path = _paths.legacy_checkpoint(wt)
             if checkpoint_path.exists() and policy == "resume":
                 logger.info(
                     "reconciling: re-spawning %s with --resume from %s",
