@@ -23,10 +23,12 @@ Two subsystems built on top of the core build/certify/improve flows:
   + foreground watcher that spawns one `otto` subprocess per task into its own
   git worktree on its own branch. Crash-safe via PID-reuse-safe child tracking.
 - **Merge** (`otto/merge/`): Python-driven `git merge --no-ff` orchestrator.
-  Clean merges burn $0 (no LLM). Conflicts invoke an LLM resolver (sequential
-  per-branch by default; opt-in consolidated mode resolves all conflicts in
-  one agent session). After merging, a triage agent emits a verification
-  plan and the certifier re-runs the must-verify subset.
+  Clean merges burn $0 (no LLM). When git can't auto-merge, otto commits
+  marker-laden merges to preserve history, then invokes ONE agent session
+  with full project context (Bash + test command + cross-branch context)
+  to resolve every conflict globally. The agent self-corrects within its
+  session via test-driven feedback. After merging, a triage agent emits a
+  verification plan and the certifier re-runs the must-verify subset.
 
 ## System Diagram
 
@@ -217,50 +219,47 @@ otto improve bugs "error handling" -n 5
                     ┌──────────────────────┐
                     │ orchestrator.run_merge│
                     └──────────┬───────────┘
-                               │
-                ┌──────────────┴──────────────┐
-                ▼                              ▼
-     ┌─────────────────────┐       ┌─────────────────────────────────┐
-     │ Sequential (default)│       │ Consolidated (opt-in)           │
-     │                     │       │ queue.merge_mode: consolidated  │
-     │ for each branch:    │       │                                 │
-     │   git merge --no-ff │       │ Phase 1: sequential merges,     │
-     │   if conflict:      │       │   commit marker-laden files     │
-     │     conflict_agent. │       │   (capture pre-commit diff per  │
-     │     resolve_one(    │       │    branch for agent context)    │
-     │       branch       )│       │                                 │
-     │     validate +     │       │ Phase 2: ONE agent session       │
-     │     stage + commit  │       │   resolves all conflicts        │
-     │                     │       │   globally, runs project tests  │
-     │   2 retries on      │       │                                 │
-     │   validation fail   │       │ Single final validation:        │
-     │                     │       │   no out-of-scope edits,        │
-     │                     │       │   HEAD unchanged, no leftover   │
-     │                     │       │   markers (content scan)        │
-     │                     │       │                                 │
-     │                     │       │ NO retry — agent self-corrects  │
-     │                     │       │ within its session, or merge    │
-     │                     │       │ bails (user resolves manually)  │
-     └─────────┬───────────┘       └────────────┬────────────────────┘
-               └──────────────┬─────────────────┘
-                              ▼
-                  ┌─────────────────────────┐
-                  │ collect_stories_from_   │
-                  │ branches (per task)     │
-                  └────────┬────────────────┘
-                           ▼
-                  ┌─────────────────────────┐
-                  │ triage_agent: emit      │
-                  │ verification plan       │
-                  │   must_verify           │
-                  │   skip_likely_safe      │
-                  │   flag_for_human        │
-                  └────────┬────────────────┘
-                           ▼
-                  ┌─────────────────────────┐
-                  │ certifier (must_verify  │
-                  │ subset, post-merge tree)│
-                  └─────────────────────────┘
+                               ▼
+              ┌─────────────────────────────────────┐
+              │ Phase 1: sequential `git merge`     │
+              │   for each branch:                  │
+              │     git merge --no-ff               │
+              │     if clean → outcome=merged       │
+              │     else if --fast → bail           │
+              │     else:                           │
+              │       capture conflict diff (--merge)│
+              │       capture raw file snapshots     │
+              │       git add + git commit           │
+              │       outcome=merged_with_markers    │
+              └────────────────┬─────────────────────┘
+                               ▼
+              ┌─────────────────────────────────────┐
+              │ Phase 2: ONE agent session          │
+              │   prompt = all branches' intents +  │
+              │            stories + diff + test cmd│
+              │   tools  = Bash, Read, Edit, Write, │
+              │            MultiEdit, Grep, Glob    │
+              │   loop   = test-driven retry inside │
+              │            the agent's session      │
+              └────────────────┬─────────────────────┘
+                               ▼
+              ┌─────────────────────────────────────┐
+              │ Phase 3: orchestrator validation    │
+              │   (validate_post_agent — see below) │
+              │   on fail → bail, user resolves     │
+              │   on pass → git add + commit        │
+              │             outcome=conflict_resolved│
+              └────────────────┬─────────────────────┘
+                               ▼
+              ┌─────────────────────────────────────┐
+              │ Phase 4: triage + cert               │
+              │   collect_stories_from_branches      │
+              │   triage_agent: must_verify /        │
+              │                  skip_likely_safe /  │
+              │                  flag_for_human      │
+              │   certifier on must_verify subset    │
+              │   (--no-certify skips this phase)    │
+              └─────────────────────────────────────┘
 ```
 
 **Validation guarantees** (`conflict_agent.validate_post_agent`):
@@ -268,9 +267,10 @@ otto improve bugs "error handling" -n 5
 1. Out-of-scope edits — `post_diff − pre_diff ⊆ expected_uu_files`
 2. No new untracked files (build artifacts caught here; otto's
    `setup_gitignore.py` adds common patterns to keep this from tripping)
-3. No conflict markers remain — `git diff --check` for the sequential
-   path; direct content scan of `expected_uu_files` for the consolidated
-   path (markers may live in committed files where `diff --check` is blind)
+3. No conflict markers remain — direct content scan of `expected_uu_files`
+   (markers live in committed files where `git diff --check` is blind);
+   ANY column-zero `<<<<<<<` / `=======` / `>>>>>>>` line fails closed,
+   including partial / mangled marker remnants
 4. HEAD unchanged (agent didn't `commit` or `reset`)
 
 **Branch outcome statuses** (`merge/state.py`):
@@ -278,17 +278,22 @@ otto improve bugs "error handling" -n 5
 | Status | Meaning |
 |---|---|
 | `merged` | Clean `git merge --no-ff` |
-| `merged_with_markers` | Marker-laden merge commit (consolidated mode phase 1) |
-| `conflict_resolved` | Agent resolved a conflict and committed the resolution |
-| `agent_giveup` | Agent failed validation after retries (or post-stage git failure) |
+| `merged_with_markers` | Marker-laden merge commit (phase 1) |
+| `conflict_resolved` | Agent resolved all phase-1 markers (phase 3) |
+| `agent_giveup` | Agent failed validation, or post-stage git failure |
 | `skipped` | Skipped per orchestrator policy |
 | `pending` | Pre-flight state; should never appear in final state |
 
-**Bash sandbox.** The sequential conflict agent has `disallowed_tools=["Bash"]`
-to prevent shell escape (the orchestrator owns `git`). The consolidated agent
-ALLOWS Bash — it can run project tests to self-verify — and is checked
-post-hoc by HEAD-unchanged + out-of-scope-edit validation. Codex provider is
-rejected for conflict resolution (it ignores `disallowed_tools`).
+**Why one agent session, no orchestrator-level retry.** Test-driven retry
+inside the agent's session is more powerful than re-rolling at the orchestrator
+layer: the agent runs the project's test command, cross-references branches via
+`git diff` / `git show`, and iterates until tests pass. P6 bench measured this
+at 18min / $5.12 / 4 files vs 37min / $7.52 / 2 files for the prior per-conflict
+approach — 2.1× faster, 32% cheaper, more files resolved cleanly.
+
+**Codex provider rejected.** Codex does not reliably honor tool restrictions,
+which would break the orchestrator's safety model for conflict resolution.
+Conflict resolution requires `provider: claude` in `otto.yaml`.
 
 ## Certifier Modes
 
@@ -374,8 +379,7 @@ otto/prompts/
   certifier-hillclimb.md    Product improvements (missing features, UX)
   certifier-target.md       Metric measurement (METRIC_VALUE/METRIC_MET)
   spec-light.md             Spec-gate generator (run_spec_agent)
-  merger-conflict.md        Per-conflict resolver (sequential merge mode)
-  merger-conflict-agentic.md   Consolidated agent-mode resolver
+  merger-conflict-agentic.md   Consolidated conflict resolver (single agent session)
   merger-triage.md          Post-merge verification-plan generator
 ```
 
@@ -405,9 +409,9 @@ Run `find otto/ -name "*.py" -not -path "*__pycache__*" | xargs wc -l | sort -rn
 | `queue/schema.py` | `.otto-queue.yml` + `state.json` + commands.jsonl read/write (atomic) |
 | `queue/runner.py` | Foreground watcher: spawn / reap / cancel / timeout / lock |
 | `queue/ids.py` | Slug-to-id rules, branch + worktree path generation |
-| `merge/orchestrator.py` | `run_merge`, sequential and consolidated drivers, post-merge verification |
+| `merge/orchestrator.py` | `run_merge`, consolidated merge driver, post-merge verification |
 | `merge/git_ops.py` | Thin git wrappers — `merge_no_ff`, `conflicted_files`, `diff_check`, … |
-| `merge/conflict_agent.py` | Per-conflict and consolidated LLM resolvers + `validate_post_agent` |
+| `merge/conflict_agent.py` | Consolidated LLM resolver + `validate_post_agent` + `_files_with_markers` |
 | `merge/triage_agent.py` | Post-merge verification-plan generator (must_verify / skip / flag) |
 | `merge/stories.py` | Collect stories from merged branches (queue manifests + build manifests) |
 | `merge/state.py` | `BranchOutcome`, per-merge `state.json`, status `Literal` |

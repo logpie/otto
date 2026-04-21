@@ -235,3 +235,36 @@ Tests are real code and accumulate the same slop as production.
 - New `tests/_helpers.py` factory replacing duplicated `_init_repo`/`_make_repo` across 9 files
 
 Test count: 430 → 426 (−4 from merging redundant tests, +1 parametrize). LOC: 6,811 → 6,704 (−107).
+
+---
+
+## Implementation Gate — 2026-04-20 — Delete sequential merge mode
+
+Removed per-conflict sequential merge entirely. Consolidated agent mode is
+now the only conflict-resolution path. Driven by bench data: P6 measured
+2.1× faster, 32% cheaper, more files resolved cleanly.
+
+### Round 1 — Codex
+- [IMPORTANT] Phase-1 `merged_with_markers` rows never upgraded after agent success →
+  conflicted branches showed yellow warning icons in CLI summary even when resolved.
+  The synthetic `(consolidated)` row had the success status; per-branch rows had stale state.
+- [NOTE] Stale docstrings in orchestrator.py / state.py / cli_merge.py / conflict_agent.py
+  referencing deleted sequential behavior, --resume continuation, Codex disallowed_tools.
+- [NOTE] `_files_with_markers` fail-closed scope worth documenting (intentional false
+  positives on literal markers in conflict-set files).
+
+### Round 2 — Codex re-reviewed fixes
+- New helper `_update_consolidated_conflict_outcomes` in orchestrator.py walks
+  `state.outcomes` and rewrites `merged_with_markers` rows in place at every
+  terminal point (success → `conflict_resolved`; failure paths → `agent_giveup`
+  with the failure note). Synthetic `(consolidated)` row no longer appended.
+- Docstrings cleaned: orchestrator.py / conflict_agent.py / state.py / cli_merge.py
+  now describe single-mode reality and mark --resume as deferred bookkeeping.
+- `_files_with_markers` docstring now explicit about intentional fail-closed
+  bias on literal markers in conflict-set files.
+- Regression test `test_consolidated_resolution_upgrades_per_branch_outcomes`
+  added (success-path coverage).
+- APPROVED. No new findings. Failure-path rewrites only have indirect coverage
+  but no behavioral defect was found at the call sites.
+
+Test count: 420 → 421. LOC: otto/ ~11,000 → ~10,500 (−500 lines net).

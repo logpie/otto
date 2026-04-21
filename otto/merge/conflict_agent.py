@@ -1,29 +1,26 @@
-"""Phase 4.2: per-conflict agent invocation with Python-enforced scope.
+"""Agent-mode consolidated conflict resolution.
 
-Called by the orchestrator AFTER `git merge` returns conflict status.
-The agent is given:
-- The list of conflicted files
-- Both branches' resolved intents
-- Both branches' stories
-- The conflict diff
+The orchestrator first attempts each `git merge --no-ff`, committing
+marker-laden files on conflicts so later branches can keep landing. It
+then invokes ONE agent session on the union of unresolved files. Full
+tool access is intentional: the agent can run the project's test command
+to self-verify and use Bash to inspect branch context with `git diff` /
+`git show`.
 
-It must edit ONLY the conflicted files and remove ALL conflict markers.
-After it returns, the orchestrator validates:
-1. delta = post_diff - pre_diff ⊆ conflict_files (no scope creep)
-2. `git diff --check` passes (no leftover markers)
-3. HEAD unchanged (agent didn't commit/reset)
-Then orchestrator stages + commits.
+Validation guarantees (`validate_post_agent`):
+1. Out-of-scope edits — `post_diff − pre_diff ⊆ expected_uu_files`
+2. No new untracked files (build artifacts caught here)
+3. No conflict markers remain — content scan of `expected_uu_files`
+   (markers can live in committed files where `git diff --check` is blind)
+4. HEAD unchanged (agent didn't `commit`/`reset`)
 
-Bash is disabled at the SDK level via `disallowed_tools=["Bash"]` (the
-strongest constraint we have). Combined with post-call diff-name-only
-validation, agent escape is caught and triggers retry-from-snapshot.
-Codex provider is rejected outright — it ignores `disallowed_tools`.
+Codex provider is rejected outright because it does not reliably honor
+tool restrictions globally, which would undermine the merge safety model.
 """
 
 from __future__ import annotations
 
 import logging
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -31,10 +28,6 @@ from typing import Any
 from otto.merge import git_ops
 
 logger = logging.getLogger("otto.merge.conflict_agent")
-
-
-# How many times the orchestrator will retry the agent on validation failure
-MAX_AGENT_RETRIES = 2
 
 
 @dataclass
@@ -47,23 +40,13 @@ class ConflictResolutionAttempt:
 
 
 @dataclass
-class ConflictContext:
-    """Inputs the agent needs."""
-    target: str
-    branch_being_merged: str
-    branch_intents: dict[str, str]   # branch → resolved intent
-    branch_stories: list[dict[str, Any]]   # tagged with source_branch
-    conflict_files: list[str]
-    conflict_diff: str               # `git diff --merge` output
-
-
-@dataclass
 class ConsolidatedConflictContext:
     """Global context for agent-mode consolidated resolution.
 
-    Used when the orchestrator has attempted all branch merges sequentially
-    (committing-with-markers on conflicts) and now invokes the agent ONCE on
-    the union of all unresolved files.
+    Built by the orchestrator after it has attempted every branch merge,
+    committing marker-laden results on conflicts. Carries the union of
+    unresolved files plus per-branch intent/story metadata so the agent
+    can preserve each branch's behaviors.
     """
     target: str
     all_branches: list[str]                  # every branch the merge attempted
@@ -97,59 +80,6 @@ def _format_stories(stories: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def render_conflict_prompt(ctx: ConflictContext) -> str:
-    """Render the merger-conflict.md prompt with `ctx` substituted in."""
-    from otto.prompts import _PROMPTS_DIR
-    template = (_PROMPTS_DIR / "merger-conflict.md").read_text()
-    files_listing = "\n".join(f"- {f}" for f in ctx.conflict_files)
-    return (
-        template
-        .replace("{target}", ctx.target)
-        .replace("{branch_being_merged}", ctx.branch_being_merged)
-        .replace("{branch_intents_section}", _format_branch_intents(ctx.branch_intents))
-        .replace("{stories_section}", _format_stories(ctx.branch_stories))
-        .replace("{conflict_files_listing}", files_listing or "(none?)")
-        .replace("{conflict_diff}", ctx.conflict_diff[:50000])  # cap to fit context
-    )
-
-
-def snapshot_conflict_files(project_dir: Path, files: list[str]) -> dict[str, bytes]:
-    """Read raw bytes of each conflicted file (with markers intact) for
-    retry restoration. Returns dict of {path → bytes}."""
-    out: dict[str, bytes] = {}
-    for f in files:
-        p = project_dir / f
-        if p.exists():
-            out[f] = p.read_bytes()
-    return out
-
-
-def restore_conflict_files(
-    project_dir: Path,
-    snapshot: dict[str, bytes],
-    *,
-    pre_untracked_files: set[str] | None = None,
-) -> None:
-    """Write back snapshotted contents and remove new untracked files."""
-    for f, data in snapshot.items():
-        p = project_dir / f
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_bytes(data)
-    if pre_untracked_files is None:
-        return
-    extra_untracked = sorted(
-        set(git_ops.untracked_files(project_dir)) - pre_untracked_files,
-        key=lambda path: len(Path(path.rstrip("/")).parts),
-        reverse=True,
-    )
-    for rel_path in extra_untracked:
-        path = project_dir / rel_path.rstrip("/")
-        if path.is_dir():
-            shutil.rmtree(path, ignore_errors=True)
-        elif path.exists() or path.is_symlink():
-            path.unlink(missing_ok=True)
-
-
 def _files_with_markers(project_dir: Path, files: list[str] | set[str]) -> list[str]:
     """Return the subset of `files` that still contain conflict markers.
 
@@ -157,6 +87,8 @@ def _files_with_markers(project_dir: Path, files: list[str] | set[str]) -> list[
     (where `git diff --check` is blind), so we scan content directly.
     Any column-zero conflict marker line is suspicious in a file that was
     previously unmerged, including partial or mangled marker triplets.
+    This intentionally false-positives on literal marker examples in the
+    conflict set so the merge fails closed instead of landing bad content.
     """
     out: list[str] = []
     for rel in files:
@@ -181,22 +113,18 @@ def validate_post_agent(
     expected_uu_files: set[str],
     pre_untracked_files: set[str],
     pre_head: str,
-    scan_files_for_markers: bool = False,
 ) -> tuple[bool, str | None]:
     """Validate orchestrator-side after the agent returns.
 
     Returns (ok, error_message). Checks:
     1. Out-of-scope edits — `post_diff - pre_diff` must ⊆ `expected_uu_files`
     2. No new untracked files
-    3. No conflict markers remain — `git diff --check` for the sequential
-       path; direct content scan of `expected_uu_files` for the consolidated
-       path (markers may live in committed files where `diff --check` is
-       blind). Set `scan_files_for_markers=True` for the consolidated path.
+    3. No conflict markers remain in `expected_uu_files` (content scan —
+       `git diff --check` is blind to markers in already-committed files)
     4. HEAD unchanged
 
-    Staging happens AFTER this validation. On failure the index is still
-    unmerged and retry can restore the worktree only (sequential path); the
-    consolidated path has no retry.
+    Staging happens AFTER this validation. On failure the merge bails;
+    the user resolves manually.
     """
     post_diff_files = set(git_ops.changed_files(project_dir))
     delta = post_diff_files - pre_diff_files
@@ -214,10 +142,9 @@ def validate_post_agent(
             f"__pycache__/, node_modules/, dist/). Add them to .gitignore "
             f"and re-run the merge."
         ))
-    if scan_files_for_markers:
-        leftover = _files_with_markers(project_dir, expected_uu_files)
-        if leftover:
-            return (False, f"conflict markers still in files: {leftover!r}")
+    leftover = _files_with_markers(project_dir, expected_uu_files)
+    if leftover:
+        return (False, f"conflict markers still in files: {leftover!r}")
     dc = git_ops.diff_check(project_dir)
     if not dc.ok:
         return (False, f"git diff --check failed: {dc.stdout.strip()}\n{dc.stderr.strip()}")
@@ -226,114 +153,6 @@ def validate_post_agent(
         return (False, f"HEAD changed during agent call: {pre_head} → {cur_head}")
     return (True, None)
 
-
-async def resolve_one_conflict(
-    *,
-    project_dir: Path,
-    config: dict[str, Any],
-    ctx: ConflictContext,
-    budget: Any | None = None,
-) -> ConflictResolutionAttempt:
-    """Invoke the conflict agent, validate, retry up to MAX_AGENT_RETRIES.
-
-    Provider gate: orchestrator should reject non-claude providers before
-    merge starts. This function keeps the same check as a final safeguard.
-    """
-    from otto.config import agent_provider
-    from otto.agent import (
-        AgentCallError,
-        make_agent_options,
-        run_agent_with_timeout,
-    )
-    provider = agent_provider(config)
-    if provider != "claude":
-        return ConflictResolutionAttempt(
-            success=False,
-            agent_invoked=False,
-            note=(
-                f"conflict resolution requires the 'claude' provider "
-                f"(got '{provider}'); the codex provider ignores "
-                f"disallowed_tools so the Bash-disabled scope cannot be "
-                f"enforced. Switch otto.yaml provider, or merge manually."
-            ),
-        )
-
-    pre_head = git_ops.head_sha(project_dir)
-    pre_diff_files = set(git_ops.changed_files(project_dir))
-    pre_untracked_files = set(git_ops.untracked_files(project_dir))
-    pre_contents = snapshot_conflict_files(project_dir, ctx.conflict_files)
-    expected_uu = set(ctx.conflict_files)
-
-    total_cost = 0.0
-    last_note = ""
-    for attempt in range(MAX_AGENT_RETRIES + 1):
-        prompt = render_conflict_prompt(ctx)
-        options = make_agent_options(project_dir, config)
-        # Disallow Bash so the agent can't run `git` and bypass the
-        # orchestrator's commit/HEAD discipline. Edit/Write/MultiEdit OK;
-        # `validate_post_agent` catches any out-of-scope drift.
-        options.disallowed_tools = list(set((options.disallowed_tools or []) + ["Bash"]))
-        timeout = budget.for_call() if budget is not None else None
-
-        try:
-            _text, cost, _session = await run_agent_with_timeout(
-                prompt,
-                options,
-                log_path=project_dir / "otto_logs" / "merge" / "conflict-agent.log",
-                timeout=timeout,
-                project_dir=project_dir,
-            )
-        except AgentCallError as exc:
-            return ConflictResolutionAttempt(
-                success=False,
-                cost_usd=total_cost,
-                retries_used=attempt,
-                note=f"agent call error: {exc.reason}",
-            )
-        total_cost += float(cost or 0)
-
-        ok, err = validate_post_agent(
-            project_dir=project_dir,
-            pre_diff_files=pre_diff_files,
-            expected_uu_files=expected_uu,
-            pre_untracked_files=pre_untracked_files,
-            pre_head=pre_head,
-        )
-        if ok:
-            return ConflictResolutionAttempt(
-                success=True,
-                cost_usd=total_cost,
-                retries_used=attempt,
-                note=f"resolved on attempt {attempt + 1}",
-            )
-
-        # Validation failed — restore worktree and retry
-        last_note = err or "unknown validation failure"
-        logger.warning("conflict agent attempt %d failed: %s", attempt + 1, last_note)
-        restore_conflict_files(
-            project_dir,
-            pre_contents,
-            pre_untracked_files=pre_untracked_files,
-        )
-
-    return ConflictResolutionAttempt(
-        success=False,
-        cost_usd=total_cost,
-        retries_used=MAX_AGENT_RETRIES,
-        note=f"gave up after {MAX_AGENT_RETRIES + 1} attempts; last error: {last_note}",
-    )
-
-
-# ----------------------------------------------------------------------
-# Consolidated agent-mode resolver — opt-in via queue.merge_mode = "consolidated"
-# ----------------------------------------------------------------------
-#
-# Single agent session resolves all conflicts across all branches at once.
-# Full tool access (no Bash restriction) so the agent can run project tests
-# to self-verify. No Python retry loop — orchestrator does ONE final
-# validation (out-of-scope edits caught, HEAD-unchanged enforced, marker
-# scan in `expected_uu_files`). On validation failure the merge bails;
-# user resolves manually or re-invokes.
 
 def render_consolidated_prompt(ctx: ConsolidatedConflictContext) -> str:
     """Render the consolidated agent-mode prompt."""
@@ -371,13 +190,10 @@ async def resolve_all_conflicts(
 ) -> ConflictResolutionAttempt:
     """Agent-mode consolidated resolver. ONE Claude session, full tools.
 
-    Caller (orchestrator) is responsible for:
-    - Capturing pre_head, pre_diff_files, pre_untracked_files, expected_uu_files
-      BEFORE calling this function.
-    - Calling validate_post_agent ONCE after this returns (no retry-from-snapshot).
-
-    The agent has Bash to run tests, Read/Edit/MultiEdit/Write/Grep/Glob.
-    No tool restrictions beyond what build/improve agents have.
+    Caller (orchestrator) captures pre_head / pre_diff_files /
+    pre_untracked_files / expected_uu_files BEFORE this call. We invoke
+    validate_post_agent ONCE on return; on failure the merge bails (the
+    agent already had a full test-driven retry budget within its session).
     """
     from otto.config import agent_provider
     from otto.agent import (
@@ -392,16 +208,16 @@ async def resolve_all_conflicts(
             agent_invoked=False,
             note=(
                 f"agent-mode conflict resolution requires the 'claude' provider "
-                f"(got '{provider}'). Codex ignores tool restrictions, which "
-                f"would break the orchestrator's safety guards."
+                f"(got '{provider}'). Codex does not reliably honor tool "
+                f"restrictions, which would break the orchestrator's safety guards."
             ),
         )
 
     prompt = render_consolidated_prompt(ctx)
     options = make_agent_options(project_dir, config)
     # NO disallowed_tools — match build/improve. Agent has full Bash, Edit,
-    # Write, MultiEdit, Read, Grep, Glob. Orchestrator's HEAD-unchanged and
-    # out-of-scope-files checks catch the dangerous things.
+    # Write, MultiEdit, Read, Grep, Glob. Orchestrator-side validation
+    # catches the dangerous things after the session returns.
     timeout = budget.for_call() if budget is not None else None
 
     try:
@@ -418,17 +234,15 @@ async def resolve_all_conflicts(
             note=f"agent call error: {exc.reason}",
         )
 
-    # Single final validation. No retry-from-snapshot (the whole point of
-    # agent mode is that the agent self-corrects within its session).
-    # scan_files_for_markers=True because the consolidated path commits
-    # markers into HEAD, where `git diff --check` can't see them.
+    # Single orchestrator-level validation — the agent self-corrects within
+    # its session via the project's test command + Bash (test-driven retry
+    # at the agent layer is more powerful than re-rolling at this layer).
     ok, err = validate_post_agent(
         project_dir=project_dir,
         pre_diff_files=pre_diff_files,
         expected_uu_files=expected_uu_files,
         pre_untracked_files=pre_untracked_files,
         pre_head=pre_head,
-        scan_files_for_markers=True,
     )
     if ok:
         return ConflictResolutionAttempt(

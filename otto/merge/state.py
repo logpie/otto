@@ -1,13 +1,14 @@
-"""Phase 4: merge run state — persisted across pause/resume.
+"""Persisted merge-run state for Otto's consolidated merge flow.
 
 `<project>/otto_logs/merge/<merge-id>/state.json` records:
 - target branch + sha at start
 - branches in queue (in order)
 - per-branch outcome
-- if paused at conflict: the branch index, branch_head_at_pause, and stage
+- optional manual-follow-up hints if the consolidated resolver fails
 
-Used by `otto merge --resume` to verify HEAD matches expectations and
-continue from the right point.
+`otto merge --resume` is still deferred, so the file is currently for
+reporting, debugging, and post-mortem inspection rather than active
+continuation.
 """
 
 from __future__ import annotations
@@ -60,11 +61,11 @@ class MergeState:
     target_head_before: str = ""              # SHA of target HEAD at start
     branches_in_order: list[str] = field(default_factory=list)
     outcomes: list[BranchOutcome] = field(default_factory=list)
-    # If paused mid-merge:
+    # Manual follow-up hints if the merge stops after a consolidated failure:
     paused_at_index: int | None = None        # index into branches_in_order
     paused_branch: str | None = None
-    paused_branch_head: str | None = None     # SHA of the branch tip when we paused
-    paused_stage: str | None = None           # "agent_invoked" | "manual_fix_required"
+    paused_branch_head: str | None = None     # reserved for future resume support
+    paused_stage: str | None = None           # currently only "manual_fix_required"
     # Final verification:
     verification_plan_path: str | None = None
     cert_run_id: str | None = None

@@ -70,7 +70,7 @@ otto queue run --concurrent 3               # foreground watcher dispatches up t
 otto merge --all                            # land all done tasks into main
 ```
 
-The watcher spawns each task in `.worktrees/<task-id>/` so they can build, test, and commit in isolation. `otto merge` does Python-driven `git merge --no-ff`; if a merge conflicts, an LLM conflict-resolution agent is invoked (clean merges burn $0). After all branches land, a triage agent emits a verification plan and the certifier re-runs the must-verify subset.
+The watcher spawns each task in `.worktrees/<task-id>/` so they can build, test, and commit in isolation. `otto merge` does Python-driven `git merge --no-ff`; clean merges burn $0. When git can't auto-merge, otto commits all marker-laden merges first, then runs ONE agent session that resolves every conflict globally — full Bash + project test command + cross-branch context. After all branches land, a triage agent emits a verification plan and the certifier re-runs the must-verify subset.
 
 ## Why Otto
 
@@ -337,9 +337,9 @@ After all branches are merged, a triage agent computes a verification plan (whic
 | `--full-verify` | Verify all stories (no skip-likely-safe optimization) |
 | `--cleanup-on-success` | Remove worktrees of merged tasks after successful merge |
 
-**Conflict resolution.** When `git` can't auto-merge, otto invokes a per-conflict LLM agent (default sequential mode) that resolves conflict markers with full project context. An opt-in **consolidated** mode (set `queue.merge_mode: consolidated` in `otto.yaml`) instead commits all marker-laden merges first, then runs ONE agent session to resolve everything globally — measured ~2× faster on multi-branch conflicts in benchmarks, but with a smaller safety net (no per-branch retry).
+**Conflict resolution.** When `git` can't auto-merge, otto first commits all marker-laden merges (preserving each branch's merge history), then runs ONE agent session that resolves every conflict globally with full project context — Bash, project test command, all tools. The agent self-corrects within its session (test-driven retry), then a single orchestrator-level validation enforces no out-of-scope edits, no leftover markers, HEAD unchanged. Bench data: ~2× faster and ~30% cheaper than per-conflict resolution on multi-branch merges.
 
-**Resume after manual fix.** If a merge conflict requires manual intervention, fix it, run `git merge --continue`, then run a fresh `otto merge` for any remaining branches. (`--resume` is on the roadmap but not yet implemented — the flag prints a deferred-message and exits non-zero.)
+**Manual fallback.** Use `--fast` to bail on the first conflict without invoking the agent. Then resolve manually with `git merge --continue` and run `otto merge` again for any remaining branches. (`--resume` is on the roadmap but not yet implemented — the flag prints a deferred-message and exits non-zero.)
 
 ### `otto history`
 
@@ -386,7 +386,6 @@ queue:
   worktree_dir: .worktrees             # where per-task worktrees live (relative to project)
   on_watcher_restart: resume           # resume | fail — when watcher restarts mid-flight
   task_timeout_s: 1800                 # SIGTERM a queue task after N seconds (null disables)
-  merge_mode: sequential               # sequential (default) | consolidated (opt-in agent-mode)
   bookkeeping_files:                   # files queue tasks should NOT commit to their branches
     - intent.md
     - otto.yaml
@@ -496,9 +495,7 @@ otto queue run --concurrent 3
 otto merge --all --cleanup-on-success
 ```
 
-The watcher commits artifacts to per-task branches and writes manifests to `otto_logs/queue/<task-id>/`. `otto merge` runs `git merge --no-ff` against the target branch; the LLM conflict agent is only invoked when git can't auto-merge. Use `--fast` for a pure-git merge that bails on the first conflict.
-
-For higher-throughput multi-branch conflict resolution, opt into the **consolidated agent mode** by setting `queue.merge_mode: consolidated` in `otto.yaml`. The orchestrator will commit all marker-laden merges first and then run a single agent session to resolve everything globally — cheaper and faster on dense conflicts, but with no per-branch retry safety net.
+The watcher commits artifacts to per-task branches and writes manifests to `otto_logs/queue/<task-id>/`. `otto merge` runs `git merge --no-ff` against the target branch; the LLM conflict agent is only invoked when git can't auto-merge. The agent gets full project context (Bash, test command) and resolves all branches' conflicts in one session. Use `--fast` for a pure-git merge that bails on the first conflict.
 
 ## Logs
 

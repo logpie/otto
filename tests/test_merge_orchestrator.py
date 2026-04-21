@@ -19,7 +19,7 @@ import pytest
 from otto.merge import conflict_agent
 from otto.merge.orchestrator import MergeOptions, run_merge
 from otto.merge import git_ops
-from otto.merge.state import find_latest_merge_id
+from otto.merge.state import find_latest_merge_id, load_state
 from tests._helpers import init_repo
 
 
@@ -146,7 +146,7 @@ def test_fast_mode_bails_on_conflict(tmp_path: Path):
     statuses = [o.status for o in result.state.outcomes]
     assert "merged" in statuses
     assert "agent_giveup" in statuses
-    # Working tree should be left dirty (UU markers) for --resume
+    # Working tree should be left dirty for manual resolution.
     assert git_ops.merge_in_progress(repo)
     git_ops.merge_abort(repo)  # cleanup
 
@@ -198,11 +198,13 @@ def test_conflict_agent_rejects_new_untracked_files(tmp_path: Path, monkeypatch:
     _make_branch(repo, "feat-b", "f.txt", "B\n")
 
     async def fake_run_agent_with_timeout(*args, **kwargs):
-        (repo / "f.txt").write_text("resolved\n")
+        # Resolve markers in conflict files, but also create a stray
+        # untracked file that the validator must reject.
+        for f in repo.glob("f.txt"):
+            f.write_text("resolved\n")
         (repo / "extra.txt").write_text("stray\n")
         return ("done", 0.0, "")
 
-    monkeypatch.setattr(conflict_agent, "MAX_AGENT_RETRIES", 0)
     with patch("otto.agent.run_agent_with_timeout", side_effect=fake_run_agent_with_timeout):
         result = asyncio.run(run_merge(
             project_dir=repo,
@@ -213,9 +215,6 @@ def test_conflict_agent_rejects_new_untracked_files(tmp_path: Path, monkeypatch:
 
     assert result.success is False
     assert "untracked files" in result.note
-    assert (repo / "extra.txt").exists() is False
-    assert git_ops.merge_in_progress(repo)
-    git_ops.merge_abort(repo)
 
 
 def test_consolidated_merge_captures_merge_aware_diff_with_both_sides(
@@ -238,11 +237,7 @@ def test_consolidated_merge_captures_merge_aware_diff_with_both_sides(
 
     result = asyncio.run(run_merge(
         project_dir=repo,
-        config={
-            "provider": "claude",
-            "default_branch": "main",
-            "queue": {"bookkeeping_files": [], "merge_mode": "consolidated"},
-        },
+        config=_config_no_bookkeeping(),
         options=MergeOptions(target="main", no_certify=True),
         explicit_ids_or_branches=["feat-a", "feat-b"],
     ))
@@ -250,6 +245,69 @@ def test_consolidated_merge_captures_merge_aware_diff_with_both_sides(
     assert result.success is False
     assert "<<<<<<<" in captured["diff"]
     assert ">>>>>>>" in captured["diff"]
+
+
+def test_consolidated_merge_upgrades_conflicted_branch_outcomes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    repo = _init_repo_with_gitattributes(tmp_path)
+    (repo / "f1.txt").write_text("base-1\n")
+    (repo / "f2.txt").write_text("base-2\n")
+    subprocess.run(["git", "add", "f1.txt", "f2.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "add conflict fixtures"], cwd=repo, check=True)
+
+    subprocess.run(["git", "checkout", "-b", "feat-a"], cwd=repo, capture_output=True, check=True)
+    (repo / "f1.txt").write_text("feat-a-1\n")
+    (repo / "f2.txt").write_text("feat-a-2\n")
+    subprocess.run(["git", "add", "f1.txt", "f2.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "feat-a: change both files"], cwd=repo, check=True)
+    subprocess.run(["git", "checkout", "main"], cwd=repo, capture_output=True, check=True)
+
+    subprocess.run(["git", "checkout", "-b", "feat-b"], cwd=repo, capture_output=True, check=True)
+    (repo / "f1.txt").write_text("feat-b-1\n")
+    subprocess.run(["git", "add", "f1.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "feat-b: conflict on f1"], cwd=repo, check=True)
+    subprocess.run(["git", "checkout", "main"], cwd=repo, capture_output=True, check=True)
+
+    subprocess.run(["git", "checkout", "-b", "feat-c"], cwd=repo, capture_output=True, check=True)
+    (repo / "f2.txt").write_text("feat-c-2\n")
+    subprocess.run(["git", "add", "f2.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "feat-c: conflict on f2"], cwd=repo, check=True)
+    subprocess.run(["git", "checkout", "main"], cwd=repo, capture_output=True, check=True)
+
+    async def fake_resolve_all_conflicts(*, project_dir: Path, config: dict[str, Any], ctx, **kwargs):
+        assert ctx.conflict_files == ["f1.txt", "f2.txt"]
+        (project_dir / "f1.txt").write_text("resolved-f1\n")
+        (project_dir / "f2.txt").write_text("resolved-f2\n")
+        return conflict_agent.ConflictResolutionAttempt(
+            success=True,
+            note="resolved for test",
+            cost_usd=12.34,
+        )
+
+    monkeypatch.setattr(conflict_agent, "resolve_all_conflicts", fake_resolve_all_conflicts)
+
+    result = asyncio.run(run_merge(
+        project_dir=repo,
+        config=_config_no_bookkeeping(),
+        options=MergeOptions(target="main", no_certify=True),
+        explicit_ids_or_branches=["feat-a", "feat-b", "feat-c"],
+    ))
+
+    assert result.success, result.note
+    outcome_by_branch = {outcome.branch: outcome for outcome in result.state.outcomes}
+    assert outcome_by_branch["feat-a"].status == "merged"
+    assert outcome_by_branch["feat-b"].status == "conflict_resolved"
+    assert outcome_by_branch["feat-c"].status == "conflict_resolved"
+    assert "(consolidated)" not in outcome_by_branch
+    assert "shared call" in outcome_by_branch["feat-b"].note
+    assert "shared call" in outcome_by_branch["feat-c"].note
+
+    persisted = load_state(repo, result.merge_id)
+    persisted_by_branch = {outcome.branch: outcome for outcome in persisted.outcomes}
+    assert persisted_by_branch["feat-b"].status == "conflict_resolved"
+    assert persisted_by_branch["feat-c"].status == "conflict_resolved"
+    assert "(consolidated)" not in persisted_by_branch
 
 
 # ---------- bookkeeping precondition ----------

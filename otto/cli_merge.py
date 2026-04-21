@@ -1,10 +1,9 @@
-"""Otto CLI — `otto merge ...` (Phase 4 + 5).
+"""Otto CLI — `otto merge ...`.
 
 Single command with mode flags:
     otto merge --all                  # land all done queue tasks into target
     otto merge t3 build/x             # explicit task ids or branches
     otto merge --target develop       # merge target other than default_branch
-    otto merge --resume               # continue after manual conflict fix
     otto merge --no-certify           # skip post-merge verification
     otto merge --full-verify          # don't skip stories during triage
     otto merge --fast                 # pure git, NO LLM, bail on first conflict
@@ -76,7 +75,7 @@ def register_merge_command(main: click.Group) -> None:
     @click.option("--fast", is_flag=True,
                   help="Pure git merge; bail on first conflict (no LLM)")
     @click.option("--resume", is_flag=True,
-                  help="Continue from a paused merge (manual conflict fix or --fast bail)")
+                  help="Deferred; reserved for future merge resume support")
     @click.option("--cleanup-on-success", is_flag=True,
                   help="Remove worktrees of merged tasks on successful merge")
     def merge(
@@ -102,7 +101,6 @@ def register_merge_command(main: click.Group) -> None:
             otto merge build/csv-export build/settings-redesign
             otto merge --all --no-certify
             otto merge --all --fast        # pure git, bail on conflict
-            otto merge --resume            # after a manual fix
         """
         from otto.config import load_config
         from otto.merge.orchestrator import MergeOptions, run_merge
@@ -122,7 +120,6 @@ def register_merge_command(main: click.Group) -> None:
             pass  # non-fatal; downstream precondition checks will surface a clearer error
 
         if resume:
-            # TODO Phase 4.6: full resume support (Mode A/B/C dispatch)
             error_console.print(
                 "[yellow]--resume support deferred to a follow-up.[/yellow]\n"
                 "  Workaround: complete your conflict resolution and `git merge --continue`,\n"

@@ -1,18 +1,15 @@
-"""Phase 4.1+4.5+4.6: Python-driven merge orchestration.
+"""Python-driven merge orchestration.
 
-The Python loop owns `git merge`. The agent is invoked **only** for
-actual conflicts (one call per conflict, scoped to conflict files via
-`disallowed_tools=["Bash"]` + post-call validation).
+Otto now has one merge strategy:
+- merge each branch with `git merge --no-ff`
+- commit conflicted files with markers so later branches can keep landing
+- run one consolidated Claude session on the union of unresolved files
+- validate the agent result, commit the cleanup, then run triage/cert
 
-Bookkeeping conflicts (intent.md, otto.yaml) are handled by git's
-union/ours merge drivers from Phase 1.6 — no Python normalization here.
-
-Three resume modes (Phase 4.6):
-- Mode A: clean tree, manual fix committed → verify HEAD is a merge commit
-  with parents matching the snapshot, continue from next branch
-- Mode B: dirty tree with UU markers (from --fast or agent giveup) →
-  invoke conflict agent on current state
-- Mode C: dirty tree without UU → refuse with instructions
+Bookkeeping conflicts (`intent.md`, `otto.yaml`) are handled by git's
+union/ours merge drivers; the Python loop only handles real code/content
+conflicts. `--resume` is still deferred, so `state.json` is informative
+bookkeeping rather than an active continuation contract.
 """
 
 from __future__ import annotations
@@ -23,10 +20,6 @@ from pathlib import Path
 from typing import Any
 
 from otto.merge import git_ops
-from otto.merge.conflict_agent import (
-    ConflictContext,
-    resolve_one_conflict,
-)
 from otto.merge.state import (
     BranchOutcome,
     MergeState,
@@ -213,167 +206,7 @@ async def run_merge(
 
     logger.info("merge %s starting: target=%s, branches=%s", merge_id, options.target, branches)
 
-    # Opt-in: queue.merge_mode = "consolidated" routes to the agent-mode
-    # path (sequential git merges + commits with markers, then one agent
-    # call resolves all markers globally). Default sequential mode below.
-    use_consolidated = (
-        not options.fast
-        and bool((config.get("queue") or {}).get("merge_mode") == "consolidated")
-    )
-    if use_consolidated:
-        return await _run_consolidated_agentic_merge(
-            project_dir=project_dir,
-            config=config,
-            options=options,
-            state=state,
-            merge_id=merge_id,
-            branches=branches,
-            queue_lookup=queue_lookup,
-            target_head_before=target_head_before,
-            budget=budget,
-        )
-
-    # Per-branch loop (default sequential mode)
-    for index, branch in enumerate(branches):
-        branch_head_at_pause = git_ops.resolve_branch(project_dir, branch)
-        result = git_ops.merge_no_ff(project_dir, branch)
-        if result.ok:
-            state.outcomes.append(BranchOutcome(
-                branch=branch, status="merged",
-                merge_commit=git_ops.head_sha(project_dir),
-            ))
-            write_state(project_dir, state)
-            continue
-
-        # Conflict path
-        conflicts = git_ops.conflicted_files(project_dir)
-        if not conflicts:
-            # git merge failed but no UU files — likely a tree-level error
-            state.outcomes.append(BranchOutcome(
-                branch=branch, status="agent_giveup",
-                note=f"git merge failed without conflict markers: {result.stderr.strip()[:200]}",
-            ))
-            state.paused_at_index = index
-            state.paused_branch = branch
-            state.paused_branch_head = branch_head_at_pause
-            state.paused_stage = "manual_fix_required"
-            write_state(project_dir, state)
-            return MergeRunResult(
-                success=False, merge_id=merge_id, state=state,
-                note=f"git merge of {branch!r} failed: {result.stderr.strip()[:200]}",
-            )
-
-        if options.fast:
-            # --fast: bail on first conflict, leave dirty for manual or --resume
-            state.outcomes.append(BranchOutcome(
-                branch=branch, status="agent_giveup",
-                note="conflict; --fast mode does not invoke agent",
-            ))
-            state.paused_at_index = index
-            state.paused_branch = branch
-            state.paused_branch_head = branch_head_at_pause
-            state.paused_stage = "manual_fix_required"
-            write_state(project_dir, state)
-            return MergeRunResult(
-                success=False, merge_id=merge_id, state=state,
-                note=(
-                    f"conflict on {branch!r}; --fast mode requires manual "
-                    f"resolution. Either fix conflicts and `git merge --continue`, "
-                    f"then `otto merge --resume`, OR run `otto merge --resume` "
-                    f"(without --fast) to invoke the conflict agent."
-                ),
-            )
-
-        # Default mode: invoke conflict agent
-        ctx = _build_conflict_context(
-            project_dir=project_dir,
-            target=options.target,
-            branch=branch,
-            branches_so_far=branches[: index + 1],
-            queue_lookup=queue_lookup,
-            conflicts=conflicts,
-        )
-        attempt = await resolve_one_conflict(
-            project_dir=project_dir,
-            config=config,
-            ctx=ctx,
-            budget=budget,
-        )
-        if not attempt.success:
-            state.outcomes.append(BranchOutcome(
-                branch=branch,
-                status="agent_giveup",
-                agent_invoked=attempt.agent_invoked,
-                note=attempt.note,
-            ))
-            state.paused_at_index = index
-            state.paused_branch = branch
-            state.paused_branch_head = branch_head_at_pause
-            state.paused_stage = "agent_giveup"
-            write_state(project_dir, state)
-            return MergeRunResult(
-                success=False, merge_id=merge_id, state=state,
-                note=(
-                    f"conflict agent gave up on {branch!r}: {attempt.note}\n"
-                    f"  Resolve manually then `otto merge --resume`."
-                ),
-            )
-
-        # Stage + commit (agent only edits worktree; orchestrator stages)
-        add_r = git_ops.add_paths(project_dir, conflicts)
-        if not add_r.ok:
-            state.outcomes.append(BranchOutcome(
-                branch=branch, status="agent_giveup",
-                agent_invoked=True,
-                note=f"git add failed after agent resolution: {add_r.stderr.strip()}",
-            ))
-            write_state(project_dir, state)
-            return MergeRunResult(
-                success=False, merge_id=merge_id, state=state,
-                note="git add failed; merge aborted",
-            )
-        # Sanity: no UU left after staging
-        if git_ops.conflicted_files(project_dir):
-            state.outcomes.append(BranchOutcome(
-                branch=branch, status="agent_giveup",
-                agent_invoked=True,
-                note="UU entries remain after agent + staging",
-            ))
-            write_state(project_dir, state)
-            return MergeRunResult(
-                success=False, merge_id=merge_id, state=state,
-                note=f"merge of {branch!r} still has UU entries",
-            )
-        commit_r = git_ops.commit_no_edit(project_dir)
-        if not commit_r.ok:
-            state.outcomes.append(BranchOutcome(
-                branch=branch, status="agent_giveup",
-                agent_invoked=True,
-                note=f"git commit failed: {commit_r.stderr.strip()}",
-            ))
-            write_state(project_dir, state)
-            return MergeRunResult(
-                success=False, merge_id=merge_id, state=state,
-                note="commit failed; merge aborted",
-            )
-        state.outcomes.append(BranchOutcome(
-            branch=branch, status="conflict_resolved",
-            agent_invoked=True,
-            merge_commit=git_ops.head_sha(project_dir),
-            note=f"resolved by agent (cost ${attempt.cost_usd:.2f}, retries {attempt.retries_used})",
-        ))
-        write_state(project_dir, state)
-
-    # All branches merged. Run triage + cert phase (unless --no-certify).
-    if options.no_certify:
-        if options.cleanup_on_success:
-            _cleanup_worktrees_for_merged_tasks(project_dir, queue_lookup)
-        return MergeRunResult(
-            success=True, merge_id=merge_id, state=state,
-            note="cert skipped per --no-certify; verify manually with `otto certify`",
-        )
-
-    result = await _run_post_merge_verification(
+    return await _run_consolidated_agentic_merge(
         project_dir=project_dir,
         config=config,
         options=options,
@@ -384,9 +217,27 @@ async def run_merge(
         target_head_before=target_head_before,
         budget=budget,
     )
-    if result.success and options.cleanup_on_success:
-        _cleanup_worktrees_for_merged_tasks(project_dir, queue_lookup)
-    return result
+
+
+def _update_consolidated_conflict_outcomes(
+    *,
+    state: MergeState,
+    status: str,
+    note: str,
+    agent_invoked: bool,
+    merge_commit: str | None = None,
+) -> list[str]:
+    """Rewrite phase-1 marker rows to the final consolidated outcome."""
+    updated_branches: list[str] = []
+    for outcome in state.outcomes:
+        if outcome.status != "merged_with_markers":
+            continue
+        outcome.status = status
+        outcome.agent_invoked = agent_invoked
+        outcome.merge_commit = merge_commit
+        outcome.note = note
+        updated_branches.append(outcome.branch)
+    return updated_branches
 
 
 def _cleanup_worktrees_for_merged_tasks(
@@ -525,7 +376,7 @@ async def _run_post_merge_verification(
 
 
 # ----------------------------------------------------------------------
-# Consolidated agent-mode merge — opt-in via queue.merge_mode = "consolidated"
+# Consolidated agent-mode merge — the only merge path
 # ----------------------------------------------------------------------
 
 async def _run_consolidated_agentic_merge(
@@ -543,7 +394,7 @@ async def _run_consolidated_agentic_merge(
     """Consolidated agent-mode merge.
 
     Strategy:
-    1. Sequential `git merge --no-ff <branch>` for each branch.
+    1. `git merge --no-ff <branch>` for each branch in order.
        - On clean merge: commit normally.
        - On conflict: stage marker-laden files (`git add -u`) and commit
          (markers retained in the commit). This is intentionally weird —
@@ -556,8 +407,8 @@ async def _run_consolidated_agentic_merge(
        and commit the cleanup as a "resolve all conflicts" commit.
 
     On any unrecoverable failure (e.g., agent leaves markers, edits out
-    of scope), the merge bails. State.json captures the partial outcome
-    for `--resume` (deferred) or manual fix.
+    of scope), the merge bails. State.json records which branches still
+    need manual follow-up; `--resume` itself is still deferred.
     """
     from otto.merge.conflict_agent import (
         ConsolidatedConflictContext,
@@ -591,6 +442,23 @@ async def _run_consolidated_agentic_merge(
             return MergeRunResult(
                 success=False, merge_id=merge_id, state=state,
                 note=f"git merge of {branch!r} failed: {result.stderr.strip()[:200]}",
+            )
+        if options.fast:
+            # --fast: bail on first conflict. Leave the in-progress merge
+            # in the worktree (UU files staged, no commit yet) so the user
+            # can resolve manually and `git merge --continue`.
+            state.outcomes.append(BranchOutcome(
+                branch=branch, status="agent_giveup",
+                note="conflict; --fast mode does not invoke agent",
+            ))
+            write_state(project_dir, state)
+            return MergeRunResult(
+                success=False, merge_id=merge_id, state=state,
+                note=(
+                    f"conflict on {branch!r}; --fast mode requires manual "
+                    f"resolution. Fix the conflict, `git merge --continue`, "
+                    f"then run `otto merge` (without --fast) for any remaining branches."
+                ),
             )
         # Capture the conflict diff BEFORE committing markers (otherwise
         # `git diff HEAD` returns empty since markers are now in HEAD).
@@ -695,12 +563,27 @@ async def _run_consolidated_agentic_merge(
         budget=budget,
     )
     if not attempt.success:
-        state.outcomes.append(BranchOutcome(
-            branch="(consolidated)", status="agent_giveup",
+        conflicted_branch_count = len(
+            [outcome for outcome in state.outcomes if outcome.status == "merged_with_markers"]
+        )
+        unresolved_branches = _update_consolidated_conflict_outcomes(
+            state=state,
+            status="agent_giveup",
             agent_invoked=attempt.agent_invoked,
-            note=attempt.note,
-        ))
-        state.paused_stage = "agent_giveup"
+            note=(
+                "consolidated agent failed on the shared conflict set "
+                f"for {len(expected_uu)} files across {conflicted_branch_count} "
+                f"conflicted branches: {attempt.note}"
+            ),
+        )
+        state.paused_stage = "manual_fix_required"
+        state.paused_at_index = (
+            state.branches_in_order.index(unresolved_branches[0])
+            if unresolved_branches
+            else None
+        )
+        state.paused_branch = unresolved_branches[0] if unresolved_branches else None
+        state.paused_branch_head = None
         write_state(project_dir, state)
         return MergeRunResult(
             success=False, merge_id=merge_id, state=state,
@@ -714,11 +597,20 @@ async def _run_consolidated_agentic_merge(
     # Stage + commit the agent's resolution
     add_r = git_ops.add_paths(project_dir, accumulated_conflict_files)
     if not add_r.ok:
-        state.outcomes.append(BranchOutcome(
-            branch="(consolidated)", status="agent_giveup",
+        unresolved_branches = _update_consolidated_conflict_outcomes(
+            state=state,
+            status="agent_giveup",
             agent_invoked=True,
-            note=f"git add failed after agent resolution: {add_r.stderr.strip()}",
-        ))
+            note=f"git add failed after consolidated resolution: {add_r.stderr.strip()}",
+        )
+        state.paused_stage = "manual_fix_required"
+        state.paused_at_index = (
+            state.branches_in_order.index(unresolved_branches[0])
+            if unresolved_branches
+            else None
+        )
+        state.paused_branch = unresolved_branches[0] if unresolved_branches else None
+        state.paused_branch_head = None
         write_state(project_dir, state)
         return MergeRunResult(
             success=False, merge_id=merge_id, state=state,
@@ -729,22 +621,44 @@ async def _run_consolidated_agentic_merge(
     commit_msg = f"resolve {len(accumulated_conflict_files)} files across {len(branches)} branches"
     commit_r = git_ops.run_git(project_dir, "commit", "-m", commit_msg)
     if not commit_r.ok:
-        state.outcomes.append(BranchOutcome(
-            branch="(consolidated)", status="agent_giveup",
+        unresolved_branches = _update_consolidated_conflict_outcomes(
+            state=state,
+            status="agent_giveup",
             agent_invoked=True,
-            note=f"git commit failed after resolution: {commit_r.stderr.strip()}",
-        ))
+            note=f"git commit failed after consolidated resolution: {commit_r.stderr.strip()}",
+        )
+        state.paused_stage = "manual_fix_required"
+        state.paused_at_index = (
+            state.branches_in_order.index(unresolved_branches[0])
+            if unresolved_branches
+            else None
+        )
+        state.paused_branch = unresolved_branches[0] if unresolved_branches else None
+        state.paused_branch_head = None
         write_state(project_dir, state)
         return MergeRunResult(
             success=False, merge_id=merge_id, state=state,
             note=f"git commit failed after resolution: {commit_r.stderr.strip()}",
         )
-    state.outcomes.append(BranchOutcome(
-        branch="(consolidated)", status="conflict_resolved",
-        merge_commit=git_ops.head_sha(project_dir),
+    final_head = git_ops.head_sha(project_dir)
+    conflicted_branch_count = len(
+        [outcome for outcome in state.outcomes if outcome.status == "merged_with_markers"]
+    )
+    _update_consolidated_conflict_outcomes(
+        state=state,
+        status="conflict_resolved",
         agent_invoked=True,
-        note=f"resolved {len(accumulated_conflict_files)} files (cost ${attempt.cost_usd:.2f})",
-    ))
+        merge_commit=final_head,
+        note=(
+            "resolved by consolidated agent in one shared call "
+            f"(total cost ${attempt.cost_usd:.2f} across {conflicted_branch_count} "
+            "conflicted branches)"
+        ),
+    )
+    state.paused_stage = None
+    state.paused_at_index = None
+    state.paused_branch = None
+    state.paused_branch_head = None
     write_state(project_dir, state)
 
     # Phase 4: triage + cert (unless --no-certify)
@@ -764,33 +678,6 @@ async def _run_consolidated_agentic_merge(
     if result.success and options.cleanup_on_success:
         _cleanup_worktrees_for_merged_tasks(project_dir, queue_lookup)
     return result
-
-
-def _build_conflict_context(
-    *,
-    project_dir: Path,
-    target: str,
-    branch: str,
-    branches_so_far: list[str],
-    queue_lookup: dict[str, str],
-    conflicts: list[str],
-) -> ConflictContext:
-    """Build the context the conflict agent needs."""
-    intents = _gather_intents(project_dir, branches_so_far, queue_lookup)
-    stories = collect_stories_from_branches(
-        project_dir=project_dir,
-        branches=branches_so_far,
-        queue_task_lookup=queue_lookup,
-    )
-    diff = git_ops.run_git(project_dir, "diff", "--merge").stdout
-    return ConflictContext(
-        target=target,
-        branch_being_merged=branch,
-        branch_intents=intents,
-        branch_stories=stories,
-        conflict_files=conflicts,
-        conflict_diff=diff,
-    )
 
 
 def _render_conflict_file_snapshots(project_dir: Path, conflicts: list[str]) -> str:
