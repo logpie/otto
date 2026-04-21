@@ -210,13 +210,22 @@ otto build "add dark mode toggle to the settings page"   # incremental
 | `--yes` | Auto-approve the generated spec (CI/scripts) |
 | `--force` | Discard an active paused spec run and start fresh |
 | `--fast` | Fast certification — happy-path smoke test only (the default) |
+| `--standard` | Standard certification — subagents + screenshots, no adversarial probing |
 | `--thorough` | Thorough certification — adversarial edge cases + code review |
 | `--no-qa` | Skip certification entirely (just build) |
 | `--split` | Python-driven certify→fix loop (vs. single agent session) |
+| `--strict` | Require two consecutive PASSes (re-verify for consistency). Default stops at first PASS |
 | `--rounds N` / `-n N` | Max certification rounds (default 8) |
+| `--budget SECONDS` | Total wall-clock budget for the run (default 3600) |
+| `--model MODEL` | Override the coding model for this run (e.g. `sonnet`, `opus`) |
+| `--provider {claude\|codex}` | Override the agent provider for this run |
+| `--effort {low\|medium\|high}` | Provider-specific reasoning effort hint |
+| `--verbose` | Show tool-call counts in heartbeat + extra detail in terminal |
 | `--resume` | Resume from last checkpoint; intent inherited from checkpoint |
 
 **Certifier mode selection**: CLI flag > `otto.yaml` > `fast` fallback. No flag + no yaml setting → `fast`. Projects that want real verification by default set `certifier_mode: standard` (or `thorough`) in `otto.yaml`.
+
+**Precedence**: CLI flag > `otto.yaml` > built-in `DEFAULTS`. Everything is optional — run without any config at all and you get sane defaults for a quick dev loop.
 
 **Spec gate**: `--spec` generates `otto_logs/sessions/<session-id>/spec/spec.md` with sections _Intent / What It Does / Core User Journey / Must Have / Must NOT Have Yet / Success Criteria / Open Questions_. Pauses for `[a]pprove / [e]dit / [r]egenerate / [q]uit`. Approved spec flows into build.md + the certifier prompt — the certifier flags features found in "Must NOT Have Yet" as scope-creep WARNings (non-failing).
 
@@ -227,11 +236,13 @@ Certify any project — independent, builder-blind verification. Tests the produ
 The intent describes what the product should do. The certifier generates test stories from it.
 
 ```bash
-otto certify                                            # reads intent.md or README.md
+otto certify                                            # reads intent.md or README.md — fast mode
 otto certify "notes API with auth, CRUD, and search"    # explicit intent
-otto certify --fast                                     # quick smoke test (~30s)
+otto certify --standard                                 # subagents + screenshots, no adversarial probing
 otto certify --thorough                                 # adversarial: edge cases, code review
 ```
+
+Same override flags as `otto build`: `--model`, `--provider`, `--effort`, `--budget`, `--verbose`, `--strict`.
 
 ### `otto improve`
 
@@ -281,17 +292,34 @@ otto history             # show recent builds
 otto history -n 20       # show last 20 builds
 ```
 
+### `otto replay`
+
+Regenerate `narrative.log` from a session's lossless `messages.jsonl`. Useful after upgrading otto: the narrative format may have improved, but the raw event stream in `messages.jsonl` is preserved — replay rebuilds the human-readable log with the current formatter.
+
+```bash
+otto replay                              # replay the latest session
+otto replay 2026-04-21-181130-a2cabf     # replay a specific session
+```
+
+Writes `narrative.regenerated.log` alongside the original (never overwrites).
+
 ### `otto setup`
 
-Generate a `CLAUDE.md` file with project conventions for the coding agent. Reads the project structure and creates instructions automatically.
+Generate a `CLAUDE.md` file with project conventions for the coding agent, plus an `otto.yaml` with all control knobs commented. Reads the project structure and detects test frameworks automatically.
 
 ```bash
 otto setup
 ```
 
+### `otto --version`
+
+Print the installed otto version, git commit, branch, and source path. Useful when multiple otto installs exist (dev venv vs system) — confirms which one is being invoked.
+
 ## Configuration (`otto.yaml`)
 
-`otto.yaml` is auto-created on first run (`otto build` or `otto setup`). All settings are optional — otto auto-detects what it can, and the CLI fallback is sane for quick iteration.
+`otto.yaml` is **opt-in** — created by running `otto setup`. Without it, otto uses built-in `DEFAULTS` plus auto-detected project values (test command, default branch). Only create one when you want to persist overrides.
+
+**Precedence**: CLI flag > `otto.yaml` > `DEFAULTS`.
 
 ```yaml
 # Auto-detected (you usually don't need to set these)
@@ -300,16 +328,31 @@ test_command: pytest                   # auto-detected from project files
 
 # Provider — which coding agent to use
 provider: claude                       # "claude" (default) or "codex"
-model: null                            # override model (e.g. "sonnet", "gpt-5")
+model: null                            # override model (e.g. "sonnet", "opus", "gpt-5")
                                        # if null, uses the provider's default
+effort: medium                         # low | medium | high (provider reasoning effort)
+
+# Per-agent overrides — YAML-only (no CLI flags). Each falls back to the
+# top-level provider/model/effort above when unset.
+build:
+  provider: claude
+  model: opus
+certifier:
+  provider: claude
+  model: sonnet
+  effort: low                          # certifier doesn't need deep reasoning
+spec:
+  provider: claude
+  model: sonnet
 
 # Budget + certification
-run_budget_seconds: 3600               # total wall-clock for the whole invocation (primary knob)
+run_budget_seconds: 3600               # total wall-clock for the whole invocation
 certifier_mode: fast                   # fast | standard | thorough
-                                       # CLI no-flag default is `fast` (cheap dev loop);
-                                       # set this to `standard` or `thorough` for real QA
+                                       # CLI no-flag default is `fast` (cheap dev loop)
 max_certify_rounds: 8                  # max certify→fix attempts before giving up
+strict_mode: false                     # true = require two consecutive PASSes (opt-in via --strict)
 spec_timeout: 600                      # cap on the spec-agent call specifically
+# memory: true                         # cross-run certifier memory (opt-in)
 ```
 
 ### Timeout semantics
@@ -459,7 +502,7 @@ otto/                        ~5,400 lines
   cli_improve.py            CLI: improve (bugs, feature, target)
   config.py                 Config, intent resolution, helpers
   journal.py                Build journal for improve rounds
-tests/                       158 tests
+tests/                       250 tests
 ```
 
 ## Requirements
