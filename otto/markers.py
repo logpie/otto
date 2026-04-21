@@ -37,18 +37,37 @@ def _parse_diagnosis(raw: str) -> str:
 
 
 def _parse_story_result(stripped: str, evidence: dict[str, str]) -> dict[str, Any] | None:
-    """Parse a single STORY_RESULT: line. Returns None if placeholder."""
+    """Parse a single STORY_RESULT: line. Returns None if placeholder.
+
+    Verdict tokens: PASS, FAIL, SKIPPED, FLAG_FOR_HUMAN. The first two are
+    the standard pass/fail signal. SKIPPED and FLAG_FOR_HUMAN are emitted
+    by the merge cert path when a story has no overlap with the merge
+    diff (skipped) or is genuinely contradicted by another merged branch
+    (flagged). Neither counts as a regression.
+
+    `passed` stays as backward-compat boolean (True only for PASS).
+    Callers that need to distinguish skip/flag from fail should read `verdict`.
+    """
     parts = stripped[len("STORY_RESULT:"):].strip().split("|", 2)
     if len(parts) < 2:
         return None
     sid = parts[0].strip()
     if sid in _PLACEHOLDER_IDS:
         return None
-    passed = "PASS" in parts[1].upper()
+    verdict_text = parts[1].strip().upper()
+    if "FLAG_FOR_HUMAN" in verdict_text:
+        verdict = "FLAG_FOR_HUMAN"
+    elif "SKIPPED" in verdict_text:
+        verdict = "SKIPPED"
+    elif "PASS" in verdict_text:
+        verdict = "PASS"
+    else:
+        verdict = "FAIL"
     summary = parts[2].strip() if len(parts) > 2 else ""
     return {
         "story_id": sid,
-        "passed": passed,
+        "verdict": verdict,
+        "passed": verdict == "PASS",
         "summary": summary,
         "evidence": evidence.get(sid, ""),
     }

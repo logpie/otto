@@ -4,8 +4,9 @@ For each branch being merged, find its manifest (queue or atomic), read
 the proof_of_work_path from the manifest, and parse the stories. Returns
 a flat list of stories tagged with their source branch.
 
-The merge agent's triage step uses this list (see merger-triage.md) to
-produce a verification plan.
+The post-merge certifier uses this list to verify the merged story union.
+Per-story pruning happens inline via the merge_context preamble rather
+than a separate verification-plan step.
 """
 
 from __future__ import annotations

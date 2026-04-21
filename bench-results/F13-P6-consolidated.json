@@ -1,55 +1,55 @@
 {
   "name": "F13-P6-consolidated",
-  "started_at": "2026-04-20T18:32:57Z",
-  "finished_at": "2026-04-20T11:51:05Z",
-  "wall_seconds": 1087.9610562324524,
-  "total_cost_usd": 11.173377249999998,
+  "started_at": "2026-04-21T00:39:23Z",
+  "finished_at": "2026-04-20T17:58:28Z",
+  "wall_seconds": 1145.3393449783325,
+  "total_cost_usd": 10.89615,
   "queue_concurrency": 3,
   "tasks": [
     {
       "id": "base",
       "status": "done",
-      "cost_usd": 0.55676725,
-      "duration_s": 118.44504117965698,
+      "cost_usd": 0.6288952499999999,
+      "duration_s": 120.94269275665283,
       "branch": null,
       "failure_reason": null
     },
     {
       "id": "imp-categories",
       "status": "failed",
-      "cost_usd": 4.539391749999998,
-      "duration_s": 838.3499388694763,
+      "cost_usd": 2.6950902500000002,
+      "duration_s": 613.2335119247437,
       "branch": null,
       "failure_reason": "exit_code=1"
     },
     {
       "id": "imp-suppliers",
       "status": "failed",
-      "cost_usd": 2.8781085,
-      "duration_s": 589.881110906601,
+      "cost_usd": 3.3502255,
+      "duration_s": 729.2161793708801,
       "branch": null,
       "failure_reason": "exit_code=1"
     },
     {
       "id": "imp-alerts",
       "status": "done",
-      "cost_usd": 3.19910975,
-      "duration_s": 674.8924736976624,
+      "cost_usd": 2.6519390000000005,
+      "duration_s": 553.8161332607269,
       "branch": null,
       "failure_reason": null
     }
   ],
-  "merge_outcome": "failed",
-  "merge_cost_usd": 0.0,
-  "merge_seconds": 0.3825371265411377,
+  "merge_outcome": "success",
+  "merge_cost_usd": 1.57,
+  "merge_seconds": 128.03460693359375,
   "cert_passed": null,
   "notes": [
     "F13 consolidated agent-mode merge",
     "Branches merged: ['improve/imp-categories-2026-04-20', 'improve/imp-suppliers-2026-04-20', 'improve/imp-alerts-2026-04-20']",
-    "Phase 1+2 cost (base + improves): $11.17",
-    "Phase 3 cost (consolidated agent merge): $0.00",
-    "Phase 3 wall: 0s (0.0min)",
-    "Merge log tail: r\" % token.id, token.start_mark)\nyaml.parser.ParserError: while parsing a block mapping\n  in \"<unicode string>\", line 1, column 1:\n    default_branch: main\n    ^\nexpected <block end>, but found '<block mapping start>'\n  in \"<unicode string>\", line 16, column 3:\n      merge_mode: consolidated\n      ^"
+    "Phase 1+2 cost (base + improves): $9.33",
+    "Phase 3 cost (consolidated agent merge): $1.57",
+    "Phase 3 wall: 128s (2.1min)",
+    "Merge log tail: otal cost $1.57 across\n2 conflicted branches)\n    \u2713 improve/imp-suppliers-2026-04-20 (conflict_resolved)\n      resolved by consolidated agent in one shared call (total cost $1.57 across\n2 conflicted branches)\n    \u2713 improve/imp-alerts-2026-04-20 (merged)\n\n  Merge complete (id: merge-1776732981-75358)"
   ],
-  "repo_path": "/var/folders/xg/dk8wgfy119z44797kyz7w0380000gn/T/bench-p6-08503fvi"
+  "repo_path": "/var/folders/xg/dk8wgfy119z44797kyz7w0380000gn/T/bench-p6-pvjs94m6"
 }

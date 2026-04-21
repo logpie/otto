@@ -268,3 +268,39 @@ now the only conflict-resolution path. Driven by bench data: P6 measured
   but no behavioral defect was found at the call sites.
 
 Test count: 420 → 421. LOC: otto/ ~11,000 → ~10,500 (−500 lines net).
+
+---
+
+## Implementation Gate — 2026-04-20 — Delete triage agent, fold into cert prompt
+
+Removed the per-merge triage agent. Cert agent now does inline story-pruning
+via a `merge_context` preamble in the rendered stories section. Same
+pruning logic, no extra LLM call, no new prompt file.
+
+### Round 1 — Codex
+- [IMPORTANT] state.json back-compat: removed `verification_plan_path` from MergeState
+  but `load_state()` still does `MergeState(**data)` → old state files raise
+  `TypeError: unexpected keyword`.
+- [IMPORTANT] `--full-verify` semantic shift: setting merge_context=None disables
+  BOTH SKIPPED instruction AND FLAG_FOR_HUMAN instruction. Old --full-verify only
+  disabled skip_likely_safe pruning while keeping flagging.
+- [IMPORTANT] PoW report renders from `passed` boolean → SKIPPED and FLAG_FOR_HUMAN
+  show up as FAIL, lying to users.
+- [NOTE] Stale triage references in 16+ sites (CLI docstrings, README, architecture,
+  bench scripts).
+
+### Round 2 — Codex re-reviewed fixes
+- `load_state()` filters `data` through `dataclasses.fields(MergeState)` before
+  construction; drops unknown keys silently. Future-proofs against further field
+  removals. Regression test added.
+- `merge_context` always passed; new `allow_skip` flag (False when --full-verify).
+  Preamble conditionally renders SKIPPED block; FLAG_FOR_HUMAN block always renders.
+- New helpers `_story_verdict()`, `_story_verdict_display()`, `_normalize_story_result()`.
+  PoW renderers use verdict-aware icons (✓ ✗ – ⚠). Regression test verifies all
+  four verdicts render distinctly.
+- All 16+ stale references rewritten to describe the single-cert-call flow.
+- APPROVED. No new findings. Remaining `verification_plan_path` mentions are in
+  the back-compat test fixture, which is correct.
+
+Test count: 421 → 429 (+8 net: deleted 3 triage tests, added 11 new). LOC delta:
+otto/ ~10,500 → ~10,300 (−200 lines).

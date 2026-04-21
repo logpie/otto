@@ -21,25 +21,137 @@ if TYPE_CHECKING:
 logger = logging.getLogger("otto.certifier")
 
 
-def _format_stories_section(stories: list[dict[str, Any]] | None) -> str:
-    """Format the optional must-verify story list (Phase 4.0).
+def _story_verdict(story: dict[str, Any]) -> str:
+    """Return the canonical verdict for a story, with back-compat fallback."""
+    verdict = story.get("verdict")
+    if verdict:
+        return str(verdict)
+    return "PASS" if story.get("passed") else "FAIL"
 
-    When None or empty, returns "". When provided, renders an explicit
-    "## Stories to Verify" block listing each story by name + description,
-    plus an instruction that constrains the certifier to ONLY these stories
-    (skipping its usual checklist-driven planning).
+
+def _normalize_story_result(story: dict[str, Any]) -> dict[str, Any]:
+    """Ensure PoW consumers always get an explicit verdict field."""
+    normalized = dict(story)
+    verdict = _story_verdict(story)
+    normalized["verdict"] = verdict
+    normalized["passed"] = verdict == "PASS"
+    return normalized
+
+
+def _story_verdict_display(story: dict[str, Any]) -> tuple[str, str, str]:
+    """Return (verdict, icon, css_class) for PoW rendering."""
+    verdict = _story_verdict(story)
+    return {
+        "PASS": ("PASS", "✓", "pass"),
+        "FAIL": ("FAIL", "✗", "fail"),
+        "SKIPPED": ("SKIPPED", "–", "skipped"),
+        "FLAG_FOR_HUMAN": ("FLAG_FOR_HUMAN", "⚠", "flag"),
+    }.get(verdict, (verdict, "?", "unknown"))
+
+
+def _render_pow_markdown(
+    story_results: list[dict[str, Any]],
+    *,
+    outcome: str,
+    duration: float,
+    cost: float,
+    stories_passed: int,
+    stories_tested: int,
+) -> str:
+    """Render the markdown proof-of-work report."""
+    md_lines = [
+        "# Proof-of-Work Certification Report",
+        "",
+        f"> **Generated:** {time.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"> **Outcome:** {outcome}",
+        f"> **Duration:** {duration:.0f}s",
+        f"> **Cost:** ${cost:.2f}",
+        f"> **Stories:** {stories_passed}/{stories_tested}",
+        "",
+    ]
+    for s in story_results:
+        verdict, icon, _status_class = _story_verdict_display(s)
+        md_lines.append(f"- **{icon} {verdict}** {s['story_id']}: {s.get('summary', '')}")
+    md_lines.append("")
+    return "\n".join(md_lines)
+
+
+def _format_stories_section(
+    stories: list[dict[str, Any]] | None,
+    merge_context: dict[str, Any] | None = None,
+) -> str:
+    """Format the optional must-verify story list.
+
+    When None or empty, returns "". When provided, renders a "## Stories
+    to Verify" block listing each story plus an instruction to run ONLY
+    these stories (no additional checklist planning).
 
     Used by `otto merge`'s post-merge cert phase to verify the union of
     merged branches' stories without redoing exploratory test discovery.
+
+    `merge_context` (optional) carries `target` (str), `diff_files`
+    (list[str]), and `allow_skip` (bool) from a multi-branch merge.
+    When set, prepends a preamble that lets the cert agent skip stories
+    whose feature lives entirely in files not touched by the merge,
+    unless `allow_skip=False`. It still preserves contradiction flagging
+    for human review. This replaces the former separate planning pass
+    with the same pruning logic and no extra LLM call.
     """
     if not stories:
         return ""
-    lines = ["## Stories to Verify (REQUIRED)",
-             "",
-             "Run ONLY these stories. Do NOT plan additional ones from "
-             "the standard checklist; the union of these stories is the "
-             "complete contract for this run.",
-             ""]
+    lines: list[str] = []
+    if merge_context:
+        target = merge_context.get("target", "the target branch")
+        diff_files = merge_context.get("diff_files") or []
+        allow_skip = merge_context.get("allow_skip", True)
+        files_block = "\n".join(f"- `{f}`" for f in diff_files) or "(no files in merge diff)"
+        lines += [
+            "## Merge Verification Context",
+            "",
+            f"These stories came from a multi-branch merge into `{target}`.",
+            "",
+            "Files touched by the merge:",
+            files_block,
+            "",
+            "For each story below, decide before testing:",
+            "",
+        ]
+        if allow_skip:
+            lines += [
+                "- **SKIPPED** — the story's feature lives entirely in files NOT touched by",
+                "  the merge. Don't run the test; the behavior can't have regressed.",
+                "  Emit: `STORY_RESULT: <name> | SKIPPED | no overlap with merge diff`",
+                "",
+            ]
+        lines += [
+            "- **FLAG_FOR_HUMAN** — the story is genuinely contradicted by another",
+            "  merged branch (e.g., one branch added a feature another branch deleted).",
+            "  Don't try to resolve.",
+            "  Emit: `STORY_RESULT: <name> | FLAG_FOR_HUMAN | <one-sentence reason>`",
+            "",
+            "- **Otherwise** — test as you normally would, emit PASS/FAIL.",
+            "",
+        ]
+        if allow_skip:
+            lines += [
+                "When in doubt, test it. False positives (testing an unaffected story)",
+                "are cheap; false negatives (skipping a regression) defeat the purpose",
+                "of merge verification.",
+                "",
+            ]
+        else:
+            lines += [
+                "Test every story below; do not skip on file overlap.",
+                "",
+            ]
+    lines += [
+        "## Stories to Verify (REQUIRED)",
+        "",
+        "Run ONLY these stories. Do NOT plan additional ones from "
+        "the standard checklist; the union of these stories is the "
+        "complete contract for this run.",
+        "",
+    ]
     for i, story in enumerate(stories, 1):
         name = story.get("name") or story.get("summary") or story.get("story_id") or f"story-{i}"
         desc = story.get("description") or ""
@@ -62,12 +174,13 @@ def _render_certifier_prompt(
     focus: str | None = None,
     target: str | None = None,
     stories: list[dict[str, Any]] | None = None,
+    merge_context: dict[str, Any] | None = None,
 ) -> str:
     """Render a standalone certifier prompt with safe placeholder defaults."""
     from otto.prompts import render_prompt
 
     focus_section = f"## Improvement Focus\n{focus}" if focus else ""
-    stories_section = _format_stories_section(stories)
+    stories_section = _format_stories_section(stories, merge_context=merge_context)
     prompt_name = {
         "standard": "certifier.md",
         "fast": "certifier-fast.md",
@@ -100,6 +213,7 @@ async def run_agentic_certifier(
     target: str | None = None,
     budget: "RunBudget | None" = None,
     stories: list[dict[str, Any]] | None = None,
+    merge_context: dict[str, Any] | None = None,
 ) -> "CertificationReport":
     """Agentic certifier: one monolithic agent does everything.
 
@@ -141,6 +255,7 @@ async def run_agentic_certifier(
         focus=focus,
         target=target,
         stories=stories,
+        merge_context=merge_context,
     )
 
     # Inject cross-run memory (opt-in via config)
@@ -177,10 +292,13 @@ async def run_agentic_certifier(
     total_duration = round(time.monotonic() - start_time, 1)
     from otto.markers import parse_certifier_markers
     parsed = parse_certifier_markers(text or "")
-    story_results = parsed.stories
+    story_results = [_normalize_story_result(s) for s in parsed.stories]
 
-    # Determine outcome
-    has_failures = any(not s["passed"] for s in story_results)
+    # Determine outcome. SKIPPED and FLAG_FOR_HUMAN are not regressions —
+    # only an explicit FAIL counts against the cert. Stories without an
+    # explicit verdict default to FAIL (parser sets verdict="FAIL" for
+    # anything that isn't PASS/SKIPPED/FLAG_FOR_HUMAN).
+    has_failures = any(s.get("verdict", "FAIL") == "FAIL" for s in story_results)
     passed = parsed.verdict_pass and not has_failures and bool(story_results)
     target_mode = mode == "target" or bool(target) or bool(config.get("_target"))
     if target_mode:
@@ -216,21 +334,16 @@ async def run_agentic_certifier(
                                     diagnosis=parsed.diagnosis)
 
         # Markdown PoW
-        md_lines = [
-            "# Proof-of-Work Certification Report",
-            "",
-            f"> **Generated:** {time.strftime('%Y-%m-%d %H:%M:%S')}",
-            f"> **Outcome:** {outcome.value}",
-            f"> **Duration:** {total_duration:.0f}s",
-            f"> **Cost:** ${float(cost or 0):.2f}",
-            f"> **Stories:** {parsed.stories_passed}/{parsed.stories_tested}",
-            "",
-        ]
-        for s in story_results:
-            status = "PASS" if s["passed"] else "FAIL"
-            md_lines.append(f"- **{status}** {s['story_id']}: {s.get('summary', '')}")
-        md_lines.append("")
-        (report_dir / "proof-of-work.md").write_text("\n".join(md_lines))
+        (report_dir / "proof-of-work.md").write_text(
+            _render_pow_markdown(
+                story_results,
+                outcome=outcome.value,
+                duration=total_duration,
+                cost=float(cost or 0),
+                stories_passed=parsed.stories_passed,
+                stories_tested=parsed.stories_tested,
+            )
+        )
     except Exception as exc:
         logger.warning("Failed to write PoW report: %s", exc)
 
@@ -300,10 +413,16 @@ def _generate_agentic_html_pow(
         ".story { border: 1px solid #e0e0e0; border-radius: 10px; padding: 1.2em; margin: 1em 0; background: #fff; }",
         ".story.pass { border-left: 5px solid #22c55e; }",
         ".story.fail { border-left: 5px solid #ef4444; }",
+        ".story.skipped { border-left: 5px solid #64748b; }",
+        ".story.flag { border-left: 5px solid #f59e0b; }",
+        ".story.unknown { border-left: 5px solid #6b7280; }",
         ".story-header { display: flex; align-items: center; gap: 0.8em; }",
         ".badge { display: inline-block; padding: 3px 10px; border-radius: 5px; font-weight: 700; font-size: 0.8em; letter-spacing: 0.03em; }",
         ".badge.pass { background: #dcfce7; color: #166534; }",
         ".badge.fail { background: #fee2e2; color: #991b1b; }",
+        ".badge.skipped { background: #e2e8f0; color: #334155; }",
+        ".badge.flag { background: #fef3c7; color: #92400e; }",
+        ".badge.unknown { background: #e5e7eb; color: #374151; }",
         ".story-id { font-weight: 600; font-size: 1.05em; }",
         ".summary { margin-top: 0.5em; color: #444; line-height: 1.5; }",
         ".evidence { margin-top: 0.8em; }",
@@ -355,14 +474,16 @@ def _generate_agentic_html_pow(
         html.append("</div>")
 
     for i, s in enumerate(story_results):
-        status_class = "pass" if s["passed"] else "fail"
-        badge = "PASS" if s["passed"] else "FAIL"
+        verdict, icon, status_class = _story_verdict_display(s)
         sid = _html.escape(s.get("story_id", ""))
         summary = _html.escape(s.get("summary", ""))
         evidence = s.get("evidence", "")
 
         html.append(f"<div class='story {status_class}'>")
-        html.append(f"<div class='story-header'><span class='badge {status_class}'>{badge}</span><span class='story-id'>{sid}</span></div>")
+        html.append(
+            f"<div class='story-header'><span class='badge {status_class}'>{icon} {verdict}</span>"
+            f"<span class='story-id'>{sid}</span></div>"
+        )
         html.append(f"<div class='summary'>{summary}</div>")
 
         if evidence:

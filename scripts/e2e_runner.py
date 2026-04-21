@@ -384,7 +384,7 @@ def scenario_b4_fast_bail(results: list[Result]) -> None:
 
 def scenario_b8_no_certify(results: list[Result]) -> None:
     """B8: --no-certify skips post-merge verification."""
-    with scenario("B8: --no-certify skips triage+cert", results), make_repo("b8-") as repo:
+    with scenario("B8: --no-certify skips post-merge cert", results), make_repo("b8-") as repo:
         repo.otto("queue", "build", "--as", "only", "single task")
         w = start_watcher(repo, concurrent=1)
         try:
@@ -395,7 +395,7 @@ def scenario_b8_no_certify(results: list[Result]) -> None:
         out = (r.stdout or "") + (r.stderr or "")
         if r.returncode != 0:
             raise AssertionError(f"--no-certify merge failed: rc={r.returncode}, out={out!r}")
-        # Confirm no triage or certify run was invoked. The literal flag
+        # Confirm no post-merge cert run was invoked. The literal flag
         # `--no-certify` appears in the "Mode: --no-certify" header — strip it
         # before matching.
         sanitized = out.lower().replace("--no-certify", "").replace("no-certify", "")
@@ -652,7 +652,7 @@ def scenario_c1b_merge_after_real_build(results: list[Result]) -> None:
             )
         finally:
             w.stop()
-        # Merge with --no-certify (no LLM cost from triage/cert)
+        # Merge with --no-certify (no LLM cost from post-merge cert)
         r = real_otto_run(repo, "merge", "--all", "--no-certify", "--cleanup-on-success")
         out = (r.stdout or "") + (r.stderr or "")
         assert r.returncode == 0, f"merge failed: rc={r.returncode}, out={out!r}"

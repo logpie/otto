@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Literal
 
@@ -67,7 +67,6 @@ class MergeState:
     paused_branch_head: str | None = None     # reserved for future resume support
     paused_stage: str | None = None           # currently only "manual_fix_required"
     # Final verification:
-    verification_plan_path: str | None = None
     cert_run_id: str | None = None
     cert_passed: bool | None = None
 
@@ -102,8 +101,10 @@ def load_state(project_dir: Path, merge_id: str) -> MergeState:
             f"{path}: schema_version mismatch (got {data.get('schema_version')!r})"
         )
     outcomes = [BranchOutcome(**o) for o in data.get("outcomes", [])]
-    data["outcomes"] = outcomes
-    return MergeState(**data)
+    allowed_keys = {f.name for f in fields(MergeState)}
+    filtered = {k: v for k, v in data.items() if k in allowed_keys}
+    filtered["outcomes"] = outcomes
+    return MergeState(**filtered)
 
 
 def find_latest_merge_id(project_dir: Path) -> str | None:

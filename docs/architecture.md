@@ -27,8 +27,10 @@ Two subsystems built on top of the core build/certify/improve flows:
   marker-laden merges to preserve history, then invokes ONE agent session
   with full project context (Bash + test command + cross-branch context)
   to resolve every conflict globally. The agent self-corrects within its
-  session via test-driven feedback. After merging, a triage agent emits a
-  verification plan and the certifier re-runs the must-verify subset.
+  session via test-driven feedback. After merging, one certifier call
+  verifies the merged story union. Its merge-context preamble lets it
+  skip unaffected stories inline and flag genuine contradictions for
+  human review.
 
 ## System Diagram
 
@@ -252,12 +254,12 @@ otto improve bugs "error handling" -n 5
               └────────────────┬─────────────────────┘
                                ▼
               ┌─────────────────────────────────────┐
-              │ Phase 4: triage + cert               │
+              │ Phase 4: post-merge cert             │
               │   collect_stories_from_branches      │
-              │   triage_agent: must_verify /        │
-              │                  skip_likely_safe /  │
-              │                  flag_for_human      │
-              │   certifier on must_verify subset    │
+              │   certifier on merged story union    │
+              │   merge_context preamble:            │
+              │     skip unaffected stories          │
+              │     or flag contradictions           │
               │   (--no-certify skips this phase)    │
               └─────────────────────────────────────┘
 ```
@@ -380,7 +382,7 @@ otto/prompts/
   certifier-target.md       Metric measurement (METRIC_VALUE/METRIC_MET)
   spec-light.md             Spec-gate generator (run_spec_agent)
   merger-conflict-agentic.md   Consolidated conflict resolver (single agent session)
-  merger-triage.md          Post-merge verification-plan generator
+  certifier*.md                Post-merge certifier prompts; merge_context prunes inline
 ```
 
 ## Key Modules
@@ -412,8 +414,7 @@ Run `find otto/ -name "*.py" -not -path "*__pycache__*" | xargs wc -l | sort -rn
 | `merge/orchestrator.py` | `run_merge`, consolidated merge driver, post-merge verification |
 | `merge/git_ops.py` | Thin git wrappers — `merge_no_ff`, `conflicted_files`, `diff_check`, … |
 | `merge/conflict_agent.py` | Consolidated LLM resolver + `validate_post_agent` + `_files_with_markers` |
-| `merge/triage_agent.py` | Post-merge verification-plan generator (must_verify / skip / flag) |
-| `merge/stories.py` | Collect stories from merged branches (queue manifests + build manifests) |
+| `merge/stories.py` | Collect stories from merged branches for the post-merge certifier |
 | `merge/state.py` | `BranchOutcome`, per-merge `state.json`, status `Literal` |
 
 ## Error Handling

@@ -70,7 +70,7 @@ otto queue run --concurrent 3               # foreground watcher dispatches up t
 otto merge --all                            # land all done tasks into main
 ```
 
-The watcher spawns each task in `.worktrees/<task-id>/` so they can build, test, and commit in isolation. `otto merge` does Python-driven `git merge --no-ff`; clean merges burn $0. When git can't auto-merge, otto commits all marker-laden merges first, then runs ONE agent session that resolves every conflict globally — full Bash + project test command + cross-branch context. After all branches land, a triage agent emits a verification plan and the certifier re-runs the must-verify subset.
+The watcher spawns each task in `.worktrees/<task-id>/` so they can build, test, and commit in isolation. `otto merge` does Python-driven `git merge --no-ff`; clean merges burn $0. When git can't auto-merge, otto commits all marker-laden merges first, then runs ONE agent session that resolves every conflict globally — full Bash + project test command + cross-branch context. After all branches land, the certifier verifies the merged story union in one call. Its merge-context preamble prunes unaffected stories inline and flags genuine cross-branch contradictions for human review.
 
 ## Why Otto
 
@@ -326,7 +326,7 @@ otto merge --all --fast                       # pure git merge, bail on first co
 otto merge --all --cleanup-on-success         # remove worktrees after successful merge
 ```
 
-After all branches are merged, a triage agent computes a verification plan (which stories must be re-run vs. skipped vs. flagged for human review), and the certifier runs the must-verify subset against the post-merge tree. Use `--no-certify` to skip this; `--full-verify` to verify the full union.
+After all branches are merged, the certifier runs once against the post-merge tree on the merged story union. The merge-context preamble lets it skip stories whose feature has no overlap with the merge diff and flag genuine cross-branch contradictions for human review. Use `--no-certify` to skip this; `--full-verify` to test the full union without the skip option.
 
 | Flag | What it does |
 |---|---|
@@ -517,8 +517,8 @@ otto_logs/
   queue/<task-id>/
     manifest.json            Final task manifest (status, cost, branch, paths)
   merge/
-    merge.log                Orchestrator + conflict-agent + triage-agent events
-    <merge-id>/state.json    Per-merge state with branch outcomes + verification plan
+    merge.log                Orchestrator + conflict-agent events
+    <merge-id>/state.json    Per-merge state with branch outcomes + cert status
   run-history.jsonl          One line per build (for otto history)
 build-journal.md             Round-by-round tracking (improve mode)
 improvement-report.md        Final improve summary with merge instructions
@@ -559,8 +559,7 @@ otto/                        ~11,000 lines
     orchestrator.py          Sequential and consolidated agent-mode merge drivers
     git_ops.py               Thin git wrappers (merge_no_ff, conflicted_files, …)
     conflict_agent.py        Per-conflict + consolidated LLM resolvers
-    triage_agent.py          Post-merge verification-plan generator
-    stories.py               Collect stories from merged branches
+    stories.py               Collect stories from merged branches + manifests
     state.py                 BranchOutcome + per-merge state.json
 tests/                       420 tests, ~6,700 lines
   _helpers.py                Shared init_repo factory used across test files

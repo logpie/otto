@@ -16,10 +16,15 @@ from unittest.mock import patch
 
 import pytest
 
+from otto.certifier.report import CertificationOutcome, CertificationReport
 from otto.merge import conflict_agent
-from otto.merge.orchestrator import MergeOptions, run_merge
+from otto.merge.orchestrator import (
+    MergeOptions,
+    _run_post_merge_verification,
+    run_merge,
+)
 from otto.merge import git_ops
-from otto.merge.state import find_latest_merge_id, load_state
+from otto.merge.state import MergeState, find_latest_merge_id, load_state
 from tests._helpers import init_repo
 
 
@@ -358,6 +363,64 @@ def test_merge_skips_gitattributes_check_with_optout(tmp_path: Path):
 
 
 # ---------- state persistence ----------
+
+
+def test_post_merge_verification_full_verify_preserves_merge_context_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        "otto.merge.orchestrator.collect_stories_from_branches",
+        lambda **kwargs: [{"story_id": "story-a", "summary": "summary"}],
+    )
+    monkeypatch.setattr(
+        "otto.merge.orchestrator.dedupe_stories",
+        lambda stories: (stories, []),
+    )
+    monkeypatch.setattr(
+        "otto.merge.orchestrator.git_ops.changed_files_between",
+        lambda *args, **kwargs: ["app/csv.py"],
+    )
+    monkeypatch.setattr(
+        "otto.merge.orchestrator.git_ops.head_sha",
+        lambda *args, **kwargs: "new-head",
+    )
+    monkeypatch.setattr("otto.config.resolve_intent", lambda project_dir: "intent")
+
+    async def fake_run_agentic_certifier(**kwargs):
+        captured["merge_context"] = kwargs["merge_context"]
+        return CertificationReport(
+            outcome=CertificationOutcome.PASSED,
+            story_results=[{"story_id": "story-a", "verdict": "PASS", "passed": True}],
+            run_id="cert-1",
+        )
+
+    monkeypatch.setattr("otto.certifier.run_agentic_certifier", fake_run_agentic_certifier)
+
+    state = MergeState(
+        merge_id="merge-test",
+        started_at="2026-04-20T00:00:00Z",
+        target="main",
+        target_head_before="old-head",
+    )
+    result = asyncio.run(_run_post_merge_verification(
+        project_dir=tmp_path,
+        config=_config_no_bookkeeping(),
+        options=MergeOptions(target="main", full_verify=True),
+        state=state,
+        merge_id="merge-test",
+        branches=["feat-a"],
+        queue_lookup={},
+        target_head_before="old-head",
+    ))
+
+    assert result.success is True
+    assert captured["merge_context"] == {
+        "target": "main",
+        "diff_files": ["app/csv.py"],
+        "allow_skip": False,
+    }
 
 
 def test_merge_state_persisted_to_disk(tmp_path: Path):

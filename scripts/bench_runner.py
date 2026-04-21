@@ -203,7 +203,7 @@ def bench_p1_todo_parallel_improves(name: str = "P1-todo-parallel-improves") -> 
     - Real base build via queue
     - 3 parallel improves
     - Merge with likely-conflict (all touch the CLI)
-    - Real triage + cert
+    - Real post-merge cert with inline per-story pruning
     """
     hr(f"BENCH {name}")
     repo = make_repo("bench-p1-")
@@ -376,22 +376,28 @@ def _sum_merge_agent_cost(repo: Path) -> float:
     """Sum the conflict-agent cost across ALL merge runs in this repo.
 
     Reads `otto_logs/merge/merge-*/state.json` and parses BranchOutcome.note
-    strings of the form `resolved by agent (cost $X.YZ, retries N)`.
+    strings for `cost $X.YZ`. The consolidated path emits the SAME shared-
+    cost note on every conflicted-branch row (one agent call, cost shared) —
+    dedupe by note string within a state file before summing to avoid
+    multiplying the agent cost by the number of conflicted branches.
     """
+    import re
+    cost_re = re.compile(r"cost \$(\d+(?:\.\d+)?)")
     total = 0.0
     for state_file in (repo / "otto_logs" / "merge").glob("merge-*/state.json"):
         try:
             d = json.loads(state_file.read_text())
         except Exception:
             continue
+        seen_notes: set[str] = set()
         for o in d.get("outcomes", []):
             note = o.get("note") or ""
-            if "cost $" in note:
-                try:
-                    bit = note.split("cost $")[1].split(",")[0].split(")")[0]
-                    total += float(bit)
-                except (IndexError, ValueError):
-                    continue
+            if not note or note in seen_notes:
+                continue
+            m = cost_re.search(note)
+            if m:
+                total += float(m.group(1))
+                seen_notes.add(note)
     return total
 
 
@@ -402,7 +408,7 @@ def bench_p3_bookmark_parallel_features(name: str = "P3-bookmark-parallel-featur
     - Real complex web product
     - 2 parallel improves on shared codebase
     - Higher chance of conflicts (more files / shared modules)
-    - Real triage on multi-story codebase
+    - Real post-merge cert on multi-story codebase
 
     Uses Flask (simpler than Next.js for tmp-bench purposes; no node deps).
     """

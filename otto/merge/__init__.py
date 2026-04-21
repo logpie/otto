@@ -1,10 +1,11 @@
 """Otto merge subsystem (Phase 4 of plan-parallel.md).
 
 Python-driven merge orchestration. The Python loop owns `git merge`; the
-agent is invoked **only** for actual conflicts (one agent call per
-conflict, scoped to the conflict files). A separate triage agent runs
-once at the end to produce a verification plan, then the certifier runs
-on the must-verify subset.
+agent is invoked only for actual conflicts, and the current resolver
+uses one consolidated agent session over the union of unresolved files.
+After merging, one certifier call verifies the merged story union; the
+merge-context preamble lets the certifier skip unaffected stories or flag
+genuine cross-branch contradictions inline.
 
 `--fast` does no LLM work at all (pure git, bail on first conflict).
 

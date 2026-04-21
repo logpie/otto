@@ -4,7 +4,7 @@ Otto now has one merge strategy:
 - merge each branch with `git merge --no-ff`
 - commit conflicted files with markers so later branches can keep landing
 - run one consolidated Claude session on the union of unresolved files
-- validate the agent result, commit the cleanup, then run triage/cert
+- validate the agent result, commit the cleanup, then run one cert call
 
 Bookkeeping conflicts (`intent.md`, `otto.yaml`) are handled by git's
 union/ours merge drivers; the Python loop only handles real code/content
@@ -15,7 +15,7 @@ bookkeeping rather than an active continuation contract.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +27,6 @@ from otto.merge.state import (
     write_state,
 )
 from otto.merge.stories import collect_stories_from_branches, dedupe_stories
-from otto.merge.triage_agent import VerificationPlan, produce_verification_plan, write_plan
 
 logger = logging.getLogger("otto.merge.orchestrator")
 
@@ -37,8 +36,8 @@ class MergeRunResult:
     success: bool
     merge_id: str
     state: MergeState
-    plan: VerificationPlan | None = None
     cert_passed: bool | None = None
+    cert_story_results: list[dict[str, Any]] = field(default_factory=list)
     note: str = ""
 
 
@@ -299,44 +298,44 @@ async def _run_post_merge_verification(
     target_head_before: str,
     budget: Any | None = None,
 ) -> MergeRunResult:
-    """Triage + certifier on must-verify subset."""
+    """Cert all merged-branch stories in one call.
+
+    Pruning (skip stories whose feature lives in files the merge didn't
+    touch) and contradiction-flagging happen inline inside the cert agent
+    via a merge_context preamble in the rendered stories section. The
+    cert emits per-story verdicts (PASS / FAIL / SKIPPED / FLAG_FOR_HUMAN)
+    that the orchestrator records directly — no separate planning call.
+
+    `--full-verify` still passes merge context to the certifier, but with
+    `allow_skip=False` so it tests every story while still surfacing
+    cross-branch contradictions as FLAG_FOR_HUMAN.
+    """
     # Collect all stories from merged branches
     all_stories = collect_stories_from_branches(
         project_dir=project_dir, branches=branches, queue_task_lookup=queue_lookup,
     )
     deduped, _ = dedupe_stories(all_stories)
 
-    # Files changed by the merge
-    diff_files = git_ops.changed_files_between(
-        project_dir, target_head_before, git_ops.head_sha(project_dir),
-    )
-
-    plan = await produce_verification_plan(
-        project_dir=project_dir,
-        config=config,
-        branches=branches,
-        stories=deduped,
-        merge_diff_files=diff_files,
-        full_verify=options.full_verify,
-        budget=budget,
-    )
-    write_plan(project_dir, merge_id, plan)
-    state.verification_plan_path = str(
-        (project_dir / "otto_logs" / "merge" / merge_id / "verify-plan.json")
-    )
-    write_state(project_dir, state)
-
-    if not plan.must_verify:
-        # No stories to verify — successful merge with no cert work needed
+    if not deduped:
+        # No stories registered for these branches — nothing to verify.
         state.cert_passed = True
         write_state(project_dir, state)
         return MergeRunResult(
-            success=True, merge_id=merge_id, state=state, plan=plan,
+            success=True, merge_id=merge_id, state=state,
             cert_passed=True,
-            note="no stories required verification (skip-likely-safe covered all)",
+            note="no stories registered for the merged branches",
         )
 
-    # Run certifier on the must-verify subset
+    # Files changed by the merge — drives the cert's per-story skip decision.
+    diff_files = git_ops.changed_files_between(
+        project_dir, target_head_before, git_ops.head_sha(project_dir),
+    )
+    merge_context: dict[str, Any] = {
+        "target": options.target,
+        "diff_files": diff_files,
+        "allow_skip": not options.full_verify,
+    }
+
     from otto.config import resolve_intent
     from otto.certifier import run_agentic_certifier
     intent = resolve_intent(project_dir) or "(no intent.md found)"
@@ -347,14 +346,15 @@ async def _run_post_merge_verification(
             config=config,
             mode=str((config.get("queue") or {}).get("merge_certifier_mode", "standard")),
             budget=budget,
-            stories=plan.must_verify,
+            stories=deduped,
+            merge_context=merge_context,
         )
     except Exception as exc:
         logger.exception("certifier raised during post-merge verification")
         state.cert_passed = False
         write_state(project_dir, state)
         return MergeRunResult(
-            success=False, merge_id=merge_id, state=state, plan=plan,
+            success=False, merge_id=merge_id, state=state,
             cert_passed=False,
             note=f"certifier failed: {exc}",
         )
@@ -366,8 +366,9 @@ async def _run_post_merge_verification(
     write_state(project_dir, state)
 
     return MergeRunResult(
-        success=cert_passed, merge_id=merge_id, state=state, plan=plan,
+        success=cert_passed, merge_id=merge_id, state=state,
         cert_passed=cert_passed,
+        cert_story_results=list(cert_report.story_results),
         note=(
             f"cert {'PASSED' if cert_passed else 'FAILED'} "
             f"({cert_report.outcome.value}); see otto_logs/certifier/{cert_report.run_id}/proof-of-work.html"
@@ -503,7 +504,7 @@ async def _run_consolidated_agentic_merge(
     accumulated_conflict_files = sorted(set(accumulated_conflict_files))
     if not accumulated_conflict_files:
         logger.info("merge %s: all branches merged clean, no agent call needed", merge_id)
-        # Continue to triage + cert if not --no-certify
+        # Continue to post-merge certification if not --no-certify
         if options.no_certify:
             if options.cleanup_on_success:
                 _cleanup_worktrees_for_merged_tasks(project_dir, queue_lookup)
@@ -661,7 +662,7 @@ async def _run_consolidated_agentic_merge(
     state.paused_branch_head = None
     write_state(project_dir, state)
 
-    # Phase 4: triage + cert (unless --no-certify)
+    # Phase 4: post-merge certification (unless --no-certify)
     if options.no_certify:
         if options.cleanup_on_success:
             _cleanup_worktrees_for_merged_tasks(project_dir, queue_lookup)

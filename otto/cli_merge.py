@@ -5,7 +5,7 @@ Single command with mode flags:
     otto merge t3 build/x             # explicit task ids or branches
     otto merge --target develop       # merge target other than default_branch
     otto merge --no-certify           # skip post-merge verification
-    otto merge --full-verify          # don't skip stories during triage
+    otto merge --full-verify          # test every merged story
     otto merge --fast                 # pure git, NO LLM, bail on first conflict
     otto merge --cleanup-on-success   # remove worktrees after merge
 """
@@ -27,8 +27,8 @@ logger = logging.getLogger("otto.cli_merge")
 
 def _install_merge_logging(project_dir: Path) -> None:
     """Attach a file handler to the `otto.merge` logger tree so the
-    orchestrator, conflict-agent, and triage-agent events get persisted
-    to otto_logs/merge/merge.log. Without this they vanish.
+    orchestrator and conflict-agent events get persisted to
+    otto_logs/merge/merge.log. Without this they vanish.
 
     Idempotent: removes any prior `_otto_merge_handler` we added.
     """
@@ -71,7 +71,7 @@ def register_merge_command(main: click.Group) -> None:
     @click.option("--no-certify", is_flag=True,
                   help="Skip post-merge story verification")
     @click.option("--full-verify", is_flag=True,
-                  help="Don't put any story in skip_likely_safe; verify the full union")
+                  help="Verify the full merged story union; don't allow per-story skips")
     @click.option("--fast", is_flag=True,
                   help="Pure git merge; bail on first conflict (no LLM)")
     @click.option("--resume", is_flag=True,
@@ -92,8 +92,10 @@ def register_merge_command(main: click.Group) -> None:
 
         Python-driven git merge. The conflict agent is invoked ONLY when
         git can't auto-merge — clean merges burn $0. After all branches
-        merge, a triage agent emits a verification plan, and the
-        certifier re-runs the must-verify subset.
+        merge, the certifier verifies the union of merged branches'
+        stories; it skips per-story when the merge diff doesn't touch the
+        story's feature, and flags genuine cross-branch contradictions
+        for human review.
 
         \b
         Examples:
@@ -153,8 +155,8 @@ def register_merge_command(main: click.Group) -> None:
         if full_verify:
             console.print("  [dim]Mode:[/dim] [yellow]--full-verify[/yellow]")
 
-        # Wire up merge logger so orchestrator/conflict/triage agent events
-        # land in otto_logs/merge/merge.log.
+        # Wire up merge logger so orchestrator/conflict-agent events land
+        # in otto_logs/merge/merge.log.
         _install_merge_logging(project_dir)
 
         try:
@@ -196,16 +198,27 @@ def register_merge_command(main: click.Group) -> None:
         console.print()
         if result.success:
             console.print(f"  [success bold]Merge complete[/success bold] (id: {result.merge_id})")
-            if result.plan:
-                console.print(f"  Verification: {len(result.plan.must_verify)} verified, "
-                              f"{len(result.plan.skip_likely_safe)} skipped, "
-                              f"{len(result.plan.flag_for_human)} flagged for human")
-                if result.plan.flag_for_human:
+            if result.cert_story_results:
+                # Group cert verdicts inline. The cert prunes (SKIPPED) and
+                # flags contradictions (FLAG_FOR_HUMAN) itself via the
+                # merge_context preamble — no separate planning call.
+                buckets: dict[str, list[dict[str, str]]] = {
+                    "PASS": [], "FAIL": [], "SKIPPED": [], "FLAG_FOR_HUMAN": [],
+                }
+                for s in result.cert_story_results:
+                    buckets.setdefault(s.get("verdict", "FAIL"), []).append(s)
+                console.print(
+                    f"  Verification: {len(buckets['PASS'])} passed, "
+                    f"{len(buckets['FAIL'])} failed, "
+                    f"{len(buckets['SKIPPED'])} skipped, "
+                    f"{len(buckets['FLAG_FOR_HUMAN'])} flagged for human"
+                )
+                if buckets["FLAG_FOR_HUMAN"]:
                     console.print()
-                    for s in result.plan.flag_for_human:
-                        name = s.get("name", "?")
-                        rat = s.get("rationale", "")
-                        console.print(f"    [yellow]⚠ {rich_escape(name)}[/yellow]")
+                    for s in buckets["FLAG_FOR_HUMAN"]:
+                        sid = s.get("story_id") or s.get("name") or "?"
+                        rat = s.get("summary") or ""
+                        console.print(f"    [yellow]⚠ {rich_escape(sid)}[/yellow]")
                         if rat:
                             console.print(f"      [dim]{rich_escape(rat)}[/dim]")
         else:

@@ -1,51 +1,51 @@
 {
   "name": "F13-P6-phases-1-2",
-  "started_at": "2026-04-20T18:32:57Z",
-  "finished_at": "2026-04-20T11:51:05Z",
-  "wall_seconds": 1087.5785191059113,
-  "total_cost_usd": 11.173377249999998,
+  "started_at": "2026-04-21T00:39:23Z",
+  "finished_at": "2026-04-20T17:56:20Z",
+  "wall_seconds": 1017.3047380447388,
+  "total_cost_usd": 9.32615,
   "queue_concurrency": 3,
   "tasks": [
     {
       "id": "base",
       "status": "done",
-      "cost_usd": 0.55676725,
-      "duration_s": 118.44504117965698,
+      "cost_usd": 0.6288952499999999,
+      "duration_s": 120.94269275665283,
       "branch": null,
       "failure_reason": null
     },
     {
       "id": "imp-categories",
       "status": "failed",
-      "cost_usd": 4.539391749999998,
-      "duration_s": 838.3499388694763,
+      "cost_usd": 2.6950902500000002,
+      "duration_s": 613.2335119247437,
       "branch": null,
       "failure_reason": "exit_code=1"
     },
     {
       "id": "imp-suppliers",
       "status": "failed",
-      "cost_usd": 2.8781085,
-      "duration_s": 589.881110906601,
+      "cost_usd": 3.3502255,
+      "duration_s": 729.2161793708801,
       "branch": null,
       "failure_reason": "exit_code=1"
     },
     {
       "id": "imp-alerts",
       "status": "done",
-      "cost_usd": 3.19910975,
-      "duration_s": 674.8924736976624,
+      "cost_usd": 2.6519390000000005,
+      "duration_s": 553.8161332607269,
       "branch": null,
       "failure_reason": null
     }
   ],
   "merge_outcome": "success",
   "merge_cost_usd": 0.0,
-  "merge_seconds": 120.38147592544556,
+  "merge_seconds": 119.18458104133606,
   "cert_passed": true,
   "notes": [
     "rounds_per_improve: 2",
-    "merge_log_tail: Merging into main\n\n    \u2713 build/base-2026-04-20 (merged)\n    \u2713 improve/imp-alerts-2026-04-20 (merged)\n\n  Merge complete (id: merge-1776710945-33272)\n  Verification: 6 verified, 0 skipped, 0 flagged for human"
+    "merge_log_tail: Merging into main\n\n    \u2713 build/base-2026-04-20 (merged)\n    \u2713 improve/imp-alerts-2026-04-20 (merged)\n\n  Merge complete (id: merge-1776732862-60655)\n  Verification: 7 verified, 0 skipped, 0 flagged for human"
   ],
-  "repo_path": "/var/folders/xg/dk8wgfy119z44797kyz7w0380000gn/T/bench-p6-08503fvi"
+  "repo_path": "/var/folders/xg/dk8wgfy119z44797kyz7w0380000gn/T/bench-p6-pvjs94m6"
 }

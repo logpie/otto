@@ -1,10 +1,11 @@
 """F13 bench: P6 with consolidated agent-mode merge.
 
-Same scenario as P6 baseline. After improves finish, sets queue.merge_mode:
-consolidated in otto.yaml and runs salvage merge. Compares to:
+Same scenario as P6 baseline. After improves finish, runs salvage merge.
+Compares to historical baselines:
 - Original P6 baseline (sequential, $2.41/13.3min for 1 conflict)
 - F12 P6 (sequential, Edit-only, $19.22/49min for 2 conflicts)
 - Post-revert P6 (sequential, Write allowed, $7.52/37min for 2 conflicts)
+- Pre-deletion P6 (consolidated opt-in, $5.12/18min for 2 conflicts)
 
 Run: .venv/bin/python scripts/bench_p6_consolidated.py
 """
@@ -13,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -65,21 +67,7 @@ def main() -> int:
         log("No improve branches to merge — bench inconclusive")
         return 1
 
-    # Enable consolidated mode in otto.yaml
-    yaml_path = repo / "otto.yaml"
-    if yaml_path.exists():
-        yml = yaml_path.read_text()
-        if "merge_mode:" not in yml:
-            # Append under queue: section, or add new section
-            if "queue:" in yml:
-                yml = yml.replace("queue:", "queue:\n  merge_mode: consolidated", 1)
-            else:
-                yml += "\nqueue:\n  merge_mode: consolidated\n"
-            yaml_path.write_text(yml)
-            log(f"Enabled merge_mode: consolidated in {yaml_path}")
-    else:
-        yaml_path.write_text("queue:\n  merge_mode: consolidated\n")
-        log(f"Created {yaml_path} with merge_mode: consolidated")
+    # Consolidated agent-mode is now the only merge path — no config flip needed.
 
     # Manual salvage-style merge with the consolidated path. Use --no-certify
     # to focus measurement on the conflict-resolution wall time.
@@ -94,16 +82,24 @@ def main() -> int:
     out = (r.stdout or "") + (r.stderr or "")
     log(f"Merge done in {merge_seconds:.0f}s, rc={r.returncode}")
 
-    # Parse cost from outcome notes
+    # Parse cost from outcome notes. The consolidated path emits the SAME
+    # shared-cost note on every conflicted-branch row (one agent call,
+    # cost shared) — dedupe by note string before summing to avoid
+    # multiplying the agent cost by the number of conflicted branches.
     merge_cost = 0.0
+    cost_re = re.compile(r"cost \$(\d+(?:\.\d+)?)")
     for state_file in (repo / "otto_logs" / "merge").glob("merge-*/state.json"):
         try:
             d = json.loads(state_file.read_text())
+            seen_notes: set[str] = set()
             for o in d.get("outcomes", []):
                 note = o.get("note") or ""
-                if "cost $" in note:
-                    bit = note.split("cost $")[1].split(",")[0].split(")")[0]
-                    merge_cost += float(bit)
+                if note in seen_notes:
+                    continue
+                m = cost_re.search(note)
+                if m:
+                    merge_cost += float(m.group(1))
+                    seen_notes.add(note)
         except Exception:
             pass
 
