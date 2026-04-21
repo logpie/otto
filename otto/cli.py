@@ -19,7 +19,40 @@ from otto.display import CONTEXT_SETTINGS, console, rich_escape
 from otto.theme import error_console
 
 
+def _version_callback(ctx: click.Context, _param: click.Parameter, value: bool) -> None:
+    """Print otto version + git commit + branch + source path, then exit."""
+    if not value or ctx.resilient_parsing:
+        return
+    import subprocess as _sp
+    import otto as _otto_pkg
+    src = Path(_otto_pkg.__file__).resolve().parent
+    tree = src.parent  # repo root (src is .../otto)
+
+    def _git(args: list[str]) -> str:
+        try:
+            r = _sp.run(["git", "-C", str(tree)] + args,
+                        capture_output=True, text=True, timeout=2)
+            return r.stdout.strip() if r.returncode == 0 else ""
+        except (OSError, _sp.SubprocessError):
+            return ""
+
+    commit = _git(["rev-parse", "--short", "HEAD"]) or "unknown"
+    branch = _git(["rev-parse", "--abbrev-ref", "HEAD"]) or "unknown"
+    dirty = " (dirty)" if _git(["status", "--porcelain"]) else ""
+    try:
+        from importlib.metadata import version as _pkg_version
+        pkg_ver = _pkg_version("otto")
+    except Exception:
+        pkg_ver = "dev"
+    click.echo(f"otto {pkg_ver}  —  {branch}@{commit}{dirty}")
+    click.echo(f"  source: {src}")
+    ctx.exit(0)
+
+
 @click.group(context_settings=CONTEXT_SETTINGS)
+@click.option("--version", is_flag=True, expose_value=False, is_eager=True,
+              callback=_version_callback,
+              help="Show version, git commit, branch, and source path.")
 def main():
     """Otto — build and certify software products.
 
@@ -29,7 +62,15 @@ def main():
     # This catches the shared-venv bug where worktree otto runs main repo code.
     import otto as _otto_pkg
     _otto_src = str(Path(_otto_pkg.__file__).resolve().parent)
-    _cwd = str(Path.cwd().resolve())
+    try:
+        _cwd = str(Path.cwd().resolve())
+    except FileNotFoundError:
+        click.echo(
+            "ERROR: current directory no longer exists (deleted out from "
+            "under the shell). cd to a real directory and retry.",
+            err=True,
+        )
+        sys.exit(1)
     if "worktree" in _cwd and "worktree" not in _otto_src:
         click.echo(
             f"ERROR: otto loaded from {_otto_src}\n"
