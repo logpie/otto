@@ -121,7 +121,7 @@ class TestNarrativeFormatter:
         f.start()
         f.close()
 
-        assert _strip_ts(path.read_text().strip()) == "\u2501\u2501\u2501 BUILD starting \u2501\u2501\u2501"
+        assert _strip_ts(path.read_text().strip()) == "\u2014 BUILD starting \u2014"
 
     def test_start_emits_spec_banner(self, tmp_path):
         path = tmp_path / "narrative.log"
@@ -129,7 +129,7 @@ class TestNarrativeFormatter:
         f.start()
         f.close()
 
-        assert _strip_ts(path.read_text().strip()) == "\u2501\u2501\u2501 SPEC starting \u2501\u2501\u2501"
+        assert _strip_ts(path.read_text().strip()) == "\u2014 SPEC starting \u2014"
 
     def test_terminal_callback_fires_for_phase_banners(self, tmp_path):
         path = tmp_path / "narrative.log"
@@ -149,10 +149,10 @@ class TestNarrativeFormatter:
         ]))
         f.close()
 
-        assert seen[0] == "[bold]  \u2501\u2501\u2501 BUILD starting \u2501\u2501\u2501[/bold]"
-        assert seen[1] == "[bold]  \u2501\u2501\u2501 BUILD complete — handing off to certifier \u2501\u2501\u2501[/bold]"
-        assert seen[2] == "[bold]  \u2501\u2501\u2501 CERTIFY ROUND 1 starting \u2501\u2501\u2501[/bold]"
-        assert seen[3] == "[bold]  \u2501\u2501\u2501 CERTIFY ROUND 1 → PASS (1/1) \u2501\u2501\u2501[/bold]"
+        assert seen[0] == "[dim]  \u2014 BUILD starting \u2014[/dim]"
+        assert seen[1] == "[dim]  \u2014 BUILD complete; starting verification \u2014[/dim]"
+        assert seen[2] == "[dim]  \u2014 CERTIFY ROUND 1 \u2014[/dim]"
+        assert seen[3] == "[dim]  \u2014 CERTIFY ROUND 1 \u2192 PASS (1/1) \u2014[/dim]"
         assert all("[+" not in event for event in seen)
 
     def test_terminal_callback_ignores_quiet_events(self, tmp_path):
@@ -184,9 +184,9 @@ class TestNarrativeFormatter:
 
         lines = [_strip_ts(line) for line in path.read_text().splitlines()]
         assert lines == [
-            "\u2501\u2501\u2501 BUILD starting \u2501\u2501\u2501",
-            "\u2501\u2501\u2501 BUILD complete — handing off to certifier \u2501\u2501\u2501",
-            "\u2501\u2501\u2501 CERTIFY ROUND 1 starting \u2501\u2501\u2501",
+            "\u2014 BUILD starting \u2014",
+            "\u2014 BUILD complete; starting verification \u2014",
+            "\u2014 CERTIFY ROUND 1 \u2014",
         ]
 
     def test_tool_use_with_summary(self, tmp_path):
@@ -205,13 +205,79 @@ class TestNarrativeFormatter:
         path = tmp_path / "narrative.log"
         f = NarrativeFormatter(path)
         f.write_message(AssistantMessage(content=[
-            ToolResultBlock(content="EPERM: permission denied", is_error=True),
+            ToolUseBlock(name="WebFetch", input={"url": "https://example.com"}, id="web-1"),
+            ToolResultBlock(content="EPERM: permission denied", tool_use_id="web-1", is_error=True),
         ]))
         f.close()
 
-        line = _strip_ts(path.read_text().strip())
-        assert "error" in line.lower()
+        line = _strip_ts(path.read_text().splitlines()[-1])
+        assert line.startswith("\u26a0 tool WebFetch retry:")
         assert "EPERM" in line
+
+    def test_tool_result_error_dropped_when_next_retry_succeeds(self, tmp_path):
+        path = tmp_path / "narrative.log"
+        f = NarrativeFormatter(path)
+        f.write_message(AssistantMessage(content=[
+            ToolUseBlock(name="WebFetch", input={"url": "https://example.com"}, id="web-1"),
+        ]))
+        f.write_message(AssistantMessage(content=[
+            ToolResultBlock(content="Invalid URL", tool_use_id="web-1", is_error=True),
+        ]))
+        f.write_message(AssistantMessage(content=[
+            ToolUseBlock(name="WebFetch", input={"url": "https://example.com"}, id="web-2"),
+        ]))
+        f.write_message(AssistantMessage(content=[
+            ToolResultBlock(content="200 OK", tool_use_id="web-2", is_error=False),
+        ]))
+        f.write_message(ResultMessage(subtype="success", is_error=False, session_id="x", total_cost_usd=0.1))
+        f.close()
+
+        content = path.read_text()
+        assert "\u26a0 tool WebFetch retry:" not in content
+        assert "Notes: worked around" not in content
+
+    def test_tool_result_error_dropped_when_different_tool_succeeds_next(self, tmp_path):
+        path = tmp_path / "narrative.log"
+        f = NarrativeFormatter(path)
+        f.write_message(AssistantMessage(content=[
+            ToolUseBlock(name="Bash", input={"command": "npm test"}, id="bash-1"),
+        ]))
+        f.write_message(AssistantMessage(content=[
+            ToolResultBlock(content="Exit code 1", tool_use_id="bash-1", is_error=True),
+        ]))
+        f.write_message(AssistantMessage(content=[
+            ToolUseBlock(name="Read", input={"file_path": "src/App.jsx"}, id="read-1"),
+        ]))
+        f.write_message(AssistantMessage(content=[
+            ToolResultBlock(content="1\tconst x = 1\n", tool_use_id="read-1", is_error=False),
+        ]))
+        f.write_message(ResultMessage(subtype="success", is_error=False, session_id="x", total_cost_usd=0.1))
+        f.close()
+
+        content = path.read_text()
+        assert "\u26a0 tool Bash retry:" not in content
+        assert "Notes: worked around" not in content
+
+    def test_tool_result_error_strips_xml_wrapper_and_truncates(self, tmp_path):
+        path = tmp_path / "narrative.log"
+        f = NarrativeFormatter(path)
+        f.write_message(AssistantMessage(content=[
+            ToolUseBlock(name="Write", input={"file_path": "src/App.jsx"}, id="write-1"),
+            ToolResultBlock(
+                content=(
+                    "<tool_use_error>File has not been read yet. "
+                    "Read it first before writing to it. Extra trailing detail.</tool_use_error>"
+                ),
+                tool_use_id="write-1",
+                is_error=True,
+            ),
+        ]))
+        f.close()
+
+        line = _strip_ts(path.read_text().splitlines()[-1])
+        assert "<tool_use_error>" not in line
+        assert len(line) < 120
+        assert line.endswith("...")
 
     def test_tool_result_elevates_certifier_markers(self, tmp_path):
         """STORY_RESULT / VERDICT lines inside subagent tool output must be
@@ -282,9 +348,14 @@ class TestNarrativeFormatter:
                 assert not line.endswith("supercalifragilisticexpialido...")
 
     def test_git_commit_elevated(self, tmp_path):
-        """Git-commit Bash output lines are rendered with ✓ glyph."""
+        """Git-commit Bash output lines are demoted below final success."""
         path = tmp_path / "narrative.log"
-        f = NarrativeFormatter(path)
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        import subprocess as _sp
+        _sp.run(["git", "init", "-q"], cwd=repo, check=True, capture_output=True)
+        _sp.run(["git", "checkout", "-b", "worktree-i2p"], cwd=repo, check=True, capture_output=True)
+        f = NarrativeFormatter(path, project_dir=repo)
         commit_output = (
             "[main abc1234] Add kanban board\n"
             " 3 files changed, 42 insertions(+)\n"
@@ -295,9 +366,69 @@ class TestNarrativeFormatter:
         f.close()
 
         line = path.read_text()
-        assert "\u2713" in line
+        assert "\u2022 committed to worktree-i2p:" in line
         assert "abc1234" in line
+        assert "commit abc1234" not in line
         assert "Add kanban board" in line
+
+    def test_story_results_stream_to_terminal_callback(self, tmp_path):
+        path = tmp_path / "narrative.log"
+        seen: list[str] = []
+        f = NarrativeFormatter(path, stdout_callback=seen.append)
+        f.start()
+        f.write_message(AssistantMessage(content=[
+            ToolUseBlock(
+                name="Agent",
+                input={"prompt": "Please certify.\n## Verdict Format\nVERDICT: PASS|FAIL"},
+                id="cert-1",
+            ),
+            ToolResultBlock(
+                tool_use_id="cert-1",
+                content=(
+                    "STORY_RESULT: cols | PASS | Board renders 3 columns\n"
+                    "STORY_RESULT: persist | FAIL | Cards persist to localStorage after being added\n"
+                    "DIAGNOSIS: localStorage.setItem not called in addCard handler\n"
+                    "VERDICT: FAIL\n"
+                ),
+            ),
+        ]))
+        f.close()
+
+        assert any("✓ Board renders 3 columns" in line for line in seen)
+        assert any(
+            "✗ Cards persist to localStorage after being added — localStorage.setItem not called" in line
+            for line in seen
+        )
+
+    def test_heartbeat_uses_latest_activity_label(self, tmp_path):
+        path = tmp_path / "narrative.log"
+        f = NarrativeFormatter(path)
+        f.write_message(AssistantMessage(content=[
+            ToolUseBlock(name="Write", input={"file_path": "src/App.jsx"}, id="w1"),
+        ]))
+        f.write_heartbeat("1m 20s")
+        f.close()
+
+        assert "⋯ building… (1m 20s) · writing src/App.jsx" in path.read_text()
+
+    def test_heartbeat_uses_verifying_label_inside_certify_round(self, tmp_path):
+        path = tmp_path / "narrative.log"
+        f = NarrativeFormatter(path)
+        f.start()
+        f.write_message(AssistantMessage(content=[
+            ToolUseBlock(
+                name="Agent",
+                input={"prompt": "Please certify.\n## Verdict Format\nVERDICT: PASS|FAIL"},
+                id="cert-1",
+            ),
+        ]))
+        f.write_message(AssistantMessage(content=[
+            ToolUseBlock(name="Bash", input={"command": "node test.js 2"}, id="bash-1"),
+        ]))
+        f.write_heartbeat("25s")
+        f.close()
+
+        assert "⋯ verifying… (25s) · running node test.js 2" in path.read_text()
 
     def test_result_message_writes_terminal_marker(self, tmp_path):
         path = tmp_path / "narrative.log"
@@ -422,7 +553,7 @@ class TestNarrativeFormatter:
         f.close()
 
         lines = [_strip_ts(line) for line in path.read_text().splitlines()]
-        assert lines[0] == "\u2501\u2501\u2501 CERTIFY complete \u2501\u2501\u2501"
+        assert lines[0] == "\u2014 CERTIFY complete \u2014"
         assert "RUN SUMMARY: certify=0:15 (1 round), total=$0.08 0:15" in lines[1]
         assert "SUCCESS $0.08 in 0:15" in lines[2]
 
@@ -449,8 +580,8 @@ class TestNarrativeFormatter:
         f.close()
 
         lines = [_strip_ts(line) for line in path.read_text().splitlines()]
-        assert lines[0] == "\u2501\u2501\u2501 SPEC starting \u2501\u2501\u2501"
-        assert lines[1] == "\u2501\u2501\u2501 SPEC complete \u2501\u2501\u2501"
+        assert lines[0] == "\u2014 SPEC starting \u2014"
+        assert lines[1] == "\u2014 SPEC complete \u2014"
         assert "RUN SUMMARY: spec=" in lines[2]
         assert "SUCCESS" in lines[3]
 

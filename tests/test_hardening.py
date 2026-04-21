@@ -1766,6 +1766,96 @@ class TestBuildResume:
         assert "run-fail-123/build" in result.output
         assert "narrative.log" in result.output
 
+    def test_build_cli_success_summary_shows_open_hint_and_spent_breakdown(
+        self, tmp_bare_git_repo, monkeypatch
+    ):
+        from click.testing import CliRunner
+        from otto import paths as _paths
+        from otto.cli import main
+
+        run_id = "run-pass-123"
+        _paths.ensure_session_scaffold(tmp_bare_git_repo, run_id)
+        (tmp_bare_git_repo / "index.html").write_text("<!doctype html><title>app</title>")
+        (_paths.certify_dir(tmp_bare_git_repo, run_id) / "proof-of-work.html").write_text("<html>pass</html>")
+
+        async def fake_build(intent, project_dir, config, **kwargs):
+            return BuildResult(
+                passed=True,
+                build_id=run_id,
+                rounds=2,
+                total_cost=0.94,
+                tasks_passed=2,
+                tasks_failed=0,
+                journeys=[
+                    {"name": "Page serves over HTTP with 200 status and full content", "passed": True},
+                    {"name": "Board has exactly 3 columns: To Do, In Progress, Done", "passed": True},
+                ],
+                breakdown={
+                    "build": {"duration_s": 120.0, "cost_usd": 0.25, "estimated": True},
+                    "certify": {"duration_s": 178.0, "cost_usd": 0.70, "estimated": True, "rounds": 2},
+                },
+            )
+
+        monkeypatch.chdir(tmp_bare_git_repo)
+        with patch("otto.pipeline.build_agentic_v3", side_effect=fake_build):
+            result = CliRunner().invoke(
+                main,
+                ["build", "kanban board"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0
+        assert "Time budget" in result.output
+        assert "60m" in result.output
+        assert "Max build rounds" in result.output
+        assert "(all defaults — override with --model, --budget, --rounds, etc.)" in result.output
+        assert "Working on:" in result.output
+        assert "Project:" in result.output
+        assert "Session:" in result.output
+        assert "otto_logs/sessions" in result.output
+        assert "run-pass-123" in result.output
+        assert "Live log:" in result.output
+        assert "otto_logs/latest/build/narrative.log" in result.output
+        assert "Verifying core requirements after each build." in result.output
+        assert "Open it:  open index.html" in result.output
+        assert "Built: kanban board" in result.output
+        assert "Verification passed" in result.output
+        assert "Full evidence" in result.output
+        assert "otto_logs/latest/certify/proof-of-work.html" in result.output
+        assert "Build Summary  ·  Run ID: run-pass-123" in result.output
+        assert "Spent: 2:00 building, 2:58 verifying  (~$0.25 / ~$0.70 estimated, total $0.94)" in result.output
+        assert "View report:  otto_logs/latest/certify/proof-of-work.html" in result.output
+        assert "Tail live log:  otto_logs/latest/build/narrative.log" in result.output
+        assert "See past runs:  otto history" in result.output
+
+    def test_build_cli_threads_strict_and_verbose_flags(self, tmp_git_repo, monkeypatch):
+        from click.testing import CliRunner
+        from otto.cli import main
+
+        captured = {}
+
+        async def fake_build(intent, project_dir, config, **kwargs):
+            captured.update(kwargs)
+            return BuildResult(
+                passed=True,
+                build_id="run-flags-123",
+                total_cost=0.0,
+                tasks_passed=0,
+                tasks_failed=0,
+            )
+
+        monkeypatch.chdir(tmp_git_repo)
+        with patch("otto.pipeline.build_agentic_v3", side_effect=fake_build):
+            result = CliRunner().invoke(
+                main,
+                ["build", "flagged app", "--strict", "--verbose"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0
+        assert captured["strict_mode"] is True
+        assert captured["verbose"] is True
+
     def test_improve_resume_threads_run_id_into_split_and_agentic(
         self, tmp_git_repo, monkeypatch
     ):

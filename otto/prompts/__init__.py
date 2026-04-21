@@ -19,6 +19,7 @@ _KNOWN_PLACEHOLDERS = frozenset({
     "max_certify_rounds",
     "evidence_dir",
     "target",
+    "strict_mode",
 })
 
 _PLACEHOLDER_PATTERN = re.compile(

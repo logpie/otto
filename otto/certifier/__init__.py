@@ -65,6 +65,7 @@ async def run_agentic_certifier(
     budget: "RunBudget | None" = None,
     session_id: str | None = None,
     write_session_summary: bool = True,
+    verbose: bool = False,
 ) -> "CertificationReport":
     """Agentic certifier: one monolithic agent does everything.
 
@@ -131,6 +132,7 @@ async def run_agentic_certifier(
         timeout=timeout,
         project_dir=project_dir,
         on_terminal_event=console.print,
+        verbose=verbose,
     )
 
     # Parse results from agent output

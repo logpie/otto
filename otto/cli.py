@@ -1,10 +1,12 @@
 """Otto CLI — entrypoint for all otto commands."""
 
 import asyncio
+import json
 import os
 import re
 import sys
 import time
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -83,64 +85,167 @@ def main():
         sys.exit(1)
 
 
+def _load_yaml_raw(config_path: Path) -> dict[str, Any]:
+    if not config_path.exists():
+        return {}
+    import yaml as _yaml
+
+    try:
+        raw = _yaml.safe_load(config_path.read_text()) or {}
+    except Exception:
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _format_elapsed_compact(seconds: float) -> str:
+    total = max(0, int(seconds))
+    if total >= 3600:
+        hours, rem = divmod(total, 3600)
+        minutes, secs = divmod(rem, 60)
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    minutes, secs = divmod(total, 60)
+    return f"{minutes}:{secs:02d}"
+
+
+def _format_budget_value(seconds: Any) -> str:
+    try:
+        total = int(seconds)
+    except (TypeError, ValueError):
+        return str(seconds)
+    if total < 60:
+        return f"{total}s"
+    minutes, rem = divmod(total, 60)
+    if rem == 0:
+        return f"{minutes}m"
+    return f"{minutes}m {rem:02d}s"
+
+
+def _runtime_model_name(provider: str | None) -> str | None:
+    provider = (provider or "").strip().lower()
+    if provider == "codex":
+        for path in (
+            Path.home() / ".codex" / "config.toml",
+            Path.home() / ".config" / "codex" / "config.toml",
+        ):
+            try:
+                data = tomllib.loads(path.read_text())
+            except (OSError, tomllib.TOMLDecodeError):
+                continue
+            model = data.get("model")
+            if isinstance(model, str) and model.strip():
+                return model.strip()
+    if provider == "claude":
+        for path in (
+            Path.home() / ".claude" / "settings.json",
+            Path.home() / ".claude" / "settings.local.json",
+        ):
+            try:
+                data = json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            for key in ("model", "defaultModel"):
+                value = data.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+    return None
+
+
+def _config_source(key: str, cli_sources: dict[str, str], yaml_raw: dict[str, Any]) -> str:
+    if key in cli_sources:
+        return cli_sources[key]
+    if key in yaml_raw:
+        return "yaml"
+    return "default"
+
+
+def _render_config_value(value: Any, source: str, *, show_default_suffix: bool) -> str:
+    label = rich_escape(str(value))
+    if source == "default" and not show_default_suffix:
+        return label
+    if source == "default":
+        return f"{label} [dim](default)[/dim]"
+    if source == "yaml":
+        return f"{label} [dim](yaml)[/dim]"
+    return f"{label} [dim]({rich_escape(source)})[/dim]"
+
+
 def _print_config_banner(
     console_: Any,
     config: dict,
     cli_sources: dict[str, str],
     config_path: Path,
 ) -> None:
-    """Print the resolved configuration with its source per value.
-
-    Source is ``cli`` if the user passed a flag, ``otto.yaml`` if the
-    value came from the loaded file, or ``default`` if it fell through
-    to DEFAULTS.
-    """
-    yaml_raw: dict[str, Any] = {}
-    if config_path.exists():
-        import yaml as _yaml
-        try:
-            raw = _yaml.safe_load(config_path.read_text()) or {}
-            if isinstance(raw, dict):
-                yaml_raw = raw
-        except Exception:
-            pass
-
-    def _source(key: str) -> str:
-        if cli_sources.get(key) == "cli":
-            return "cli"
-        if key in yaml_raw:
-            return "otto.yaml"
-        return "default"
-
+    """Print the resolved configuration with concise source labeling."""
     from rich.table import Table
 
-    def _cell(value: Any, source: str) -> str:
-        return f"{rich_escape(str(value))} [dim]({source})[/dim]"
+    yaml_raw = _load_yaml_raw(config_path)
+    model_value = config.get("model") or _runtime_model_name(str(config.get("provider") or ""))
+
+    rows: list[tuple[str, Any, str]] = [
+        ("Mode", config.get("certifier_mode"), "certifier_mode"),
+        ("Time budget", _format_budget_value(config.get("run_budget_seconds")), "run_budget_seconds"),
+        ("Provider", config.get("provider"), "provider"),
+        ("Max build rounds", config.get("max_certify_rounds"), "max_certify_rounds"),
+    ]
+    if model_value:
+        rows.insert(3, ("Model", model_value, "model"))
+
+    all_default = all(_config_source(key, cli_sources, yaml_raw) == "default" for _, _, key in rows)
 
     table = Table(box=None, show_header=False, pad_edge=False, show_edge=False, expand=False)
     table.add_column(justify="left", no_wrap=True)
     table.add_column(justify="left", no_wrap=True)
     table.add_column(justify="left", no_wrap=True)
     table.add_column(justify="left", no_wrap=True)
-    table.add_row(
-        "  Mode",
-        _cell(config.get("certifier_mode"), _source("certifier_mode")),
-        "Budget",
-        _cell(f"{config.get('run_budget_seconds')}s", _source("run_budget_seconds")),
-    )
-    table.add_row(
-        "  Provider",
-        _cell(config.get("provider"), _source("provider")),
-        "Model",
-        _cell(config.get("model") or "(provider default)", _source("model")),
-    )
-    table.add_row(
-        "  Rounds",
-        _cell(config.get("max_certify_rounds"), _source("max_certify_rounds")),
-        "",
-        "",
-    )
+
+    pairs = list(zip(rows[::2], rows[1::2], strict=False))
+    if len(rows) % 2 == 1:
+        pairs.append((rows[-1], None))
+
+    for left, right in pairs:
+        left_label, left_value, left_key = left
+        row = [
+            f"  {left_label}",
+            _render_config_value(
+                left_value,
+                _config_source(left_key, cli_sources, yaml_raw),
+                show_default_suffix=not all_default,
+            ),
+        ]
+        if right is None:
+            row.extend(["", ""])
+        else:
+            right_label, right_value, right_key = right
+            row.extend([
+                right_label,
+                _render_config_value(
+                    right_value,
+                    _config_source(right_key, cli_sources, yaml_raw),
+                    show_default_suffix=not all_default,
+                ),
+            ])
+        table.add_row(*row)
+
     console_.print(table)
+    if all_default:
+        console_.print("  [dim](all defaults — override with --model, --budget, --rounds, etc.)[/dim]")
+
+
+def _print_startup_context(console_: Any, project_dir: Path, run_id: str) -> None:
+    from otto import paths as _paths
+
+    session_dir = _paths.session_dir(project_dir, run_id)
+    try:
+        session_display = session_dir.relative_to(project_dir)
+    except ValueError:
+        session_display = session_dir
+
+    console_.print("  Working on:")
+    console_.print(f"    Project: {project_dir.resolve()}")
+    console_.print(f"    Session: {session_display}")
+    console_.print("  Live log: otto_logs/latest/build/narrative.log  (tail in another terminal for full detail)")
 
 
 def _new_run_id(project_dir: "Path | None" = None) -> str:
@@ -419,35 +524,109 @@ async def _run_spec_phase(
         sys.exit(1)
 
 
-def _print_build_result(project_dir: Path, intent: str, result, build_duration: float) -> None:
+def _open_command_hint(project_dir: Path) -> str:
+    index_html = project_dir / "index.html"
+    if index_html.exists():
+        opener = "open" if sys.platform == "darwin" else "xdg-open"
+        return f"Open it:  {opener} index.html"
+
+    package_json = project_dir / "package.json"
+    if package_json.exists():
+        try:
+            pkg = json.loads(package_json.read_text())
+        except (OSError, json.JSONDecodeError):
+            pkg = {}
+        scripts = pkg.get("scripts", {}) if isinstance(pkg, dict) else {}
+        if isinstance(scripts, dict) and isinstance(scripts.get("start"), str) and scripts.get("start", "").strip():
+            if (project_dir / "pnpm-lock.yaml").exists():
+                cmd = "pnpm start"
+            elif (project_dir / "yarn.lock").exists():
+                cmd = "yarn start"
+            else:
+                cmd = "npm start"
+            return f"Open it:  {cmd}"
+
+    return f"Project:  {project_dir.resolve()}"
+
+
+def _spent_line(result: Any, build_duration: float) -> str:
+    breakdown = getattr(result, "breakdown", {}) or {}
+    build_entry = breakdown.get("build", {})
+    certify_entry = breakdown.get("certify", {})
+    build_seconds = float(build_entry.get("duration_s", build_duration))
+    verify_seconds = float(certify_entry.get("duration_s", 0.0))
+    line = f"Spent: {_format_elapsed_compact(build_seconds)} building"
+    if certify_entry:
+        line += f", {_format_elapsed_compact(verify_seconds)} verifying"
+
+    phase_costs: list[str] = []
+    estimated = False
+    for entry in (build_entry, certify_entry):
+        cost = entry.get("cost_usd")
+        if isinstance(cost, int | float):
+            prefix = "~" if entry.get("estimated") is True else ""
+            estimated = estimated or entry.get("estimated") is True
+            phase_costs.append(f"{prefix}${float(cost):.2f}")
+
+    if phase_costs:
+        detail = " / ".join(phase_costs)
+        if estimated:
+            detail += " estimated"
+        line += f"  ({detail}, total ${result.total_cost:.2f})"
+    else:
+        line += f"  (total ${result.total_cost:.2f})"
+    return line
+
+
+def _verification_heading(result: Any, strict_mode: bool) -> str:
+    if result.passed:
+        if strict_mode:
+            rounds = getattr(result, "rounds", 1)
+            return f"Verification passed (strict mode, {rounds} rounds)"
+        return "Verification passed"
+    return f"Verification failed after {result.rounds} round(s)"
+
+
+def _print_build_result(
+    project_dir: Path,
+    intent: str,
+    result,
+    build_duration: float,
+    *,
+    strict_mode: bool = False,
+) -> None:
     """Render build verification output and summary."""
+    from otto import paths as _paths
+
+    pow_html = _paths.certify_dir(project_dir, result.build_id) / "proof-of-work.html"
+
+    if result.passed:
+        console.print()
+        console.print(f"  [bold]{_open_command_hint(project_dir)}[/bold]")
+        console.print(f"  Built: {rich_escape(intent)}")
+
     if result.journeys:
         console.print()
-        if result.passed:
-            console.print(f"  [success]All journeys passed[/success]"
-                          f" (round {result.rounds})")
-        else:
-            console.print(f"  [red]Some journeys failed[/red]"
-                          f" (after {result.rounds} round(s))")
+        status_style = "success" if result.passed else "red"
+        console.print(f"  [{status_style}]{_verification_heading(result, strict_mode)}[/{status_style}]")
         for j in result.journeys:
             status_icon = "[success]\u2713[/success]" if j.get("passed") else "[red]\u2717[/red]"
             console.print(f"    {status_icon} {rich_escape(j.get('name', ''))}")
+        if pow_html.exists():
+            console.print("  Full evidence (screenshots, video, tool traces): otto_logs/latest/certify/proof-of-work.html")
 
     console.print()
-    console.print(f"  [bold]Build Summary[/bold]  ({result.build_id})")
-    console.print(f"  Intent: {rich_escape(intent[:80])}")
+    console.print(f"  [bold]Build Summary[/bold]  \u00b7  Run ID: {result.build_id}")
+    console.print(f"  Intent: {rich_escape(intent[:200])}")
     if result.journeys:
         console.print(f"  Stories: {result.tasks_passed} passed, {result.tasks_failed} failed")
     else:
         console.print(f"  Tasks: {result.tasks_passed} passed, {result.tasks_failed} failed")
-    console.print(f"  [bold]Total cost: ${result.total_cost:.2f}[/bold]")
-    console.print(f"  Duration: {build_duration / 60:.1f} min")
-    from otto import paths as _paths
-    pow_html = _paths.certify_dir(project_dir, result.build_id) / "proof-of-work.html"
+    console.print(f"  {_spent_line(result, build_duration)}")
     if pow_html.exists():
-        console.print("  Report:   otto_logs/latest/certify/proof-of-work.html")
-    console.print("  Live log: otto_logs/latest/build/narrative.log")
-    console.print("  History:  otto history")
+        console.print("  View report:  otto_logs/latest/certify/proof-of-work.html")
+    console.print("  Tail live log:  otto_logs/latest/build/narrative.log")
+    console.print("  See past runs:  otto history")
     console.print()
 
 
@@ -477,6 +656,8 @@ def _exit_for_lock_busy(exc) -> None:
 @click.option("--model", default=None, help="Override model for every agent (e.g. sonnet, haiku, gpt-5)")
 @click.option("--provider", default=None, help="Override provider for every agent: claude | codex")
 @click.option("--effort", default=None, help="Override effort level for every agent: low | medium | high | max")
+@click.option("--strict", is_flag=True, help="Require two consecutive PASS rounds before stopping")
+@click.option("--verbose", is_flag=True, help="Show detailed live progress, including tool-call counts")
 @click.option("--resume", is_flag=True, help="Resume from last checkpoint (requires an in-progress run)")
 @click.option("--spec", is_flag=True, help="Generate a reviewable spec before building")
 @click.option("--spec-file", type=click.Path(exists=False, dir_okay=False, path_type=Path),
@@ -484,7 +665,7 @@ def _exit_for_lock_busy(exc) -> None:
 @click.option("--yes", is_flag=True, help="Auto-approve the generated spec (for CI/scripts)")
 @click.option("--force", is_flag=True, help="Discard an active paused spec run and start fresh")
 @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
-def build(intent, no_qa, fast, standard_, thorough, split, rounds, budget, model, provider, effort, resume, spec, spec_file, yes, force, break_lock):
+def build(intent, no_qa, fast, standard_, thorough, split, rounds, budget, model, provider, effort, strict, verbose, resume, spec, spec_file, yes, force, break_lock):
     """Build a product from a natural language intent.
 
     One agent builds, certifies, and fixes autonomously. The certifier
@@ -512,7 +693,7 @@ def build(intent, no_qa, fast, standard_, thorough, split, rounds, budget, model
         with _paths.project_lock(project_dir, "build", break_lock=break_lock):
             _build_locked(
                 intent, no_qa, fast, standard_, thorough, split, rounds,
-                budget, model, provider, effort,
+                budget, model, provider, effort, strict, verbose,
                 resume, spec, spec_file, yes, force, project_dir,
             )
     except _paths.LockBusy as exc:
@@ -531,6 +712,8 @@ def _build_locked(
     model,
     provider,
     effort,
+    strict,
+    verbose,
     resume,
     spec,
     spec_file,
@@ -658,6 +841,9 @@ def _build_locked(
 
     display_intent = intent or display_intent
     print_resume_status(console, resume_state, resume, expected_command="build")
+    run_id: str = resume_state.run_id or ""
+    if not run_id:
+        run_id = _new_run_id(project_dir)
 
     # No auto-create: `otto.yaml` only exists if the user ran `otto setup`.
     # `load_config` returns built-in defaults + auto-detected project values
@@ -679,24 +865,29 @@ def _build_locked(
     mode_flag = "fast" if fast else ("standard" if standard_ else ("thorough" if thorough else None))
     if mode_flag:
         config["certifier_mode"] = mode_flag
-        sources["certifier_mode"] = "cli"
+        sources["certifier_mode"] = f"--{mode_flag}"
     if rounds is not None:
         config["max_certify_rounds"] = rounds
-        sources["max_certify_rounds"] = "cli"
+        sources["max_certify_rounds"] = "--rounds"
     if budget is not None:
         config["run_budget_seconds"] = budget
-        sources["run_budget_seconds"] = "cli"
+        sources["run_budget_seconds"] = "--budget"
     if model:
         config["model"] = model
-        sources["model"] = "cli"
+        sources["model"] = "--model"
     if provider:
         config["provider"] = provider
-        sources["provider"] = "cli"
+        sources["provider"] = "--provider"
     if effort:
         config["effort"] = effort
-        sources["effort"] = "cli"
+        sources["effort"] = "--effort"
+    if strict:
+        config["strict_mode"] = True
+        sources["strict_mode"] = "--strict"
+    config["_verbose"] = bool(verbose)
 
     _print_config_banner(console, config, sources, config_path)
+    _print_startup_context(console, project_dir, run_id)
 
     from otto.pipeline import build_agentic_v3, run_certify_fix_loop, BuildResult
     from otto.budget import RunBudget
@@ -706,11 +897,8 @@ def _build_locked(
     # Start timer BEFORE spec so reported duration matches budget accounting.
     build_start = time.time()
     spec_content: str | None = None
-    run_id: str = resume_state.run_id or ""
     spec_cost_total: float = resume_state.spec_cost or 0.0
     spec_duration_total: float = 0.0
-    if not run_id:
-        run_id = _new_run_id(project_dir)
     if use_spec:
         try:
             run_id, spec_content, spec_cost_total, spec_duration_total = asyncio.run(_run_spec_phase(
@@ -758,16 +946,12 @@ def _build_locked(
                                      spec=spec_content,
                                      spec_cost=spec_cost_total,
                                      spec_duration=spec_duration_total,
-                                     budget=run_budget)
+                                     budget=run_budget,
+                                     strict_mode=bool(config.get("strict_mode")),
+                                     verbose=bool(verbose))
             )
         else:
-            if certifier_mode == "fast":
-                mode_label = "happy-path only (Must-Have stories, ~30s certify)"
-            elif certifier_mode == "thorough":
-                mode_label = "adversarial (Must-Have + edge probes + code review)"
-            else:
-                mode_label = "standard (Must-Have + generic checklist: CRUD, edge cases, access control)"
-            console.print(f"  [bold]Agentic build[/bold] \u2014 certifier: {mode_label}\n")
+            console.print("  Verifying core requirements after each build.\n")
             result: BuildResult = asyncio.run(
                 build_agentic_v3(intent, project_dir, config,
                                  certifier_mode=certifier_mode,
@@ -778,7 +962,9 @@ def _build_locked(
                                  run_id=run_id or None,
                                  budget=run_budget,
                                  spec_cost=spec_cost_total,
-                                 spec_duration=spec_duration_total)
+                                 spec_duration=spec_duration_total,
+                                 strict_mode=bool(config.get("strict_mode")),
+                                 verbose=bool(verbose))
             )
     except KeyboardInterrupt:
         console.print("\n  [yellow]Paused. Run `otto build --resume` to continue.[/yellow]")
@@ -808,7 +994,13 @@ def _build_locked(
         sys.exit(1)
 
     build_duration = time.time() - build_start
-    _print_build_result(project_dir, display_intent, result, build_duration)
+    _print_build_result(
+        project_dir,
+        display_intent,
+        result,
+        build_duration,
+        strict_mode=bool(config.get("strict_mode")),
+    )
 
     if not result.passed:
         build_dir = _paths.build_dir(project_dir, result.build_id)

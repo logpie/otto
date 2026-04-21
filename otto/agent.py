@@ -178,6 +178,8 @@ async def run_agent_with_timeout(
     project_dir: Path,
     capture_tool_output: bool = False,
     on_terminal_event: Callable[[str], None] | None = None,
+    verbose: bool = False,
+    strict_mode: bool = False,
 ) -> tuple[str, float, str, dict[str, Any]]:
     """Run an agent query with streaming session logs, timeout, and orphan cleanup.
 
@@ -199,6 +201,9 @@ async def run_agent_with_timeout(
         log_dir,
         phase_name=phase_name,
         stdout_callback=on_terminal_event,
+        verbose=verbose,
+        strict_mode=strict_mode,
+        project_dir=project_dir,
     )
     close_fh = callbacks.pop("_close")
     narrative = callbacks.pop("_narrative")
@@ -214,17 +219,18 @@ async def run_agent_with_timeout(
         except OSError:
             pass
 
-    def _format_heartbeat_elapsed(elapsed_s: float) -> str:
+    def _fmt_elapsed(elapsed_s: float) -> str:
         secs = max(0, int(elapsed_s))
         if secs < 60:
             return f"{secs}s"
         if secs < 3600:
-            return f"{secs // 60}m"
+            mins, rem = divmod(secs, 60)
+            return f"{mins}m {rem:02d}s"
         hours, rem = divmod(secs, 3600)
-        mins = rem // 60
+        mins, seconds = divmod(rem, 60)
         if mins:
-            return f"{hours}h {mins}m"
-        return f"{hours}h"
+            return f"{hours}h {mins:02d}m {seconds:02d}s"
+        return f"{hours}h 00m {seconds:02d}s"
 
     heartbeat_task: asyncio.Task[None] | None = None
     if on_terminal_event is not None:
@@ -235,12 +241,7 @@ async def run_agent_with_timeout(
                 if (asyncio.get_running_loop().time()
                         - narrative.last_terminal_event_monotonic()) < interval_s:
                     continue
-                elapsed = _format_heartbeat_elapsed(narrative.elapsed_seconds())
-                tool_calls = narrative._tool_call_count
-                noun = "call" if tool_calls == 1 else "calls"
-                on_terminal_event(
-                    f"[dim]  ⋯ still running, {elapsed} elapsed, {tool_calls} tool {noun}[/dim]"
-                )
+                narrative.write_heartbeat(_fmt_elapsed(narrative.phase_elapsed_seconds()))
 
         heartbeat_task = asyncio.create_task(_heartbeat())
 
@@ -256,6 +257,7 @@ async def run_agent_with_timeout(
         breakdown_data = {
             "round_timings": narrative.round_timings(),
             "build_duration_s": narrative.build_duration_or_none(),
+            "recovered_tool_errors": 0,
         }
         phase = (phase_name or "").lower()
         finalize_breakdown: dict[str, dict[str, float | int]] | None = None
@@ -299,7 +301,10 @@ async def run_agent_with_timeout(
                 for phase_name, phase_costs in estimated_costs.items():
                     if phase_name in finalize_breakdown:
                         finalize_breakdown[phase_name].update(phase_costs)
-        narrative.finalize(finalize_breakdown)
+        finalize_stats = narrative.finalize(finalize_breakdown)
+        breakdown_data["recovered_tool_errors"] = int(
+            finalize_stats.get("recovered_tool_errors", 0)
+        )
         return text, cost, session_id, breakdown_data
     except asyncio.TimeoutError:
         log.error("Agent timed out after %ds", timeout)

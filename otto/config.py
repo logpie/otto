@@ -50,6 +50,7 @@ DEFAULTS: dict[str, Any] = {
     "certifier_mode":         "fast",    # fast | standard | thorough
     "skip_product_qa":        False,
     "split_mode":             False,
+    "strict_mode":            False,
 
     # Features (opt-in)
     "memory":                 False,

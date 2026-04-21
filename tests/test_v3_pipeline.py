@@ -77,6 +77,28 @@ VERDICT: PASS
 DIAGNOSIS: null
 """
 
+AGENT_OUTPUT_TWO_PASS = """\
+Built and tested.
+
+CERTIFY_ROUND: 1
+STORIES_TESTED: 2
+STORIES_PASSED: 2
+STORY_RESULT: crud | PASS | Works
+STORY_RESULT: auth | PASS | Works
+VERDICT: PASS
+DIAGNOSIS: null
+
+Re-running verification.
+
+CERTIFY_ROUND: 2
+STORIES_TESTED: 2
+STORIES_PASSED: 2
+STORY_RESULT: crud | PASS | Still works
+STORY_RESULT: auth | PASS | Still works
+VERDICT: PASS
+DIAGNOSIS: null
+"""
+
 AGENT_OUTPUT_NO_MARKERS = """\
 I built the product. Everything looks good. Committed.
 """
@@ -441,6 +463,35 @@ class TestV3FixLoop:
         assert pow_data["outcome"] == "passed"
         # Should have round history
         assert pow_data.get("certify_rounds", 0) >= 2
+
+    @pytest.mark.asyncio
+    async def test_strict_mode_requires_two_consecutive_passes(self, tmp_git_repo):
+        with patch("otto.agent.run_agent_query",
+                    side_effect=_make_mock_query(AGENT_OUTPUT_PASS)):
+            result = await build_agentic_v3("test", tmp_git_repo, {}, strict_mode=True)
+
+        assert result.passed is False
+
+    @pytest.mark.asyncio
+    async def test_strict_mode_passes_after_two_consecutive_passes(self, tmp_git_repo):
+        with patch("otto.agent.run_agent_query",
+                    side_effect=_make_mock_query(AGENT_OUTPUT_TWO_PASS)):
+            result = await build_agentic_v3("test", tmp_git_repo, {}, strict_mode=True)
+
+        assert result.passed is True
+
+    @pytest.mark.asyncio
+    async def test_strict_mode_prompt_includes_reverification_instruction(self, tmp_git_repo):
+        captured_prompts = []
+
+        async def capture_query(prompt, options, **kwargs):
+            captured_prompts.append(prompt)
+            return AGENT_OUTPUT_TWO_PASS, 0.50, MagicMock(session_id="s2")
+
+        with patch("otto.agent.run_agent_query", side_effect=capture_query):
+            await build_agentic_v3("test", tmp_git_repo, {}, strict_mode=True)
+
+        assert "STRICT MODE: after the first PASS, run the certifier one more time." in captured_prompts[0]
 
 
 class TestV3EdgeCases:

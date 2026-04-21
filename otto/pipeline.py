@@ -30,6 +30,7 @@ class BuildResult:
     journeys: list[dict[str, Any]] = field(default_factory=list)
     tasks_passed: int = 0
     tasks_failed: int = 0
+    breakdown: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 def _stories_to_journeys(stories: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -91,6 +92,15 @@ def _round_cost(value: float) -> float:
     return round(float(value), 4)
 
 
+def _strict_mode_guidance(strict_mode: bool) -> str:
+    if not strict_mode:
+        return ""
+    return (
+        "   - STRICT MODE: after the first PASS, run the certifier one more time.\n"
+        "     Stop only after you get two consecutive PASS verdicts.\n"
+    )
+
+
 async def build_agentic_v3(
     intent: str,
     project_dir: Path,
@@ -109,6 +119,8 @@ async def build_agentic_v3(
     spec_duration: float = 0.0,
     budget: "RunBudget | None" = None,
     is_improve_run: bool = False,
+    strict_mode: bool = False,
+    verbose: bool = False,
 ) -> BuildResult:
     """Fully agent-driven session: one agent, certifier as environment.
 
@@ -172,6 +184,8 @@ async def build_agentic_v3(
 
     evidence_dir_path: Path | None = None
     skip_qa = bool(config.get("skip_product_qa"))
+    strict_mode = bool(strict_mode or config.get("strict_mode"))
+    verbose = bool(verbose or config.get("_verbose"))
 
     if skip_qa:
         prompt_mode = "code"
@@ -192,7 +206,8 @@ async def build_agentic_v3(
             max_certify_rounds = get_max_rounds(config)
             prompt = render_prompt("improve.md",
                                    max_certify_rounds=str(max_certify_rounds),
-                                   spec_section=spec_section)
+                                   spec_section=spec_section,
+                                   strict_mode=_strict_mode_guidance(strict_mode))
             prompt += f"\n\nImprove this product:\n\n{intent}"
         else:
             # Default: build mode
@@ -200,7 +215,8 @@ async def build_agentic_v3(
             max_certify_rounds = get_max_rounds(config)
             prompt = render_prompt("build.md",
                                    max_certify_rounds=str(max_certify_rounds),
-                                   spec_section=spec_section)
+                                   spec_section=spec_section,
+                                   strict_mode=_strict_mode_guidance(strict_mode))
             prompt += f"\n\nBuild this product:\n\n{intent}"
 
         # Pre-fill certifier prompt for modes that use certification
@@ -300,6 +316,8 @@ async def build_agentic_v3(
             project_dir=project_dir,
             capture_tool_output=True,
             on_terminal_event=console.print,
+            verbose=verbose,
+            strict_mode=strict_mode,
         )
     except AgentCallError as err:
         if not manage_checkpoint:
@@ -349,13 +367,16 @@ async def build_agentic_v3(
 
     rounds = len(round_timings)
     total_certify_s = sum(end - start for start, end in round_timings)
+    build_duration_s = breakdown_data.get("build_duration_s")
     if rounds > 0:
         breakdown["certify"] = {
             "duration_s": round(total_certify_s, 1),
             "rounds": rounds,
         }
 
-    if rounds > 0:
+    if isinstance(build_duration_s, int | float):
+        breakdown["build"] = {"duration_s": round(float(build_duration_s), 1)}
+    elif rounds > 0:
         breakdown["build"] = {"duration_s": round(max(total_duration - total_certify_s, 0.0), 1)}
     else:
         breakdown["build"] = {"duration_s": round(total_duration, 1)}
@@ -407,6 +428,12 @@ async def build_agentic_v3(
         passed = verdict_pass and bool(story_results) and all(s["passed"] for s in story_results)
         if target_mode:
             passed = passed and parsed.metric_met is True
+        if strict_mode:
+            last_two_rounds = certify_rounds[-2:]
+            passed = passed and len(last_two_rounds) == 2 and all(
+                round_data.get("verdict") is True
+                for round_data in last_two_rounds
+            )
 
     journeys = _stories_to_journeys(story_results)
 
@@ -574,6 +601,7 @@ async def build_agentic_v3(
         journeys=journeys,
         tasks_passed=sum(1 for j in journeys if j["passed"]),
         tasks_failed=sum(1 for j in journeys if not j["passed"]),
+        breakdown=breakdown,
     )
 
 
@@ -766,6 +794,8 @@ async def run_certify_fix_loop(
     spec: str | None = None,
     spec_cost: float = 0.0,
     spec_duration: float = 0.0,
+    strict_mode: bool = False,
+    verbose: bool = False,
 ) -> BuildResult:
     """System-driven certify-fix loop.
 
@@ -782,6 +812,7 @@ async def run_certify_fix_loop(
     """
     from otto.certifier import run_agentic_certifier
     from otto.certifier.report import CertificationOutcome
+    from otto.display import console
     from otto.journal import (
         append_journal, init_round, record_build, record_certifier,
         update_current_state,
@@ -874,6 +905,7 @@ async def run_certify_fix_loop(
                 spec_cost=spec_cost,
                 spec_duration=spec_duration,
                 budget=budget,
+                verbose=verbose,
             )
         except AgentCallError as err:
             build_phase_duration += time.monotonic() - build_call_start
@@ -890,6 +922,7 @@ async def run_certify_fix_loop(
     # --- Certify + fix loop ---
     passed = False
     actual_rounds = 0
+    consecutive_passes = 0
     previous_attempts: list[dict[str, Any]] = []
     MAX_RETRIES = 2
 
@@ -922,6 +955,7 @@ async def run_certify_fix_loop(
                         budget=budget,
                         session_id=build_id,
                         write_session_summary=False,
+                        verbose=verbose,
                     )
                     certify_phase_duration += time.monotonic() - certify_call_start
                     certify_phase_cost += float(report.cost_usd)
@@ -1000,10 +1034,19 @@ async def run_certify_fix_loop(
                     checkpoint_rounds.append(round_summary)
                     last_completed_round = round_num
                     _save_cp(phase="round_complete")
-                    passed = True
+                    consecutive_passes += 1
+                    if strict_mode and consecutive_passes < 2 and round_num < max_rounds:
+                        console.print(
+                            "  [dim]\u2713 round "
+                            f"{round_num} passed \u2014 re-verifying for consistency (strict mode)[/dim]"
+                        )
+                        logger.info("Certify-fix loop: strict re-verification after round %d", round_num)
+                        continue
+                    passed = consecutive_passes >= (2 if strict_mode else 1)
                     logger.info("Certify-fix loop: target met on round %d (%s)",
                                 round_num, metric_value)
                     break
+                consecutive_passes = 0
                 if metric_met is None:
                     checkpoint_rounds.append(round_summary)
                     last_completed_round = round_num
@@ -1017,9 +1060,19 @@ async def run_certify_fix_loop(
                 checkpoint_rounds.append(round_summary)
                 last_completed_round = round_num
                 _save_cp(phase="round_complete")
-                passed = True
+                consecutive_passes += 1
+                if strict_mode and consecutive_passes < 2 and round_num < max_rounds:
+                    console.print(
+                        "  [dim]\u2713 round "
+                        f"{round_num} passed \u2014 re-verifying for consistency (strict mode)[/dim]"
+                    )
+                    logger.info("Certify-fix loop: strict re-verification after round %d", round_num)
+                    continue
+                passed = consecutive_passes >= (2 if strict_mode else 1)
                 logger.info("Certify-fix loop: PASS on round %d", round_num)
                 break
+            else:
+                consecutive_passes = 0
 
             if round_num >= max_rounds:
                 checkpoint_rounds.append(round_summary)
@@ -1085,6 +1138,7 @@ async def run_certify_fix_loop(
                         run_id=build_id,
                         spec=spec,
                         budget=budget,
+                        verbose=verbose,
                     )
                     build_phase_duration += time.monotonic() - fix_call_start
                     break
@@ -1209,6 +1263,7 @@ async def run_certify_fix_loop(
         journeys=journeys,
         tasks_passed=sum(1 for j in journeys if j.get("passed")),
         tasks_failed=sum(1 for j in journeys if not j.get("passed")),
+        breakdown=split_breakdown,
     )
 
 

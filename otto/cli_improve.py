@@ -166,16 +166,20 @@ def _run_improve_locked(
     sources: dict[str, str] = {}
     if overrides.get("budget") is not None:
         config["run_budget_seconds"] = overrides["budget"]
-        sources["run_budget_seconds"] = "cli"
+        sources["run_budget_seconds"] = "--budget"
     if overrides.get("model"):
         config["model"] = overrides["model"]
-        sources["model"] = "cli"
+        sources["model"] = "--model"
     if overrides.get("provider"):
         config["provider"] = overrides["provider"]
-        sources["provider"] = "cli"
+        sources["provider"] = "--provider"
     if overrides.get("effort"):
         config["effort"] = overrides["effort"]
-        sources["effort"] = "cli"
+        sources["effort"] = "--effort"
+    if overrides.get("strict"):
+        config["strict_mode"] = True
+        sources["strict_mode"] = "--strict"
+    config["_verbose"] = bool(overrides.get("verbose"))
 
     # Give improve modes a larger wall-clock budget by default, since
     # multi-round fix loops legitimately take longer than a single build.
@@ -228,6 +232,8 @@ def _run_improve_locked(
                 command=command_id,
                 session_id=resume_state.run_id or run_id,
                 budget=budget,
+                strict_mode=bool(config.get("strict_mode")),
+                verbose=bool(config.get("_verbose")),
             ))
         else:
             # Agent-driven: one session, agent drives certify→fix loop
@@ -241,6 +247,8 @@ def _run_improve_locked(
                 command=command_id,
                 run_id=resume_state.run_id or run_id,
                 budget=budget,
+                strict_mode=bool(config.get("strict_mode")),
+                verbose=bool(config.get("_verbose")),
             ))
     except KeyboardInterrupt:
         console.print("\n  [yellow]Paused. Run with --resume to continue.[/yellow]")
@@ -354,8 +362,10 @@ def register_improve_commands(main: click.Group) -> None:
     @click.option("--model", default=None, help="Override model for every agent (e.g. sonnet, haiku, gpt-5)")
     @click.option("--provider", default=None, help="Override provider for every agent: claude | codex")
     @click.option("--effort", default=None, help="Override effort level for every agent: low | medium | high | max")
+    @click.option("--strict", is_flag=True, help="Require two consecutive PASS rounds before stopping")
+    @click.option("--verbose", is_flag=True, help="Show detailed live progress, including tool-call counts")
     @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
-    def bugs(focus, rounds, split, resume, budget, model, provider, effort, break_lock):
+    def bugs(focus, rounds, split, resume, budget, model, provider, effort, strict, verbose, break_lock):
         """Find and fix bugs, edge cases, and error handling gaps.
 
         One agent certifies, reads findings, fixes, and re-certifies
@@ -381,7 +391,14 @@ def register_improve_commands(main: click.Group) -> None:
             split=split,
             resume=resume,
             break_lock=break_lock,
-            cli_overrides={"budget": budget, "model": model, "provider": provider, "effort": effort},
+            cli_overrides={
+                "budget": budget,
+                "model": model,
+                "provider": provider,
+                "effort": effort,
+                "strict": strict,
+                "verbose": verbose,
+            },
         )
 
     @improve.command(context_settings=CONTEXT_SETTINGS)
@@ -393,8 +410,10 @@ def register_improve_commands(main: click.Group) -> None:
     @click.option("--model", default=None, help="Override model for every agent (e.g. sonnet, haiku, gpt-5)")
     @click.option("--provider", default=None, help="Override provider for every agent: claude | codex")
     @click.option("--effort", default=None, help="Override effort level for every agent: low | medium | high | max")
+    @click.option("--strict", is_flag=True, help="Require two consecutive PASS rounds before stopping")
+    @click.option("--verbose", is_flag=True, help="Show detailed live progress, including tool-call counts")
     @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
-    def feature(focus, rounds, split, resume, budget, model, provider, effort, break_lock):
+    def feature(focus, rounds, split, resume, budget, model, provider, effort, strict, verbose, break_lock):
         """Suggest and implement product improvements.
 
         One agent evaluates the product, identifies improvements, implements
@@ -419,7 +438,14 @@ def register_improve_commands(main: click.Group) -> None:
             split=split,
             resume=resume,
             break_lock=break_lock,
-            cli_overrides={"budget": budget, "model": model, "provider": provider, "effort": effort},
+            cli_overrides={
+                "budget": budget,
+                "model": model,
+                "provider": provider,
+                "effort": effort,
+                "strict": strict,
+                "verbose": verbose,
+            },
         )
 
     @improve.command(context_settings=CONTEXT_SETTINGS)
@@ -431,8 +457,10 @@ def register_improve_commands(main: click.Group) -> None:
     @click.option("--model", default=None, help="Override model for every agent (e.g. sonnet, haiku, gpt-5)")
     @click.option("--provider", default=None, help="Override provider for every agent: claude | codex")
     @click.option("--effort", default=None, help="Override effort level for every agent: low | medium | high | max")
+    @click.option("--strict", is_flag=True, help="Require two consecutive PASS rounds before stopping")
+    @click.option("--verbose", is_flag=True, help="Show detailed live progress, including tool-call counts")
     @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
-    def target(goal, rounds, split, resume, budget, model, provider, effort, break_lock):
+    def target(goal, rounds, split, resume, budget, model, provider, effort, strict, verbose, break_lock):
         """Optimize toward a measurable target.
 
         Measures a metric, compares to the target, and iterates until met.
@@ -496,5 +524,12 @@ def register_improve_commands(main: click.Group) -> None:
             resume=resume,
             resume_state=resume_state,
             break_lock=break_lock,
-            cli_overrides={"budget": budget, "model": model, "provider": provider, "effort": effort},
+            cli_overrides={
+                "budget": budget,
+                "model": model,
+                "provider": provider,
+                "effort": effort,
+                "strict": strict,
+                "verbose": verbose,
+            },
         )

@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -61,6 +62,8 @@ _WRITE_EDIT_BOILERPLATE_RE = re.compile(
     r"\s*\(file state is current in your context[^)]*\)\s*$"
 )
 _TERMINAL_STAMP_RE = re.compile(r"^\[\+\d+:\d{2}(?::\d{2})?\]\s+")
+_TOOL_USE_ERROR_TAG_RE = re.compile(r"</?tool_use_error>")
+_SHELL_NOISE_SPLIT_RE = re.compile(r"\s*(?:\||&&|;|>|<)\s*")
 
 
 def _iso_ts() -> str:
@@ -189,7 +192,8 @@ class NarrativeFormatter:
     _GLYPH_MARKER = "\u2726"     # ✦ elevated certifier marker
     _GLYPH_SUBAGENT = "\u21d0"   # ⇐ subagent tool result
     _GLYPH_SUMMARY = "\u220e"    # ∎ closing summary text
-    _GLYPH_PHASE = "\u2501" * 3  # ━━━ phase begin/end banner
+    _GLYPH_PHASE = "\u2501" * 3  # ━━━ final summary banner
+    _GLYPH_WARNING = "\u26a0"    # ⚠ recoverable tool warning
 
     def __init__(
         self,
@@ -197,6 +201,9 @@ class NarrativeFormatter:
         *,
         phase_name: str = "BUILD",
         stdout_callback: Callable[[str], None] | None = None,
+        verbose: bool = False,
+        strict_mode: bool = False,
+        project_dir: Path | None = None,
     ) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._path = path
@@ -204,6 +211,9 @@ class NarrativeFormatter:
         self._start = time.monotonic()
         self._phase_name = (phase_name or "BUILD").upper()
         self._stdout_callback = stdout_callback
+        self._verbose = verbose
+        self._strict_mode = strict_mode
+        self._project_dir = project_dir
         # tool_use_id -> tool name, so ToolResultBlock renderers can
         # tailor output (Glob=>"(N files)", Read=>"(N lines)", Agent=>
         # subagent glyph).
@@ -223,19 +233,36 @@ class NarrativeFormatter:
         self._summary_written = False
         self._pending_result: ResultMessage | None = None
         self._last_terminal_event_monotonic = self._start
+        self._pending_tool_error: dict[str, Any] | None = None
+        self._tool_error_chain_count = 0
+        self._recovered_tool_errors = 0
+        self._last_round_verdict: str | None = None
+        self._current_phase_label = self._initial_phase_label()
+        self._phase_started_monotonic = self._start
+        self._latest_activity: str | None = None
+        self._latest_activity_tool_name: str | None = None
+        self._streamed_story_keys: set[tuple[int, str]] = set()
+        self._git_context_label_cache: str | None = None
+        self._in_certify_round = False
 
     def start(self) -> None:
         if self._phase_started:
             return
         self._phase_started = True
         self._write_terminal_event(
-            f"{self._stamp()} {self._GLYPH_PHASE} "
-            f"{self._phase_name} starting {self._GLYPH_PHASE}",
-            style="bold",
+            self._phase_banner(f"{self._phase_name} starting"),
+            style="dim",
         )
 
     def _elapsed_seconds(self) -> float:
         return time.monotonic() - self._start
+
+    def _initial_phase_label(self) -> str:
+        if self._phase_name == "SPEC":
+            return "specing"
+        if self._phase_name == "CERTIFY":
+            return "verifying"
+        return "building"
 
     def _elapsed_fmt(self) -> str:
         secs = int(self._elapsed_seconds())
@@ -243,20 +270,17 @@ class NarrativeFormatter:
 
     def _phase_complete_line(self) -> str:
         if self._phase_name == "BUILD":
-            return (
-                f"{self._stamp()} {self._GLYPH_PHASE} BUILD complete — "
-                f"handing off to certifier {self._GLYPH_PHASE}"
-            )
-        return (
-            f"{self._stamp()} {self._GLYPH_PHASE} {self._phase_name} complete "
-            f"{self._GLYPH_PHASE}"
-        )
+            return self._phase_banner("BUILD complete; starting verification")
+        return self._phase_banner(f"{self._phase_name} complete")
+
+    def _phase_banner(self, label: str) -> str:
+        return f"{self._stamp()} \u2014 {label} \u2014"
 
     def _write_phase_complete(self) -> None:
         if self._phase_complete_written:
             return
         self._phase_complete_written = True
-        self._write_terminal_event(self._phase_complete_line(), style="bold")
+        self._write_terminal_event(self._phase_complete_line(), style="dim")
 
     def _summary_label(self) -> str:
         return self._phase_name.lower()
@@ -346,6 +370,31 @@ class NarrativeFormatter:
         self._write(line)
         self._emit_terminal(line, style=style)
 
+    def _set_phase_activity(self, label: str) -> None:
+        if label == self._current_phase_label:
+            return
+        self._current_phase_label = label
+        self._phase_started_monotonic = time.monotonic()
+
+    def phase_elapsed_seconds(self) -> float:
+        return time.monotonic() - self._phase_started_monotonic
+
+    def write_heartbeat(self, elapsed: str) -> None:
+        label = self._current_phase_label
+        tool_calls = self._tool_call_count
+        noun = "call" if tool_calls == 1 else "calls"
+        activity = f" \u00b7 {self._latest_activity}" if self._latest_activity else ""
+        detailed = (
+            f"{self._stamp()} \u22ef {label}\u2026 ({elapsed}){activity}"
+            f" \u00b7 {tool_calls} tool {noun}"
+        )
+        terminal = (
+            detailed if self._verbose
+            else f"{self._stamp()} \u22ef {label}\u2026 ({elapsed}){activity}"
+        )
+        self._write(detailed)
+        self._emit_terminal(terminal, style="dim")
+
     def last_terminal_event_monotonic(self) -> float:
         return self._last_terminal_event_monotonic
 
@@ -362,6 +411,8 @@ class NarrativeFormatter:
         ts = self._stamp()
         if isinstance(block, ToolUseBlock):
             self._tool_call_count += 1
+            self._latest_activity = _tool_activity_label(block)
+            self._latest_activity_tool_name = block.name or ""
             # Remember the tool name so tool_result renderers can look
             # up the originator by tool_use_id.
             if block.id:
@@ -375,16 +426,26 @@ class NarrativeFormatter:
                     if self._phase_name == "BUILD":
                         self._write_phase_complete()
                 self._agent_dispatch_count += 1
+                self._in_certify_round = True
+                self._set_phase_activity("verifying")
+                self._latest_activity = "running verifier"
+                self._latest_activity_tool_name = "Agent"
                 round_n = self._agent_dispatch_count
+                if self._strict_mode and round_n == 2 and self._last_round_verdict == "PASS":
+                    self._write_terminal_event(
+                        f"{ts} \u2713 round 1 passed \u2014 re-verifying for consistency (strict mode)",
+                        style="dim",
+                    )
                 if block.id:
                     self._agent_round_by_id[block.id] = round_n
                     self._round_start_elapsed_by_id[block.id] = round_start_elapsed
                 self._write_terminal_event(
-                    f"{ts} {self._GLYPH_PHASE} CERTIFY ROUND {round_n} "
-                    f"starting {self._GLYPH_PHASE}",
-                    style="bold",
+                    self._phase_banner(f"CERTIFY ROUND {round_n}"),
+                    style="dim",
                 )
                 return
+            if self._phase_name == "BUILD" and not self._in_certify_round:
+                self._set_phase_activity("building")
             summary = tool_use_summary(block) or ""
             line = f"{ts} \u25cf {block.name} {summary}".rstrip()
             self._write(_truncate_at_word(line))
@@ -459,9 +520,9 @@ class NarrativeFormatter:
             is_subagent = tool_name == "Agent"
 
         if block.is_error:
-            first = (content.split("\n", 1)[0][:200]) if content else "(empty)"
-            self._write_terminal_event(f"{ts} \u2717 error: {first}")
+            self._buffer_tool_error(tool_name, content)
             return
+        self._recover_tool_errors()
         if not content:
             self._write(f"{ts} \u2190 (empty)")
             return
@@ -480,6 +541,11 @@ class NarrativeFormatter:
         marker_lines = [line.strip() for line in content.split("\n")
                         if _is_marker(line.strip())]
         if marker_lines:
+            diagnosis = ""
+            for marker in marker_lines:
+                if marker.startswith("DIAGNOSIS:"):
+                    diagnosis = _parse_diagnosis_marker(marker)
+                    break
             if is_subagent:
                 prose = "\n".join(
                     l for l in content.split("\n")
@@ -491,6 +557,8 @@ class NarrativeFormatter:
                         f"{ts} {self._GLYPH_SUBAGENT} [subagent]: "
                         f"{_truncate_at_word(flat)}"
                     )
+            round_n_for_stream = self._agent_round_by_id.get(block.tool_use_id or "", 0)
+            self._stream_story_results(ts, marker_lines, diagnosis, round_n_for_stream)
             for s in marker_lines:
                 self._write(f"{ts} {self._GLYPH_MARKER} {s}")
             # Round-end banner when we can correlate to a round start.
@@ -501,18 +569,24 @@ class NarrativeFormatter:
                     if round_start is not None:
                         self._round_timings.append((round_start, self._elapsed_seconds()))
                     verdict, passed, tested = _summarize_round(marker_lines)
+                    self._last_round_verdict = verdict
+                    self._in_certify_round = False
+                    if self._phase_name == "BUILD":
+                        self._set_phase_activity("building")
                     stats = f" ({passed}/{tested})" if tested else ""
                     self._write_terminal_event(
-                        f"{ts} {self._GLYPH_PHASE} CERTIFY ROUND {round_n} "
-                        f"→ {verdict}{stats} {self._GLYPH_PHASE}",
-                        style="bold",
+                        self._phase_banner(f"CERTIFY ROUND {round_n} \u2192 {verdict}{stats}"),
+                        style="dim",
                     )
             return
 
         # Detect git-commit in Bash output, elevate to a distinct glyph.
         commit_line = _extract_commit_line(content)
         if commit_line:
-            self._write_terminal_event(f"{ts} \u2713 {commit_line}")
+            self._write_terminal_event(
+                f"{ts} \u2022 committed to {self._git_context_label()}: {commit_line}",
+                style="dim",
+            )
             return
 
         # Subagent result — dedicated glyph + word-safe truncation.
@@ -557,14 +631,100 @@ class NarrativeFormatter:
     def _write_result(self, message: ResultMessage) -> None:
         self._pending_result = message
 
-    def finalize(self, breakdown: dict[str, dict[str, float | int]] | None = None) -> None:
-        if self._summary_written:
+    def _tool_error_reason(self, content: str) -> str:
+        cleaned = _TOOL_USE_ERROR_TAG_RE.sub("", content or "")
+        first = _first_meaningful_line(cleaned) or "(empty)"
+        return _truncate_at_word(first.strip(), 80)
+
+    def _buffer_tool_error(self, tool_name: str, content: str) -> None:
+        pending = {
+            "tool_name": tool_name or "unknown",
+            "reason": self._tool_error_reason(content),
+        }
+        if self._pending_tool_error is not None:
+            self._emit_tool_warning(self._pending_tool_error)
+        self._pending_tool_error = pending
+        self._tool_error_chain_count += 1
+
+    def _recover_tool_errors(self) -> None:
+        if self._tool_error_chain_count <= 0:
             return
+        self._recovered_tool_errors += self._tool_error_chain_count
+        self._tool_error_chain_count = 0
+        self._pending_tool_error = None
+
+    def _emit_tool_warning(self, pending: dict[str, Any]) -> None:
+        ts = self._stamp()
+        tool_name = pending.get("tool_name", "unknown")
+        reason = pending.get("reason", "(empty)")
+        self._write_terminal_event(
+            f"{ts} {self._GLYPH_WARNING} tool {tool_name} retry: {reason}",
+            style="dim",
+        )
+
+    def _stream_story_results(
+        self,
+        ts: str,
+        marker_lines: list[str],
+        diagnosis: str,
+        round_n: int,
+    ) -> None:
+        for line in marker_lines:
+            story = _parse_story_result_marker(line)
+            if story is None:
+                continue
+            story_key = (round_n, story["story_id"] or story["summary"])
+            if story_key in self._streamed_story_keys:
+                continue
+            self._streamed_story_keys.add(story_key)
+            glyph = "\u2713" if story["passed"] else "\u2717"
+            rendered = story["summary"]
+            if not story["passed"] and diagnosis:
+                rendered += f" \u2014 {_truncate_at_word(diagnosis, 100)}"
+            style = "success" if story["passed"] else "red"
+            self._write_terminal_event(f"{ts} {glyph} {rendered}", style=style)
+
+    def _git_context_label(self) -> str:
+        if self._git_context_label_cache is not None:
+            return self._git_context_label_cache
+        label = "current branch"
+        if self._project_dir is not None:
+            for cmd in (
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                ["git", "branch", "--show-current"],
+            ):
+                try:
+                    result = subprocess.run(
+                        cmd,
+                        cwd=self._project_dir,
+                        capture_output=True,
+                        text=True,
+                        timeout=2,
+                    )
+                except (OSError, subprocess.SubprocessError):
+                    continue
+                branch = result.stdout.strip()
+                if result.returncode == 0 and branch:
+                    label = branch
+                    break
+        self._git_context_label_cache = label
+        return label
+
+    def finalize(
+        self,
+        breakdown: dict[str, dict[str, float | int]] | None = None,
+    ) -> dict[str, int]:
+        if self._summary_written:
+            return {"recovered_tool_errors": self._recovered_tool_errors}
         self._summary_written = True
+
+        if self._pending_tool_error is not None:
+            self._emit_tool_warning(self._pending_tool_error)
+            self._pending_tool_error = None
 
         message = self._pending_result
         if message is None:
-            return
+            return {"recovered_tool_errors": self._recovered_tool_errors}
 
         ts = self._stamp()
         total_elapsed = self._elapsed_seconds()
@@ -575,6 +735,7 @@ class NarrativeFormatter:
         cost = f" ${message.total_cost_usd:.2f}" if message.total_cost_usd else ""
         duration = f" in {self._elapsed_fmt()}"
         self._write_terminal_event(f"{ts} \u2501\u2501\u2501 {status}{cost}{duration}")
+        return {"recovered_tool_errors": self._recovered_tool_errors}
 
     def close(self) -> None:
         self.finalize()
@@ -851,7 +1012,63 @@ def _extract_commit_line(content: str) -> str | None:
             if len(parts) >= 2 and all(c in "0123456789abcdef" for c in parts[-1]) and len(parts[-1]) >= 7:
                 title = s[rbr + 1:].strip()
                 if title:
-                    return f"commit {parts[-1]} \"{title[:120]}\""
+                    return f"{parts[-1]} \"{title[:120]}\""
+    return None
+
+
+def _parse_story_result_marker(line: str) -> dict[str, Any] | None:
+    if not line.startswith("STORY_RESULT:"):
+        return None
+    parts = line[len("STORY_RESULT:"):].strip().split("|", 2)
+    if len(parts) < 2:
+        return None
+    summary = parts[2].strip() if len(parts) > 2 else ""
+    return {
+        "story_id": parts[0].strip(),
+        "passed": "PASS" in parts[1].strip().upper(),
+        "summary": summary,
+    }
+
+
+def _parse_diagnosis_marker(line: str) -> str:
+    if not line.startswith("DIAGNOSIS:"):
+        return ""
+    value = line.split(":", 1)[1].strip()
+    if value.lower() == "null":
+        return ""
+    return value
+
+
+def _tool_activity_label(block: ToolUseBlock) -> str | None:
+    tool_name = block.name or ""
+    tool_input = block.input if isinstance(block.input, dict) else {}
+
+    if tool_name in {"Write", "Edit", "MultiEdit"}:
+        path = tool_input.get("file_path") or tool_input.get("path")
+        if isinstance(path, str) and path.strip():
+            verb = "writing" if tool_name == "Write" else "editing"
+            return f"{verb} {path.strip()}"
+
+    if tool_name == "Read":
+        path = tool_input.get("file_path") or tool_input.get("path")
+        if isinstance(path, str) and path.strip():
+            return f"reading {path.strip()}"
+
+    if tool_name == "Glob":
+        pattern = tool_input.get("pattern")
+        if isinstance(pattern, str) and pattern.strip():
+            return f"scanning {pattern.strip()}"
+
+    if tool_name == "Bash":
+        command = tool_input.get("command")
+        if isinstance(command, str) and command.strip():
+            cleaned = " ".join(command.strip().split())
+            cleaned = _SHELL_NOISE_SPLIT_RE.split(cleaned, maxsplit=1)[0]
+            return f"running {_truncate_at_word(cleaned, 40)}"
+
+    if tool_name == "Agent" and _looks_like_certifier_prompt(tool_input):
+        return "running verifier"
+
     return None
 
 
@@ -860,6 +1077,9 @@ def make_session_logger(
     *,
     phase_name: str = "BUILD",
     stdout_callback: Callable[[str], None] | None = None,
+    verbose: bool = False,
+    strict_mode: bool = False,
+    project_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Open messages.jsonl + narrative.log in ``log_dir`` and return the
     callback dict for run_agent_with_timeout / run_agent_query.
@@ -880,6 +1100,9 @@ def make_session_logger(
         log_dir / "narrative.log",
         phase_name=phase_name,
         stdout_callback=stdout_callback,
+        verbose=verbose,
+        strict_mode=strict_mode,
+        project_dir=project_dir,
     )
     narr.start()
 
