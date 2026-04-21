@@ -15,8 +15,9 @@ Plus management verbs:
     otto queue cancel <id>
     otto queue run --concurrent N
 
-The CLI is **strictly append-only** to queue.yml + commands.jsonl.
-The watcher (`otto queue run`) is the SOLE writer of state.json.
+The CLI appends to queue.yml + commands.jsonl and may directly remove a
+queued task from queue.yml when no watcher is running. The watcher
+(`otto queue run`) is the SOLE writer of state.json.
 """
 
 from __future__ import annotations
@@ -179,6 +180,11 @@ def _watcher_alive(state: dict[str, Any], *, max_age_s: float = 10.0) -> bool:
     w = state.get("watcher")
     if not w:
         return False
+    pid = w.get("pid")
+    if not isinstance(pid, int):
+        return False
+    if not w.get("started_at"):
+        return False
     hb = w.get("heartbeat")
     if not hb:
         return False
@@ -186,9 +192,28 @@ def _watcher_alive(state: dict[str, Any], *, max_age_s: float = 10.0) -> bool:
         from datetime import datetime, timezone
         when = datetime.strptime(hb, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
         age = (datetime.now(tz=timezone.utc) - when).total_seconds()
-        return age < max_age_s
+        if age >= max_age_s:
+            return False
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
     except Exception:
         return False
+
+
+def _watcher_is_alive(project_dir: Path, *, max_age_s: float = 10.0) -> bool:
+    """Load state.json and return True iff the watcher heartbeat is fresh and live."""
+    from otto.queue.schema import load_state
+
+    try:
+        state = load_state(project_dir)
+    except Exception:
+        return False
+    return _watcher_alive(state, max_age_s=max_age_s)
 
 
 def _print_added(task_id: str, project_dir: Path) -> None:
@@ -559,35 +584,68 @@ def register_queue_commands(main: click.Group) -> None:
     @queue.command(context_settings=CONTEXT_SETTINGS)
     @click.argument("task_id")
     def rm(task_id: str) -> None:
-        """Remove a task from the queue (queues a remove command for the watcher)."""
-        from otto.queue.schema import append_command, load_queue
+        """Remove a task from the queue."""
+        from otto.queue.schema import append_command, load_queue, remove_task
+
         project_dir = _project_dir()
         if not any(t.id == task_id for t in load_queue(project_dir)):
             error_console.print(f"[error]No such task: {task_id!r}[/error]")
             sys.exit(2)
+        if not _watcher_is_alive(project_dir):
+            if not remove_task(project_dir, task_id):
+                error_console.print(f"[error]No such task: {task_id!r}[/error]")
+                sys.exit(2)
+            console.print(f"  Removed [info]{task_id}[/info] from queue.")
+            return
         append_command(project_dir, {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "cmd": "remove",
             "id": task_id,
         })
-        console.print(f"  Remove requested for [info]{task_id}[/info].")
+        console.print("  Remove queued; watcher will apply within ~1s.")
 
     # ---- cancel ----
     @queue.command(context_settings=CONTEXT_SETTINGS)
     @click.argument("task_id")
     def cancel(task_id: str) -> None:
         """Signal a running task to stop (process group SIGTERM)."""
-        from otto.queue.schema import append_command, load_queue
+        from otto.queue.schema import append_command, load_queue, load_state, remove_task
+
         project_dir = _project_dir()
         if not any(t.id == task_id for t in load_queue(project_dir)):
             error_console.print(f"[error]No such task: {task_id!r}[/error]")
             sys.exit(2)
+        if not _watcher_is_alive(project_dir):
+            state = load_state(project_dir)
+            ts = state.get("tasks", {}).get(task_id, {"status": "queued"})
+            status = ts.get("status", "queued")
+            if status == "queued":
+                if not remove_task(project_dir, task_id):
+                    error_console.print(f"[error]No such task: {task_id!r}[/error]")
+                    sys.exit(2)
+                console.print(
+                    f"  Task [info]{task_id}[/info] was never started. Removed from queue."
+                )
+                return
+            if status in {"running", "terminating"}:
+                console.print(
+                    f"  [yellow]Task [info]{task_id}[/info] is marked {status}, but the worker is "
+                    "not running.[/yellow] Start the watcher with: "
+                    "[info]otto queue run --break-lock --concurrent N[/info] "
+                    "for safe cleanup, or send SIGTERM to the child process group manually."
+                )
+                return
+            console.print(
+                f"  Task [info]{task_id}[/info] is already "
+                f"{rich_escape(str(status))}. No queue change made."
+            )
+            return
         append_command(project_dir, {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "cmd": "cancel",
             "id": task_id,
         })
-        console.print(f"  Cancel requested for [info]{task_id}[/info].")
+        console.print("  Cancel queued; watcher will apply within ~1s.")
 
     # ---- cleanup (Phase 6.4) ----
     @queue.command(context_settings=CONTEXT_SETTINGS)

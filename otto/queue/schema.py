@@ -1,11 +1,11 @@
 """Queue file schemas + atomic I/O (Phase 2.1).
 
 Three files, three writers:
-- queue.yml   — CLI appends task definitions; watcher reads only
+- queue.yml   — CLI appends task definitions and may remove queued tasks offline; watcher reads only
 - state.json  — watcher sole writer; CLI reads via load_state()
 - commands.jsonl — CLI appends mutation requests; watcher consumes
 
-Atomic writes via tempfile + os.rename. Concurrent CLI appends to queue.yml
+Atomic writes via tempfile + os.rename. Concurrent CLI writes to queue.yml
 and commands.jsonl serialised via fcntl.flock(LOCK_EX). The watcher never
 takes a write lock — it's the only writer of state.json, and queue.yml is
 re-read on mtime change (no lock needed for reads).
@@ -139,9 +139,7 @@ def _task_from_dict(d: dict[str, Any]) -> QueueTask:
 def append_task(project_dir: Path, task: QueueTask) -> None:
     """Append one task to queue.yml. Atomic: lock → read → append → rename.
 
-    queue.yml is **append-only from CLI**. Existing entries are NEVER
-    modified or removed by this function. Removal is represented in
-    state.json (`status: removed`).
+    Existing entries are NEVER modified or removed by this function.
     """
     path = queue_path(project_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -156,6 +154,27 @@ def append_task(project_dir: Path, task: QueueTask) -> None:
                 raise ValueError(f"task id {task.id!r} already exists in queue")
             current.append(task)
             _write_queue(path, current)
+        finally:
+            fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+
+
+def remove_task(project_dir: Path, task_id: str) -> bool:
+    """Remove one task from queue.yml under the queue lock.
+
+    Returns True if the task existed and was removed, False otherwise.
+    """
+    path = queue_path(project_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock = path.with_suffix(".yml.lock")
+    with open(lock, "w") as lf:
+        fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+        try:
+            current = load_queue(project_dir)
+            kept = [task for task in current if task.id != task_id]
+            if len(kept) == len(current):
+                return False
+            _write_queue(path, kept)
+            return True
         finally:
             fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
 

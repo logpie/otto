@@ -14,6 +14,7 @@ from otto.queue.schema import (
     COMMANDS_FILE,
     QUEUE_FILE,
     load_queue,
+    write_state,
 )
 from tests._helpers import init_repo
 
@@ -28,6 +29,25 @@ def _run(args: list[str], *, cwd: Path) -> tuple[int, str, str]:
     finally:
         os.chdir(saved_cwd)
     return result.exit_code, result.output, ""
+
+
+def _fresh_iso_now() -> str:
+    return cli_queue_module.time.strftime("%Y-%m-%dT%H:%M:%SZ", cli_queue_module.time.gmtime())
+
+
+def _write_watcher_state(
+    repo: Path,
+    *,
+    watcher: dict | None,
+    tasks: dict[str, dict] | None = None,
+) -> None:
+    write_state(
+        repo,
+        {
+            "watcher": watcher,
+            "tasks": tasks or {},
+        },
+    )
 
 
 # ---------- enqueue commands ----------
@@ -236,11 +256,34 @@ def test_queue_show_unknown_task(tmp_path: Path):
 # ---------- rm / cancel ----------
 
 
-def test_queue_rm_appends_command(tmp_path: Path):
+def test_queue_rm_without_watcher_removes_from_queue(tmp_path: Path):
     repo = init_repo(tmp_path)
     _run(["queue", "build", "csv"], cwd=repo)
     code, out, _ = _run(["queue", "rm", "csv"], cwd=repo)
     assert code == 0
+    assert "Removed csv from queue." in out
+    assert [task.id for task in load_queue(repo)] == []
+    assert not (repo / COMMANDS_FILE).exists()
+
+
+def test_queue_rm_with_watcher_running_appends_command(tmp_path: Path, monkeypatch):
+    repo = init_repo(tmp_path)
+    _run(["queue", "build", "csv"], cwd=repo)
+    now = _fresh_iso_now()
+    _write_watcher_state(
+        repo,
+        watcher={
+            "pid": 4242,
+            "pgid": 4242,
+            "started_at": now,
+            "heartbeat": now,
+        },
+    )
+    monkeypatch.setattr(cli_queue_module.os, "kill", lambda pid, sig: None)
+    code, out, _ = _run(["queue", "rm", "csv"], cwd=repo)
+    assert code == 0
+    assert "Remove queued; watcher will apply within ~1s." in out
+    assert [task.id for task in load_queue(repo)] == ["csv"]
     cmds_path = repo / COMMANDS_FILE
     assert cmds_path.exists()
     cmds = [json.loads(line) for line in cmds_path.read_text().splitlines() if line.strip()]
@@ -249,14 +292,35 @@ def test_queue_rm_appends_command(tmp_path: Path):
     assert cmds[0]["id"] == "csv"
 
 
-def test_queue_cancel_appends_command(tmp_path: Path):
+def test_queue_cancel_without_watcher_removes_queued_task(tmp_path: Path):
     repo = init_repo(tmp_path)
     _run(["queue", "build", "csv"], cwd=repo)
     code, out, _ = _run(["queue", "cancel", "csv"], cwd=repo)
     assert code == 0
-    cmds_path = repo / COMMANDS_FILE
-    cmds = [json.loads(line) for line in cmds_path.read_text().splitlines() if line.strip()]
-    assert cmds[0]["cmd"] == "cancel"
+    assert "was never started. Removed from queue." in out
+    assert [task.id for task in load_queue(repo)] == []
+    assert not (repo / COMMANDS_FILE).exists()
+
+
+def test_queue_cancel_without_watcher_warns_for_running_task(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    _run(["queue", "build", "csv"], cwd=repo)
+    _write_watcher_state(
+        repo,
+        watcher=None,
+        tasks={
+            "csv": {
+                "status": "running",
+                "child": {"pid": 999, "pgid": 999},
+            },
+        },
+    )
+    code, out, _ = _run(["queue", "cancel", "csv"], cwd=repo)
+    assert code == 0
+    assert "is marked running, but the worker is not running." in out
+    assert "--break-lock --concurrent N" in out
+    assert [task.id for task in load_queue(repo)] == ["csv"]
+    assert not (repo / COMMANDS_FILE).exists()
 
 
 def test_queue_rm_rejects_unknown_task(tmp_path: Path):
