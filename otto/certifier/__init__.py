@@ -124,22 +124,10 @@ async def run_agentic_certifier(
 
     text, cost, _session_id = await run_agent_with_timeout(
         prompt, options,
-        log_path=report_dir / "live.log",
+        log_dir=report_dir,
         timeout=timeout,
         project_dir=project_dir,
     )
-
-    # Save full agent output for auditability (not truncated)
-    try:
-        agent_log = report_dir / "certifier-agent.log"
-        agent_log.write_text(
-            f"# Certifier agent output — {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-            f"# Cost: ${float(cost or 0):.3f}\n"
-            f"# Text length: {len(text or '')} chars\n\n"
-            f"{text or '(no output)'}\n"
-        )
-    except Exception as exc:
-        logger.warning("Failed to write certifier agent log: %s", exc)
 
     # Parse results from agent output
     total_duration = round(time.monotonic() - start_time, 1)

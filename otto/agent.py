@@ -139,26 +139,41 @@ async def run_agent_with_timeout(
     prompt: str,
     options: AgentOptions,
     *,
-    log_path: Path,
+    log_dir: Path,
     timeout: int | None,
     project_dir: Path,
     capture_tool_output: bool = False,
 ) -> tuple[str, float, str]:
-    """Run an agent query with live logging, timeout, and orphan cleanup.
+    """Run an agent query with streaming session logs, timeout, and orphan cleanup.
 
     Returns (text, cost, session_id) on success.
     Raises AgentCallError on timeout/crash.
-    Always closes the live logger and cleans up orphan processes on failure.
+    Always closes the session loggers and cleans up orphan processes on failure.
+
+    Writes ``log_dir/messages.jsonl`` (lossless normalized SDK event stream)
+    and ``log_dir/narrative.log`` (human-readable stream). A ``live.log``
+    symlink -> ``narrative.log`` is also created for back-compat.
     """
     import asyncio
     import logging
 
+    from otto.logstream import make_session_logger
+
     log = logging.getLogger("otto.agent")
-    callbacks = make_live_logger(log_path)
+    callbacks = make_session_logger(log_dir)
     close_fh = callbacks.pop("_close")
     # Mutable bag — streaming handlers update it so timeout/crash paths can
     # recover the last-known session_id for a resumable checkpoint.
     agent_state: dict[str, str] = {"session_id": ""}
+
+    def _append_narrative(line: str) -> None:
+        """Append a terminal-error marker to narrative.log for human debugging."""
+        try:
+            with open(log_dir / "narrative.log", "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+        except OSError:
+            pass
+
     try:
         text, cost, result_msg = await asyncio.wait_for(
             run_agent_query(prompt, options,
@@ -171,6 +186,7 @@ async def run_agent_with_timeout(
         return text, cost, session_id
     except asyncio.TimeoutError:
         log.error("Agent timed out after %ds", timeout)
+        _append_narrative(f"\u2501\u2501\u2501 Timed out after {timeout}s")
         from otto.pipeline import _cleanup_orphan_processes
         _cleanup_orphan_processes(project_dir)
         raise AgentCallError(
@@ -178,11 +194,13 @@ async def run_agent_with_timeout(
             session_id=agent_state.get("session_id", ""),
         )
     except KeyboardInterrupt:
+        _append_narrative("\u2501\u2501\u2501 KeyboardInterrupt")
         from otto.pipeline import _cleanup_orphan_processes
         _cleanup_orphan_processes(project_dir)
         raise
     except Exception as exc:
         log.exception("Agent crashed")
+        _append_narrative(f"\u2501\u2501\u2501 Agent crashed: {exc}")
         from otto.pipeline import _cleanup_orphan_processes
         _cleanup_orphan_processes(project_dir)
         raise AgentCallError(
@@ -512,55 +530,6 @@ def tool_use_summary(block) -> str:
     return ""
 
 
-def make_live_logger(log_path: Path) -> dict[str, Callable]:
-    """Create callback functions that write agent activity to a live log file.
-
-    Returns a dict with on_text, on_tool, on_tool_result keys suitable for
-    passing to run_agent_query as **kwargs.
-
-    The log is append-mode and flushed after each write, so it can be
-    tailed in real time: tail -f otto_logs/certifier/live.log
-    """
-    import time
-    start = time.monotonic()
-    _fh = open(log_path, "a")
-
-    def _elapsed() -> str:
-        secs = time.monotonic() - start
-        return f"[{secs:6.1f}s]"
-
-    def _on_tool(block: Any) -> None:
-        name = getattr(block, "name", "?")
-        summary = tool_use_summary(block)
-        _fh.write(f"{_elapsed()} \u25cf {name}  {summary}\n")
-        _fh.flush()
-
-    def _on_tool_result(block: Any) -> None:
-        content = str(getattr(block, "content", "") or "")
-        is_error = getattr(block, "is_error", False)
-        prefix = "\u2717 error" if is_error else "\u2190 result"
-        # Truncate to first meaningful line
-        first_line = content.split("\n")[0][:200] if content else "(empty)"
-        _fh.write(f"{_elapsed()} {prefix}: {first_line}\n")
-        _fh.flush()
-
-    def _on_text(text: str) -> None:
-        # Only log thinking blocks and short text (skip large agent output)
-        if text.startswith("[thinking]"):
-            _fh.write(f"{_elapsed()} \u2192 {text[:150]}\n")
-            _fh.flush()
-
-    def _close() -> None:
-        _fh.close()
-
-    return {
-        "on_tool": _on_tool,
-        "on_tool_result": _on_tool_result,
-        "on_text": _on_text,
-        "_close": _close,
-    }
-
-
 async def run_agent_query(
     prompt: str,
     options: ClaudeAgentOptions,
@@ -569,6 +538,7 @@ async def run_agent_query(
     on_tool: Callable[[Any], Any] | None = None,
     on_tool_result: Callable[[Any], Any] | None = None,
     on_result: Callable[[Any], Any] | None = None,
+    on_message: Callable[[Any], Any] | None = None,
     capture_tool_output: bool = False,
     state: dict[str, str] | None = None,
 ) -> tuple[str, float, Any]:
@@ -577,6 +547,10 @@ async def run_agent_query(
     If capture_tool_output=True, tool result content (including subagent output)
     is appended to the returned text. This is useful when the caller needs to
     parse structured markers from subagent output.
+
+    If `on_message` is provided, it receives every normalized message before
+    block-level dispatch. This is the hook session loggers use to stream
+    both messages.jsonl and narrative.log.
 
     If `state` is provided, the function updates ``state["session_id"]`` as
     soon as a session_id is seen on any streamed message. This lets callers
@@ -595,6 +569,14 @@ async def run_agent_query(
             sid = getattr(message, "session_id", "") or ""
             if sid:
                 state["session_id"] = sid
+
+        if on_message is not None:
+            try:
+                on_message(message)
+            except Exception:
+                # Log writers must never kill the run.
+                import logging
+                logging.getLogger("otto.agent").exception("on_message handler failed")
 
         if isinstance(message, ResultMessage):
             result_msg = message

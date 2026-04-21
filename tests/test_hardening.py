@@ -140,12 +140,12 @@ class TestTimeoutEnforcement:
         # several seconds. 9s still catches a no-timeout regression (which
         # would sleep the full 10s plus overhead).
         assert elapsed < 9, f"Timeout not enforced; elapsed={elapsed:.1f}s"
-        # Check the raw log mentions timeout — strict `Timed out` match,
-        # not case-insensitive (AgentCallError writes exactly "Timed out").
+        # Check narrative.log mentions timeout — strict `Timed out` match,
+        # written by run_agent_with_timeout on asyncio.TimeoutError.
         from otto import paths
         build_dir = paths.build_dir(tmp_git_repo, result.build_id)
-        raw = (build_dir / "agent-raw.log").read_text()
-        assert "Timed out" in raw, f"Timeout not reported in raw log: {raw[:200]}"
+        narr = (build_dir / "narrative.log").read_text()
+        assert "Timed out" in narr, f"Timeout not reported in narrative.log: {narr[:200]}"
 
 
 # -- Test: CLAUDECODE env var --

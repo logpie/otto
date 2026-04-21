@@ -276,9 +276,9 @@ All artifacts from one invocation live under `otto_logs/sessions/<id>/`.
 
 | Question | Where to look |
 |----------|---------------|
-| What was built/fixed? | `otto_logs/latest/build/agent.log` |
-| Full agent trace? | `otto_logs/latest/build/agent-raw.log` |
-| Live tool calls? | `otto_logs/latest/build/live.log` (timestamped) |
+| What was built/fixed? | `otto_logs/latest/build/narrative.log` (human) or `messages.jsonl` (machine) |
+| Live tool calls? | `tail -f otto_logs/latest/build/narrative.log` |
+| Full lossless replay? | `jq . otto_logs/latest/build/messages.jsonl` |
 | Certifier results? | `otto_logs/latest/certify/proof-of-work.{json,html}` |
 | Build history? | `otto history` or `otto_logs/cross-sessions/history.jsonl` |
 | Improve progress? | `otto_logs/latest/improve/{build-journal.md,current-state.md}` |

@@ -12,11 +12,30 @@ def make_mock_query(text, cost=0.50, session_id="test-session"):
     Returns an async callable that yields canned text/cost/ResultMessage.
     Used by tests that patch ``otto.agent.run_agent_query`` to exercise the
     pipeline without hitting the real SDK.
+
+    Invokes the caller-supplied ``on_message`` callback with a synthetic
+    AssistantMessage(text) + ResultMessage so the session logger (Phase 6)
+    populates narrative.log and messages.jsonl realistically.
     """
     result_msg = MagicMock()
     result_msg.session_id = session_id
+    result_msg.subtype = "success"
+    result_msg.is_error = False
+    result_msg.result = None
+    result_msg.total_cost_usd = cost
+    result_msg.usage = None
 
     async def mock_query(prompt, options, **kwargs):
+        from otto.agent import AssistantMessage, ResultMessage, TextBlock
+        on_message = kwargs.get("on_message")
+        if on_message is not None:
+            # Emit the canned text as a single assistant TextBlock so the
+            # session logger sees real content to stream.
+            on_message(AssistantMessage(content=[TextBlock(text=text)]))
+            on_message(ResultMessage(
+                subtype="success", is_error=False, session_id=session_id,
+                result=None, total_cost_usd=cost, usage=None,
+            ))
         return text, cost, result_msg
 
     return mock_query

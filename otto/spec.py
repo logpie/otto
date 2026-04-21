@@ -43,6 +43,7 @@ _REQUIRED_HEADINGS = (
 )
 
 _INTENT_LINE = re.compile(r"^\s*\*\*Intent:\*\*\s+(?P<value>\S.*?)\s*$", re.MULTILINE)
+_BULLET_LINE = re.compile(r"^(?:[-*]|\d+\.)\s+(.*)")
 
 
 @dataclass
@@ -264,13 +265,13 @@ async def run_spec_agent(
         spec_cap = 600
     timeout: int = min(budget.for_call(), spec_cap) if budget is not None else spec_cap
 
-    log_name = f"spec-agent{'-v' + str(version) if version else ''}.log"
-    log_path = run_dir / log_name
+    # Per-version log subdir so regens don't overwrite each other.
+    log_subdir = run_dir / (f"agent-v{version}" if version else "agent")
 
     start = time.monotonic()
     _text, cost, _session = await run_agent_with_timeout(
         prompt, options,
-        log_path=log_path,
+        log_dir=log_subdir,
         timeout=timeout,
         project_dir=project_dir,
         capture_tool_output=False,
@@ -280,7 +281,7 @@ async def run_spec_agent(
 
     if not spec_path.exists():
         raise RuntimeError(
-            f"spec agent did not write {spec_path}. See {log_path} for details."
+            f"spec agent did not write {spec_path}. See {log_subdir}/narrative.log for details."
         )
 
     content = spec_path.read_text()
@@ -288,7 +289,7 @@ async def run_spec_agent(
     if errors:
         raise RuntimeError(
             "spec agent produced an invalid spec: " + "; ".join(errors)
-            + f". Inspect {spec_path} and {log_path}."
+            + f". Inspect {spec_path} and {log_subdir}/narrative.log."
         )
 
     return SpecResult(
@@ -325,8 +326,9 @@ def _summarize_spec(content: str) -> str:
             stripped = line.strip()
             if stripped.startswith("##"):
                 break
-            if stripped.startswith("-") or stripped.startswith("*"):
-                out.append(stripped.lstrip("-* ").strip())
+            m = _BULLET_LINE.match(stripped)
+            if m:
+                out.append(m.group(1).strip())
                 if len(out) >= limit:
                     break
         return out
@@ -406,12 +408,29 @@ async def review_spec(
             return current
 
         if action == "e":
+            import os
+            import shlex
+            import subprocess
+            editor_env = os.environ.get("VISUAL") or os.environ.get("EDITOR")
             print()
-            print(f"  Edit {current.path} then press Enter to continue...")
-            try:
-                input()
-            except EOFError:
-                raise KeyboardInterrupt("EOF during spec review")
+            if editor_env:
+                cmd = shlex.split(editor_env) + [str(current.path)]
+                print(f"  Opening {current.path} in {editor_env}...")
+                try:
+                    subprocess.call(cmd)
+                except (OSError, FileNotFoundError) as exc:
+                    print(f"  [error] could not launch editor ({exc}).")
+                    print(f"  Edit {current.path} manually, then press Enter to continue...")
+                    try:
+                        input()
+                    except EOFError:
+                        raise KeyboardInterrupt("EOF during spec review")
+            else:
+                print(f"  No $EDITOR/$VISUAL set. Edit {current.path} manually, then press Enter to continue...")
+                try:
+                    input()
+                except EOFError:
+                    raise KeyboardInterrupt("EOF during spec review")
             try:
                 content = current.path.read_text()
             except OSError as exc:

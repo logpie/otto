@@ -418,9 +418,9 @@ otto_logs/
         spec-v1.md, spec-v2.md              Regen history
         agent.log                           Spec agent trace
       build/                                Coding agent artifacts
-        live.log                            Streamed tool/thinking activity
-        agent.log                           Post-run summary: commits, verdict
-        agent-raw.log                       Full agent output (streamed)
+        narrative.log                       Human-readable streamed event log
+        messages.jsonl                      Lossless SDK event stream (JSON)
+        live.log                            Symlink -> narrative.log (back-compat)
       certify/                              Verification artifacts
         proof-of-work.{html,json,md}        Human + machine-readable reports
         evidence/                           Screenshots, recordings, transcripts

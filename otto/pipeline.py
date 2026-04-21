@@ -229,8 +229,7 @@ async def build_agentic_v3(
     try:
         text, cost, session_id = await run_agent_with_timeout(
             prompt, options,
-            log_path=build_dir / "live.log",
-            raw_log_path=build_dir / "agent-raw.log",
+            log_dir=build_dir,
             timeout=timeout,
             project_dir=project_dir,
             capture_tool_output=True,
@@ -257,86 +256,10 @@ async def build_agentic_v3(
     final_status = "paused" if text.startswith("BUILD ERROR:") else "completed"
     _cp(final_status, session_id=session_id)
 
-    # Save agent output:
-    # - agent-raw.log: streamed during the run (see run_agent_with_timeout);
-    #   file already complete by the time we get here.
-    # - agent.log: structured summary built now — what was built, certifier
-    #   results, fixes applied, timing. Enough to debug without reading raw.
-    agent_log_path = build_dir / "agent.log"
-    try:
-        ts = time.strftime("%Y-%m-%d %H:%M:%S")
-        # agent-raw.log was streamed during the run; no end-of-run dump needed.
-        # If the agent produced no text blocks (e.g., early error), fall back to
-        # writing a placeholder so the file exists.
-        raw_path = build_dir / "agent-raw.log"
-        if not raw_path.exists() or raw_path.stat().st_size == 0:
-            raw_path.write_text(text or "(no output)")
-
-        summary_lines = [
-            f"[{ts}] === Agentic v3 build ===",
-            f"[{ts}] Duration: {total_duration:.1f}s, Cost: ${total_run_cost:.2f}",
-            f"[{ts}] Raw output: {len(text or '')} chars -> agent-raw.log",
-        ]
-
-        # Extract structured events from agent text
-        if text:
-            # Git commits = what was built/fixed
-            try:
-                git_log_cmd = ["git", "log", "--oneline"]
-                if _head_before:
-                    git_log_cmd.append(f"{_head_before}..HEAD")
-                else:
-                    git_log_cmd.append("--max-count=20")
-                git_log = subprocess.run(
-                    git_log_cmd,
-                    cwd=str(project_dir), capture_output=True, text=True,
-                ).stdout.strip()
-                if git_log:
-                    summary_lines.append(f"[{ts}] Git commits:")
-                    for line in git_log.split("\n"):
-                        summary_lines.append(f"[{ts}]   {line}")
-            except (OSError, subprocess.SubprocessError) as exc:
-                logger.debug("git log read for agent.log failed: %s", exc)
-
-            # Certifier markers + diagnosis + failed story details
-            for line in text.split("\n"):
-                stripped = line.strip()
-                if any(stripped.startswith(m) for m in (
-                    "CERTIFY_ROUND:", "STORIES_TESTED:", "STORIES_PASSED:",
-                    "VERDICT:", "DIAGNOSIS:",
-                )):
-                    summary_lines.append(f"[{ts}]   {stripped}")
-                elif stripped.startswith("STORY_RESULT:"):
-                    # Always log failures; log passes concisely
-                    if "FAIL" in stripped.upper():
-                        summary_lines.append(f"[{ts}]   {stripped}")
-                    else:
-                        summary_lines.append(f"[{ts}]   {stripped[:120]}")
-
-            # Agent's own summary text (last ~500 chars of TextBlock content,
-            # which is the agent's final message after certifier results)
-            # Look for the agent's wrap-up after the last VERDICT
-            last_verdict_idx = text.rfind("VERDICT:")
-            if last_verdict_idx >= 0:
-                tail = text[last_verdict_idx:].strip()
-                # Skip the markers, get the prose after
-                prose_lines = []
-                past_markers = False
-                for line in tail.split("\n"):
-                    s = line.strip()
-                    if past_markers and s and not s.startswith(("STORY_RESULT:", "STORIES_", "VERDICT:", "DIAGNOSIS:", "CERTIFY_ROUND:")):
-                        prose_lines.append(s)
-                    if s.startswith("DIAGNOSIS:"):
-                        past_markers = True
-                if prose_lines:
-                    summary_lines.append(f"[{ts}] Agent summary:")
-                    for p in prose_lines[:10]:  # cap at 10 lines
-                        summary_lines.append(f"[{ts}]   {p[:200]}")
-
-        from otto.observability import append_text_log
-        append_text_log(agent_log_path, summary_lines)
-    except Exception as exc:
-        logger.warning("Failed to write agent log: %s", exc)
+    # Session logs (messages.jsonl, narrative.log) streamed during the run
+    # and were closed by run_agent_with_timeout. Nothing to write here —
+    # narrative.log IS the debuggable log, and messages.jsonl is the
+    # machine-readable replay.
 
     # Parse certification results from agent output
     from otto.markers import parse_certifier_markers

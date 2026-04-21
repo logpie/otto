@@ -24,9 +24,9 @@ Session id format: `<yyyy-mm-dd>-<HHMMSS>-<6hex>`.
 | `intent.txt` | Archival copy of the intent at session start |
 | `spec/spec.md` | Approved spec (spec-gate); versioned `spec-v1.md…` |
 | `spec/agent.log` | Spec agent trace |
-| `build/live.log` | Streamed tool/thinking activity (timestamped) |
-| `build/agent.log` | Post-run structured summary: commits, certifier rounds, verdict |
-| `build/agent-raw.log` | Full unfiltered agent output (streamed) |
+| `build/narrative.log` | Human-readable streamed event log (tail -f during run). Tool calls, results, thinking, STORY_RESULT / VERDICT markers elevated |
+| `build/messages.jsonl` | Lossless normalized SDK event stream — one JSON per event. Machine-consumable (`jq`, future `otto replay`) |
+| `build/live.log` | Symlink to `narrative.log` (back-compat for one release) |
 | `certify/proof-of-work.html` | Styled report with screenshots + video link |
 | `certify/proof-of-work.json` | Machine-readable: stories, evidence, round history |
 | `certify/proof-of-work.md` | Markdown summary |
@@ -64,21 +64,26 @@ command; clean up by `rm`-ing legacy subdirs if desired.
 ### Common debugging patterns
 
 **"Why did the build fail?"**
-→ Read `otto_logs/latest/build/agent.log` — look for STORY_RESULT lines.
+→ Read `otto_logs/latest/build/narrative.log` — scan for `STORY_RESULT:` and `VERDICT:` markers.
+→ For full replay: `jq -r '.blocks[]' otto_logs/latest/build/messages.jsonl`.
 
 **"What did the certifier test?"**
 → Read `otto_logs/latest/certify/proof-of-work.json`.
 
 **"Did the fix loop trigger?"**
-→ `build/agent.log` — CERTIFY_ROUND: 1 (FAIL) → CERTIFY_ROUND: 2 (PASS).
+→ `build/narrative.log` — `CERTIFY_ROUND: 1 (FAIL)` → `CERTIFY_ROUND: 2 (PASS)`.
 → `certify/proof-of-work.json` → `certify_rounds` and `round_history`.
 
 **"How much did it cost?"**
 → `summary.json` → `cost_usd`. Or `otto history`.
 
 **"Live tail during a run?"**
-→ `tail -f otto_logs/latest/build/live.log` (until Phase 6 replaces it
-with `narrative.log`).
+→ `tail -f otto_logs/latest/build/narrative.log` (or the legacy
+`…/live.log` symlink pointing at the same file).
+
+**"Replay the full run programmatically?"**
+→ `messages.jsonl` — one JSON object per normalized SDK message, streams
+live, never truncated.
 
 ## Key Principles
 

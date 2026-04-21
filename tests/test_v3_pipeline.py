@@ -208,17 +208,19 @@ class TestV3PipelinePass:
 
         from otto import paths as _paths
 
-        # --- Per-build logs ---
+        # --- Per-build session logs (Phase 6 layout) ---
         build_dir = _paths.build_dir(tmp_git_repo, result.build_id)
-        log_content = (build_dir / "agent.log").read_text()
-        assert "VERDICT: PASS" in log_content
-        assert "STORY_RESULT:" in log_content
-        # agent-raw.log should capture the full agent output verbatim —
-        # check for a distinctive substring from AGENT_OUTPUT_PASS that
-        # only appears in the raw mock text, not in the structured summary.
-        raw_content = (build_dir / "agent-raw.log").read_text()
-        assert "VERDICT: PASS" in raw_content
-        assert "dispatching the certifier" in raw_content
+        # narrative.log — human-readable streamed event log. VERDICT and
+        # STORY_RESULT markers are elevated as marker lines.
+        narr = (build_dir / "narrative.log").read_text()
+        assert "VERDICT: PASS" in narr
+        assert "STORY_RESULT:" in narr
+        # messages.jsonl — lossless normalized SDK event stream. Contains
+        # full text blocks including agent prose like "dispatching the
+        # certifier" that the narrative might compress.
+        jsonl = (build_dir / "messages.jsonl").read_text()
+        assert "VERDICT: PASS" in jsonl
+        assert "dispatching the certifier" in jsonl
 
         # --- Per-build checkpoint (summary of the run) ---
         cp = json.loads((build_dir / "checkpoint.json").read_text())
