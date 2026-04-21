@@ -611,7 +611,9 @@ def register_queue_commands(main: click.Group) -> None:
                   help="Suppress watcher event lines (spawn/reap/cancel) on stdout")
     @click.option("--no-dashboard", is_flag=True,
                   help="Force the prefixed-stdout watcher instead of the Textual dashboard")
-    def run(concurrent: int | None, quiet: bool, no_dashboard: bool) -> None:
+    @click.option("--dashboard-mouse", is_flag=True,
+                  help="Enable mouse capture (loses terminal copy in most terminals)")
+    def run(concurrent: int | None, quiet: bool, no_dashboard: bool, dashboard_mouse: bool) -> None:
         """Start the foreground queue watcher. Run in a tmux pane like `vite dev`."""
         from otto.config import load_config
         from otto.queue.runner import (
@@ -647,6 +649,7 @@ def register_queue_commands(main: click.Group) -> None:
                             project_dir,
                             concurrent=rcfg.concurrent,
                             quiet=quiet,
+                            dashboard_mouse=dashboard_mouse,
                             runner_config=rcfg,
                             otto_bin=otto_bin,
                         )

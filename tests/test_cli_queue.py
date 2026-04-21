@@ -252,3 +252,12 @@ def test_resolve_otto_bin_fallback_returns_argv(monkeypatch, tmp_path: Path):
     fake_python.write_text("")
     monkeypatch.setattr(cli_queue_module.sys, "executable", str(fake_python))
     assert cli_queue_module._resolve_otto_bin() == [str(fake_python), "-m", "otto.cli"]
+
+
+def test_queue_run_help_shows_dashboard_mouse_flag(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    code, out, _ = _run(["queue", "run", "--help"], cwd=repo)
+    help_text = " ".join(out.split())
+    assert code == 0
+    assert "--dashboard-mouse" in help_text
+    assert "loses terminal copy in most terminals" in help_text

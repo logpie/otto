@@ -274,9 +274,12 @@ async def test_empty_queue(tmp: Path) -> None:
     app = QueueApp(project_dir=repo, concurrent=2)
     async with app.run_test(size=(120, 30)) as pilot:
         await pilot.pause(0.6)
-        from textual.widgets import DataTable
+        from textual.widgets import DataTable, Static
         table = app.screen.query_one(DataTable)
+        empty_state = app.screen.query_one("#empty-state", Static)
         check(table.row_count == 0, f"empty queue → 0 rows (got {table.row_count})")
+        check("No tasks queued." in str(empty_state.content),
+              "empty queue shows the empty-state hint")
         # Press q — should exit cleanly
         await pilot.press("q")
         await pilot.pause(0.3)

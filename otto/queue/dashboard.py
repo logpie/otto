@@ -25,7 +25,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container
 from textual.screen import ModalScreen, Screen
-from textual.widgets import DataTable, RichLog, Static
+from textual.widgets import DataTable, Log, Static
 
 from otto import paths
 from otto.manifest import queue_index_path_for
@@ -36,6 +36,7 @@ logger = logging.getLogger("otto.queue.dashboard")
 
 _NARRATIVE_TAIL_BYTES = 32 * 1024
 _NARRATIVE_MAX_LINES = 5000
+_CANCEL_DEDUPE_WINDOW_S = 2.0
 _PHASE_BUILD = "BUILD"
 _PHASE_CERTIFY = "CERTIFY"
 _STATUS_CANCELABLE = {"running"}
@@ -575,6 +576,11 @@ class OverviewScreen(Screen[None]):
         yield Static(id="overview-banner")
         yield Static(id="overview-header")
         yield DataTable(id="overview-table")
+        yield Static(
+            "No tasks queued. Use `otto queue build|improve|certify <intent>` to add some, "
+            "or wait for the watcher to pick them up.",
+            id="empty-state",
+        )
         yield Static(id="overview-status")
 
     def on_mount(self) -> None:
@@ -593,7 +599,7 @@ class OverviewScreen(Screen[None]):
 
     def _refresh(self) -> None:
         snapshot = self.app.model.snapshot()
-        self.app.last_snapshot = snapshot
+        self.app.update_snapshot(snapshot)
         banner = self.query_one("#overview-banner", Static)
         banner.update(Text(self.app.model.overview_banner() or ""))
         header = self.query_one("#overview-header", Static)
@@ -611,6 +617,7 @@ class OverviewScreen(Screen[None]):
 
     def _sync_rows(self, tasks: Sequence[TaskView]) -> None:
         table = self.query_one("#overview-table", DataTable)
+        empty_state = self.query_one("#empty-state", Static)
         wanted = [task.task.id for task in tasks]
         current = set(self._row_order)
         for task_id in list(self._row_order):
@@ -641,6 +648,9 @@ class OverviewScreen(Screen[None]):
         if self._row_order:
             cursor_row = min(table.cursor_row, len(self._row_order) - 1)
             table.move_cursor(row=cursor_row, column=0, animate=False, scroll=True)
+        is_empty = not self._row_order
+        table.styles.display = "none" if is_empty else "block"
+        empty_state.styles.display = "block" if is_empty else "none"
 
     def _selected_task_id(self) -> str | None:
         table = self.query_one("#overview-table", DataTable)
@@ -729,10 +739,10 @@ class TaskDetailScreen(Screen[None]):
         Binding("q", "back", "Back", show=False),
         Binding("j", "scroll_down", "Down", show=False),
         Binding("k", "scroll_up", "Up", show=False),
-        Binding("pagedown", "page_down", "Page Down", show=False),
-        Binding("pageup", "page_up", "Page Up", show=False),
-        Binding("end", "follow_tail", "Tail", show=False),
-        Binding("home", "top", "Top", show=False),
+        Binding("pagedown", "page_down", "Page Down", show=False, priority=True),
+        Binding("pageup", "page_up", "Page Up", show=False, priority=True),
+        Binding("end", "follow_tail", "Tail", show=False, priority=True),
+        Binding("home", "top", "Top", show=False, priority=True),
         Binding("y", "yank_to_clipboard", "Yank", show=False),
         Binding("c", "cancel_task", "Cancel", show=False),
         Binding("?", "show_help", "Help", show=False),
@@ -747,11 +757,11 @@ class TaskDetailScreen(Screen[None]):
     def compose(self) -> ComposeResult:
         yield Static(id="detail-header")
         yield Static(id="detail-info")
-        yield RichLog(id="detail-log", max_lines=_NARRATIVE_MAX_LINES, markup=True, highlight=True)
+        yield Log(id="detail-log", max_lines=_NARRATIVE_MAX_LINES, auto_scroll=True, highlight=True)
         yield Static("[esc/q back · y yank · j/k scroll · pgup/pgdn · c cancel · end follow]", id="detail-status")
 
     def on_mount(self) -> None:
-        self.query_one("#detail-log", RichLog).focus()
+        self.query_one("#detail-log", Log).focus()
         self._refresh()
         self.set_interval(0.25, self._refresh)
 
@@ -762,16 +772,19 @@ class TaskDetailScreen(Screen[None]):
         return current.narrative_path
 
     def _refresh(self) -> None:
-        current = self.app.model.resolve_task(self.task_id)
+        snapshot = self.app.model.snapshot()
+        self.app.update_snapshot(snapshot)
+        current = snapshot.by_id.get(self.task_id)
         self._update_header(current)
         self._update_info(current)
-        log = self.query_one("#detail-log", RichLog)
+        log = self.query_one("#detail-log", Log)
         clear, lines = self._tailer.poll()
         if clear:
             log.clear()
         for line in lines:
-            log.write(Text(line), scroll_end=self._follow)
+            log.write_line(line, scroll_end=self._follow)
         if self._follow and lines:
+            log.auto_scroll = True
             log.scroll_end(animate=False)
 
     def _update_header(self, current: TaskView | None) -> None:
@@ -804,27 +817,39 @@ class TaskDetailScreen(Screen[None]):
 
     def action_scroll_down(self) -> None:
         self._follow = False
-        self.query_one("#detail-log", RichLog).scroll_down(animate=False)
+        log = self.query_one("#detail-log", Log)
+        log.auto_scroll = False
+        log.scroll_down(animate=False)
 
     def action_scroll_up(self) -> None:
         self._follow = False
-        self.query_one("#detail-log", RichLog).scroll_up(animate=False)
+        log = self.query_one("#detail-log", Log)
+        log.auto_scroll = False
+        log.scroll_up(animate=False)
 
     def action_page_down(self) -> None:
         self._follow = False
-        self.query_one("#detail-log", RichLog).scroll_page_down(animate=False)
+        log = self.query_one("#detail-log", Log)
+        log.auto_scroll = False
+        log.scroll_page_down(animate=False)
 
     def action_page_up(self) -> None:
         self._follow = False
-        self.query_one("#detail-log", RichLog).scroll_page_up(animate=False)
+        log = self.query_one("#detail-log", Log)
+        log.auto_scroll = False
+        log.scroll_page_up(animate=False)
 
     def action_follow_tail(self) -> None:
         self._follow = True
-        self.query_one("#detail-log", RichLog).scroll_end(animate=False)
+        log = self.query_one("#detail-log", Log)
+        log.auto_scroll = True
+        log.scroll_end(animate=False)
 
     def action_top(self) -> None:
         self._follow = False
-        self.query_one("#detail-log", RichLog).scroll_home(animate=False)
+        log = self.query_one("#detail-log", Log)
+        log.auto_scroll = False
+        log.scroll_home(animate=False)
 
     def action_cancel_task(self) -> None:
         self.app.cancel_task(self.task_id)
@@ -888,8 +913,15 @@ class QueueApp(App[int]):
         color: $text-muted;
     }
 
-    #overview-table, #detail-log {
+    #overview-table, #detail-log, #empty-state {
         height: 1fr;
+    }
+
+    #empty-state {
+        display: none;
+        padding: 1 4;
+        color: $text-muted;
+        content-align: center middle;
     }
 
     #help-modal {
@@ -913,14 +945,17 @@ class QueueApp(App[int]):
         concurrent: int,
         cancel_callback: Callable[[str], None] | None = None,
         runner: Runner | None = None,
+        dashboard_mouse: bool = False,
     ) -> None:
         super().__init__()
         self.project_dir = project_dir
         self.concurrent = concurrent
+        self.dashboard_mouse = dashboard_mouse
         self.model = QueueModel(project_dir)
         self.cancel_callback = cancel_callback or (lambda task_id: _append_cancel_command(project_dir, task_id))
         self.runner = runner
         self.last_snapshot = QueueSnapshot([], None, "-", 0.0, 0, 0, 0, 0)
+        self._recent_cancel_requests: dict[str, float] = {}
 
     async def on_mount(self) -> None:
         await self.push_screen(OverviewScreen())
@@ -930,6 +965,13 @@ class QueueApp(App[int]):
             self.runner.shutdown_level = "graceful"
         self.exit(0)
 
+    def update_snapshot(self, snapshot: QueueSnapshot) -> None:
+        self.last_snapshot = snapshot
+        running_ids = {task.task.id for task in snapshot.tasks if task.can_cancel}
+        for task_id in list(self._recent_cancel_requests):
+            if task_id not in running_ids:
+                self._recent_cancel_requests.pop(task_id, None)
+
     def cancel_task(self, task_id: str) -> None:
         current = self.model.resolve_task(task_id)
         if current is None:
@@ -938,7 +980,13 @@ class QueueApp(App[int]):
         if not current.can_cancel:
             self.notify("task is not running, cannot cancel", severity="warning")
             return
+        now = time.monotonic()
+        last_sent = self._recent_cancel_requests.get(task_id)
+        if last_sent is not None and (now - last_sent) < _CANCEL_DEDUPE_WINDOW_S:
+            self.notify(f"cancel already sent for {task_id}", severity="information")
+            return
         self.cancel_callback(task_id)
+        self._recent_cancel_requests[task_id] = now
         self.notify(f"cancel queued for {task_id}", severity="information")
 
 
@@ -985,7 +1033,7 @@ def _copy_to_clipboard(text: str) -> bool:
 
 async def _run_dashboard_async(app: QueueApp, runner: Runner, *, quiet: bool) -> int:
     runner_task = asyncio.create_task(runner.run_async())
-    app_task = asyncio.create_task(app.run_async(mouse=False))
+    app_task = asyncio.create_task(app.run_async(mouse=app.dashboard_mouse))
 
     while True:
         done, _pending = await asyncio.wait(
@@ -1031,6 +1079,7 @@ def run_dashboard(
     *,
     concurrent: int,
     quiet: bool,
+    dashboard_mouse: bool = False,
     runner_config: RunnerConfig,
     otto_bin: list[str] | str,
 ) -> int:
@@ -1039,5 +1088,5 @@ def run_dashboard(
 
     _install_runner_logging(project_dir, quiet=True)
     runner = Runner(project_dir, runner_config, otto_bin=otto_bin)
-    app = QueueApp(project_dir, concurrent=concurrent, runner=runner)
+    app = QueueApp(project_dir, concurrent=concurrent, runner=runner, dashboard_mouse=dashboard_mouse)
     return asyncio.run(_run_dashboard_async(app, runner, quiet=quiet))

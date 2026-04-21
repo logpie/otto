@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
-from textual.widgets import DataTable, RichLog, Static
+from textual.widgets import DataTable, Log, Static
 
 import otto.cli_queue as cli_queue_module
 import otto.queue.dashboard as dashboard_module
@@ -138,6 +138,23 @@ async def test_overview_updates_when_state_changes(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_overview_shows_empty_state_for_zero_tasks(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    _write_queue_state(repo, {})
+
+    app = _build_app(repo)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        table = app.screen.query_one("#overview-table", DataTable)
+        empty_state = app.screen.query_one("#empty-state", Static)
+
+        assert table.row_count == 0
+        assert table.styles.display == "none"
+        assert empty_state.styles.display == "block"
+        assert "No tasks queued." in str(empty_state.content)
+
+
+@pytest.mark.asyncio
 async def test_navigation_and_detail_screen(tmp_path: Path):
     repo = init_repo(tmp_path)
     append_task(repo, _queue_task("alpha", branch="build/alpha", worktree=".worktrees/alpha"))
@@ -170,6 +187,64 @@ async def test_navigation_and_detail_screen(tmp_path: Path):
         await pilot.press("escape")
         await pilot.pause()
         assert isinstance(app.screen, OverviewScreen)
+
+
+@pytest.mark.asyncio
+async def test_detail_uses_log_and_end_resumes_follow(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    append_task(repo, _queue_task("alpha", branch="build/alpha", worktree=".worktrees/alpha"))
+    narrative_path = (
+        repo
+        / ".worktrees"
+        / "alpha"
+        / "otto_logs"
+        / "sessions"
+        / "session-alpha"
+        / "build"
+        / "narrative.log"
+    )
+    _write_narrative(
+        repo,
+        "alpha",
+        "".join(f"[+0:{idx:02d}] line {idx}\n" for idx in range(40)),
+    )
+    _write_queue_state(
+        repo,
+        {"alpha": {"status": "running", "started_at": "2026-04-21T20:00:01Z"}},
+    )
+
+    app = _build_app(repo)
+    async with app.run_test(size=(80, 10)) as pilot:
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause(0.4)
+
+        assert isinstance(app.screen, TaskDetailScreen)
+        log_widget = app.screen.query_one("#detail-log", Log)
+        assert isinstance(log_widget, Log)
+        assert log_widget.auto_scroll is True
+
+        app.screen.action_top()
+        await pilot.pause(0.1)
+        assert app.screen._follow is False
+        assert log_widget.auto_scroll is False
+        assert log_widget.scroll_y == 0
+
+        with narrative_path.open("a", encoding="utf-8") as handle:
+            handle.write("[+0:40] after home\n")
+        await pilot.pause(0.4)
+        assert log_widget.scroll_y == 0
+
+        await pilot.press("end")
+        await pilot.pause(0.2)
+        assert app.screen._follow is True
+        assert log_widget.auto_scroll is True
+        assert log_widget.scroll_y == log_widget.max_scroll_y
+
+        with narrative_path.open("a", encoding="utf-8") as handle:
+            handle.write("[+0:41] after end\n")
+        await pilot.pause(0.4)
+        assert log_widget.scroll_y == log_widget.max_scroll_y
 
 
 def test_narrative_tailer_reads_new_bytes(tmp_path: Path):
@@ -206,6 +281,90 @@ async def test_cancel_key_calls_callback_for_selected_task(tmp_path: Path):
         await pilot.press("c")
         await pilot.pause()
         assert seen == ["alpha"]
+
+
+@pytest.mark.asyncio
+async def test_overview_cancel_dedupes_notifications(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    repo = init_repo(tmp_path)
+    append_task(repo, _queue_task("alpha", branch="build/alpha", worktree=".worktrees/alpha"))
+    _write_narrative(repo, "alpha", "[+0:00] — BUILD starting —\n")
+    _write_queue_state(
+        repo,
+        {"alpha": {"status": "running", "started_at": "2026-04-21T20:00:01Z"}},
+    )
+    seen: list[str] = []
+    notices: list[tuple[str, str]] = []
+    app = _build_app(repo, cancel_callback=seen.append)
+    monkeypatch.setattr(
+        app,
+        "notify",
+        lambda message, **kwargs: notices.append((message, kwargs.get("severity", "information"))),
+    )
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("c")
+        await pilot.pause(0.1)
+        await pilot.press("c")
+        await pilot.pause(0.1)
+
+        assert seen == ["alpha"]
+        assert notices[:2] == [
+            ("cancel queued for alpha", "information"),
+            ("cancel already sent for alpha", "information"),
+        ]
+        assert "alpha" in app._recent_cancel_requests
+
+        _write_queue_state(
+            repo,
+            {
+                "alpha": {
+                    "status": "done",
+                    "started_at": "2026-04-21T20:00:01Z",
+                    "finished_at": "2026-04-21T20:00:05Z",
+                }
+            },
+        )
+        await pilot.pause(0.6)
+
+        assert "alpha" not in app._recent_cancel_requests
+        await pilot.press("c")
+        await pilot.pause(0.1)
+        assert notices[-1] == ("task is not running, cannot cancel", "warning")
+
+
+@pytest.mark.asyncio
+async def test_detail_cancel_dedupes_notifications(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    repo = init_repo(tmp_path)
+    append_task(repo, _queue_task("alpha", branch="build/alpha", worktree=".worktrees/alpha"))
+    _write_narrative(repo, "alpha", "[+0:00] — BUILD starting —\n")
+    _write_queue_state(
+        repo,
+        {"alpha": {"status": "running", "started_at": "2026-04-21T20:00:01Z"}},
+    )
+    seen: list[str] = []
+    notices: list[tuple[str, str]] = []
+    app = _build_app(repo, cancel_callback=seen.append)
+    monkeypatch.setattr(
+        app,
+        "notify",
+        lambda message, **kwargs: notices.append((message, kwargs.get("severity", "information"))),
+    )
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause(0.2)
+        await pilot.press("c")
+        await pilot.pause(0.1)
+        await pilot.press("c")
+        await pilot.pause(0.1)
+
+    assert seen == ["alpha"]
+    assert notices[:2] == [
+        ("cancel queued for alpha", "information"),
+        ("cancel already sent for alpha", "information"),
+    ]
 
 
 @pytest.mark.asyncio
