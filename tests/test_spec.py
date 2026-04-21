@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 
 from otto.spec import (
-    MAX_SPEC_LINES,
     SpecResult,
     count_open_questions,
     format_spec_section,
@@ -69,11 +68,6 @@ class TestValidateSpec:
         content = MINIMAL_VALID.replace("## Must NOT Have Yet", "## Not Actually")
         errs = validate_spec(content)
         assert any("Must NOT Have Yet" in e for e in errs)
-
-    def test_size_cap(self):
-        content = MINIMAL_VALID + ("\nextra line" * (MAX_SPEC_LINES + 10))
-        errs = validate_spec(content)
-        assert any("lines" in e for e in errs)
 
     def test_accepts_minimal_valid(self):
         assert validate_spec(MINIMAL_VALID) == []

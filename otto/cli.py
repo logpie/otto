@@ -5,6 +5,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 # Clear CLAUDECODE at startup so otto can run from inside Claude Code sessions.
 # Without this, agent SDK query() spawns a Claude Code subprocess that detects
@@ -79,6 +80,47 @@ def main():
             err=True,
         )
         sys.exit(1)
+
+
+def _print_config_banner(
+    console_: Any,
+    config: dict,
+    cli_sources: dict[str, str],
+    config_path: Path,
+) -> None:
+    """Print the resolved configuration with its source per value.
+
+    Source is ``cli`` if the user passed a flag, ``otto.yaml`` if the
+    value came from the loaded file, or ``default`` if it fell through
+    to DEFAULTS.
+    """
+    from otto.config import DEFAULTS
+    yaml_raw: dict[str, Any] = {}
+    if config_path.exists():
+        import yaml as _yaml
+        try:
+            raw = _yaml.safe_load(config_path.read_text()) or {}
+            if isinstance(raw, dict):
+                yaml_raw = raw
+        except Exception:
+            pass
+
+    def _source(key: str) -> str:
+        if cli_sources.get(key) == "cli":
+            return "cli"
+        if key in yaml_raw:
+            return "otto.yaml"
+        return "default"
+
+    rows = [
+        ("mode",     config.get("certifier_mode"), _source("certifier_mode")),
+        ("rounds",   config.get("max_certify_rounds"), _source("max_certify_rounds")),
+        ("budget",   f"{config.get('run_budget_seconds')}s", _source("run_budget_seconds")),
+        ("provider", config.get("provider"), _source("provider")),
+        ("model",    config.get("model") or "(provider default)", _source("model")),
+    ]
+    parts = [f"{label}: {val} ({src})" for label, val, src in rows]
+    console_.print(f"  [dim]{' | '.join(parts)}[/dim]")
 
 
 def _new_run_id(project_dir: "Path | None" = None) -> str:
@@ -396,7 +438,11 @@ def _exit_for_lock_busy(exc) -> None:
 @click.option("--standard", "standard_", is_flag=True, help="Standard certification — Must-Have + generic CRUD/edge/access checklist")
 @click.option("--thorough", is_flag=True, help="Thorough certification — adversarial edge cases + code review")
 @click.option("--split", is_flag=True, help="Split mode: system-controlled certify loop with build journal")
-@click.option("--rounds", "-n", default=None, type=int, help="Max certification rounds (default: 8)")
+@click.option("--rounds", "-n", default=None, type=int, help="Max certification rounds (default from otto.yaml or 8)")
+@click.option("--budget", default=None, type=int, help="Total wall-clock budget in seconds (default from otto.yaml or 3600)")
+@click.option("--model", default=None, help="Override model for every agent (e.g. sonnet, haiku, gpt-5)")
+@click.option("--provider", default=None, help="Override provider for every agent: claude | codex")
+@click.option("--effort", default=None, help="Override effort level for every agent: low | medium | high | max")
 @click.option("--resume", is_flag=True, help="Resume from last checkpoint (requires an in-progress run)")
 @click.option("--spec", is_flag=True, help="Generate a reviewable spec before building")
 @click.option("--spec-file", type=click.Path(exists=False, dir_okay=False, path_type=Path),
@@ -404,7 +450,7 @@ def _exit_for_lock_busy(exc) -> None:
 @click.option("--yes", is_flag=True, help="Auto-approve the generated spec (for CI/scripts)")
 @click.option("--force", is_flag=True, help="Discard an active paused spec run and start fresh")
 @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
-def build(intent, no_qa, fast, standard_, thorough, split, rounds, resume, spec, spec_file, yes, force, break_lock):
+def build(intent, no_qa, fast, standard_, thorough, split, rounds, budget, model, provider, effort, resume, spec, spec_file, yes, force, break_lock):
     """Build a product from a natural language intent.
 
     One agent builds, certifies, and fixes autonomously. The certifier
@@ -431,8 +477,9 @@ def build(intent, no_qa, fast, standard_, thorough, split, rounds, resume, spec,
     try:
         with _paths.project_lock(project_dir, "build", break_lock=break_lock):
             _build_locked(
-                intent, no_qa, fast, standard_, thorough, split, rounds, resume,
-                spec, spec_file, yes, force, project_dir,
+                intent, no_qa, fast, standard_, thorough, split, rounds,
+                budget, model, provider, effort,
+                resume, spec, spec_file, yes, force, project_dir,
             )
     except _paths.LockBusy as exc:
         _exit_for_lock_busy(exc)
@@ -446,6 +493,10 @@ def _build_locked(
     thorough,
     split,
     rounds,
+    budget,
+    model,
+    provider,
+    effort,
     resume,
     spec,
     spec_file,
@@ -586,18 +637,35 @@ def _build_locked(
             "[error]--fast, --standard, and --thorough are mutually exclusive.[/error]"
         )
         sys.exit(2)
-    if fast:
-        config["_certifier_mode"] = "fast"
-    elif standard_:
-        config["_certifier_mode"] = "standard"
-    elif thorough:
-        config["_certifier_mode"] = "thorough"
+
+    # Resolve CLI overrides into config. Track sources so the banner can
+    # show where each active value came from.
+    sources: dict[str, str] = {}
+    mode_flag = "fast" if fast else ("standard" if standard_ else ("thorough" if thorough else None))
+    if mode_flag:
+        config["certifier_mode"] = mode_flag
+        sources["certifier_mode"] = "cli"
     if rounds is not None:
         config["max_certify_rounds"] = rounds
+        sources["max_certify_rounds"] = "cli"
+    if budget is not None:
+        config["run_budget_seconds"] = budget
+        sources["run_budget_seconds"] = "cli"
+    if model:
+        config["model"] = model
+        sources["model"] = "cli"
+    if provider:
+        config["provider"] = provider
+        sources["provider"] = "cli"
+    if effort:
+        config["effort"] = effort
+        sources["effort"] = "cli"
+
+    _print_config_banner(console, config, sources, config_path)
 
     from otto.pipeline import build_agentic_v3, run_certify_fix_loop, BuildResult
     from otto.budget import RunBudget
-    budget = RunBudget.start_from(config)
+    run_budget = RunBudget.start_from(config)
 
     # --- Spec phase (if --spec or --spec-file) ---
     # Start timer BEFORE spec so reported duration matches budget accounting.
@@ -618,7 +686,7 @@ def _build_locked(
                 resume_state=resume_state,
                 config=config,
                 run_id=run_id or None,
-                budget=budget,
+                budget=run_budget,
             ))
         except KeyboardInterrupt:
             console.print("\n  [yellow]Paused. Run `otto build --resume` to continue.[/yellow]")
@@ -650,7 +718,7 @@ def _build_locked(
                                      record_intent=not resume_without_intent,
                                      spec=spec_content,
                                      spec_cost=spec_cost_total,
-                                     budget=budget)
+                                     budget=run_budget)
             )
         else:
             if certifier_mode == "fast":
@@ -668,7 +736,7 @@ def _build_locked(
                                  resume_existing_session=resume_without_intent,
                                  spec=spec_content,
                                  run_id=run_id or None,
-                                 budget=budget,
+                                 budget=run_budget,
                                  spec_cost=spec_cost_total)
             )
     except KeyboardInterrupt:

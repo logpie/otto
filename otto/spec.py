@@ -26,14 +26,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("otto.spec")
 
-# Line cap for a valid spec. Generous enough for the `light` template plus
-# commentary, strict enough to refuse "agent dumped a PRD" mistakes.
-MAX_SPEC_LINES = 300
-
-# Regenerate cap in the interactive review gate. 6th request forces the user
-# to approve, edit manually, or quit.
-MAX_REGENERATIONS = 5
-
 # Required section headings (exact match after stripping whitespace). The
 # spec prompt is constrained to produce these — validation catches drift.
 _REQUIRED_HEADINGS = (
@@ -69,17 +61,12 @@ def validate_spec(content: str) -> list[str]:
       - all required `##` headings (Must Have, Must NOT Have Yet, Success
         Criteria)
       - non-empty content
-      - fewer than MAX_SPEC_LINES lines
     """
     errors: list[str] = []
 
     if not content.strip():
         errors.append("spec is empty")
         return errors
-
-    line_count = len(content.splitlines())
-    if line_count > MAX_SPEC_LINES:
-        errors.append(f"spec is {line_count} lines (max {MAX_SPEC_LINES})")
 
     intents = _INTENT_LINE.findall(content)
     if not intents:
@@ -389,8 +376,6 @@ async def review_spec(
         print()
         print(_summarize_spec(current.content))
         print()
-        if regen_count >= MAX_REGENERATIONS:
-            print("  [regen cap reached — approve, edit, or quit]")
         print("  [a] approve and build")
         print("  [e] edit spec.md yourself (I'll wait)")
         print("  [r] regenerate with notes")
@@ -452,9 +437,6 @@ async def review_spec(
             continue
 
         if action == "r":
-            if regen_count >= MAX_REGENERATIONS:
-                print(f"  [regen cap of {MAX_REGENERATIONS} reached — approve, edit, or quit]")
-                continue
             try:
                 note = input("  One-line note (what to change): ").strip()
             except EOFError:
