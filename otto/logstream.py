@@ -294,9 +294,23 @@ class NarrativeFormatter:
             return
 
         # Elevate certifier markers embedded in tool/subagent output.
+        # For subagent results, also preserve the non-marker prose so the
+        # human gets the summary (e.g. "All 5 tests pass") alongside the
+        # parsed STORY_RESULT / VERDICT lines.
         marker_lines = [line.strip() for line in content.split("\n")
                         if _is_marker(line.strip())]
         if marker_lines:
+            if is_subagent:
+                prose = "\n".join(
+                    l for l in content.split("\n")
+                    if l.strip() and not _is_marker(l.strip())
+                ).strip()
+                if prose:
+                    flat = " ".join(prose.split())
+                    self._write(
+                        f"{ts} {self._GLYPH_SUBAGENT} [subagent]: "
+                        f"{_truncate_at_word(flat)}"
+                    )
             for s in marker_lines:
                 self._write(f"{ts} {self._GLYPH_MARKER} {s}")
             return
@@ -405,10 +419,16 @@ def _maybe_extract_subagent_text(content: Any) -> str | None:
         stripped = content.lstrip()
         if not stripped.startswith("["):
             return None
+        # Try JSON first (double-quoted). Subagent outputs are often
+        # python-repr style with single quotes; fall through to ast.literal_eval.
         try:
             parsed = json.loads(stripped)
         except (json.JSONDecodeError, ValueError):
-            return None
+            import ast
+            try:
+                parsed = ast.literal_eval(stripped)
+            except (ValueError, SyntaxError):
+                return None
     else:
         return None
 
