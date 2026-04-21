@@ -42,6 +42,7 @@ from otto.queue.schema import (
     load_queue,
     load_state,
     lock_path,
+    remove_task,
     write_state,
 )
 from otto.queue.ids import detect_cycles
@@ -132,7 +133,10 @@ def child_is_alive(child: dict[str, Any]) -> bool:
         # start_time_ns: psutil exposes create_time() in seconds (float)
         recorded = child.get("start_time_ns")
         if recorded is not None:
-            actual_ns = int(proc.create_time() * 1_000_000_000)
+            try:
+                actual_ns = int(proc.create_time() * 1_000_000_000)
+            except (psutil.NoSuchProcess, ProcessLookupError):
+                return False
             # Allow 100ms drift to absorb float→int conversion noise
             if abs(actual_ns - int(recorded)) > 100_000_000:
                 return False
@@ -280,6 +284,23 @@ class Runner:
         self._reconcile_on_startup()
         self._update_watcher_state()
 
+    def _load_queue_or_empty(self, *, context: str) -> list[QueueTask]:
+        try:
+            return load_queue(self.project_dir)
+        except (OSError, ValueError) as exc:
+            logger.error("failed to load queue.yml during %s: %s", context, exc)
+            return []
+
+    def _remove_task_definition(self, task_id: str) -> bool | None:
+        try:
+            removed = remove_task(self.project_dir, task_id)
+        except (OSError, ValueError) as exc:
+            logger.error("remove: failed to update queue.yml for %s: %s", task_id, exc)
+            return None
+        if not removed:
+            logger.warning("remove: task %s was already absent from queue.yml", task_id)
+        return removed
+
     def _run_iteration(self, last_heartbeat: float) -> tuple[float, int | None, bool]:
         try:
             self._tick()
@@ -381,7 +402,7 @@ class Runner:
           fail   → mark failed
         """
         state = load_state(self.project_dir)
-        tasks_by_id = {t.id: t for t in load_queue(self.project_dir)}
+        tasks_by_id = {t.id: t for t in self._load_queue_or_empty(context="startup reconcile")}
         policy = self.config.on_watcher_restart
         for tid, ts in list(state.get("tasks", {}).items()):
             status = ts.get("status")
@@ -486,6 +507,8 @@ class Runner:
                 ts["terminal_status"] = "cancelled"
                 ts["failure_reason"] = "cancelled by user"
                 return
+            if self._remove_task_definition(tid) is None:
+                return
             ts["status"] = "cancelled"
             ts["finished_at"] = now_iso()
             ts["child"] = None
@@ -493,6 +516,11 @@ class Runner:
         elif kind == "remove":
             if status == "removed":
                 logger.warning("remove ignored for %s in status=removed", tid)
+                return
+            if status in {"done", "failed", "cancelled"}:
+                logger.warning("remove ignored for %s in terminal status=%s; use cleanup", tid, status)
+                return
+            if self._remove_task_definition(tid) is None:
                 return
             if status == "running":
                 child = ts.get("child") or {}

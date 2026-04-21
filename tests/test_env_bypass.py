@@ -13,7 +13,8 @@ import os
 import subprocess
 from pathlib import Path
 
-from otto.cli import _check_venv_guard
+from otto.cli import _check_venv_guard, _resolve_git_worktree_context
+from tests._helpers import init_repo
 
 
 # ---------- _check_venv_guard pure logic ----------
@@ -68,6 +69,39 @@ def test_guard_does_not_block_when_cwd_outside_worktree():
         queue_runner_env=None,
     )
     assert should_block is False
+
+
+def test_guard_blocks_for_other_repo_linked_worktree_with_git_context(tmp_path: Path):
+    otto_repo = init_repo(tmp_path, subdir="otto")
+    user_repo = init_repo(tmp_path, subdir="user")
+    user_worktree = tmp_path / "user-wt"
+    subprocess.run(
+        ["git", "worktree", "add", str(user_worktree)],
+        cwd=user_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    cwd_context = _resolve_git_worktree_context(user_worktree)
+    otto_context = _resolve_git_worktree_context(otto_repo)
+    assert cwd_context is not None
+    assert otto_context is not None
+    assert cwd_context["git_dir"] != cwd_context["git_common_dir"]
+
+    should_block, msg = _check_venv_guard(
+        cwd=str(user_worktree),
+        otto_src=str(otto_repo / "otto"),
+        queue_runner_env=None,
+        cwd_repo_root=cwd_context["repo_root"],
+        otto_repo_root=otto_context["repo_root"],
+        cwd_git_dir=cwd_context["git_dir"],
+        cwd_git_common_dir=cwd_context["git_common_dir"],
+    )
+
+    assert should_block is True
+    assert msg is not None
+    assert "linked worktree" in msg
 
 
 # ---------- env scoping (one-level-deep) ----------

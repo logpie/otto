@@ -19,6 +19,7 @@ import fcntl
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -71,6 +72,12 @@ class MergeOptions:
     full_verify: bool = False
     fast: bool = False                  # pure git, bail on first conflict
     cleanup_on_success: bool = False    # remove worktrees after merge
+    allow_any_branch: bool = False
+
+
+_ATOMIC_BRANCH_RE = re.compile(
+    r"^(?P<mode>[a-z0-9][a-z0-9._-]*)/(?P<slug>[a-z0-9][a-z0-9-]*)-(?P<date>\d{4}-\d{2}-\d{2})$"
+)
 
 
 @contextmanager
@@ -116,6 +123,7 @@ def _resolve_branches(
     *,
     explicit_ids_or_branches: list[str] | None,
     all_done_queue_tasks: bool,
+    allow_any_branch: bool = False,
 ) -> tuple[list[str], dict[str, str]]:
     """Decide which branches to merge.
 
@@ -134,11 +142,17 @@ def _resolve_branches(
             logger.warning("could not load queue.yml for explicit-id resolution: %s", exc)
             tasks = []
         by_id = {t.id: t for t in tasks}
+        queue_branches = {t.branch for t in tasks if t.branch}
         for item in explicit_ids_or_branches:
             if item in by_id and by_id[item].branch:
                 branches.append(by_id[item].branch)
                 lookup[by_id[item].branch] = item
             elif git_ops.branch_exists(project_dir, item):
+                _validate_managed_branch(
+                    item,
+                    queue_branches=queue_branches,
+                    allow_any_branch=allow_any_branch,
+                )
                 branches.append(item)
             else:
                 raise ValueError(f"unknown task id or branch: {item!r}")
@@ -191,6 +205,34 @@ def _resolve_branches(
     return (branches, lookup)
 
 
+def _looks_like_atomic_mode_branch(branch: str) -> bool:
+    match = _ATOMIC_BRANCH_RE.fullmatch(branch)
+    if match is None:
+        return False
+    try:
+        datetime.strptime(match.group("date"), "%Y-%m-%d")
+    except ValueError:
+        return False
+    return True
+
+
+def _validate_managed_branch(
+    branch: str,
+    *,
+    queue_branches: set[str],
+    allow_any_branch: bool,
+) -> None:
+    if allow_any_branch:
+        return
+    if branch in queue_branches or _looks_like_atomic_mode_branch(branch):
+        return
+    raise ValueError(
+        "branch "
+        f"'{branch}' is not a queue task or atomic-mode branch; otto merge only works on "
+        "otto-managed branches. Use plain `git merge` for arbitrary branches."
+    )
+
+
 async def run_merge(
     *,
     project_dir: Path,
@@ -238,6 +280,7 @@ async def run_merge(
         project_dir,
         explicit_ids_or_branches=explicit_ids_or_branches,
         all_done_queue_tasks=all_done_queue_tasks,
+        allow_any_branch=options.allow_any_branch,
     )
     provider = agent_provider(config)
     if provider != "claude" and not options.fast:

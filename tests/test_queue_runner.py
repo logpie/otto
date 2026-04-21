@@ -886,6 +886,63 @@ def test_cancel_done_task_is_noop_with_warning(tmp_path: Path, caplog):
     assert "cancel ignored for done1 in status=done" in caplog.text
 
 
+def test_cancel_queued_task_removes_queue_entry(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    append_task(repo, QueueTask(
+        id="queued1",
+        command_argv=["build", "queued1"],
+        branch="build/queued1",
+        worktree=".worktrees/queued1",
+    ))
+    runner = Runner(repo, RunnerConfig(), otto_bin="/bin/true")
+    state = load_state(repo)
+
+    runner._apply_command({"cmd": "cancel", "id": "queued1"}, state)
+
+    assert state["tasks"]["queued1"]["status"] == "cancelled"
+    assert load_queue(repo) == []
+
+
+def test_remove_command_updates_queue_yml_for_live_task(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    append_task(repo, QueueTask(
+        id="rm1",
+        command_argv=["build", "rm1"],
+        branch="build/rm1",
+        worktree=".worktrees/rm1",
+    ))
+    runner = Runner(repo, RunnerConfig(), otto_bin="/bin/true")
+    state = load_state(repo)
+
+    runner._apply_command({"cmd": "remove", "id": "rm1"}, state)
+
+    assert state["tasks"]["rm1"]["status"] == "removed"
+    assert load_queue(repo) == []
+
+
+def test_remove_done_task_is_noop_with_cleanup_warning(tmp_path: Path, caplog):
+    repo = init_repo(tmp_path)
+    append_task(repo, QueueTask(
+        id="done1",
+        command_argv=["build", "done1"],
+        branch="build/done1",
+        worktree=".worktrees/done1",
+    ))
+    runner = Runner(repo, RunnerConfig(), otto_bin="/bin/true")
+    state = load_state(repo)
+    state["tasks"]["done1"] = {
+        "status": "done",
+        "finished_at": "2026-04-20T00:00:00Z",
+    }
+
+    with caplog.at_level("WARNING", logger="otto.queue.runner"):
+        runner._apply_command({"cmd": "remove", "id": "done1"}, state)
+
+    assert state["tasks"]["done1"]["status"] == "done"
+    assert [task.id for task in load_queue(repo)] == ["done1"]
+    assert "use cleanup" in caplog.text
+
+
 def test_spawn_uses_snapshotted_branch_when_intent_matches(tmp_path: Path, monkeypatch):
     repo = init_repo(tmp_path)
     task1 = QueueTask(
@@ -930,6 +987,31 @@ def test_spawn_uses_snapshotted_branch_when_intent_matches(tmp_path: Path, monke
         "build/same-intent-2026-04-20",
         "build/same-intent-2-2026-04-20",
     ]
+
+
+def test_reconcile_on_startup_tolerates_malformed_queue_yml(tmp_path: Path, caplog):
+    repo = init_repo(tmp_path)
+    write_state(
+        repo,
+        {
+            "schema_version": 1,
+            "watcher": None,
+            "tasks": {
+                "running1": {
+                    "status": "running",
+                    "child": {"pid": 999999, "pgid": 999999},
+                },
+            },
+        },
+    )
+    (repo / ".otto-queue.yml").write_text("schema_version: [\n")
+    runner = Runner(repo, RunnerConfig(on_watcher_restart="resume"), otto_bin="/bin/true")
+
+    with caplog.at_level("ERROR", logger="otto.queue.runner"):
+        runner._reconcile_on_startup()
+
+    assert "failed to load queue.yml during startup reconcile" in caplog.text
+    assert load_state(repo)["tasks"]["running1"]["status"] == "failed"
 
 
 # ---------- restart reconciliation ----------

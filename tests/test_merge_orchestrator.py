@@ -94,7 +94,7 @@ def test_merge_refuses_when_not_on_target(tmp_path: Path):
     result = asyncio.run(run_merge(
         project_dir=repo,
         config=_config_no_bookkeeping(),
-        options=MergeOptions(target="main", no_certify=True),
+        options=MergeOptions(target="main", no_certify=True, allow_any_branch=True),
         explicit_ids_or_branches=["feat-a"],
     ))
     assert result.success is False
@@ -109,7 +109,7 @@ def test_merge_refuses_when_dirty(tmp_path: Path):
     result = asyncio.run(run_merge(
         project_dir=repo,
         config=_config_no_bookkeeping(),
-        options=MergeOptions(target="main", no_certify=True),
+        options=MergeOptions(target="main", no_certify=True, allow_any_branch=True),
         explicit_ids_or_branches=["feat-a"],
     ))
     assert result.success is False
@@ -127,6 +127,34 @@ def test_merge_refuses_unknown_branch(tmp_path: Path):
         ))
 
 
+def test_merge_refuses_unmanaged_local_branch_by_default(tmp_path: Path):
+    repo = _init_repo_with_gitattributes(tmp_path)
+    _make_branch(repo, "feature/random", "a.txt", "A\n")
+
+    with pytest.raises(ValueError, match="not a queue task or atomic-mode branch"):
+        asyncio.run(run_merge(
+            project_dir=repo,
+            config=_config_no_bookkeeping(),
+            options=MergeOptions(target="main", no_certify=True),
+            explicit_ids_or_branches=["feature/random"],
+        ))
+
+
+def test_merge_allows_unmanaged_local_branch_with_escape_hatch(tmp_path: Path):
+    repo = _init_repo_with_gitattributes(tmp_path)
+    _make_branch(repo, "feature/random", "a.txt", "A\n")
+
+    result = asyncio.run(run_merge(
+        project_dir=repo,
+        config=_config_no_bookkeeping(),
+        options=MergeOptions(target="main", no_certify=True, allow_any_branch=True),
+        explicit_ids_or_branches=["feature/random"],
+    ))
+
+    assert result.success is True
+    assert (repo / "a.txt").exists()
+
+
 # ---------- clean merges (no agent) ----------
 
 
@@ -137,7 +165,7 @@ def test_clean_merge_two_independent_branches(tmp_path: Path):
     result = asyncio.run(run_merge(
         project_dir=repo,
         config=_config_no_bookkeeping(),
-        options=MergeOptions(target="main", no_certify=True),
+        options=MergeOptions(target="main", no_certify=True, allow_any_branch=True),
         explicit_ids_or_branches=["feat-a", "feat-b"],
     ))
     assert result.success, f"expected success, got: {result.note}"
@@ -153,7 +181,7 @@ def test_clean_merge_single_branch(tmp_path: Path):
     result = asyncio.run(run_merge(
         project_dir=repo,
         config=_config_no_bookkeeping(),
-        options=MergeOptions(target="main", no_certify=True),
+        options=MergeOptions(target="main", no_certify=True, allow_any_branch=True),
         explicit_ids_or_branches=["feat-x"],
     ))
     assert result.success
@@ -170,7 +198,7 @@ def test_fast_mode_bails_on_conflict(tmp_path: Path):
     result = asyncio.run(run_merge(
         project_dir=repo,
         config=_config_no_bookkeeping(),
-        options=MergeOptions(target="main", no_certify=True, fast=True),
+        options=MergeOptions(target="main", no_certify=True, fast=True, allow_any_branch=True),
         explicit_ids_or_branches=["feat-a", "feat-b"],
     ))
     assert result.success is False
@@ -196,7 +224,7 @@ def test_conflict_with_codex_provider_refused(tmp_path: Path):
     result = asyncio.run(run_merge(
         project_dir=repo,
         config=_config_codex_provider(),
-        options=MergeOptions(target="main", no_certify=True),
+        options=MergeOptions(target="main", no_certify=True, allow_any_branch=True),
         explicit_ids_or_branches=["feat-a", "feat-b"],
     ))
     assert result.success is False
@@ -215,7 +243,7 @@ def test_codex_provider_allowed_in_fast_mode(tmp_path: Path):
     result = asyncio.run(run_merge(
         project_dir=repo,
         config=_config_codex_provider(),
-        options=MergeOptions(target="main", no_certify=True, fast=True),
+        options=MergeOptions(target="main", no_certify=True, fast=True, allow_any_branch=True),
         explicit_ids_or_branches=["feat-a", "feat-b"],
     ))
     assert result.success is False
@@ -242,7 +270,7 @@ def test_conflict_agent_cleans_new_untracked_files(tmp_path: Path, monkeypatch: 
         result = asyncio.run(run_merge(
             project_dir=repo,
             config=_config_no_bookkeeping(),
-            options=MergeOptions(target="main", no_certify=True),
+            options=MergeOptions(target="main", no_certify=True, allow_any_branch=True),
             explicit_ids_or_branches=["feat-a", "feat-b"],
         ))
 
@@ -271,7 +299,7 @@ def test_consolidated_merge_captures_merge_aware_diff_with_both_sides(
     result = asyncio.run(run_merge(
         project_dir=repo,
         config=_config_no_bookkeeping(),
-        options=MergeOptions(target="main", no_certify=True),
+        options=MergeOptions(target="main", no_certify=True, allow_any_branch=True),
         explicit_ids_or_branches=["feat-a", "feat-b"],
     ))
 
@@ -323,7 +351,7 @@ def test_consolidated_merge_upgrades_conflicted_branch_outcomes(
     result = asyncio.run(run_merge(
         project_dir=repo,
         config=_config_no_bookkeeping(),
-        options=MergeOptions(target="main", no_certify=True),
+        options=MergeOptions(target="main", no_certify=True, allow_any_branch=True),
         explicit_ids_or_branches=["feat-a", "feat-b", "feat-c"],
     ))
 
@@ -362,7 +390,7 @@ def test_merge_requires_gitattributes_when_bookkeeping_enabled(tmp_path: Path):
     result = asyncio.run(run_merge(
         project_dir=repo,
         config=cfg,
-        options=MergeOptions(target="main", no_certify=True),
+        options=MergeOptions(target="main", no_certify=True, allow_any_branch=True),
         explicit_ids_or_branches=["feat-a"],
     ))
     assert result.success is False
@@ -384,7 +412,7 @@ def test_merge_skips_gitattributes_check_with_optout(tmp_path: Path):
     result = asyncio.run(run_merge(
         project_dir=repo,
         config=cfg,
-        options=MergeOptions(target="main", no_certify=True),
+        options=MergeOptions(target="main", no_certify=True, allow_any_branch=True),
         explicit_ids_or_branches=["feat-a"],
     ))
     assert result.success, f"expected success: {result.note}"
@@ -457,7 +485,7 @@ def test_merge_state_persisted_to_disk(tmp_path: Path):
     result = asyncio.run(run_merge(
         project_dir=repo,
         config=_config_no_bookkeeping(),
-        options=MergeOptions(target="main", no_certify=True),
+        options=MergeOptions(target="main", no_certify=True, allow_any_branch=True),
         explicit_ids_or_branches=["feat-a"],
     ))
     assert result.success
@@ -475,7 +503,7 @@ def test_find_latest_merge_id(tmp_path: Path):
     result1 = asyncio.run(run_merge(
         project_dir=repo,
         config=_config_no_bookkeeping(),
-        options=MergeOptions(target="main", no_certify=True),
+        options=MergeOptions(target="main", no_certify=True, allow_any_branch=True),
         explicit_ids_or_branches=["feat-a"],
     ))
     assert result1.success
@@ -646,7 +674,7 @@ def test_intent_md_union_merge_no_conflict(tmp_path: Path):
     result = asyncio.run(run_merge(
         project_dir=repo,
         config=cfg,
-        options=MergeOptions(target="main", no_certify=True),
+        options=MergeOptions(target="main", no_certify=True, allow_any_branch=True),
         explicit_ids_or_branches=["feat-a", "feat-b"],
     ))
     assert result.success, f"union merge driver should make this auto-merge: {result.note}"

@@ -253,6 +253,22 @@ def test_queue_show_unknown_task(tmp_path: Path):
     assert "No such task" in out
 
 
+def test_queue_show_reports_malformed_queue_yml_cleanly(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    (repo / QUEUE_FILE).write_text(
+        "schema_version: 1\n"
+        "tasks:\n"
+        "  - id: broken\n"
+        "    added_at: 2026-04-21T00:00:00Z\n"
+    )
+
+    code, out, _ = _run(["queue", "show", "broken"], cwd=repo)
+
+    assert code == 2
+    assert "queue.yml is malformed" in out
+    assert "command_argv" in out
+
+
 # ---------- rm / cancel ----------
 
 
@@ -292,6 +308,39 @@ def test_queue_rm_with_watcher_running_appends_command(tmp_path: Path, monkeypat
     assert cmds[0]["id"] == "csv"
 
 
+def test_queue_rm_reports_malformed_queue_yml_cleanly(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    (repo / QUEUE_FILE).write_text(
+        "schema_version: 1\n"
+        "tasks:\n"
+        "  - id: csv\n"
+        "    command_argv: build csv\n"
+    )
+
+    code, out, _ = _run(["queue", "rm", "csv"], cwd=repo)
+
+    assert code == 2
+    assert "queue.yml is malformed" in out
+    assert "command_argv must be list[str]" in out
+
+
+def test_queue_rm_refuses_finished_task_without_watcher(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    _run(["queue", "build", "csv"], cwd=repo)
+    _write_watcher_state(
+        repo,
+        watcher=None,
+        tasks={"csv": {"status": "done"}},
+    )
+
+    code, out, _ = _run(["queue", "rm", "csv"], cwd=repo)
+
+    assert code == 2
+    assert "task csv is done" in out
+    assert "otto queue cleanup csv" in out
+    assert [task.id for task in load_queue(repo)] == ["csv"]
+
+
 def test_queue_cancel_without_watcher_removes_queued_task(tmp_path: Path):
     repo = init_repo(tmp_path)
     _run(["queue", "build", "csv"], cwd=repo)
@@ -320,6 +369,96 @@ def test_queue_cancel_without_watcher_warns_for_running_task(tmp_path: Path):
     assert "is marked running, but the worker is not running." in out
     assert "--break-lock --concurrent N" in out
     assert [task.id for task in load_queue(repo)] == ["csv"]
+    assert not (repo / COMMANDS_FILE).exists()
+
+
+def test_queue_cancel_with_watcher_describes_queued_task(tmp_path: Path, monkeypatch):
+    repo = init_repo(tmp_path)
+    _run(["queue", "build", "csv"], cwd=repo)
+    now = _fresh_iso_now()
+    _write_watcher_state(
+        repo,
+        watcher={
+            "pid": 4242,
+            "pgid": 4242,
+            "started_at": now,
+            "heartbeat": now,
+        },
+        tasks={"csv": {"status": "queued"}},
+    )
+    monkeypatch.setattr(cli_queue_module.os, "kill", lambda pid, sig: None)
+
+    code, out, _ = _run(["queue", "cancel", "csv"], cwd=repo)
+
+    assert code == 0
+    assert "Cancel queued; watcher will remove from queue." in out
+
+
+def test_queue_cancel_with_watcher_describes_running_task(tmp_path: Path, monkeypatch):
+    repo = init_repo(tmp_path)
+    _run(["queue", "build", "csv"], cwd=repo)
+    now = _fresh_iso_now()
+    _write_watcher_state(
+        repo,
+        watcher={
+            "pid": 4242,
+            "pgid": 4242,
+            "started_at": now,
+            "heartbeat": now,
+        },
+        tasks={"csv": {"status": "running"}},
+    )
+    monkeypatch.setattr(cli_queue_module.os, "kill", lambda pid, sig: None)
+
+    code, out, _ = _run(["queue", "cancel", "csv"], cwd=repo)
+
+    assert code == 0
+    assert "Cancel queued; watcher will signal the task." in out
+
+
+def test_queue_cancel_with_watcher_reports_terminating_task(tmp_path: Path, monkeypatch):
+    repo = init_repo(tmp_path)
+    _run(["queue", "build", "csv"], cwd=repo)
+    now = _fresh_iso_now()
+    _write_watcher_state(
+        repo,
+        watcher={
+            "pid": 4242,
+            "pgid": 4242,
+            "started_at": now,
+            "heartbeat": now,
+        },
+        tasks={"csv": {"status": "terminating"}},
+    )
+    monkeypatch.setattr(cli_queue_module.os, "kill", lambda pid, sig: None)
+
+    code, out, _ = _run(["queue", "cancel", "csv"], cwd=repo)
+
+    assert code == 0
+    assert "Cancel already in progress." in out
+    assert not (repo / COMMANDS_FILE).exists()
+
+
+def test_queue_cancel_with_watcher_refuses_finished_task(tmp_path: Path, monkeypatch):
+    repo = init_repo(tmp_path)
+    _run(["queue", "build", "csv"], cwd=repo)
+    now = _fresh_iso_now()
+    _write_watcher_state(
+        repo,
+        watcher={
+            "pid": 4242,
+            "pgid": 4242,
+            "started_at": now,
+            "heartbeat": now,
+        },
+        tasks={"csv": {"status": "done"}},
+    )
+    monkeypatch.setattr(cli_queue_module.os, "kill", lambda pid, sig: None)
+
+    code, out, _ = _run(["queue", "cancel", "csv"], cwd=repo)
+
+    assert code == 2
+    assert "task csv is done; nothing to cancel." in out
     assert not (repo / COMMANDS_FILE).exists()
 
 

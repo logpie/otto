@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 import tomllib
@@ -28,6 +29,10 @@ def _check_venv_guard(
     cwd: str,
     otto_src: str,
     queue_runner_env: str | None,
+    cwd_repo_root: str | None = None,
+    otto_repo_root: str | None = None,
+    cwd_git_dir: str | None = None,
+    cwd_git_common_dir: str | None = None,
 ) -> tuple[bool, str | None]:
     """Pure logic for the worktree-venv guard. Returns (should_block, error_message).
 
@@ -37,17 +42,84 @@ def _check_venv_guard(
 
     Extracted for testability — see tests/test_env_bypass.py.
     """
-    in_worktree_cwd = "worktree" in cwd
-    otto_from_worktree = "worktree" in otto_src
-    if in_worktree_cwd and not otto_from_worktree:
+    def _norm(path_str: str | None) -> str | None:
+        if not path_str:
+            return None
+        return str(Path(path_str).expanduser().resolve(strict=False))
+
+    def _looks_like_linked_worktree(path_str: str) -> bool:
+        normalized = _norm(path_str) or path_str
+        marker = f"{os.sep}.worktrees{os.sep}"
+        return marker in normalized
+
+    def _same_project() -> bool:
+        normalized_cwd_root = _norm(cwd_repo_root)
+        normalized_otto_root = _norm(otto_repo_root)
+        if normalized_cwd_root and normalized_otto_root:
+            return normalized_cwd_root == normalized_otto_root
+        normalized_cwd = _norm(cwd) or cwd
+        normalized_otto = _norm(otto_src) or otto_src
+        cwd_path = Path(normalized_cwd)
+        otto_path = Path(normalized_otto)
+        return otto_path.is_relative_to(cwd_path)
+
+    normalized_git_dir = _norm(cwd_git_dir)
+    normalized_common_dir = _norm(cwd_git_common_dir)
+    in_linked_worktree = (
+        normalized_git_dir is not None
+        and normalized_common_dir is not None
+        and normalized_git_dir != normalized_common_dir
+    )
+    if not in_linked_worktree:
+        in_linked_worktree = _looks_like_linked_worktree(cwd)
+
+    if in_linked_worktree and not _same_project():
         if queue_runner_env != "1":
             return (True, (
                 f"ERROR: otto loaded from {otto_src}\n"
-                f"  but cwd is a worktree ({cwd}).\n"
+                f"  but cwd is a linked worktree ({cwd}).\n"
                 f"  Use the worktree's own venv: .venv/bin/otto\n"
                 f"  (or set OTTO_INTERNAL_QUEUE_RUNNER=1 if you are the queue runner)"
             ))
     return (False, None)
+
+
+def _git_rev_parse(path: Path, arg: str) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", arg],
+            cwd=path,
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    if not value:
+        return None
+    resolved = Path(value)
+    if not resolved.is_absolute():
+        resolved = (path / resolved).resolve()
+    else:
+        resolved = resolved.resolve()
+    return str(resolved)
+
+
+def _resolve_git_worktree_context(path: Path) -> dict[str, str] | None:
+    repo_root = _git_rev_parse(path, "--show-toplevel")
+    git_dir = _git_rev_parse(path, "--git-dir")
+    git_common_dir = _git_rev_parse(path, "--git-common-dir")
+    if repo_root is None or git_dir is None or git_common_dir is None:
+        return None
+    return {
+        "repo_root": repo_root,
+        "git_dir": git_dir,
+        "git_common_dir": git_common_dir,
+    }
 
 
 def _version_callback(ctx: click.Context, _param: click.Parameter, value: bool) -> None:
@@ -103,10 +175,16 @@ def main():
             err=True,
         )
         sys.exit(1)
+    cwd_context = _resolve_git_worktree_context(Path(_cwd)) or {}
+    otto_context = _resolve_git_worktree_context(Path(_otto_pkg.__file__).resolve().parent) or {}
     should_block, msg = _check_venv_guard(
         cwd=_cwd,
         otto_src=str(Path(_otto_pkg.__file__).resolve().parent),
         queue_runner_env=os.environ.get("OTTO_INTERNAL_QUEUE_RUNNER"),
+        cwd_repo_root=cwd_context.get("repo_root"),
+        otto_repo_root=otto_context.get("repo_root"),
+        cwd_git_dir=cwd_context.get("git_dir"),
+        cwd_git_common_dir=cwd_context.get("git_common_dir"),
     )
     if should_block:
         click.echo(msg, err=True)

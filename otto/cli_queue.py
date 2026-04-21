@@ -31,6 +31,7 @@ from typing import Any
 
 import click
 from rich.table import Table
+import yaml
 
 from otto.display import CONTEXT_SETTINGS, console, rich_escape
 from otto.theme import error_console
@@ -214,6 +215,30 @@ def _watcher_is_alive(project_dir: Path, *, max_age_s: float = 10.0) -> bool:
     except Exception:
         return False
     return _watcher_alive(state, max_age_s=max_age_s)
+
+
+def _load_queue_or_exit(project_dir: Path):
+    from otto.queue.schema import load_queue
+
+    try:
+        return load_queue(project_dir)
+    except (ValueError, yaml.YAMLError) as exc:
+        detail = str(exc)
+        prefix = "queue.yml is malformed: "
+        if detail.startswith(prefix):
+            detail = detail[len(prefix):]
+        error_console.print(
+            f"[error]queue.yml is malformed: {rich_escape(detail)}[/error]"
+        )
+        sys.exit(2)
+
+
+def _task_status(project_dir: Path, task_id: str) -> str:
+    from otto.queue.schema import load_state
+
+    state = load_state(project_dir)
+    ts = state.get("tasks", {}).get(task_id, {"status": "queued"})
+    return str(ts.get("status", "queued"))
 
 
 def _print_added(task_id: str, project_dir: Path) -> None:
@@ -536,9 +561,9 @@ def register_queue_commands(main: click.Group) -> None:
     @click.argument("task_id")
     def show(task_id: str) -> None:
         """Show full details of one task."""
-        from otto.queue.schema import load_queue, load_state
+        from otto.queue.schema import load_state
         project_dir = _project_dir()
-        tasks = load_queue(project_dir)
+        tasks = _load_queue_or_exit(project_dir)
         state = load_state(project_dir)
         task = next((t for t in tasks if t.id == task_id), None)
         if task is None:
@@ -585,11 +610,20 @@ def register_queue_commands(main: click.Group) -> None:
     @click.argument("task_id")
     def rm(task_id: str) -> None:
         """Remove a task from the queue."""
-        from otto.queue.schema import append_command, load_queue, remove_task
+        from otto.queue.schema import append_command, remove_task
 
         project_dir = _project_dir()
-        if not any(t.id == task_id for t in load_queue(project_dir)):
+        tasks = _load_queue_or_exit(project_dir)
+        if not any(t.id == task_id for t in tasks):
             error_console.print(f"[error]No such task: {task_id!r}[/error]")
+            sys.exit(2)
+        status = _task_status(project_dir, task_id)
+        if status in {"done", "failed", "cancelled"}:
+            error_console.print(
+                "[error]task "
+                f"{task_id} is {status}; use `otto queue cleanup {task_id}` to clear finished tasks."
+                "[/error]"
+            )
             sys.exit(2)
         if not _watcher_is_alive(project_dir):
             if not remove_task(project_dir, task_id):
@@ -609,10 +643,11 @@ def register_queue_commands(main: click.Group) -> None:
     @click.argument("task_id")
     def cancel(task_id: str) -> None:
         """Signal a running task to stop (process group SIGTERM)."""
-        from otto.queue.schema import append_command, load_queue, load_state, remove_task
+        from otto.queue.schema import append_command, load_state, remove_task
 
         project_dir = _project_dir()
-        if not any(t.id == task_id for t in load_queue(project_dir)):
+        tasks = _load_queue_or_exit(project_dir)
+        if not any(t.id == task_id for t in tasks):
             error_console.print(f"[error]No such task: {task_id!r}[/error]")
             sys.exit(2)
         if not _watcher_is_alive(project_dir):
@@ -640,12 +675,30 @@ def register_queue_commands(main: click.Group) -> None:
                 f"{rich_escape(str(status))}. No queue change made."
             )
             return
-        append_command(project_dir, {
-            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "cmd": "cancel",
-            "id": task_id,
-        })
-        console.print("  Cancel queued; watcher will apply within ~1s.")
+        status = _task_status(project_dir, task_id)
+        if status == "queued":
+            append_command(project_dir, {
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "cmd": "cancel",
+                "id": task_id,
+            })
+            console.print("  Cancel queued; watcher will remove from queue.")
+            return
+        if status == "running":
+            append_command(project_dir, {
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "cmd": "cancel",
+                "id": task_id,
+            })
+            console.print("  Cancel queued; watcher will signal the task.")
+            return
+        if status == "terminating":
+            console.print("  Cancel already in progress.")
+            return
+        error_console.print(
+            f"[error]task {task_id} is {status}; nothing to cancel.[/error]"
+        )
+        sys.exit(2)
 
     # ---- cleanup (Phase 6.4) ----
     @queue.command(context_settings=CONTEXT_SETTINGS)

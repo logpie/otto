@@ -64,3 +64,24 @@ def test_merge_summary_uses_warning_icon_for_merged_with_markers(
 
     assert code == 0
     assert "⚠ feature/conflict (merged_with_markers)" in out
+
+
+def test_merge_allow_any_branch_flag_reaches_orchestrator(tmp_path: Path, monkeypatch):
+    repo = init_repo(tmp_path)
+    seen: dict[str, object] = {}
+
+    async def fake_run_merge(**kwargs):
+        seen["options"] = kwargs["options"]
+        return MergeRunResult(
+            success=True,
+            merge_id="merge-test",
+            state=MergeState(merge_id="merge-test", target="main", outcomes=[]),
+            note="ok",
+        )
+
+    monkeypatch.setattr("otto.merge.orchestrator.run_merge", fake_run_merge)
+
+    code, _out = _run(["merge", "feature/random", "--allow-any-branch", "--no-certify"], cwd=repo)
+
+    assert code == 0
+    assert getattr(seen["options"], "allow_any_branch") is True

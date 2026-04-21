@@ -15,6 +15,7 @@ from otto.queue.dashboard import (
     NarrativeTailer,
     OverviewScreen,
     QueueApp,
+    QueueModel,
     TaskDetailScreen,
 )
 from otto.queue.runner import Runner
@@ -152,6 +153,50 @@ async def test_overview_shows_empty_state_for_zero_tasks(tmp_path: Path):
         assert table.styles.display == "none"
         assert empty_state.styles.display == "block"
         assert "No tasks queued." in str(empty_state.content)
+
+
+@pytest.mark.asyncio
+async def test_dashboard_shows_queue_parse_warning_and_stays_usable(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    (repo / ".otto-queue.yml").write_text("schema_version: [\n")
+    _write_queue_state(repo, {})
+
+    app = _build_app(repo)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        banner = app.screen.query_one("#overview-banner", Static)
+        empty_state = app.screen.query_one("#empty-state", Static)
+
+        assert "queue.yml" in str(banner.content)
+        assert "parse error" in str(banner.content)
+        assert "No tasks queued." in str(empty_state.content)
+
+
+def test_overview_on_mount_tolerates_missing_table(monkeypatch):
+    screen = OverviewScreen()
+    monkeypatch.setattr(screen, "query", lambda selector: [])
+    monkeypatch.setattr(screen, "_refresh", lambda: None)
+    timers: list[tuple[float, object]] = []
+    monkeypatch.setattr(screen, "set_interval", lambda interval, callback: timers.append((interval, callback)))
+
+    screen.on_mount()
+
+    assert timers
+
+
+def test_queue_model_preserves_last_good_cache_on_malformed_queue(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    append_task(repo, _queue_task("alpha", branch="build/alpha", worktree=".worktrees/alpha"))
+    model = QueueModel(repo)
+
+    first = model.snapshot()
+    assert [task.task.id for task in first.tasks] == ["alpha"]
+
+    (repo / ".otto-queue.yml").write_text("schema_version: 1\ntasks:\n  - id: alpha\n")
+    second = model.snapshot()
+
+    assert [task.task.id for task in second.tasks] == ["alpha"]
+    assert "queue.yml" in str(model.overview_banner())
 
 
 @pytest.mark.asyncio

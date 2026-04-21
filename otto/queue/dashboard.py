@@ -572,6 +572,15 @@ class OverviewScreen(Screen[None]):
         self._row_order: list[str] = []
         self._refresh_timer = None
 
+    def _first_widget(self, selector: str, expected_type: type[Any]):
+        matches = list(self.query(selector))
+        if not matches:
+            return None
+        widget = matches[0]
+        if not isinstance(widget, expected_type):
+            return None
+        return widget
+
     def compose(self) -> ComposeResult:
         yield Static(id="overview-banner")
         yield Static(id="overview-header")
@@ -584,7 +593,11 @@ class OverviewScreen(Screen[None]):
         yield Static(id="overview-status")
 
     def on_mount(self) -> None:
-        table = self.query_one("#overview-table", DataTable)
+        table = self._first_widget("#overview-table", DataTable)
+        if table is None:
+            logger.warning("overview table missing during mount; skipping table initialization")
+            self._refresh_timer = self.set_interval(0.5, self._refresh)
+            return
         table.cursor_type = "row"
         table.zebra_stripes = True
         table.add_column("ID", key="id")
@@ -600,24 +613,29 @@ class OverviewScreen(Screen[None]):
     def _refresh(self) -> None:
         snapshot = self.app.model.snapshot()
         self.app.update_snapshot(snapshot)
-        banner = self.query_one("#overview-banner", Static)
-        banner.update(Text(self.app.model.overview_banner() or ""))
-        header = self.query_one("#overview-header", Static)
-        header.update(
+        banner = self._first_widget("#overview-banner", Static)
+        if banner is not None:
+            banner.update(Text(self.app.model.overview_banner() or ""))
+        header = self._first_widget("#overview-header", Static)
+        if header is not None:
+            header.update(
             f"[bold]otto queue[/bold] · concurrent={self.app.concurrent} · "
             f"{snapshot.header_elapsed} · {_format_cost(snapshot.total_cost_usd)}"
-        )
-        footer = self.query_one("#overview-status", Static)
-        footer.update(
+            )
+        footer = self._first_widget("#overview-status", Static)
+        if footer is not None:
+            footer.update(
             f"{snapshot.running_count} running · {snapshot.queued_count} queued · "
             f"{snapshot.done_count} done · {snapshot.total_count} total · "
             "enter open · y yank · c cancel · ? help · q quit/drain"
-        )
+            )
         self._sync_rows(snapshot.tasks)
 
     def _sync_rows(self, tasks: Sequence[TaskView]) -> None:
-        table = self.query_one("#overview-table", DataTable)
-        empty_state = self.query_one("#empty-state", Static)
+        table = self._first_widget("#overview-table", DataTable)
+        empty_state = self._first_widget("#empty-state", Static)
+        if table is None or empty_state is None:
+            return
         wanted = [task.task.id for task in tasks]
         current = set(self._row_order)
         for task_id in list(self._row_order):
@@ -653,17 +671,23 @@ class OverviewScreen(Screen[None]):
         empty_state.styles.display = "block" if is_empty else "none"
 
     def _selected_task_id(self) -> str | None:
-        table = self.query_one("#overview-table", DataTable)
+        table = self._first_widget("#overview-table", DataTable)
+        if table is None:
+            return None
         if not self._row_order:
             return None
         row = min(max(table.cursor_row, 0), len(self._row_order) - 1)
         return self._row_order[row]
 
     def action_cursor_down(self) -> None:
-        self.query_one("#overview-table", DataTable).action_cursor_down()
+        table = self._first_widget("#overview-table", DataTable)
+        if table is not None:
+            table.action_cursor_down()
 
     def action_cursor_up(self) -> None:
-        self.query_one("#overview-table", DataTable).action_cursor_up()
+        table = self._first_widget("#overview-table", DataTable)
+        if table is not None:
+            table.action_cursor_up()
 
     def action_open_task(self) -> None:
         task_id = self._selected_task_id()

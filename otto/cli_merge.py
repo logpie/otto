@@ -78,6 +78,8 @@ def register_merge_command(main: click.Group) -> None:
                   help="Deferred; reserved for future merge resume support")
     @click.option("--cleanup-on-success", is_flag=True,
                   help="Remove worktrees of merged tasks on successful merge")
+    @click.option("--allow-any-branch", is_flag=True,
+                  help="Allow arbitrary local branches, not just otto-managed branches")
     def merge(
         ids_or_branches: tuple[str, ...],
         all_done: bool,
@@ -87,6 +89,7 @@ def register_merge_command(main: click.Group) -> None:
         fast: bool,
         resume: bool,
         cleanup_on_success: bool,
+        allow_any_branch: bool,
     ) -> None:
         """Land queued / built branches into the target branch.
 
@@ -141,6 +144,7 @@ def register_merge_command(main: click.Group) -> None:
             full_verify=full_verify,
             fast=fast,
             cleanup_on_success=cleanup_on_success,
+            allow_any_branch=allow_any_branch,
         )
 
         if not (all_done or ids_or_branches):
@@ -159,6 +163,8 @@ def register_merge_command(main: click.Group) -> None:
             console.print("  [dim]Mode:[/dim] [yellow]--no-certify[/yellow]")
         if full_verify:
             console.print("  [dim]Mode:[/dim] [yellow]--full-verify[/yellow]")
+        if allow_any_branch:
+            console.print("  [dim]Mode:[/dim] [yellow]--allow-any-branch[/yellow]")
 
         # Wire up merge logger so orchestrator/conflict-agent events land
         # in otto_logs/merge/merge.log.
