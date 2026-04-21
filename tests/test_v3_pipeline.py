@@ -237,6 +237,8 @@ class TestV3PipelinePass:
         assert summary["status"] == "completed"
         assert summary["stories_passed"] == 5
         assert summary["stories_tested"] == 5
+        assert summary["breakdown"]["build"]["duration_s"] >= 0
+        assert summary["breakdown"].get("certify", {}).get("rounds", 0) == 0
 
         # --- PoW (proof-of-work) ---
         certifier_dir = _paths.certify_dir(tmp_git_repo, result.build_id)

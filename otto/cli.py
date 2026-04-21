@@ -145,10 +145,10 @@ async def _run_spec_phase(
     config: dict,
     run_id: str | None = None,
     budget=None,
-) -> tuple[str, str, float]:
+) -> tuple[str, str, float, float]:
     """Drive the spec phase before the main build.
 
-    Returns (run_id, spec_content, total_spec_cost). Writes checkpoint at
+    Returns (run_id, spec_content, total_spec_cost, total_spec_duration). Writes checkpoint at
     each phase boundary (`spec` → `spec_review` → `spec_approved`).
 
     Raises SystemExit(2) with a user message on failure.
@@ -194,9 +194,10 @@ async def _run_spec_phase(
                 "  Run without --resume to start a fresh spec, or restore the original file.[/error]"
             )
             sys.exit(2)
-        return run_id, content, resume_state.spec_cost
+        return run_id, content, resume_state.spec_cost, 0.0
 
     spec_cost = resume_state.spec_cost or 0.0
+    spec_duration = 0.0
     current_phase = "spec"
     current_spec_path = resume_state.spec_path or ""
     current_spec_hash = resume_state.spec_hash or ""
@@ -272,6 +273,7 @@ async def _run_spec_phase(
                     version=resume_state.spec_version, budget=budget,
                 )
                 spec_cost += spec_result.cost
+                spec_duration += spec_result.duration_s
                 current_phase = "spec_review"
                 current_spec_path = str(spec_result.path)
                 current_spec_hash = spec_hash(spec_result.content)
@@ -307,6 +309,7 @@ async def _run_spec_phase(
                 intent, project_dir, run_dir, config, budget=budget,
             )
             spec_cost += spec_result.cost
+            spec_duration += spec_result.duration_s
             current_phase = "spec_review"
             current_spec_path = str(spec_result.path)
             current_spec_hash = spec_hash(spec_result.content)
@@ -325,6 +328,7 @@ async def _run_spec_phase(
             budget=budget,
         )
         spec_cost = approved.cost
+        spec_duration = approved.duration_s
         current_phase = "spec_approved"
         current_spec_path = str(approved.path)
         current_spec_hash = spec_hash(approved.content)
@@ -336,7 +340,7 @@ async def _run_spec_phase(
             intent=intent, spec_path=str(approved.path),
             spec_hash=current_spec_hash, spec_version=current_spec_version, spec_cost=spec_cost,
         )
-        return run_id, approved.content, spec_cost
+        return run_id, approved.content, spec_cost, spec_duration
 
     except ValueError as exc:
         error_console.print(f"[error]{exc}[/error]")
@@ -678,11 +682,12 @@ def _build_locked(
     spec_content: str | None = None
     run_id: str = resume_state.run_id or ""
     spec_cost_total: float = resume_state.spec_cost or 0.0
+    spec_duration_total: float = 0.0
     if not run_id:
         run_id = _new_run_id(project_dir)
     if use_spec:
         try:
-            run_id, spec_content, spec_cost_total = asyncio.run(_run_spec_phase(
+            run_id, spec_content, spec_cost_total, spec_duration_total = asyncio.run(_run_spec_phase(
                 project_dir=project_dir,
                 intent=intent,
                 spec=spec,
@@ -723,6 +728,7 @@ def _build_locked(
                                      record_intent=not resume_without_intent,
                                      spec=spec_content,
                                      spec_cost=spec_cost_total,
+                                     spec_duration=spec_duration_total,
                                      budget=run_budget)
             )
         else:
@@ -742,7 +748,8 @@ def _build_locked(
                                  spec=spec_content,
                                  run_id=run_id or None,
                                  budget=run_budget,
-                                 spec_cost=spec_cost_total)
+                                 spec_cost=spec_cost_total,
+                                 spec_duration=spec_duration_total)
             )
     except KeyboardInterrupt:
         console.print("\n  [yellow]Paused. Run `otto build --resume` to continue.[/yellow]")

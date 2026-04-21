@@ -21,7 +21,7 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from otto.agent import (
     AssistantMessage,
@@ -205,6 +205,8 @@ class NarrativeFormatter:
         self._build_duration: float | None = None
         self._phase_started = False
         self._phase_complete_written = False
+        self._summary_written = False
+        self._pending_result: ResultMessage | None = None
 
     def start(self) -> None:
         if self._phase_started:
@@ -242,19 +244,60 @@ class NarrativeFormatter:
     def _summary_label(self) -> str:
         return self._phase_name.lower()
 
-    def _summary_line(self, total_elapsed: float) -> str:
+    def round_timings(self) -> list[tuple[float, float]]:
+        return list(self._round_timings)
+
+    def build_duration_or_none(self) -> float | None:
+        return self._build_duration
+
+    def elapsed_seconds(self) -> float:
+        return self._elapsed_seconds()
+
+    def _fallback_breakdown(self, total_elapsed: float) -> dict[str, dict[str, float | int]]:
         primary_label = self._summary_label()
         build_duration = self._build_duration
         if build_duration is None:
             build_duration = total_elapsed
-        parts = [f"{primary_label}={_format_elapsed_seconds(build_duration)}"]
+        breakdown: dict[str, dict[str, float | int]] = {
+            primary_label: {"duration_s": build_duration},
+        }
         if self._round_timings and self._phase_name == "BUILD":
             certify_duration = sum(end - start for start, end in self._round_timings)
-            parts.append(
-                f"certify={_format_elapsed_seconds(certify_duration)} "
-                f"({len(self._round_timings)} rounds)"
-            )
-        parts.append(f"total={_format_elapsed_seconds(total_elapsed)}")
+            breakdown["certify"] = {
+                "duration_s": certify_duration,
+                "rounds": len(self._round_timings),
+            }
+        return breakdown
+
+    def _summary_line(
+        self,
+        total_elapsed: float,
+        breakdown: dict[str, dict[str, float | int]] | None,
+        total_cost_usd: float | None,
+    ) -> str:
+        if breakdown is None:
+            breakdown = self._fallback_breakdown(total_elapsed)
+
+        parts: list[str] = []
+        for phase in ("spec", "build", "certify"):
+            phase_data = breakdown.get(phase)
+            if not phase_data:
+                continue
+            segment = f"{phase}="
+            cost_usd = phase_data.get("cost_usd")
+            if isinstance(cost_usd, int | float):
+                segment += f"${float(cost_usd):.2f} "
+            segment += _format_elapsed_seconds(float(phase_data.get("duration_s", 0.0)))
+            rounds = phase_data.get("rounds")
+            if phase == "certify" and isinstance(rounds, int):
+                segment += f" ({rounds} round{'s' if rounds != 1 else ''})"
+            parts.append(segment)
+
+        total_segment = "total="
+        if isinstance(total_cost_usd, int | float):
+            total_segment += f"${float(total_cost_usd):.2f} "
+        total_segment += _format_elapsed_seconds(total_elapsed)
+        parts.append(total_segment)
         return (
             f"{self._stamp()} {self._GLYPH_PHASE} RUN SUMMARY: "
             f"{', '.join(parts)} {self._GLYPH_PHASE}"
@@ -472,17 +515,29 @@ class NarrativeFormatter:
         self._write(f"{ts} \u2190 {_truncate_at_word(first)}{suffix}")
 
     def _write_result(self, message: ResultMessage) -> None:
+        self._pending_result = message
+
+    def finalize(self, breakdown: dict[str, dict[str, float | int]] | None = None) -> None:
+        if self._summary_written:
+            return
+        self._summary_written = True
+
+        message = self._pending_result
+        if message is None:
+            return
+
         ts = self._stamp()
         total_elapsed = self._elapsed_seconds()
         if self._phase_name != "BUILD":
             self._write_phase_complete()
-        self._write(self._summary_line(total_elapsed))
+        self._write(self._summary_line(total_elapsed, breakdown, message.total_cost_usd))
         status = "ERROR" if message.is_error else message.subtype.upper()
         cost = f" ${message.total_cost_usd:.2f}" if message.total_cost_usd else ""
         duration = f" in {self._elapsed_fmt()}"
         self._write(f"{ts} \u2501\u2501\u2501 {status}{cost}{duration}")
 
     def close(self) -> None:
+        self.finalize()
         try:
             self._fh.close()
         except OSError:
@@ -668,7 +723,7 @@ def _extract_commit_line(content: str) -> str | None:
     return None
 
 
-def make_session_logger(log_dir: Path, *, phase_name: str = "BUILD") -> dict[str, Callable]:
+def make_session_logger(log_dir: Path, *, phase_name: str = "BUILD") -> dict[str, Any]:
     """Open messages.jsonl + narrative.log in ``log_dir`` and return the
     callback dict for run_agent_with_timeout / run_agent_query.
 
@@ -680,6 +735,7 @@ def make_session_logger(log_dir: Path, *, phase_name: str = "BUILD") -> dict[str
     Returned callbacks:
       on_message  — receives every normalized SDK message (assistant/result).
       _close      — closes both writers; callers must invoke in `finally`.
+      _narrative  — NarrativeFormatter for post-run timing inspection/finalize.
     """
     log_dir.mkdir(parents=True, exist_ok=True)
     jsonl = JsonlMessageWriter(log_dir / "messages.jsonl")
@@ -702,4 +758,4 @@ def make_session_logger(log_dir: Path, *, phase_name: str = "BUILD") -> dict[str
         jsonl.close()
         narr.close()
 
-    return {"on_message": _on_message, "_close": _close}
+    return {"on_message": _on_message, "_close": _close, "_narrative": narr}

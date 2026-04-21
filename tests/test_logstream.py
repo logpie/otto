@@ -275,8 +275,79 @@ class TestNarrativeFormatter:
         f.close()
 
         lines = [_strip_ts(line) for line in path.read_text().splitlines()]
-        assert "RUN SUMMARY: build=0:30, certify=0:40 (2 rounds), total=1:40" in lines[0]
+        assert "RUN SUMMARY: build=0:30, certify=0:40 (2 rounds), total=$1.23 1:40" in lines[0]
         assert "SUCCESS $1.23 in 1:40" in lines[1]
+
+    def test_finalize_with_phase_costs_emits_cost_annotated_summary(self, tmp_path):
+        path = tmp_path / "narrative.log"
+        f = NarrativeFormatter(path)
+        f._start = time.monotonic() - 271.0
+        f.write_message(ResultMessage(
+            subtype="success", is_error=False, session_id="x",
+            total_cost_usd=0.98,
+        ))
+        f.finalize({
+            "build": {"duration_s": 138.0, "cost_usd": 0.49},
+            "certify": {"duration_s": 111.0, "cost_usd": 0.41, "rounds": 2},
+        })
+        f.close()
+
+        lines = [_strip_ts(line) for line in path.read_text().splitlines()]
+        assert (
+            "RUN SUMMARY: build=$0.49 2:18, certify=$0.41 1:51 (2 rounds), "
+            "total=$0.98 4:31"
+        ) in lines[0]
+        assert "SUCCESS $0.98 in 4:31" in lines[1]
+
+    def test_finalize_without_phase_costs_omits_cost_annotations(self, tmp_path):
+        path = tmp_path / "narrative.log"
+        f = NarrativeFormatter(path)
+        f._start = time.monotonic() - 271.0
+        f.write_message(ResultMessage(
+            subtype="success", is_error=False, session_id="x",
+            total_cost_usd=0.98,
+        ))
+        f.finalize({
+            "build": {"duration_s": 138.0},
+            "certify": {"duration_s": 111.0, "rounds": 2},
+        })
+        f.close()
+
+        summary = _strip_ts(path.read_text().splitlines()[0])
+        assert "RUN SUMMARY: build=2:18, certify=1:51 (2 rounds), total=$0.98 4:31" in summary
+        assert "build=$" not in summary
+        assert "certify=$" not in summary
+
+    def test_finalize_no_qa_shape_omits_certify_entry(self, tmp_path):
+        path = tmp_path / "narrative.log"
+        f = NarrativeFormatter(path)
+        f._start = time.monotonic() - 65.2
+        f.write_message(ResultMessage(
+            subtype="success", is_error=False, session_id="x",
+            total_cost_usd=0.55,
+        ))
+        f.finalize({"build": {"duration_s": 65.2}})
+        f.close()
+
+        summary = _strip_ts(path.read_text().splitlines()[0])
+        assert "RUN SUMMARY: build=1:05, total=$0.55 1:05" in summary
+        assert "certify=" not in summary
+
+    def test_finalize_standalone_certify_shape(self, tmp_path):
+        path = tmp_path / "narrative.log"
+        f = NarrativeFormatter(path, phase_name="CERTIFY")
+        f._start = time.monotonic() - 15.1
+        f.write_message(ResultMessage(
+            subtype="success", is_error=False, session_id="x",
+            total_cost_usd=0.08,
+        ))
+        f.finalize({"certify": {"duration_s": 15.0, "rounds": 1}})
+        f.close()
+
+        lines = [_strip_ts(line) for line in path.read_text().splitlines()]
+        assert lines[0] == "\u2501\u2501\u2501 CERTIFY complete \u2501\u2501\u2501"
+        assert "RUN SUMMARY: certify=0:15 (1 round), total=$0.08 0:15" in lines[1]
+        assert "SUCCESS $0.08 in 0:15" in lines[2]
 
     def test_write_result_without_certify_omits_certify_summary(self, tmp_path):
         path = tmp_path / "narrative.log"

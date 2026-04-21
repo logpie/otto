@@ -175,10 +175,10 @@ async def run_agent_with_timeout(
     timeout: int | None,
     project_dir: Path,
     capture_tool_output: bool = False,
-) -> tuple[str, float, str]:
+) -> tuple[str, float, str, dict[str, Any]]:
     """Run an agent query with streaming session logs, timeout, and orphan cleanup.
 
-    Returns (text, cost, session_id) on success.
+    Returns (text, cost, session_id, breakdown_data) on success.
     Raises AgentCallError on timeout/crash.
     Always closes the session loggers and cleans up orphan processes on failure.
 
@@ -194,6 +194,7 @@ async def run_agent_with_timeout(
     log = logging.getLogger("otto.agent")
     callbacks = make_session_logger(log_dir, phase_name=phase_name)
     close_fh = callbacks.pop("_close")
+    narrative = callbacks.pop("_narrative")
     # Mutable bag — streaming handlers update it so timeout/crash paths can
     # recover the last-known session_id for a resumable checkpoint.
     agent_state: dict[str, str] = {"session_id": ""}
@@ -215,7 +216,48 @@ async def run_agent_with_timeout(
             timeout=timeout,
         )
         session_id = getattr(result_msg, "session_id", "") or agent_state.get("session_id", "")
-        return text, cost, session_id
+        breakdown_data = {
+            "round_timings": narrative.round_timings(),
+            "build_duration_s": narrative.build_duration_or_none(),
+        }
+        phase = (phase_name or "").lower()
+        finalize_breakdown: dict[str, dict[str, float | int]] | None = None
+        if phase == "build":
+            rounds = len(breakdown_data["round_timings"])
+            if rounds > 0:
+                certify_duration = sum(
+                    end - start for start, end in breakdown_data["round_timings"]
+                )
+                build_duration = breakdown_data["build_duration_s"]
+                if build_duration is None:
+                    build_duration = max(narrative.elapsed_seconds() - certify_duration, 0.0)
+                if build_duration is not None:
+                    finalize_breakdown = {
+                        "build": {"duration_s": build_duration},
+                        "certify": {
+                            "duration_s": certify_duration,
+                            "rounds": rounds,
+                        },
+                    }
+            else:
+                finalize_breakdown = {"build": {"duration_s": narrative.elapsed_seconds()}}
+        elif phase == "certify":
+            rounds = len(breakdown_data["round_timings"]) or 1
+            finalize_breakdown = {
+                "certify": {
+                    "duration_s": narrative.elapsed_seconds(),
+                    "rounds": rounds,
+                }
+            }
+        elif phase == "spec":
+            finalize_breakdown = {
+                "spec": {
+                    "duration_s": narrative.elapsed_seconds(),
+                    "cost_usd": float(cost or 0.0),
+                }
+            }
+        narrative.finalize(finalize_breakdown)
+        return text, cost, session_id, breakdown_data
     except asyncio.TimeoutError:
         log.error("Agent timed out after %ds", timeout)
         _append_narrative(f"\u2501\u2501\u2501 Timed out after {timeout}s")

@@ -56,6 +56,7 @@ def _write_session_summary(
     status: str = "completed",
     intent: str = "",
     command: str = "build",
+    breakdown: dict[str, dict[str, Any]] | None = None,
 ) -> None:
     """Write the canonical summary artifact for a completed session.
 
@@ -81,7 +82,13 @@ def _write_session_summary(
         "rounds": rounds,
         "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+    if breakdown is not None:
+        summary["breakdown"] = breakdown
     write_json_file(paths.session_summary(project_dir, session_id), summary)
+
+
+def _round_cost(value: float) -> float:
+    return round(float(value), 4)
 
 
 async def build_agentic_v3(
@@ -99,6 +106,7 @@ async def build_agentic_v3(
     spec: str | None = None,
     run_id: str | None = None,
     spec_cost: float = 0.0,
+    spec_duration: float = 0.0,
     budget: "RunBudget | None" = None,
     is_improve_run: bool = False,
 ) -> BuildResult:
@@ -283,7 +291,7 @@ async def build_agentic_v3(
     timeout = budget.for_call() if budget is not None else None
 
     try:
-        text, cost, session_id = await run_agent_with_timeout(
+        text, cost, session_id, breakdown_data = await run_agent_with_timeout(
             prompt, options,
             log_dir=build_dir,
             phase_name="BUILD",
@@ -300,6 +308,7 @@ async def build_agentic_v3(
         text = f"BUILD ERROR: {err.reason}"
         cost = 0.0
         session_id = err.session_id or checkpoint_session_id
+        breakdown_data = {"round_timings": [], "build_duration_s": None}
         if session_id:
             logger.info("Agent failed but session_id preserved (%s) — --resume supported", session_id)
         else:
@@ -327,6 +336,27 @@ async def build_agentic_v3(
     overall_diagnosis = parsed.diagnosis
     certify_rounds = parsed.certify_rounds
     target_mode = bool(config.get("_target")) or certifier_mode == "target"
+    round_timings = list(breakdown_data.get("round_timings", []))
+
+    breakdown: dict[str, dict[str, Any]] = {}
+    if spec_cost > 0.0 and spec_duration > 0.0:
+        breakdown["spec"] = {
+            "duration_s": round(spec_duration, 1),
+            "cost_usd": _round_cost(spec_cost),
+        }
+
+    rounds = len(round_timings)
+    total_certify_s = sum(end - start for start, end in round_timings)
+    if rounds > 0:
+        breakdown["certify"] = {
+            "duration_s": round(total_certify_s, 1),
+            "rounds": rounds,
+        }
+
+    if rounds > 0 and total_duration > total_certify_s:
+        breakdown["build"] = {"duration_s": round(total_duration - total_certify_s, 1)}
+    elif rounds == 0:
+        breakdown["build"] = {"duration_s": round(total_duration, 1)}
 
     # Summarize certify rounds for the checkpoint so forensic reads see real
     # history instead of `current_round: 0, rounds: []`.
@@ -466,6 +496,7 @@ async def build_agentic_v3(
             status=final_status,
             intent=intent,
             command=command,
+            breakdown=breakdown or None,
         )
 
     logger.info("Agentic v3 done: %s, %d/%d stories, %.1fs, $%.2f",
@@ -716,6 +747,7 @@ async def run_certify_fix_loop(
     is_improve_run: bool = True,
     spec: str | None = None,
     spec_cost: float = 0.0,
+    spec_duration: float = 0.0,
 ) -> BuildResult:
     """System-driven certify-fix loop.
 
@@ -751,6 +783,18 @@ async def run_certify_fix_loop(
     checkpoint_rounds = list(resume_rounds or [])
     last_completed_round = max(start_round - 1, 0)
     checkpoint_phase = "initial_build" if not skip_initial_build else "certify"
+    split_breakdown: dict[str, dict[str, Any]] = {}
+    if spec_cost > 0.0 and spec_duration > 0.0:
+        split_breakdown["spec"] = {
+            "duration_s": round(spec_duration, 1),
+            "cost_usd": _round_cost(spec_cost),
+        }
+    build_phase_duration = 0.0
+    build_phase_cost = 0.0
+    certify_phase_duration = 0.0
+    certify_phase_cost = 0.0
+    certify_phase_rounds = 0
+    spec_cost_remaining = float(spec_cost or 0.0)
 
     if record_intent:
         _append_intent(project_dir, intent, build_id)
@@ -803,19 +847,26 @@ async def run_certify_fix_loop(
         if budget is not None and budget.exhausted():
             return _paused_result("initial_build")
         try:
+            build_call_start = time.monotonic()
             result = await build_agentic_v3(
                 intent, project_dir, build_config,
                 manage_checkpoint=False,
                 run_id=build_id,
                 spec=spec,
                 spec_cost=spec_cost,
+                spec_duration=spec_duration,
                 budget=budget,
             )
         except AgentCallError as err:
+            build_phase_duration += time.monotonic() - build_call_start
             logger.warning("Initial build hit budget/timeout: %s", err.reason)
             _save_cp(status="paused", phase="initial_build")
             return BuildResult(passed=False, build_id=build_id, total_cost=total_cost)
+        build_phase_duration += time.monotonic() - build_call_start
         total_cost += result.total_cost
+        build_cost = max(float(result.total_cost) - spec_cost_remaining, 0.0)
+        build_phase_cost += build_cost
+        spec_cost_remaining = 0.0
         record_build(project_dir, round_id, result, session_id=build_id)
 
     # --- Certify + fix loop ---
@@ -842,6 +893,7 @@ async def run_certify_fix_loop(
             for attempt in range(MAX_RETRIES + 1):
                 try:
                     logger.info("Certify-fix loop round %d: certifying (%s)", round_num, certifier_mode)
+                    certify_call_start = time.monotonic()
                     report = await run_agentic_certifier(
                         intent=intent,
                         project_dir=project_dir,
@@ -853,11 +905,16 @@ async def run_certify_fix_loop(
                         session_id=build_id,
                         write_session_summary=False,
                     )
+                    certify_phase_duration += time.monotonic() - certify_call_start
+                    certify_phase_cost += float(report.cost_usd)
+                    certify_phase_rounds += 1
                     break
                 except AgentCallError:
+                    certify_phase_duration += time.monotonic() - certify_call_start
                     # Budget exhaustion or agent timeout — don't retry.
                     raise
                 except Exception as err:
+                    certify_phase_duration += time.monotonic() - certify_call_start
                     if attempt < MAX_RETRIES:
                         logger.warning("Certify round %d attempt %d failed: %s. Retrying...",
                                        round_num, attempt + 1, err)
@@ -1003,6 +1060,7 @@ async def run_certify_fix_loop(
                 try:
                     logger.info("Certify-fix loop round %d: fixing %d issues (attempt %d)",
                                 round_num, len(failures), attempt + 1)
+                    fix_call_start = time.monotonic()
                     fix_result = await build_agentic_v3(
                         "\n".join(fix_lines), project_dir, fix_config,
                         manage_checkpoint=False,
@@ -1010,11 +1068,14 @@ async def run_certify_fix_loop(
                         spec=spec,
                         budget=budget,
                     )
+                    build_phase_duration += time.monotonic() - fix_call_start
                     break
                 except AgentCallError:
+                    build_phase_duration += time.monotonic() - fix_call_start
                     # Budget exhaustion / timeout — don't retry.
                     raise
                 except Exception as err:
+                    build_phase_duration += time.monotonic() - fix_call_start
                     if attempt < MAX_RETRIES:
                         logger.warning("Fix round %d attempt %d failed: %s. Retrying...",
                                        round_num, attempt + 1, err)
@@ -1023,6 +1084,7 @@ async def run_certify_fix_loop(
 
             if fix_result:
                 total_cost += fix_result.total_cost
+                build_phase_cost += float(fix_result.total_cost)
                 record_build(project_dir, round_id, fix_result, session_id=build_id)
                 append_journal(project_dir, round_id, f"fix round {round_num}",
                                "done" if fix_result.passed else "warning",
@@ -1093,6 +1155,19 @@ async def run_certify_fix_loop(
         logger.warning("Failed to mark checkpoint completed: %s", exc)
 
     journeys = _stories_to_journeys(last_stories)
+    if build_phase_duration > 0.0:
+        build_entry: dict[str, Any] = {"duration_s": round(build_phase_duration, 1)}
+        if build_phase_cost > 0.0:
+            build_entry["cost_usd"] = _round_cost(build_phase_cost)
+        split_breakdown["build"] = build_entry
+    if certify_phase_duration > 0.0:
+        certify_entry: dict[str, Any] = {
+            "duration_s": round(certify_phase_duration, 1),
+            "rounds": certify_phase_rounds,
+        }
+        if certify_phase_cost > 0.0:
+            certify_entry["cost_usd"] = _round_cost(certify_phase_cost)
+        split_breakdown["certify"] = certify_entry
     _write_session_summary(
         project_dir,
         build_id,
@@ -1105,6 +1180,7 @@ async def run_certify_fix_loop(
         rounds=actual_rounds,
         intent=intent,
         command=command,
+        breakdown=split_breakdown or None,
     )
 
     return BuildResult(

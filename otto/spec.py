@@ -256,7 +256,7 @@ async def run_spec_agent(
     log_subdir = run_dir / (f"agent-v{version}" if version else "agent")
 
     start = time.monotonic()
-    _text, cost, _session = await run_agent_with_timeout(
+    _text, cost, _session, _breakdown = await run_agent_with_timeout(
         prompt, options,
         log_dir=log_subdir,
         phase_name="SPEC",

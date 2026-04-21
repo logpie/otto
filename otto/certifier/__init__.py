@@ -123,7 +123,7 @@ async def run_agentic_certifier(
     # Timeout derives from the run budget (None = no timeout).
     timeout = budget.for_call() if budget is not None else None
 
-    text, cost, _session_id = await run_agent_with_timeout(
+    text, cost, _session_id, _breakdown = await run_agent_with_timeout(
         prompt, options,
         log_dir=report_dir,
         phase_name="CERTIFY",
@@ -219,6 +219,14 @@ async def run_agentic_certifier(
     if write_session_summary:
         try:
             from otto.pipeline import _write_session_summary
+            certify_rounds_count = len(parsed.certify_rounds) or 1
+            breakdown = {
+                "certify": {
+                    "duration_s": total_duration,
+                    "cost_usd": float(cost or 0.0),
+                    "rounds": certify_rounds_count,
+                }
+            }
             _write_session_summary(
                 project_dir,
                 run_id,
@@ -228,9 +236,10 @@ async def run_agentic_certifier(
                 duration=total_duration,
                 stories_passed=parsed.stories_passed,
                 stories_tested=parsed.stories_tested,
-                rounds=1,
+                rounds=certify_rounds_count,
                 intent=intent,
                 command="certify",
+                breakdown=breakdown,
             )
         except Exception as exc:
             logger.warning("Failed to write session summary: %s", exc)

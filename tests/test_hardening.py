@@ -1697,7 +1697,7 @@ class TestBuildResume:
         captured = {}
 
         async def fake_spec_phase(**kwargs):
-            return "run-spec-123", "# Approved Spec", 1.25
+            return "run-spec-123", "# Approved Spec", 1.25, 12.0
 
         async def fake_loop(intent, project_dir, config, **kwargs):
             captured.update(kwargs)
@@ -1722,6 +1722,7 @@ class TestBuildResume:
         assert captured["session_id"] == "run-spec-123"
         assert captured["spec"] == "# Approved Spec"
         assert captured["spec_cost"] == 1.25
+        assert captured["spec_duration"] == 12.0
 
     def test_improve_resume_threads_run_id_into_split_and_agentic(
         self, tmp_git_repo, monkeypatch
