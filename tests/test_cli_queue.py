@@ -98,6 +98,38 @@ def test_queue_build_rejects_resume_in_args(tmp_path: Path):
     assert "--resume is not allowed" in out
 
 
+def test_queue_build_rejects_flag_like_missing_intent_after_double_dash(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    code, out, _ = _run(["queue", "build", "--as", "add", "--", "--fast"], cwd=repo)
+    assert code == 2
+    assert "looks like a CLI flag" in out
+    assert '"add csv export" --as csv -- --fast --rounds 3' in out
+
+
+def test_queue_build_accepts_real_intent_before_double_dash(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    code, out, _ = _run(
+        ["queue", "build", "real intent", "--as", "add", "--", "--fast"],
+        cwd=repo,
+    )
+    assert code == 0, out
+    tasks = load_queue(repo)
+    assert tasks[0].id == "add"
+    assert tasks[0].command_argv == ["build", "real intent", "--fast"]
+
+
+def test_looks_like_flag_rejects_short_flag_like_intent():
+    assert cli_queue_module._looks_like_flag("-foo") is True
+
+
+def test_queue_build_allows_dash_inside_intent(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    code, out, _ = _run(["queue", "build", "fix bug -1"], cwd=repo)
+    assert code == 0, out
+    tasks = load_queue(repo)
+    assert tasks[0].resolved_intent == "fix bug -1"
+
+
 def test_queue_build_explicit_as(tmp_path: Path):
     repo = init_repo(tmp_path)
     code, out, _ = _run(["queue", "build", "test", "--as", "my-id"], cwd=repo)

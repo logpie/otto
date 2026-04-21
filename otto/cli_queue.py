@@ -1,9 +1,12 @@
 """Otto CLI — `otto queue ...` command group (Phase 2.3-2.7).
 
 Wrapper syntax: prepend `otto queue` to the otto command you'd already write.
-    otto queue build "add csv export"        # enqueue a build
-    otto queue improve bugs --rounds 3       # enqueue an improve
-    otto queue certify --thorough            # enqueue a certify
+    otto queue build "add csv export"                  # simple
+    otto queue build "add csv export" --as csv         # explicit task id
+    otto queue build "add csv export" -- --fast        # passthrough flags after --
+    otto queue build "add csv export" --as csv -- --fast --rounds 3
+    otto queue improve bugs "error handling" -- --rounds 3
+    otto queue certify "release candidate" -- --thorough
 
 Plus management verbs:
     otto queue ls
@@ -146,6 +149,18 @@ def _resolve_otto_bin() -> list[str]:
     return [sys.executable, "-m", "otto.cli"]
 
 
+def _looks_like_flag(value: str) -> bool:
+    """Return True if value looks like a forgotten CLI flag, not a real intent."""
+    if not value:
+        return True
+    stripped = value.strip()
+    if stripped.startswith("--"):
+        return True
+    if stripped.startswith("-") and len(stripped) > 1 and stripped[1].isalpha():
+        return True
+    return False
+
+
 def _validate_target_args(command: click.Command, argv: list[str]) -> None:
     """Validate queued args against the target command signature without running it."""
     try:
@@ -211,6 +226,7 @@ def _enqueue(
     resumable: bool,
     focus: str | None = None,
     target: str | None = None,
+    explicit_intent: str | None = None,
 ) -> None:
     """The shared path for `otto queue build|improve|certify`."""
     from otto.branching import compute_branch_name
@@ -242,6 +258,16 @@ def _enqueue(
 
     existing = load_queue(project_dir)
     existing_ids = [t.id for t in existing]
+
+    if explicit_intent is not None and _looks_like_flag(explicit_intent):
+        error_console.print(
+            f"[error]Intent looks like a CLI flag ({rich_escape(explicit_intent)!r}), not a description.[/error]\n"
+            "  Did you forget to quote the intent? Examples:\n"
+            "    otto queue build \"add csv export\" --as csv\n"
+            "    otto queue build \"add csv export\" --as csv -- --fast --rounds 3\n"
+            "  Note: intent must come BEFORE `--`. Anything after `--` is passed through to the inner otto build."
+        )
+        sys.exit(2)
 
     try:
         task_id = generate_task_id(
@@ -294,9 +320,12 @@ def register_queue_commands(main: click.Group) -> None:
         Wrap any otto command with `otto queue` to defer execution:
 
         \b
-            otto queue build "add csv export"
-            otto queue improve bugs --rounds 3
-            otto queue certify --thorough
+            otto queue build "add csv export"                  # simple
+            otto queue build "add csv export" --as csv         # explicit task id
+            otto queue build "add csv export" -- --fast        # passthrough flags after --
+            otto queue build "add csv export" --as csv -- --fast --rounds 3
+            otto queue improve bugs "error handling" -- --rounds 3
+            otto queue certify "release candidate" -- --thorough
 
         Then start the watcher to process queued tasks:
 
@@ -316,12 +345,23 @@ def register_queue_commands(main: click.Group) -> None:
     @click.argument("extra_args", nargs=-1, type=click.UNPROCESSED)
     def queue_build(intent: str, after: tuple[str, ...], explicit_as: str | None,
                     extra_args: tuple[str, ...]) -> None:
-        """Enqueue an `otto build` run."""
+        """Enqueue an `otto build` run.
+
+        \b
+            otto queue build "add csv export"                  # simple
+            otto queue build "add csv export" --as csv         # explicit task id
+            otto queue build "add csv export" -- --fast        # passthrough flags after --
+            otto queue build "add csv export" --as csv -- --fast --rounds 3
+
+        Intent must come before `--`. Anything after `--` is passed through
+        to the inner `otto build` command.
+        """
         _validate_target_args(main.commands["build"], [intent, *extra_args])
         _enqueue(
             command="build",
             raw_args=[intent, *extra_args],
             intent=intent,
+            explicit_intent=intent,
             after=list(after),
             explicit_as=explicit_as,
             resumable=True,
@@ -340,7 +380,16 @@ def register_queue_commands(main: click.Group) -> None:
     def queue_improve(subcommand: str, focus_or_goal: str | None,
                       after: tuple[str, ...], explicit_as: str | None,
                       extra_args: tuple[str, ...]) -> None:
-        """Enqueue an `otto improve <bugs|feature|target>` run."""
+        """Enqueue an `otto improve <bugs|feature|target>` run.
+
+        \b
+            otto queue improve bugs "error handling"
+            otto queue improve bugs "error handling" -- --rounds 3
+            otto queue improve target "p95 latency under 100ms" -- --strict
+
+        For subcommands with an explicit focus/goal, it must come before `--`.
+        Anything after `--` is passed through to the inner `otto improve`.
+        """
         from otto.config import resolve_intent_for_enqueue
 
         snapshot_intent = resolve_intent_for_enqueue(_project_dir())
@@ -361,6 +410,7 @@ def register_queue_commands(main: click.Group) -> None:
             command="improve",
             raw_args=raw,
             intent=snapshot_intent,
+            explicit_intent=focus_or_goal,
             after=list(after),
             explicit_as=explicit_as,
             resumable=True,
@@ -379,7 +429,16 @@ def register_queue_commands(main: click.Group) -> None:
     @click.argument("extra_args", nargs=-1, type=click.UNPROCESSED)
     def queue_certify(intent: str | None, after: tuple[str, ...],
                       explicit_as: str | None, extra_args: tuple[str, ...]) -> None:
-        """Enqueue an `otto certify` run."""
+        """Enqueue an `otto certify` run.
+
+        \b
+            otto queue certify
+            otto queue certify "release candidate"
+            otto queue certify "release candidate" -- --thorough
+
+        If you pass an explicit intent, it must come before `--`. Anything
+        after `--` is passed through to the inner `otto certify`.
+        """
         from otto.config import resolve_intent_for_enqueue
 
         resolved = resolve_intent_for_enqueue(_project_dir(), explicit=intent)
@@ -390,6 +449,7 @@ def register_queue_commands(main: click.Group) -> None:
             command="certify",
             raw_args=raw,
             intent=resolved,
+            explicit_intent=intent,
             after=list(after),
             explicit_as=explicit_as,
             resumable=False,  # certify has no --resume per cli.py:617
