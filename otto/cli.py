@@ -393,6 +393,7 @@ def _exit_for_lock_busy(exc) -> None:
 @click.argument("intent", required=False)
 @click.option("--no-qa", is_flag=True, help="Skip product certification after build")
 @click.option("--fast", is_flag=True, help="Fast certification — happy path smoke test only (default)")
+@click.option("--standard", "standard_", is_flag=True, help="Standard certification — Must-Have + generic CRUD/edge/access checklist")
 @click.option("--thorough", is_flag=True, help="Thorough certification — adversarial edge cases + code review")
 @click.option("--split", is_flag=True, help="Split mode: system-controlled certify loop with build journal")
 @click.option("--rounds", "-n", default=None, type=int, help="Max certification rounds (default: 8)")
@@ -403,7 +404,7 @@ def _exit_for_lock_busy(exc) -> None:
 @click.option("--yes", is_flag=True, help="Auto-approve the generated spec (for CI/scripts)")
 @click.option("--force", is_flag=True, help="Discard an active paused spec run and start fresh")
 @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
-def build(intent, no_qa, fast, thorough, split, rounds, resume, spec, spec_file, yes, force, break_lock):
+def build(intent, no_qa, fast, standard_, thorough, split, rounds, resume, spec, spec_file, yes, force, break_lock):
     """Build a product from a natural language intent.
 
     One agent builds, certifies, and fixes autonomously. The certifier
@@ -430,7 +431,7 @@ def build(intent, no_qa, fast, thorough, split, rounds, resume, spec, spec_file,
     try:
         with _paths.project_lock(project_dir, "build", break_lock=break_lock):
             _build_locked(
-                intent, no_qa, fast, thorough, split, rounds, resume,
+                intent, no_qa, fast, standard_, thorough, split, rounds, resume,
                 spec, spec_file, yes, force, project_dir,
             )
     except _paths.LockBusy as exc:
@@ -441,6 +442,7 @@ def _build_locked(
     intent,
     no_qa,
     fast,
+    standard_,
     thorough,
     split,
     rounds,
@@ -580,11 +582,15 @@ def _build_locked(
 
     if no_qa:
         config["skip_product_qa"] = True
-    if fast and thorough:
-        error_console.print("[error]--fast and --thorough are mutually exclusive.[/error]")
+    if sum(bool(x) for x in (fast, standard_, thorough)) > 1:
+        error_console.print(
+            "[error]--fast, --standard, and --thorough are mutually exclusive.[/error]"
+        )
         sys.exit(2)
     if fast:
         config["_certifier_mode"] = "fast"
+    elif standard_:
+        config["_certifier_mode"] = "standard"
     elif thorough:
         config["_certifier_mode"] = "thorough"
     if rounds is not None:
@@ -681,10 +687,11 @@ def _build_locked(
 
 @main.command(context_settings=CONTEXT_SETTINGS)
 @click.argument("intent", required=False)
-@click.option("--thorough", is_flag=True, help="Thorough mode — find what's broken, not just verify")
+@click.option("--thorough", is_flag=True, help="Thorough mode — adversarial edge cases + code review")
 @click.option("--fast", is_flag=True, help="Fast mode — happy path smoke test only")
+@click.option("--standard", "standard_", is_flag=True, help="Standard mode — Must-Have + generic CRUD/edge/access checklist (default when no flag given)")
 @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
-def certify(intent, thorough, fast, break_lock):
+def certify(intent, thorough, fast, standard_, break_lock):
     """Certify a product — independent, builder-blind verification.
 
     Tests the product in the current directory as a real user. Works on
@@ -693,22 +700,28 @@ def certify(intent, thorough, fast, break_lock):
     If no intent is given, reads intent.md or README.md from the project.
 
     Examples:
-        otto certify                   # reads intent.md
+        otto certify                   # standard mode (default)
         otto certify --fast            # quick smoke test (~1-2 min)
         otto certify --thorough        # adversarial deep inspection
     """
     project_dir = Path.cwd()
     from otto import paths as _paths
 
+    if sum(bool(x) for x in (fast, standard_, thorough)) > 1:
+        error_console.print(
+            "[error]--fast, --standard, and --thorough are mutually exclusive.[/error]"
+        )
+        sys.exit(2)
+
     try:
         with _paths.project_lock(project_dir, "certify", break_lock=break_lock):
             session_id = _new_run_id(project_dir)
-            _certify_locked(intent, thorough, fast, project_dir, session_id)
+            _certify_locked(intent, thorough, fast, standard_, project_dir, session_id)
     except _paths.LockBusy as exc:
         _exit_for_lock_busy(exc)
 
 
-def _certify_locked(intent, thorough, fast, project_dir: Path, session_id: str):
+def _certify_locked(intent, thorough, fast, standard_, project_dir: Path, session_id: str):
 
     # Load config so run_budget_seconds and other settings are respected
     config_path = project_dir / "otto.yaml"
