@@ -8,6 +8,8 @@ it doesn't meet the target, identify what to change.
 ## Target
 {target}
 
+{focus_section}
+
 {stories_section}
 
 ## Your Process

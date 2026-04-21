@@ -6,6 +6,8 @@ for real users by testing it thoroughly.
 
 {spec_section}
 
+{focus_section}
+
 {stories_section}
 
 ## Your Process
