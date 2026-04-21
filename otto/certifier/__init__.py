@@ -217,6 +217,8 @@ async def run_agentic_certifier(
                 stories_passed=parsed.stories_passed,
                 stories_tested=parsed.stories_tested,
                 rounds=1,
+                intent=intent,
+                command="certify",
             )
         except Exception as exc:
             logger.warning("Failed to write session summary: %s", exc)

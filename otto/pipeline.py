@@ -54,13 +54,22 @@ def _write_session_summary(
     stories_tested: int,
     rounds: int,
     status: str = "completed",
+    intent: str = "",
+    command: str = "build",
 ) -> None:
-    """Write the canonical summary artifact for a completed session."""
+    """Write the canonical summary artifact for a completed session.
+
+    Includes `intent` and `command` so a single read of summary.json
+    answers "what was this session about?" — no crossref to
+    project-root intent.md required.
+    """
     from otto import paths
     from otto.observability import write_json_file
 
     summary = {
         "session_id": session_id,
+        "command": command,
+        "intent": intent,
         "verdict": verdict,
         "passed": passed,
         "cost_usd": round(cost, 2),
@@ -355,6 +364,25 @@ async def build_agentic_v3(
             round_history=round_history,
             evidence_dir=evidence_dir_path,
         )
+
+        # Markdown PoW — complements .html/.json with a text-only summary.
+        md_lines = [
+            "# Proof-of-Work Certification Report",
+            "",
+            f"> **Generated:** {time.strftime('%Y-%m-%d %H:%M:%S')}",
+            f"> **Outcome:** {'passed' if passed else 'failed'}",
+            f"> **Duration:** {total_duration:.0f}s",
+            f"> **Cost:** ${float(cost or 0):.2f}",
+            f"> **Stories:** {stories_passed}/{stories_tested}",
+            f"> **Rounds:** {len(certify_rounds) or 1}",
+            "",
+        ]
+        for s in story_results:
+            status = "WARN" if s.get("warn") else ("PASS" if s["passed"] else "FAIL")
+            md_lines.append(f"- **{status}** {s.get('story_id', '?')}: {s.get('summary', '')}")
+        if overall_diagnosis:
+            md_lines += ["", "## Diagnosis", "", overall_diagnosis]
+        (report_dir / "proof-of-work.md").write_text("\n".join(md_lines) + "\n")
     except Exception as exc:
         logger.warning("Failed to write PoW: %s", exc)
 
@@ -383,6 +411,8 @@ async def build_agentic_v3(
             stories_tested=stories_tested,
             rounds=max(len(certify_rounds), 1),
             status=final_status,
+            intent=intent,
+            command=command,
         )
 
     logger.info("Agentic v3 done: %s, %d/%d stories, %.1fs, $%.2f",
@@ -1007,6 +1037,8 @@ async def run_certify_fix_loop(
         stories_passed=sum(1 for j in journeys if j.get("passed")),
         stories_tested=len(journeys),
         rounds=actual_rounds,
+        intent=intent,
+        command=command,
     )
 
     return BuildResult(
