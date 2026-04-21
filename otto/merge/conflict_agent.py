@@ -9,7 +9,7 @@ to self-verify and use Bash to inspect branch context with `git diff` /
 
 Validation guarantees (`validate_post_agent`):
 1. Out-of-scope edits — `post_diff − pre_diff ⊆ expected_uu_files`
-2. No new untracked files (build artifacts caught here)
+2. Agent-created untracked files are delta-cleaned; cleanup failures fail closed
 3. No conflict markers remain — content scan of `expected_uu_files`
    (markers can live in committed files where `git diff --check` is blind)
 4. HEAD unchanged (agent didn't `commit`/`reset`)
@@ -21,6 +21,7 @@ tool restrictions globally, which would undermine the merge safety model.
 from __future__ import annotations
 
 import logging
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -106,6 +107,24 @@ def _files_with_markers(project_dir: Path, files: list[str] | set[str]) -> list[
     return sorted(out)
 
 
+def _cleanup_agent_untracked_delta(project_dir: Path, new_untracked: set[str]) -> list[str]:
+    """Best-effort remove only the untracked paths created during the agent session."""
+    failed: list[str] = []
+    for rel in sorted(new_untracked, key=lambda p: (len(Path(p).parts), p), reverse=True):
+        path = project_dir / rel
+        try:
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path, ignore_errors=False)
+            elif path.exists() or path.is_symlink():
+                path.unlink()
+            else:
+                continue
+            logger.info("removed agent-created untracked path: %s", rel)
+        except OSError:
+            failed.append(rel)
+    return failed
+
+
 def validate_post_agent(
     *,
     project_dir: Path,
@@ -118,7 +137,7 @@ def validate_post_agent(
 
     Returns (ok, error_message). Checks:
     1. Out-of-scope edits — `post_diff - pre_diff` must ⊆ `expected_uu_files`
-    2. No new untracked files
+    2. Agent-created untracked files are delta-cleaned; cleanup failures fail closed
     3. No conflict markers remain in `expected_uu_files` (content scan —
        `git diff --check` is blind to markers in already-committed files)
     4. HEAD unchanged
@@ -133,15 +152,14 @@ def validate_post_agent(
         return (False, f"agent edited files outside conflict set: {sorted(out_of_scope)!r}")
     new_untracked = set(git_ops.untracked_files(project_dir)) - pre_untracked_files
     if new_untracked:
-        # Build artifacts from agent test runs (__pycache__/, node_modules/,
-        # etc.) typically trip this. Otto's setup_gitignore adds common
-        # patterns; older project gitignore files may not.
-        return (False, (
-            f"agent created untracked files: {sorted(new_untracked)!r}. "
-            f"These are likely build artifacts from running tests (e.g. "
-            f"__pycache__/, node_modules/, dist/). Add them to .gitignore "
-            f"and re-run the merge."
-        ))
+        failed_cleanup = set(_cleanup_agent_untracked_delta(project_dir, new_untracked))
+        remaining_untracked = set(git_ops.untracked_files(project_dir)) - pre_untracked_files
+        failed_cleanup |= remaining_untracked
+        if failed_cleanup:
+            return (False, (
+                f"could not clean up agent-created files: {sorted(failed_cleanup)!r}. "
+                f"Inspect the working tree manually, then re-run the merge."
+            ))
     leftover = _files_with_markers(project_dir, expected_uu_files)
     if leftover:
         return (False, f"conflict markers still in files: {leftover!r}")

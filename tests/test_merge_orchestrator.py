@@ -197,14 +197,14 @@ def test_codex_provider_allowed_in_fast_mode(tmp_path: Path):
     git_ops.merge_abort(repo)
 
 
-def test_conflict_agent_rejects_new_untracked_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_conflict_agent_cleans_new_untracked_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     repo = _init_repo_with_gitattributes(tmp_path)
     _make_branch(repo, "feat-a", "f.txt", "A\n")
     _make_branch(repo, "feat-b", "f.txt", "B\n")
 
     async def fake_run_agent_with_timeout(*args, **kwargs):
         # Resolve markers in conflict files, but also create a stray
-        # untracked file that the validator must reject.
+        # untracked file that the validator should clean up.
         for f in repo.glob("f.txt"):
             f.write_text("resolved\n")
         (repo / "extra.txt").write_text("stray\n")
@@ -218,8 +218,8 @@ def test_conflict_agent_rejects_new_untracked_files(tmp_path: Path, monkeypatch:
             explicit_ids_or_branches=["feat-a", "feat-b"],
         ))
 
-    assert result.success is False
-    assert "untracked files" in result.note
+    assert result.success is True
+    assert not (repo / "extra.txt").exists()
 
 
 def test_consolidated_merge_captures_merge_aware_diff_with_both_sides(

@@ -2,13 +2,27 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from pathlib import Path
 
+from otto.merge import git_ops
 from otto.merge.conflict_agent import (
     _files_with_markers,
     validate_post_agent,
 )
+
+
+def _init_repo(tmp_path: Path) -> str:
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=tmp_path, check=True)
+    (tmp_path / "tracked.py").write_text("def tracked():\n    return 1\n")
+    subprocess.run(["git", "add", "tracked.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=tmp_path, check=True)
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True
+    ).stdout.strip()
 
 
 def test_files_with_markers_detects_marker_lines(tmp_path: Path):
@@ -101,17 +115,88 @@ def test_validate_post_agent_catches_committed_markers(tmp_path: Path):
     assert err is not None and "f.py" in err and "markers" in err
 
 
+def test_validate_post_agent_cleans_agent_created_untracked_files(
+    tmp_path: Path, caplog
+):
+    head = _init_repo(tmp_path)
+    notes = tmp_path / "notes.txt"
+    notes.write_text("notes\n")
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    (output_dir / "report.log").write_text("report\n")
+
+    caplog.set_level(logging.INFO, logger="otto.merge.conflict_agent")
+    ok, err = validate_post_agent(
+        project_dir=tmp_path,
+        pre_diff_files=set(),
+        expected_uu_files=set(),
+        pre_untracked_files=set(),
+        pre_head=head,
+    )
+
+    assert ok, f"cleanup should allow validation to pass; got err={err}"
+    assert err is None
+    assert not notes.exists()
+    assert not output_dir.exists()
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("notes.txt" in message for message in messages)
+    assert any("output" in message for message in messages)
+
+
+def test_validate_post_agent_preserves_preexisting_untracked_files(tmp_path: Path):
+    head = _init_repo(tmp_path)
+    existing = tmp_path / "existing.txt"
+    existing.write_text("keep me\n")
+    pre_untracked_files = set(git_ops.untracked_files(tmp_path))
+    new_file = tmp_path / "new.txt"
+    new_file.write_text("remove me\n")
+
+    ok, err = validate_post_agent(
+        project_dir=tmp_path,
+        pre_diff_files=set(),
+        expected_uu_files=set(),
+        pre_untracked_files=pre_untracked_files,
+        pre_head=head,
+    )
+
+    assert ok, f"only agent-created residue should be cleaned; got err={err}"
+    assert err is None
+    assert existing.exists()
+    assert not new_file.exists()
+    assert set(git_ops.untracked_files(tmp_path)) == {"existing.txt"}
+
+
+def test_validate_post_agent_fails_when_untracked_cleanup_fails(tmp_path: Path, monkeypatch):
+    head = _init_repo(tmp_path)
+    victim = tmp_path / "new.txt"
+    victim.write_text("remove me\n")
+    real_unlink = Path.unlink
+
+    def raising_unlink(self: Path, *args, **kwargs):
+        if self == victim:
+            raise PermissionError("blocked")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", raising_unlink)
+
+    ok, err = validate_post_agent(
+        project_dir=tmp_path,
+        pre_diff_files=set(),
+        expected_uu_files=set(),
+        pre_untracked_files=set(),
+        pre_head=head,
+    )
+
+    assert not ok
+    assert err is not None
+    assert "could not clean up agent-created files" in err
+    assert "new.txt" in err
+    assert victim.exists()
+
+
 def test_validate_post_agent_passes_clean_tree(tmp_path: Path):
     """Clean tree, expected_uu_files empty, HEAD unchanged → passes."""
-    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "config", "user.email", "t@e.com"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "config", "user.name", "T"], cwd=tmp_path, check=True)
-    (tmp_path / "f.py").write_text("def f(): return 1\n")
-    subprocess.run(["git", "add", "f.py"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-q", "-m", "i"], cwd=tmp_path, check=True)
-    head = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True
-    ).stdout.strip()
+    head = _init_repo(tmp_path)
 
     ok, err = validate_post_agent(
         project_dir=tmp_path,
