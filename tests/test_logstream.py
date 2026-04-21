@@ -25,6 +25,7 @@ from otto.agent import (
 from otto.logstream import (
     JsonlMessageWriter,
     NarrativeFormatter,
+    estimate_phase_costs,
     make_session_logger,
 )
 
@@ -86,6 +87,19 @@ class TestJsonlWriter:
 
         rec = json.loads(path.read_text().strip())
         assert rec["structured_output"] == {"verdict": "PASS", "stories": 3}
+
+    def test_assistant_message_records_usage(self, tmp_path):
+        path = tmp_path / "messages.jsonl"
+        w = JsonlMessageWriter(path)
+        w.write(AssistantMessage(
+            content=[TextBlock(text="hello")],
+            usage={"input_tokens": 12, "output_tokens": 34},
+        ))
+        w.close()
+
+        rec = json.loads(path.read_text().strip())
+        assert rec["type"] == "assistant"
+        assert rec["usage"] == {"input_tokens": 12, "output_tokens": 34}
 
     def test_appends_on_reopen(self, tmp_path):
         path = tmp_path / "messages.jsonl"
@@ -317,6 +331,31 @@ class TestNarrativeFormatter:
         assert "RUN SUMMARY: build=2:18, certify=1:51 (2 rounds), total=$0.98 4:31" in summary
         assert "build=$" not in summary
         assert "certify=$" not in summary
+
+    def test_finalize_with_estimated_phase_costs_emits_tilde_prefixed_summary(self, tmp_path):
+        path = tmp_path / "narrative.log"
+        f = NarrativeFormatter(path)
+        f._start = time.monotonic() - 271.0
+        f.write_message(ResultMessage(
+            subtype="success", is_error=False, session_id="x",
+            total_cost_usd=0.98,
+        ))
+        f.finalize({
+            "build": {"duration_s": 138.0, "cost_usd": 0.49, "estimated": True},
+            "certify": {
+                "duration_s": 111.0,
+                "cost_usd": 0.41,
+                "estimated": True,
+                "rounds": 2,
+            },
+        })
+        f.close()
+
+        summary = _strip_ts(path.read_text().splitlines()[0])
+        assert (
+            "RUN SUMMARY: build=~$0.49 2:18, certify=~$0.41 1:51 (2 rounds), "
+            "total=$0.98 4:31"
+        ) in summary
 
     def test_finalize_no_qa_shape_omits_certify_entry(self, tmp_path):
         path = tmp_path / "narrative.log"
@@ -678,3 +717,81 @@ class TestMakeSessionLogger:
 
         rec = json.loads((tmp_path / "messages.jsonl").read_text().strip())
         assert rec["type"] == "unknown"
+
+
+class TestEstimatePhaseCosts:
+    def test_attributes_cost_by_output_token_share(self, tmp_path):
+        path = tmp_path / "messages.jsonl"
+        records = [
+            {
+                "type": "assistant",
+                "blocks": [{"type": "text", "text": "build"}],
+                "usage": {"output_tokens": 40},
+            },
+            {
+                "type": "assistant",
+                "blocks": [{
+                    "type": "tool_use",
+                    "id": "cert-1",
+                    "name": "Agent",
+                    "input": {"prompt": "hello\n## Verdict Format\nbye"},
+                }],
+                "usage": {"output_tokens": 10},
+            },
+            {
+                "type": "assistant",
+                "blocks": [{"type": "text", "text": "inside certify"}],
+                "usage": {"output_tokens": 20},
+            },
+            {
+                "type": "assistant",
+                "blocks": [{
+                    "type": "tool_result",
+                    "tool_use_id": "cert-1",
+                    "content": "done",
+                    "is_error": False,
+                }],
+                "usage": {"output_tokens": 30},
+            },
+            {
+                "type": "assistant",
+                "blocks": [{"type": "text", "text": "wrap up"}],
+                "usage": {"output_tokens": 50},
+            },
+        ]
+        path.write_text("\n".join(json.dumps(rec) for rec in records) + "\n")
+
+        estimated = estimate_phase_costs(path, 1.5)
+
+        assert estimated == {
+            "build": {"cost_usd": 0.9, "estimated": True},
+            "certify": {"cost_usd": 0.6, "estimated": True},
+        }
+
+    def test_no_agent_dispatches_attribute_all_cost_to_build(self, tmp_path):
+        path = tmp_path / "messages.jsonl"
+        records = [
+            {
+                "type": "assistant",
+                "blocks": [{"type": "text", "text": "build"}],
+                "usage": {"output_tokens": 30},
+            },
+            {
+                "type": "assistant",
+                "blocks": [{"type": "text", "text": "more build"}],
+                "usage": {"output_tokens": 70},
+            },
+        ]
+        path.write_text("\n".join(json.dumps(rec) for rec in records) + "\n")
+
+        estimated = estimate_phase_costs(path, 2.0)
+
+        assert estimated == {
+            "build": {"cost_usd": 2.0, "estimated": True},
+        }
+
+    def test_malformed_jsonl_returns_none(self, tmp_path):
+        path = tmp_path / "messages.jsonl"
+        path.write_text("{not json}\n")
+
+        assert estimate_phase_costs(path, 1.0) is None

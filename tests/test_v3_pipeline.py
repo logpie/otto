@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from otto.agent import AssistantMessage, TextBlock, ToolResultBlock, ToolUseBlock
 from otto.pipeline import build_agentic_v3
 from tests.conftest import make_mock_query as _make_mock_query
 
@@ -288,6 +289,61 @@ async def test_completed_checkpoint_total_cost_and_run_id_match_build_result(tmp
     assert checkpoint["total_cost"] == pytest.approx(0.75)
     assert result.total_cost == pytest.approx(0.75)
     assert _paths.resolve_pointer(tmp_git_repo, _paths.PAUSED_POINTER) is None
+
+
+@pytest.mark.asyncio
+async def test_agent_mode_summary_includes_estimated_phase_costs_when_usage_is_logged(tmp_git_repo):
+    assistant_messages = [
+        AssistantMessage(
+            content=[TextBlock(text="I'll build this product. Now dispatching the certifier.")],
+            usage={"output_tokens": 40},
+        ),
+        AssistantMessage(
+            content=[ToolUseBlock(
+                name="Agent",
+                id="cert-1",
+                input={"prompt": "Quick smoke test\n## Verdict Format\nReturn PASS/FAIL."},
+            )],
+            usage={"output_tokens": 10},
+        ),
+        AssistantMessage(
+            content=[TextBlock(text="Certifier is running.")],
+            usage={"output_tokens": 25},
+        ),
+        AssistantMessage(
+            content=[ToolResultBlock(
+                tool_use_id="cert-1",
+                content=(
+                    "STORIES_TESTED: 5\n"
+                    "STORIES_PASSED: 5\n"
+                    "STORY_RESULT: smoke | PASS | core flow works\n"
+                    "VERDICT: PASS\n"
+                    "DIAGNOSIS: null"
+                ),
+            )],
+            usage={"output_tokens": 15},
+        ),
+        AssistantMessage(
+            content=[TextBlock(text=AGENT_OUTPUT_PASS)],
+            usage={"output_tokens": 30},
+        ),
+    ]
+    with patch(
+        "otto.agent.run_agent_query",
+        side_effect=_make_mock_query(AGENT_OUTPUT_PASS, assistant_messages=assistant_messages),
+    ):
+        result = await build_agentic_v3("test", tmp_git_repo, {})
+
+    from otto import paths as _paths
+
+    summary = json.loads(_paths.session_summary(tmp_git_repo, result.build_id).read_text())
+    build_entry = summary["breakdown"]["build"]
+    certify_entry = summary["breakdown"]["certify"]
+    assert build_entry["cost_usd"] >= 0
+    assert build_entry["estimated"] is True
+    assert certify_entry["cost_usd"] >= 0
+    assert certify_entry["estimated"] is True
+    assert certify_entry["rounds"] == 1
 
 
 @pytest.mark.asyncio

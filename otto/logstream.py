@@ -152,9 +152,13 @@ class JsonlMessageWriter:
         elif isinstance(message, UserMessage):
             record["type"] = "user"
             record["blocks"] = [_block_to_dict(b) for b in message.content]
+            if message.usage is not None:
+                record["usage"] = _coerce_usage(message.usage)
         elif isinstance(message, AssistantMessage):
             record["type"] = "assistant"
             record["blocks"] = [_block_to_dict(b) for b in message.content]
+            if message.usage is not None:
+                record["usage"] = _coerce_usage(message.usage)
         else:
             record["type"] = "unknown"
             record["repr"] = str(message)[:500]
@@ -272,7 +276,7 @@ class NarrativeFormatter:
     def _summary_line(
         self,
         total_elapsed: float,
-        breakdown: dict[str, dict[str, float | int]] | None,
+        breakdown: dict[str, dict[str, Any]] | None,
         total_cost_usd: float | None,
     ) -> str:
         if breakdown is None:
@@ -286,6 +290,8 @@ class NarrativeFormatter:
             segment = f"{phase}="
             cost_usd = phase_data.get("cost_usd")
             if isinstance(cost_usd, int | float):
+                if phase_data.get("estimated") is True:
+                    segment += "~"
                 segment += f"${float(cost_usd):.2f} "
             segment += _format_elapsed_seconds(float(phase_data.get("duration_s", 0.0)))
             rounds = phase_data.get("rounds")
@@ -658,6 +664,98 @@ def _looks_like_certifier_prompt(tool_input: Any) -> bool:
     if not isinstance(prompt, str):
         return False
     return "## Verdict Format" in prompt
+
+
+def estimate_phase_costs(
+    messages_jsonl: Path,
+    total_cost_usd: float,
+) -> dict[str, dict[str, Any]] | None:
+    """Estimate build/certify cost split from assistant output-token share.
+
+    Assistant messages are classified into build vs certify brackets by
+    certifier-shaped Agent dispatches. Missing files, malformed JSONL,
+    missing usage, or zero-token runs return ``None``.
+    """
+    if total_cost_usd <= 0 or not messages_jsonl.exists():
+        return None
+
+    build_tokens = 0
+    certify_tokens = 0
+    in_certify_round = False
+    certifier_tool_use_id: str | None = None
+
+    try:
+        with messages_jsonl.open(encoding="utf-8") as fh:
+            for raw_line in fh:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                if rec.get("type") != "assistant":
+                    continue
+
+                blocks = rec.get("blocks")
+                if not isinstance(blocks, list):
+                    return None
+
+                opens_certify = False
+                closes_certify = False
+                opening_tool_use_id: str | None = None
+                for block in blocks:
+                    if not isinstance(block, dict):
+                        return None
+                    block_type = block.get("type")
+                    if (
+                        block_type == "tool_use"
+                        and block.get("name") == "Agent"
+                        and _looks_like_certifier_prompt(block.get("input"))
+                    ):
+                        opens_certify = True
+                        opening_tool_use_id = str(block.get("id", "") or "")
+                    elif (
+                        block_type == "tool_result"
+                        and certifier_tool_use_id
+                        and str(block.get("tool_use_id", "") or "") == certifier_tool_use_id
+                    ):
+                        closes_certify = True
+
+                usage = rec.get("usage")
+                output_tokens = 0
+                if isinstance(usage, dict):
+                    raw_tokens = usage.get("output_tokens")
+                    if isinstance(raw_tokens, int | float):
+                        output_tokens = max(int(raw_tokens), 0)
+
+                if opens_certify or in_certify_round:
+                    certify_tokens += output_tokens
+                else:
+                    build_tokens += output_tokens
+
+                if opens_certify:
+                    in_certify_round = True
+                    certifier_tool_use_id = opening_tool_use_id
+                if closes_certify:
+                    in_certify_round = False
+                    certifier_tool_use_id = None
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+
+    total_tokens = build_tokens + certify_tokens
+    if total_tokens <= 0:
+        return None
+
+    estimated: dict[str, dict[str, Any]] = {}
+    if build_tokens > 0:
+        estimated["build"] = {
+            "cost_usd": round(float(total_cost_usd) * (build_tokens / total_tokens), 4),
+            "estimated": True,
+        }
+    if certify_tokens > 0:
+        estimated["certify"] = {
+            "cost_usd": round(float(total_cost_usd) * (certify_tokens / total_tokens), 4),
+            "estimated": True,
+        }
+    return estimated or None
 
 
 def _summarize_round(marker_lines: list[str]) -> tuple[str, int, int]:

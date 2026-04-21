@@ -24,7 +24,7 @@ from otto.agent import (
     ToolUseBlock,
     UserMessage,
 )
-from otto.logstream import NarrativeFormatter
+from otto.logstream import NarrativeFormatter, estimate_phase_costs
 
 
 def _rebuild_block(d: dict):
@@ -88,6 +88,7 @@ def _replay_one(jsonl_path: Path, out_path: Path) -> int:
     f.start()
     original_start = time.monotonic()
     lines_in = 0
+    total_cost_usd: float | None = None
     try:
         with jsonl_path.open(encoding="utf-8") as fh:
             for line in fh:
@@ -99,12 +100,24 @@ def _replay_one(jsonl_path: Path, out_path: Path) -> int:
                     rec = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                raw_cost = rec.get("cost_usd", rec.get("total_cost_usd"))
+                if isinstance(raw_cost, int | float):
+                    total_cost_usd = float(raw_cost)
                 # Rewind the formatter's clock so output elapsed matches original.
                 elapsed = rec.get("elapsed_s") or 0.0
                 f._start = original_start - float(elapsed)
                 msg = _rebuild_message(rec)
                 if msg is not None:
                     f.write_message(msg)
+        if total_cost_usd is not None:
+            breakdown = f._fallback_breakdown(f.elapsed_seconds())
+            estimated_costs = estimate_phase_costs(jsonl_path, total_cost_usd)
+            if estimated_costs:
+                for phase_name, phase_costs in estimated_costs.items():
+                    phase_entry = breakdown.get(phase_name)
+                    if phase_entry:
+                        phase_entry.update(phase_costs)
+            f.finalize(breakdown)
     finally:
         f.close()
     return lines_in

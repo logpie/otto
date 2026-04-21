@@ -66,6 +66,7 @@ class ToolResultBlock:
 class AssistantMessage:
     content: list[Any] = field(default_factory=list)
     session_id: str = ""
+    usage: dict[str, Any] | None = None
 
 
 @dataclass
@@ -79,6 +80,7 @@ class UserMessage:
     """
     content: list[Any] = field(default_factory=list)
     session_id: str = ""
+    usage: dict[str, Any] | None = None
 
 
 @dataclass
@@ -189,7 +191,7 @@ async def run_agent_with_timeout(
     import asyncio
     import logging
 
-    from otto.logstream import make_session_logger
+    from otto.logstream import estimate_phase_costs, make_session_logger
 
     log = logging.getLogger("otto.agent")
     callbacks = make_session_logger(log_dir, phase_name=phase_name)
@@ -256,6 +258,12 @@ async def run_agent_with_timeout(
                     "cost_usd": float(cost or 0.0),
                 }
             }
+        if phase == "build" and finalize_breakdown is not None:
+            estimated_costs = estimate_phase_costs(log_dir / "messages.jsonl", float(cost or 0.0))
+            if estimated_costs:
+                for phase_name, phase_costs in estimated_costs.items():
+                    if phase_name in finalize_breakdown:
+                        finalize_breakdown[phase_name].update(phase_costs)
         narrative.finalize(finalize_breakdown)
         return text, cost, session_id, breakdown_data
     except asyncio.TimeoutError:
@@ -437,7 +445,11 @@ def _normalize_message(message: Any) -> Any | None:
                 normalized = _normalize_block(block)
                 if normalized is not None:
                     content.append(normalized)
-        return UserMessage(content=content, session_id=session_id)
+        return UserMessage(
+            content=content,
+            session_id=session_id,
+            usage=getattr(message, "usage", None),
+        )
 
     if (_SDKAssistantMessage and isinstance(message, _SDKAssistantMessage)) or hasattr(message, "content"):
         content = []
@@ -455,8 +467,16 @@ def _normalize_message(message: Any) -> Any | None:
         # outputs fed back into the model. Tag as UserMessage so
         # messages.jsonl records type="user" correctly.
         if content and all(isinstance(b, ToolResultBlock) for b in content):
-            return UserMessage(content=content, session_id=session_id)
-        return AssistantMessage(content=content, session_id=session_id)
+            return UserMessage(
+                content=content,
+                session_id=session_id,
+                usage=getattr(message, "usage", None),
+            )
+        return AssistantMessage(
+            content=content,
+            session_id=session_id,
+            usage=getattr(message, "usage", None),
+        )
     return None
 
 

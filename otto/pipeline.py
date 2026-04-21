@@ -353,10 +353,26 @@ async def build_agentic_v3(
             "rounds": rounds,
         }
 
-    if rounds > 0 and total_duration > total_certify_s:
-        breakdown["build"] = {"duration_s": round(total_duration - total_certify_s, 1)}
-    elif rounds == 0:
+    if rounds > 0:
+        breakdown["build"] = {"duration_s": round(max(total_duration - total_certify_s, 0.0), 1)}
+    else:
         breakdown["build"] = {"duration_s": round(total_duration, 1)}
+
+    estimated_phase_costs = None
+    if not skip_qa:
+        from otto.logstream import estimate_phase_costs
+
+        estimated_phase_costs = estimate_phase_costs(build_dir / "messages.jsonl", cost)
+    if estimated_phase_costs:
+        for phase_name, phase_costs in estimated_phase_costs.items():
+            phase_entry = breakdown.get(phase_name)
+            if not phase_entry:
+                continue
+            cost_value = phase_costs.get("cost_usd")
+            if isinstance(cost_value, int | float):
+                phase_entry["cost_usd"] = _round_cost(float(cost_value))
+            if phase_costs.get("estimated") is True:
+                phase_entry["estimated"] = True
 
     # Summarize certify rounds for the checkpoint so forensic reads see real
     # history instead of `current_round: 0, rounds: []`.
