@@ -202,10 +202,14 @@ class TestV3PipelinePass:
         assert result.tasks_passed == 5
         assert result.tasks_failed == 0
         assert result.total_cost == 0.50
-        assert result.build_id.startswith("build-")
+        # build_id in the new layout is the unified session_id
+        # (<date>-<HHMMSS>-<6hex>). Just check it's non-empty.
+        assert result.build_id
+
+        from otto import paths as _paths
 
         # --- Per-build logs ---
-        build_dir = tmp_git_repo / "otto_logs" / "builds" / result.build_id
+        build_dir = _paths.build_dir(tmp_git_repo, result.build_id)
         log_content = (build_dir / "agent.log").read_text()
         assert "VERDICT: PASS" in log_content
         assert "STORY_RESULT:" in log_content
@@ -216,7 +220,7 @@ class TestV3PipelinePass:
         assert "VERDICT: PASS" in raw_content
         assert "dispatching the certifier" in raw_content
 
-        # --- Per-build checkpoint ---
+        # --- Per-build checkpoint (summary of the run) ---
         cp = json.loads((build_dir / "checkpoint.json").read_text())
         assert cp["passed"] is True
         assert cp["stories_passed"] == 5
@@ -224,7 +228,7 @@ class TestV3PipelinePass:
         assert cp["mode"] == "agentic_v3"
 
         # --- PoW (proof-of-work) ---
-        certifier_dir = tmp_git_repo / "otto_logs" / "certifier"
+        certifier_dir = _paths.certify_dir(tmp_git_repo, result.build_id)
         pow_data = json.loads((certifier_dir / "proof-of-work.json").read_text())
         assert pow_data["outcome"] == "passed"
         assert len(pow_data["stories"]) == 5
@@ -234,7 +238,7 @@ class TestV3PipelinePass:
         intent_md = (tmp_git_repo / "intent.md").read_text()
         assert intent in intent_md
         entry = json.loads(
-            (tmp_git_repo / "otto_logs" / "run-history.jsonl").read_text().strip().split("\n")[-1]
+            _paths.history_jsonl(tmp_git_repo).read_text().strip().split("\n")[-1]
         )
         assert entry["passed"] is True
         assert entry["stories_passed"] == 5
@@ -260,7 +264,10 @@ async def test_completed_checkpoint_total_cost_and_run_id_match_build_result(tmp
             run_id="run-123",
         )
 
-    checkpoint = json.loads((tmp_git_repo / "otto_logs" / "checkpoint.json").read_text())
+    # run_id="run-123" is the session_id in the new layout.
+    from otto import paths as _paths
+    checkpoint_path = _paths.session_dir(tmp_git_repo, "run-123") / "checkpoint.json"
+    checkpoint = json.loads(checkpoint_path.read_text())
     assert checkpoint["run_id"] == "run-123"
     assert checkpoint["total_cost"] == pytest.approx(0.75)
     assert result.total_cost == pytest.approx(0.75)
@@ -283,17 +290,19 @@ class TestV3PipelineFail:
         with patch("otto.agent.run_agent_query", side_effect=_make_mock_query(AGENT_OUTPUT_FAIL)):
             result = await build_agentic_v3("test", tmp_git_repo, {})
 
-        build_dir = tmp_git_repo / "otto_logs" / "builds" / result.build_id
+        from otto import paths as _paths
+        build_dir = _paths.build_dir(tmp_git_repo, result.build_id)
         cp = json.loads((build_dir / "checkpoint.json").read_text())
         assert cp["passed"] is False
 
     @pytest.mark.asyncio
     async def test_fail_pow_shows_failures(self, tmp_git_repo):
         with patch("otto.agent.run_agent_query", side_effect=_make_mock_query(AGENT_OUTPUT_FAIL)):
-            await build_agentic_v3("test", tmp_git_repo, {})
+            result = await build_agentic_v3("test", tmp_git_repo, {})
 
+        from otto import paths as _paths
         pow_data = json.loads(
-            (tmp_git_repo / "otto_logs" / "certifier" / "proof-of-work.json").read_text()
+            (_paths.certify_dir(tmp_git_repo, result.build_id) / "proof-of-work.json").read_text()
         )
         assert pow_data["outcome"] == "failed"
         failed = [s for s in pow_data["stories"] if not s["passed"]]
@@ -304,8 +313,9 @@ class TestV3PipelineFail:
         with patch("otto.agent.run_agent_query", side_effect=_make_mock_query(AGENT_OUTPUT_FAIL)):
             await build_agentic_v3("test", tmp_git_repo, {})
 
+        from otto import paths as _paths
         entry = json.loads(
-            (tmp_git_repo / "otto_logs" / "run-history.jsonl").read_text().strip()
+            _paths.history_jsonl(tmp_git_repo).read_text().strip()
         )
         assert entry["passed"] is False
         assert entry["stories_passed"] == 2
@@ -328,10 +338,11 @@ class TestV3FixLoop:
     async def test_multi_round_pow_shows_rounds(self, tmp_git_repo):
         with patch("otto.agent.run_agent_query",
                     side_effect=_make_mock_query(AGENT_OUTPUT_FAIL_THEN_PASS)):
-            await build_agentic_v3("test", tmp_git_repo, {})
+            result = await build_agentic_v3("test", tmp_git_repo, {})
 
+        from otto import paths as _paths
         pow_data = json.loads(
-            (tmp_git_repo / "otto_logs" / "certifier" / "proof-of-work.json").read_text()
+            (_paths.certify_dir(tmp_git_repo, result.build_id) / "proof-of-work.json").read_text()
         )
         assert pow_data["outcome"] == "passed"
         # Should have round history

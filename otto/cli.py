@@ -40,12 +40,15 @@ def main():
         sys.exit(1)
 
 
-def _new_run_id() -> str:
-    """Human-readable + unique-ish identifier for a full otto run."""
-    import secrets
-    stamp = time.strftime("%Y-%m-%d")
-    slug = secrets.token_hex(3)
-    return f"{stamp}-{slug}"
+def _new_run_id(project_dir: "Path | None" = None) -> str:
+    """Unified session_id allocation (see otto.paths.new_session_id)."""
+    from otto import paths
+    if project_dir is None:
+        # Fallback for callers that don't pass project_dir (legacy tests).
+        import secrets
+        stamp = time.strftime("%Y-%m-%d-%H%M%S")
+        return f"{stamp}-{secrets.token_hex(3)}"
+    return paths.new_session_id(project_dir)
 
 
 async def _run_spec_phase(
@@ -82,9 +85,13 @@ async def _run_spec_phase(
         validate_spec,
     )
 
-    # Determine run_id: resume preserves, otherwise fresh.
-    run_id = resume_state.run_id or _new_run_id()
-    run_dir = project_dir / "otto_logs" / "runs" / run_id
+    from otto import paths as _paths
+    # Determine run_id (unified session_id): resume preserves, otherwise fresh.
+    run_id = resume_state.run_id or _new_run_id(project_dir)
+    _paths.ensure_session_scaffold(project_dir, run_id)
+    run_dir = _paths.spec_dir(project_dir, run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    _paths.set_pointer(project_dir, _paths.LATEST_POINTER, run_id)
 
     # Resume fast-path: already approved.
     if resume_state.resumed and spec_phase_completed(resume_state.phase):
@@ -285,7 +292,18 @@ async def _run_spec_phase(
                 "`run_budget_seconds` in otto.yaml."
             )
             sys.exit(1)
-        error_console.print(f"[error]Spec phase failed: {exc}[/error]")
+        # Validation failures / missing-spec-file errors leave no resumable
+        # state — clear the in_progress checkpoint so retry doesn't demand
+        # --force for a checkpoint that couldn't be resumed anyway.
+        from otto.checkpoint import clear_checkpoint
+        try:
+            clear_checkpoint(project_dir)
+        except Exception:
+            pass
+        error_console.print(
+            f"[error]Spec phase failed: {exc}[/error]\n"
+            "  The invalid spec has been discarded — re-run `otto build --spec` to retry."
+        )
         sys.exit(1)
 
 
@@ -376,16 +394,34 @@ def build(intent, no_qa, fast, thorough, split, rounds, resume, spec, spec_file,
             )
             sys.exit(2)
         from otto.checkpoint import clear_checkpoint
+        from otto import paths as _paths
         run_id_to_archive = cp.get("run_id", "") or ""
         if run_id_to_archive:
-            run_dir_old = project_dir / "otto_logs" / "runs" / run_id_to_archive
-            run_dir_abandoned = project_dir / "otto_logs" / "runs" / f"{run_id_to_archive}.abandoned"
-            if run_dir_old.exists():
+            # New layout: mark the session as abandoned via summary.json
+            # (preserves dir for forensics, no rename). Legacy fallback does
+            # the old rename for pre-restructure layouts.
+            session_dir = _paths.session_dir(project_dir, run_id_to_archive)
+            if session_dir.exists():
                 try:
-                    run_dir_old.rename(run_dir_abandoned)
-                    console.print(f"  [yellow]Archived prior spec run to {run_dir_abandoned}[/yellow]")
+                    import json as _json
+                    summary_path = session_dir / "summary.json"
+                    summary_path.write_text(_json.dumps({
+                        "status": "abandoned",
+                        "abandoned_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "run_id": run_id_to_archive,
+                    }, indent=2))
+                    console.print(f"  [yellow]Marked prior session as abandoned: {session_dir}[/yellow]")
                 except OSError as exc:
-                    console.print(f"  [yellow]Could not archive prior spec run: {exc}[/yellow]")
+                    console.print(f"  [yellow]Could not mark prior session abandoned: {exc}[/yellow]")
+            # Legacy path (pre-restructure) archive-by-rename.
+            legacy_run_dir = project_dir / "otto_logs" / "runs" / run_id_to_archive
+            legacy_abandoned = project_dir / "otto_logs" / "runs" / f"{run_id_to_archive}.abandoned"
+            if legacy_run_dir.exists():
+                try:
+                    legacy_run_dir.rename(legacy_abandoned)
+                    console.print(f"  [yellow]Archived legacy spec run to {legacy_abandoned}[/yellow]")
+                except OSError as exc:
+                    console.print(f"  [yellow]Could not archive legacy spec run: {exc}[/yellow]")
         clear_checkpoint(project_dir)
         cp = None
 
@@ -523,8 +559,13 @@ def build(intent, no_qa, fast, thorough, split, rounds, resume, spec, spec_file,
                                      budget=budget)
             )
         else:
-            mode_label = "fast smoke test" if certifier_mode == "fast" else "one agent builds, certifies, fixes"
-            console.print(f"  [bold]Agentic mode[/bold] \u2014 {mode_label}\n")
+            if certifier_mode == "fast":
+                mode_label = "happy-path only (Must-Have stories, ~30s certify)"
+            elif certifier_mode == "thorough":
+                mode_label = "adversarial (Must-Have + edge probes + code review)"
+            else:
+                mode_label = "standard (Must-Have + generic checklist: CRUD, edge cases, access control)"
+            console.print(f"  [bold]Agentic build[/bold] \u2014 certifier: {mode_label}\n")
             result: BuildResult = asyncio.run(
                 build_agentic_v3(intent, project_dir, config,
                                  certifier_mode=certifier_mode,
@@ -583,13 +624,13 @@ def certify(intent, thorough, fast):
             sys.exit(2)
 
     if fast:
-        mode_label = "fast smoke test"
+        mode_label = "happy-path only (Must-Have stories, ~30s)"
         _mode = "fast"
     elif thorough:
-        mode_label = "thorough inspection"
+        mode_label = "adversarial (Must-Have + edge probes + code review)"
         _mode = "thorough"
     else:
-        mode_label = "independent product verification"
+        mode_label = "standard (Must-Have + generic checklist: CRUD, edge cases, access control)"
         _mode = "standard"
     console.print(f"\n  [bold]Certifying[/bold] \u2014 {mode_label}\n")
 
@@ -639,10 +680,19 @@ def certify(intent, thorough, fast):
 
     console.print(f"  Cost: ${report.cost_usd:.2f}  Duration: {duration:.0f}s")
 
-    # PoW report location
-    pow_dir = project_dir / "otto_logs" / "certifier" / "latest"
-    if (pow_dir / "proof-of-work.html").exists():
-        console.print(f"  Report: {pow_dir / 'proof-of-work.html'}")
+    # PoW report location — new layout uses session-scoped paths, pointed
+    # to by the `latest` symlink. Fall back to the legacy certifier/latest
+    # path for projects still on pre-restructure layout.
+    from otto import paths as _paths
+    latest_session = _paths.resolve_pointer(project_dir, _paths.LATEST_POINTER)
+    if latest_session is not None:
+        pow_html = latest_session / "certify" / "proof-of-work.html"
+        if pow_html.exists():
+            console.print(f"  Report: {pow_html}")
+    else:
+        legacy_pow = project_dir / "otto_logs" / "certifier" / "latest" / "proof-of-work.html"
+        if legacy_pow.exists():
+            console.print(f"  Report: {legacy_pow}")
 
     console.print()
     sys.exit(0 if outcome == "passed" else 1)

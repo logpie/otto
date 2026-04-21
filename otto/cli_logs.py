@@ -9,7 +9,49 @@ import click
 
 from otto.display import CONTEXT_SETTINGS, console, format_cost, format_duration, rich_escape
 from otto.theme import error_console
-HISTORY_FILE = "otto_logs/run-history.jsonl"
+from otto import paths
+
+# Legacy history path — still READ for upgrade safety; new writes go to
+# otto_logs/cross-sessions/history.jsonl via paths.py.
+LEGACY_HISTORY_FILE = "otto_logs/run-history.jsonl"
+
+
+def _load_history_entries(project_dir: Path) -> list[dict]:
+    """Read history entries from new, legacy, and archived sources.
+
+    Preserves chronological order (append-only); de-dups by session_id/build_id.
+    """
+    sources: list[Path] = [
+        paths.history_jsonl(project_dir),
+        project_dir / LEGACY_HISTORY_FILE,
+    ]
+    for archive in paths.archived_pre_restructure_dirs(project_dir):
+        sources.append(archive / paths.LEGACY_RUN_HISTORY)
+
+    seen_ids: set[str] = set()
+    entries: list[dict] = []
+    for src in sources:
+        if not src.exists():
+            continue
+        try:
+            for line in src.read_text().splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                # De-dup: prefer first occurrence (new file wins over legacy).
+                key = entry.get("session_id") or entry.get("build_id") or ""
+                if key and key in seen_ids:
+                    continue
+                if key:
+                    seen_ids.add(key)
+                entries.append(entry)
+        except OSError:
+            continue
+    return entries
 
 
 def register_history_command(main: click.Group) -> None:
@@ -23,28 +65,10 @@ def register_history_command(main: click.Group) -> None:
         from rich.text import Text
 
         project_dir = Path.cwd()
-        history_path = project_dir / HISTORY_FILE
-
-        if not history_path.exists():
-            console.print("[dim]No build history. Run 'otto build' to get started.[/dim]")
-            return
-
-        entries = []
-        try:
-            for line in history_path.read_text().splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entries.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-        except OSError:
-            error_console.print("Error reading history file", style="error")
-            sys.exit(1)
+        entries = _load_history_entries(project_dir)
 
         if not entries:
-            console.print("[dim]No build history.[/dim]")
+            console.print("[dim]No build history. Run 'otto build' to get started.[/dim]")
             return
 
         entries.reverse()

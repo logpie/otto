@@ -63,6 +63,7 @@ async def run_agentic_certifier(
     focus: str | None = None,
     target: str | None = None,
     budget: "RunBudget | None" = None,
+    session_id: str | None = None,
 ) -> "CertificationReport":
     """Agentic certifier: one monolithic agent does everything.
 
@@ -85,12 +86,17 @@ async def run_agentic_certifier(
     config = config or {}
     start_time = time.monotonic()
 
-    # Each certifier run gets a unique directory to prevent overwrites.
-    # Also write to the "latest" dir for tools that expect a fixed path.
-    run_id = f"certify-{int(time.time())}-{os.getpid()}"
-    report_dir = project_dir / "otto_logs" / "certifier" / run_id
+    # Each certifier run goes under a session dir. When called standalone
+    # (no session_id), allocate one.
+    from otto import paths
+    if session_id is None:
+        session_id = paths.new_session_id(project_dir)
+        paths.ensure_session_scaffold(project_dir, session_id)
+        paths.set_pointer(project_dir, paths.LATEST_POINTER, session_id)
+    run_id = session_id  # kept for downstream log mentions
+    report_dir = paths.certify_dir(project_dir, session_id)
     report_dir.mkdir(parents=True, exist_ok=True)
-    latest_dir = project_dir / "otto_logs" / "certifier" / "latest"
+    latest_dir: Path | None = None  # `latest` pointer is now managed by paths.set_pointer
 
     # Evidence stays inside the run-specific directory so concurrent runs do
     # not clobber each other's screenshots or recordings.
@@ -188,23 +194,16 @@ async def run_agentic_certifier(
             "",
         ]
         for s in story_results:
-            status = "PASS" if s["passed"] else "FAIL"
+            status = "WARN" if s.get("warn") else ("PASS" if s["passed"] else "FAIL")
             md_lines.append(f"- **{status}** {s['story_id']}: {s.get('summary', '')}")
         md_lines.append("")
         (report_dir / "proof-of-work.md").write_text("\n".join(md_lines))
     except Exception as exc:
         logger.warning("Failed to write PoW report: %s", exc)
 
-    # Update "latest" symlink to point to this run
-    try:
-        if latest_dir.is_symlink():
-            latest_dir.unlink()
-        elif latest_dir.exists():
-            import shutil
-            shutil.rmtree(latest_dir)
-        latest_dir.symlink_to(report_dir.name)
-    except Exception:
-        pass
+    # `latest` pointer (session-scoped) is set by paths.set_pointer above;
+    # the old top-level certifier/latest symlink is retired. Callers that
+    # want the newest PoW should use paths.resolve_pointer("latest").
 
     logger.info(
         "Agentic certifier done: %s, %d/%d stories, %.1fs, $%.3f",
@@ -261,10 +260,12 @@ def _generate_agentic_html_pow(
         ".story { border: 1px solid #e0e0e0; border-radius: 10px; padding: 1.2em; margin: 1em 0; background: #fff; }",
         ".story.pass { border-left: 5px solid #22c55e; }",
         ".story.fail { border-left: 5px solid #ef4444; }",
+        ".story.warn { border-left: 5px solid #eab308; }",
         ".story-header { display: flex; align-items: center; gap: 0.8em; }",
         ".badge { display: inline-block; padding: 3px 10px; border-radius: 5px; font-weight: 700; font-size: 0.8em; letter-spacing: 0.03em; }",
         ".badge.pass { background: #dcfce7; color: #166534; }",
         ".badge.fail { background: #fee2e2; color: #991b1b; }",
+        ".badge.warn { background: #fef3c7; color: #92400e; }",
         ".story-id { font-weight: 600; font-size: 1.05em; }",
         ".summary { margin-top: 0.5em; color: #444; line-height: 1.5; }",
         ".evidence { margin-top: 0.8em; }",
@@ -316,8 +317,15 @@ def _generate_agentic_html_pow(
         html.append("</div>")
 
     for i, s in enumerate(story_results):
-        status_class = "pass" if s["passed"] else "fail"
-        badge = "PASS" if s["passed"] else "FAIL"
+        if s.get("warn"):
+            status_class = "warn"
+            badge = "WARN"
+        elif s["passed"]:
+            status_class = "pass"
+            badge = "PASS"
+        else:
+            status_class = "fail"
+            badge = "FAIL"
         sid = _html.escape(s.get("story_id", ""))
         summary = _html.escape(s.get("summary", ""))
         evidence = s.get("evidence", "")

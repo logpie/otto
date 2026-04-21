@@ -197,7 +197,14 @@ def _run_improve(
     report_lines.append(f"Merge: `git merge {branch}`")
     report_lines.append("")
 
-    report_path = project_dir / "otto_logs" / "improvement-report.md"
+    # Under the new layout the report lives inside the improve session dir.
+    from otto import paths as _paths
+    sess_dir = _paths.resolve_pointer(project_dir, _paths.LATEST_POINTER)
+    if sess_dir is not None:
+        report_path = _paths.improve_dir(project_dir, sess_dir.name) / "improvement-report.md"
+    else:
+        # Legacy fallback — pre-restructure layout.
+        report_path = project_dir / "otto_logs" / "improvement-report.md"
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text("\n".join(report_lines))
 

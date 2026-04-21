@@ -58,6 +58,7 @@ async def build_agentic_v3(
     run_id: str | None = None,
     spec_cost: float = 0.0,
     budget: "RunBudget | None" = None,
+    is_improve_run: bool = False,
 ) -> BuildResult:
     """Fully agent-driven session: one agent, certifier as environment.
 
@@ -88,11 +89,18 @@ async def build_agentic_v3(
     certifier_mode controls which certifier prompt is pre-filled.
     """
     from otto.agent import make_agent_options, run_agent_with_timeout
+    from otto import paths
 
-    build_id = f"build-{int(time.time())}-{os.getpid()}"
-    checkpoint_run_id = run_id or build_id
-    build_dir = project_dir / "otto_logs" / "builds" / build_id
-    build_dir.mkdir(parents=True, exist_ok=True)
+    # run_id is the unified session_id in the new layout. Older callers
+    # (e.g. some tests) may omit it; allocate one locally in that case so
+    # the path plumbing never has to deal with an empty id.
+    session_id = run_id or paths.new_session_id(project_dir)
+    paths.ensure_session_scaffold(project_dir, session_id)
+    build_id = session_id                 # kept as a local alias for logs
+    checkpoint_run_id = session_id
+    build_dir = paths.build_dir(project_dir, session_id)
+    # Point `latest` at this session so users can `tail -f $(readlink latest)/build/live.log`.
+    paths.set_pointer(project_dir, paths.LATEST_POINTER, session_id)
 
     # Resumed SDK sessions already carry prior context; avoid polluting
     # intent.md or stdin when the user resumes without a fresh intent.
@@ -144,7 +152,8 @@ async def build_agentic_v3(
         # Pre-fill certifier prompt for modes that use certification
         if prompt_mode != "code":
             # Per-run evidence dir so parallel/sequential runs don't clobber each other
-            evidence_dir_path = project_dir / "otto_logs" / "certifier" / "evidence" / build_id
+            evidence_dir_path = paths.certify_dir(project_dir, session_id) / "evidence"
+            evidence_dir_path.mkdir(parents=True, exist_ok=True)
             evidence_dir = str(evidence_dir_path)
             safe_intent = intent.replace("</certifier_prompt>", "")
             certifier_filename = {
@@ -185,7 +194,7 @@ async def build_agentic_v3(
         except Exception as exc:
             logger.warning("Failed to read checkpoint for session resume: %s", exc)
 
-    def _cp(status: str, session_id: str = "") -> None:
+    def _cp(status: str, session_id: str = "", phase: str = "build") -> None:
         if not manage_checkpoint:
             return
         try:
@@ -198,6 +207,7 @@ async def build_agentic_v3(
                 session_id=session_id,
                 total_cost=total_run_cost,
                 status=status,
+                phase=phase,
                 spec_cost=float(spec_cost or 0.0),
             )
         except Exception as exc:
@@ -220,6 +230,7 @@ async def build_agentic_v3(
         text, cost, session_id = await run_agent_with_timeout(
             prompt, options,
             log_path=build_dir / "live.log",
+            raw_log_path=build_dir / "agent-raw.log",
             timeout=timeout,
             project_dir=project_dir,
             capture_tool_output=True,
@@ -246,15 +257,20 @@ async def build_agentic_v3(
     final_status = "paused" if text.startswith("BUILD ERROR:") else "completed"
     _cp(final_status, session_id=session_id)
 
-    # Save agent output in two forms:
-    # 1. agent-raw.log — full unfiltered output (for deep debugging)
-    # 2. agent.log — structured summary: what was built, certifier results,
-    #    fixes applied, timing. Enough to debug without reading raw.
+    # Save agent output:
+    # - agent-raw.log: streamed during the run (see run_agent_with_timeout);
+    #   file already complete by the time we get here.
+    # - agent.log: structured summary built now — what was built, certifier
+    #   results, fixes applied, timing. Enough to debug without reading raw.
     agent_log_path = build_dir / "agent.log"
     try:
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
-        # Raw output — write once, full content
-        (build_dir / "agent-raw.log").write_text(text or "(no output)")
+        # agent-raw.log was streamed during the run; no end-of-run dump needed.
+        # If the agent produced no text blocks (e.g., early error), fall back to
+        # writing a placeholder so the file exists.
+        raw_path = build_dir / "agent-raw.log"
+        if not raw_path.exists() or raw_path.stat().st_size == 0:
+            raw_path.write_text(text or "(no output)")
 
         summary_lines = [
             f"[{ts}] === Agentic v3 build ===",
@@ -349,7 +365,9 @@ async def build_agentic_v3(
     # Write PoW report
     try:
         from otto.certifier import _generate_agentic_html_pow
-        report_dir = project_dir / "otto_logs" / "certifier"
+        # NB: `session_id` here is the SDK session, not the otto session_id
+        # (that's `build_id` in this function scope).
+        report_dir = paths.certify_dir(project_dir, build_id)
         report_dir.mkdir(parents=True, exist_ok=True)
 
         pow_data = {
@@ -403,21 +421,26 @@ async def build_agentic_v3(
                 "passed" if passed else "failed",
                 stories_passed, stories_tested, total_duration, total_run_cost)
 
-    # Improvement report — human-readable summary for post-auditing.
-    try:
-        _write_improvement_report(
-            build_dir, build_id, intent, project_dir,
-            certify_rounds, story_results, passed,
-            stories_passed, stories_tested,
-            total_duration, total_run_cost,
-            head_before=_head_before,
-        )
-    except Exception as exc:
-        logger.warning("Failed to write improvement report: %s", exc)
+    # Session report — human-readable summary for post-auditing. Only
+    # written for improve runs; regular builds use summary.json in the
+    # session dir (leaner, JSON-only record). NB: use `build_id`, not
+    # `session_id` — `session_id` is overwritten by the SDK return earlier.
+    if is_improve_run:
+        try:
+            _write_improvement_report(
+                paths.improve_dir(project_dir, build_id), build_id, intent, project_dir,
+                certify_rounds, story_results, passed,
+                stories_passed, stories_tested,
+                total_duration, total_run_cost,
+                head_before=_head_before,
+            )
+        except Exception as exc:
+            logger.warning("Failed to write session report: %s", exc)
 
     # Append to run history (one line per build for `otto history`)
     from otto.observability import append_text_log
-    history_path = project_dir / "otto_logs" / "run-history.jsonl"
+    history_path = paths.history_jsonl(project_dir)
+    history_path.parent.mkdir(parents=True, exist_ok=True)
     history_entry = json.dumps({
         "build_id": build_id,
         "intent": intent[:200],
@@ -563,7 +586,10 @@ def _write_improvement_report(
     lines.append(f"- **Duration:** {duration / 60:.1f} min")
     lines.append("")
 
-    report_path = build_dir / "improvement-report.md"
+    # Caller passes the target dir (improve_dir(session_id) for `otto improve`,
+    # legacy build dir for older callers). Rename: session-report.md.
+    build_dir.mkdir(parents=True, exist_ok=True)
+    report_path = build_dir / "session-report.md"
     report_path.write_text("\n".join(lines))
 
 
@@ -629,6 +655,8 @@ async def run_certify_fix_loop(
     command: str = "improve",
     record_intent: bool = True,
     budget: "RunBudget | None" = None,
+    session_id: str | None = None,
+    is_improve_run: bool = True,
 ) -> BuildResult:
     """System-driven certify-fix loop.
 
@@ -651,8 +679,12 @@ async def run_certify_fix_loop(
     )
 
     from otto.checkpoint import write_checkpoint as _write_cp
+    from otto import paths as _paths
 
-    build_id = f"build-{int(time.time())}-{os.getpid()}"
+    # Unified session_id (was build_id). Allocate if caller didn't provide.
+    build_id = session_id or _paths.new_session_id(project_dir)
+    _paths.ensure_session_scaffold(project_dir, build_id)
+    _paths.set_pointer(project_dir, _paths.LATEST_POINTER, build_id)
     total_cost = resume_cost
     from otto.config import get_max_rounds
     max_rounds = get_max_rounds(config)

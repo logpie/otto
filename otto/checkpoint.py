@@ -3,6 +3,14 @@
 Writes checkpoint after each round so runs can survive crashes,
 pause/resume, and recover from errors. Works for both agent mode
 (stores session_id for SDK resume) and split mode (stores round number).
+
+Layout:
+  otto_logs/sessions/<session_id>/checkpoint.json  — new location
+  otto_logs/checkpoint.json                        — legacy (read-only fallback)
+
+`run_id` is the same thing as `session_id` in the new layout (unified session
+id: `<yyyy-mm-dd>-<HHMMSS>-<6hex>`). The CLI entrypoint allocates it once and
+threads it through.
 """
 
 from __future__ import annotations
@@ -15,9 +23,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from otto import paths
+
 logger = logging.getLogger("otto.checkpoint")
 
-CHECKPOINT_FILE = "otto_logs/checkpoint.json"
+# Legacy top-level checkpoint path. Still READ (for upgrade safety). Never
+# written by new code.
+LEGACY_CHECKPOINT_FILE = "otto_logs/checkpoint.json"
+
 POST_INITIAL_BUILD_PHASES = frozenset({"certify", "fix", "round_complete", "complete"})
 # Phases that belong to the new spec-gate pre-build flow. Treated specially
 # for --force / --resume semantics: clearing or overwriting them without
@@ -56,7 +69,7 @@ class ResumeState:
     target: str = ""              # persisted target goal for improve.target resume
     # Spec-gate fields (new; all empty/None for pre-spec checkpoints)
     intent: str = ""              # canonical intent (for resume without CLI intent)
-    run_id: str = ""              # outer run scope for spec artifacts
+    run_id: str = ""              # session_id in the new layout (kept as run_id for compat)
     spec_path: str = ""           # absolute path to approved/in-review spec.md
     spec_hash: str = ""           # sha256 of normalized spec content
     spec_version: int = 0         # regeneration counter (0 = never regenerated)
@@ -147,6 +160,11 @@ def initial_build_completed(phase: str) -> bool:
     return phase in POST_INITIAL_BUILD_PHASES
 
 
+def _checkpoint_path_for(project_dir: Path, run_id: str) -> Path:
+    """Return the session-scoped checkpoint path for a run/session id."""
+    return paths.session_checkpoint(project_dir, run_id)
+
+
 def write_checkpoint(
     project_dir: Path,
     *,
@@ -172,13 +190,20 @@ def write_checkpoint(
 ) -> None:
     """Write checkpoint to disk. Called after each round.
 
+    `run_id` is the session_id in the new layout — the checkpoint lives at
+    `otto_logs/sessions/<run_id>/checkpoint.json`. A "paused" pointer is
+    set for `status in {paused, in_progress}` so `--resume` can find it.
+
     For spec-gate fields (`intent`, `spec_path`, `spec_hash`, `spec_version`,
     `spec_cost`): `None` preserves the prior checkpoint value (or default);
     explicit values overwrite. This lets a phase=build write not clobber the
     spec fields that were set at phase=spec_approved.
     """
-    checkpoint_path = project_dir / CHECKPOINT_FILE
-    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    if not run_id:
+        raise ValueError("write_checkpoint requires a non-empty run_id (session_id)")
+
+    paths.ensure_session_scaffold(project_dir, run_id)
+    checkpoint_path = _checkpoint_path_for(project_dir, run_id)
 
     # Merge spec fields with prior on-disk state (preserve across writes).
     prior = _read_prior(checkpoint_path)
@@ -210,6 +235,12 @@ def write_checkpoint(
     }
 
     _write_checkpoint_file(checkpoint_path, data)
+    # Update the `paused` pointer so --resume can locate the session.
+    # We point at in_progress sessions too — a hard crash leaves status=in_progress
+    # without a clean transition, and resolve_pointer preferentially returns
+    # paused over in_progress when scanning.
+    if status in ("in_progress", "paused"):
+        paths.set_pointer(project_dir, paths.PAUSED_POINTER, run_id)
     logger.debug("Checkpoint written: round %d, status=%s, phase=%s", current_round, status, phase)
 
 
@@ -221,41 +252,107 @@ def _read_prior(checkpoint_path: Path) -> dict[str, Any] | None:
         return None
 
 
-def load_checkpoint(project_dir: Path) -> dict[str, Any] | None:
-    """Load checkpoint if one exists and is active (in_progress or paused)."""
-    checkpoint_path = project_dir / CHECKPOINT_FILE
+def _load_legacy_checkpoint(project_dir: Path) -> dict[str, Any] | None:
+    """Read legacy top-level checkpoint.json (pre-restructure layout).
 
+    Still readable so upgrades don't strand an active legacy paused run.
+    Returns None on any error or when status is not active.
+    """
+    legacy_path = paths.legacy_checkpoint(project_dir)
     try:
-        data = json.loads(checkpoint_path.read_text())
+        data = json.loads(legacy_path.read_text())
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return None
-
     if data.get("status") not in ("in_progress", "paused"):
         return None
-
     return data
 
 
+def load_checkpoint(project_dir: Path) -> dict[str, Any] | None:
+    """Load checkpoint if one exists and is active (in_progress or paused).
+
+    Tries in order:
+      1. `paused` pointer → session_dir/checkpoint.json
+      2. Scan fallback (built into resolve_pointer) over sessions/
+      3. Legacy otto_logs/checkpoint.json (for upgrade safety)
+    """
+    # 1 & 2: new layout via pointer + scan fallback.
+    session_path = paths.resolve_pointer(project_dir, paths.PAUSED_POINTER)
+    if session_path is not None:
+        cp_path = session_path / "checkpoint.json"
+        try:
+            data = json.loads(cp_path.read_text())
+            if data.get("status") in ("in_progress", "paused"):
+                return data
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            pass
+
+    # 3: legacy fallback.
+    legacy = _load_legacy_checkpoint(project_dir)
+    if legacy is not None:
+        return legacy
+
+    return None
+
+
 def clear_checkpoint(project_dir: Path) -> None:
-    """Remove checkpoint file (run completed or user chose fresh start)."""
-    checkpoint_path = project_dir / CHECKPOINT_FILE
-    if checkpoint_path.exists():
-        checkpoint_path.unlink()
-        logger.debug("Checkpoint cleared")
+    """Remove checkpoint file and the `paused` pointer.
+
+    Also removes the legacy checkpoint file for complete upgrade-clean state.
+    """
+    # New layout: locate the active session checkpoint and remove it.
+    session_path = paths.resolve_pointer(project_dir, paths.PAUSED_POINTER)
+    if session_path is not None:
+        cp_path = session_path / "checkpoint.json"
+        if cp_path.exists():
+            try:
+                cp_path.unlink()
+            except OSError as exc:
+                logger.warning("Failed to unlink %s: %s", cp_path, exc)
+    paths.clear_pointer(project_dir, paths.PAUSED_POINTER)
+
+    # Legacy file, if still present (upgrade path).
+    legacy_path = paths.legacy_checkpoint(project_dir)
+    if legacy_path.exists():
+        try:
+            legacy_path.unlink()
+        except OSError as exc:
+            logger.warning("Failed to unlink legacy checkpoint: %s", exc)
+
+    logger.debug("Checkpoint cleared")
 
 
 def complete_checkpoint(project_dir: Path, total_cost: float = 0.0) -> None:
-    """Mark checkpoint as completed."""
-    checkpoint_path = project_dir / CHECKPOINT_FILE
-    if not checkpoint_path.exists():
+    """Mark checkpoint as completed (new layout) and clear the `paused` pointer.
+
+    For legacy-layout checkpoints, updates the legacy file in place (the
+    caller owns deletion).
+    """
+    session_path = paths.resolve_pointer(project_dir, paths.PAUSED_POINTER)
+    if session_path is not None:
+        cp_path = session_path / "checkpoint.json"
+        if cp_path.exists():
+            try:
+                data = json.loads(cp_path.read_text())
+                data["status"] = "completed"
+                data["total_cost"] = round(total_cost, 2)
+                data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
+                _write_checkpoint_file(cp_path, data)
+            except (json.JSONDecodeError, OSError):
+                pass
+        paths.clear_pointer(project_dir, paths.PAUSED_POINTER)
         return
 
+    # Legacy fallback: update the legacy file in place.
+    legacy_path = paths.legacy_checkpoint(project_dir)
+    if not legacy_path.exists():
+        return
     try:
-        data = json.loads(checkpoint_path.read_text())
+        data = json.loads(legacy_path.read_text())
         data["status"] = "completed"
         data["total_cost"] = round(total_cost, 2)
         data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
-        _write_checkpoint_file(checkpoint_path, data)
+        _write_checkpoint_file(legacy_path, data)
     except (json.JSONDecodeError, OSError):
         pass
 

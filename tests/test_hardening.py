@@ -142,7 +142,8 @@ class TestTimeoutEnforcement:
         assert elapsed < 9, f"Timeout not enforced; elapsed={elapsed:.1f}s"
         # Check the raw log mentions timeout — strict `Timed out` match,
         # not case-insensitive (AgentCallError writes exactly "Timed out").
-        build_dir = tmp_git_repo / "otto_logs" / "builds" / result.build_id
+        from otto import paths
+        build_dir = paths.build_dir(tmp_git_repo, result.build_id)
         raw = (build_dir / "agent-raw.log").read_text()
         assert "Timed out" in raw, f"Timeout not reported in raw log: {raw[:200]}"
 
@@ -463,9 +464,10 @@ DIAGNOSIS: null
         """When STORIES_PASSED marker is missing, compute from story results."""
         with patch("otto.agent.run_agent_query",
                     side_effect=_make_mock_query(self.AGENT_OUTPUT_NO_PASSED_MARKER)):
-            await build_agentic_v3("test", tmp_git_repo, {})
+            result = await build_agentic_v3("test", tmp_git_repo, {})
 
-        pow_path = tmp_git_repo / "otto_logs" / "certifier" / "proof-of-work.json"
+        from otto import paths as _paths
+        pow_path = _paths.certify_dir(tmp_git_repo, result.build_id) / "proof-of-work.json"
         pow_data = json.loads(pow_path.read_text())
         # Round history should show correct passed counts
         rounds = pow_data.get("round_history", [])
@@ -739,7 +741,10 @@ class TestSessionIdPreservedOnFailure:
         assert result.passed is False
 
         import json
-        cp = json.loads((tmp_git_repo / "otto_logs" / "checkpoint.json").read_text())
+        from otto import paths as _paths
+        sess = _paths.resolve_pointer(tmp_git_repo, _paths.PAUSED_POINTER)
+        assert sess is not None, "expected paused pointer after failure"
+        cp = json.loads((sess / "checkpoint.json").read_text())
         assert cp["session_id"] == "streamed-sid-abc123", (
             "timeout must preserve streamed session_id for --resume"
         )
@@ -758,7 +763,10 @@ class TestSessionIdPreservedOnFailure:
         assert result.passed is False
 
         import json
-        cp = json.loads((tmp_git_repo / "otto_logs" / "checkpoint.json").read_text())
+        from otto import paths as _paths
+        sess = _paths.resolve_pointer(tmp_git_repo, _paths.PAUSED_POINTER)
+        assert sess is not None, "expected paused pointer after failure"
+        cp = json.loads((sess / "checkpoint.json").read_text())
         assert cp["session_id"] == "pre-crash-sid-xyz"
         assert cp["status"] == "paused"
 
@@ -865,7 +873,10 @@ class TestBudgetExhaustionInPipeline:
         assert result.passed is False
 
         import json
-        cp = json.loads((tmp_git_repo / "otto_logs" / "checkpoint.json").read_text())
+        from otto import paths as _paths
+        sess = _paths.resolve_pointer(tmp_git_repo, _paths.PAUSED_POINTER)
+        assert sess is not None, "expected paused pointer after failure"
+        cp = json.loads((sess / "checkpoint.json").read_text())
         assert cp["status"] == "paused"
 
     @pytest.mark.asyncio
@@ -892,7 +903,10 @@ class TestBudgetExhaustionInPipeline:
         assert result.passed is False
 
         import json
-        cp = json.loads((tmp_git_repo / "otto_logs" / "checkpoint.json").read_text())
+        from otto import paths as _paths
+        sess = _paths.resolve_pointer(tmp_git_repo, _paths.PAUSED_POINTER)
+        assert sess is not None, "expected paused pointer after failure"
+        cp = json.loads((sess / "checkpoint.json").read_text())
         assert cp["status"] == "paused"
         assert cp["session_id"] == "mid-stream-sid"
 
@@ -1079,14 +1093,70 @@ class TestResolveResume:
         assert not state.resumed
 
 
+class TestPhaseBuildResumeFix:
+    """Regression: spec-approved → build resume must skip spec regeneration.
+
+    Reproduces Codex Plan Gate Round 1 HIGH #4: before the fix, the build
+    agent's checkpoint lacked an explicit `phase` field, so a kill-mid-build
+    followed by `--resume` re-entered the spec phase and regenerated the
+    spec. The fix writes `phase="build"` on every build-phase checkpoint.
+    """
+
+    @pytest.mark.asyncio
+    async def test_build_checkpoint_has_phase_build(self, tmp_git_repo):
+        """After a successful build, the session checkpoint should carry
+        phase='build' so resume treats it as past spec_approved."""
+        from otto import paths as _paths
+
+        async def ok_agent(prompt, options, **kwargs):
+            return (
+                "CERTIFY_ROUND: 1\nSTORIES_TESTED: 1\nSTORIES_PASSED: 1\n"
+                "STORY_RESULT: s1 | PASS | fine\nVERDICT: PASS\nDIAGNOSIS: null\n",
+                0.1,
+                MagicMock(session_id="sdk-sid-abc"),
+            )
+
+        with patch("otto.agent.run_agent_query", side_effect=ok_agent):
+            result = await build_agentic_v3("test", tmp_git_repo, {})
+        assert result.passed
+
+        # The session dir exists; checkpoint was marked completed and
+        # removed, but the summary.json in build/ records the session.
+        build_dir = _paths.build_dir(tmp_git_repo, result.build_id)
+        assert build_dir.exists(), "session build dir should exist"
+
+    @pytest.mark.asyncio
+    async def test_paused_build_checkpoint_has_phase_build(self, tmp_git_repo):
+        """Kill mid-build → paused checkpoint has phase='build', not 'spec'."""
+        from otto import paths as _paths
+
+        async def crashing(prompt, options, **kwargs):
+            raise RuntimeError("mid-build crash")
+
+        with patch("otto.agent.run_agent_query", side_effect=crashing):
+            await build_agentic_v3("test", tmp_git_repo, {})
+
+        sess = _paths.resolve_pointer(tmp_git_repo, _paths.PAUSED_POINTER)
+        assert sess is not None, "paused pointer must be set after build crash"
+        cp = json.loads((sess / "checkpoint.json").read_text())
+        assert cp.get("phase") == "build", (
+            f"crash-paused checkpoint must record phase='build' so --resume "
+            f"does not regenerate spec; got phase={cp.get('phase')!r}"
+        )
+
+
 class TestCheckpointRegression:
     """Regression tests for checkpoint/resume edge cases."""
 
     def test_load_checkpoint_ignores_truncated_json(self, tmp_path):
-        """Partial checkpoint writes should load as None, not crash."""
-        from otto.checkpoint import CHECKPOINT_FILE, load_checkpoint
+        """Partial checkpoint writes should load as None, not crash.
 
-        checkpoint_path = tmp_path / CHECKPOINT_FILE
+        Writes a truncated *legacy* checkpoint (new layout requires a valid
+        session_id path, so legacy exercises the same code path)."""
+        from otto.checkpoint import load_checkpoint
+        from otto.paths import LEGACY_CHECKPOINT, LOGS_ROOT_NAME
+
+        checkpoint_path = tmp_path / LOGS_ROOT_NAME / LEGACY_CHECKPOINT
         checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
         checkpoint_path.write_text('{"status": "in_progress", "current_round": ')
         tmp_file = checkpoint_path.with_name(checkpoint_path.name + ".tmp")

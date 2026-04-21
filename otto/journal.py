@@ -1,9 +1,10 @@
 """Build journal — memory system for the certify→fix loop.
 
 Three layers:
-  current-state.md  — handoff for the next agent (rewritten each round)
-  build-journal.md  — index of all rounds (append-only)
-  otto_logs/rounds/  — immutable per-round evidence
+  current-state.md   — handoff for the next agent (rewritten each round)
+  build-journal.md   — index of all rounds (append-only)
+  sessions/<id>/improve/rounds/  — immutable per-round evidence (new layout)
+  otto_logs/rounds/              — legacy location (read fallback only)
 """
 
 from __future__ import annotations
@@ -14,10 +15,20 @@ import time
 from pathlib import Path
 from typing import Any
 
+from otto import paths
 
-def init_round(project_dir: Path, action: str) -> str:
+
+def _rounds_dir(project_dir: Path, session_id: str | None) -> Path:
+    """Per-session rounds dir under improve/. Falls back to the legacy
+    top-level otto_logs/rounds/ if session_id is not provided (legacy callers)."""
+    if session_id:
+        return paths.improve_dir(project_dir, session_id) / "rounds"
+    return project_dir / "otto_logs" / "rounds"
+
+
+def init_round(project_dir: Path, action: str, session_id: str | None = None) -> str:
     """Start a new round. Returns round_id."""
-    rounds_dir = project_dir / "otto_logs" / "rounds"
+    rounds_dir = _rounds_dir(project_dir, session_id)
     rounds_dir.mkdir(parents=True, exist_ok=True)
 
     # Sequential round number
@@ -48,9 +59,10 @@ def record_certifier(
     round_id: str,
     report: Any,
     stories: list[dict[str, Any]],
+    session_id: str | None = None,
 ) -> None:
     """Record certifier findings for a round."""
-    round_dir = project_dir / "otto_logs" / "rounds" / round_id
+    round_dir = _rounds_dir(project_dir, session_id) / round_id
 
     # Machine-readable outcome
     outcome = {
@@ -79,9 +91,10 @@ def record_build(
     project_dir: Path,
     round_id: str,
     build_result: Any,
+    session_id: str | None = None,
 ) -> None:
     """Record build agent actions for a round."""
-    round_dir = project_dir / "otto_logs" / "rounds" / round_id
+    round_dir = _rounds_dir(project_dir, session_id) / round_id
 
     sha_after = _get_head_sha(project_dir)
 
@@ -206,10 +219,10 @@ def append_journal(
         f.write(line)
 
 
-def _collect_traps(project_dir: Path, current_round_id: str) -> list[dict]:
+def _collect_traps(project_dir: Path, current_round_id: str, session_id: str | None = None) -> list[dict]:
     """Collect failed fix attempts from previous rounds for the handoff."""
     traps = []
-    rounds_dir = project_dir / "otto_logs" / "rounds"
+    rounds_dir = _rounds_dir(project_dir, session_id)
     if not rounds_dir.exists():
         return traps
 

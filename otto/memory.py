@@ -22,8 +22,12 @@ import time
 from pathlib import Path
 from typing import Any
 
+from otto import paths
+
 MAX_ENTRIES = 5
-HISTORY_FILE = "otto_logs/certifier-memory.jsonl"
+# Legacy path still READ as a fallback; new writes go to
+# otto_logs/cross-sessions/certifier-memory.jsonl via paths.py.
+LEGACY_HISTORY_FILE = "otto_logs/certifier-memory.jsonl"
 
 
 def record_run(
@@ -50,7 +54,7 @@ def _record_run_impl(
     stories: list[dict[str, Any]],
     cost: float,
 ) -> None:
-    history_path = project_dir / HISTORY_FILE
+    history_path = paths.certifier_memory_jsonl(project_dir)
     history_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Collect git info for citations
@@ -87,22 +91,32 @@ def _record_run_impl(
 
 
 def load_history(project_dir: Path) -> list[dict[str, Any]]:
-    """Read last N entries from certifier memory."""
-    history_path = project_dir / HISTORY_FILE
-    if not history_path.exists():
-        return []
+    """Read last N entries from certifier memory.
 
-    entries = []
-    try:
-        for line in history_path.read_text().splitlines():
-            line = line.strip()
-            if line:
-                try:
-                    entries.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-    except OSError:
-        return []
+    Reads from (in order, merged): new cross-sessions path, legacy top-level
+    path, and any pre-restructure archive siblings. Preserves append order.
+    """
+    candidates: list[Path] = [
+        paths.certifier_memory_jsonl(project_dir),
+        project_dir / LEGACY_HISTORY_FILE,
+    ]
+    for archive in paths.archived_pre_restructure_dirs(project_dir):
+        candidates.append(archive / paths.LEGACY_CERTIFIER_MEMORY)
+
+    entries: list[dict[str, Any]] = []
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            for line in path.read_text().splitlines():
+                line = line.strip()
+                if line:
+                    try:
+                        entries.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+        except OSError:
+            continue
 
     return entries[-MAX_ENTRIES:]
 
