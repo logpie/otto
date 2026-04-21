@@ -346,7 +346,11 @@ After all branches are merged, the certifier runs once against the post-merge tr
 | `--fast` | Pure git merge; bail on first conflict (no LLM agent) |
 | `--no-certify` | Skip post-merge story verification |
 | `--full-verify` | Verify all stories (no skip-likely-safe optimization) |
-| `--cleanup-on-success` | Remove worktrees of merged tasks after successful merge |
+| `--cleanup-on-success` | Graduate each task's session to main, then remove the worktree |
+
+**Session graduation.** With `--cleanup-on-success`, each merged task's full session (`narrative.log`, `messages.jsonl`, `proof-of-work.*`, screenshots, recording) is moved from the worktree into the main repo's canonical `otto_logs/sessions/<id>/` before the worktree is removed. `summary.json` gets `merge_commit_sha` + `merged_at` amended in place, so later you can run `git log <merge_commit_sha>^..<merge_commit_sha>^2` to see exactly which commits a given graduated session contributed. No evidence is destroyed. If graduation fails for any reason, that task's worktree is left intact (safe default).
+
+**Concurrent merges.** `otto merge` takes an exclusive `otto_logs/.merge.lock` for its whole run. Second concurrent `otto merge` in the same project exits with a clear "another merge in progress" error. The lock is separate from the queue watcher's lock, so watching and merging don't fight.
 
 **Conflict resolution.** When `git` can't auto-merge, otto first commits all marker-laden merges (preserving each branch's merge history), then runs ONE agent session that resolves every conflict globally with full project context — Bash, project test command, all tools. The agent self-corrects within its session (test-driven retry), then a single orchestrator-level validation enforces no out-of-scope edits, no leftover markers, HEAD unchanged. Bench data: ~2× faster and ~30% cheaper than per-conflict resolution on multi-branch merges.
 

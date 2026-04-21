@@ -188,9 +188,13 @@ otto improve bugs "error handling" -n 5
               │  .worktrees/redesign/      build/redesign... │
               │  .worktrees/improve-bugs/  improve/...       │
               │                                              │
-              │  Each writes:                                │
-              │    otto_logs/builds/<id>/...                 │
-              │    otto_logs/queue/<task-id>/manifest.json   │
+              │  Each writes (pre-merge):                    │
+              │    <worktree>/otto_logs/sessions/<id>/       │
+              │      summary.json, manifest.json,            │
+              │      build/narrative.log + messages.jsonl,   │
+              │      certify/proof-of-work.{html,json,md}    │
+              │    main/otto_logs/queue/<task-id>/           │
+              │      manifest.json (mirror, index by slug)   │
               └──────────────────────────────────────────────┘
 ```
 
@@ -211,6 +215,51 @@ otto improve bugs "error handling" -n 5
 - On watcher restart, in-flight tasks are either resumed (default,
   `on_watcher_restart: resume`) by reconciling state.json against live PIDs
   or marked failed (`fail`).
+
+**Log namespace (canonical vs index):**
+
+- `otto_logs/sessions/<id>/` is the canonical record for every run —
+  atomic builds, atomic improves, queued tasks (pre-merge in the
+  worktree, post-merge on main). One shape, one namespace.
+- `otto_logs/queue/<task-slug>/manifest.json` is a control-plane INDEX
+  keyed by slug (for watcher lookup + merge discovery). It's a mirror of
+  the canonical manifest with a `mirror_of` field pointing at the source.
+- A graduated queue session is indistinguishable in shape from an atomic
+  session — provenance is captured by fields (`queue_task_id`,
+  `merge_commit_sha`, `merged_at`), not by file-tree placement.
+
+## Session Graduation (on merge)
+
+When `otto merge --cleanup-on-success` lands merged branches on main,
+each queue task's worktree is about to be destroyed by `git worktree
+remove`. Before that, the orchestrator **graduates** the task's full
+session from the worktree into the main repo's canonical sessions/:
+
+```
+Before:
+  .worktrees/add/otto_logs/sessions/<id>/   (narrative.log, PoW, evidence, …)
+  main/otto_logs/queue/add/manifest.json    (mirror pointing at worktree)
+
+After `otto merge add --cleanup-on-success`:
+  main/otto_logs/sessions/<id>/             (moved — same shape)
+    summary.json                             + merge_commit_sha, merged_at
+    manifest.json                            paths rewritten to main
+    build/… certify/… (unchanged contents)
+  main/otto_logs/queue/add/manifest.json    (paths rewritten to graduated)
+  .worktrees/add/                           (removed)
+```
+
+**Failure handling:** If graduation fails at any step (destination id
+collision, move error, amend failure) for a given task, that task's
+worktree is NOT removed. Other tasks graduate independently. The merge
+commit already landed on main — graduation failures never surface as
+"merge failed" to the user.
+
+**Concurrency:** `otto merge` holds an exclusive file lock at
+`otto_logs/.merge.lock` for its entire run (separate from the watcher's
+`.otto-queue.lock`). Two concurrent `otto merge` processes in the same
+project can't race on graduation or worktree removal — the second exits
+with a clear "another otto merge is in progress" error.
 
 ## Merge Subsystem
 
