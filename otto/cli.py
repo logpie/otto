@@ -15,7 +15,7 @@ os.environ.pop("CLAUDECODE", None)
 import click
 
 from otto.agent import AgentCallError
-from otto.config import load_config, require_git
+from otto.config import _normalize_intent, load_config, require_git
 from otto.display import CONTEXT_SETTINGS, console, rich_escape
 from otto.theme import error_console
 
@@ -359,7 +359,11 @@ async def _run_spec_phase(
     except Exception as exc:
         if isinstance(exc, AgentCallError):
             prior_cp = load_checkpoint(project_dir) or {}
-            session_id = exc.session_id or prior_cp.get("session_id", "")
+            session_id = (
+                exc.session_id
+                or prior_cp.get("agent_session_id")
+                or prior_cp.get("session_id", "")
+            )
             write_checkpoint(
                 project_dir, run_id=run_id, command="build",
                 status="paused", phase=current_phase,
@@ -574,11 +578,12 @@ def _build_locked(
         )
         sys.exit(2)
 
-    intent = (intent or "").strip()
+    intent = _normalize_intent(intent or "")
 
     if spec_file:
         try:
             file_intent, _ = read_spec_file(Path(spec_file))
+            file_intent = _normalize_intent(file_intent)
         except ValueError as exc:
             error_console.print(f"[error]{exc}[/error]")
             sys.exit(2)
@@ -606,11 +611,11 @@ def _build_locked(
     if not intent:
         if resume_without_intent:
             if resume_state.intent:
-                intent = resume_state.intent
+                intent = _normalize_intent(resume_state.intent)
                 display_intent = intent
             elif split and not no_qa:
                 from otto.config import resolve_intent
-                intent = (resolve_intent(project_dir) or "").strip()
+                intent = _normalize_intent(resolve_intent(project_dir) or "")
                 if not intent:
                     error_console.print(
                         "[error]Resume needs a product description for split mode. "
@@ -731,7 +736,7 @@ def _build_locked(
             result: BuildResult = asyncio.run(
                 build_agentic_v3(intent, project_dir, config,
                                  certifier_mode=certifier_mode,
-                                 resume_session_id=resume_state.session_id or None,
+                                 resume_session_id=resume_state.agent_session_id or None,
                                  record_intent=not resume_without_intent,
                                  resume_existing_session=resume_without_intent,
                                  spec=spec_content,
@@ -783,6 +788,7 @@ def certify(intent, thorough, fast, standard_, budget, model, provider, effort, 
             "[error]--fast, --standard, and --thorough are mutually exclusive.[/error]"
         )
         sys.exit(2)
+    intent = _normalize_intent(intent or "")
 
     try:
         with _paths.project_lock(project_dir, "certify", break_lock=break_lock):
@@ -828,7 +834,7 @@ def _certify_locked(
     # Resolve intent: argument > intent.md > README.md
     if not intent:
         from otto.config import resolve_intent
-        intent = resolve_intent(project_dir)
+        intent = _normalize_intent(resolve_intent(project_dir) or "")
         if intent:
             console.print("  [dim]Intent from project files[/dim]")
         else:

@@ -2,7 +2,7 @@
 
 Writes checkpoint after each round so runs can survive crashes,
 pause/resume, and recover from errors. Works for both agent mode
-(stores session_id for SDK resume) and split mode (stores round number).
+(stores agent_session_id for SDK resume) and split mode (stores round number).
 
 Layout:
   otto_logs/sessions/<session_id>/checkpoint.json  — new location
@@ -54,10 +54,10 @@ class ResumeState:
     ``resumed=False`` means a fresh run (either no checkpoint, or user chose
     not to resume). ``resumed=True`` means pipeline functions should pick up
     from ``start_round``/``total_cost``/``rounds`` (split mode) or
-    ``session_id`` (agent mode).
+    ``agent_session_id`` (agent mode).
     """
 
-    session_id: str = ""
+    agent_session_id: str = ""
     start_round: int = 1
     total_cost: float = 0.0
     rounds: list[dict[str, Any]] = field(default_factory=list)
@@ -74,6 +74,46 @@ class ResumeState:
     spec_hash: str = ""           # sha256 of normalized spec content
     spec_version: int = 0         # regeneration counter (0 = never regenerated)
     spec_cost: float = 0.0        # cost of spec phase (subset of total_cost)
+
+    @property
+    def session_id(self) -> str:
+        """Backward-compatible alias for one release."""
+        return self.agent_session_id
+
+    @session_id.setter
+    def session_id(self, value: str) -> None:
+        self.agent_session_id = value
+
+
+def _checkpoint_agent_session_id(data: dict[str, Any]) -> str:
+    """Read the SDK resume id from new or legacy checkpoint keys."""
+    return data.get("agent_session_id") or data.get("session_id", "") or ""
+
+
+def _checkpoint_run_id(data: dict[str, Any]) -> str:
+    """Read the otto run id from new or legacy checkpoint keys."""
+    return data.get("run_id") or data.get("build_id", "") or ""
+
+
+def _normalize_checkpoint_data(data: dict[str, Any]) -> dict[str, Any]:
+    """Fill upgrade-safe aliases on checkpoint reads."""
+    normalized = dict(data)
+    normalized["agent_session_id"] = _checkpoint_agent_session_id(data)
+    normalized["run_id"] = _checkpoint_run_id(data)
+    return normalized
+
+
+def _prune_checkpoint_defaults(data: dict[str, Any]) -> dict[str, Any]:
+    """Drop default-valued optional fields from serialized checkpoints."""
+    if data.get("focus") is None:
+        data.pop("focus", None)
+    if data.get("target") is None:
+        data.pop("target", None)
+    if data.get("current_round", 0) == 0:
+        data.pop("current_round", None)
+    if not data.get("rounds"):
+        data.pop("rounds", None)
+    return data
 
 
 def print_resume_status(console: Any, state: ResumeState, resume_flag: bool, expected_command: str) -> None:
@@ -136,7 +176,7 @@ def resolve_resume(
     prior_cmd = checkpoint.get("command", "") or ""
     current_round = checkpoint.get("current_round", 0) or 0
     return ResumeState(
-        session_id=checkpoint.get("session_id", "") or "",
+        agent_session_id=_checkpoint_agent_session_id(checkpoint),
         start_round=current_round + 1,
         total_cost=float(checkpoint.get("total_cost", 0.0) or 0.0),
         rounds=list(checkpoint.get("rounds", []) or []),
@@ -147,7 +187,7 @@ def resolve_resume(
         phase=checkpoint.get("phase", "") or "",
         target=checkpoint.get("target", "") or "",
         intent=checkpoint.get("intent", "") or "",
-        run_id=checkpoint.get("run_id", "") or "",
+        run_id=_checkpoint_run_id(checkpoint),
         spec_path=checkpoint.get("spec_path", "") or "",
         spec_hash=checkpoint.get("spec_hash", "") or "",
         spec_version=int(checkpoint.get("spec_version", 0) or 0),
@@ -219,7 +259,7 @@ def write_checkpoint(
         "max_rounds": max_rounds,
         "status": status,
         "phase": phase,
-        "session_id": session_id,
+        "agent_session_id": session_id,
         "current_round": current_round,
         "total_cost": float(total_cost),
         "rounds": rounds or [],
@@ -234,6 +274,8 @@ def write_checkpoint(
         "started_at": _read_started_at(checkpoint_path),
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+    if status == "completed":
+        data = _prune_checkpoint_defaults(data)
 
     _write_checkpoint_file(checkpoint_path, data)
     # Update the `paused` pointer so --resume can locate the session.
@@ -286,14 +328,14 @@ def load_checkpoint(project_dir: Path) -> dict[str, Any] | None:
         try:
             data = json.loads(cp_path.read_text())
             if data.get("status") in ("in_progress", "paused"):
-                return data
+                return _normalize_checkpoint_data(data)
         except (FileNotFoundError, json.JSONDecodeError, OSError):
             pass
 
     # 3: legacy fallback.
     legacy = _load_legacy_checkpoint(project_dir)
     if legacy is not None:
-        return legacy
+        return _normalize_checkpoint_data(legacy)
 
     return None
 
@@ -343,6 +385,7 @@ def complete_checkpoint(
     caller owns deletion).
     """
     def _apply(data: dict[str, Any]) -> None:
+        data.update(_normalize_checkpoint_data(data))
         data["status"] = "completed"
         data["total_cost"] = float(total_cost)
         if current_round is not None:
@@ -350,13 +393,14 @@ def complete_checkpoint(
         if rounds is not None:
             data["rounds"] = list(rounds)
         data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        _prune_checkpoint_defaults(data)
 
     session_path = paths.resolve_pointer(project_dir, paths.PAUSED_POINTER)
     if session_path is not None:
         cp_path = session_path / "checkpoint.json"
         if cp_path.exists():
             try:
-                data = json.loads(cp_path.read_text())
+                data = _normalize_checkpoint_data(json.loads(cp_path.read_text()))
                 _apply(data)
                 _write_checkpoint_file(cp_path, data)
             except (json.JSONDecodeError, OSError):
@@ -369,7 +413,7 @@ def complete_checkpoint(
     if not legacy_path.exists():
         return
     try:
-        data = json.loads(legacy_path.read_text())
+        data = _normalize_checkpoint_data(json.loads(legacy_path.read_text()))
         _apply(data)
         _write_checkpoint_file(legacy_path, data)
     except (json.JSONDecodeError, OSError):

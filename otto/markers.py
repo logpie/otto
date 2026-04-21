@@ -57,13 +57,29 @@ def _parse_story_result(stripped: str, evidence: dict[str, str]) -> dict[str, An
     story: dict[str, Any] = {
         "story_id": sid,
         "passed": passed,
-        "warn": is_warn,
         "summary": summary,
     }
+    if is_warn:
+        story["warn"] = True
     ev = evidence.get(sid, "")
     if ev:
         story["evidence"] = ev
     return story
+
+
+def compact_story_result(story: dict[str, Any]) -> dict[str, Any]:
+    """Drop default-valued optional fields from serialized story payloads."""
+    compact = dict(story)
+    if not compact.get("warn"):
+        compact.pop("warn", None)
+    if not compact.get("evidence"):
+        compact.pop("evidence", None)
+    return compact
+
+
+def compact_story_results(stories: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Apply ``compact_story_result`` across a story list."""
+    return [compact_story_result(story) for story in stories]
 
 
 def _is_template_verdict(verdict_text: str) -> bool:

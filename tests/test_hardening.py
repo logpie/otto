@@ -746,7 +746,7 @@ class TestSessionIdPreservedOnFailure:
         sess = _paths.resolve_pointer(tmp_git_repo, _paths.PAUSED_POINTER)
         assert sess is not None, "expected paused pointer after failure"
         cp = json.loads((sess / "checkpoint.json").read_text())
-        assert cp["session_id"] == "streamed-sid-abc123", (
+        assert cp["agent_session_id"] == "streamed-sid-abc123", (
             "timeout must preserve streamed session_id for --resume"
         )
         assert cp["status"] == "paused", "failed run must be resumable, not completed"
@@ -768,7 +768,7 @@ class TestSessionIdPreservedOnFailure:
         sess = _paths.resolve_pointer(tmp_git_repo, _paths.PAUSED_POINTER)
         assert sess is not None, "expected paused pointer after failure"
         cp = json.loads((sess / "checkpoint.json").read_text())
-        assert cp["session_id"] == "pre-crash-sid-xyz"
+        assert cp["agent_session_id"] == "pre-crash-sid-xyz"
         assert cp["status"] == "paused"
 
 
@@ -909,7 +909,7 @@ class TestBudgetExhaustionInPipeline:
         assert sess is not None, "expected paused pointer after failure"
         cp = json.loads((sess / "checkpoint.json").read_text())
         assert cp["status"] == "paused"
-        assert cp["session_id"] == "mid-stream-sid"
+        assert cp["agent_session_id"] == "mid-stream-sid"
 
 
 # -- Test: invalid spec_timeout in config is tolerated --
@@ -933,6 +933,30 @@ class TestSpecTimeoutTolerance:
             )
         assert report.outcome == CertificationOutcome.PASSED
         assert report.story_results and report.story_results[0]["story_id"] == "x"
+
+
+class TestProofOfWorkRendering:
+    def test_html_omits_empty_visual_evidence_and_diagnosis_sections(self, tmp_path):
+        from otto.certifier import _generate_agentic_html_pow
+
+        evidence_dir = tmp_path / "evidence"
+        evidence_dir.mkdir()
+
+        _generate_agentic_html_pow(
+            tmp_path,
+            [{"story_id": "smoke", "passed": True, "summary": "ok"}],
+            "passed",
+            1.0,
+            0.1,
+            1,
+            1,
+            diagnosis="",
+            evidence_dir=evidence_dir,
+        )
+
+        html = (tmp_path / "proof-of-work.html").read_text()
+        assert "Visual Evidence" not in html
+        assert "Overall Diagnosis" not in html
 
 
 # -- Test: run_test_suite handles git worktree add failure --
@@ -973,6 +997,7 @@ class TestCrossRunMemory:
 
         record_run(
             tmp_path,
+            run_id="run-1",
             command="build",
             certifier_mode="thorough",
             stories=[
@@ -984,6 +1009,7 @@ class TestCrossRunMemory:
 
         entries = load_history(tmp_path)
         assert len(entries) == 1
+        assert entries[0]["run_id"] == "run-1"
         assert entries[0]["command"] == "build"
         assert entries[0]["tested"] == 2
         assert entries[0]["passed"] == 1
@@ -999,7 +1025,7 @@ class TestCrossRunMemory:
         from otto.memory import format_for_prompt, record_run
 
         record_run(
-            tmp_path, command="certify", certifier_mode="fast",
+            tmp_path, run_id="run-2", command="certify", certifier_mode="fast",
             stories=[{"story_id": "smoke", "passed": True, "summary": "Works"}],
             cost=0.14,
         )
@@ -1015,7 +1041,7 @@ class TestCrossRunMemory:
 
         for i in range(MAX_ENTRIES + 3):
             record_run(
-                tmp_path, command="build", certifier_mode="fast",
+                tmp_path, run_id=f"run-{i}", command="build", certifier_mode="fast",
                 stories=[{"story_id": f"s{i}", "passed": True, "summary": f"Story {i}"}],
                 cost=0.1,
             )
@@ -1108,7 +1134,7 @@ class TestResolveResume:
         assert not state.resumed
         assert state.start_round == 1
         assert state.total_cost == 0.0
-        assert state.session_id == ""
+        assert state.agent_session_id == ""
 
     def test_no_checkpoint_with_resume_flag(self, tmp_path):
         """User passed --resume but no checkpoint exists → fall back to fresh."""
@@ -1140,7 +1166,7 @@ class TestResolveResume:
         assert state.resumed
         assert state.start_round == 3   # current_round + 1
         assert state.total_cost == 1.23
-        assert state.session_id == "sess-abc"
+        assert state.agent_session_id == "sess-abc"
         assert state.prior_command == "build"
         assert not state.command_mismatch
         assert len(state.rounds) == 2
@@ -1208,7 +1234,7 @@ class TestLegacyLayoutResume:
         state = resolve_resume(tmp_path, resume=True, expected_command="build")
         assert state.resumed
         assert state.prior_command == "build"
-        assert state.session_id == "sdk-legacy-xyz"
+        assert state.agent_session_id == "sdk-legacy-xyz"
         assert state.run_id == "legacy-run-42"
         assert state.start_round == 3  # current_round + 1
         assert state.total_cost == 1.75
@@ -1252,7 +1278,7 @@ class TestLegacyLayoutResume:
         state = resolve_resume(tmp_path, resume=True, expected_command="build")
         assert state.resumed
         # New layout wins.
-        assert state.session_id == "sdk-new"
+        assert state.agent_session_id == "sdk-new"
         assert state.run_id == "2026-04-20-170200-abcdef"
         assert state.total_cost == 3.33
 
@@ -1355,7 +1381,7 @@ class TestCheckpointRegression:
 
         checkpoint = load_checkpoint(tmp_git_repo)
         assert checkpoint["status"] == "in_progress"
-        assert checkpoint["session_id"] == "sess-resume-123"
+        assert checkpoint["agent_session_id"] == "sess-resume-123"
 
     @pytest.mark.asyncio
     async def test_split_resume_tracks_phase_and_last_completed_round(self, tmp_git_repo):
@@ -1435,6 +1461,89 @@ class TestBuildResume:
         r = CliRunner().invoke(main, ["certify", "--help"])
         assert r.exit_code == 0
         assert "--break-lock" in r.output
+
+    def test_build_cli_normalizes_multiline_intent(self, tmp_git_repo, monkeypatch):
+        from click.testing import CliRunner
+        from otto.cli import main
+
+        captured = {}
+
+        async def fake_build(intent, project_dir, config, **kwargs):
+            captured["intent"] = intent
+            return BuildResult(
+                passed=True,
+                build_id="run-1",
+                total_cost=0.0,
+                tasks_passed=1,
+                tasks_failed=0,
+            )
+
+        monkeypatch.chdir(tmp_git_repo)
+        with patch("otto.pipeline.build_agentic_v3", side_effect=fake_build):
+            result = CliRunner().invoke(
+                main,
+                ["build", "a kanban board:\n  localStorage"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0
+        assert captured["intent"] == "a kanban board: localStorage"
+
+    def test_certify_cli_normalizes_multiline_intent(self, tmp_git_repo, monkeypatch):
+        from click.testing import CliRunner
+        from otto.certifier.report import CertificationOutcome, CertificationReport
+        from otto.cli import main
+
+        captured = {}
+
+        async def fake_certify(intent, project_dir, config=None, **kwargs):
+            captured["intent"] = intent
+            return CertificationReport(
+                outcome=CertificationOutcome.PASSED,
+                cost_usd=0.0,
+                duration_s=1.0,
+                story_results=[{"story_id": "smoke", "passed": True, "summary": "ok"}],
+            )
+
+        monkeypatch.chdir(tmp_git_repo)
+        with patch("otto.certifier.run_agentic_certifier", side_effect=fake_certify):
+            result = CliRunner().invoke(
+                main,
+                ["certify", "a kanban board:\n  localStorage"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0
+        assert captured["intent"] == "a kanban board: localStorage"
+
+    def test_improve_normalizes_resolved_intent(self, tmp_git_repo, monkeypatch):
+        from click.testing import CliRunner
+        from otto.cli import main
+
+        (tmp_git_repo / "intent.md").write_text("a kanban board:\n  localStorage")
+        captured = {}
+
+        async def fake_build(intent, project_dir, config, **kwargs):
+            captured["intent"] = intent
+            return BuildResult(
+                passed=True,
+                build_id="run-2",
+                total_cost=0.0,
+                tasks_passed=1,
+                tasks_failed=0,
+            )
+
+        monkeypatch.chdir(tmp_git_repo)
+        with patch("otto.cli_improve._create_improve_branch", return_value="improve/2026-04-21"), \
+             patch("otto.pipeline.build_agentic_v3", side_effect=fake_build):
+            result = CliRunner().invoke(
+                main,
+                ["improve", "bugs"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0
+        assert captured["intent"] == "a kanban board: localStorage"
 
     def test_build_without_intent_without_resume_errors(self, tmp_git_repo, monkeypatch):
         """Missing intent and no checkpoint → exits 2."""

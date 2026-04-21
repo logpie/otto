@@ -26,8 +26,8 @@ def _exit_for_lock_busy(exc) -> None:
 
 def _resolve_intent(project_dir: Path) -> str | None:
     """Resolve product description from intent.md or README.md."""
-    from otto.config import resolve_intent
-    intent = resolve_intent(project_dir)
+    from otto.config import _normalize_intent, resolve_intent
+    intent = _normalize_intent(resolve_intent(project_dir) or "")
     if intent:
         console.print("  [dim]Intent from project files[/dim]")
     return intent
@@ -237,7 +237,7 @@ def _run_improve_locked(
                 config,
                 certifier_mode=certifier_mode,
                 prompt_mode="improve",
-                resume_session_id=resume_state.session_id or None,
+                resume_session_id=resume_state.agent_session_id or None,
                 command=command_id,
                 run_id=resume_state.run_id or run_id,
                 budget=budget,
@@ -451,8 +451,10 @@ def register_improve_commands(main: click.Group) -> None:
         resume_state = resolve_resume(
             project_dir, resume, expected_command="improve.target"
         )
-        checkpoint_goal = (resume_state.target or "").strip()
-        requested_goal = (goal or "").strip()
+        from otto.config import _normalize_intent
+
+        checkpoint_goal = _normalize_intent(resume_state.target or "")
+        requested_goal = _normalize_intent(goal or "")
 
         if resume and resume_state.resumed:
             if resume_state.prior_command != "improve.target":
@@ -472,7 +474,7 @@ def register_improve_commands(main: click.Group) -> None:
             elif checkpoint_goal:
                 goal = checkpoint_goal
 
-        goal = (goal or "").strip()
+        goal = _normalize_intent(goal or "")
         if not goal:
             error_console.print(
                 "[error]Goal cannot be empty. Provide a measurable target, or use "

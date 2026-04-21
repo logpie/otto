@@ -269,6 +269,7 @@ class TestResumeStateSpecFields:
         from otto.checkpoint import ResumeState
         rs = ResumeState()
         assert rs.intent == ""
+        assert rs.agent_session_id == ""
         assert rs.run_id == ""
         assert rs.spec_path == ""
         assert rs.spec_hash == ""
@@ -289,6 +290,30 @@ class TestResumeStateSpecFields:
         assert rs.spec_path == "/tmp/x.md"
         assert rs.spec_hash == "hh"
         assert rs.spec_cost == 0.25
+
+
+class TestCheckpointArtifactShape:
+    def test_completed_checkpoint_omits_default_optional_fields(self, tmp_path):
+        import json
+
+        from otto import paths
+        from otto.checkpoint import complete_checkpoint, write_checkpoint
+
+        write_checkpoint(
+            tmp_path,
+            run_id="r1",
+            command="build",
+            status="paused",
+            current_round=0,
+            rounds=[],
+        )
+        complete_checkpoint(tmp_path, total_cost=1.0, current_round=0, rounds=[])
+
+        checkpoint = json.loads(paths.session_checkpoint(tmp_path, "r1").read_text())
+        assert "focus" not in checkpoint
+        assert "target" not in checkpoint
+        assert "current_round" not in checkpoint
+        assert "rounds" not in checkpoint
 
 
 class TestBuildPromptSpecIntegration:

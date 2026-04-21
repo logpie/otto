@@ -1,6 +1,7 @@
 """Otto configuration — load/create otto.yaml, auto-detect project settings."""
 
 import json
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -59,6 +60,11 @@ DEFAULTS: dict[str, Any] = {
 DEFAULT_CONFIG: dict[str, Any] = DEFAULTS
 
 SUPPORTED_PROVIDERS = {"claude", "codex"}
+
+
+def _normalize_intent(s: str) -> str:
+    """Collapse shell-wrapped or multiline intent input to one clean line."""
+    return re.sub(r"\s+", " ", s).strip()
 
 
 def normalize_provider(

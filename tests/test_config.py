@@ -7,6 +7,7 @@ import yaml
 
 from otto.config import (
     DEFAULT_CONFIG,
+    _normalize_intent,
     agent_provider,
     create_config,
     detect_default_branch,
@@ -90,6 +91,9 @@ class TestProviderHelpers:
 
     def test_default_config_exposes_spec_timeout(self):
         assert DEFAULT_CONFIG["spec_timeout"] == 600
+
+    def test_normalize_intent_collapses_multiline_whitespace(self):
+        assert _normalize_intent("a kanban board:\n  localStorage") == "a kanban board: localStorage"
 
 
 class TestDetectTestCommand:

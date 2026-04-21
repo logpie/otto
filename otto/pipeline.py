@@ -68,7 +68,7 @@ def _write_session_summary(
 
     # Full precision preserved in JSON; round at display time only.
     summary = {
-        "session_id": session_id,
+        "run_id": session_id,
         "command": command,
         "intent": intent,
         "verdict": verdict,
@@ -233,8 +233,11 @@ async def build_agentic_v3(
     total_run_cost = float(spec_cost or 0.0)
     if manage_checkpoint and not checkpoint_session_id:
         try:
+            checkpoint_data = load_checkpoint(project_dir) or {}
             checkpoint_session_id = (
-                (load_checkpoint(project_dir) or {}).get("session_id", "") or ""
+                checkpoint_data.get("agent_session_id")
+                or checkpoint_data.get("session_id", "")
+                or ""
             )
         except Exception as exc:
             logger.warning("Failed to read checkpoint for session resume: %s", exc)
@@ -315,11 +318,11 @@ async def build_agentic_v3(
     # machine-readable replay.
 
     # Parse certification results from agent output
-    from otto.markers import parse_certifier_markers
+    from otto.markers import compact_story_results, parse_certifier_markers
     parsed = parse_certifier_markers(text or "")
     stories_tested = parsed.stories_tested
     stories_passed = parsed.stories_passed
-    story_results = parsed.stories
+    story_results = compact_story_results(parsed.stories)
     verdict_pass = parsed.verdict_pass
     overall_diagnosis = parsed.diagnosis
     certify_rounds = parsed.certify_rounds
@@ -433,8 +436,10 @@ async def build_agentic_v3(
         logger.warning("Failed to write PoW: %s", exc)
 
     # Checkpoint — full precision, ISO-Z timestamp.
+    # `build_id` kept as an alias of `run_id` for one release (back-compat).
     # `cost_usd` kept as alias of `total_cost_usd` for one release (back-compat).
     checkpoint = {
+        "run_id": build_id,
         "build_id": build_id,
         "mode": "agentic_v3",
         "passed": passed,
@@ -503,8 +508,14 @@ async def build_agentic_v3(
     # Record cross-run memory (only if certification produced stories)
     if story_results and not skip_qa:
         from otto.memory import record_run
-        record_run(project_dir, command="build", certifier_mode=certifier_mode,
-                   stories=story_results, cost=float(cost or 0))
+        record_run(
+            project_dir,
+            run_id=build_id,
+            command="build",
+            certifier_mode=certifier_mode,
+            stories=story_results,
+            cost=float(cost or 0),
+        )
 
     return BuildResult(
         passed=passed,

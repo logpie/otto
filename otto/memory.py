@@ -35,6 +35,7 @@ LEGACY_HISTORY_FILE = "otto_logs/certifier-memory.jsonl"
 def record_run(
     project_dir: Path,
     *,
+    run_id: str,
     command: str,
     certifier_mode: str,
     stories: list[dict[str, Any]],
@@ -42,8 +43,14 @@ def record_run(
 ) -> None:
     """Append one entry after a run completes. Best-effort — never raises."""
     try:
-        _record_run_impl(project_dir, command=command, certifier_mode=certifier_mode,
-                         stories=stories, cost=cost)
+        _record_run_impl(
+            project_dir,
+            run_id=run_id,
+            command=command,
+            certifier_mode=certifier_mode,
+            stories=stories,
+            cost=cost,
+        )
     except Exception:
         logging.getLogger("otto.memory").warning("Failed to record certifier memory")
 
@@ -51,6 +58,7 @@ def record_run(
 def _record_run_impl(
     project_dir: Path,
     *,
+    run_id: str,
     command: str,
     certifier_mode: str,
     stories: list[dict[str, Any]],
@@ -79,6 +87,7 @@ def _record_run_impl(
 
     entry = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "run_id": run_id,
         "command": command,
         "certifier_mode": certifier_mode,
         "commit": head_sha,

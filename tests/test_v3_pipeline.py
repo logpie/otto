@@ -224,12 +224,15 @@ class TestV3PipelinePass:
 
         # --- Per-build checkpoint (summary of the run) ---
         cp = json.loads((build_dir / "checkpoint.json").read_text())
+        assert cp["run_id"] == result.build_id
+        assert cp["build_id"] == result.build_id
         assert cp["passed"] is True
         assert cp["stories_passed"] == 5
         assert cp["stories_tested"] == 5
         assert cp["mode"] == "agentic_v3"
 
         summary = json.loads(_paths.session_summary(tmp_git_repo, result.build_id).read_text())
+        assert summary["run_id"] == result.build_id
         assert summary["verdict"] == "passed"
         assert summary["status"] == "completed"
         assert summary["stories_passed"] == 5
@@ -240,6 +243,8 @@ class TestV3PipelinePass:
         pow_data = json.loads((certifier_dir / "proof-of-work.json").read_text())
         assert pow_data["outcome"] == "passed"
         assert len(pow_data["stories"]) == 5
+        assert all("warn" not in story for story in pow_data["stories"])
+        assert all("evidence" not in story for story in pow_data["stories"])
         assert (certifier_dir / "proof-of-work.html").exists()
 
         # --- Cumulative logs ---
@@ -277,6 +282,7 @@ async def test_completed_checkpoint_total_cost_and_run_id_match_build_result(tmp
     checkpoint_path = _paths.session_dir(tmp_git_repo, "run-123") / "checkpoint.json"
     checkpoint = json.loads(checkpoint_path.read_text())
     assert checkpoint["run_id"] == "run-123"
+    assert checkpoint["agent_session_id"] == "test-session"
     assert checkpoint["total_cost"] == pytest.approx(0.75)
     assert result.total_cost == pytest.approx(0.75)
     assert _paths.resolve_pointer(tmp_git_repo, _paths.PAUSED_POINTER) is None
