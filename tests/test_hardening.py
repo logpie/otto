@@ -655,8 +655,9 @@ class TestTargetModeMetricGate:
         assert mock_fix.await_count == 0
         assert result.passed is False
         assert result.rounds == 1
+        from otto import paths as _paths
         assert "FAIL (certifier omitted METRIC_MET)" in (
-            tmp_git_repo / "build-journal.md"
+            _paths.improve_dir(tmp_git_repo, result.build_id) / "build-journal.md"
         ).read_text()
 
 
@@ -1022,6 +1023,80 @@ class TestCrossRunMemory:
         entries = load_history(tmp_path)
         assert len(entries) == MAX_ENTRIES
 
+    def test_load_history_sorts_by_timestamp_across_sources(self, tmp_path):
+        """New, legacy, and archived memory entries should merge chronologically."""
+        from otto.memory import load_history
+        from otto import paths
+
+        new_path = paths.certifier_memory_jsonl(tmp_path)
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        new_path.write_text(json.dumps({
+            "ts": "2026-04-20T12:00:00Z",
+            "command": "build",
+            "certifier_mode": "fast",
+            "findings": [],
+        }) + "\n")
+
+        legacy_path = tmp_path / "otto_logs" / "certifier-memory.jsonl"
+        legacy_path.parent.mkdir(parents=True, exist_ok=True)
+        legacy_path.write_text(json.dumps({
+            "ts": "2026-04-20T11:00:00Z",
+            "command": "legacy",
+            "certifier_mode": "fast",
+            "findings": [],
+        }) + "\n")
+
+        archive_dir = tmp_path / "otto_logs.pre-restructure.2026-04-19T000000Z"
+        archive_dir.mkdir()
+        (archive_dir / paths.LEGACY_CERTIFIER_MEMORY).write_text(json.dumps({
+            "ts": "2026-04-20T10:00:00Z",
+            "command": "archive",
+            "certifier_mode": "fast",
+            "findings": [],
+        }) + "\n")
+
+        entries = load_history(tmp_path)
+        assert [entry["command"] for entry in entries] == ["archive", "legacy", "build"]
+
+
+class TestHistoryOrdering:
+    """History merges should sort by timestamps, not source precedence."""
+
+    def test_load_history_entries_sorts_chronologically(self, tmp_path):
+        from otto.cli_logs import _load_history_entries
+        from otto import paths
+
+        new_path = paths.history_jsonl(tmp_path)
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        new_path.write_text(json.dumps({
+            "build_id": "new-run",
+            "timestamp": "2026-04-20T12:00:00Z",
+            "intent": "new",
+        }) + "\n")
+
+        legacy_path = tmp_path / "otto_logs" / "run-history.jsonl"
+        legacy_path.parent.mkdir(parents=True, exist_ok=True)
+        legacy_path.write_text(json.dumps({
+            "build_id": "legacy-run",
+            "timestamp": "2026-04-20T11:00:00Z",
+            "intent": "legacy",
+        }) + "\n")
+
+        archive_dir = tmp_path / "otto_logs.pre-restructure.2026-04-19T000000Z"
+        archive_dir.mkdir()
+        (archive_dir / paths.LEGACY_RUN_HISTORY).write_text(json.dumps({
+            "build_id": "archive-run",
+            "timestamp": "2026-04-20T10:00:00Z",
+            "intent": "archive",
+        }) + "\n")
+
+        entries = _load_history_entries(tmp_path)
+        assert [entry["build_id"] for entry in entries] == [
+            "archive-run",
+            "legacy-run",
+            "new-run",
+        ]
+
 
 class TestResolveResume:
     """resolve_resume handles the four checkpoint states consistently."""
@@ -1349,7 +1424,17 @@ class TestBuildResume:
         r = CliRunner().invoke(main, ["build", "--help"])
         assert r.exit_code == 0
         assert "--resume" in r.output
+        assert "--break-lock" in r.output
         assert "[INTENT]" in r.output  # intent is optional
+
+    def test_certify_cli_exposes_break_lock_flag(self):
+        """Standalone certify should expose the manual lock escape hatch."""
+        from click.testing import CliRunner
+        from otto.cli import main
+
+        r = CliRunner().invoke(main, ["certify", "--help"])
+        assert r.exit_code == 0
+        assert "--break-lock" in r.output
 
     def test_build_without_intent_without_resume_errors(self, tmp_git_repo, monkeypatch):
         """Missing intent and no checkpoint → exits 2."""
@@ -1492,3 +1577,104 @@ class TestBuildResume:
 
         assert result.exit_code == 0
         assert captured["skip_initial_build"] is False
+
+    def test_split_build_threads_run_id_and_spec_into_pipeline(
+        self, tmp_git_repo, monkeypatch
+    ):
+        """Split build should preserve the spec phase session and cost."""
+        from click.testing import CliRunner
+        from otto.cli import main
+
+        captured = {}
+
+        async def fake_spec_phase(**kwargs):
+            return "run-spec-123", "# Approved Spec", 1.25
+
+        async def fake_loop(intent, project_dir, config, **kwargs):
+            captured.update(kwargs)
+            return BuildResult(
+                passed=True,
+                build_id="run-spec-123",
+                total_cost=1.25,
+                tasks_passed=1,
+                tasks_failed=0,
+            )
+
+        monkeypatch.chdir(tmp_git_repo)
+        with patch("otto.cli._run_spec_phase", side_effect=fake_spec_phase), \
+             patch("otto.pipeline.run_certify_fix_loop", side_effect=fake_loop):
+            result = CliRunner().invoke(
+                main,
+                ["build", "spec build", "--split", "--spec", "--yes"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0
+        assert captured["session_id"] == "run-spec-123"
+        assert captured["spec"] == "# Approved Spec"
+        assert captured["spec_cost"] == 1.25
+
+    def test_improve_resume_threads_run_id_into_split_and_agentic(
+        self, tmp_git_repo, monkeypatch
+    ):
+        """Improve resume should keep using the existing Otto session dir."""
+        from click.testing import CliRunner
+        from otto.checkpoint import write_checkpoint
+        from otto.cli import main
+
+        (tmp_git_repo / "intent.md").write_text("test intent")
+        write_checkpoint(
+            tmp_git_repo,
+            run_id="improve-run-123",
+            command="improve.bugs",
+            status="paused",
+            phase="certify",
+            current_round=1,
+            total_cost=2.5,
+            session_id="sdk-resume-1",
+        )
+
+        split_captured = {}
+        agentic_captured = {}
+
+        async def fake_loop(intent, project_dir, config, **kwargs):
+            split_captured.update(kwargs)
+            return BuildResult(
+                passed=True,
+                build_id="improve-run-123",
+                total_cost=2.5,
+                tasks_passed=1,
+                tasks_failed=0,
+            )
+
+        async def fake_build(intent, project_dir, config, **kwargs):
+            agentic_captured.update(kwargs)
+            return BuildResult(
+                passed=True,
+                build_id="improve-run-123",
+                total_cost=2.5,
+                tasks_passed=1,
+                tasks_failed=0,
+            )
+
+        monkeypatch.chdir(tmp_git_repo)
+        with patch("otto.cli_improve._create_improve_branch", return_value="improve/2026-04-20"), \
+             patch("otto.pipeline.run_certify_fix_loop", side_effect=fake_loop):
+            result = CliRunner().invoke(
+                main,
+                ["improve", "bugs", "--split", "--resume"],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 0
+        assert split_captured["session_id"] == "improve-run-123"
+
+        monkeypatch.chdir(tmp_git_repo)
+        with patch("otto.cli_improve._create_improve_branch", return_value="improve/2026-04-20"), \
+             patch("otto.pipeline.build_agentic_v3", side_effect=fake_build):
+            result = CliRunner().invoke(
+                main,
+                ["improve", "bugs", "--resume"],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 0
+        assert agentic_captured["run_id"] == "improve-run-123"

@@ -44,11 +44,14 @@ def _parse_story_result(stripped: str, evidence: dict[str, str]) -> dict[str, An
     sid = parts[0].strip()
     if sid in _PLACEHOLDER_IDS:
         return None
-    passed = "PASS" in parts[1].upper()
+    verdict_raw = parts[1].strip().upper()
+    is_warn = "WARN" in verdict_raw
+    passed = "PASS" in verdict_raw or is_warn
     summary = parts[2].strip() if len(parts) > 2 else ""
     return {
         "story_id": sid,
         "passed": passed,
+        "warn": is_warn,
         "summary": summary,
         "evidence": evidence.get(sid, ""),
     }

@@ -42,6 +42,38 @@ def _stories_to_journeys(stories: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+def _write_session_summary(
+    project_dir: Path,
+    session_id: str,
+    *,
+    verdict: str,
+    passed: bool,
+    cost: float,
+    duration: float,
+    stories_passed: int,
+    stories_tested: int,
+    rounds: int,
+    status: str = "completed",
+) -> None:
+    """Write the canonical summary artifact for a completed session."""
+    from otto import paths
+    from otto.observability import write_json_file
+
+    summary = {
+        "session_id": session_id,
+        "verdict": verdict,
+        "passed": passed,
+        "cost_usd": round(cost, 2),
+        "duration_s": duration,
+        "stories_passed": stories_passed,
+        "stories_tested": stories_tested,
+        "status": status,
+        "rounds": rounds,
+        "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    write_json_file(paths.session_summary(project_dir, session_id), summary)
+
+
 async def build_agentic_v3(
     intent: str,
     project_dir: Path,
@@ -339,6 +371,19 @@ async def build_agentic_v3(
     }
     from otto.observability import write_json_file
     write_json_file(build_dir / "checkpoint.json", checkpoint)
+    if manage_checkpoint and final_status == "completed":
+        _write_session_summary(
+            project_dir,
+            build_id,
+            verdict="passed" if passed else "failed",
+            passed=passed,
+            cost=total_run_cost,
+            duration=total_duration,
+            stories_passed=stories_passed,
+            stories_tested=stories_tested,
+            rounds=max(len(certify_rounds), 1),
+            status=final_status,
+        )
 
     logger.info("Agentic v3 done: %s, %d/%d stories, %.1fs, $%.2f",
                 "passed" if passed else "failed",
@@ -580,6 +625,8 @@ async def run_certify_fix_loop(
     budget: "RunBudget | None" = None,
     session_id: str | None = None,
     is_improve_run: bool = True,
+    spec: str | None = None,
+    spec_cost: float = 0.0,
 ) -> BuildResult:
     """System-driven certify-fix loop.
 
@@ -609,6 +656,7 @@ async def run_certify_fix_loop(
     _paths.ensure_session_scaffold(project_dir, build_id)
     _paths.set_pointer(project_dir, _paths.LATEST_POINTER, build_id)
     total_cost = resume_cost
+    loop_start = time.monotonic()
     from otto.config import get_max_rounds
     max_rounds = get_max_rounds(config)
     checkpoint_rounds = list(resume_rounds or [])
@@ -653,7 +701,8 @@ async def run_certify_fix_loop(
     # --- Optional initial build ---
     round_id = init_round(project_dir,
                           f"build: {intent[:60]}" if not skip_initial_build
-                          else f"certify: {intent[:60]}")
+                          else f"certify: {intent[:60]}",
+                          session_id=build_id)
 
     if not skip_initial_build:
         build_config = dict(config)
@@ -668,6 +717,9 @@ async def run_certify_fix_loop(
             result = await build_agentic_v3(
                 intent, project_dir, build_config,
                 manage_checkpoint=False,
+                run_id=build_id,
+                spec=spec,
+                spec_cost=spec_cost,
                 budget=budget,
             )
         except AgentCallError as err:
@@ -675,7 +727,7 @@ async def run_certify_fix_loop(
             _save_cp(status="paused", phase="initial_build")
             return BuildResult(passed=False, build_id=build_id, total_cost=total_cost)
         total_cost += result.total_cost
-        record_build(project_dir, round_id, result)
+        record_build(project_dir, round_id, result, session_id=build_id)
 
     # --- Certify + fix loop ---
     passed = False
@@ -688,7 +740,7 @@ async def run_certify_fix_loop(
             actual_rounds = round_num
 
             # Each certify round gets its own round_id
-            round_id = init_round(project_dir, f"certify round {round_num}")
+            round_id = init_round(project_dir, f"certify round {round_num}", session_id=build_id)
 
             _save_cp(phase="certify")
 
@@ -709,6 +761,8 @@ async def run_certify_fix_loop(
                         focus=focus,
                         target=target,
                         budget=budget,
+                        session_id=build_id,
+                        write_session_summary=False,
                     )
                     break
                 except AgentCallError:
@@ -723,32 +777,32 @@ async def run_certify_fix_loop(
 
             if report is None:
                 append_journal(project_dir, round_id, f"certify round {round_num}",
-                               "ERROR (all retries failed)", 0.0)
+                               "ERROR (all retries failed)", 0.0, session_id=build_id)
                 break
 
             total_cost += report.cost_usd
             stories = report.story_results
             last_stories = stories
 
-            record_certifier(project_dir, round_id, report, stories)
+            record_certifier(project_dir, round_id, report, stories, session_id=build_id)
 
             # Infra error — certifier crashed/timed out
             if getattr(report, "outcome", None) == CertificationOutcome.INFRA_ERROR:
                 logger.warning("Certify-fix loop: infra error on round %d", round_num)
                 append_journal(project_dir, round_id, f"certify round {round_num}",
-                               "INFRA_ERROR", report.cost_usd)
+                               "INFRA_ERROR", report.cost_usd, session_id=build_id)
                 break
 
             # Empty stories — certifier produced no results
             if not stories:
                 logger.warning("Certify-fix loop round %d: no stories returned", round_num)
                 append_journal(project_dir, round_id, f"certify round {round_num}",
-                               "FAIL (no stories)", report.cost_usd)
+                               "FAIL (no stories)", report.cost_usd, session_id=build_id)
                 break
 
             # Update current state AFTER infra/empty checks
             update_current_state(project_dir, round_id, stories,
-                                 f"certify round {round_num}")
+                                 f"certify round {round_num}", session_id=build_id)
 
             failures = [s for s in stories if not s.get("passed")]
             result_str = (f"FAIL {len(stories) - len(failures)}/{len(stories)}"
@@ -767,7 +821,7 @@ async def run_certify_fix_loop(
                     result_str = "FAIL (certifier omitted METRIC_MET)"
 
             append_journal(project_dir, round_id, f"certify round {round_num}",
-                           result_str, report.cost_usd)
+                           result_str, report.cost_usd, session_id=build_id)
 
             round_summary = {
                 "round": round_num,
@@ -811,7 +865,7 @@ async def run_certify_fix_loop(
                 break
 
             # --- Fix round with retry ---
-            round_id = init_round(project_dir, f"fix round {round_num}")
+            round_id = init_round(project_dir, f"fix round {round_num}", session_id=build_id)
             _save_cp(phase="fix")
 
             fix_lines = [
@@ -863,6 +917,8 @@ async def run_certify_fix_loop(
                     fix_result = await build_agentic_v3(
                         "\n".join(fix_lines), project_dir, fix_config,
                         manage_checkpoint=False,
+                        run_id=build_id,
+                        spec=spec,
                         budget=budget,
                     )
                     break
@@ -878,10 +934,10 @@ async def run_certify_fix_loop(
 
             if fix_result:
                 total_cost += fix_result.total_cost
-                record_build(project_dir, round_id, fix_result)
+                record_build(project_dir, round_id, fix_result, session_id=build_id)
                 append_journal(project_dir, round_id, f"fix round {round_num}",
                                "done" if fix_result.passed else "warning",
-                               fix_result.total_cost)
+                               fix_result.total_cost, session_id=build_id)
 
             # Record this attempt for future rounds
             head_after_fix = _get_head_sha(project_dir)
@@ -929,9 +985,9 @@ async def run_certify_fix_loop(
 
     # Final journal entry gets its own round_id so attribution is unambiguous
     # regardless of which branch above terminated the loop.
-    final_round_id = init_round(project_dir, "loop complete")
+    final_round_id = init_round(project_dir, "loop complete", session_id=build_id)
     append_journal(project_dir, final_round_id, "build complete",
-                   "PASS" if passed else "FAIL", total_cost)
+                   "PASS" if passed else "FAIL", total_cost, session_id=build_id)
 
     # Mark checkpoint completed
     try:
@@ -941,6 +997,17 @@ async def run_certify_fix_loop(
         logger.warning("Failed to mark checkpoint completed: %s", exc)
 
     journeys = _stories_to_journeys(last_stories)
+    _write_session_summary(
+        project_dir,
+        build_id,
+        verdict="passed" if passed else "failed",
+        passed=passed,
+        cost=total_cost,
+        duration=round(time.monotonic() - loop_start, 1),
+        stories_passed=sum(1 for j in journeys if j.get("passed")),
+        stories_tested=len(journeys),
+        rounds=actual_rounds,
+    )
 
     return BuildResult(
         passed=passed,

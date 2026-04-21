@@ -60,6 +60,7 @@ async def _run_spec_phase(
     auto_approve: bool,
     resume_state,
     config: dict,
+    run_id: str | None = None,
     budget=None,
 ) -> tuple[str, str, float]:
     """Drive the spec phase before the main build.
@@ -87,7 +88,7 @@ async def _run_spec_phase(
 
     from otto import paths as _paths
     # Determine run_id (unified session_id): resume preserves, otherwise fresh.
-    run_id = resume_state.run_id or _new_run_id(project_dir)
+    run_id = run_id or resume_state.run_id or _new_run_id(project_dir)
     _paths.ensure_session_scaffold(project_dir, run_id)
     run_dir = _paths.spec_dir(project_dir, run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -333,6 +334,20 @@ def _print_build_result(intent: str, result, build_duration: float) -> None:
     console.print()
 
 
+def _exit_for_lock_busy(exc) -> None:
+    holder = exc.holder or {}
+    pid = holder.get("pid", "?")
+    command = holder.get("command", "?")
+    started_at = holder.get("started_at", "?")
+    session_id = holder.get("session_id", "") or "unknown"
+    error_console.print(
+        "[error]Another otto command is already running in this project.[/error]\n"
+        f"  Holder: pid={pid} command={command} started_at={started_at} session={session_id}\n"
+        "  Re-run with `--break-lock` only if you are sure the lock is stuck."
+    )
+    sys.exit(1)
+
+
 @main.command(context_settings=CONTEXT_SETTINGS)
 @click.argument("intent", required=False)
 @click.option("--no-qa", is_flag=True, help="Skip product certification after build")
@@ -346,7 +361,8 @@ def _print_build_result(intent: str, result, build_duration: float) -> None:
               default=None, help="Use a pre-written spec file (implies --yes)")
 @click.option("--yes", is_flag=True, help="Auto-approve the generated spec (for CI/scripts)")
 @click.option("--force", is_flag=True, help="Discard an active paused spec run and start fresh")
-def build(intent, no_qa, fast, thorough, split, rounds, resume, spec, spec_file, yes, force):
+@click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
+def build(intent, no_qa, fast, thorough, split, rounds, resume, spec, spec_file, yes, force, break_lock):
     """Build a product from a natural language intent.
 
     One agent builds, certifies, and fixes autonomously. The certifier
@@ -368,6 +384,33 @@ def build(intent, no_qa, fast, thorough, split, rounds, resume, spec, spec_file,
     """
     require_git()
     project_dir = Path.cwd()
+    from otto import paths as _paths
+
+    try:
+        with _paths.project_lock(project_dir, "build", break_lock=break_lock):
+            _build_locked(
+                intent, no_qa, fast, thorough, split, rounds, resume,
+                spec, spec_file, yes, force, project_dir,
+            )
+    except _paths.LockBusy as exc:
+        _exit_for_lock_busy(exc)
+
+
+def _build_locked(
+    intent,
+    no_qa,
+    fast,
+    thorough,
+    split,
+    rounds,
+    resume,
+    spec,
+    spec_file,
+    yes,
+    force,
+    project_dir: Path,
+):
+    from otto import paths as _paths
 
     from otto.checkpoint import (
         initial_build_completed,
@@ -394,7 +437,6 @@ def build(intent, no_qa, fast, thorough, split, rounds, resume, spec, spec_file,
             )
             sys.exit(2)
         from otto.checkpoint import clear_checkpoint
-        from otto import paths as _paths
         run_id_to_archive = cp.get("run_id", "") or ""
         if run_id_to_archive:
             # New layout: mark the session as abandoned via summary.json
@@ -517,6 +559,8 @@ def build(intent, no_qa, fast, thorough, split, rounds, resume, spec, spec_file,
     spec_content: str | None = None
     run_id: str = resume_state.run_id or ""
     spec_cost_total: float = resume_state.spec_cost or 0.0
+    if not run_id:
+        run_id = _new_run_id(project_dir)
     if use_spec:
         try:
             run_id, spec_content, spec_cost_total = asyncio.run(_run_spec_phase(
@@ -527,6 +571,7 @@ def build(intent, no_qa, fast, thorough, split, rounds, resume, spec, spec_file,
                 auto_approve=yes,
                 resume_state=resume_state,
                 config=config,
+                run_id=run_id or None,
                 budget=budget,
             ))
         except KeyboardInterrupt:
@@ -554,8 +599,11 @@ def build(intent, no_qa, fast, thorough, split, rounds, resume, spec, spec_file,
                                      start_round=resume_state.start_round,
                                      resume_cost=resume_state.total_cost,
                                      resume_rounds=resume_state.rounds,
+                                     session_id=run_id or None,
                                      command="build",
                                      record_intent=not resume_without_intent,
+                                     spec=spec_content,
+                                     spec_cost=spec_cost_total,
                                      budget=budget)
             )
         else:
@@ -594,7 +642,8 @@ def build(intent, no_qa, fast, thorough, split, rounds, resume, spec, spec_file,
 @click.argument("intent", required=False)
 @click.option("--thorough", is_flag=True, help="Thorough mode — find what's broken, not just verify")
 @click.option("--fast", is_flag=True, help="Fast mode — happy path smoke test only")
-def certify(intent, thorough, fast):
+@click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
+def certify(intent, thorough, fast, break_lock):
     """Certify a product — independent, builder-blind verification.
 
     Tests the product in the current directory as a real user. Works on
@@ -608,6 +657,17 @@ def certify(intent, thorough, fast):
         otto certify --thorough        # adversarial deep inspection
     """
     project_dir = Path.cwd()
+    from otto import paths as _paths
+
+    try:
+        with _paths.project_lock(project_dir, "certify", break_lock=break_lock):
+            session_id = _new_run_id(project_dir)
+            _certify_locked(intent, thorough, fast, project_dir, session_id)
+    except _paths.LockBusy as exc:
+        _exit_for_lock_busy(exc)
+
+
+def _certify_locked(intent, thorough, fast, project_dir: Path, session_id: str):
 
     # Load config so run_budget_seconds and other settings are respected
     config_path = project_dir / "otto.yaml"
@@ -646,6 +706,7 @@ def certify(intent, thorough, fast):
             config=config,
             mode=_mode,
             budget=budget,
+            session_id=session_id,
         ))
     except KeyboardInterrupt:
         console.print("\n  Aborted.")

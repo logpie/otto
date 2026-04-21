@@ -12,6 +12,18 @@ from otto.display import CONTEXT_SETTINGS, console, rich_escape
 from otto.theme import error_console
 
 
+def _exit_for_lock_busy(exc) -> None:
+    holder = exc.holder or {}
+    error_console.print(
+        "[error]Another otto command is already running in this project.[/error]\n"
+        f"  Holder: pid={holder.get('pid', '?')} command={holder.get('command', '?')} "
+        f"started_at={holder.get('started_at', '?')} "
+        f"session={holder.get('session_id', '') or 'unknown'}\n"
+        "  Re-run with `--break-lock` only if you are sure the lock is stuck."
+    )
+    sys.exit(1)
+
+
 def _resolve_intent(project_dir: Path) -> str | None:
     """Resolve product description from intent.md or README.md."""
     from otto.config import resolve_intent
@@ -71,6 +83,7 @@ def _run_improve(
     split: bool = False,
     resume: bool = False,
     resume_state=None,
+    break_lock: bool = False,
 ) -> None:
     """CLI wrapper: branch creation, display, and report around the shared loop.
 
@@ -79,13 +92,56 @@ def _run_improve(
     exact intent and the mismatch warning can fire if the user switches modes.
     """
     from otto.checkpoint import print_resume_status, resolve_resume
-    from otto.config import load_config
-    from otto.pipeline import build_agentic_v3, run_certify_fix_loop
 
     command_id = f"improve.{subcommand}"
     if resume_state is None:
         resume_state = resolve_resume(project_dir, resume, expected_command=command_id)
     print_resume_status(console, resume_state, resume, expected_command=command_id)
+
+    from otto import paths as _paths
+    try:
+        with _paths.project_lock(project_dir, command_id, break_lock=break_lock):
+            run_id = resume_state.run_id or ""
+            if not run_id:
+                run_id = _paths.new_session_id(project_dir)
+            _run_improve_locked(
+                project_dir=project_dir,
+                intent=intent,
+                rounds=rounds,
+                focus=focus,
+                certifier_mode=certifier_mode,
+                command_label=command_label,
+                command_id=command_id,
+                subcommand=subcommand,
+                target=target,
+                split=split,
+                resume=resume,
+                resume_state=resume_state,
+                run_id=run_id,
+            )
+    except _paths.LockBusy as exc:
+        _exit_for_lock_busy(exc)
+
+
+def _run_improve_locked(
+    *,
+    project_dir: Path,
+    intent: str,
+    rounds: int,
+    focus: str | None,
+    certifier_mode: str,
+    command_label: str,
+    command_id: str,
+    subcommand: str,
+    target: str | None,
+    split: bool,
+    resume: bool,
+    resume_state,
+    run_id: str,
+) -> None:
+    from otto import paths as _paths
+    from otto.config import load_config
+    from otto.pipeline import build_agentic_v3, run_certify_fix_loop
 
     # Create improvement branch
     branch = _create_improve_branch(project_dir)
@@ -139,6 +195,7 @@ def _run_improve(
                 resume_cost=resume_state.total_cost,
                 resume_rounds=resume_state.rounds,
                 command=command_id,
+                session_id=resume_state.run_id or run_id,
                 budget=budget,
             ))
         else:
@@ -151,6 +208,7 @@ def _run_improve(
                 prompt_mode="improve",
                 resume_session_id=resume_state.session_id or None,
                 command=command_id,
+                run_id=resume_state.run_id or run_id,
                 budget=budget,
             ))
     except KeyboardInterrupt:
@@ -198,13 +256,7 @@ def _run_improve(
     report_lines.append("")
 
     # Under the new layout the report lives inside the improve session dir.
-    from otto import paths as _paths
-    sess_dir = _paths.resolve_pointer(project_dir, _paths.LATEST_POINTER)
-    if sess_dir is not None:
-        report_path = _paths.improve_dir(project_dir, sess_dir.name) / "improvement-report.md"
-    else:
-        # Legacy fallback — pre-restructure layout.
-        report_path = project_dir / "otto_logs" / "improvement-report.md"
+    report_path = _paths.improve_dir(project_dir, result.build_id) / "improvement-report.md"
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text("\n".join(report_lines))
 
@@ -267,7 +319,8 @@ def register_improve_commands(main: click.Group) -> None:
     @click.option("--rounds", "-n", default=3, help="Maximum rounds (default: 3)")
     @click.option("--split", is_flag=True, help="System-controlled loop (vs agent-driven)")
     @click.option("--resume", is_flag=True, help="Resume from last checkpoint")
-    def bugs(focus, rounds, split, resume):
+    @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
+    def bugs(focus, rounds, split, resume, break_lock):
         """Find and fix bugs, edge cases, and error handling gaps.
 
         One agent certifies, reads findings, fixes, and re-certifies
@@ -292,6 +345,7 @@ def register_improve_commands(main: click.Group) -> None:
             subcommand="bugs",
             split=split,
             resume=resume,
+            break_lock=break_lock,
         )
 
     @improve.command(context_settings=CONTEXT_SETTINGS)
@@ -299,7 +353,8 @@ def register_improve_commands(main: click.Group) -> None:
     @click.option("--rounds", "-n", default=3, help="Maximum rounds (default: 3)")
     @click.option("--split", is_flag=True, help="System-controlled loop (vs agent-driven)")
     @click.option("--resume", is_flag=True, help="Resume from last checkpoint")
-    def feature(focus, rounds, split, resume):
+    @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
+    def feature(focus, rounds, split, resume, break_lock):
         """Suggest and implement product improvements.
 
         One agent evaluates the product, identifies improvements, implements
@@ -323,6 +378,7 @@ def register_improve_commands(main: click.Group) -> None:
             subcommand="feature",
             split=split,
             resume=resume,
+            break_lock=break_lock,
         )
 
     @improve.command(context_settings=CONTEXT_SETTINGS)
@@ -330,7 +386,8 @@ def register_improve_commands(main: click.Group) -> None:
     @click.option("--rounds", "-n", default=5, help="Maximum rounds (default: 5)")
     @click.option("--split", is_flag=True, help="System-controlled loop (vs agent-driven)")
     @click.option("--resume", is_flag=True, help="Resume from last checkpoint")
-    def target(goal, rounds, split, resume):
+    @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
+    def target(goal, rounds, split, resume, break_lock):
         """Optimize toward a measurable target.
 
         Measures a metric, compares to the target, and iterates until met.
@@ -391,4 +448,5 @@ def register_improve_commands(main: click.Group) -> None:
             split=split,
             resume=resume,
             resume_state=resume_state,
+            break_lock=break_lock,
         )

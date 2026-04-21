@@ -229,6 +229,12 @@ class TestV3PipelinePass:
         assert cp["stories_tested"] == 5
         assert cp["mode"] == "agentic_v3"
 
+        summary = json.loads(_paths.session_summary(tmp_git_repo, result.build_id).read_text())
+        assert summary["verdict"] == "passed"
+        assert summary["status"] == "completed"
+        assert summary["stories_passed"] == 5
+        assert summary["stories_tested"] == 5
+
         # --- PoW (proof-of-work) ---
         certifier_dir = _paths.certify_dir(tmp_git_repo, result.build_id)
         pow_data = json.loads((certifier_dir / "proof-of-work.json").read_text())
@@ -273,6 +279,28 @@ async def test_completed_checkpoint_total_cost_and_run_id_match_build_result(tmp
     assert checkpoint["run_id"] == "run-123"
     assert checkpoint["total_cost"] == pytest.approx(0.75)
     assert result.total_cost == pytest.approx(0.75)
+    assert _paths.resolve_pointer(tmp_git_repo, _paths.PAUSED_POINTER) is None
+
+
+@pytest.mark.asyncio
+async def test_paused_build_does_not_write_summary_json(tmp_git_repo):
+    async def crashing_query(*_args, **_kwargs):
+        raise RuntimeError("agent crashed mid-build")
+
+    with patch("otto.agent.run_agent_query", side_effect=crashing_query):
+        result = await build_agentic_v3("test", tmp_git_repo, {})
+
+    from otto import paths as _paths
+
+    paused_sess = _paths.resolve_pointer(tmp_git_repo, _paths.PAUSED_POINTER)
+    assert paused_sess is not None
+    assert paused_sess.name == result.build_id
+    assert not _paths.session_summary(tmp_git_repo, result.build_id).exists()
+
+    checkpoint = json.loads(
+        _paths.session_checkpoint(tmp_git_repo, result.build_id).read_text()
+    )
+    assert checkpoint["status"] == "paused"
 
 
 class TestV3PipelineFail:

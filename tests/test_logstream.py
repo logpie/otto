@@ -72,6 +72,20 @@ class TestJsonlWriter:
         assert rec["usage"] == {"input_tokens": 100, "output_tokens": 50}
         assert rec["session_id"] == "sess-1"
 
+    def test_result_message_records_structured_output(self, tmp_path):
+        path = tmp_path / "messages.jsonl"
+        w = JsonlMessageWriter(path)
+        w.write(ResultMessage(
+            subtype="success",
+            is_error=False,
+            session_id="sess-1",
+            structured_output={"verdict": "PASS", "stories": 3},
+        ))
+        w.close()
+
+        rec = json.loads(path.read_text().strip())
+        assert rec["structured_output"] == {"verdict": "PASS", "stories": 3}
+
     def test_appends_on_reopen(self, tmp_path):
         path = tmp_path / "messages.jsonl"
         w1 = JsonlMessageWriter(path)

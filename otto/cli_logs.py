@@ -1,6 +1,7 @@
 """Otto CLI — history command for build log inspection."""
 
 import json
+import logging
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -10,6 +11,8 @@ import click
 from otto.display import CONTEXT_SETTINGS, console, format_cost, format_duration, rich_escape
 from otto.theme import error_console
 from otto import paths
+
+logger = logging.getLogger("otto.cli_logs")
 
 # Legacy history path — still READ for upgrade safety; new writes go to
 # otto_logs/cross-sessions/history.jsonl via paths.py.
@@ -29,12 +32,16 @@ def _load_history_entries(project_dir: Path) -> list[dict]:
         sources.append(archive / paths.LEGACY_RUN_HISTORY)
 
     seen_ids: set[str] = set()
-    entries: list[dict] = []
-    for src in sources:
+    entries: list[tuple[tuple[float, int, int], dict]] = []
+    for source_index, src in enumerate(sources):
         if not src.exists():
             continue
         try:
-            for line in src.read_text().splitlines():
+            fallback_ts = src.stat().st_mtime
+        except OSError:
+            fallback_ts = 0.0
+        try:
+            for line_index, line in enumerate(src.read_text().splitlines()):
                 line = line.strip()
                 if not line:
                     continue
@@ -48,10 +55,41 @@ def _load_history_entries(project_dir: Path) -> list[dict]:
                     continue
                 if key:
                     seen_ids.add(key)
-                entries.append(entry)
+                entries.append((
+                    _history_sort_key(
+                        entry,
+                        fallback_ts=fallback_ts,
+                        source_index=source_index,
+                        line_index=line_index,
+                    ),
+                    entry,
+                ))
         except OSError:
             continue
-    return entries
+    entries.sort(key=lambda item: item[0])
+    return [entry for _, entry in entries]
+
+
+def _history_sort_key(
+    entry: dict,
+    *,
+    fallback_ts: float,
+    source_index: int,
+    line_index: int,
+) -> tuple[float, int, int]:
+    ts = entry.get("timestamp") or entry.get("started_at") or entry.get("updated_at")
+    if isinstance(ts, str) and ts:
+        try:
+            return (
+                datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp(),
+                source_index,
+                line_index,
+            )
+        except ValueError:
+            logger.warning("Unparseable history timestamp %r; falling back to file mtime", ts)
+    else:
+        logger.warning("Missing history timestamp; falling back to file mtime")
+    return (fallback_ts, source_index, line_index)
 
 
 def register_history_command(main: click.Group) -> None:

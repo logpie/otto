@@ -19,7 +19,7 @@ Session id format: `<yyyy-mm-dd>-<HHMMSS>-<6hex>`.
 
 | File / dir | What it tells you |
 |------|-------------------|
-| `summary.json` | Post-run: verdict, cost, duration, stories, status |
+| `summary.json` | Completed-session summary: verdict, cost, duration, stories, status |
 | `checkpoint.json` | Resume state — exists only while running/paused |
 | `intent.txt` | Archival copy of the intent at session start |
 | `spec/spec.md` | Approved spec (spec-gate); versioned `spec-v1.md…` |

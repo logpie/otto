@@ -19,11 +19,13 @@ import json
 import logging
 import subprocess
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from otto import paths
 
+logger = logging.getLogger("otto.memory")
 MAX_ENTRIES = 5
 # Legacy path still READ as a fallback; new writes go to
 # otto_logs/cross-sessions/certifier-memory.jsonl via paths.py.
@@ -103,22 +105,58 @@ def load_history(project_dir: Path) -> list[dict[str, Any]]:
     for archive in paths.archived_pre_restructure_dirs(project_dir):
         candidates.append(archive / paths.LEGACY_CERTIFIER_MEMORY)
 
-    entries: list[dict[str, Any]] = []
-    for path in candidates:
+    entries: list[tuple[tuple[float, int, int], dict[str, Any]]] = []
+    for source_index, path in enumerate(candidates):
         if not path.exists():
             continue
         try:
-            for line in path.read_text().splitlines():
+            fallback_ts = path.stat().st_mtime
+        except OSError:
+            fallback_ts = 0.0
+        try:
+            for line_index, line in enumerate(path.read_text().splitlines()):
                 line = line.strip()
                 if line:
                     try:
-                        entries.append(json.loads(line))
+                        entry = json.loads(line)
+                        entries.append((
+                            _history_sort_key(
+                                entry,
+                                fallback_ts=fallback_ts,
+                                source_index=source_index,
+                                line_index=line_index,
+                            ),
+                            entry,
+                        ))
                     except json.JSONDecodeError:
                         continue
         except OSError:
             continue
 
-    return entries[-MAX_ENTRIES:]
+    entries.sort(key=lambda item: item[0])
+    return [entry for _, entry in entries[-MAX_ENTRIES:]]
+
+
+def _history_sort_key(
+    entry: dict[str, Any],
+    *,
+    fallback_ts: float,
+    source_index: int,
+    line_index: int,
+) -> tuple[float, int, int]:
+    ts = entry.get("ts") or entry.get("started_at") or entry.get("updated_at")
+    if isinstance(ts, str) and ts:
+        try:
+            return (
+                datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp(),
+                source_index,
+                line_index,
+            )
+        except ValueError:
+            logger.warning("Unparseable memory timestamp %r; falling back to file mtime", ts)
+    else:
+        logger.warning("Missing memory timestamp; falling back to file mtime")
+    return (fallback_ts, source_index, line_index)
 
 
 def format_for_prompt(project_dir: Path) -> str:

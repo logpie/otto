@@ -241,6 +241,8 @@ def write_checkpoint(
     # paused over in_progress when scanning.
     if status in ("in_progress", "paused"):
         paths.set_pointer(project_dir, paths.PAUSED_POINTER, run_id)
+    elif status == "completed":
+        paths.clear_pointer(project_dir, paths.PAUSED_POINTER)
     logger.debug("Checkpoint written: round %d, status=%s, phase=%s", current_round, status, phase)
 
 

@@ -5,7 +5,7 @@ New layout (one dir per invocation):
     otto_logs/
     ├── sessions/<session_id>/
     │   ├── intent.txt
-    │   ├── summary.json
+    │   ├── summary.json             # only for completed sessions
     │   ├── checkpoint.json          # only while in-flight/paused
     │   ├── spec/                    # only if --spec used
     │   ├── build/                   # coding-agent artifacts
@@ -20,6 +20,10 @@ New layout (one dir per invocation):
 
 Legacy layout (pre-restructure) is still readable. Writers go through this
 module exclusively — no `otto_logs/...` literals elsewhere.
+
+Project locking uses a kernel `flock` on Unix for correctness. On Windows,
+locking is best-effort; `release()` has an unavoidable TOCTOU. Use flock
+(Unix) for full correctness.
 """
 
 from __future__ import annotations
@@ -28,13 +32,20 @@ import json
 import logging
 import os
 import secrets
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+
 logger = logging.getLogger("otto.paths")
+_BEST_EFFORT_LOCK_WARNING_EMITTED = False
 
 # ---------------------------------------------------------------------------
 # Path constants and layout helpers
@@ -110,7 +121,7 @@ def session_checkpoint(project_dir: Path, session_id: str) -> Path:
 
 
 def session_summary(project_dir: Path, session_id: str) -> Path:
-    """Post-run summary (permanent record: verdict, cost, duration, status)."""
+    """Post-run summary for completed sessions (permanent final record)."""
     return session_dir(project_dir, session_id) / "summary.json"
 
 
@@ -347,35 +358,86 @@ class LockHandle:
     """Returned by acquire_project_lock. Use as a context manager."""
 
     _path: Path
+    _fd: int | None
     _pid: int
     _started_at: str
     _command: str
+    _nonce: str
     _session_id: str | None = None
+    _released: bool = False
 
     def set_session_id(self, session_id: str) -> None:
-        """Update the lock record once session_id is allocated."""
+        """Remember the bound session_id without mutating the lock record."""
         self._session_id = session_id
-        self._write_record()
-
-    def _write_record(self) -> None:
-        record = {
-            "pid": self._pid,
-            "started_at": self._started_at,
-            "command": self._command,
-            "session_id": self._session_id,
-        }
-        tmp = self._path.with_suffix(".lock.tmp")
-        try:
-            tmp.write_text(json.dumps(record))
-            os.replace(tmp, self._path)
-        except OSError as exc:
-            logger.warning("lock record write failed: %s", exc)
+        logger.info("lock now bound to session %s", session_id)
 
     def release(self) -> None:
-        """Remove the lock file. Idempotent."""
+        """Release the kernel lock and unlink the lock path if it is still ours."""
+        if self._released:
+            return
+        self._released = True
+
+        if self._fd is not None:
+            try:
+                fd_stat = os.fstat(self._fd)
+            except OSError:
+                fd_stat = None
+
+            try:
+                path_stat = os.stat(self._path)
+            except FileNotFoundError:
+                logger.warning("lock record no longer ours (broken?)")
+                path_stat = None
+            except OSError as exc:
+                logger.warning("lock release failed: %s", exc)
+                path_stat = None
+
+            try:
+                if (
+                    fd_stat is not None
+                    and path_stat is not None
+                    and fd_stat.st_ino == path_stat.st_ino
+                    and fd_stat.st_dev == path_stat.st_dev
+                ):
+                    os.unlink(self._path)
+                elif path_stat is not None:
+                    logger.warning("lock record no longer ours (broken?)")
+            except FileNotFoundError:
+                logger.warning("lock record no longer ours (broken?)")
+            except OSError as exc:
+                logger.warning("lock release failed: %s", exc)
+            finally:
+                try:
+                    os.close(self._fd)
+                except OSError:
+                    pass
+            return
+
         try:
-            if self._path.exists():
-                self._path.unlink()
+            holder = json.loads(self._path.read_text())
+        except FileNotFoundError:
+            logger.warning("lock record no longer ours (broken?)")
+            return
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("lock release failed: %s", exc)
+            return
+
+        if holder.get("nonce") != self._nonce:
+            logger.warning("lock record no longer ours (broken?)")
+            return
+
+        try:
+            # Windows fallback: release-time TOCTOU is inherent here.
+            # Between the nonce check and the unlink, another process could
+            # replace `.lock` (e.g., via `otto --break-lock`). We accept this
+            # because (a) the window is microseconds, (b) the `--break-lock`
+            # operator knows they're forcing things, and (c) a spurious
+            # unlink just means the next acquire creates a fresh lock. Full
+            # correctness would require fcntl/flock which Windows does not
+            # provide.
+            os.unlink(self._path)
+        except FileNotFoundError:
+            logger.warning("lock record no longer ours (broken?)")
         except OSError as exc:
             logger.warning("lock release failed: %s", exc)
 
@@ -402,6 +464,51 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
+def _read_lock_record_fd(fd: int) -> dict[str, object]:
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+        raw = os.read(fd, 65536)
+    except OSError:
+        return {}
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+
+
+def _write_lock_record_fd(fd: int, record: dict[str, object]) -> None:
+    payload = json.dumps(record).encode("utf-8")
+    os.ftruncate(fd, 0)
+    os.lseek(fd, 0, os.SEEK_SET)
+    os.write(fd, payload)
+    os.fsync(fd)
+
+
+def _path_points_to_fd(path: Path, fd: int | None) -> bool:
+    if fd is None:
+        return False
+    try:
+        path_stat = os.stat(path)
+        fd_stat = os.fstat(fd)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+    return path_stat.st_ino == fd_stat.st_ino and path_stat.st_dev == fd_stat.st_dev
+
+
+def _warn_best_effort_lock_once() -> None:
+    global _BEST_EFFORT_LOCK_WARNING_EMITTED
+    if _BEST_EFFORT_LOCK_WARNING_EMITTED:
+        return
+    logger.warning(
+        "kernel-level lock unavailable on this platform; using best-effort file lock with PID check"
+    )
+    _BEST_EFFORT_LOCK_WARNING_EMITTED = True
+
+
 def acquire_project_lock(
     project_dir: Path,
     command: str,
@@ -410,48 +517,154 @@ def acquire_project_lock(
 ) -> LockHandle:
     """Acquire exclusive project lock. Returns a LockHandle (context manager).
 
-    Raises LockBusy if another live PID holds the lock. If the holder PID is
-    gone and `break_stale=True`, auto-releases the stale lock with a WARN.
-
-    Called BEFORE session_id allocation. Caller updates the record via
-    `handle.set_session_id(sid)` once the ID is chosen.
+    Raises LockBusy if another process holds the project lock. On Unix this is
+    backed by a kernel flock. On platforms without `fcntl`, it falls back to a
+    best-effort PID check around `O_EXCL`; that path has a check-then-act race.
     """
     root = logs_dir(project_dir)
     root.mkdir(parents=True, exist_ok=True)
     lock_path = root / LOCK_FILE_NAME
+    has_kernel_lock = fcntl is not None
+    if not has_kernel_lock:
+        _warn_best_effort_lock_once()
 
-    if lock_path.exists():
+    holder: dict = {}
+    for attempt in range(8):
+        fd: int | None = None
         try:
-            holder = json.loads(lock_path.read_text())
-        except (OSError, json.JSONDecodeError):
-            holder = {}
-        holder_pid = int(holder.get("pid", 0) or 0)
-        if holder_pid and _pid_alive(holder_pid):
-            raise LockBusy(holder)
-        if break_stale:
-            logger.warning(
-                "stale lock from pid=%s (gone) — breaking", holder_pid
+            fd = os.open(
+                lock_path,
+                os.O_CREAT | os.O_EXCL | os.O_RDWR,
+                0o644,
             )
+        except FileExistsError:
+            try:
+                fd = os.open(lock_path, os.O_RDWR)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                holder = {}
+                raise LockBusy(holder)
+
+            if has_kernel_lock:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    holder = _read_lock_record_fd(fd)
+                    os.close(fd)
+                    raise LockBusy(holder)
+                except OSError:
+                    holder = _read_lock_record_fd(fd)
+                    os.close(fd)
+                    raise LockBusy(holder)
+
+            holder = _read_lock_record_fd(fd)
+            holder_pid = int(holder.get("pid", 0) or 0)
+            if not break_stale:
+                os.close(fd)
+                raise LockBusy(holder)
+
+            if has_kernel_lock:
+                logger.warning("stale lock from pid=%s (flock released) — breaking", holder_pid)
+                try:
+                    if _path_points_to_fd(lock_path, fd):
+                        os.unlink(lock_path)
+                finally:
+                    os.close(fd)
+                continue
+
+            if _pid_alive(holder_pid):
+                os.close(fd)
+                raise LockBusy(holder)
+
+            logger.warning(
+                "stale lock from pid=%s (best-effort pid check) — breaking",
+                holder_pid,
+            )
+            os.close(fd)
+            try:
+                os.unlink(lock_path)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                raise LockBusy(holder)
+            continue
+
+        if has_kernel_lock:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                try:
+                    os.close(fd)
+                finally:
+                    try:
+                        lock_path.unlink()
+                    except OSError:
+                        pass
+                raise
+
+        handle = LockHandle(
+            _path=lock_path,
+            _fd=fd,
+            _pid=os.getpid(),
+            _started_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            _command=command,
+            _nonce=uuid.uuid4().hex,
+        )
+        try:
+            _write_lock_record_fd(fd, {
+                "pid": handle._pid,
+                "started_at": handle._started_at,
+                "command": handle._command,
+                "nonce": handle._nonce,
+                "session_id": None,
+            })
+            if not has_kernel_lock:
+                os.close(fd)
+                handle._fd = None
+        except OSError:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
             try:
                 lock_path.unlink()
             except OSError:
                 pass
-        else:
-            raise LockBusy(holder)
+            raise
+        return handle
 
-    handle = LockHandle(
-        _path=lock_path,
-        _pid=os.getpid(),
-        _started_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        _command=command,
-    )
-    handle._write_record()
-    return handle
+    raise LockBusy(holder)
+
+
+def break_project_lock(project_dir: Path) -> dict[str, object]:
+    """Force-remove the project lock and return the prior holder record."""
+    lock_path = logs_dir(project_dir) / LOCK_FILE_NAME
+    try:
+        holder = json.loads(lock_path.read_text()) if lock_path.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        holder = {}
+    try:
+        if lock_path.exists():
+            lock_path.unlink()
+    except OSError as exc:
+        logger.warning("manual lock break failed: %s", exc)
+        raise
+    return holder
 
 
 @contextmanager
-def project_lock(project_dir: Path, command: str) -> Iterator[LockHandle]:
+def project_lock(
+    project_dir: Path,
+    command: str,
+    *,
+    break_lock: bool = False,
+) -> Iterator[LockHandle]:
     """Context-manager convenience wrapper around acquire_project_lock."""
+    if break_lock:
+        holder = break_project_lock(project_dir)
+        logger.warning("project lock manually cleared for %s: %s", command, holder)
     handle = acquire_project_lock(project_dir, command)
     try:
         yield handle

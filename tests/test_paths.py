@@ -10,13 +10,24 @@ Covers the invariants Codex flagged during Plan Gate review:
 from __future__ import annotations
 
 import json
+import logging
+import multiprocessing
 import os
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from otto import paths
+
+
+def _crash_lock_holder(project_dir_str: str, ready_conn, exit_conn) -> None:
+    """Acquire the project lock in a child process, then exit without release."""
+    handle = paths.acquire_project_lock(Path(project_dir_str), "child")
+    ready_conn.send(handle._nonce)
+    exit_conn.recv()
+    os._exit(0)
 
 
 @pytest.fixture
@@ -173,32 +184,135 @@ class TestProjectLock:
         """Second acquire should raise LockBusy when the first holder is alive."""
         first = paths.acquire_project_lock(project_dir, "build")
         try:
-            # Spoof the "live" check so the second call sees the first PID
-            # as alive regardless of OS behavior with the current test PID.
-            with patch("otto.paths._pid_alive", return_value=True):
-                with pytest.raises(paths.LockBusy):
-                    paths.acquire_project_lock(project_dir, "build")
+            with pytest.raises(paths.LockBusy):
+                paths.acquire_project_lock(project_dir, "build", break_stale=False)
         finally:
             first.release()
 
     def test_stale_lock_auto_released(self, project_dir):
-        """If the holder PID is gone, the lock is auto-released on next acquire."""
-        # Write a stale lock manually.
+        """A leftover lock file without a live flock holder is replaced."""
         paths.logs_dir(project_dir).mkdir(parents=True, exist_ok=True)
         (paths.logs_dir(project_dir) / paths.LOCK_FILE_NAME).write_text(json.dumps({
             "pid": 999999,  # unlikely to be alive
             "started_at": "2026-01-01T00:00:00",
             "command": "build",
+            "nonce": "stale-nonce",
             "session_id": None,
         }))
-        # Force _pid_alive to return False for the stale pid.
-        with patch("otto.paths._pid_alive", return_value=False):
-            handle = paths.acquire_project_lock(project_dir, "build")
+        handle = paths.acquire_project_lock(project_dir, "build")
+        try:
+            record = json.loads((paths.logs_dir(project_dir) / paths.LOCK_FILE_NAME).read_text())
+            assert record["command"] == "build"
+            assert record["nonce"] == handle._nonce
+            assert record["nonce"] != "stale-nonce"
+        finally:
             handle.release()
 
-    def test_set_session_id_updates_record(self, project_dir):
-        """LockHandle.set_session_id() updates the record in place."""
+    def test_set_session_id_does_not_mutate_lock_record(self, project_dir, caplog):
+        """LockHandle.set_session_id() is metadata-only and leaves .lock immutable."""
+        caplog.set_level(logging.INFO, logger="otto.paths")
         with paths.project_lock(project_dir, "build") as handle:
+            before = json.loads((paths.logs_dir(project_dir) / paths.LOCK_FILE_NAME).read_text())
             handle.set_session_id("2026-04-20-170200-abcdef")
-            record = json.loads((paths.logs_dir(project_dir) / paths.LOCK_FILE_NAME).read_text())
-            assert record["session_id"] == "2026-04-20-170200-abcdef"
+            after = json.loads((paths.logs_dir(project_dir) / paths.LOCK_FILE_NAME).read_text())
+            assert after == before
+            assert after["session_id"] is None
+            assert "lock now bound to session 2026-04-20-170200-abcdef" in caplog.text
+
+    def test_break_lock_forcibly_clears_existing_holder(self, project_dir):
+        """Manual break-lock should remove even a live holder before reacquiring."""
+        first = paths.acquire_project_lock(project_dir, "build")
+        try:
+            with paths.project_lock(project_dir, "certify", break_lock=True):
+                record = json.loads((paths.logs_dir(project_dir) / paths.LOCK_FILE_NAME).read_text())
+                assert record["command"] == "certify"
+        finally:
+            first.release()
+
+    def test_release_does_not_unlink_replaced_lock(self, project_dir, caplog):
+        """Old holders must not remove a lock recreated by --break-lock."""
+        first = paths.acquire_project_lock(project_dir, "build")
+        try:
+            prior = paths.break_project_lock(project_dir)
+            assert prior["nonce"] == first._nonce
+
+            lock_path = paths.logs_dir(project_dir) / paths.LOCK_FILE_NAME
+            replacement = {
+                "pid": 424242,
+                "started_at": "2026-04-20T17:02:01+00:00",
+                "command": "certify",
+                "nonce": "replacement-nonce",
+                "session_id": None,
+            }
+            lock_path.write_text(json.dumps(replacement))
+
+            first.release()
+
+            assert lock_path.exists(), "replaced lock must remain after stale holder release()"
+            record = json.loads(lock_path.read_text())
+            assert record == replacement
+            assert "lock record no longer ours (broken?)" in caplog.text
+        finally:
+            first.release()
+
+    def test_best_effort_lock_closes_fd_and_release_uses_nonce(self, project_dir, monkeypatch, caplog):
+        """Best-effort locks should not keep an fd open after creation."""
+        monkeypatch.setattr(paths, "fcntl", None)
+
+        first = paths.acquire_project_lock(project_dir, "build")
+        try:
+            assert first._fd is None
+
+            prior = paths.break_project_lock(project_dir)
+            assert prior["nonce"] == first._nonce
+
+            lock_path = paths.logs_dir(project_dir) / paths.LOCK_FILE_NAME
+            replacement = {
+                "pid": 424242,
+                "started_at": "2026-04-20T17:02:01+00:00",
+                "command": "certify",
+                "nonce": "replacement-nonce",
+                "session_id": None,
+            }
+            lock_path.write_text(json.dumps(replacement))
+
+            first.release()
+
+            assert lock_path.exists(), "replaced lock must remain after stale holder release()"
+            record = json.loads(lock_path.read_text())
+            assert record == replacement
+            assert "lock record no longer ours (broken?)" in caplog.text
+        finally:
+            first.release()
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="fcntl not available on Windows")
+    def test_flock_survives_process_exit_and_stale_file_is_replaced(self, project_dir):
+        """Kernel flock blocks concurrent holders and is released when the holder dies."""
+        ctx = multiprocessing.get_context("fork")
+        parent_ready, child_ready = ctx.Pipe(duplex=False)
+        child_exit, parent_exit = ctx.Pipe(duplex=False)
+        proc = ctx.Process(
+            target=_crash_lock_holder,
+            args=(str(project_dir), child_ready, child_exit),
+        )
+        proc.start()
+        child_nonce = parent_ready.recv()
+
+        with pytest.raises(paths.LockBusy):
+            paths.acquire_project_lock(project_dir, "parent", break_stale=False)
+
+        parent_exit.send(True)
+        proc.join(timeout=2)
+        assert proc.exitcode == 0
+
+        lock_path = paths.logs_dir(project_dir) / paths.LOCK_FILE_NAME
+        assert lock_path.exists(), "crashed holder should leave behind a stale lock file"
+
+        replacement = paths.acquire_project_lock(project_dir, "parent")
+        try:
+            record = json.loads(lock_path.read_text())
+            assert record["command"] == "parent"
+            assert record["nonce"] == replacement._nonce
+            assert record["nonce"] != child_nonce
+        finally:
+            replacement.release()

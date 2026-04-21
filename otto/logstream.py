@@ -113,6 +113,8 @@ class JsonlMessageWriter:
             record["is_error"] = message.is_error
             if message.result:
                 record["result"] = message.result
+            if message.structured_output is not None:
+                record["structured_output"] = message.structured_output
             if message.total_cost_usd is not None:
                 record["cost_usd"] = message.total_cost_usd
             if message.usage is not None:

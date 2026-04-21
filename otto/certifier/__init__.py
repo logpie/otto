@@ -64,6 +64,7 @@ async def run_agentic_certifier(
     target: str | None = None,
     budget: "RunBudget | None" = None,
     session_id: str | None = None,
+    write_session_summary: bool = True,
 ) -> "CertificationReport":
     """Agentic certifier: one monolithic agent does everything.
 
@@ -91,8 +92,8 @@ async def run_agentic_certifier(
     from otto import paths
     if session_id is None:
         session_id = paths.new_session_id(project_dir)
-        paths.ensure_session_scaffold(project_dir, session_id)
-        paths.set_pointer(project_dir, paths.LATEST_POINTER, session_id)
+    paths.ensure_session_scaffold(project_dir, session_id)
+    paths.set_pointer(project_dir, paths.LATEST_POINTER, session_id)
     run_id = session_id  # kept for downstream log mentions
     report_dir = paths.certify_dir(project_dir, session_id)
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -202,6 +203,23 @@ async def run_agentic_certifier(
     from otto.memory import record_run
     record_run(project_dir, command="certify", certifier_mode=mode,
                stories=story_results, cost=float(cost or 0))
+
+    if write_session_summary:
+        try:
+            from otto.pipeline import _write_session_summary
+            _write_session_summary(
+                project_dir,
+                run_id,
+                verdict=outcome.value,
+                passed=passed,
+                cost=float(cost or 0),
+                duration=total_duration,
+                stories_passed=parsed.stories_passed,
+                stories_tested=parsed.stories_tested,
+                rounds=1,
+            )
+        except Exception as exc:
+            logger.warning("Failed to write session summary: %s", exc)
 
     return report
 
