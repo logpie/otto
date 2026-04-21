@@ -21,7 +21,9 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+
+from rich.markup import escape as rich_escape
 
 from otto.agent import (
     AssistantMessage,
@@ -58,6 +60,7 @@ _PLACEHOLDER_RE = re.compile(r"<[a-zA-Z_]")
 _WRITE_EDIT_BOILERPLATE_RE = re.compile(
     r"\s*\(file state is current in your context[^)]*\)\s*$"
 )
+_TERMINAL_STAMP_RE = re.compile(r"^\[\+\d+:\d{2}(?::\d{2})?\]\s+")
 
 
 def _iso_ts() -> str:
@@ -188,16 +191,24 @@ class NarrativeFormatter:
     _GLYPH_SUMMARY = "\u220e"    # ∎ closing summary text
     _GLYPH_PHASE = "\u2501" * 3  # ━━━ phase begin/end banner
 
-    def __init__(self, path: Path, *, phase_name: str = "BUILD") -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        phase_name: str = "BUILD",
+        stdout_callback: Callable[[str], None] | None = None,
+    ) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._path = path
         self._fh = open(path, "a", encoding="utf-8")
         self._start = time.monotonic()
         self._phase_name = (phase_name or "BUILD").upper()
+        self._stdout_callback = stdout_callback
         # tool_use_id -> tool name, so ToolResultBlock renderers can
         # tailor output (Glob=>"(N files)", Read=>"(N lines)", Agent=>
         # subagent glyph).
         self._tool_by_id: dict[str, str] = {}
+        self._tool_call_count: int = 0
         # Counter for subagent dispatches, used to label certify rounds
         # (each Agent-tool dispatch that looks like a certifier prompt
         # begins a new "round"). Tracked separately from total Agent
@@ -211,14 +222,16 @@ class NarrativeFormatter:
         self._phase_complete_written = False
         self._summary_written = False
         self._pending_result: ResultMessage | None = None
+        self._last_terminal_event_monotonic = self._start
 
     def start(self) -> None:
         if self._phase_started:
             return
         self._phase_started = True
-        self._write(
+        self._write_terminal_event(
             f"{self._stamp()} {self._GLYPH_PHASE} "
-            f"{self._phase_name} starting {self._GLYPH_PHASE}"
+            f"{self._phase_name} starting {self._GLYPH_PHASE}",
+            style="bold",
         )
 
     def _elapsed_seconds(self) -> float:
@@ -243,7 +256,7 @@ class NarrativeFormatter:
         if self._phase_complete_written:
             return
         self._phase_complete_written = True
-        self._write(self._phase_complete_line())
+        self._write_terminal_event(self._phase_complete_line(), style="bold")
 
     def _summary_label(self) -> str:
         return self._phase_name.lower()
@@ -318,6 +331,24 @@ class NarrativeFormatter:
         self._fh.write(line)
         self._fh.flush()
 
+    def _emit_terminal(self, line: str, *, style: str | None = None) -> None:
+        self._last_terminal_event_monotonic = time.monotonic()
+        if self._stdout_callback is None:
+            return
+        rendered = f"  {_TERMINAL_STAMP_RE.sub('', line, count=1)}"
+        escaped = rich_escape(rendered)
+        if style:
+            self._stdout_callback(f"[{style}]{escaped}[/{style}]")
+            return
+        self._stdout_callback(escaped)
+
+    def _write_terminal_event(self, line: str, *, style: str | None = None) -> None:
+        self._write(line)
+        self._emit_terminal(line, style=style)
+
+    def last_terminal_event_monotonic(self) -> float:
+        return self._last_terminal_event_monotonic
+
     def write_message(self, message: Any) -> None:
         if isinstance(message, ResultMessage):
             self._write_result(message)
@@ -330,6 +361,7 @@ class NarrativeFormatter:
     def _write_block(self, block: Any) -> None:
         ts = self._stamp()
         if isinstance(block, ToolUseBlock):
+            self._tool_call_count += 1
             # Remember the tool name so tool_result renderers can look
             # up the originator by tool_use_id.
             if block.id:
@@ -347,9 +379,10 @@ class NarrativeFormatter:
                 if block.id:
                     self._agent_round_by_id[block.id] = round_n
                     self._round_start_elapsed_by_id[block.id] = round_start_elapsed
-                self._write(
+                self._write_terminal_event(
                     f"{ts} {self._GLYPH_PHASE} CERTIFY ROUND {round_n} "
-                    f"starting {self._GLYPH_PHASE}"
+                    f"starting {self._GLYPH_PHASE}",
+                    style="bold",
                 )
                 return
             summary = tool_use_summary(block) or ""
@@ -427,7 +460,7 @@ class NarrativeFormatter:
 
         if block.is_error:
             first = (content.split("\n", 1)[0][:200]) if content else "(empty)"
-            self._write(f"{ts} \u2717 error: {first}")
+            self._write_terminal_event(f"{ts} \u2717 error: {first}")
             return
         if not content:
             self._write(f"{ts} \u2190 (empty)")
@@ -469,16 +502,17 @@ class NarrativeFormatter:
                         self._round_timings.append((round_start, self._elapsed_seconds()))
                     verdict, passed, tested = _summarize_round(marker_lines)
                     stats = f" ({passed}/{tested})" if tested else ""
-                    self._write(
+                    self._write_terminal_event(
                         f"{ts} {self._GLYPH_PHASE} CERTIFY ROUND {round_n} "
-                        f"→ {verdict}{stats} {self._GLYPH_PHASE}"
+                        f"→ {verdict}{stats} {self._GLYPH_PHASE}",
+                        style="bold",
                     )
             return
 
         # Detect git-commit in Bash output, elevate to a distinct glyph.
         commit_line = _extract_commit_line(content)
         if commit_line:
-            self._write(f"{ts} \u2713 {commit_line}")
+            self._write_terminal_event(f"{ts} \u2713 {commit_line}")
             return
 
         # Subagent result — dedicated glyph + word-safe truncation.
@@ -536,11 +570,11 @@ class NarrativeFormatter:
         total_elapsed = self._elapsed_seconds()
         if self._phase_name != "BUILD":
             self._write_phase_complete()
-        self._write(self._summary_line(total_elapsed, breakdown, message.total_cost_usd))
+        self._write_terminal_event(self._summary_line(total_elapsed, breakdown, message.total_cost_usd))
         status = "ERROR" if message.is_error else message.subtype.upper()
         cost = f" ${message.total_cost_usd:.2f}" if message.total_cost_usd else ""
         duration = f" in {self._elapsed_fmt()}"
-        self._write(f"{ts} \u2501\u2501\u2501 {status}{cost}{duration}")
+        self._write_terminal_event(f"{ts} \u2501\u2501\u2501 {status}{cost}{duration}")
 
     def close(self) -> None:
         self.finalize()
@@ -821,7 +855,12 @@ def _extract_commit_line(content: str) -> str | None:
     return None
 
 
-def make_session_logger(log_dir: Path, *, phase_name: str = "BUILD") -> dict[str, Any]:
+def make_session_logger(
+    log_dir: Path,
+    *,
+    phase_name: str = "BUILD",
+    stdout_callback: Callable[[str], None] | None = None,
+) -> dict[str, Any]:
     """Open messages.jsonl + narrative.log in ``log_dir`` and return the
     callback dict for run_agent_with_timeout / run_agent_query.
 
@@ -837,7 +876,11 @@ def make_session_logger(log_dir: Path, *, phase_name: str = "BUILD") -> dict[str
     """
     log_dir.mkdir(parents=True, exist_ok=True)
     jsonl = JsonlMessageWriter(log_dir / "messages.jsonl")
-    narr = NarrativeFormatter(log_dir / "narrative.log", phase_name=phase_name)
+    narr = NarrativeFormatter(
+        log_dir / "narrative.log",
+        phase_name=phase_name,
+        stdout_callback=stdout_callback,
+    )
     narr.start()
 
     live = log_dir / "live.log"

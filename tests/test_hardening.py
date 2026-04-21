@@ -1724,6 +1724,48 @@ class TestBuildResume:
         assert captured["spec_cost"] == 1.25
         assert captured["spec_duration"] == 12.0
 
+    def test_build_cli_certification_failure_prints_report_and_narrative(
+        self, tmp_git_repo, monkeypatch
+    ):
+        from click.testing import CliRunner
+        from otto import paths as _paths
+        from otto.cli import main
+
+        run_id = "run-fail-123"
+        _paths.ensure_session_scaffold(tmp_git_repo, run_id)
+        build_dir = _paths.build_dir(tmp_git_repo, run_id)
+        certify_dir = _paths.certify_dir(tmp_git_repo, run_id)
+        (build_dir / "narrative.log").write_text("build narrative\n")
+        (certify_dir / "proof-of-work.html").write_text("<html>fail</html>")
+
+        async def fake_build(intent, project_dir, config, **kwargs):
+            return BuildResult(
+                passed=False,
+                build_id=run_id,
+                total_cost=0.5,
+                tasks_passed=2,
+                tasks_failed=3,
+                journeys=[
+                    {"name": "story 1", "passed": True},
+                    {"name": "story 2", "passed": False},
+                ],
+            )
+
+        monkeypatch.chdir(tmp_git_repo)
+        with patch("otto.pipeline.build_agentic_v3", side_effect=fake_build):
+            result = CliRunner().invoke(
+                main,
+                ["build", "failing app"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 1
+        assert "Build did not pass certification (2/5 stories passed)." in result.output
+        assert "run-fail-123/certify" in result.output
+        assert "proof-of-work.html" in result.output
+        assert "run-fail-123/build" in result.output
+        assert "narrative.log" in result.output
+
     def test_improve_resume_threads_run_id_into_split_and_agentic(
         self, tmp_git_repo, monkeypatch
     ):

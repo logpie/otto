@@ -12,6 +12,7 @@ Flow:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import re
@@ -215,6 +216,7 @@ async def run_spec_agent(
     spec, missing file) still raise `RuntimeError`.
     """
     from otto.agent import make_agent_options, run_agent_with_timeout
+    from otto.display import console
     from otto.prompts import render_prompt
 
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -263,6 +265,7 @@ async def run_spec_agent(
         timeout=timeout,
         project_dir=project_dir,
         capture_tool_output=False,
+        on_terminal_event=console.print,
     )
 
     duration = round(time.monotonic() - start, 1)
@@ -382,7 +385,7 @@ async def review_spec(
         print("  [r] regenerate with notes")
         print("  [q] quit")
         try:
-            choice = input("  Choice: ").strip().lower()
+            choice = input("  Choice [a/e/r/q]: ").strip().lower()
         except EOFError:
             raise KeyboardInterrupt("EOF during spec review")
 
@@ -446,6 +449,7 @@ async def review_spec(
                 print("  [skipped — empty note]")
                 continue
             regen_count += 1
+            print("    Regenerating spec from your note…")
             # Archive the prior version
             archive_path = run_dir / f"spec-v{regen_count}.md"
             try:
@@ -453,13 +457,29 @@ async def review_spec(
                 logger.info("Archived prior spec to %s", archive_path)
             except OSError as exc:
                 logger.warning("Could not archive prior spec: %s", exc)
-            new = await run_spec_agent(
-                intent, project_dir, run_dir, config,
-                prior_spec=current.content,
-                user_notes=note,
-                version=regen_count,
-                budget=budget,
-            )
+            regen_started = time.monotonic()
+
+            async def _regen_heartbeat() -> None:
+                while True:
+                    await asyncio.sleep(15)
+                    elapsed = int(time.monotonic() - regen_started)
+                    print(f"    ⋯ Regenerating ({elapsed}s elapsed)")
+
+            heartbeat_task = asyncio.create_task(_regen_heartbeat())
+            try:
+                new = await run_spec_agent(
+                    intent, project_dir, run_dir, config,
+                    prior_spec=current.content,
+                    user_notes=note,
+                    version=regen_count,
+                    budget=budget,
+                )
+            finally:
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except asyncio.CancelledError:
+                    pass
             # Combine cost so the caller sees total spec cost
             current = SpecResult(
                 path=new.path,

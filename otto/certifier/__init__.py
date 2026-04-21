@@ -83,6 +83,7 @@ async def run_agentic_certifier(
         CertificationOutcome,
         CertificationReport,
     )
+    from otto.display import console
 
     config = config or {}
     start_time = time.monotonic()
@@ -129,6 +130,7 @@ async def run_agentic_certifier(
         phase_name="CERTIFY",
         timeout=timeout,
         project_dir=project_dir,
+        on_terminal_event=console.print,
     )
 
     # Parse results from agent output

@@ -140,6 +140,7 @@ async def build_agentic_v3(
     """
     from otto.agent import make_agent_options, run_agent_with_timeout
     from otto import paths
+    from otto.display import console
 
     # run_id is the unified session_id in the new layout. Older callers
     # (e.g. some tests) may omit it; allocate one locally in that case so
@@ -298,6 +299,7 @@ async def build_agentic_v3(
             timeout=timeout,
             project_dir=project_dir,
             capture_tool_output=True,
+            on_terminal_event=console.print,
         )
     except AgentCallError as err:
         if not manage_checkpoint:

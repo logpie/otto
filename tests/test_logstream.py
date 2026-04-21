@@ -131,6 +131,44 @@ class TestNarrativeFormatter:
 
         assert _strip_ts(path.read_text().strip()) == "\u2501\u2501\u2501 SPEC starting \u2501\u2501\u2501"
 
+    def test_terminal_callback_fires_for_phase_banners(self, tmp_path):
+        path = tmp_path / "narrative.log"
+        seen: list[str] = []
+        f = NarrativeFormatter(path, stdout_callback=seen.append)
+        f.start()
+        f.write_message(AssistantMessage(content=[
+            ToolUseBlock(
+                name="Agent",
+                input={"prompt": "Please certify.\n## Verdict Format\nVERDICT: PASS|FAIL"},
+                id="cert-1",
+            ),
+            ToolResultBlock(
+                tool_use_id="cert-1",
+                content="STORIES_TESTED: 1\nSTORIES_PASSED: 1\nVERDICT: PASS\n",
+            ),
+        ]))
+        f.close()
+
+        assert seen[0] == "[bold]  \u2501\u2501\u2501 BUILD starting \u2501\u2501\u2501[/bold]"
+        assert seen[1] == "[bold]  \u2501\u2501\u2501 BUILD complete — handing off to certifier \u2501\u2501\u2501[/bold]"
+        assert seen[2] == "[bold]  \u2501\u2501\u2501 CERTIFY ROUND 1 starting \u2501\u2501\u2501[/bold]"
+        assert seen[3] == "[bold]  \u2501\u2501\u2501 CERTIFY ROUND 1 → PASS (1/1) \u2501\u2501\u2501[/bold]"
+        assert all("[+" not in event for event in seen)
+
+    def test_terminal_callback_ignores_quiet_events(self, tmp_path):
+        path = tmp_path / "narrative.log"
+        seen: list[str] = []
+        f = NarrativeFormatter(path, stdout_callback=seen.append)
+        f.write_message(AssistantMessage(content=[
+            ToolUseBlock(name="Read", input={"file_path": "/tmp/x.py"}, id="read-1"),
+            ToolResultBlock(tool_use_id="read-1", content="1\tprint('hi')\n"),
+            ThinkingBlock(thinking="let me inspect this"),
+            TextBlock(text="Now let me check the next file."),
+        ]))
+        f.close()
+
+        assert seen == []
+
     def test_first_certifier_dispatch_emits_build_handoff_then_round_start(self, tmp_path):
         path = tmp_path / "narrative.log"
         f = NarrativeFormatter(path)

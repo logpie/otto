@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -94,7 +95,6 @@ def _print_config_banner(
     value came from the loaded file, or ``default`` if it fell through
     to DEFAULTS.
     """
-    from otto.config import DEFAULTS
     yaml_raw: dict[str, Any] = {}
     if config_path.exists():
         import yaml as _yaml
@@ -112,15 +112,35 @@ def _print_config_banner(
             return "otto.yaml"
         return "default"
 
-    rows = [
-        ("mode",     config.get("certifier_mode"), _source("certifier_mode")),
-        ("rounds",   config.get("max_certify_rounds"), _source("max_certify_rounds")),
-        ("budget",   f"{config.get('run_budget_seconds')}s", _source("run_budget_seconds")),
-        ("provider", config.get("provider"), _source("provider")),
-        ("model",    config.get("model") or "(provider default)", _source("model")),
-    ]
-    parts = [f"{label}: {val} ({src})" for label, val, src in rows]
-    console_.print(f"  [dim]{' | '.join(parts)}[/dim]")
+    from rich.table import Table
+
+    def _cell(value: Any, source: str) -> str:
+        return f"{rich_escape(str(value))} [dim]({source})[/dim]"
+
+    table = Table(box=None, show_header=False, pad_edge=False, show_edge=False, expand=False)
+    table.add_column(justify="left", no_wrap=True)
+    table.add_column(justify="left", no_wrap=True)
+    table.add_column(justify="left", no_wrap=True)
+    table.add_column(justify="left", no_wrap=True)
+    table.add_row(
+        "  Mode",
+        _cell(config.get("certifier_mode"), _source("certifier_mode")),
+        "Budget",
+        _cell(f"{config.get('run_budget_seconds')}s", _source("run_budget_seconds")),
+    )
+    table.add_row(
+        "  Provider",
+        _cell(config.get("provider"), _source("provider")),
+        "Model",
+        _cell(config.get("model") or "(provider default)", _source("model")),
+    )
+    table.add_row(
+        "  Rounds",
+        _cell(config.get("max_certify_rounds"), _source("max_certify_rounds")),
+        "",
+        "",
+    )
+    console_.print(table)
 
 
 def _new_run_id(project_dir: "Path | None" = None) -> str:
@@ -399,7 +419,7 @@ async def _run_spec_phase(
         sys.exit(1)
 
 
-def _print_build_result(intent: str, result, build_duration: float) -> None:
+def _print_build_result(project_dir: Path, intent: str, result, build_duration: float) -> None:
     """Render build verification output and summary."""
     if result.journeys:
         console.print()
@@ -422,6 +442,12 @@ def _print_build_result(intent: str, result, build_duration: float) -> None:
         console.print(f"  Tasks: {result.tasks_passed} passed, {result.tasks_failed} failed")
     console.print(f"  [bold]Total cost: ${result.total_cost:.2f}[/bold]")
     console.print(f"  Duration: {build_duration / 60:.1f} min")
+    from otto import paths as _paths
+    pow_html = _paths.certify_dir(project_dir, result.build_id) / "proof-of-work.html"
+    if pow_html.exists():
+        console.print("  Report:   otto_logs/latest/certify/proof-of-work.html")
+    console.print("  Live log: otto_logs/latest/build/narrative.log")
+    console.print("  History:  otto history")
     console.print()
 
 
@@ -703,6 +729,9 @@ def _build_locked(
             sys.exit(0)
 
     console.print()
+    build_dir = _paths.build_dir(project_dir, run_id)
+    certify_dir = _paths.certify_dir(project_dir, run_id)
+    narrative_log = build_dir / "narrative.log"
 
     # Priority: CLI flag (stored in _certifier_mode) > otto.yaml (certifier_mode)
     # > "fast" fallback (cheap default for quick iteration; users who want real
@@ -755,13 +784,74 @@ def _build_locked(
         console.print("\n  [yellow]Paused. Run `otto build --resume` to continue.[/yellow]")
         sys.exit(0)
     except Exception as e:
-        error_console.print(f"[error]Build failed: {rich_escape(str(e))}[/error]")
+        if isinstance(e, AgentCallError) and e.reason.startswith("Timed out after"):
+            error_console.print(
+                f"[error]Run timed out after {rich_escape(e.reason.removeprefix('Timed out after ').strip())} "
+                "(run_budget_seconds).[/error]\n"
+                f"  Narrative log: {build_dir / 'narrative.log'}\n"
+                "  Resume:        otto build --resume"
+            )
+            sys.exit(1)
+        if isinstance(e, AgentCallError) and e.reason.startswith("Agent crashed"):
+            crash_reason = e.reason.removeprefix("Agent crashed:").strip()
+            error_console.print(
+                f"[error]Agent crashed: {rich_escape(crash_reason)}[/error]\n"
+                f"  Narrative log: {build_dir / 'narrative.log'}  "
+                "(last events may be incomplete)\n"
+                "  Resume:        otto build --resume"
+            )
+            sys.exit(1)
+        error_console.print(
+            f"[error]Build failed: {rich_escape(str(e))}[/error]\n"
+            f"  Narrative log: {build_dir / 'narrative.log'}  (for full context)"
+        )
         sys.exit(1)
 
     build_duration = time.time() - build_start
-    _print_build_result(display_intent, result, build_duration)
+    _print_build_result(project_dir, display_intent, result, build_duration)
 
-    sys.exit(0 if result.passed else 1)
+    if not result.passed:
+        build_dir = _paths.build_dir(project_dir, result.build_id)
+        certify_dir = _paths.certify_dir(project_dir, result.build_id)
+        narrative_log = build_dir / "narrative.log"
+        total_stories = result.tasks_passed + result.tasks_failed
+        pow_html = certify_dir / "proof-of-work.html"
+        try:
+            narrative_text = narrative_log.read_text() if narrative_log.exists() else ""
+        except OSError:
+            narrative_text = ""
+        timeout_match = re.search(r"Timed out after (\d+s)", narrative_text)
+        crash_match = re.search(r"Agent crashed: (.+)", narrative_text)
+        if timeout_match:
+            error_console.print(
+                f"[error]Run timed out after {timeout_match.group(1)} "
+                "(run_budget_seconds).[/error]\n"
+                f"  Narrative log: {narrative_log}\n"
+                "  Resume:        otto build --resume"
+            )
+            sys.exit(1)
+        if crash_match:
+            error_console.print(
+                f"[error]Agent crashed: {rich_escape(crash_match.group(1).strip())}[/error]\n"
+                f"  Narrative log: {narrative_log}  (last events may be incomplete)\n"
+                "  Resume:        otto build --resume"
+            )
+            sys.exit(1)
+        if pow_html.exists():
+            error_console.print(
+                f"[error]Build did not pass certification ({result.tasks_passed}/{total_stories} "
+                "stories passed).[/error]\n"
+                f"  Report: {pow_html}\n"
+                f"  Narrative: {narrative_log}"
+            )
+        else:
+            error_console.print(
+                "[error]Build failed.[/error]\n"
+                f"  Narrative log: {narrative_log}  (for full context)"
+            )
+        sys.exit(1)
+
+    sys.exit(0)
 
 
 @main.command(context_settings=CONTEXT_SETTINGS)

@@ -416,3 +416,48 @@ class TestReviewSpecResumeState:
         assert recorded["version"] == 3
         assert result.version == 3
         assert result.cost == 1.25
+
+    @pytest.mark.asyncio
+    async def test_regenerate_prints_acknowledgement(self, tmp_path, monkeypatch, capsys):
+        from otto.spec import review_spec
+
+        project_dir = tmp_path
+        run_dir = tmp_path / "otto_logs" / "runs" / "run-2"
+        run_dir.mkdir(parents=True)
+        spec_path = run_dir / "spec.md"
+        spec_path.write_text(MINIMAL_VALID)
+
+        async def fake_run_spec_agent(intent, project_dir, run_dir, config, **kwargs):
+            return SpecResult(
+                path=spec_path,
+                content=MINIMAL_VALID,
+                open_questions=0,
+                cost=0.1,
+                duration_s=1.0,
+                version=kwargs["version"],
+            )
+
+        answers = iter(["r", "tighten the success criteria", "a"])
+        monkeypatch.setattr("otto.spec._is_tty", lambda: True)
+        monkeypatch.setattr("otto.spec.run_spec_agent", fake_run_spec_agent)
+        monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+
+        await review_spec(
+            SpecResult(
+                path=spec_path,
+                content=MINIMAL_VALID,
+                open_questions=0,
+                cost=1.0,
+                duration_s=2.0,
+                version=0,
+            ),
+            project_dir,
+            run_dir,
+            "run-2",
+            "counter app",
+            {},
+            auto_approve=False,
+        )
+
+        out = capsys.readouterr().out
+        assert "Regenerating spec from your note" in out

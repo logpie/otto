@@ -134,8 +134,19 @@ def print_resume_status(console: Any, state: ResumeState, resume_flag: bool, exp
             f"\n  [yellow]\u26a0 Checkpoint is from `{state.prior_command}`, "
             f"resuming in `{expected_command}`.[/yellow]"
         )
+    phase = state.phase or ""
+    if phase in {"spec", "spec_review"}:
+        status = "Resuming spec review"
+    elif phase in {"spec_approved", "build"}:
+        status = "Resuming build agent (after spec approval)"
+    elif phase == "certify":
+        status = f"Resuming after certify round {state.current_round}"
+    elif phase == "fix":
+        status = f"Resuming after fix round {state.current_round}"
+    else:
+        status = f"Resuming from round {state.start_round} (phase={phase or 'unknown'})"
     console.print(
-        f"\n  [info]Resuming from round {state.start_round} "
+        f"\n  [info]{status} "
         f"(${state.total_cost:.2f} spent so far)[/info]\n"
     )
 

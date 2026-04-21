@@ -177,6 +177,7 @@ async def run_agent_with_timeout(
     timeout: int | None,
     project_dir: Path,
     capture_tool_output: bool = False,
+    on_terminal_event: Callable[[str], None] | None = None,
 ) -> tuple[str, float, str, dict[str, Any]]:
     """Run an agent query with streaming session logs, timeout, and orphan cleanup.
 
@@ -194,7 +195,11 @@ async def run_agent_with_timeout(
     from otto.logstream import estimate_phase_costs, make_session_logger
 
     log = logging.getLogger("otto.agent")
-    callbacks = make_session_logger(log_dir, phase_name=phase_name)
+    callbacks = make_session_logger(
+        log_dir,
+        phase_name=phase_name,
+        stdout_callback=on_terminal_event,
+    )
     close_fh = callbacks.pop("_close")
     narrative = callbacks.pop("_narrative")
     # Mutable bag — streaming handlers update it so timeout/crash paths can
@@ -208,6 +213,36 @@ async def run_agent_with_timeout(
                 fh.write(line + "\n")
         except OSError:
             pass
+
+    def _format_heartbeat_elapsed(elapsed_s: float) -> str:
+        secs = max(0, int(elapsed_s))
+        if secs < 60:
+            return f"{secs}s"
+        if secs < 3600:
+            return f"{secs // 60}m"
+        hours, rem = divmod(secs, 3600)
+        mins = rem // 60
+        if mins:
+            return f"{hours}h {mins}m"
+        return f"{hours}h"
+
+    heartbeat_task: asyncio.Task[None] | None = None
+    if on_terminal_event is not None:
+        async def _heartbeat() -> None:
+            interval_s = 20
+            while True:
+                await asyncio.sleep(interval_s)
+                if (asyncio.get_running_loop().time()
+                        - narrative.last_terminal_event_monotonic()) < interval_s:
+                    continue
+                elapsed = _format_heartbeat_elapsed(narrative.elapsed_seconds())
+                tool_calls = narrative._tool_call_count
+                noun = "call" if tool_calls == 1 else "calls"
+                on_terminal_event(
+                    f"[dim]  ⋯ still running, {elapsed} elapsed, {tool_calls} tool {noun}[/dim]"
+                )
+
+        heartbeat_task = asyncio.create_task(_heartbeat())
 
     try:
         text, cost, result_msg = await asyncio.wait_for(
@@ -290,6 +325,12 @@ async def run_agent_with_timeout(
             session_id=agent_state.get("session_id", ""),
         )
     finally:
+        if heartbeat_task is not None:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
         close_fh()
 
 
