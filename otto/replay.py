@@ -70,12 +70,22 @@ def _rebuild_message(rec: dict):
     return None
 
 
+def _infer_phase_name(path: Path) -> str:
+    parts = set(path.parts)
+    if "certify" in parts:
+        return "CERTIFY"
+    if "spec" in parts:
+        return "SPEC"
+    return "BUILD"
+
+
 def _replay_one(jsonl_path: Path, out_path: Path) -> int:
     """Replay one messages.jsonl → narrative.log. Returns lines written."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if out_path.exists():
         out_path.unlink()
-    f = NarrativeFormatter(out_path)
+    f = NarrativeFormatter(out_path, phase_name=_infer_phase_name(out_path))
+    f.start()
     original_start = time.monotonic()
     lines_in = 0
     try:

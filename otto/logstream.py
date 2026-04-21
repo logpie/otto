@@ -181,13 +181,15 @@ class NarrativeFormatter:
     # Glyphs — referenced from multiple methods.
     _GLYPH_MARKER = "\u2726"     # ✦ elevated certifier marker
     _GLYPH_SUBAGENT = "\u21d0"   # ⇐ subagent tool result
+    _GLYPH_SUMMARY = "\u220e"    # ∎ closing summary text
     _GLYPH_PHASE = "\u2501" * 3  # ━━━ phase begin/end banner
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, phase_name: str = "BUILD") -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._path = path
         self._fh = open(path, "a", encoding="utf-8")
         self._start = time.monotonic()
+        self._phase_name = (phase_name or "BUILD").upper()
         # tool_use_id -> tool name, so ToolResultBlock renderers can
         # tailor output (Glob=>"(N files)", Read=>"(N lines)", Agent=>
         # subagent glyph).
@@ -198,15 +200,65 @@ class NarrativeFormatter:
         # dispatches in case other subagents are dispatched.
         self._agent_dispatch_count: int = 0
         self._agent_round_by_id: dict[str, int] = {}
+        self._round_start_elapsed_by_id: dict[str, float] = {}
+        self._round_timings: list[tuple[float, float]] = []
+        self._build_duration: float | None = None
+        self._phase_started = False
+        self._phase_complete_written = False
+
+    def start(self) -> None:
+        if self._phase_started:
+            return
+        self._phase_started = True
+        self._write(
+            f"{self._stamp()} {self._GLYPH_PHASE} "
+            f"{self._phase_name} starting {self._GLYPH_PHASE}"
+        )
+
+    def _elapsed_seconds(self) -> float:
+        return time.monotonic() - self._start
 
     def _elapsed_fmt(self) -> str:
-        secs = int(time.monotonic() - self._start)
-        if secs >= 3600:
-            h, rem = divmod(secs, 3600)
-            m, s = divmod(rem, 60)
-            return f"{h}:{m:02d}:{s:02d}"
-        m, s = divmod(secs, 60)
-        return f"{m}:{s:02d}"
+        secs = int(self._elapsed_seconds())
+        return _format_elapsed_seconds(secs)
+
+    def _phase_complete_line(self) -> str:
+        if self._phase_name == "BUILD":
+            return (
+                f"{self._stamp()} {self._GLYPH_PHASE} BUILD complete — "
+                f"handing off to certifier {self._GLYPH_PHASE}"
+            )
+        return (
+            f"{self._stamp()} {self._GLYPH_PHASE} {self._phase_name} complete "
+            f"{self._GLYPH_PHASE}"
+        )
+
+    def _write_phase_complete(self) -> None:
+        if self._phase_complete_written:
+            return
+        self._phase_complete_written = True
+        self._write(self._phase_complete_line())
+
+    def _summary_label(self) -> str:
+        return self._phase_name.lower()
+
+    def _summary_line(self, total_elapsed: float) -> str:
+        primary_label = self._summary_label()
+        build_duration = self._build_duration
+        if build_duration is None:
+            build_duration = total_elapsed
+        parts = [f"{primary_label}={_format_elapsed_seconds(build_duration)}"]
+        if self._round_timings and self._phase_name == "BUILD":
+            certify_duration = sum(end - start for start, end in self._round_timings)
+            parts.append(
+                f"certify={_format_elapsed_seconds(certify_duration)} "
+                f"({len(self._round_timings)} rounds)"
+            )
+        parts.append(f"total={_format_elapsed_seconds(total_elapsed)}")
+        return (
+            f"{self._stamp()} {self._GLYPH_PHASE} RUN SUMMARY: "
+            f"{', '.join(parts)} {self._GLYPH_PHASE}"
+        )
 
     def _stamp(self) -> str:
         return f"[+{self._elapsed_fmt()}]"
@@ -236,10 +288,16 @@ class NarrativeFormatter:
             # Certify-phase banners — Agent dispatches with a
             # certifier-shaped prompt open a new round.
             if block.name == "Agent" and _looks_like_certifier_prompt(block.input):
+                round_start_elapsed = self._elapsed_seconds()
+                if self._agent_dispatch_count == 0:
+                    self._build_duration = round_start_elapsed
+                    if self._phase_name == "BUILD":
+                        self._write_phase_complete()
                 self._agent_dispatch_count += 1
                 round_n = self._agent_dispatch_count
                 if block.id:
                     self._agent_round_by_id[block.id] = round_n
+                    self._round_start_elapsed_by_id[block.id] = round_start_elapsed
                 self._write(
                     f"{ts} {self._GLYPH_PHASE} CERTIFY ROUND {round_n} "
                     f"starting {self._GLYPH_PHASE}"
@@ -272,6 +330,11 @@ class NarrativeFormatter:
             if flood_summary is not None:
                 self._write(f"{ts} \u25b8 {flood_summary}")
                 return
+            text_glyph = (
+                self._GLYPH_SUMMARY
+                if self._agent_dispatch_count >= 1 and _looks_like_closing_summary(text)
+                else "\u25b8"
+            )
             # Suppress redundant final-summary re-emission: when the
             # agent's closing text contains CERTIFY_ROUND marker blocks
             # from already-completed rounds, we've already streamed those
@@ -286,7 +349,7 @@ class NarrativeFormatter:
                     if l.strip() and not _is_marker(l.strip())
                 ]
                 for s in prose_lines:
-                    self._write(f"{ts} \u25b8 {_truncate_at_word(s)}")
+                    self._write(f"{ts} {text_glyph} {_truncate_at_word(s)}")
                 return
             for line in text.split("\n"):
                 s = line.strip()
@@ -295,7 +358,7 @@ class NarrativeFormatter:
                 if _is_marker(s):
                     self._write(f"{ts} {self._GLYPH_MARKER} {s}")
                 else:
-                    self._write(f"{ts} \u25b8 {_truncate_at_word(s)}")
+                    self._write(f"{ts} {text_glyph} {_truncate_at_word(s)}")
 
     def _write_tool_result(self, ts: str, block: ToolResultBlock) -> None:
         raw_content = block.content
@@ -352,6 +415,9 @@ class NarrativeFormatter:
             if is_subagent and block.tool_use_id:
                 round_n = self._agent_round_by_id.get(block.tool_use_id)
                 if round_n is not None:
+                    round_start = self._round_start_elapsed_by_id.pop(block.tool_use_id, None)
+                    if round_start is not None:
+                        self._round_timings.append((round_start, self._elapsed_seconds()))
                     verdict, passed, tested = _summarize_round(marker_lines)
                     stats = f" ({passed}/{tested})" if tested else ""
                     self._write(
@@ -407,6 +473,10 @@ class NarrativeFormatter:
 
     def _write_result(self, message: ResultMessage) -> None:
         ts = self._stamp()
+        total_elapsed = self._elapsed_seconds()
+        if self._phase_name != "BUILD":
+            self._write_phase_complete()
+        self._write(self._summary_line(total_elapsed))
         status = "ERROR" if message.is_error else message.subtype.upper()
         cost = f" ${message.total_cost_usd:.2f}" if message.total_cost_usd else ""
         duration = f" in {self._elapsed_fmt()}"
@@ -427,6 +497,32 @@ def _is_marker(line: str) -> bool:
     if _PLACEHOLDER_RE.search(line):
         return False
     return True
+
+
+def _format_elapsed_seconds(elapsed_s: float) -> str:
+    secs = max(0, int(elapsed_s))
+    if secs >= 3600:
+        h, rem = divmod(secs, 3600)
+        m, s = divmod(rem, 60)
+        return f"{h}:{m:02d}:{s:02d}"
+    m, s = divmod(secs, 60)
+    return f"{m}:{s:02d}"
+
+
+def _looks_like_closing_summary(text: str) -> bool:
+    lines = [line.strip() for line in text.split("\n") if line.strip()]
+    if any(line.startswith("## ") for line in lines):
+        return True
+
+    bullet_run = 0
+    for line in lines:
+        if line.startswith("- "):
+            bullet_run += 1
+            if bullet_run >= 3:
+                return True
+        else:
+            bullet_run = 0
+    return False
 
 
 def _prompt_flood_summary(text: str) -> str | None:
@@ -572,7 +668,7 @@ def _extract_commit_line(content: str) -> str | None:
     return None
 
 
-def make_session_logger(log_dir: Path) -> dict[str, Callable]:
+def make_session_logger(log_dir: Path, *, phase_name: str = "BUILD") -> dict[str, Callable]:
     """Open messages.jsonl + narrative.log in ``log_dir`` and return the
     callback dict for run_agent_with_timeout / run_agent_query.
 
@@ -587,7 +683,8 @@ def make_session_logger(log_dir: Path) -> dict[str, Callable]:
     """
     log_dir.mkdir(parents=True, exist_ok=True)
     jsonl = JsonlMessageWriter(log_dir / "messages.jsonl")
-    narr = NarrativeFormatter(log_dir / "narrative.log")
+    narr = NarrativeFormatter(log_dir / "narrative.log", phase_name=phase_name)
+    narr.start()
 
     live = log_dir / "live.log"
     try:

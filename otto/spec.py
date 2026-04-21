@@ -259,6 +259,7 @@ async def run_spec_agent(
     _text, cost, _session = await run_agent_with_timeout(
         prompt, options,
         log_dir=log_subdir,
+        phase_name="SPEC",
         timeout=timeout,
         project_dir=project_dir,
         capture_tool_output=False,

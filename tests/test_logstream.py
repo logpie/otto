@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 
 from otto.agent import (
     AssistantMessage,
@@ -100,6 +101,42 @@ class TestJsonlWriter:
 
 
 class TestNarrativeFormatter:
+    def test_start_emits_build_banner(self, tmp_path):
+        path = tmp_path / "narrative.log"
+        f = NarrativeFormatter(path)
+        f.start()
+        f.close()
+
+        assert _strip_ts(path.read_text().strip()) == "\u2501\u2501\u2501 BUILD starting \u2501\u2501\u2501"
+
+    def test_start_emits_spec_banner(self, tmp_path):
+        path = tmp_path / "narrative.log"
+        f = NarrativeFormatter(path, phase_name="SPEC")
+        f.start()
+        f.close()
+
+        assert _strip_ts(path.read_text().strip()) == "\u2501\u2501\u2501 SPEC starting \u2501\u2501\u2501"
+
+    def test_first_certifier_dispatch_emits_build_handoff_then_round_start(self, tmp_path):
+        path = tmp_path / "narrative.log"
+        f = NarrativeFormatter(path)
+        f.start()
+        f.write_message(AssistantMessage(content=[
+            ToolUseBlock(
+                name="Agent",
+                input={"prompt": "Please certify this.\n## Verdict Format\nVERDICT: PASS|FAIL"},
+                id="cert-1",
+            ),
+        ]))
+        f.close()
+
+        lines = [_strip_ts(line) for line in path.read_text().splitlines()]
+        assert lines == [
+            "\u2501\u2501\u2501 BUILD starting \u2501\u2501\u2501",
+            "\u2501\u2501\u2501 BUILD complete — handing off to certifier \u2501\u2501\u2501",
+            "\u2501\u2501\u2501 CERTIFY ROUND 1 starting \u2501\u2501\u2501",
+        ]
+
     def test_tool_use_with_summary(self, tmp_path):
         path = tmp_path / "narrative.log"
         f = NarrativeFormatter(path)
@@ -224,6 +261,50 @@ class TestNarrativeFormatter:
         assert "$1.23" in content
         # Terminal marker carries a duration suffix: "in 0:00" etc.
         assert re.search(r" in \d+:\d{2}", content)
+
+    def test_write_result_emits_run_summary_before_success(self, tmp_path):
+        path = tmp_path / "narrative.log"
+        f = NarrativeFormatter(path)
+        f._start = time.monotonic() - 100.2
+        f._build_duration = 30.0
+        f._round_timings = [(30.0, 50.0), (60.0, 80.0)]
+        f.write_message(ResultMessage(
+            subtype="success", is_error=False, session_id="x",
+            total_cost_usd=1.23,
+        ))
+        f.close()
+
+        lines = [_strip_ts(line) for line in path.read_text().splitlines()]
+        assert "RUN SUMMARY: build=0:30, certify=0:40 (2 rounds), total=1:40" in lines[0]
+        assert "SUCCESS $1.23 in 1:40" in lines[1]
+
+    def test_write_result_without_certify_omits_certify_summary(self, tmp_path):
+        path = tmp_path / "narrative.log"
+        f = NarrativeFormatter(path)
+        f._start = time.monotonic() - 65.2
+        f.write_message(ResultMessage(
+            subtype="success", is_error=False, session_id="x",
+        ))
+        f.close()
+
+        summary = _strip_ts(path.read_text().splitlines()[0])
+        assert "RUN SUMMARY: build=1:05, total=1:05" in summary
+        assert "certify=" not in summary
+
+    def test_spec_phase_emits_complete_before_summary(self, tmp_path):
+        path = tmp_path / "narrative.log"
+        f = NarrativeFormatter(path, phase_name="SPEC")
+        f.start()
+        f.write_message(ResultMessage(
+            subtype="success", is_error=False, session_id="x",
+        ))
+        f.close()
+
+        lines = [_strip_ts(line) for line in path.read_text().splitlines()]
+        assert lines[0] == "\u2501\u2501\u2501 SPEC starting \u2501\u2501\u2501"
+        assert lines[1] == "\u2501\u2501\u2501 SPEC complete \u2501\u2501\u2501"
+        assert "RUN SUMMARY: spec=" in lines[2]
+        assert "SUCCESS" in lines[3]
 
     def test_agent_tool_use_renders_subagent_summary(self, tmp_path):
         """Agent tool_use renders subagent=<type> plus prompt preview."""
@@ -397,6 +478,33 @@ class TestNarrativeFormatter:
         # A single summary line — not one per prompt row.
         assert len(lines) == 1
         assert "subagent prompt" in lines[0]
+
+    def test_closing_summary_text_uses_summary_glyph(self, tmp_path):
+        path = tmp_path / "narrative.log"
+        f = NarrativeFormatter(path)
+        f.write_message(AssistantMessage(content=[
+            ToolUseBlock(
+                name="Agent",
+                input={"prompt": "Please certify.\n## Verdict Format\nVERDICT: PASS|FAIL"},
+                id="cert-1",
+            ),
+            TextBlock(text="## Summary\n- shipped\n- verified\n- closed"),
+        ]))
+        f.close()
+
+        content = path.read_text()
+        assert "\u220e ## Summary" in content
+        assert "\u220e - shipped" in content
+
+    def test_inline_agent_prose_still_uses_standard_glyph(self, tmp_path):
+        path = tmp_path / "narrative.log"
+        f = NarrativeFormatter(path)
+        f.write_message(AssistantMessage(content=[
+            TextBlock(text="Now dispatching the certifier."),
+        ]))
+        f.close()
+
+        assert "\u25b8 Now dispatching the certifier." in path.read_text()
 
     def test_session_id_propagated_onto_assistant_message(self, tmp_path):
         """messages.jsonl records session_id on AssistantMessage entries,

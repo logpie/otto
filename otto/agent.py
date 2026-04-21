@@ -171,6 +171,7 @@ async def run_agent_with_timeout(
     options: AgentOptions,
     *,
     log_dir: Path,
+    phase_name: str = "BUILD",
     timeout: int | None,
     project_dir: Path,
     capture_tool_output: bool = False,
@@ -191,7 +192,7 @@ async def run_agent_with_timeout(
     from otto.logstream import make_session_logger
 
     log = logging.getLogger("otto.agent")
-    callbacks = make_session_logger(log_dir)
+    callbacks = make_session_logger(log_dir, phase_name=phase_name)
     close_fh = callbacks.pop("_close")
     # Mutable bag — streaming handlers update it so timeout/crash paths can
     # recover the last-known session_id for a resumable checkpoint.

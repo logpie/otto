@@ -126,6 +126,7 @@ async def run_agentic_certifier(
     text, cost, _session_id = await run_agent_with_timeout(
         prompt, options,
         log_dir=report_dir,
+        phase_name="CERTIFY",
         timeout=timeout,
         project_dir=project_dir,
     )

@@ -283,6 +283,7 @@ async def build_agentic_v3(
         text, cost, session_id = await run_agent_with_timeout(
             prompt, options,
             log_dir=build_dir,
+            phase_name="BUILD",
             timeout=timeout,
             project_dir=project_dir,
             capture_tool_output=True,
