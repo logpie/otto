@@ -609,7 +609,9 @@ def register_queue_commands(main: click.Group) -> None:
                   help="Max concurrent tasks (default from otto.yaml queue.concurrent)")
     @click.option("--quiet", is_flag=True,
                   help="Suppress watcher event lines (spawn/reap/cancel) on stdout")
-    def run(concurrent: int | None, quiet: bool) -> None:
+    @click.option("--no-dashboard", is_flag=True,
+                  help="Force the prefixed-stdout watcher instead of the Textual dashboard")
+    def run(concurrent: int | None, quiet: bool, no_dashboard: bool) -> None:
         """Start the foreground queue watcher. Run in a tmux pane like `vite dev`."""
         from otto.config import load_config
         from otto.queue.runner import (
@@ -627,6 +629,31 @@ def register_queue_commands(main: click.Group) -> None:
         if concurrent is not None:
             rcfg.concurrent = max(1, concurrent)
         otto_bin = _resolve_otto_bin()
+
+        use_tui = (
+            not no_dashboard
+            and sys.stdout.isatty()
+            and not os.environ.get("OTTO_NO_TUI")
+        )
+        if use_tui:
+            try:
+                from otto.queue.dashboard import run_dashboard
+            except ImportError:
+                use_tui = False
+            else:
+                try:
+                    sys.exit(
+                        run_dashboard(
+                            project_dir,
+                            concurrent=rcfg.concurrent,
+                            quiet=quiet,
+                            runner_config=rcfg,
+                            otto_bin=otto_bin,
+                        )
+                    )
+                except WatcherAlreadyRunning as exc:
+                    error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
+                    sys.exit(1)
 
         # Install handlers so watcher's spawn/reap/cancel/heartbeat events
         # appear on stdout (and persist to otto_logs/queue/watcher.log).

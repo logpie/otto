@@ -23,6 +23,7 @@ See plan-parallel.md §5 Phase 2 (steps 2.7-2.9).
 
 from __future__ import annotations
 
+import asyncio
 import errno
 import fcntl
 import logging
@@ -243,50 +244,84 @@ class Runner:
 
     def run(self) -> int:
         """Run the watcher loop until shutdown. Returns exit code."""
-        self._lock_fh = acquire_lock(self.project_dir)
         try:
-            self._install_signal_handlers()
-            self._reconcile_on_startup()
-            self._update_watcher_state()
+            self._begin_run()
             last_heartbeat = time.monotonic()
             while True:
-                try:
-                    self._tick()
-                except StatePersistenceError:
-                    logger.exception("state persistence failed; stopping runner")
-                    return 1
-                except Exception:
-                    logger.exception("tick failed; continuing")
-                # Heartbeat
-                now = time.monotonic()
-                if now - last_heartbeat >= self.config.heartbeat_interval_s:
-                    try:
-                        self._update_watcher_state()
-                    except StatePersistenceError:
-                        logger.exception("state persistence failed during heartbeat; stopping runner")
-                        return 1
-                    last_heartbeat = now
-                # Shutdown decisions
-                if self.shutdown_level == "immediate":
-                    self._kill_all_in_flight()
+                last_heartbeat, exit_code, done = self._run_iteration(last_heartbeat)
+                if exit_code is not None:
+                    return exit_code
+                if done:
                     break
-                if self.shutdown_level == "graceful":
-                    if not self._has_in_flight():
-                        break
                 time.sleep(self.config.poll_interval_s)
-            try:
-                self._clear_watcher_state()
-            except StatePersistenceError:
-                logger.exception("failed to clear watcher state during shutdown")
-                return 1
-            return 0
+            return self._end_run()
         finally:
-            if self._lock_fh is not None:
-                try:
-                    fcntl.flock(self._lock_fh.fileno(), fcntl.LOCK_UN)
-                    self._lock_fh.close()
-                except Exception as exc:
-                    logger.debug("failed to clean up queue lock: %s", exc)
+            self._release_lock()
+
+    async def run_async(self) -> int:
+        """Async version of ``run()`` for the Textual dashboard path."""
+        try:
+            self._begin_run()
+            last_heartbeat = time.monotonic()
+            while True:
+                last_heartbeat, exit_code, done = self._run_iteration(last_heartbeat)
+                if exit_code is not None:
+                    return exit_code
+                if done:
+                    break
+                await asyncio.sleep(self.config.poll_interval_s)
+            return self._end_run()
+        finally:
+            self._release_lock()
+
+    def _begin_run(self) -> None:
+        self._lock_fh = acquire_lock(self.project_dir)
+        self._install_signal_handlers()
+        self._reconcile_on_startup()
+        self._update_watcher_state()
+
+    def _run_iteration(self, last_heartbeat: float) -> tuple[float, int | None, bool]:
+        try:
+            self._tick()
+        except StatePersistenceError:
+            logger.exception("state persistence failed; stopping runner")
+            return last_heartbeat, 1, False
+        except Exception:
+            logger.exception("tick failed; continuing")
+
+        now = time.monotonic()
+        if now - last_heartbeat >= self.config.heartbeat_interval_s:
+            try:
+                self._update_watcher_state()
+            except StatePersistenceError:
+                logger.exception("state persistence failed during heartbeat; stopping runner")
+                return last_heartbeat, 1, False
+            last_heartbeat = now
+
+        if self.shutdown_level == "immediate":
+            self._kill_all_in_flight()
+            return last_heartbeat, None, True
+        if self.shutdown_level == "graceful" and not self._has_in_flight():
+            return last_heartbeat, None, True
+        return last_heartbeat, None, False
+
+    def _end_run(self) -> int:
+        try:
+            self._clear_watcher_state()
+        except StatePersistenceError:
+            logger.exception("failed to clear watcher state during shutdown")
+            return 1
+        return 0
+
+    def _release_lock(self) -> None:
+        if self._lock_fh is not None:
+            try:
+                fcntl.flock(self._lock_fh.fileno(), fcntl.LOCK_UN)
+                self._lock_fh.close()
+            except Exception as exc:
+                logger.debug("failed to clean up queue lock: %s", exc)
+            finally:
+                self._lock_fh = None
 
     def _tick(self) -> None:
         """One main-loop iteration: drain commands, reap children, dispatch new."""
