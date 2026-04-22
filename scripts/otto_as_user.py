@@ -19,7 +19,7 @@ import time
 import traceback
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from cast_utils import (
     CURSOR_HIDE,
@@ -36,6 +36,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ARTIFACT_ROOT = REPO_ROOT / "bench-results" / "as-user"
 DEFAULT_ROWS = 30
 DEFAULT_COLS = 120
+DEFAULT_SCENARIO_DELAY_S = 5.0
+INFRA_RETRY_DELAY_S = 30.0
+INFRA_RETRY_ATTEMPTS = 2
+INFRA_SMOKING_GUN_DURATION_S = 2.0
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\\\)")
 QUICK_SCENARIOS = ["A1", "A2", "B1", "B3", "C1", "D2"]
 OTTO_BIN = REPO_ROOT / ".venv" / "bin" / "otto"
@@ -43,6 +47,11 @@ FAKE_OTTO_BIN = REPO_ROOT / "scripts" / "fake-otto.sh"
 PYTHON_BIN = REPO_ROOT / ".venv" / "bin" / "python"
 LOCAL_ASCIINEMA = REPO_ROOT / ".venv" / "bin" / "asciinema"
 ASCIINEMA_SHIM = REPO_ROOT / "scripts" / "asciinema_shim.py"
+INFRA_COLOR = "\033[2;33m"
+ANSI_RESET = "\033[0m"
+
+FailureClassification = Literal["INFRA", "FAIL"]
+ScenarioStatus = Literal["PASS", "FAIL", "INFRA"]
 
 
 def now_iso() -> str:
@@ -73,6 +82,37 @@ def read_json(path: Path) -> dict[str, Any]:
 def ensure_parent(path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def format_seconds_for_log(seconds: float) -> str:
+    if float(seconds).is_integer():
+        return f"{int(seconds)}s"
+    return f"{seconds:g}s"
+
+
+def attempt_suffix(attempt_index: int) -> str:
+    if attempt_index <= 1:
+        return ""
+    if attempt_index == 2:
+        return "-retry"
+    return f"-retry{attempt_index - 1}"
+
+
+def attempt_filename(filename: str, attempt_index: int) -> str:
+    suffix = attempt_suffix(attempt_index)
+    if not suffix:
+        return filename
+    path = Path(filename)
+    return f"{path.stem}{suffix}{path.suffix}"
+
+
+def read_text_if_exists(path: Path | None) -> str:
+    if path is None or not path.exists():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
 
 
 def find_asciinema() -> Path | None:
@@ -550,6 +590,57 @@ class RunResult:
     details: dict[str, Any] = field(default_factory=dict)
 
 
+def _extract_cost_values(payload: Any) -> list[float]:
+    costs: list[float] = []
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                if isinstance(nested, (int, float)) and "cost" in key.lower():
+                    costs.append(float(nested))
+                else:
+                    walk(nested)
+            return
+        if isinstance(value, list):
+            for nested in value:
+                walk(nested)
+
+    walk(payload)
+    return costs
+
+
+def classify_failure(
+    narrative_log_path: Path | None,
+    debug_log_path: Path | None,
+    run_result: RunResult,
+) -> FailureClassification:
+    narrative_text = read_text_if_exists(narrative_log_path)
+    debug_text = read_text_if_exists(debug_log_path)
+    text = "\n".join(
+        part for part in [narrative_text, debug_text, run_result.output] if part
+    )
+    if "Not logged in" in text:
+        return "INFRA"
+    if "Please run /login" in text:
+        return "INFRA"
+    if re.search(r"rate limit", text, re.IGNORECASE):
+        return "INFRA"
+    if re.search(r"(?:429.{0,80}(?:throttle|rate)|(?:throttle|rate).{0,80}429)", text, re.IGNORECASE | re.DOTALL):
+        return "INFRA"
+
+    costs = _extract_cost_values(run_result.details)
+    zero_cost = any(abs(cost) <= 1e-9 for cost in costs)
+    smoking_gun = (
+        "Command failed with exit code 1" in text
+        and "Check stderr output for details" in text
+        and run_result.duration_s < INFRA_SMOKING_GUN_DURATION_S
+        and (zero_cost or not costs)
+    )
+    if smoking_gun:
+        return "INFRA"
+    return "FAIL"
+
+
 @dataclass
 class VerifyResult:
     passed: bool
@@ -560,9 +651,14 @@ class VerifyResult:
 @dataclass
 class ScenarioOutcome:
     scenario: "Scenario"
+    outcome: ScenarioStatus
     run_result: RunResult
     verify_result: VerifyResult
     artifact_dir: Path
+    recording_name: str = "recording.cast"
+    attempt_count: int = 1
+    wall_duration_s: float = 0.0
+    retried_after_infra: bool = False
 
 
 @dataclass
@@ -595,6 +691,7 @@ class ExecutionContext:
     repo: Path
     provider: str
     debug_log: Path
+    recording_path: Path
 
     @property
     def env(self) -> dict[str, str]:
@@ -680,6 +777,19 @@ def latest_session_dir(repo: Path) -> Path:
     if not latest.exists():
         raise AssertionError("otto_logs/latest not found")
     return latest.resolve()
+
+
+def latest_narrative_log(repo: Path) -> Path | None:
+    candidates: list[Path] = []
+    direct_latest = repo / "otto_logs" / "latest" / "build" / "narrative.log"
+    if direct_latest.exists():
+        candidates.append(direct_latest)
+    candidates.extend(repo.glob("otto_logs/sessions/*/build/narrative.log"))
+    candidates.extend(repo.glob(".worktrees/*/otto_logs/latest/build/narrative.log"))
+    candidates.extend(repo.glob(".worktrees/*/otto_logs/sessions/*/build/narrative.log"))
+    if not candidates:
+        return None
+    return max(candidates, key=lambda path: path.stat().st_mtime)
 
 
 def load_summary(repo: Path) -> dict[str, Any]:
@@ -1052,7 +1162,7 @@ def _base_result(returncode: int, output: str = "", **details: Any) -> RunResult
         started_at=details.pop("started_at", now_iso()),
         finished_at=details.pop("finished_at", now_iso()),
         duration_s=float(details.pop("duration_s", 0.0)),
-        recording_path=str(ctx.artifact_dir / "recording.cast"),
+        recording_path=str(ctx.recording_path),
         repo_path=str(ctx.repo),
         debug_log=str(ctx.debug_log),
         output=output,
@@ -2580,42 +2690,67 @@ def print_scenario_list() -> None:
 
 def print_summary(run_id: str, provider: str, mode: str, outcomes: list[ScenarioOutcome]) -> None:
     total_cost = sum(item.scenario.estimated_cost for item in outcomes)
-    total_secs = sum(item.run_result.duration_s or item.scenario.estimated_seconds for item in outcomes)
-    passed = sum(1 for item in outcomes if item.verify_result.passed)
+    total_secs = sum(item.wall_duration_s or item.run_result.duration_s or item.scenario.estimated_seconds for item in outcomes)
+    passed = sum(1 for item in outcomes if item.outcome == "PASS")
+    failed = [item for item in outcomes if item.outcome == "FAIL"]
+    infra = [item for item in outcomes if item.outcome == "INFRA"]
+
+    def format_result(status: ScenarioStatus) -> str:
+        if status == "INFRA":
+            return f"{INFRA_COLOR}INFRA{ANSI_RESET}"
+        return status
+
     print()
     print(f"otto-as-user run {run_id}")
     print(f"provider: {provider}   mode: {mode}   scenarios: {len(outcomes)}")
     print()
     print("ID  Description                                   Result  Cost   Duration  Artifact")
     for item in outcomes:
-        result = "PASS" if item.verify_result.passed else "FAIL"
+        result = format_result(item.outcome)
         artifact = item.artifact_dir.relative_to(DEFAULT_ARTIFACT_ROOT)
         print(
             f"{item.scenario.name:2}  {item.scenario.description[:43]:43}  "
-            f"{result:4}   ${item.scenario.estimated_cost:>4.2f}  "
-            f"{int(item.run_result.duration_s or item.scenario.estimated_seconds):>4}s     "
-            f"{artifact}/recording.cast"
+            f"{result:5}  ${item.scenario.estimated_cost:>4.2f}  "
+            f"{int(item.wall_duration_s or item.run_result.duration_s or item.scenario.estimated_seconds):>4}s     "
+            f"{artifact}/{item.recording_name}"
         )
     print()
     print(
-        f"Totals: {len(outcomes)} scenarios, {passed} PASS, {len(outcomes) - passed} FAIL\n"
+        f"Totals: {len(outcomes)} scenarios, {passed} PASS, {len(failed)} FAIL, {len(infra)} INFRA\n"
         f"Total estimated cost: ${total_cost:.2f}   Total wall: {int(total_secs // 60)}m {int(total_secs % 60):02d}s\n"
         f"Provider: {provider}"
     )
-    failed = [item for item in outcomes if not item.verify_result.passed]
     if failed:
         print("\nFailed scenarios:")
         for item in failed:
             rel = item.artifact_dir.relative_to(DEFAULT_ARTIFACT_ROOT)
             print(f"  {item.scenario.name}: {item.verify_result.note}")
-            print(f"  -> see {rel}/{{recording.cast,debug.log,run_result.json,verify.json}}")
-            print(f"  Replay: asciinema play {rel}/recording.cast")
+            print(f"  -> see {rel}/{{recording.cast,recording-retry.cast,debug.log,debug-retry.log,run_result.json,run_result-retry.json,verify.json,verify-retry.json}}")
+            print(f"  Replay: asciinema play {rel}/{item.recording_name}")
+    if infra:
+        print("\nInfra scenarios:")
+        for item in infra:
+            rel = item.artifact_dir.relative_to(DEFAULT_ARTIFACT_ROOT)
+            print(f"  {item.scenario.name}: {item.verify_result.note}")
+            print(f"  -> see {rel}/{{recording.cast,recording-retry.cast,debug.log,debug-retry.log,run_result.json,run_result-retry.json,verify.json,verify-retry.json}}")
+            print(f"  Replay: asciinema play {rel}/{item.recording_name}")
+        print(
+            f"\nTransient infra issues: {len(infra)} scenario(s) classified as INFRA; "
+            f"{'exiting 0 because no real FAIL outcomes were detected.' if not failed else 'these are excluded from FAIL totals.'}"
+        )
 
 
 def maybe_prune_artifacts(artifact_dir: Path, *, keep_failed_only: bool, passed: bool) -> None:
     if not keep_failed_only or not passed:
         return
-    keep_names = {"recording.cast", "run_result.json", "verify.json"}
+    keep_names = {
+        "recording.cast",
+        "recording-retry.cast",
+        "run_result.json",
+        "run_result-retry.json",
+        "verify.json",
+        "verify-retry.json",
+    }
     for child in artifact_dir.iterdir():
         if child.name in keep_names:
             continue
@@ -2625,15 +2760,25 @@ def maybe_prune_artifacts(artifact_dir: Path, *, keep_failed_only: bool, passed:
             child.unlink(missing_ok=True)
 
 
-def internal_run_scenario(scenario_id: str, repo_path: Path, artifact_dir: Path, provider: str) -> int:
+def internal_run_scenario(
+    scenario_id: str,
+    repo_path: Path,
+    artifact_dir: Path,
+    provider: str,
+    attempt_index: int = 1,
+) -> int:
     scenario = SCENARIOS[scenario_id]
+    recording_name = attempt_filename("recording.cast", attempt_index)
+    debug_name = attempt_filename("debug.log", attempt_index)
+    run_result_name = attempt_filename("run_result.json", attempt_index)
     global EXECUTION_CONTEXT
     EXECUTION_CONTEXT = ExecutionContext(
         scenario=scenario,
         artifact_dir=artifact_dir,
         repo=repo_path,
         provider=provider,
-        debug_log=artifact_dir / "debug.log",
+        debug_log=artifact_dir / debug_name,
+        recording_path=artifact_dir / recording_name,
     )
     artifact_dir.mkdir(parents=True, exist_ok=True)
     try:
@@ -2646,26 +2791,32 @@ def internal_run_scenario(scenario_id: str, repo_path: Path, artifact_dir: Path,
             started_at=now_iso(),
             finished_at=now_iso(),
             duration_s=0.0,
-            recording_path=str(artifact_dir / "recording.cast"),
+            recording_path=str(artifact_dir / recording_name),
             repo_path=str(repo_path),
-            debug_log=str(artifact_dir / "debug.log"),
+            debug_log=str(artifact_dir / debug_name),
             output=traceback_text,
             details={"error": str(exc)},
         )
-        with (artifact_dir / "debug.log").open("a", encoding="utf-8") as handle:
+        with (artifact_dir / debug_name).open("a", encoding="utf-8") as handle:
             handle.write(traceback_text)
-        write_json(artifact_dir / "run_result.json", asdict(result))
+        write_json(artifact_dir / run_result_name, asdict(result))
         return 1
-    write_json(artifact_dir / "run_result.json", asdict(result))
+    write_json(artifact_dir / run_result_name, asdict(result))
     return 0 if result.returncode == 0 else 1
 
 
-def record_one_scenario(asciinema_bin: Path, scenario: Scenario, run_id: str, provider: str) -> ScenarioOutcome:
-    artifact_dir = DEFAULT_ARTIFACT_ROOT / run_id / scenario.name
-    repo_path = Path(tempfile.mkdtemp(prefix=f"o{scenario.name.lower()}-", dir="/tmp"))
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-    scenario.setup(repo_path, provider)
-
+def run_one_scenario_attempt(
+    asciinema_bin: Path,
+    scenario: Scenario,
+    provider: str,
+    repo_path: Path,
+    artifact_dir: Path,
+    *,
+    attempt_index: int,
+) -> tuple[RunResult, VerifyResult, str]:
+    recording_name = attempt_filename("recording.cast", attempt_index)
+    run_result_name = attempt_filename("run_result.json", attempt_index)
+    verify_name = attempt_filename("verify.json", attempt_index)
     internal_cmd = [
         str(PYTHON_BIN if PYTHON_BIN.exists() else Path(sys.executable)),
         str(Path(__file__).resolve()),
@@ -2674,8 +2825,9 @@ def record_one_scenario(asciinema_bin: Path, scenario: Scenario, run_id: str, pr
         str(repo_path),
         str(artifact_dir),
         provider,
+        str(attempt_index),
     ]
-    cast_path = artifact_dir / "recording.cast"
+    cast_path = artifact_dir / recording_name
     rec_launcher = [str(asciinema_bin)]
     is_shim = asciinema_bin.suffix == ".py"
     if is_shim:
@@ -2702,7 +2854,7 @@ def record_one_scenario(asciinema_bin: Path, scenario: Scenario, run_id: str, pr
             str(cast_path),
         ]
     result = subprocess.run(rec_cmd, cwd=REPO_ROOT, text=True)
-    run_result_path = artifact_dir / "run_result.json"
+    run_result_path = artifact_dir / run_result_name
     if run_result_path.exists():
         run_result = RunResult(**read_json(run_result_path))
     else:
@@ -2712,19 +2864,102 @@ def record_one_scenario(asciinema_bin: Path, scenario: Scenario, run_id: str, pr
             started_at=now_iso(),
             finished_at=now_iso(),
             duration_s=float(scenario.estimated_seconds),
-            recording_path=str(artifact_dir / "recording.cast"),
+            recording_path=str(artifact_dir / recording_name),
             repo_path=str(repo_path),
-            debug_log=str(artifact_dir / "debug.log"),
+            debug_log=str(artifact_dir / attempt_filename("debug.log", attempt_index)),
             output="run_result.json missing",
             details={},
         )
     verify_result = scenario.verify(repo_path, run_result)
-    write_json(artifact_dir / "verify.json", asdict(verify_result))
+    write_json(artifact_dir / verify_name, asdict(verify_result))
+    return run_result, verify_result, recording_name
+
+
+def record_one_scenario(asciinema_bin: Path, scenario: Scenario, run_id: str, provider: str) -> ScenarioOutcome:
+    artifact_dir = DEFAULT_ARTIFACT_ROOT / run_id / scenario.name
+    repo_path = Path(tempfile.mkdtemp(prefix=f"o{scenario.name.lower()}-", dir="/tmp"))
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    scenario.setup(repo_path, provider)
+
+    first_run_result, first_verify_result, first_recording_name = run_one_scenario_attempt(
+        asciinema_bin,
+        scenario,
+        provider,
+        repo_path,
+        artifact_dir,
+        attempt_index=1,
+    )
+    if first_verify_result.passed:
+        return ScenarioOutcome(
+            scenario=scenario,
+            outcome="PASS",
+            run_result=first_run_result,
+            verify_result=first_verify_result,
+            artifact_dir=artifact_dir,
+            recording_name=first_recording_name,
+            wall_duration_s=first_run_result.duration_s,
+        )
+
+    first_classification = classify_failure(
+        latest_narrative_log(repo_path),
+        Path(first_run_result.debug_log),
+        first_run_result,
+    )
+    if first_classification != "INFRA":
+        return ScenarioOutcome(
+            scenario=scenario,
+            outcome="FAIL",
+            run_result=first_run_result,
+            verify_result=first_verify_result,
+            artifact_dir=artifact_dir,
+            recording_name=first_recording_name,
+            wall_duration_s=first_run_result.duration_s,
+        )
+
+    print(
+        f"[{scenario.name}] INFRA detected; sleeping {format_seconds_for_log(INFRA_RETRY_DELAY_S)} "
+        f"and retrying (attempt 2/{INFRA_RETRY_ATTEMPTS})",
+        flush=True,
+    )
+    time.sleep(INFRA_RETRY_DELAY_S)
+    retry_run_result, retry_verify_result, retry_recording_name = run_one_scenario_attempt(
+        asciinema_bin,
+        scenario,
+        provider,
+        repo_path,
+        artifact_dir,
+        attempt_index=2,
+    )
+    wall_duration_s = first_run_result.duration_s + INFRA_RETRY_DELAY_S + retry_run_result.duration_s
+    if retry_verify_result.passed:
+        retry_verify_result.note = f"{retry_verify_result.note} (retried after INFRA error)"
+        return ScenarioOutcome(
+            scenario=scenario,
+            outcome="PASS",
+            run_result=retry_run_result,
+            verify_result=retry_verify_result,
+            artifact_dir=artifact_dir,
+            recording_name=retry_recording_name,
+            attempt_count=2,
+            wall_duration_s=wall_duration_s,
+            retried_after_infra=True,
+        )
+
+    retry_classification = classify_failure(
+        latest_narrative_log(repo_path),
+        Path(retry_run_result.debug_log),
+        retry_run_result,
+    )
     return ScenarioOutcome(
         scenario=scenario,
-        run_result=run_result,
-        verify_result=verify_result,
+        outcome=retry_classification,
+        run_result=retry_run_result,
+        verify_result=retry_verify_result,
         artifact_dir=artifact_dir,
+        recording_name=retry_recording_name,
+        attempt_count=2,
+        wall_duration_s=wall_duration_s,
+        retried_after_infra=True,
     )
 
 
@@ -2734,6 +2969,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--provider", choices=["claude", "codex"], default="claude")
     parser.add_argument("--scenario", help="Comma-separated scenario ids, e.g. A1,B3,C1")
     parser.add_argument("--group", help="Comma-separated group ids, e.g. A,B,D,U")
+    parser.add_argument("--scenario-delay", type=float, default=DEFAULT_SCENARIO_DELAY_S)
     parser.add_argument("--keep-failed-only", action="store_true")
     parser.add_argument("--bail-fast", action="store_true")
     parser.add_argument("--list", action="store_true")
@@ -2743,35 +2979,44 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main(argv: list[str]) -> int:
     if argv and argv[0] == "_internal-run":
-        if len(argv) != 5:
-            raise SystemExit("usage: _internal-run <scenario> <repo> <artifact_dir> <provider>")
-        return internal_run_scenario(argv[1], Path(argv[2]), Path(argv[3]), argv[4])
+        if len(argv) not in {5, 6}:
+            raise SystemExit("usage: _internal-run <scenario> <repo> <artifact_dir> <provider> [attempt_index]")
+        attempt_index = int(argv[5]) if len(argv) == 6 else 1
+        return internal_run_scenario(argv[1], Path(argv[2]), Path(argv[3]), argv[4], attempt_index)
 
     args = parse_args(argv)
     if args.list:
         print_scenario_list()
         return 0
+    if args.scenario_delay < 0:
+        raise SystemExit("--scenario-delay must be >= 0")
 
     scenarios = select_scenarios(mode=args.mode, scenario_csv=args.scenario, group_csv=args.group)
     asciinema_bin = install_asciinema()
     run_id = utc_run_id()
     outcomes: list[ScenarioOutcome] = []
-    for scenario in scenarios:
+    for index, scenario in enumerate(scenarios):
         print(f"\n=== {scenario.name} {scenario.description} ===", flush=True)
         outcome = record_one_scenario(asciinema_bin, scenario, run_id, args.provider)
         outcomes.append(outcome)
         maybe_prune_artifacts(
             outcome.artifact_dir,
             keep_failed_only=args.keep_failed_only,
-            passed=outcome.verify_result.passed,
+            passed=outcome.outcome == "PASS",
         )
-        status = "PASS" if outcome.verify_result.passed else "FAIL"
+        status = outcome.outcome
         print(f"[{scenario.name}] {status}: {outcome.verify_result.note}", flush=True)
-        if args.bail_fast and not outcome.verify_result.passed:
+        if args.bail_fast and outcome.outcome == "FAIL":
             break
+        if index < len(scenarios) - 1:
+            print(
+                f"[scenario-delay] sleeping {format_seconds_for_log(args.scenario_delay)} before next scenario",
+                flush=True,
+            )
+            time.sleep(args.scenario_delay)
 
     print_summary(run_id, args.provider, args.mode, outcomes)
-    return 0 if all(item.verify_result.passed for item in outcomes) else 1
+    return 1 if any(item.outcome == "FAIL" for item in outcomes) else 0
 
 
 if __name__ == "__main__":
