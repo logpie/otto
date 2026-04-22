@@ -7,6 +7,7 @@ When debugging otto runs, ALWAYS read real logs. Never guess.
 ### Quick diagnosis
 ```bash
 otto history                                          # Build history with results
+otto pow                                              # Open latest proof-of-work report
 cat otto_logs/cross-sessions/history.jsonl            # Machine-readable history
 readlink otto_logs/latest                             # Most recent session
 readlink otto_logs/paused                             # Resumable session (if any)

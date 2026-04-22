@@ -347,6 +347,8 @@ otto merge --all --target develop             # target other than default_branch
 otto merge --all --no-certify                 # skip post-merge story verification
 otto merge --all --fast                       # pure git merge, bail on first conflict (no LLM)
 otto merge --all --cleanup-on-success         # remove worktrees after successful merge
+otto pow                                      # open the latest proof-of-work report
+otto pow 2026-04-21-010203-abcdef --print     # print one session's PoW path
 ```
 
 After all branches are merged, the certifier runs once against the post-merge tree on the merged story union. The merge-context preamble lets it skip stories whose feature has no overlap with the merge diff and flag genuine cross-branch contradictions for human review. Use `--no-certify` to skip this; `--full-verify` to test the full union without the skip option.
@@ -376,6 +378,16 @@ Show build history with results, cost, and duration.
 ```bash
 otto history             # show recent builds
 otto history -n 20       # show last 20 builds
+
+### `otto pow`
+
+Open the latest proof-of-work report, or print/open a specific session's report.
+
+```bash
+otto pow
+otto pow 2026-04-21-010203-abcdef
+otto pow 2026-04-21-010203-abcdef --print
+```
 ```
 
 ### `otto replay`

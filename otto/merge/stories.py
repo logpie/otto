@@ -38,7 +38,7 @@ def collect_stories_from_branches(
     """
     out: list[dict[str, Any]] = []
     for branch in branches:
-        manifest = _find_manifest_for_branch(
+        manifest = find_manifest_for_branch(
             project_dir=project_dir,
             branch=branch,
             queue_task_lookup=queue_task_lookup or {},
@@ -67,7 +67,7 @@ def collect_stories_from_branches(
     return out
 
 
-def _find_manifest_for_branch(
+def find_manifest_for_branch(
     *,
     project_dir: Path,
     branch: str,

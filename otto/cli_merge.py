@@ -213,6 +213,20 @@ def register_merge_command(main: click.Group) -> None:
         console.print()
         if result.success:
             console.print(f"  [success bold]Merge complete[/success bold] (id: {result.merge_id})")
+            if result.source_pow_paths or result.post_merge_pow_path:
+                console.print("  PoWs from this batch:")
+                if result.source_pow_paths:
+                    console.print("    Per-task:")
+                    for record in result.source_pow_paths:
+                        label = record.get("branch", "?")
+                        task_id = record.get("task_id")
+                        if task_id:
+                            label = f"{task_id} ({record['branch']})"
+                        console.print(
+                            f"      {label}:  {record.get('path', '(missing — see manifest for details)')}"
+                        )
+                if result.post_merge_pow_path:
+                    console.print(f"    Post-merge: {result.post_merge_pow_path}")
             if result.cert_story_results:
                 # Group cert verdicts inline. The cert prunes (SKIPPED) and
                 # flags contradictions (FLAG_FOR_HUMAN) itself via the

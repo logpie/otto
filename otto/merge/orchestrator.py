@@ -36,7 +36,7 @@ from otto.merge.state import (
     new_merge_id,
     write_state,
 )
-from otto.merge.stories import collect_stories_from_branches, dedupe_stories
+from otto.merge.stories import collect_stories_from_branches, dedupe_stories, find_manifest_for_branch
 
 logger = logging.getLogger("otto.merge.orchestrator")
 
@@ -62,6 +62,8 @@ class MergeRunResult:
     state: MergeState
     cert_passed: bool | None = None
     cert_story_results: list[dict[str, Any]] = field(default_factory=list)
+    source_pow_paths: list[dict[str, str]] = field(default_factory=list)
+    post_merge_pow_path: str | None = None
     note: str = ""
 
 
@@ -351,6 +353,62 @@ def _update_consolidated_conflict_outcomes(
     return updated_branches
 
 
+def _merged_from_labels(branches: list[str], queue_lookup: dict[str, str]) -> list[str]:
+    return [queue_lookup.get(branch, branch) for branch in branches]
+
+
+def _proof_of_work_html_from_manifest(manifest: dict[str, Any]) -> str | None:
+    pow_path = manifest.get("proof_of_work_path")
+    if not pow_path:
+        return None
+    return str(Path(str(pow_path)).with_name("proof-of-work.html").resolve())
+
+
+def _resolve_source_pow_paths(
+    project_dir: Path,
+    *,
+    branches: list[str],
+    queue_lookup: dict[str, str],
+) -> list[dict[str, str]]:
+    records: list[dict[str, str]] = []
+    for branch in branches:
+        task_id = queue_lookup.get(branch)
+        manifest = find_manifest_for_branch(
+            project_dir=project_dir,
+            branch=branch,
+            queue_task_lookup=queue_lookup,
+        )
+        record: dict[str, str] = {"branch": branch}
+        if task_id:
+            record["task_id"] = task_id
+        pow_html = _proof_of_work_html_from_manifest(manifest or {})
+        if pow_html:
+            record["path"] = pow_html
+        records.append(record)
+    return records
+
+
+def _annotate_merge_cert_summary(
+    project_dir: Path,
+    *,
+    run_id: str,
+    merged_from: list[str],
+) -> None:
+    from otto import paths
+
+    summary_path = paths.session_summary(project_dir, run_id)
+    if not summary_path.exists():
+        logger.warning("merge-cert summary missing for %s: %s", run_id, summary_path)
+        return
+    try:
+        summary = _read_json(summary_path)
+    except Exception as exc:
+        logger.warning("merge-cert summary unreadable for %s: %s", run_id, exc)
+        return
+    summary["merged_from"] = list(merged_from)
+    _atomic_write_json(summary_path, summary)
+
+
 def _graduate_merged_task_sessions(
     project_dir: Path, queue_lookup: dict[str, str],
 ) -> None:
@@ -536,11 +594,19 @@ async def _run_post_merge_verification(
     state.cert_passed = cert_passed
     state.cert_run_id = cert_report.run_id
     write_state(project_dir, state)
+    _annotate_merge_cert_summary(
+        project_dir,
+        run_id=cert_report.run_id,
+        merged_from=_merged_from_labels(branches, queue_lookup),
+    )
 
     return MergeRunResult(
         success=cert_passed, merge_id=merge_id, state=state,
         cert_passed=cert_passed,
         cert_story_results=list(cert_report.story_results),
+        post_merge_pow_path=str(
+            (project_dir / "otto_logs" / "sessions" / cert_report.run_id / "certify" / "proof-of-work.html").resolve()
+        ),
         note=(
             f"cert {'PASSED' if cert_passed else 'FAILED'} "
             f"({cert_report.outcome.value}); see otto_logs/sessions/{cert_report.run_id}/certify/proof-of-work.html"
@@ -840,6 +906,11 @@ async def _run_consolidated_agentic_merge(
             _graduate_merged_task_sessions(project_dir, queue_lookup)
         return MergeRunResult(
             success=True, merge_id=merge_id, state=state,
+            source_pow_paths=_resolve_source_pow_paths(
+                project_dir,
+                branches=branches,
+                queue_lookup=queue_lookup,
+            ),
             note="cert skipped per --no-certify",
         )
     result = await _run_post_merge_verification(
@@ -850,6 +921,11 @@ async def _run_consolidated_agentic_merge(
     )
     if result.success and options.cleanup_on_success:
         _graduate_merged_task_sessions(project_dir, queue_lookup)
+    result.source_pow_paths = _resolve_source_pow_paths(
+        project_dir,
+        branches=branches,
+        queue_lookup=queue_lookup,
+    )
     return result
 
 

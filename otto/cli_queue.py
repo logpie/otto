@@ -22,6 +22,7 @@ queued task from queue.yml when no watcher is running. The watcher
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -96,6 +97,22 @@ def _print_post_merge_preview(project_dir: Path, tasks, state) -> None:
 
 def _project_dir() -> Path:
     return Path.cwd()
+
+
+def _queue_manifest_pow_html(project_dir: Path, task_id: str, *, status: str) -> str:
+    """Return the user-facing PoW HTML path string for a queue task."""
+    manifest_path = project_dir / "otto_logs" / "queue" / task_id / "manifest.json"
+    if not manifest_path.exists():
+        return "(missing — see manifest for details)" if status == "done" else "(none yet)"
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return "(missing — see manifest for details)" if status == "done" else "(none yet)"
+    pow_json = manifest.get("proof_of_work_path")
+    if not pow_json:
+        return "(missing — see manifest for details)" if status == "done" else "(none yet)"
+    pow_html = Path(str(pow_json)).with_name("proof-of-work.html")
+    return str(pow_html.resolve()) if pow_html.exists() else "(missing — see manifest for details)"
 
 
 def _install_runner_logging(project_dir: Path, *, quiet: bool) -> None:
@@ -597,6 +614,10 @@ def register_queue_commands(main: click.Group) -> None:
             console.print(f"  [dim]Duration:[/dim] {ts['duration_s']:.1f}s")
         if ts.get("manifest_path"):
             console.print(f"  [dim]Manifest:[/dim] {ts['manifest_path']}")
+        console.print(
+            "  [dim]Proof-of-work:[/dim] "
+            f"{_queue_manifest_pow_html(project_dir, task_id, status=ts.get('status', 'queued'))}"
+        )
         if ts.get("failure_reason"):
             console.print(f"  [dim]Failure reason:[/dim] [red]{rich_escape(ts['failure_reason'])}[/red]")
         child = ts.get("child")

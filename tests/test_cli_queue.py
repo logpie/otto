@@ -10,6 +10,7 @@ from click.testing import CliRunner
 
 import otto.cli_queue as cli_queue_module
 from otto.cli import main
+from otto import paths
 from otto.queue.schema import (
     COMMANDS_FILE,
     QUEUE_FILE,
@@ -244,6 +245,34 @@ def test_queue_show_existing_task(tmp_path: Path):
     assert "csv-export" in out
     assert "queued" in out
     assert "Resumable: True" in out
+
+
+def test_queue_show_reports_proof_of_work_html_path(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    _run(["queue", "build", "csv export"], cwd=repo)
+    pow_json = paths.certify_dir(repo, "run-queue-show") / "proof-of-work.json"
+    pow_html = pow_json.with_name("proof-of-work.html")
+    pow_html.parent.mkdir(parents=True, exist_ok=True)
+    pow_json.write_text("{\"stories\": []}\n")
+    pow_html.write_text("<html></html>\n")
+    manifest_dir = repo / "otto_logs" / "queue" / "csv-export"
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    (manifest_dir / "manifest.json").write_text(json.dumps({
+        "run_id": "run-queue-show",
+        "proof_of_work_path": str(pow_json.resolve()),
+    }, indent=2))
+    _write_watcher_state(
+        repo,
+        watcher=None,
+        tasks={"csv-export": {"status": "done"}},
+    )
+
+    code, out, _ = _run(["queue", "show", "csv-export"], cwd=repo)
+
+    assert code == 0
+    assert "Proof-of-work:" in out
+    normalized = "".join(out.split())
+    assert str(pow_html.resolve()).replace(" ", "") in normalized
 
 
 def test_queue_show_unknown_task(tmp_path: Path):

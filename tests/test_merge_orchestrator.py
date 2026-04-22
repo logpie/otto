@@ -481,6 +481,66 @@ def test_post_merge_verification_full_verify_preserves_merge_context_flag(
     }
 
 
+def test_post_merge_verification_writes_merged_from_to_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    session_dir = tmp_path / "otto_logs" / "sessions" / "cert-merged"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "summary.json").write_text(json.dumps({
+        "run_id": "cert-merged",
+        "command": "certify",
+        "verdict": "passed",
+    }, indent=2))
+
+    monkeypatch.setattr(
+        "otto.merge.orchestrator.collect_stories_from_branches",
+        lambda **kwargs: [{"story_id": "story-a", "summary": "summary"}],
+    )
+    monkeypatch.setattr(
+        "otto.merge.orchestrator.dedupe_stories",
+        lambda stories: (stories, []),
+    )
+    monkeypatch.setattr(
+        "otto.merge.orchestrator.git_ops.changed_files_between",
+        lambda *args, **kwargs: ["app/csv.py"],
+    )
+    monkeypatch.setattr(
+        "otto.merge.orchestrator.git_ops.head_sha",
+        lambda *args, **kwargs: "new-head",
+    )
+    monkeypatch.setattr("otto.config.resolve_intent", lambda project_dir: "intent")
+
+    async def fake_run_agentic_certifier(**kwargs):
+        return CertificationReport(
+            outcome=CertificationOutcome.PASSED,
+            story_results=[{"story_id": "story-a", "verdict": "PASS", "passed": True}],
+            run_id="cert-merged",
+        )
+
+    monkeypatch.setattr("otto.certifier.run_agentic_certifier", fake_run_agentic_certifier)
+
+    state = MergeState(
+        merge_id="merge-test",
+        started_at="2026-04-20T00:00:00Z",
+        target="main",
+        target_head_before="old-head",
+    )
+    result = asyncio.run(_run_post_merge_verification(
+        project_dir=tmp_path,
+        config=_config_no_bookkeeping(),
+        options=MergeOptions(target="main"),
+        state=state,
+        merge_id="merge-test",
+        branches=["build/add-2026-04-21", "feature/random"],
+        queue_lookup={"build/add-2026-04-21": "add"},
+        target_head_before="old-head",
+    ))
+
+    assert result.success is True
+    summary = json.loads((session_dir / "summary.json").read_text())
+    assert summary["merged_from"] == ["add", "feature/random"]
+
+
 def test_merge_state_persisted_to_disk(tmp_path: Path):
     repo = _init_repo_with_gitattributes(tmp_path)
     _make_branch(repo, "feat-a", "a.txt", "A\n")

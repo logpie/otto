@@ -20,6 +20,19 @@ logger = logging.getLogger("otto.cli_logs")
 LEGACY_HISTORY_FILE = "otto_logs/run-history.jsonl"
 
 
+def _is_merge_cert_session(project_dir: Path, run_id: str) -> bool:
+    if not run_id:
+        return False
+    summary_path = paths.session_summary(project_dir, run_id)
+    if not summary_path.exists():
+        return False
+    try:
+        summary = json.loads(summary_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    return bool(summary.get("merged_from"))
+
+
 def _load_history_entries(project_dir: Path, *, limit_hint: int = 50) -> list[dict]:
     """Read history entries from new, legacy, and archived sources.
 
@@ -132,7 +145,7 @@ def register_history_command(main: click.Group) -> None:
         table = Table(show_header=True, box=None, pad_edge=False, show_edge=False, expand=False)
         table.add_column("#", width=3, justify="right")
         table.add_column("Date", width=12)
-        table.add_column("Cmd", width=14)
+        table.add_column("Cmd", width=24)
         table.add_column("Result", width=10)
         table.add_column("Stories", width=8, justify="right")
         table.add_column("Cost", width=8, justify="right", style="dim")
@@ -159,6 +172,8 @@ def register_history_command(main: click.Group) -> None:
             intent = entry.get("intent", entry.get("failure_summary", ""))
             rounds = entry.get("certify_rounds", 1)
             command_label = normalize_command_label(entry.get("command") or "build")
+            if _is_merge_cert_session(project_dir, str(entry.get("run_id") or "")):
+                command_label += " [merge-cert]"
 
             result_text = "PASS" if passed else "FAIL"
             result_style = "success" if passed else "red"
@@ -175,7 +190,7 @@ def register_history_command(main: click.Group) -> None:
             table.add_row(
                 str(num),
                 ts_str,
-                rich_escape(command_label[:14]),
+                rich_escape(command_label[:24]),
                 Text(result_text, style=result_style),
                 stories_str,
                 cost_str,

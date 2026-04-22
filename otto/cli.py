@@ -1782,6 +1782,10 @@ from otto.cli_logs import register_history_command, register_replay_command
 register_history_command(main)
 register_replay_command(main)
 
+# PoW command (registered from otto/cli_pow.py)
+from otto.cli_pow import register_pow_command
+register_pow_command(main)
+
 # Improve commands (registered from otto/cli_improve.py)
 from otto.cli_improve import register_improve_commands
 register_improve_commands(main)

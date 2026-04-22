@@ -85,3 +85,39 @@ def test_merge_allow_any_branch_flag_reaches_orchestrator(tmp_path: Path, monkey
 
     assert code == 0
     assert getattr(seen["options"], "allow_any_branch") is True
+
+
+def test_merge_summary_lists_batch_pow_paths(tmp_path: Path, monkeypatch):
+    repo = init_repo(tmp_path)
+
+    async def fake_run_merge(**kwargs):
+        return MergeRunResult(
+            success=True,
+            merge_id="merge-test",
+            state=MergeState(merge_id="merge-test", target="main", outcomes=[]),
+            source_pow_paths=[
+                {
+                    "task_id": "add",
+                    "branch": "build/add-2026-04-21",
+                    "path": "/tmp/add-proof-of-work.html",
+                },
+                {
+                    "task_id": "mul",
+                    "branch": "build/mul-2026-04-21",
+                    "path": "/tmp/mul-proof-of-work.html",
+                },
+            ],
+            post_merge_pow_path="/tmp/post-merge-proof-of-work.html",
+            note="ok",
+        )
+
+    monkeypatch.setattr("otto.merge.orchestrator.run_merge", fake_run_merge)
+
+    code, out = _run(["merge", "--all"], cwd=repo)
+
+    assert code == 0
+    assert "PoWs from this batch:" in out
+    assert "Per-task:" in out
+    assert "add (build/add-2026-04-21):  /tmp/add-proof-of-work.html" in out
+    assert "mul (build/mul-2026-04-21):  /tmp/mul-proof-of-work.html" in out
+    assert "Post-merge: /tmp/post-merge-proof-of-work.html" in out

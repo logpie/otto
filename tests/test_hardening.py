@@ -2238,6 +2238,67 @@ class TestHistoryOrdering:
         assert "certify" in result.output
         assert "build project" not in result.output
 
+    def test_history_command_tags_merge_cert_sessions(self, tmp_git_repo):
+        from click.testing import CliRunner
+        from otto.cli import main
+        from otto import paths
+
+        history_path = paths.history_jsonl(tmp_git_repo)
+        history_path.parent.mkdir(parents=True, exist_ok=True)
+        history_path.write_text(
+            json.dumps({
+                "run_id": "run-build",
+                "build_id": "run-build",
+                "command": "build",
+                "passed": True,
+                "stories_passed": 1,
+                "stories_tested": 1,
+                "timestamp": "2026-04-20T12:00:00Z",
+            }) + "\n" +
+            json.dumps({
+                "run_id": "run-cert-merge",
+                "build_id": "run-cert-merge",
+                "command": "certify",
+                "passed": True,
+                "stories_passed": 1,
+                "stories_tested": 1,
+                "timestamp": "2026-04-20T13:00:00Z",
+            }) + "\n"
+        )
+        paths.session_dir(tmp_git_repo, "run-build").mkdir(parents=True, exist_ok=True)
+        paths.session_summary(tmp_git_repo, "run-build").write_text(json.dumps({
+            "run_id": "run-build",
+            "command": "build",
+        }))
+        paths.session_dir(tmp_git_repo, "run-cert-merge").mkdir(parents=True, exist_ok=True)
+        paths.session_summary(tmp_git_repo, "run-cert-merge").write_text(json.dumps({
+            "run_id": "run-cert-merge",
+            "command": "certify",
+            "merged_from": ["add", "mul"],
+        }))
+
+        with patch("pathlib.Path.cwd", return_value=tmp_git_repo):
+            result = CliRunner().invoke(main, ["history"], catch_exceptions=False)
+
+        assert result.exit_code == 0
+        assert "certify [merge-cert]" in result.output
+        assert "build [merge-cert]" not in result.output
+
+    def test_pow_help_and_missing_session(self, tmp_git_repo):
+        from click.testing import CliRunner
+        from otto.cli import main
+
+        with patch("pathlib.Path.cwd", return_value=tmp_git_repo):
+            help_result = CliRunner().invoke(main, ["pow", "--help"], catch_exceptions=False)
+            missing_result = CliRunner().invoke(main, ["pow", "missing-session", "--print"], catch_exceptions=False)
+
+        assert help_result.exit_code == 0
+        assert "Open a proof-of-work report." in help_result.output
+        assert "[RUN_ID]" in help_result.output
+        assert "--print" in help_result.output
+        assert missing_result.exit_code == 1
+        assert "session not found: missing-session" in missing_result.output
+
 
 class TestResolveResume:
     """resolve_resume handles the four checkpoint states consistently."""
