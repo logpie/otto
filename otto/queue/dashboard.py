@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import shutil
 import subprocess
 import sys
@@ -18,7 +19,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from rich.text import Text
 from textual.app import App, ComposeResult
@@ -41,6 +42,11 @@ _PHASE_BUILD = "BUILD"
 _PHASE_CERTIFY = "CERTIFY"
 _STATUS_CANCELABLE = {"running"}
 _LOG_UNAVAILABLE_PLACEHOLDER = "<log file no longer available>"
+_TERMINAL_ESCAPE_RE = re.compile(
+    r"\x1b\[[0-9;?]*[ -/]*[@-~]"
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
+    r"|\x1b[NO]"
+)
 
 
 def _now_utc() -> datetime:
@@ -74,10 +80,36 @@ def _format_cost(cost: float | None, *, pending: bool = False) -> str:
 
 
 def _truncate(text: str, limit: int = 88) -> str:
-    cleaned = " ".join((text or "").split())
+    cleaned = " ".join(_strip_terminal_escapes(text).split())
     if len(cleaned) <= limit:
         return cleaned
     return cleaned[: max(0, limit - 1)] + "…"
+
+
+def _strip_terminal_escapes(text: str) -> str:
+    return _TERMINAL_ESCAPE_RE.sub("", text or "")
+
+
+def _render_dashboard_closed_notice(running_count: int) -> str | None:
+    if running_count <= 0:
+        return None
+    task_label = "task" if running_count == 1 else "tasks"
+    complete_label = "it completes" if running_count == 1 else "they complete"
+    return "\n".join(
+        [
+            "Dashboard closed. Watcher continues running in foreground.",
+            f"{running_count} {task_label} still running; this command will return when {complete_label}.",
+            "Press Ctrl-C to interrupt (twice for immediate stop).",
+        ]
+    )
+
+
+def _print_dashboard_closed_notice(running_count: int, *, stream: TextIO | None = None) -> bool:
+    message = _render_dashboard_closed_notice(running_count)
+    if message is None:
+        return False
+    print(message, file=stream or sys.stdout, flush=True)
+    return True
 
 
 def _safe_json(path: Path) -> dict[str, Any] | None:
@@ -469,7 +501,7 @@ class QueueModel:
         except OSError:
             return "-", default_phase
 
-        lines = [line.strip() for line in chunk.splitlines() if line.strip()]
+        lines = [_strip_terminal_escapes(line).strip() for line in chunk.splitlines() if line.strip()]
         last_line = lines[-1] if lines else "-"
         phase = infer_phase_from_narrative(
             lines,
@@ -575,7 +607,7 @@ class NarrativeTailer:
             parts = text.splitlines()
             self._pending = parts.pop() if parts else text
             lines = parts
-        return clear, lines
+        return clear, [_strip_terminal_escapes(line) for line in lines]
 
 
 class HelpModal(ModalScreen[None]):
@@ -669,9 +701,9 @@ class OverviewScreen(Screen[None]):
         footer = self._first_widget("#overview-status", Static)
         if footer is not None:
             footer.update(
-            f"{snapshot.running_count} running · {snapshot.queued_count} queued · "
-            f"{snapshot.done_count} done · {snapshot.total_count} total · "
-            "enter open · y yank · c cancel · ? help · q quit/drain"
+                f"{snapshot.running_count} running · {snapshot.queued_count} queued · "
+                f"{snapshot.done_count} done · {snapshot.total_count} total · "
+                "enter open · y yank · c cancel · ? help · q hide dashboard (watcher continues)"
             )
         self._sync_rows(snapshot.tasks)
 
@@ -792,7 +824,7 @@ class OverviewScreen(Screen[None]):
                     "Enter: open task detail",
                     "y: yank selected row to clipboard",
                     "c: queue cancel for selected running task",
-                    "q: quit dashboard; watcher drains running tasks, then exits",
+                    "q: hide dashboard; watcher continues until tasks complete (Ctrl-C to stop)",
                 ],
             )
         )
@@ -1120,6 +1152,7 @@ async def _run_dashboard_async(app: QueueApp, runner: Runner, *, quiet: bool) ->
                 return await runner_task
             if not runner_task.done():
                 runner.shutdown_level = runner.shutdown_level or "graceful"
+                _print_dashboard_closed_notice(app.model.snapshot().running_count)
                 return await runner_task
             return runner_task.result()
 

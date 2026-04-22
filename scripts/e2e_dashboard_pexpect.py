@@ -787,16 +787,25 @@ def scenario_s7(ctx: ScenarioContext) -> None:
         before = session.snapshot("s7-before-q")
         ctx.save_snapshot(before)
         session.send("q")
-        rc = session.wait(2.0)
-        if rc is None:
-            raise AssertionError("process still running 2s after q while tasks were in flight")
-        if rc != 0:
-            raise AssertionError(f"expected exit code 0 after q, got {rc}")
+        notice = wait_for_screen_text(session, "Dashboard closed.", timeout=3.0, label="post-quit notice")
+        ctx.save_snapshot(notice)
+        notice_text = strip_ansi(notice.screen_text)
+        if "2 tasks still running; this command will return when they complete." not in notice_text:
+            raise AssertionError(f"post-quit notice missing running-task count: {notice_text}")
+        if "Press Ctrl-C to interrupt (twice for immediate stop)." not in notice_text:
+            raise AssertionError(f"post-quit notice missing Ctrl-C guidance: {notice_text}")
+        if session.wait(2.0) is not None:
+            raise AssertionError("process exited before running tasks drained after q")
         wait_for(
             lambda: status_counts(ctx.repo).get("done", 0) == 2,
             timeout=15.0,
             label="tasks finished after dashboard quit",
         )
+        rc = session.wait(5.0)
+        if rc is None:
+            raise AssertionError("process was still running after drained tasks should have completed")
+        if rc != 0:
+            raise AssertionError(f"expected exit code 0 after drained shutdown, got {rc}")
     finally:
         session.terminate()
 
@@ -858,10 +867,10 @@ def scenario_s10(ctx: ScenarioContext) -> None:
         screen = strip_ansi(detail.screen_text)
         if "otto queue" not in screen:
             raise AssertionError("detail chrome was corrupted while tailing ANSI-bearing log")
-        if "\x1b[" in detail.raw_tail:
-            ansi_lines = [line for line in detail.raw_tail.splitlines() if "ANSI-RED" in line]
-            if ansi_lines and any("\x1b[" in line for line in ansi_lines):
-                raise AssertionError("raw ANSI escape codes from narrative leaked through terminal output")
+        if "[31m" in screen or "[0m" in screen:
+            raise AssertionError(f"rendered detail still showed raw ANSI fragments: {screen}")
+        if "\x1b[31mANSI-RED" in detail.raw_tail or "ANSI-RED\x1b[0m" in detail.raw_tail:
+            raise AssertionError("raw narrative ANSI escape codes leaked through terminal output")
     finally:
         session.terminate()
 

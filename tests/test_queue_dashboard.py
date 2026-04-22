@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from otto.queue.dashboard import (
     QueueApp,
     QueueModel,
     TaskDetailScreen,
+    _print_dashboard_closed_notice,
 )
 from otto.queue.runner import Runner
 from otto.queue.schema import QueueTask, append_task, write_state
@@ -431,6 +433,52 @@ def test_narrative_tailer_reads_new_bytes(tmp_path: Path):
     assert lines == ["[+0:01] next line"]
 
 
+def test_narrative_tailer_strips_terminal_escapes(tmp_path: Path):
+    narrative = tmp_path / "narrative.log"
+    narrative.write_text("[+0:00] \x1b[31mANSI-RED\x1b[0m visible\n")
+    tailer = NarrativeTailer(lambda: narrative)
+
+    clear, lines = tailer.poll()
+
+    assert clear is True
+    assert lines == ["[+0:00] ANSI-RED visible"]
+    assert "\x1b[" not in lines[0]
+
+
+def test_queue_model_strips_terminal_escapes_from_event_summary(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    append_task(repo, _queue_task("alpha", branch="build/alpha", worktree=".worktrees/alpha"))
+    _write_narrative(repo, "alpha", "[+0:00] \x1b[31mANSI-RED\x1b[0m visible\n")
+    _write_queue_state(repo, {"alpha": {"status": "running", "started_at": "2026-04-21T20:00:01Z"}})
+
+    snapshot = QueueModel(repo).snapshot()
+
+    assert snapshot.tasks[0].event == "[+0:00] ANSI-RED visible"
+    assert "\x1b[" not in snapshot.tasks[0].event
+
+
+def test_print_dashboard_closed_notice_for_running_tasks() -> None:
+    stream = io.StringIO()
+
+    printed = _print_dashboard_closed_notice(2, stream=stream)
+
+    assert printed is True
+    assert stream.getvalue() == (
+        "Dashboard closed. Watcher continues running in foreground.\n"
+        "2 tasks still running; this command will return when they complete.\n"
+        "Press Ctrl-C to interrupt (twice for immediate stop).\n"
+    )
+
+
+def test_print_dashboard_closed_notice_skips_clean_exit() -> None:
+    stream = io.StringIO()
+
+    printed = _print_dashboard_closed_notice(0, stream=stream)
+
+    assert printed is False
+    assert stream.getvalue() == ""
+
+
 def test_resolve_manifest_path_falls_back_when_mirror_is_stale(tmp_path: Path):
     repo = init_repo(tmp_path)
     append_task(repo, _queue_task("alpha", branch="build/alpha", worktree=".worktrees/alpha"))
@@ -652,9 +700,13 @@ async def test_help_overlay_appears(tmp_path: Path):
     app = _build_app(repo)
     async with app.run_test() as pilot:
         await pilot.pause()
+        status = app.screen.query_one("#overview-status", Static)
+        assert "q hide dashboard (watcher continues)" in str(status.content)
         await pilot.press("?")
         await pilot.pause()
         assert isinstance(app.screen, HelpModal)
+        help_body = app.screen.query_one("#help-body", Static)
+        assert "q: hide dashboard; watcher continues until tasks complete (Ctrl-C to stop)" in str(help_body.content)
 
 
 @pytest.mark.asyncio
