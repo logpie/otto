@@ -70,6 +70,7 @@ SUPPORTED_PROVIDERS = {"claude", "codex"}
 SUPPORTED_CERTIFIER_MODES = ("fast", "standard", "thorough", "hillclimb", "target")
 _REPO_STATE_MARKERS: tuple[tuple[str, str], ...] = (
     ("MERGE_HEAD", "merge in progress"),
+    ("REBASE_HEAD", "rebase in progress"),
     ("rebase-merge", "rebase in progress"),
     ("rebase-apply", "rebase/apply in progress"),
     ("CHERRY_PICK_HEAD", "cherry-pick in progress"),
@@ -448,17 +449,6 @@ def repo_preflight_issues(project_dir: Path) -> dict[str, list[str]]:
             f"`git diff --cached --quiet` failed: {stderr or 'unknown git error'}"
         )
 
-    status = _run_git(project_dir, "status", "--porcelain", "--untracked-files=all")
-    if status.returncode != 0:
-        stderr = (status.stderr or "").strip()
-        blocking_issues.append(
-            f"`git status --porcelain` failed: {stderr or 'unknown git error'}"
-        )
-    else:
-        porcelain_lines = [line for line in status.stdout.splitlines() if line.strip()]
-        if any(line.startswith("?? ") for line in porcelain_lines):
-            dirty_issues.append("working tree has untracked files")
-
     unmerged = _run_git(project_dir, "diff", "--name-only", "--diff-filter=U")
     if unmerged.returncode != 0:
         stderr = (unmerged.stderr or "").strip()
@@ -495,7 +485,7 @@ def ensure_safe_repo_state(project_dir: Path, *, allow_dirty: bool = False) -> N
     suffix = (
         "Resolve the repo state above before running Otto."
         if allow_dirty and blocking
-        else "Re-run with `--allow-dirty` only if you intentionally want Otto to proceed on a dirty tree."
+        else "Re-run with `--allow-dirty` only if you intentionally want Otto to proceed with tracked modifications, staged changes, or an in-progress git operation."
     )
     raise ConfigError(
         "Refusing to run Otto in the current git state:\n"

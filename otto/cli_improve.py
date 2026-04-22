@@ -507,7 +507,7 @@ def register_improve_commands(main: click.Group) -> None:
     @click.option("--thorough", is_flag=True, help="Bug certification depth (default)")
     @click.option("--strict", is_flag=True, help="Require two consecutive PASS rounds before stopping")
     @click.option("--verbose", is_flag=True, help="Show detailed live progress, including tool-call counts")
-    @click.option("--allow-dirty", is_flag=True, help="Proceed even if the repo has local modifications or untracked files")
+    @click.option("--allow-dirty", is_flag=True, help="Proceed even if the repo has tracked modifications, staged changes, or an in-progress git operation")
     @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
     @click.option("--force", is_flag=True, help="Override resume checkpoint mismatch checks")
     def bugs(focus, rounds, split, resume, budget, max_turns, model, provider, effort, fast, standard, thorough, strict, verbose, allow_dirty, break_lock, force):
@@ -568,7 +568,7 @@ def register_improve_commands(main: click.Group) -> None:
     @click.option("--effort", default=None, help="Override effort level for every agent: low | medium | high | max")
     @click.option("--strict", is_flag=True, help="Require two consecutive PASS rounds before stopping")
     @click.option("--verbose", is_flag=True, help="Show detailed live progress, including tool-call counts")
-    @click.option("--allow-dirty", is_flag=True, help="Proceed even if the repo has local modifications or untracked files")
+    @click.option("--allow-dirty", is_flag=True, help="Proceed even if the repo has tracked modifications, staged changes, or an in-progress git operation")
     @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
     @click.option("--force", is_flag=True, help="Override resume checkpoint mismatch checks")
     def feature(focus, rounds, split, resume, budget, max_turns, model, provider, effort, strict, verbose, allow_dirty, break_lock, force):
@@ -622,7 +622,7 @@ def register_improve_commands(main: click.Group) -> None:
     @click.option("--effort", default=None, help="Override effort level for every agent: low | medium | high | max")
     @click.option("--strict", is_flag=True, help="Require two consecutive PASS rounds before stopping")
     @click.option("--verbose", is_flag=True, help="Show detailed live progress, including tool-call counts")
-    @click.option("--allow-dirty", is_flag=True, help="Proceed even if the repo has local modifications or untracked files")
+    @click.option("--allow-dirty", is_flag=True, help="Proceed even if the repo has tracked modifications, staged changes, or an in-progress git operation")
     @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
     @click.option("--force", is_flag=True, help="Override resume checkpoint mismatch checks")
     def target(goal, rounds, split, resume, budget, max_turns, model, provider, effort, strict, verbose, allow_dirty, break_lock, force):

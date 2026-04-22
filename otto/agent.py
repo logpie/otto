@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
+import signal
+import tempfile
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
+
+from otto.costs import build_cost_payload, normalize_usage
 
 _SDK_IMPORT_ERROR_MESSAGE = ""
 
@@ -123,6 +128,23 @@ class AgentOptions:
 # Backward-compatible name used throughout the codebase and tests.
 ClaudeAgentOptions = AgentOptions
 
+_CODEX_LIFECYCLE_EVENT_TYPES = frozenset({
+    "thread.started",
+    "thread.updated",
+    "thread.completed",
+    "turn.started",
+    "turn.updated",
+    "turn.completed",
+    "item.started",
+    "item.updated",
+    "item.completed",
+})
+_CODEX_LIFECYCLE_EVENT_PREFIXES = (
+    "thread.",
+    "turn.",
+    "item.",
+)
+
 
 def make_agent_options(
     project_dir: Path,
@@ -180,12 +202,19 @@ class AgentCallError(Exception):
     blank the session_id and ``otto build --resume`` would start a fresh
     agent session instead of continuing the existing SDK conversation.
     """
-    def __init__(self, reason: str, session_id: str = "", total_cost_usd: float = 0.0):
+    def __init__(
+        self,
+        reason: str,
+        session_id: str = "",
+        total_cost_usd: float | None = None,
+    ):
         from otto.redaction import redact_text
 
         self.reason = redact_text(reason)
         self.session_id = session_id
-        self.total_cost_usd = float(total_cost_usd or 0.0)
+        self.total_cost_usd = (
+            float(total_cost_usd) if isinstance(total_cost_usd, (int, float)) else None
+        )
         super().__init__(self.reason)
 
 
@@ -339,7 +368,7 @@ async def run_agent_with_timeout(
     on_terminal_event: Callable[[str], None] | None = None,
     verbose: bool = False,
     strict_mode: bool = False,
-) -> tuple[str, float, str, dict[str, Any]]:
+) -> tuple[str, float | None, str, dict[str, Any]]:
     """Run an agent query with streaming session logs, timeout, and orphan cleanup.
 
     Returns (text, cost, session_id, breakdown_data) on success.
@@ -371,7 +400,7 @@ async def run_agent_with_timeout(
     agent_state: dict[str, Any] = {
         "session_id": "",
         "child_session_ids": [],
-        "total_cost_usd": 0.0,
+        "total_cost_usd": None,
     }
 
     def _append_narrative(line: str) -> None:
@@ -436,17 +465,23 @@ async def run_agent_with_timeout(
             raise AgentCallError(
                 str(reason),
                 session_id=session_id,
-                total_cost_usd=float(cost or 0.0),
+                total_cost_usd=cost,
             )
         child_session_ids = [
             sid for sid in agent_state.get("child_session_ids", []) or []
             if sid and sid != session_id
         ]
+        cost_payload = build_cost_payload(
+            provider=_provider_name(options),
+            total_cost_usd=cost,
+            usage=getattr(result_msg, "usage", None),
+        )
         breakdown_data = {
             "round_timings": narrative.round_timings(),
             "build_duration_s": narrative.build_duration_or_none(),
             "recovered_tool_errors": 0,
             "child_session_ids": child_session_ids,
+            "cost": cost_payload,
         }
         phase = (phase_name or "").lower()
         finalize_breakdown: dict[str, dict[str, float | int]] | None = None
@@ -478,14 +513,15 @@ async def run_agent_with_timeout(
                 }
             }
         elif phase == "spec":
-            finalize_breakdown = {
-                "spec": {
-                    "duration_s": narrative.elapsed_seconds(),
-                    "cost_usd": float(cost or 0.0),
-                }
-            }
+            finalize_breakdown = {"spec": {"duration_s": narrative.elapsed_seconds()}}
+            if isinstance(cost, (int, float)):
+                finalize_breakdown["spec"]["cost_usd"] = float(cost)
         if phase == "build" and finalize_breakdown is not None:
-            estimated_costs = estimate_phase_costs(log_dir / "messages.jsonl", float(cost or 0.0))
+            estimated_costs = (
+                estimate_phase_costs(log_dir / "messages.jsonl", float(cost))
+                if isinstance(cost, (int, float))
+                else None
+            )
             if estimated_costs:
                 for phase_name, phase_costs in estimated_costs.items():
                     if phase_name in finalize_breakdown:
@@ -514,7 +550,7 @@ async def run_agent_with_timeout(
         raise AgentCallError(
             f"Timed out after {timeout}s",
             session_id=agent_state.get("session_id", ""),
-            total_cost_usd=float(agent_state.get("total_cost_usd", 0.0) or 0.0),
+            total_cost_usd=agent_state.get("total_cost_usd"),
         )
     except KeyboardInterrupt:
         _append_narrative("\u2501\u2501\u2501 KeyboardInterrupt")
@@ -535,7 +571,7 @@ async def run_agent_with_timeout(
         raise AgentCallError(
             f"Agent crashed: {exc}",
             session_id=agent_state.get("session_id", ""),
-            total_cost_usd=float(agent_state.get("total_cost_usd", 0.0) or 0.0),
+            total_cost_usd=agent_state.get("total_cost_usd"),
         )
     finally:
         if heartbeat_task is not None:
@@ -598,11 +634,285 @@ def _codex_prompt(prompt: str, options: AgentOptions) -> str:
     parts: list[str] = []
     if isinstance(options.system_prompt, str) and options.system_prompt.strip():
         parts.append(options.system_prompt.strip())
+    elif isinstance(options.system_prompt, dict):
+        preset = str(options.system_prompt.get("preset", "") or "").strip()
+        prompt_type = str(options.system_prompt.get("type", "") or "").strip()
+        if not (prompt_type == "preset" and preset == "claude_code"):
+            raise NotImplementedError(
+                "codex provider does not support structured system_prompt presets "
+                f"({options.system_prompt!r})"
+            )
     compat = _codex_compat_prelude(options)
     if compat:
         parts.append(compat)
     parts.append(prompt)
     return "\n\n".join(part for part in parts if part).strip()
+
+
+def _remember_session_id(state: dict[str, Any] | None, session_id: str) -> None:
+    if state is None or not session_id:
+        return
+    state["session_id"] = session_id
+    seen = state.setdefault("seen_session_ids", set())
+    if isinstance(seen, set):
+        seen.add(session_id)
+        state["child_session_ids"] = sorted(seen)
+
+
+def _codex_event_payload(event: dict[str, Any]) -> dict[str, Any]:
+    payload = event.get("params")
+    if isinstance(payload, dict):
+        return payload
+    return event
+
+
+def _codex_event_name(event: dict[str, Any]) -> str:
+    raw = event.get("type") or event.get("method") or ""
+    return str(raw or "").replace("/", ".").strip()
+
+
+def _codex_event_item(event: dict[str, Any]) -> dict[str, Any]:
+    payload = _codex_event_payload(event)
+    item = payload.get("item")
+    return item if isinstance(item, dict) else {}
+
+
+def _codex_first_nonempty_str(*values: Any) -> str:
+    for value in values:
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def _codex_string_content(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts = [_codex_string_content(part) for part in value]
+        return "\n".join(part for part in parts if part)
+    if isinstance(value, dict):
+        for key in ("text", "content", "output_text", "summary_text", "reasoning_text", "value"):
+            if key in value:
+                text = _codex_string_content(value.get(key))
+                if text:
+                    return text
+        try:
+            return json.dumps(value, ensure_ascii=False, sort_keys=True)
+        except TypeError:
+            return str(value)
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _codex_item_type(item: dict[str, Any], payload: dict[str, Any]) -> str:
+    return str(
+        item.get("type")
+        or payload.get("item_type")
+        or payload.get("itemType")
+        or ""
+    ).replace("/", ".").strip()
+
+
+def _codex_item_id(item: dict[str, Any], payload: dict[str, Any]) -> str | None:
+    raw = (
+        item.get("id")
+        or item.get("item_id")
+        or item.get("tool_use_id")
+        or item.get("call_id")
+        or payload.get("call_id")
+        or payload.get("tool_use_id")
+        or payload.get("item_id")
+    )
+    return str(raw) if raw else None
+
+
+def _codex_parse_input(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, str):
+        stripped = raw.strip()
+        if not stripped:
+            return {}
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            return {"input": raw}
+        if isinstance(parsed, dict):
+            return parsed
+        return {"input": parsed}
+    return {}
+
+
+def _codex_tool_input(item: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    for candidate in (
+        item.get("input"),
+        item.get("arguments"),
+        payload.get("input"),
+        payload.get("arguments"),
+    ):
+        parsed = _codex_parse_input(candidate)
+        if parsed:
+            return parsed
+    if isinstance(item.get("function"), dict):
+        parsed = _codex_parse_input(item["function"].get("arguments"))
+        if parsed:
+            return parsed
+    return {}
+
+
+def _codex_tool_name(item: dict[str, Any], payload: dict[str, Any]) -> str:
+    raw_name = _codex_first_nonempty_str(
+        item.get("name"),
+        item.get("tool_name"),
+        item.get("toolName"),
+        item.get("namespace"),
+        payload.get("tool_name"),
+        payload.get("toolName"),
+        payload.get("namespace"),
+    )
+    item_type = _codex_item_type(item, payload)
+    lowered = (raw_name or item_type).strip().lower()
+    aliases = {
+        "agent": "Agent",
+        "collab_agent_spawn": "Agent",
+        "spawn_agent": "Agent",
+        "subagent": "Agent",
+        "thread_spawn": "Agent",
+        "bash": "Bash",
+        "command_execution": "Bash",
+        "exec_command": "Bash",
+        "exec_command_begin": "Bash",
+        "read": "Read",
+        "read_file": "Read",
+        "view": "Read",
+        "write": "Write",
+        "write_file": "Write",
+        "edit": "Edit",
+        "apply_patch": "Edit",
+        "glob": "Glob",
+        "list_files": "Glob",
+        "grep": "Grep",
+        "search": "Grep",
+        "web_search": "WebFetch",
+        "webfetch": "WebFetch",
+        "open_page": "WebFetch",
+        "find_in_page": "WebFetch",
+        "view_image": "View",
+    }
+    if lowered in aliases:
+        return aliases[lowered]
+    return raw_name or item_type or "Tool"
+
+
+def _codex_tool_result_content(item: dict[str, Any], payload: dict[str, Any]) -> str:
+    for candidate in (
+        item.get("aggregated_output"),
+        item.get("output_text"),
+        item.get("content"),
+        item.get("output"),
+        item.get("result"),
+        payload.get("aggregated_output"),
+        payload.get("output_text"),
+        payload.get("content"),
+        payload.get("output"),
+        payload.get("result"),
+        payload.get("structuredContent"),
+        payload.get("structured_content"),
+        payload.get("content_items"),
+    ):
+        text = _codex_string_content(candidate)
+        if text:
+            return text
+    return ""
+
+
+def _codex_tool_result_error(item: dict[str, Any], payload: dict[str, Any]) -> bool:
+    raw = (
+        item.get("is_error")
+        or item.get("isError")
+        or payload.get("is_error")
+        or payload.get("isError")
+    )
+    return bool(raw)
+
+
+def _codex_thinking_text(item: dict[str, Any], payload: dict[str, Any]) -> str:
+    return _codex_first_nonempty_str(
+        _codex_string_content(item.get("summary_text")),
+        _codex_string_content(item.get("reasoning_text")),
+        _codex_string_content(item.get("text")),
+        _codex_string_content(item.get("content")),
+        _codex_string_content(payload.get("summary_text")),
+        _codex_string_content(payload.get("reasoning_text")),
+        _codex_string_content(payload.get("text")),
+        _codex_string_content(payload.get("delta")),
+        _codex_string_content(payload.get("content")),
+    )
+
+
+def _codex_message_text(item: dict[str, Any], payload: dict[str, Any]) -> str:
+    return _codex_first_nonempty_str(
+        _codex_string_content(item.get("text")),
+        _codex_string_content(item.get("delta")),
+        _codex_string_content(item.get("content")),
+        _codex_string_content(payload.get("text")),
+        _codex_string_content(payload.get("delta")),
+        _codex_string_content(payload.get("content")),
+    )
+
+
+def _codex_subagent_input(item: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    tool_input = _codex_tool_input(item, payload)
+    if "prompt" not in tool_input:
+        prompt = _codex_first_nonempty_str(
+            _codex_string_content(item.get("prompt")),
+            _codex_string_content(payload.get("prompt")),
+        )
+        if prompt:
+            tool_input["prompt"] = prompt
+    if "subagent_type" not in tool_input:
+        subagent_type = _codex_first_nonempty_str(
+            item.get("agent_type"),
+            item.get("subagent_type"),
+            payload.get("agent_type"),
+            payload.get("subagent_type"),
+            payload.get("new_agent_role"),
+        )
+        if subagent_type:
+            tool_input["subagent_type"] = subagent_type
+    return tool_input
+
+
+def _codex_usage_payload(event: dict[str, Any]) -> dict[str, Any] | None:
+    payload = _codex_event_payload(event)
+    for candidate in (
+        payload.get("usage"),
+        payload.get("token_usage"),
+        event.get("usage"),
+        event.get("token_usage"),
+    ):
+        usage = normalize_usage(candidate, provider="codex")
+        if usage is not None:
+            return usage
+    return None
+
+
+def _codex_usage_cost(usage: dict[str, Any] | None) -> float | None:
+    if not isinstance(usage, dict):
+        return None
+    raw = usage.get("total_cost_usd")
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    return None
+
+
+def _codex_is_lifecycle_event(event_type: str | None) -> bool:
+    if not event_type:
+        return False
+    if event_type in _CODEX_LIFECYCLE_EVENT_TYPES:
+        return True
+    return any(event_type.startswith(prefix) for prefix in _CODEX_LIFECYCLE_EVENT_PREFIXES)
 
 
 def _sdk_options(options: AgentOptions | None) -> Any:
@@ -676,7 +986,7 @@ def _normalize_message(message: Any) -> Any | None:
             session_id=str(getattr(message, "session_id", "") or ""),
             result=getattr(message, "result", None),
             total_cost_usd=getattr(message, "total_cost_usd", None),
-            usage=getattr(message, "usage", None),
+            usage=normalize_usage(getattr(message, "usage", None), provider="claude"),
             structured_output=getattr(message, "structured_output", None),
         )
     if isinstance(message, UserMessage):
@@ -702,7 +1012,7 @@ def _normalize_message(message: Any) -> Any | None:
         return UserMessage(
             content=content,
             session_id=session_id,
-            usage=getattr(message, "usage", None),
+            usage=normalize_usage(getattr(message, "usage", None), provider="claude"),
         )
 
     if (_SDKAssistantMessage and isinstance(message, _SDKAssistantMessage)) or hasattr(message, "content"):
@@ -724,12 +1034,12 @@ def _normalize_message(message: Any) -> Any | None:
             return UserMessage(
                 content=content,
                 session_id=session_id,
-                usage=getattr(message, "usage", None),
+                usage=normalize_usage(getattr(message, "usage", None), provider="claude"),
             )
         return AssistantMessage(
             content=content,
             session_id=session_id,
-            usage=getattr(message, "usage", None),
+            usage=normalize_usage(getattr(message, "usage", None), provider="claude"),
         )
     return None
 
@@ -783,8 +1093,38 @@ async def _query_claude(
         os.environ.update(saved_env)
 
 
-def _codex_command(options: AgentOptions) -> list[str]:
-    command = ["codex", "exec"]
+def _codex_cli_config_args(options: AgentOptions) -> list[str]:
+    args: list[str] = []
+    if options.effort:
+        effort = str(options.effort).strip().lower()
+        effort = {"max": "xhigh"}.get(effort, effort)
+        if effort not in {"low", "medium", "high", "xhigh"}:
+            raise ValueError(f"Unsupported codex effort level: {options.effort!r}")
+        # The installed Codex CLI exposes reasoning effort through config,
+        # not a dedicated `exec` flag.
+        args.extend(["-c", f"model_reasoning_effort={json.dumps(effort)}"])
+    if options.max_turns is not None:
+        args.extend(["-c", f"num_turns={int(options.max_turns)}"])
+    if options.disallowed_tools:
+        args.extend(["-c", f"disabled_tools={json.dumps(list(options.disallowed_tools))}"])
+    if options.mcp_servers:
+        raise NotImplementedError(
+            "codex provider does not support per-call mcp_servers overrides via the installed CLI"
+        )
+    return args
+
+
+def _codex_search_enabled(options: AgentOptions) -> bool:
+    blocked = {str(tool).strip().lower() for tool in (options.disallowed_tools or []) if tool}
+    return "webfetch" not in blocked and "web_fetch" not in blocked
+
+
+def _codex_command(options: AgentOptions, *, output_schema_path: str | None = None) -> list[str]:
+    command = ["codex"]
+    if _codex_search_enabled(options):
+        command.append("--search")
+    command.extend(_codex_cli_config_args(options))
+    command.append("exec")
     if options.resume:
         command.extend(["resume", "--json"])
     else:
@@ -797,6 +1137,8 @@ def _codex_command(options: AgentOptions) -> list[str]:
         command.extend(["-m", options.model])
     if options.cwd and not options.resume:
         command.extend(["-C", options.cwd])
+    if output_schema_path:
+        command.extend(["--output-schema", output_schema_path])
     if options.resume:
         command.append(options.resume)
     command.append("-")
@@ -811,10 +1153,20 @@ async def _query_codex(
 ):
     opts = options or AgentOptions()
     env = dict(opts.env or {})
+    logger = logging.getLogger("otto.agent")
+    schema_path: str | None = None
+
+    if opts.output_format is not None:
+        fd, schema_path = tempfile.mkstemp(prefix="otto-codex-schema-", suffix=".json")
+        os.close(fd)
+        Path(schema_path).write_text(
+            json.dumps(opts.output_format, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
 
     try:
         process = await asyncio.create_subprocess_exec(
-            *_codex_command(opts),
+            *_codex_command(opts, output_schema_path=schema_path),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
@@ -842,7 +1194,9 @@ async def _query_codex(
     session_id = ""
     last_text = ""
     saw_result = False
+    completion_usage: dict[str, Any] | None = None
     raw_lines: list[str] = []
+    warned_unknown_events: set[str] = set()
 
     try:
         while True:
@@ -858,43 +1212,207 @@ async def _query_codex(
             except json.JSONDecodeError:
                 continue
 
-            event_type = event.get("type")
+            payload = _codex_event_payload(event)
+            event_type = _codex_event_name(event)
+
             if event_type == "thread.started":
-                session_id = str(event.get("thread_id", "") or "")
+                session_id = str(
+                    payload.get("thread_id")
+                    or payload.get("session_id")
+                    or event.get("thread_id")
+                    or ""
+                )
+                _remember_session_id(state, session_id)
                 continue
 
-            item = event.get("item") or {}
-            item_type = item.get("type")
-            if item_type == "agent_message" and event_type == "item.completed":
-                text = str(item.get("text", "") or "")
+            if event_type == "thread.completed":
+                usage = _codex_usage_payload(event)
+                if usage is not None:
+                    completion_usage = usage
+                continue
+
+            item = _codex_event_item(event)
+            item_type = _codex_item_type(item, payload)
+
+            if event_type in {"agent_message", "agent_message_delta"}:
+                text = _codex_message_text(item, payload)
                 if text:
                     last_text = text
-                    yield AssistantMessage(content=[TextBlock(text=text)])
+                    yield AssistantMessage(
+                        content=[TextBlock(text=text)],
+                        session_id=session_id,
+                        usage=_codex_usage_payload(event),
+                    )
                 continue
 
-            if item_type == "command_execution":
-                item_id = str(item.get("id", "") or "") or None
-                command = str(item.get("command", "") or "")
-                if event_type == "item.started":
-                    yield AssistantMessage(content=[ToolUseBlock(name="Bash", input={"command": command}, id=item_id)])
+            if item_type == "agent_message" and event_type == "item.completed":
+                text = _codex_message_text(item, payload)
+                if text:
+                    last_text = text
+                    yield AssistantMessage(
+                        content=[TextBlock(text=text)],
+                        session_id=session_id,
+                        usage=_codex_usage_payload(event),
+                    )
+                continue
+
+            if event_type in {
+                "agent_reasoning",
+                "agent_reasoning_delta",
+                "agent_reasoning_raw_content",
+                "agent_reasoning_raw_content_delta",
+                "reasoning_content_delta",
+            } or item_type in {"thinking", "reasoning"}:
+                thinking = _codex_thinking_text(item, payload)
+                if thinking:
+                    yield AssistantMessage(
+                        content=[TextBlock(text=f"[thinking] {thinking}")],
+                        session_id=session_id,
+                        usage=_codex_usage_payload(event),
+                    )
+                continue
+
+            if event_type == "exec_command_begin" or item_type == "command_execution":
+                # Repeated `git status` calls are typically Codex's own
+                # repo-state probes. Otto just records streamed tool events.
+                item_id = _codex_item_id(item, payload)
+                command = _codex_first_nonempty_str(
+                    _codex_string_content(item.get("command")),
+                    _codex_string_content(payload.get("parsed_cmd")),
+                    _codex_string_content(payload.get("command")),
+                )
+                if event_type in {"item.started", "exec_command_begin"}:
+                    yield AssistantMessage(
+                        content=[ToolUseBlock(name="Bash", input={"command": command}, id=item_id)],
+                        session_id=session_id,
+                        usage=_codex_usage_payload(event),
+                    )
                     continue
-                if event_type == "item.completed":
-                    output = str(item.get("aggregated_output", "") or "")
-                    yield AssistantMessage(content=[ToolResultBlock(content=output, tool_use_id=item_id)])
+                if event_type in {"item.completed", "exec_command_end"}:
+                    output = _codex_tool_result_content(item, payload)
+                    yield UserMessage(
+                        content=[ToolResultBlock(content=output, tool_use_id=item_id)],
+                        session_id=session_id,
+                        usage=_codex_usage_payload(event),
+                    )
                     continue
 
-            if event_type == "turn.completed":
+            if event_type in {"mcp_tool_call_begin", "dynamic_tool_call_request", "view_image_tool_call", "web_search_begin", "image_generation_begin", "collab_agent_spawn_begin"}:
+                tool_payload = dict(payload)
+                tool_payload.setdefault(
+                    "tool_name",
+                    event_type.removesuffix("_begin").removesuffix("_request"),
+                )
+                tool_name = _codex_tool_name(item, tool_payload)
+                if tool_name == "Agent":
+                    tool_input = _codex_subagent_input(item, tool_payload)
+                else:
+                    tool_input = _codex_tool_input(item, tool_payload)
+                if tool_name and tool_name != "Bash":
+                    yield AssistantMessage(
+                        content=[ToolUseBlock(name=tool_name, input=tool_input, id=_codex_item_id(item, tool_payload))],
+                        session_id=session_id,
+                        usage=_codex_usage_payload(event),
+                    )
+                    continue
+
+            if event_type in {"mcp_tool_call_end", "dynamic_tool_call_response", "web_search_end", "image_generation_end", "collab_agent_spawn_end"} and item_type in {"tool_result", "function_output", "tool_use", "function_call", "thread_spawn", "subagent"}:
+                tool_payload = dict(payload)
+                tool_payload.setdefault(
+                    "tool_name",
+                    event_type.removesuffix("_end").removesuffix("_response"),
+                )
+                tool_name = _codex_tool_name(item, tool_payload)
+                if tool_name == "Agent" and event_type in {"item.completed", "collab_agent_spawn_end"}:
+                    content = _codex_tool_result_content(item, tool_payload)
+                    yield UserMessage(
+                        content=[ToolResultBlock(content=content, tool_use_id=_codex_item_id(item, tool_payload), is_error=_codex_tool_result_error(item, tool_payload))],
+                        session_id=session_id,
+                        usage=_codex_usage_payload(event),
+                    )
+                    continue
+
+            if event_type in {"mcp_tool_call_end", "dynamic_tool_call_response", "web_search_end", "image_generation_end", "collab_agent_spawn_end"}:
+                tool_payload = dict(payload)
+                tool_payload.setdefault(
+                    "tool_name",
+                    event_type.removesuffix("_end").removesuffix("_response"),
+                )
+                yield UserMessage(
+                    content=[ToolResultBlock(
+                        content=_codex_tool_result_content(item, tool_payload),
+                        tool_use_id=_codex_item_id(item, tool_payload),
+                        is_error=_codex_tool_result_error(item, tool_payload),
+                    )],
+                    session_id=session_id,
+                    usage=_codex_usage_payload(event),
+                )
+                continue
+
+            if item_type in {"tool_use", "function_call", "thread_spawn", "subagent"}:
+                tool_name = _codex_tool_name(item, payload)
+                tool_input = _codex_subagent_input(item, payload) if tool_name == "Agent" else _codex_tool_input(item, payload)
+                if event_type == "item.started":
+                    yield AssistantMessage(
+                        content=[ToolUseBlock(name=tool_name, input=tool_input, id=_codex_item_id(item, payload))],
+                        session_id=session_id,
+                        usage=_codex_usage_payload(event),
+                    )
+                    continue
+                if event_type == "item.completed":
+                    content = _codex_tool_result_content(item, payload)
+                    yield UserMessage(
+                        content=[ToolResultBlock(content=content, tool_use_id=_codex_item_id(item, payload), is_error=_codex_tool_result_error(item, payload))],
+                        session_id=session_id,
+                        usage=_codex_usage_payload(event),
+                    )
+                    continue
+
+            if item_type in {"tool_result", "function_output"}:
+                yield UserMessage(
+                    content=[ToolResultBlock(
+                        content=_codex_tool_result_content(item, payload),
+                        tool_use_id=_codex_item_id(item, payload),
+                        is_error=_codex_tool_result_error(item, payload),
+                    )],
+                    session_id=session_id,
+                    usage=_codex_usage_payload(event),
+                )
+                continue
+
+            if event_type in {"turn.completed", "task_complete"}:
                 saw_result = True
+                usage = _codex_usage_payload(event) or completion_usage
+                if usage is not None:
+                    completion_usage = usage
                 yield ResultMessage(
                     subtype="success",
                     is_error=False,
                     session_id=session_id,
                     result=last_text or None,
-                    total_cost_usd=0.0,
-                    usage=event.get("usage"),
+                    total_cost_usd=_codex_usage_cost(usage),
+                    usage=usage,
                 )
+                continue
+
+            if _codex_is_lifecycle_event(event_type):
+                continue
+
+            if event_type and event_type not in warned_unknown_events:
+                warned_unknown_events.add(event_type)
+                logger.warning("Unhandled codex event type: %s", event_type)
 
         return_code = await process.wait()
+        if not saw_result and return_code == 0 and (completion_usage is not None or last_text):
+            yield ResultMessage(
+                subtype="success",
+                is_error=False,
+                session_id=session_id,
+                result=last_text or None,
+                total_cost_usd=_codex_usage_cost(completion_usage),
+                usage=completion_usage,
+            )
+            saw_result = True
         if not saw_result or return_code != 0:
             error_lines = raw_lines[-20:]
             error_text = "\n".join(error_lines) or f"codex exited with code {return_code}"
@@ -903,13 +1421,22 @@ async def _query_codex(
                 is_error=True,
                 session_id=session_id,
                 result=error_text,
-                total_cost_usd=0.0,
+                total_cost_usd=None,
                 usage=None,
             )
     finally:
         if process.returncode is None:
-            process.kill()
+            try:
+                if getattr(process, "pid", None):
+                    os.killpg(process.pid, signal.SIGKILL)
+            except OSError:
+                process.kill()
             await process.wait()
+        if schema_path:
+            try:
+                Path(schema_path).unlink()
+            except OSError:
+                pass
 
 
 async def query(
@@ -1001,7 +1528,7 @@ async def run_agent_query(
     on_message: Callable[[Any], Any] | None = None,
     capture_tool_output: bool = False,
     state: dict[str, Any] | None = None,
-) -> tuple[str, float, Any]:
+) -> tuple[str, float | None, Any]:
     """Run a provider query, dispatching normalized events to callbacks.
 
     If capture_tool_output=True, tool result content (including subagent output)
@@ -1018,7 +1545,7 @@ async def run_agent_query(
     a resumable checkpoint.
     """
     transcript = _TranscriptAccumulator(keep_tool_output=capture_tool_output)
-    cost = 0.0
+    cost: float | None = None
     result_msg = None
     subagent_dispatches = 0
     max_subagent_dispatches = getattr(options, "max_subagent_dispatches", None)
@@ -1032,7 +1559,7 @@ async def run_agent_query(
     async for message in message_iter:
         usage_cost = _usage_total_cost_usd(message)
         if usage_cost is not None:
-            cost = max(cost, usage_cost)
+            cost = max(cost, usage_cost) if cost is not None else usage_cost
             if state is not None:
                 state["total_cost_usd"] = cost
         # Capture session_id eagerly. Every SDK message type carries it,
@@ -1059,7 +1586,7 @@ async def run_agent_query(
             result_msg = message
             raw_cost = getattr(message, "total_cost_usd", None)
             if isinstance(raw_cost, (int, float)):
-                cost = max(cost, float(raw_cost))
+                cost = max(cost, float(raw_cost)) if cost is not None else float(raw_cost)
                 if state is not None:
                     state["total_cost_usd"] = cost
             if on_result:

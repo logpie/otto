@@ -2089,6 +2089,27 @@ class TestCommitArtifactsTimeout:
         assert all(t is not None and t > 0 for t in calls_with_timeout), \
             f"Expected all git calls to have timeout, got: {calls_with_timeout}"
 
+    def test_commit_artifacts_skips_missing_intent_file(self, tmp_git_repo):
+        """Missing project-root intent.md should not make git add fail."""
+        from otto.pipeline import _commit_artifacts
+
+        git_calls = []
+        original_run = subprocess.run
+
+        def patched_run(args, **kwargs):
+            if args and isinstance(args, list) and args[0] == "git":
+                git_calls.append(list(args))
+            return original_run(args, **kwargs)
+
+        with patch("otto.pipeline.subprocess.run", side_effect=patched_run), \
+             patch("otto.display.console.print") as print_mock:
+            _commit_artifacts(tmp_git_repo)
+
+        add_calls = [call for call in git_calls if call[:2] == ["git", "add"]]
+        assert add_calls, "Expected _commit_artifacts to stage at least one artifact"
+        assert all("intent.md" not in call for call in add_calls)
+        print_mock.assert_not_called()
+
 
 class TestCriticalWriteFailures:
     @pytest.mark.asyncio
@@ -2959,11 +2980,38 @@ class TestBuildResume:
         assert "--break-lock" in r.output
         assert "[INTENT]" in r.output  # intent is optional
 
-    def test_build_refuses_dirty_repo_without_allow_dirty(self, tmp_git_repo, monkeypatch):
+    def test_build_allows_untracked_files_without_allow_dirty(self, tmp_git_repo, monkeypatch):
         from click.testing import CliRunner
         from otto.cli import main
 
         (tmp_git_repo / "scratch.txt").write_text("dirty\n")
+        monkeypatch.chdir(tmp_git_repo)
+
+        with patch(
+            "otto.pipeline.build_agentic_v3",
+            return_value=BuildResult(
+                passed=True,
+                build_id="run-1",
+                total_cost=0.0,
+                total_duration=1.0,
+                tasks_passed=0,
+                tasks_failed=0,
+            ),
+        ) as build_agent:
+            result = CliRunner().invoke(
+                main,
+                ["build", "demo app", "--no-qa"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0
+        build_agent.assert_called_once()
+
+    def test_build_refuses_tracked_modifications_without_allow_dirty(self, tmp_git_repo, monkeypatch):
+        from click.testing import CliRunner
+        from otto.cli import main
+
+        (tmp_git_repo / "otto.yaml").write_text("provider: codex\n")
         monkeypatch.chdir(tmp_git_repo)
 
         with patch("otto.pipeline.build_agentic_v3") as build_agent:
@@ -2975,7 +3023,48 @@ class TestBuildResume:
 
         assert result.exit_code == 2
         assert "Refusing to run Otto in the current git state" in result.output
-        assert "untracked files" in result.output
+        assert "working tree has unstaged changes" in result.output
+        build_agent.assert_not_called()
+
+    def test_build_refuses_staged_changes_without_allow_dirty(self, tmp_git_repo, monkeypatch):
+        import subprocess
+
+        from click.testing import CliRunner
+        from otto.cli import main
+
+        (tmp_git_repo / "staged.txt").write_text("dirty\n")
+        subprocess.run(["git", "add", "staged.txt"], cwd=tmp_git_repo, check=True)
+        monkeypatch.chdir(tmp_git_repo)
+
+        with patch("otto.pipeline.build_agentic_v3") as build_agent:
+            result = CliRunner().invoke(
+                main,
+                ["build", "demo app", "--no-qa"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 2
+        assert "index has staged but uncommitted changes" in result.output
+        build_agent.assert_not_called()
+
+    def test_build_refuses_rebase_state_without_allow_dirty(self, tmp_git_repo, monkeypatch):
+        from click.testing import CliRunner
+        from otto.cli import main
+
+        git_dir = tmp_git_repo / ".git"
+        assert git_dir.exists()
+        (git_dir / "REBASE_HEAD").write_text("deadbeef\n")
+        monkeypatch.chdir(tmp_git_repo)
+
+        with patch("otto.pipeline.build_agentic_v3") as build_agent:
+            result = CliRunner().invoke(
+                main,
+                ["build", "demo app", "--no-qa"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 2
+        assert "repository has rebase in progress" in result.output
         build_agent.assert_not_called()
 
     def test_build_allow_dirty_opt_in_reaches_pipeline(self, tmp_git_repo, monkeypatch):
@@ -3566,6 +3655,44 @@ class TestCliProjectRootResolution:
         assert result.exit_code == 0
         assert captured["strict_mode"] is True
         assert captured["verbose"] is True
+
+    def test_spent_line_uses_codex_tokens_instead_of_dollars(self):
+        from otto.cli import _spent_line
+
+        result = BuildResult(
+            passed=True,
+            build_id="run-codex-1",
+            total_cost=0.0,
+            breakdown={"build": {"duration_s": 137.0}},
+            cost={
+                "provider": "codex",
+                "total_cost_usd": None,
+                "tokens_in": 40000,
+                "tokens_out": 2381,
+                "display": "42,381 tokens",
+            },
+        )
+
+        assert _spent_line(result, 137.0) == "Spent: 2:17 building  (total 42,381 tokens)"
+
+    def test_spent_line_uses_usage_unknown_for_codex_without_tokens(self):
+        from otto.cli import _spent_line
+
+        result = BuildResult(
+            passed=True,
+            build_id="run-codex-2",
+            total_cost=0.0,
+            breakdown={"build": {"duration_s": 137.0}},
+            cost={
+                "provider": "codex",
+                "total_cost_usd": None,
+                "tokens_in": None,
+                "tokens_out": None,
+                "display": "unknown",
+            },
+        )
+
+        assert _spent_line(result, 137.0) == "Spent: 2:17 building  (usage: unknown)"
 
     def test_cli_max_turns_callbacks_reject_values_above_cap(self):
         from otto.cli import _max_turns_option as build_max_turns_option

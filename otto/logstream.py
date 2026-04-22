@@ -38,6 +38,7 @@ from otto.agent import (
     UserMessage,
     tool_use_summary,
 )
+from otto.costs import build_cost_payload, format_status_metric, format_summary_metric
 from otto.markers import _STORY_RESULT_RE, _VERDICT_RE, _parse_story_result_fields
 from otto.redaction import redact_text
 
@@ -443,6 +444,7 @@ class NarrativeFormatter:
         total_elapsed: float,
         breakdown: dict[str, dict[str, Any]] | None,
         total_cost_usd: float | None,
+        usage: dict[str, Any] | None = None,
     ) -> str:
         if breakdown is None:
             breakdown = self._fallback_breakdown(total_elapsed)
@@ -452,6 +454,7 @@ class NarrativeFormatter:
             primary_phase=self._summary_label(),
         )
 
+        total_metric = build_cost_payload(total_cost_usd=total_cost_usd, usage=usage)
         parts: list[str] = []
         for phase in ("spec", "build", "certify"):
             phase_data = breakdown.get(phase)
@@ -470,8 +473,7 @@ class NarrativeFormatter:
             parts.append(segment)
 
         total_segment = "total="
-        if isinstance(total_cost_usd, int | float):
-            total_segment += f"${float(total_cost_usd):.2f} "
+        total_segment += f"{format_summary_metric(total_metric)} "
         total_segment += _format_elapsed_seconds(total_elapsed)
         parts.append(total_segment)
         return (
@@ -865,11 +867,18 @@ class NarrativeFormatter:
         total_elapsed = self._elapsed_seconds()
         if self._phase_name != "BUILD":
             self._write_phase_complete()
-        self._write_terminal_event(self._summary_line(total_elapsed, breakdown, message.total_cost_usd))
+        cost_payload = build_cost_payload(
+            total_cost_usd=message.total_cost_usd,
+            usage=message.usage,
+        )
+        self._write_terminal_event(
+            self._summary_line(total_elapsed, breakdown, message.total_cost_usd, message.usage)
+        )
         status = "ERROR" if message.is_error else message.subtype.upper()
-        cost = f" ${message.total_cost_usd:.2f}" if message.total_cost_usd else ""
         duration = f" in {self._elapsed_fmt()}"
-        self._write_terminal_event(f"{ts} \u2501\u2501\u2501 {status}{cost}{duration}")
+        self._write_terminal_event(
+            f"{ts} \u2501\u2501\u2501 {status} {format_status_metric(cost_payload)}{duration}"
+        )
         return {"recovered_tool_errors": self._recovered_tool_errors}
 
     def close(self) -> None:
@@ -1002,7 +1011,7 @@ def _looks_like_certifier_prompt(tool_input: Any) -> bool:
 
 def estimate_phase_costs(
     messages_jsonl: Path,
-    total_cost_usd: float,
+    total_cost_usd: float | None,
 ) -> dict[str, dict[str, Any]] | None:
     """Estimate build/certify cost split from assistant output-token share.
 
@@ -1010,7 +1019,7 @@ def estimate_phase_costs(
     certifier-shaped Agent dispatches. Missing files, malformed JSONL,
     missing usage, or zero-token runs return ``None``.
     """
-    if total_cost_usd <= 0 or not messages_jsonl.exists():
+    if not isinstance(total_cost_usd, int | float) or total_cost_usd <= 0 or not messages_jsonl.exists():
         return None
 
     build_tokens = 0

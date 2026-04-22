@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from otto.agent import AgentCallError
+from otto.costs import build_cost_payload, coerce_cost_payload
 from otto.logstream import normalize_phase_breakdown
 
 if TYPE_CHECKING:
@@ -36,6 +37,7 @@ class BuildResult:
     tasks_passed: int = 0
     tasks_failed: int = 0
     breakdown: dict[str, dict[str, Any]] = field(default_factory=dict)
+    cost: dict[str, Any] | None = None
 
 
 def _stories_to_journeys(stories: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -63,6 +65,7 @@ def _write_session_summary(
     intent: str = "",
     command: str = "build",
     breakdown: dict[str, dict[str, Any]] | None = None,
+    cost_info: dict[str, Any] | None = None,
 ) -> None:
     """Write the canonical summary artifact for a completed session.
 
@@ -88,6 +91,14 @@ def _write_session_summary(
         "rounds": rounds,
         "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+    resolved_cost = coerce_cost_payload(
+        cost_info,
+        total_cost_usd=float(cost) if isinstance(cost, int | float) and cost > 0 else None,
+    )
+    if resolved_cost is None and isinstance(cost, int | float) and cost > 0:
+        resolved_cost = build_cost_payload(provider="claude", total_cost_usd=float(cost))
+    if resolved_cost is not None:
+        summary["cost"] = resolved_cost
     if breakdown is not None:
         primary_phase = "build"
         if "build" not in breakdown:
@@ -472,7 +483,7 @@ async def build_agentic_v3(
         breakdown["build"] = {"duration_s": round(total_duration, 1)}
 
     estimated_phase_costs = None
-    if not skip_qa:
+    if not skip_qa and isinstance(cost, (int, float)):
         from otto.logstream import estimate_phase_costs
 
         estimated_phase_costs = estimate_phase_costs(build_dir / "messages.jsonl", cost)
@@ -530,6 +541,10 @@ async def build_agentic_v3(
     journeys = _stories_to_journeys(story_results)
 
     certifier_cost = float(cost or 0)
+    total_cost_info = coerce_cost_payload(
+        breakdown_data.get("cost"),
+        total_cost_usd=total_run_cost if total_run_cost > 0 else None,
+    )
 
     # Write PoW report
     try:
@@ -567,6 +582,7 @@ async def build_agentic_v3(
             metric_value=parsed.metric_value,
             metric_met=parsed.metric_met,
             round_timings=round_timings,
+            cost_info=total_cost_info,
         )
         _write_pow_report(report_dir, pow_data)
     except Exception as exc:
@@ -609,6 +625,7 @@ async def build_agentic_v3(
             intent=intent,
             command=command,
             breakdown=breakdown or None,
+            cost_info=total_cost_info,
         )
 
     logger.info("Agentic v3 done: %s, %d/%d stories, %.1fs, $%.2f",
@@ -668,6 +685,7 @@ async def build_agentic_v3(
         tasks_passed=sum(1 for j in journeys if j["passed"]),
         tasks_failed=sum(1 for j in journeys if not j["passed"]),
         breakdown=breakdown,
+        cost=total_cost_info,
     )
 
 
@@ -1362,13 +1380,17 @@ async def run_certify_fix_loop(
 
 
 def _commit_artifacts(project_dir: Path) -> None:
-    """Commit otto artifacts (intent.md, etc.) so agents see them."""
+    """Commit otto artifacts so agents see them."""
     git_timeout = 30  # seconds — prevent hang on locked repo
     from otto.display import console
 
     try:
+        artifacts_to_add = ["otto.yaml"]
+        if (project_dir / "intent.md").is_file():
+            artifacts_to_add.insert(0, "intent.md")
+
         add_result = subprocess.run(
-            ["git", "add", "intent.md", "otto.yaml"],
+            ["git", "add", *artifacts_to_add],
             cwd=project_dir, capture_output=True, timeout=git_timeout,
         )
         if add_result.returncode != 0:

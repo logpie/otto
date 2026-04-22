@@ -722,9 +722,43 @@ class TestNarrativeFormatter:
         ))
         f.close()
 
-        summary = _strip_ts(path.read_text().splitlines()[0])
-        assert "RUN SUMMARY: build=1:05, total=1:05" in summary
+        lines = [_strip_ts(line) for line in path.read_text().splitlines()]
+        summary = lines[0]
+        assert "RUN SUMMARY: build=1:05, total=unknown 1:05" in summary
         assert "certify=" not in summary
+        assert "SUCCESS cost: unknown in 1:05" in lines[1]
+
+    def test_codex_result_uses_tokens_in_summary_and_status(self, tmp_path):
+        path = tmp_path / "narrative.log"
+        f = NarrativeFormatter(path)
+        f.start()
+        f.write_message(ResultMessage(
+            subtype="success",
+            is_error=False,
+            session_id="x",
+            usage={"provider": "codex", "input_tokens": 42000, "output_tokens": 381},
+        ))
+        f.close()
+
+        lines = [_strip_ts(line) for line in path.read_text().splitlines()]
+        assert "RUN SUMMARY: build=0:00, total=42,381 tokens 0:00" in lines[1]
+        assert "SUCCESS usage: 42,381 tokens in 0:00" in lines[2]
+
+    def test_codex_result_without_usage_uses_usage_unknown_fallback(self, tmp_path):
+        path = tmp_path / "narrative.log"
+        f = NarrativeFormatter(path)
+        f.start()
+        f.write_message(ResultMessage(
+            subtype="success",
+            is_error=False,
+            session_id="x",
+            usage={"provider": "codex"},
+        ))
+        f.close()
+
+        lines = [_strip_ts(line) for line in path.read_text().splitlines()]
+        assert "RUN SUMMARY: build=0:00, total=usage: unknown 0:00" in lines[1]
+        assert "SUCCESS usage: unknown in 0:00" in lines[2]
 
     def test_spec_phase_emits_complete_before_summary(self, tmp_path):
         path = tmp_path / "narrative.log"
@@ -739,7 +773,8 @@ class TestNarrativeFormatter:
         assert lines[0] == "\u2014 SPEC starting \u2014"
         assert lines[1] == "\u2014 SPEC complete \u2014"
         assert "RUN SUMMARY: spec=" in lines[2]
-        assert "SUCCESS" in lines[3]
+        assert "total=unknown" in lines[2]
+        assert "SUCCESS cost: unknown" in lines[3]
 
     def test_agent_tool_use_renders_subagent_summary(self, tmp_path):
         """Agent tool_use renders subagent=<type> plus prompt preview."""

@@ -12,6 +12,8 @@ from otto.agent import (
     TextBlock,
     ToolResultBlock,
     ToolUseBlock,
+    UserMessage,
+    _codex_command,
     make_agent_options,
     query,
     run_agent_query,
@@ -51,6 +53,7 @@ class _FakeProcess:
         self.stdout = _FakeStdout(lines)
         self._return_code = return_code
         self.returncode: int | None = None
+        self.pid = 999999999
 
     async def wait(self) -> int:
         self.returncode = self._return_code
@@ -61,13 +64,20 @@ class _FakeProcess:
 
 
 @pytest.mark.asyncio
-async def test_codex_query_normalizes_json_events(tmp_path, monkeypatch):
+async def test_codex_query_normalizes_full_json_event_set(tmp_path, monkeypatch):
     seen: dict[str, object] = {}
     process = _FakeProcess([
         '{"type":"thread.started","thread_id":"thread-123"}\n',
         '{"type":"item.completed","item":{"type":"agent_message","text":"Planning..."}}\n',
+        '{"type":"item.completed","item":{"type":"thinking","text":"Need context first"}}\n',
         '{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc \\"ls -1\\""}}\n',
         '{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc \\"ls -1\\"","aggregated_output":"README.md\\n"}}\n',
+        '{"type":"item.started","item":{"id":"read-1","type":"tool_use","name":"read_file","input":{"file_path":"README.md"}}}\n',
+        '{"type":"item.completed","item":{"id":"read-1","type":"tool_result","tool_use_id":"read-1","content":"# hello"}}\n',
+        '{"type":"item.started","item":{"call_id":"web-1","type":"function_call","name":"web_search","arguments":"{\\"query\\": \\"docs\\"}"}}\n',
+        '{"type":"item.completed","item":{"call_id":"web-1","type":"function_output","output":"Found docs"}}\n',
+        '{"type":"item.started","item":{"id":"agent-1","type":"thread_spawn","agent_type":"worker","prompt":"Investigate the flaky test"}}\n',
+        '{"type":"item.completed","item":{"id":"agent-1","type":"thread_spawn","output":"Subagent done"}}\n',
         '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":3}}\n',
     ])
 
@@ -89,25 +99,158 @@ async def test_codex_query_normalizes_json_events(tmp_path, monkeypatch):
     ):
         messages.append(message)
 
-    assert [type(m) for m in messages] == [AssistantMessage, AssistantMessage, AssistantMessage, ResultMessage]
+    assert [type(m) for m in messages] == [
+        AssistantMessage,
+        AssistantMessage,
+        AssistantMessage,
+        UserMessage,
+        AssistantMessage,
+        UserMessage,
+        AssistantMessage,
+        UserMessage,
+        AssistantMessage,
+        UserMessage,
+        ResultMessage,
+    ]
     assert isinstance(messages[0].content[0], TextBlock)
     assert messages[0].content[0].text == "Planning..."
-    assert isinstance(messages[1].content[0], ToolUseBlock)
-    assert "ls -1" in messages[1].content[0].input["command"]
-    assert messages[1].content[0].id == "item_1"
-    assert isinstance(messages[2].content[0], ToolResultBlock)
-    assert messages[2].content[0].content == "README.md\n"
-    assert messages[2].content[0].tool_use_id == "item_1"
-    assert messages[3].session_id == "thread-123"
-    assert messages[3].usage == {"input_tokens": 10, "output_tokens": 3}
+    assert messages[1].content[0].text == "[thinking] Need context first"
+    assert isinstance(messages[2].content[0], ToolUseBlock)
+    assert "ls -1" in messages[2].content[0].input["command"]
+    assert messages[2].content[0].id == "item_1"
+    assert isinstance(messages[3].content[0], ToolResultBlock)
+    assert messages[3].content[0].content == "README.md\n"
+    assert messages[3].content[0].tool_use_id == "item_1"
+    assert messages[4].content[0].name == "Read"
+    assert messages[4].content[0].input["file_path"] == "README.md"
+    assert messages[5].content[0].content == "# hello"
+    assert messages[6].content[0].name == "WebFetch"
+    assert messages[6].content[0].input["query"] == "docs"
+    assert messages[7].content[0].content == "Found docs"
+    assert messages[8].content[0].name == "Agent"
+    assert messages[8].content[0].input["subagent_type"] == "worker"
+    assert "Investigate the flaky test" in messages[8].content[0].input["prompt"]
+    assert messages[9].content[0].content == "Subagent done"
+    assert messages[10].session_id == "thread-123"
+    assert messages[10].usage == {
+        "input_tokens": 10,
+        "output_tokens": 3,
+        "provider": "codex",
+    }
+    assert messages[10].total_cost_usd is None
     assert process.stdin.buffer.decode("utf-8") == "List files"
     assert process.stdin.closed is True
 
     args = seen["args"]
-    assert args[:3] == ("codex", "exec", "--json")
+    assert args[:4] == ("codex", "--search", "exec", "--json")
     assert "--dangerously-bypass-approvals-and-sandbox" in args
     assert "-C" in args
     assert str(tmp_path) in args
+
+
+@pytest.mark.asyncio
+async def test_codex_query_captures_session_id_on_thread_started(tmp_path, monkeypatch):
+    process = _FakeProcess([
+        '{"type":"thread.started","thread_id":"thread-789"}\n',
+    ], return_code=1)
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return process
+
+    monkeypatch.setattr("otto.agent.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    state: dict[str, object] = {}
+    messages = []
+    async for message in query(
+        prompt="List files",
+        options=ClaudeAgentOptions(provider="codex", cwd=str(tmp_path)),
+        state=state,
+    ):
+        messages.append(message)
+
+    assert state["session_id"] == "thread-789"
+    assert state["child_session_ids"] == ["thread-789"]
+    assert messages[-1].session_id == "thread-789"
+    assert messages[-1].is_error is True
+
+
+@pytest.mark.asyncio
+async def test_codex_query_warns_on_unknown_event_type(tmp_path, monkeypatch, caplog):
+    process = _FakeProcess([
+        '{"type":"thread.started","thread_id":"thread-999"}\n',
+        '{"type":"totally.unknown","payload":"x"}\n',
+        '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n',
+    ])
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return process
+
+    monkeypatch.setattr("otto.agent.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    with caplog.at_level("WARNING", logger="otto.agent"):
+        async for _message in query(
+            prompt="List files",
+            options=ClaudeAgentOptions(provider="codex", cwd=str(tmp_path)),
+        ):
+            pass
+
+    assert "Unhandled codex event type: totally.unknown" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_codex_query_ignores_lifecycle_event_types_without_warning(tmp_path, monkeypatch, caplog):
+    process = _FakeProcess([
+        '{"type":"thread.started","thread_id":"thread-321"}\n',
+        '{"type":"turn.started","turn_id":"turn-1"}\n',
+        '{"type":"item.started","item":{"id":"item-1","type":"message_progress"}}\n',
+        '{"type":"item.updated","item":{"id":"item-1","type":"message_progress","delta":"working"}}\n',
+        '{"type":"item.completed","item":{"id":"item-1","type":"message_progress"}}\n',
+        '{"type":"thread.completed","thread_id":"thread-321"}\n',
+        '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n',
+    ])
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return process
+
+    monkeypatch.setattr("otto.agent.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    with caplog.at_level("WARNING", logger="otto.agent"):
+        async for _message in query(
+            prompt="List files",
+            options=ClaudeAgentOptions(provider="codex", cwd=str(tmp_path)),
+        ):
+            pass
+
+    assert "Unhandled codex event type" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_codex_query_uses_thread_completed_usage_when_turn_result_is_missing(tmp_path, monkeypatch):
+    process = _FakeProcess([
+        '{"type":"thread.started","thread_id":"thread-654"}\n',
+        '{"type":"item.completed","item":{"type":"agent_message","text":"Done."}}\n',
+        '{"type":"thread.completed","usage":{"input_tokens":9,"output_tokens":4}}\n',
+    ])
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return process
+
+    monkeypatch.setattr("otto.agent.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    messages = []
+    async for message in query(
+        prompt="List files",
+        options=ClaudeAgentOptions(provider="codex", cwd=str(tmp_path)),
+    ):
+        messages.append(message)
+
+    assert isinstance(messages[-1], ResultMessage)
+    assert messages[-1].usage == {
+        "input_tokens": 9,
+        "output_tokens": 4,
+        "provider": "codex",
+    }
+    assert messages[-1].result == "Done."
 
 
 @pytest.mark.asyncio
@@ -140,8 +283,6 @@ async def test_codex_query_prepends_project_claude_md(tmp_path, monkeypatch):
 
 
 def test_codex_resume_command_uses_resume_subcommand_shape():
-    from otto.agent import _codex_command
-
     command = _codex_command(ClaudeAgentOptions(
         provider="codex",
         resume="thread-123",
@@ -150,11 +291,44 @@ def test_codex_resume_command_uses_resume_subcommand_shape():
         permission_mode="bypassPermissions",
     ))
 
-    assert command[:4] == ["codex", "exec", "resume", "--json"]
+    assert command[:5] == ["codex", "--search", "exec", "resume", "--json"]
     assert "--dangerously-bypass-approvals-and-sandbox" in command
     assert "--color" not in command
     assert "-C" not in command
     assert command[-2:] == ["thread-123", "-"]
+
+
+def test_codex_command_maps_supported_options_and_webfetch():
+    command = _codex_command(ClaudeAgentOptions(
+        provider="codex",
+        cwd="/tmp/project",
+        permission_mode="bypassPermissions",
+        effort="high",
+        max_turns=7,
+        disallowed_tools=["Read", "Write"],
+    ))
+
+    assert command[:3] == ["codex", "--search", "-c"]
+    assert 'model_reasoning_effort="high"' in command
+    assert "num_turns=7" in command
+    assert 'disabled_tools=["Read", "Write"]' in command
+
+
+def test_codex_command_omits_search_when_webfetch_is_disallowed():
+    command = _codex_command(ClaudeAgentOptions(
+        provider="codex",
+        disallowed_tools=["WebFetch"],
+    ))
+
+    assert "--search" not in command
+
+
+def test_codex_command_rejects_unsupported_mcp_servers():
+    with pytest.raises(NotImplementedError, match="mcp_servers"):
+        _codex_command(ClaudeAgentOptions(
+            provider="codex",
+            mcp_servers={"github": {"command": ["mcp-github"]}},
+        ))
 
 
 def test_make_agent_options_cli_overrides_beat_per_agent_yaml(tmp_path):
