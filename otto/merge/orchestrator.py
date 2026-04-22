@@ -252,10 +252,18 @@ async def run_merge(
             success=False, merge_id="", state=MergeState(),
             note=f"must be on {options.target!r}; currently on {cur!r}. Run `git checkout {options.target}` first.",
         )
-    if not git_ops.working_tree_clean(project_dir):
+    dirty_entries = git_ops.status_porcelain_entries(project_dir)
+    if dirty_entries:
+        preview = ", ".join(dirty_entries[:5])
+        if len(dirty_entries) > 5:
+            preview += f", ... (+{len(dirty_entries) - 5} more)"
         return MergeRunResult(
             success=False, merge_id="", state=MergeState(),
-            note=f"working tree must be clean before merge (uncommitted changes detected)",
+            note=(
+                "working tree must be clean before merge "
+                f"(uncommitted changes detected: {preview}). "
+                "Commit, stash, or clean these paths and retry."
+            ),
         )
     if git_ops.merge_in_progress(project_dir):
         return MergeRunResult(

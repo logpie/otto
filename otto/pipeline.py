@@ -330,6 +330,7 @@ async def build_agentic_v3(
                 phase=phase,
                 current_round=current_round,
                 rounds=rounds or [],
+                intent=intent,
                 spec_cost=float(spec_cost or 0.0),
             )
         except Exception as exc:
@@ -905,6 +906,7 @@ async def run_certify_fix_loop(
                 current_round=last_completed_round,
                 total_cost=total_cost, rounds=checkpoint_rounds,
                 status=status,
+                intent=intent,
             )
         except Exception as exc:
             logger.warning("Failed to write split-mode checkpoint: %s", exc)

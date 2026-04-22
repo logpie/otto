@@ -3,6 +3,7 @@
 import asyncio
 import json
 import subprocess
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1598,6 +1599,29 @@ class TestBuildResume:
         assert "checkpoint intent: 'old intent'" in result.output
         assert "CLI intent:        'new intent'" in result.output
         assert build_agent.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_build_agent_checkpoint_preserves_intent_for_resume(self, tmp_git_repo):
+        from otto.agent import AgentCallError
+        from otto.checkpoint import load_checkpoint
+
+        async def fail_after_precheckpoint(*args, **kwargs):
+            raise AgentCallError("Timed out after 10s", session_id="sess-123")
+
+        with patch("otto.agent.make_agent_options", return_value=SimpleNamespace(resume=None)), \
+             patch("otto.agent.run_agent_with_timeout", side_effect=fail_after_precheckpoint):
+            result = await build_agentic_v3(
+                "old intent",
+                tmp_git_repo,
+                {"skip_product_qa": True},
+                run_id="run-1",
+            )
+
+        checkpoint = load_checkpoint(tmp_git_repo)
+        assert result.passed is False
+        assert checkpoint is not None
+        assert checkpoint["status"] == "paused"
+        assert checkpoint["intent"] == "old intent"
 
     def test_build_resume_reports_completed_last_run(self, tmp_git_repo, monkeypatch):
         from click.testing import CliRunner

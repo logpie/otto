@@ -114,6 +114,8 @@ def test_merge_refuses_when_dirty(tmp_path: Path):
     ))
     assert result.success is False
     assert "clean" in result.note
+    assert "dirty.txt" in result.note
+    assert "Commit, stash, or clean" in result.note
 
 
 def test_merge_refuses_unknown_branch(tmp_path: Path):

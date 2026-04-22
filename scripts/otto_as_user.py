@@ -690,6 +690,22 @@ def load_manifest(repo: Path) -> dict[str, Any]:
     return read_json(latest_session_dir(repo) / "manifest.json")
 
 
+def find_worktree(repo: Path, *, prefix: str) -> Path:
+    matches = sorted(
+        path for path in (repo / ".worktrees").glob(f"{prefix}*") if path.is_dir()
+    )
+    if not matches:
+        raise AssertionError(f"no worktree found matching {prefix!r}")
+    if len(matches) == 1:
+        return matches[0]
+    with_latest = [path for path in matches if (path / "otto_logs" / "latest").exists()]
+    if len(with_latest) == 1:
+        return with_latest[0]
+    raise AssertionError(
+        f"expected one {prefix!r} worktree, found {[path.name for path in matches]!r}"
+    )
+
+
 def assert_exists(path: Path, message: str) -> None:
     if not path.exists():
         raise AssertionError(f"{message}: missing {path}")
@@ -1174,7 +1190,9 @@ def run_a3(repo: Path, provider: str) -> RunResult:
     intent = tiny_cli_intent("worktree_hello", "print worktree hello", "worktree hello")
     started = now_iso()
     result = run_build(repo, provider, "--in-worktree", intent)
-    summary = load_summary(repo)
+    worktree = find_worktree(repo, prefix="build-")
+    log_line(f"[A3] build worktree: {worktree}")
+    summary = load_summary(worktree) if result.rc == 0 else {}
     worktrees = sorted((repo / ".worktrees").glob("*"))
     return _base_result(
         result.rc,
@@ -1183,6 +1201,8 @@ def run_a3(repo: Path, provider: str) -> RunResult:
         finished_at=now_iso(),
         duration_s=result.duration_s,
         summary=summary,
+        worktree=str(worktree),
+        branch=git(worktree, "branch", "--show-current"),
         worktrees=[str(path) for path in worktrees],
     )
 
@@ -1193,7 +1213,12 @@ def verify_a3(repo: Path, run_result: RunResult) -> VerifyResult:
     worktrees = [Path(path) for path in run_result.details.get("worktrees", [])]
     if not worktrees:
         return VerifyResult(False, "A3 expected at least one worktree")
-    return verify_summary_passed(repo, run_result, message="build --in-worktree passed")
+    worktree = Path(str(run_result.details.get("worktree", "")))
+    assert_exists(worktree / "otto_logs" / "latest", "A3 expected otto_logs/latest inside worktree")
+    branch = str(run_result.details.get("branch", ""))
+    if not branch.startswith("build/"):
+        return VerifyResult(False, f"A3 expected build/* branch inside worktree, got {branch!r}")
+    return verify_summary_passed(worktree, run_result, message="build --in-worktree passed")
 
 
 def setup_a4(repo: Path, provider: str) -> None:
@@ -1289,21 +1314,25 @@ def run_b1(repo: Path, provider: str) -> RunResult:
         session.send("\x1b")
         wait_for_screen_text(session, "add", timeout_s=10, label="overview return")
         time.sleep(2.0)
-        session.send("q")
-        notice = wait_for_screen_text(session, "Dashboard closed.", timeout_s=10, label="post quit")
-        wait_for(
-            lambda: sum(1 for task in load_queue_state(repo).get("tasks", {}).values() if task.get("status") == "done") == 2,
-            timeout_s=240,
-            label="queue drained",
-        )
-        rc = session.wait(30.0)
-        if rc is None:
-            raise AssertionError("watcher did not exit after queue drained")
+        notice_text = ""
+        try:
+            session.send("q")
+            notice = wait_for_screen_text(session, "Dashboard closed.", timeout_s=10, label="post quit")
+            notice_text = notice.screen_text
+        except OSError as exc:
+            if exc.errno != errno.EIO:
+                raise
+            log_line(f"[B1] dashboard PTY closed before quit key was delivered: {exc}")
+            notice_text = session.snapshot("post quit closed").screen_text
+        log_line("[B1] dashboard hidden; waiting for watcher exit after queue drain")
+        rc = session.wait(420.0)
+        state = load_queue_state(repo)
+        log_line(f"[B1] final queue state: {json.dumps(state, indent=2)}")
         return {
             "detail_text": detail.screen_text,
-            "notice_text": notice.screen_text,
+            "notice_text": notice_text,
             "watcher_rc": rc,
-            "state": load_queue_state(repo),
+            "state": state,
         }
 
     started = now_iso()
@@ -1315,7 +1344,10 @@ def verify_b1(repo: Path, run_result: RunResult) -> VerifyResult:
     state = run_result.details.get("state", {})
     statuses = {task_id: task.get("status") for task_id, task in state.get("tasks", {}).items()}
     if statuses != {"add": "done", "mul": "done"}:
-        return VerifyResult(False, f"B1 expected both tasks done, got {statuses}")
+        return VerifyResult(
+            False,
+            f"B1 expected both tasks done, got {statuses} (watcher_rc={run_result.details.get('watcher_rc')!r})",
+        )
     notice = strip_ansi(str(run_result.details.get("notice_text", "")))
     if "Dashboard closed." not in notice:
         return VerifyResult(False, "B1 expected dashboard closed notice")
@@ -1512,6 +1544,7 @@ def verify_b7(repo: Path, run_result: RunResult) -> VerifyResult:
 def setup_c1(repo: Path, provider: str) -> None:
     init_repo(repo)
     write_otto_yaml(repo, provider=provider, certifier_mode="fast", extra_lines=["queue:", "  concurrent: 2"])
+    commit_all(repo, "add otto config")
 
 
 def run_c1(repo: Path, provider: str) -> RunResult:
@@ -1520,18 +1553,44 @@ def run_c1(repo: Path, provider: str) -> RunResult:
     watcher = run_queue(repo, "run", "--concurrent", "2", "--no-dashboard", "--exit-when-empty", timeout_s=900)
     if watcher.rc != 0:
         return _base_result(watcher.rc, output=watcher.output)
+    queue_state = load_queue_state(repo)
+    queue_statuses = {
+        task_id: task.get("status")
+        for task_id, task in queue_state.get("tasks", {}).items()
+    }
+    log_line(f"[C1] queue state before merge: {json.dumps(queue_statuses, indent=2)}")
+    pre_merge_status = git(repo, "status", "--short")
+    log_line(f"[C1] pre-merge git status:\n{pre_merge_status or '(clean)'}")
+    if any(status != "done" for status in queue_statuses.values()):
+        return _base_result(
+            1,
+            output=watcher.output,
+            pre_merge_status=pre_merge_status,
+            queue_state=queue_state,
+            sessions=[],
+        )
     merge = run_merge(repo, "--all", "--cleanup-on-success", timeout_s=1800)
     sessions = sorted((repo / "otto_logs" / "sessions").glob("*"))
     return _base_result(
         merge.rc,
         output=watcher.output + merge.output,
         sessions=[str(path) for path in sessions],
+        pre_merge_status=pre_merge_status,
+        queue_state=queue_state,
     )
 
 
 def verify_c1(repo: Path, run_result: RunResult) -> VerifyResult:
     if run_result.returncode != 0:
-        return VerifyResult(False, f"C1 merge failed with rc={run_result.returncode}")
+        queue_state = run_result.details.get("queue_state", {})
+        statuses = {
+            task_id: task.get("status")
+            for task_id, task in queue_state.get("tasks", {}).items()
+        }
+        if statuses and any(status != "done" for status in statuses.values()):
+            return VerifyResult(False, f"C1 queued builds did not finish successfully before merge: {statuses}")
+        status = str(run_result.details.get("pre_merge_status", "")).strip() or "(clean)"
+        return VerifyResult(False, f"C1 merge failed with rc={run_result.returncode}; pre-merge status: {status}")
     sessions = [Path(path) for path in run_result.details.get("sessions", [])]
     if len(sessions) < 2:
         return VerifyResult(False, f"C1 expected graduated sessions in main repo, got {len(sessions)}")
@@ -1582,6 +1641,7 @@ def verify_c2(repo: Path, run_result: RunResult) -> VerifyResult:
 def setup_c3(repo: Path, provider: str) -> None:
     init_repo(repo)
     write_otto_yaml(repo, provider=provider, certifier_mode="fast", extra_lines=["queue:", "  concurrent: 2"])
+    commit_all(repo, "add otto config")
 
 
 def run_c3(repo: Path, provider: str) -> RunResult:
@@ -1745,6 +1805,8 @@ def setup_d3(repo: Path, provider: str) -> None:
 
 
 def run_d3(repo: Path, provider: str) -> RunResult:
+    from otto.checkpoint import load_checkpoint
+
     intent = tiny_cli_intent("resume_mismatch", "print old", "old")
     proc = subprocess.Popen(
         [str(OTTO_BIN), "build", "--provider", provider, intent],
@@ -1757,8 +1819,19 @@ def run_d3(repo: Path, provider: str) -> RunResult:
     time.sleep(8.0)
     proc.send_signal(signal.SIGTERM)
     proc.communicate(timeout=60)
+    checkpoint = load_checkpoint(repo) or {}
+    log_line(
+        "[D3] checkpoint before resume: "
+        f"status={checkpoint.get('status')!r} "
+        f"phase={checkpoint.get('phase')!r} "
+        f"intent={checkpoint.get('intent')!r}"
+    )
     mismatch = run_build(repo, provider, "different intent", "--resume", timeout_s=120)
-    return _base_result(mismatch.rc, output=mismatch.output)
+    return _base_result(
+        mismatch.rc,
+        output=mismatch.output,
+        checkpoint_before_resume=checkpoint,
+    )
 
 
 def verify_d3(repo: Path, run_result: RunResult) -> VerifyResult:

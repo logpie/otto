@@ -72,10 +72,15 @@ def resolve_branch(project_dir: Path, branch: str) -> str:
 
 def working_tree_clean(project_dir: Path) -> bool:
     """True iff `git status --porcelain` is empty."""
+    return len(status_porcelain_entries(project_dir)) == 0
+
+
+def status_porcelain_entries(project_dir: Path) -> list[str]:
+    """Return raw `git status --porcelain` entries."""
     r = run_git(project_dir, "status", "--porcelain")
     if not r.ok:
-        return False
-    return r.stdout.strip() == ""
+        return []
+    return [line.rstrip() for line in r.stdout.splitlines() if line.strip()]
 
 
 def conflicted_files(project_dir: Path) -> list[str]:
