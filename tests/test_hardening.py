@@ -422,6 +422,10 @@ class TestHistoryWrites:
                 "STORIES_TESTED: 1\n"
                 "STORIES_PASSED: 1\n"
                 "STORY_RESULT: smoke | PASS | claim=Smoke works | observed_result=OK | surface=HTTP | methodology=http-request | summary=Smoke passed\n"
+                "COVERAGE_OBSERVED:\n"
+                "- Exercised the smoke story over HTTP and observed an OK result\n"
+                "COVERAGE_GAPS:\n"
+                "- Did not exercise any deeper product-specific coverage in this mocked run\n"
                 "VERDICT: PASS\n"
                 "DIAGNOSIS: null\n",
                 0.42,
@@ -817,6 +821,10 @@ class TestCertifierStoryDedup:
             "STORY_RESULT: crud | PASS | Create works\n"
             "STORY_RESULT: crud | PASS | Create works (duplicate)\n"
             "STORY_RESULT: auth | PASS | Login works\n"
+            "COVERAGE_OBSERVED:\n"
+            "- Exercised duplicate and unique story markers in one run\n"
+            "COVERAGE_GAPS:\n"
+            "- Did not exercise additional product-specific stories in this mocked run\n"
             "VERDICT: PASS\n"
             "DIAGNOSIS: null\n"
         )
@@ -846,6 +854,10 @@ class TestCertifierStoryDedup:
             "STORY_RESULT: auth | FAIL | Initially broken\n"
             "STORY_RESULT: auth | PASS | Fixed now\n"
             "STORY_RESULT: crud | PASS | Works\n"
+            "COVERAGE_OBSERVED:\n"
+            "- Exercised a fail-to-pass duplicate story sequence\n"
+            "COVERAGE_GAPS:\n"
+            "- Did not exercise additional product-specific stories in this mocked run\n"
             "VERDICT: PASS\n"
             "DIAGNOSIS: null\n"
         )
@@ -1087,6 +1099,69 @@ def test_parser_accepts_failure_evidence_field():
     )
 
     assert parsed.stories[0]["failure_evidence"] == "crud-lifecycle-failure.png"
+
+
+def test_parser_extracts_coverage_observed_and_gaps_blocks():
+    from otto.markers import parse_certifier_markers
+
+    parsed = parse_certifier_markers(
+        "STORIES_TESTED: 2\n"
+        "STORIES_PASSED: 1\n"
+        "STORY_RESULT: add-card | PASS | Add-card flow works\n"
+        "STORY_RESULT: escape-cancel | FAIL | Escape did not cancel editing\n"
+        "COVERAGE_OBSERVED:\n"
+        "- Clicked Add Card, typed a title, and pressed Enter to commit\n"
+        "- Pressed Escape while editing an existing card title\n"
+        "COVERAGE_GAPS:\n"
+        "- Did not resize the window to test responsive layout\n"
+        "- Did not clear localStorage mid-session\n"
+        "VERDICT: FAIL\n"
+        "DIAGNOSIS: Escape cancel behavior is broken\n",
+        certifier_mode="standard",
+    )
+
+    assert parsed.coverage_observed == [
+        "Clicked Add Card, typed a title, and pressed Enter to commit",
+        "Pressed Escape while editing an existing card title",
+    ]
+    assert parsed.coverage_gaps == [
+        "Did not resize the window to test responsive layout",
+        "Did not clear localStorage mid-session",
+    ]
+
+
+def test_standard_mode_missing_coverage_markers_raises_malformed_output():
+    from otto.markers import MalformedCertifierOutputError, parse_certifier_markers
+
+    with pytest.raises(
+        MalformedCertifierOutputError,
+        match="COVERAGE_OBSERVED/COVERAGE_GAPS",
+    ):
+        parse_certifier_markers(
+            "STORIES_TESTED: 1\n"
+            "STORIES_PASSED: 1\n"
+            "STORY_RESULT: smoke | PASS | Works\n"
+            "VERDICT: PASS\n"
+            "DIAGNOSIS: null\n",
+            certifier_mode="standard",
+        )
+
+
+def test_fast_mode_allows_missing_coverage_markers():
+    from otto.markers import parse_certifier_markers
+
+    parsed = parse_certifier_markers(
+        "STORIES_TESTED: 1\n"
+        "STORIES_PASSED: 1\n"
+        "STORY_RESULT: smoke | PASS | Works\n"
+        "VERDICT: PASS\n"
+        "DIAGNOSIS: null\n",
+        certifier_mode="fast",
+    )
+
+    assert parsed.stories[0]["story_id"] == "smoke"
+    assert parsed.coverage_observed == []
+    assert parsed.coverage_gaps == []
 
 
 def test_parser_ignores_markers_inside_code_blocks():
@@ -1385,8 +1460,17 @@ class TestSpecTimeoutTolerance:
         from otto.certifier.report import CertificationOutcome
 
         async def mock_query(prompt, options, **kwargs):
-            return ("VERDICT: PASS\nSTORY_RESULT: x | PASS | ok\n"
-                    "STORIES_TESTED: 1\nSTORIES_PASSED: 1\nDIAGNOSIS: null"), 0.1, MagicMock()
+            return (
+                "VERDICT: PASS\n"
+                "STORY_RESULT: x | PASS | ok\n"
+                "STORIES_TESTED: 1\n"
+                "STORIES_PASSED: 1\n"
+                "COVERAGE_OBSERVED:\n"
+                "- Exercised the single mocked pass story\n"
+                "COVERAGE_GAPS:\n"
+                "- Did not exercise any additional product-specific flows in this mocked run\n"
+                "DIAGNOSIS: null"
+            ), 0.1, MagicMock()
 
         # Obsolete keys like `certifier_timeout` are now ignored — no raise.
         with patch("otto.agent.run_agent_query", side_effect=mock_query):
@@ -1440,6 +1524,77 @@ class TestProofOfWorkRendering:
         assert "not used (run without --spec)" in html
         assert "$0.10" in html
         assert "certifier $0.1000" not in html
+
+    def test_fast_mode_renders_note_when_per_run_coverage_is_missing(self, tmp_path):
+        from otto.certifier import _build_pow_report_data, _render_pow_html
+
+        options = type("Opts", (), {"provider": "", "model": None, "effort": None})()
+        report = _build_pow_report_data(
+            project_dir=tmp_path,
+            report_dir=tmp_path,
+            log_dir=tmp_path,
+            run_id="run-1",
+            session_id="sdk-session-1",
+            pipeline_mode="agentic_certifier",
+            certifier_mode="fast",
+            outcome="passed",
+            story_results=[{"story_id": "smoke", "passed": True, "summary": "ok"}],
+            diagnosis="",
+            certify_rounds=None,
+            duration_s=1.0,
+            certifier_cost_usd=0.1,
+            total_cost_usd=0.1,
+            intent="Smoke test the app.",
+            options=options,
+            evidence_dir=None,
+            stories_tested=1,
+            stories_passed=1,
+            coverage_observed=[],
+            coverage_gaps=[],
+            coverage_emitted=False,
+        )
+
+        html = _render_pow_html(report)
+        assert "Per-run coverage not emitted (fast mode)" in html
+
+    def test_old_pow_json_coverage_still_renders_with_deprecation_comment(self, tmp_path):
+        from otto.certifier import _build_pow_report_data, _render_pow_html
+
+        options = type("Opts", (), {"provider": "", "model": None, "effort": None})()
+        report = _build_pow_report_data(
+            project_dir=tmp_path,
+            report_dir=tmp_path,
+            log_dir=tmp_path,
+            run_id="run-1",
+            session_id="sdk-session-1",
+            pipeline_mode="agentic_certifier",
+            certifier_mode="standard",
+            outcome="passed",
+            story_results=[{"story_id": "smoke", "passed": True, "summary": "ok"}],
+            diagnosis="",
+            certify_rounds=None,
+            duration_s=1.0,
+            certifier_cost_usd=0.1,
+            total_cost_usd=0.1,
+            intent="Smoke test the app.",
+            options=options,
+            evidence_dir=None,
+            stories_tested=1,
+            stories_passed=1,
+            coverage_observed=[],
+            coverage_gaps=[],
+            coverage_emitted=False,
+        )
+        report.pop("coverage_observed", None)
+        report.pop("coverage_gaps", None)
+        report["coverage"]["tested"] = ["Clicked the main CTA"]
+        report["coverage"]["untested"] = ["Did not resize the window"]
+        report["coverage"]["escaped_bug_classes"] = ["responsive layout regressions"]
+
+        html = _render_pow_html(report)
+        assert "Deprecated legacy coverage rendering" in html
+        assert "Clicked the main CTA" in html
+        assert "Did not resize the window" in html
 
     def test_html_surfaces_methodology_caveat_for_ui_story(self, tmp_path):
         from otto.certifier import _generate_agentic_html_pow
@@ -1584,6 +1739,15 @@ class TestProofOfWorkRendering:
             evidence_dir=evidence_dir,
             stories_tested=2,
             stories_passed=1,
+            coverage_observed=[
+                "Clicked Add card, typed a title, and pressed Enter to submit",
+                "Dragged a card from In Progress into Done",
+            ],
+            coverage_gaps=[
+                "Did not resize the window to test responsive layout",
+                "Did not clear localStorage mid-session to verify empty-state recovery",
+            ],
+            coverage_emitted=True,
         )
         _write_pow_report(tmp_path, report)
 
@@ -1593,19 +1757,24 @@ class TestProofOfWorkRendering:
         assert "## Hero" in md
         assert "## Story Summary" in md
         assert "## Diagnosis" in md
-        assert "## Next Actions" in md
+        assert "## Story Details" in md
+        assert "## Visual Evidence" in md
+        assert "## Efficiency" in md
+        assert "## Coverage and Limitations" in md
+        assert "## Run Context" in md
         assert "## Artifacts & Metadata" in md
-        assert "## Coverage and Limitations" not in md
-        assert "## Visual Evidence" not in md
-        assert "## Run Context" not in md
-        assert "## Story Details" not in md
+        assert "### What this run actually exercised" in md
+        assert "### What this run did NOT cover" in md
+        assert "Mode: standard —" in md
 
         assert html.index("<h2>Story Summary</h2>") < html.index("<h2>Diagnosis</h2>")
-        assert html.index("<h2>Diagnosis</h2>") < html.index("<h2>Failing Story Detail</h2>")
-        assert html.index("<h2>Failing Story Detail</h2>") < html.index("<h2>Coverage and Limitations</h2>")
-        assert html.index("<h2>Coverage and Limitations</h2>") < html.index("<h2>Remaining Story Details</h2>")
-        assert html.index("<h2>Remaining Story Details</h2>") < html.index("<h2>Visual Evidence</h2>")
+        assert html.index("<h2>Diagnosis</h2>") < html.index("<h2>Story Details</h2>")
+        assert html.index("<h2>Story Details</h2>") < html.index("<h2>Visual Evidence</h2>")
+        assert html.index("<h2>Visual Evidence</h2>") < html.index("<h2>Efficiency</h2>")
+        assert html.index("<h2>Efficiency</h2>") < html.index("<h2>Coverage and Limitations</h2>")
+        assert html.index("<h2>Visual Evidence</h2>") < html.index("<h2>Coverage and Limitations</h2>")
         assert html.index("<h2>Visual Evidence</h2>") < html.index("<h2>Run Context</h2>")
+        assert html.index("<h2>Coverage and Limitations</h2>") < html.index("<h2>Run Context</h2>")
         assert html.index("<h2>Run Context</h2>") < html.index("<h2>Artifacts &amp; Metadata</h2>")
 
         assert "recording.webm" in html
@@ -1613,18 +1782,133 @@ class TestProofOfWorkRendering:
         assert "failure captured" in html
         assert "drag-drop.png" in html
         assert "All stories verified via live-ui-events." in html
+        assert "Clicked Add card, typed a title, and pressed Enter to submit" in html
+        assert "Did not resize the window to test responsive layout" in html
         assert "Jump to failing stories" in html
         assert "Open narrative log" not in html
         assert "agentic_certifier" not in html
         assert "Session ID" in html
 
+        assert "coverage_observed" in report
+        assert "coverage_gaps" in report
+        assert "tested" not in report["coverage"]
+        assert "untested" not in report["coverage"]
+        assert "escaped_bug_classes" not in report["coverage"]
+
+    def test_efficiency_section_renders_warning_for_outlier(self, tmp_path):
+        from otto.certifier import _build_pow_report_data, _render_pow_html, _render_pow_markdown
+
+        (tmp_path / "messages.jsonl").write_text("{}\n")
+        options = type("Opts", (), {"provider": "", "model": None, "effort": None})()
+        report = _build_pow_report_data(
+            project_dir=tmp_path,
+            report_dir=tmp_path,
+            log_dir=tmp_path,
+            run_id="run-1",
+            session_id="sdk-session-1",
+            pipeline_mode="agentic_certifier",
+            certifier_mode="standard",
+            outcome="passed",
+            story_results=[
+                {"story_id": "first-experience", "passed": True, "summary": "ok"},
+                {"story_id": "crud-lifecycle", "passed": True, "summary": "ok"},
+            ],
+            diagnosis="",
+            certify_rounds=None,
+            duration_s=3.0,
+            certifier_cost_usd=0.1,
+            total_cost_usd=0.1,
+            intent="Verify the main browser flows.",
+            options=options,
+            evidence_dir=None,
+            stories_tested=2,
+            stories_passed=2,
+        )
+        report["efficiency"] = {
+            "total_browser_calls": 75,
+            "distinct_sessions": 4,
+            "verb_counts": {"eval": 30, "snapshot": 20, "click": 15, "type": 10},
+            "calls_per_story": {"first-experience": 38, "crud-lifecycle": 37},
+            "outlier": True,
+            "outlier_reason": "standard-mode outlier: distinct sessions 4 > 3.",
+        }
+
+        md = _render_pow_markdown(report)
+        html = _render_pow_html(report)
+
+        assert "## Efficiency" in md
+        assert "- Total browser calls: 75 across 2 stories (37.5 per story)" in md
+        assert "- Distinct browser sessions: 4" in md
+        assert "- Top verbs: eval (30), snapshot (20), click (15), type (10)" in md
+        assert "- ⚠ Efficiency note: standard-mode outlier: distinct sessions 4 > 3." in md
+
+        assert "<h2>Efficiency</h2>" in html
+        assert "Total browser calls: 75 across 2 stories (37.5 per story)" in html
+        assert "Distinct browser sessions: 4" in html
+        assert "Top verbs: eval (30), snapshot (20), click (15), type (10)" in html
+        assert "Efficiency note: standard-mode outlier: distinct sessions 4 &gt; 3." in html
+
+    def test_efficiency_section_omits_warning_for_non_outlier(self, tmp_path):
+        from otto.certifier import _build_pow_report_data, _render_pow_html, _render_pow_markdown
+
+        (tmp_path / "messages.jsonl").write_text("{}\n")
+        options = type("Opts", (), {"provider": "", "model": None, "effort": None})()
+        report = _build_pow_report_data(
+            project_dir=tmp_path,
+            report_dir=tmp_path,
+            log_dir=tmp_path,
+            run_id="run-1",
+            session_id="sdk-session-1",
+            pipeline_mode="agentic_certifier",
+            certifier_mode="standard",
+            outcome="passed",
+            story_results=[{"story_id": "smoke", "passed": True, "summary": "ok"}],
+            diagnosis="",
+            certify_rounds=None,
+            duration_s=2.0,
+            certifier_cost_usd=0.1,
+            total_cost_usd=0.1,
+            intent="Smoke test the browser flow.",
+            options=options,
+            evidence_dir=None,
+            stories_tested=1,
+            stories_passed=1,
+        )
+        report["efficiency"] = {
+            "total_browser_calls": 9,
+            "distinct_sessions": 1,
+            "verb_counts": {"click": 4, "eval": 3, "snapshot": 2},
+            "calls_per_story": {"smoke": 9},
+            "outlier": False,
+            "outlier_reason": "",
+        }
+
+        md = _render_pow_markdown(report)
+        html = _render_pow_html(report)
+
+        assert "## Efficiency" in md
+        assert "- Total browser calls: 9 across 1 story (9.0 per story)" in md
+        assert "⚠ Efficiency note" not in md
+
+        assert "<h2>Efficiency</h2>" in html
+        assert "Total browser calls: 9 across 1 story (9.0 per story)" in html
+        assert "Efficiency note:" not in html
+
     def test_certifier_prompts_require_failure_evidence(self):
         standard = (Path(__file__).resolve().parents[1] / "otto" / "prompts" / "certifier.md").read_text()
         thorough = (Path(__file__).resolve().parents[1] / "otto" / "prompts" / "certifier-thorough.md").read_text()
+        fast = (Path(__file__).resolve().parents[1] / "otto" / "prompts" / "certifier-fast.md").read_text()
 
         for text in (standard, thorough):
             assert "failure_evidence=<filename" in text
             assert "Without a visual failure artifact for a visual bug, you may only emit `WARN`, not `FAIL`." in text
+            assert "COVERAGE_OBSERVED:" in text
+            assert "COVERAGE_GAPS:" in text
+            assert "## Session topology and efficiency" in text
+            assert "Avoid `agent-browser --session <story-id>` per story" in text or "Avoid per-story `--session <story-id>` churn" in text
+            assert "malformed-output error" in text
+        assert "COVERAGE_OBSERVED:" in fast
+        assert "COVERAGE_GAPS:" in fast
 
     def test_intent_excerpt_strips_markdown_headings(self):
         from otto.certifier import _intent_excerpt
@@ -2180,7 +2464,12 @@ class TestPhaseBuildResumeFix:
         async def ok_agent(prompt, options, **kwargs):
             return (
                 "CERTIFY_ROUND: 1\nSTORIES_TESTED: 1\nSTORIES_PASSED: 1\n"
-                "STORY_RESULT: s1 | PASS | fine\nVERDICT: PASS\nDIAGNOSIS: null\n",
+                "STORY_RESULT: s1 | PASS | fine\n"
+                "COVERAGE_OBSERVED:\n"
+                "- Exercised the single mocked success story in this test\n"
+                "COVERAGE_GAPS:\n"
+                "- Did not exercise any additional mocked product-specific coverage in this test\n"
+                "VERDICT: PASS\nDIAGNOSIS: null\n",
                 0.1,
                 MagicMock(session_id="sdk-sid-abc"),
             )

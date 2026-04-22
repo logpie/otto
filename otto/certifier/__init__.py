@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from otto.logstream import summarize_browser_efficiency
 from otto.redaction import redact_text
 
 try:
@@ -237,6 +238,11 @@ def _mode_profile(certifier_mode: str) -> dict[str, Any]:
     from otto.config import validate_certifier_mode
 
     return _MODE_PROFILES[validate_certifier_mode(certifier_mode)]
+
+
+def _coverage_footer_line(certifier_mode: str) -> str:
+    profile = _mode_profile(certifier_mode)
+    return f"Mode: {certifier_mode} — {profile['meaning']} See README for mode differences."
 
 
 def _counts_from_stories(stories: list[dict[str, Any]]) -> dict[str, int]:
@@ -530,6 +536,75 @@ def _story_detail_sections(stories: list[dict[str, Any]]) -> dict[str, list[dict
     return {
         "failing": [story for story in ordered if story.get("status") == "fail"],
         "remaining": [story for story in ordered if story.get("status") != "fail"],
+    }
+
+
+def _coverage_render_data(report: dict[str, Any]) -> dict[str, Any]:
+    coverage = dict(report.get("coverage") or {})
+    observed = [
+        str(item).strip() for item in report.get("coverage_observed", []) or []
+        if str(item).strip()
+    ]
+    gaps = [
+        str(item).strip() for item in report.get("coverage_gaps", []) or []
+        if str(item).strip()
+    ]
+    limitations = str(coverage.get("limitations") or "").strip()
+    if not limitations:
+        limitations = _coverage_footer_line(str(report.get("certifier_mode") or "standard"))
+    legacy_tested = [str(item).strip() for item in coverage.get("tested", []) or [] if str(item).strip()]
+    legacy_untested = [str(item).strip() for item in coverage.get("untested", []) or [] if str(item).strip()]
+    legacy_escaped = [
+        str(item).strip()
+        for item in coverage.get("escaped_bug_classes", []) or []
+        if str(item).strip()
+    ]
+    legacy_mode = not observed and not gaps and bool(legacy_tested or legacy_untested or legacy_escaped)
+    per_run_emitted = coverage.get("per_run_emitted")
+    if per_run_emitted is None:
+        per_run_emitted = bool(observed or gaps)
+    note = ""
+    if (
+        str(report.get("certifier_mode") or "").strip().lower() == "fast"
+        and not bool(per_run_emitted)
+        and not legacy_mode
+    ):
+        note = "Per-run coverage not emitted (fast mode)"
+    return {
+        "observed": observed,
+        "gaps": gaps,
+        "limitations": limitations,
+        "uniform_methodology": str(coverage.get("uniform_methodology") or "").strip(),
+        "legacy_mode": legacy_mode,
+        "legacy_tested": legacy_tested,
+        "legacy_untested": legacy_untested,
+        "legacy_escaped_bug_classes": legacy_escaped,
+        "note": note,
+    }
+
+
+def _efficiency_render_data(report: dict[str, Any]) -> dict[str, Any]:
+    raw = dict(report.get("efficiency") or {})
+    stories_total = max(int(report.get("stories_total_count") or report.get("stories_tested") or 0), 0)
+    total_browser_calls = max(int(raw.get("total_browser_calls") or 0), 0)
+    distinct_sessions = max(int(raw.get("distinct_sessions") or 0), 0)
+    avg_calls = (float(total_browser_calls) / stories_total) if stories_total > 0 else 0.0
+    verb_counts = {
+        str(name): int(count)
+        for name, count in (raw.get("verb_counts") or {}).items()
+        if str(name).strip() and isinstance(count, int | float)
+    }
+    top_verbs = sorted(verb_counts.items(), key=lambda item: (-item[1], item[0]))[:4]
+    return {
+        "stories_total": stories_total,
+        "story_label": "story" if stories_total == 1 else "stories",
+        "total_browser_calls": total_browser_calls,
+        "distinct_sessions": distinct_sessions,
+        "avg_calls_per_story": avg_calls,
+        "top_verbs": top_verbs,
+        "top_verbs_text": ", ".join(f"{name} ({count})" for name, count in top_verbs) or "none recorded",
+        "outlier": bool(raw.get("outlier")),
+        "outlier_reason": str(raw.get("outlier_reason") or "").strip(),
     }
 
 
@@ -861,6 +936,9 @@ def _build_pow_report_data(
     evidence_dir: Path | None,
     stories_tested: int,
     stories_passed: int,
+    coverage_observed: list[str] | None = None,
+    coverage_gaps: list[str] | None = None,
+    coverage_emitted: bool | None = None,
     metric_value: str = "",
     metric_met: bool | None = None,
     round_timings: list[tuple[float, float]] | None = None,
@@ -891,6 +969,24 @@ def _build_pow_report_data(
     spec_context = _load_spec_context(project_dir, run_id)
     methodology_summary = _methodology_summary(visible_stories)
     visual = _visual_evidence(report_dir, evidence_dir, certifier_mode, ordered_stories)
+    coverage_observed = [
+        str(item).strip() for item in (coverage_observed or []) if str(item).strip()
+    ]
+    coverage_gaps = [
+        str(item).strip() for item in (coverage_gaps or []) if str(item).strip()
+    ]
+    efficiency = summarize_browser_efficiency(
+        log_dir / "messages.jsonl",
+        certifier_mode=certifier_mode,
+        story_ids=[str(story.get("story_id") or "").strip() for story in story_results],
+        story_claims={
+            str(story.get("story_id") or "").strip(): str(
+                story.get("claim") or story.get("summary") or ""
+            ).strip()
+            for story in story_results
+            if str(story.get("story_id") or "").strip()
+        },
+    )
     round_history = _round_history(
         certify_rounds=certify_rounds or [],
         stories=story_results,
@@ -946,14 +1042,13 @@ def _build_pow_report_data(
             "path": str(project_dir),
         },
         "coverage": {
-            "meaning": profile["meaning"],
-            "tested": profile["tested"],
-            "untested": profile["untested"],
-            "limitations": profile["limitations"],
-            "escaped_bug_classes": profile["escaped_bug_classes"],
-            "residual_risk": profile["residual_risk"],
+            "limitations": _coverage_footer_line(certifier_mode),
+            "per_run_emitted": bool(coverage_emitted),
             "uniform_methodology": methodology_summary["value"] if methodology_summary["uniform"] else "",
         },
+        "coverage_observed": coverage_observed,
+        "coverage_gaps": coverage_gaps,
+        "efficiency": efficiency,
         "run_context": {
             "run_id": run_id,
             "session_id": session_id,
@@ -1007,6 +1102,10 @@ def _render_artifact_links_md(artifacts: list[dict[str, Any]]) -> list[str]:
 def _render_pow_markdown(report: dict[str, Any]) -> str:
     stories = report.get("stories_ordered") or _ordered_stories(report["stories"])
     methodology_summary = report.get("story_methodology_summary") or _methodology_summary(stories)
+    coverage = _coverage_render_data(report)
+    efficiency = _efficiency_render_data(report)
+    visual = report["visual_evidence"]
+    run_context = _run_context_display(report)
     lines = [
         f"# Otto Certification Report — {report['project']['name']} — {report['verdict_label']} ({report['certifier_mode']})",
         "",
@@ -1016,12 +1115,22 @@ def _render_pow_markdown(report: dict[str, Any]) -> str:
         f"- Mode: `{report['certifier_mode']}`",
         f"- Stories: {report['passed_count']} pass, {report['failed_count']} fail, {report['warn_count']} warn",
         "- Full report: [proof-of-work.html](proof-of-work.html)",
-        "",
-        "## Story Summary",
-        "",
-        "| Story | Status | Surface | Key finding | Evidence |",
-        "| --- | --- | --- | --- | --- |",
     ]
+    for action in report["next_actions"]:
+        if action.get("command"):
+            lines.append(f"- Next: {action['label']} via `{action['command']}`")
+        else:
+            lines.append(f"- Next: {action['label']} in the HTML report")
+
+    lines.extend(
+        [
+            "",
+            "## Story Summary",
+            "",
+            "| Story | Status | Surface | Key finding | Evidence |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+    )
     for story in stories:
         lines.append(
             f"| {story['story_id']} | {_story_status_label(story, methodology_summary)} | {story['surface_display']} | "
@@ -1040,15 +1149,119 @@ def _render_pow_markdown(report: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "## Next Actions",
+            "## Story Details",
             "",
         ]
     )
-    for action in report["next_actions"]:
-        if action.get("command"):
-            lines.append(f"- {action['label']}: `{action['command']}`")
+    for story in _ordered_stories(stories):
+        lines.extend(
+            [
+                f"### {story['story_id']} ({_story_status_label(story, methodology_summary)})",
+                "",
+                f"- Claim: {story['claim'] or 'not provided'}",
+                f"- Observed Result: {story['observed_result'] or 'not provided'}",
+                f"- Surface: {story['surface_display']}",
+            ]
+        )
+        if story["observed_steps"]:
+            lines.append(f"- Observed Steps: {'; '.join(story['observed_steps'])}")
         else:
-            lines.append(f"- {action['label']} in the HTML report")
+            lines.append("- Observed Steps: not provided")
+        if story.get("failure_evidence"):
+            lines.append(f"- Failure Screenshot: {Path(str(story['failure_evidence'])).name}")
+        if story["methodology_caveat"]:
+            lines.append(f"- Methodology Caveat: {story['methodology_caveat']}")
+        if story["has_evidence"]:
+            lines.append("- Evidence:")
+            lines.append("```text")
+            lines.append(story["evidence"])
+            lines.append("```")
+        else:
+            lines.append("- Evidence: not provided by certifier.")
+        lines.append("")
+
+    lines.extend(["## Visual Evidence", ""])
+    if visual["recording"]:
+        lines.append(f"- Recording: [{visual['recording']['name']}]({visual['recording']['href']})")
+    image_items = []
+    for bucket in visual["buckets"]:
+        for item in bucket["items"]:
+            label = f"{bucket['story_id']}: {item['name']}"
+            image_items.append(f"- {label} ({bucket['status']}): [{item['name']}]({item['href']})")
+    for item in visual["unassigned"]:
+        image_items.append(f"- Unassigned: [{item['name']}]({item['href']})")
+    if image_items:
+        lines.extend(image_items)
+    else:
+        lines.append(f"- Visual evidence: {visual['absence_reason']}")
+
+    lines.extend(["", "## Efficiency", ""])
+    lines.append(
+        f"- Total browser calls: {efficiency['total_browser_calls']} across "
+        f"{efficiency['stories_total']} {efficiency['story_label']} "
+        f"({efficiency['avg_calls_per_story']:.1f} per story)"
+    )
+    lines.append(f"- Distinct browser sessions: {efficiency['distinct_sessions']}")
+    lines.append(f"- Top verbs: {efficiency['top_verbs_text']}")
+    if efficiency["outlier"] and efficiency["outlier_reason"]:
+        lines.append(f"- ⚠ Efficiency note: {efficiency['outlier_reason']}")
+
+    lines.extend(["", "## Coverage and Limitations", ""])
+    if coverage["legacy_mode"]:
+        if coverage["legacy_tested"]:
+            lines.append("### Legacy Tested Coverage")
+            lines.extend(f"- {item}" for item in coverage["legacy_tested"])
+            lines.append("")
+        if coverage["legacy_untested"]:
+            lines.append("### Legacy Untested Coverage")
+            lines.extend(f"- {item}" for item in coverage["legacy_untested"])
+            lines.append("")
+        if coverage["legacy_escaped_bug_classes"]:
+            lines.append("### Legacy Escaped Bug Classes")
+            lines.extend(f"- {item}" for item in coverage["legacy_escaped_bug_classes"])
+            lines.append("")
+    else:
+        lines.append("### What this run actually exercised")
+        if coverage["observed"]:
+            lines.extend(f"- {item}" for item in coverage["observed"])
+        elif coverage["note"]:
+            lines.append(f"- {coverage['note']}")
+        else:
+            lines.append("- Not recorded.")
+        lines.append("")
+        lines.append("### What this run did NOT cover")
+        if coverage["gaps"]:
+            lines.extend(f"- {item}" for item in coverage["gaps"])
+        elif coverage["note"]:
+            lines.append(f"- {coverage['note']}")
+        else:
+            lines.append("- Not recorded.")
+        lines.append("")
+    lines.append(f"- {coverage['limitations']}")
+    if coverage.get("uniform_methodology"):
+        lines.append(f"- All stories verified via {coverage['uniform_methodology']}.")
+
+    lines.extend(["", "## Run Context", ""])
+    if run_context["run_id"]:
+        lines.append(f"- Run ID: `{run_context['run_id']}`")
+    if run_context["git_branch"] or run_context["git_commit_sha"]:
+        lines.append(
+            f"- Git: `{run_context['git_branch'] or 'unknown'}` / `{run_context['git_commit_sha'] or 'unknown'}`"
+        )
+    if run_context["intent_excerpt"]:
+        lines.append(f"- Intent Excerpt: {run_context['intent_excerpt']}")
+    lines.append(f"- Spec: {run_context['spec_text']}")
+    if run_context["execution_note"]:
+        lines.append(f"- Certifier Execution: {run_context['execution_note']}")
+    if run_context["provider_model_effort"]:
+        lines.append(f"- Provider / Model / Effort: {run_context['provider_model_effort']}")
+    if run_context["generated_at"] or run_context["generated_local"]:
+        lines.append(
+            f"- Generated: {run_context['generated_at'] or run_context['generated_local']}"
+        )
+    if run_context["duration_human"]:
+        lines.append(f"- Duration: {run_context['duration_human']}")
+    lines.extend(f"- {line}" for line in report["cost_summary"]["lines"])
 
     lines.extend(
         [
@@ -1068,11 +1281,11 @@ def _render_pow_markdown(report: dict[str, Any]) -> str:
 
 def _render_pow_html(report: dict[str, Any]) -> str:
     stories = report.get("stories_ordered") or _ordered_stories(report["stories"])
-    coverage = report["coverage"]
+    coverage = _coverage_render_data(report)
+    efficiency = _efficiency_render_data(report)
     run_context = _run_context_display(report)
     visual = report["visual_evidence"]
     methodology_summary = report.get("story_methodology_summary") or _methodology_summary(stories)
-    detail_sections = _story_detail_sections(stories)
     has_evidence = any(story["has_evidence"] for story in stories)
     banner_class = "fail" if report["outcome"] == "failed" else ("warn" if report["warn_count"] > 0 else "pass")
     title = f"Otto Certification Report — {report['project']['name']} — {report['verdict_label']} ({report['certifier_mode']})"
@@ -1188,6 +1401,8 @@ def _render_pow_html(report: dict[str, Any]) -> str:
         ".visual-grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }",
         ".visual-item { border: 1px solid #dbe4ee; border-radius: 12px; background: #fff; padding: 0.8rem; }",
         ".visual-item img, .visual-item video { width: 100%; border-radius: 8px; margin-top: 0.5rem; }",
+        ".efficiency-list { margin: 0; padding-left: 1.1rem; }",
+        ".efficiency-list li + li { margin-top: 0.35rem; }",
         ".artifact-links { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 0.75rem; }",
         ".footer { margin-top: 1rem; font-size: 0.9rem; color: #475569; }",
         "</style>",
@@ -1277,38 +1492,9 @@ def _render_pow_html(report: dict[str, Any]) -> str:
             ]
         )
 
-    if detail_sections["failing"]:
-        heading = "Failing Story Detail" if len(detail_sections["failing"]) == 1 else "Failing Story Details"
-        html_lines.extend([f"<section class='card' id='story-details'><h2>{heading}</h2>"])
-        for story in detail_sections["failing"]:
-            html_lines.extend(render_story_article(story, compressed=False))
-        html_lines.append("</section>")
-
-    html_lines.extend(
-        [
-            "<section class='card'>",
-            "<h2>Coverage and Limitations</h2>",
-            "<div class='coverage-grid'>",
-            f"<div><span class='meta-label'>What This Verdict Means</span><div>{esc(coverage['meaning'])}</div></div>",
-            f"<div><span class='meta-label'>Residual Risk</span><div>{esc(coverage['residual_risk'])}</div></div>",
-            f"<div><span class='meta-label'>Tested</span><div>{esc(', '.join(coverage['tested']))}</div></div>",
-            f"<div><span class='meta-label'>Untested</span><div>{esc(', '.join(coverage['untested']))}</div></div>",
-            f"<div><span class='meta-label'>Escaped Bug Classes</span><div>{esc(', '.join(coverage['escaped_bug_classes']))}</div></div>",
-            "</div>",
-            "</section>",
-        ]
-    )
-    if coverage.get("uniform_methodology"):
-        html_lines.insert(-1, f"<div class='note'>All stories verified via {esc(coverage['uniform_methodology'])}.</div>")
-
-    if detail_sections["remaining"]:
-        html_lines.extend(
-            [
-                "<section class='card' id='remaining-story-details'>",
-                "<h2>Remaining Story Details</h2>",
-            ]
-        )
-        for story in detail_sections["remaining"]:
+    if stories:
+        html_lines.extend(["<section class='card' id='story-details'><h2>Story Details</h2>"])
+        for story in _ordered_stories(stories):
             html_lines.extend(render_story_article(story, compressed=story["status"] == "pass"))
         html_lines.append("</section>")
 
@@ -1364,6 +1550,97 @@ def _render_pow_html(report: dict[str, Any]) -> str:
     else:
         html_lines.append(f"<div class='note'>Visual evidence: {esc(visual['absence_reason'])}</div>")
     html_lines.extend(["</section>"])
+
+    html_lines.extend(
+        [
+            "<section class='card efficiency'>",
+            "<h2>Efficiency</h2>",
+            "<ul class='efficiency-list'>",
+            (
+                f"<li>Total browser calls: {efficiency['total_browser_calls']} across "
+                f"{efficiency['stories_total']} {efficiency['story_label']} "
+                f"({efficiency['avg_calls_per_story']:.1f} per story)</li>"
+            ),
+            f"<li>Distinct browser sessions: {efficiency['distinct_sessions']}</li>",
+            f"<li>Top verbs: {esc(efficiency['top_verbs_text'])}</li>",
+            "</ul>",
+        ]
+    )
+    if efficiency["outlier"] and efficiency["outlier_reason"]:
+        html_lines.append(f"<div class='note warn'>Efficiency note: {esc(efficiency['outlier_reason'])}</div>")
+    html_lines.append("</section>")
+
+    if coverage["legacy_mode"]:
+        html_lines.append(
+            "<!-- Deprecated legacy coverage rendering: source report is missing coverage_observed/coverage_gaps. -->"
+        )
+    html_lines.extend(
+        [
+            "<section class='card'>",
+            "<h2>Coverage and Limitations</h2>",
+        ]
+    )
+    if coverage["legacy_mode"]:
+        if coverage["legacy_tested"]:
+            html_lines.extend(
+                [
+                    "<div class='visual-group'>",
+                    "<h3>Legacy Tested Coverage</h3>",
+                    "<ul>",
+                ]
+            )
+            for item in coverage["legacy_tested"]:
+                html_lines.append(f"<li>{esc(item)}</li>")
+            html_lines.extend(["</ul>", "</div>"])
+        if coverage["legacy_untested"]:
+            html_lines.extend(
+                [
+                    "<div class='visual-group'>",
+                    "<h3>Legacy Untested Coverage</h3>",
+                    "<ul>",
+                ]
+            )
+            for item in coverage["legacy_untested"]:
+                html_lines.append(f"<li>{esc(item)}</li>")
+            html_lines.extend(["</ul>", "</div>"])
+        if coverage["legacy_escaped_bug_classes"]:
+            html_lines.extend(
+                [
+                    "<div class='visual-group'>",
+                    "<h3>Legacy Escaped Bug Classes</h3>",
+                    "<ul>",
+                ]
+            )
+            for item in coverage["legacy_escaped_bug_classes"]:
+                html_lines.append(f"<li>{esc(item)}</li>")
+            html_lines.extend(["</ul>", "</div>"])
+    else:
+        html_lines.extend(
+            [
+                "<h3>What this run actually exercised</h3>",
+                "<ul>",
+            ]
+        )
+        if coverage["observed"]:
+            for item in coverage["observed"]:
+                html_lines.append(f"<li>{esc(item)}</li>")
+        elif coverage["note"]:
+            html_lines.append(f"<li>{esc(coverage['note'])}</li>")
+        else:
+            html_lines.append("<li>Not recorded.</li>")
+        html_lines.extend(["</ul>", "<h3>What this run did NOT cover</h3>", "<ul>"])
+        if coverage["gaps"]:
+            for item in coverage["gaps"]:
+                html_lines.append(f"<li>{esc(item)}</li>")
+        elif coverage["note"]:
+            html_lines.append(f"<li>{esc(coverage['note'])}</li>")
+        else:
+            html_lines.append("<li>Not recorded.</li>")
+        html_lines.append("</ul>")
+    html_lines.append(f"<div class='footer'>{esc(coverage['limitations'])}</div>")
+    if coverage.get("uniform_methodology"):
+        html_lines.append(f"<div class='note'>All stories verified via {esc(coverage['uniform_methodology'])}.</div>")
+    html_lines.append("</section>")
 
     html_lines.extend(["<section class='card'>", "<h2>Run Context</h2>", "<div class='run-grid'>"])
     if run_context["run_id"]:
@@ -1527,7 +1804,7 @@ async def run_agentic_certifier(
     )
 
     total_duration = round(time.monotonic() - start_time, 1)
-    parsed = parse_certifier_markers(text or "")
+    parsed = parse_certifier_markers(text or "", certifier_mode=mode)
     if not parsed.stories and not parsed.verdict_seen:
         raise MalformedCertifierOutputError(
             "Certifier produced no structured output — see narrative.log"
@@ -1571,6 +1848,11 @@ async def run_agentic_certifier(
             evidence_dir=evidence_dir,
             stories_tested=parsed.stories_tested,
             stories_passed=parsed.stories_passed,
+            coverage_observed=parsed.coverage_observed,
+            coverage_gaps=parsed.coverage_gaps,
+            coverage_emitted=(
+                parsed.coverage_observed_emitted or parsed.coverage_gaps_emitted
+            ),
             metric_value=parsed.metric_value,
             metric_met=parsed.metric_met,
             round_timings=breakdown.get("round_timings", []),
@@ -1661,6 +1943,9 @@ def _generate_agentic_html_pow(
     round_history: list[dict[str, Any]] | None = None,
     evidence_dir: Path | None = None,
     certifier_cost: float | None = None,
+    coverage_observed: list[str] | None = None,
+    coverage_gaps: list[str] | None = None,
+    coverage_emitted: bool | None = None,
 ) -> None:
     """Compatibility wrapper used by legacy tests."""
     report = _build_pow_report_data(
@@ -1692,6 +1977,9 @@ def _generate_agentic_html_pow(
         evidence_dir=evidence_dir,
         stories_tested=total,
         stories_passed=passed,
+        coverage_observed=coverage_observed,
+        coverage_gaps=coverage_gaps,
+        coverage_emitted=coverage_emitted,
         round_timings=None,
     )
     (output_dir / "proof-of-work.html").write_text(_render_pow_html(report))

@@ -17,6 +17,7 @@ _STORY_RESULT_RE = re.compile(
     r"^STORY_RESULT:\s*(\S+?)\s*\|\s*(PASS|FAIL|WARN)\s*\|\s*(.*)$"
 )
 _VERDICT_RE = re.compile(r"^VERDICT:\s*(PASS|FAIL)\s*$")
+_ALL_CAPS_MARKER_RE = re.compile(r"^[A-Z][A-Z0-9_ ]*:\s*.*$")
 
 
 @dataclass
@@ -32,6 +33,10 @@ class ParsedMarkers:
     # Target mode metrics
     metric_value: str = ""
     metric_met: bool | None = None  # None = not a target run
+    coverage_observed: list[str] = field(default_factory=list)
+    coverage_gaps: list[str] = field(default_factory=list)
+    coverage_observed_emitted: bool = False
+    coverage_gaps_emitted: bool = False
 
 
 class MalformedCertifierOutputError(RuntimeError):
@@ -296,7 +301,7 @@ def _iter_marker_lines(text: str):
         yield line
 
 
-def parse_certifier_markers(text: str) -> ParsedMarkers:
+def parse_certifier_markers(text: str, *, certifier_mode: str | None = None) -> ParsedMarkers:
     """Parse structured markers from certifier agent output.
 
     Handles both single-round output (standalone certifier) and multi-round
@@ -309,6 +314,7 @@ def parse_certifier_markers(text: str) -> ParsedMarkers:
         return ParsedMarkers()
 
     evidence = _extract_evidence(text)
+    normalized_mode = str(certifier_mode or "").strip().lower()
 
     # Parse per-round blocks. Each CERTIFY_ROUND starts a new round.
     certify_rounds: list[dict[str, Any]] = []
@@ -318,10 +324,29 @@ def parse_certifier_markers(text: str) -> ParsedMarkers:
         "verdict": None,
         "diagnosis": "",
         "explicit_round": False,
+        "coverage_observed": [],
+        "coverage_gaps": [],
+        "coverage_observed_emitted": False,
+        "coverage_gaps_emitted": False,
     }
+    active_coverage_block: str | None = None
 
     for line in _iter_marker_lines(text):
         stripped = line.strip()
+
+        if active_coverage_block is not None:
+            if not stripped:
+                active_coverage_block = None
+                continue
+            if _ALL_CAPS_MARKER_RE.match(stripped):
+                active_coverage_block = None
+            elif stripped.startswith("- "):
+                current_round.setdefault(active_coverage_block, []).append(
+                    stripped[2:].strip()
+                )
+                continue
+            else:
+                continue
 
         if stripped.startswith("CERTIFY_ROUND:"):
             should_append_current = (
@@ -330,6 +355,8 @@ def parse_certifier_markers(text: str) -> ParsedMarkers:
                 or current_round.get("diagnosis")
                 or current_round.get("metric_value")
                 or "metric_met" in current_round
+                or current_round.get("coverage_observed_emitted")
+                or current_round.get("coverage_gaps_emitted")
             )
             if (
                 should_append_current
@@ -339,6 +366,8 @@ def parse_certifier_markers(text: str) -> ParsedMarkers:
                     or current_round["stories"]
                     or current_round["verdict"] is not None
                     or current_round.get("diagnosis")
+                    or current_round.get("coverage_observed_emitted")
+                    or current_round.get("coverage_gaps_emitted")
                 )
             ):
                 certify_rounds.append(current_round)
@@ -356,6 +385,10 @@ def parse_certifier_markers(text: str) -> ParsedMarkers:
                 "verdict": None,
                 "diagnosis": "",
                 "explicit_round": True,
+                "coverage_observed": [],
+                "coverage_gaps": [],
+                "coverage_observed_emitted": False,
+                "coverage_gaps_emitted": False,
             }
 
         elif stripped.startswith("STORIES_TESTED:"):
@@ -382,6 +415,12 @@ def parse_certifier_markers(text: str) -> ParsedMarkers:
             diag = _parse_diagnosis(stripped[len("DIAGNOSIS:"):])
             current_round["diagnosis"] = diag
 
+        elif stripped == "COVERAGE_OBSERVED:":
+            current_round["coverage_observed_emitted"] = True
+            active_coverage_block = "coverage_observed"
+        elif stripped == "COVERAGE_GAPS:":
+            current_round["coverage_gaps_emitted"] = True
+            active_coverage_block = "coverage_gaps"
         elif stripped.startswith("METRIC_VALUE:"):
             current_round["metric_value"] = stripped.split(":", 1)[1].strip()
         elif stripped.startswith("METRIC_MET:"):
@@ -398,6 +437,8 @@ def parse_certifier_markers(text: str) -> ParsedMarkers:
         or current_round.get("diagnosis")
         or current_round.get("metric_value")
         or "metric_met" in current_round
+        or current_round.get("coverage_observed_emitted")
+        or current_round.get("coverage_gaps_emitted")
     ):
         certify_rounds.append(current_round)
 
@@ -443,6 +484,10 @@ def parse_certifier_markers(text: str) -> ParsedMarkers:
         result.verdict_pass = bool(final_round.get("verdict", False))
         result.verdict_seen = final_round.get("verdict") is not None
         result.diagnosis = final_round.get("diagnosis", "")
+        result.coverage_observed = list(final_round.get("coverage_observed", []) or [])
+        result.coverage_gaps = list(final_round.get("coverage_gaps", []) or [])
+        result.coverage_observed_emitted = bool(final_round.get("coverage_observed_emitted"))
+        result.coverage_gaps_emitted = bool(final_round.get("coverage_gaps_emitted"))
     elif len(certify_rounds) == 0:
         # Fallback: no CERTIFY_ROUND markers — scan flat output
         result.verdict_pass, result.diagnosis = _parse_verdict_from_end(text)
@@ -450,8 +495,23 @@ def parse_certifier_markers(text: str) -> ParsedMarkers:
 
         # Extract stories from flat output (dedup by story_id)
         flat_stories: list[dict[str, Any]] = []
+        active_coverage_block = None
         for line in _iter_marker_lines(text):
             stripped = line.strip()
+            if active_coverage_block is not None:
+                if not stripped:
+                    active_coverage_block = None
+                    continue
+                if _ALL_CAPS_MARKER_RE.match(stripped):
+                    active_coverage_block = None
+                elif stripped.startswith("- "):
+                    if active_coverage_block == "coverage_observed":
+                        result.coverage_observed.append(stripped[2:].strip())
+                    else:
+                        result.coverage_gaps.append(stripped[2:].strip())
+                    continue
+                else:
+                    continue
             if stripped.startswith("STORIES_TESTED:"):
                 try:
                     result.stories_tested = int(stripped.split(":", 1)[1].strip())
@@ -466,6 +526,12 @@ def parse_certifier_markers(text: str) -> ParsedMarkers:
                 result.metric_value = stripped.split(":", 1)[1].strip()
             elif stripped.startswith("METRIC_MET:"):
                 result.metric_met = stripped.split(":", 1)[1].strip().upper() == "YES"
+            elif stripped == "COVERAGE_OBSERVED:":
+                result.coverage_observed_emitted = True
+                active_coverage_block = "coverage_observed"
+            elif stripped == "COVERAGE_GAPS:":
+                result.coverage_gaps_emitted = True
+                active_coverage_block = "coverage_gaps"
             elif _STORY_RESULT_RE.match(stripped):
                 story = _parse_story_result(stripped, evidence)
                 if story:
@@ -488,11 +554,39 @@ def parse_certifier_markers(text: str) -> ParsedMarkers:
                 "passed_count": result.stories_passed or deduped_passed,
                 "metric_value": result.metric_value,
                 "metric_met": result.metric_met,
+                "coverage_observed": result.coverage_observed,
+                "coverage_gaps": result.coverage_gaps,
+                "coverage_observed_emitted": result.coverage_observed_emitted,
+                "coverage_gaps_emitted": result.coverage_gaps_emitted,
             }]
     else:
         for round_data in reversed(certify_rounds):
             if round_data.get("verdict") is not None:
                 result.verdict_seen = True
                 break
+
+    if not result.coverage_observed_emitted and not result.coverage_gaps_emitted:
+        for round_data in reversed(certify_rounds):
+            if (
+                round_data.get("coverage_observed_emitted")
+                or round_data.get("coverage_gaps_emitted")
+            ):
+                result.coverage_observed = list(
+                    round_data.get("coverage_observed", []) or []
+                )
+                result.coverage_gaps = list(round_data.get("coverage_gaps", []) or [])
+                result.coverage_observed_emitted = bool(
+                    round_data.get("coverage_observed_emitted")
+                )
+                result.coverage_gaps_emitted = bool(
+                    round_data.get("coverage_gaps_emitted")
+                )
+                break
+
+    if normalized_mode in {"standard", "thorough"} and result.stories:
+        if not result.coverage_observed_emitted or not result.coverage_gaps_emitted:
+            raise MalformedCertifierOutputError(
+                "Certifier omitted required COVERAGE_OBSERVED/COVERAGE_GAPS markers"
+            )
 
     return result

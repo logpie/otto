@@ -26,8 +26,10 @@ from otto.logstream import (
     JsonlMessageWriter,
     NarrativeFormatter,
     _parse_story_result_marker,
+    browser_efficiency_outlier,
     estimate_phase_costs,
     make_session_logger,
+    summarize_browser_efficiency,
 )
 
 
@@ -1039,3 +1041,261 @@ class TestEstimatePhaseCosts:
         assert estimated == {
             "certify": {"cost_usd": 2.0, "estimated": True},
         }
+
+
+class TestBrowserEfficiency:
+    def test_counts_browser_calls_sessions_and_verbs(self, tmp_path):
+        path = tmp_path / "messages.jsonl"
+        records = [
+            {
+                "type": "assistant",
+                "blocks": [{
+                    "type": "tool_use",
+                    "id": "agent-1",
+                    "name": "Agent",
+                    "input": {"prompt": "Verify story_id=first-experience and capture STORY_RESULT lines."},
+                }],
+            },
+            {
+                "type": "assistant",
+                "blocks": [
+                    {
+                        "type": "tool_use",
+                        "id": "bash-1",
+                        "name": "Bash",
+                        "input": {"command": "agent-browser --session main snapshot -i"},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "bash-2",
+                        "name": "Bash",
+                        "input": {"command": "agent-browser --session main eval \"return !!document.querySelector('#app')\""},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "bash-3",
+                        "name": "Bash",
+                        "input": {"command": "echo no-browser-here"},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "agent-generic",
+                        "name": "Agent",
+                        "input": {"prompt": "Summarize the browser evidence and collect screenshots."},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "bash-4",
+                        "name": "Bash",
+                        "input": {"command": "agent-browser click \"Add card\""},
+                    },
+                ],
+            },
+        ]
+        path.write_text("\n".join(json.dumps(rec) for rec in records) + "\n")
+
+        efficiency = summarize_browser_efficiency(
+            path,
+            certifier_mode="standard",
+            story_ids=["first-experience", "crud-lifecycle"],
+        )
+
+        assert efficiency["total_browser_calls"] == 3
+        assert efficiency["distinct_sessions"] == 2
+        assert efficiency["verb_counts"] == {"click": 1, "eval": 1, "snapshot": 1}
+        assert efficiency["calls_per_story"] == {
+            "first-experience": 2,
+            "crud-lifecycle": 0,
+            "shared": 1,
+        }
+
+    def test_calls_per_story_uses_direct_attribution_and_shared_bucket(self, tmp_path):
+        path = tmp_path / "messages.jsonl"
+        records = [
+            {
+                "type": "assistant",
+                "blocks": [{
+                    "type": "tool_use",
+                    "id": "agent-story-1",
+                    "name": "Agent",
+                    "input": {"description": "Run crud-lifecycle certifier story in the browser."},
+                }],
+            },
+            {
+                "type": "assistant",
+                "blocks": [{
+                    "type": "tool_use",
+                    "id": "bash-1",
+                    "name": "Bash",
+                    "input": {"command": "agent-browser --session crud-user snapshot -i"},
+                }],
+            },
+            {
+                "type": "assistant",
+                "blocks": [{
+                    "type": "tool_use",
+                    "id": "bash-1b",
+                    "name": "Bash",
+                    "input": {"command": "agent-browser --session crud-user eval \"return window.localStorage.length\""},
+                }],
+            },
+            {
+                "type": "assistant",
+                "blocks": [{
+                    "type": "tool_use",
+                    "id": "agent-story-2",
+                    "name": "Agent",
+                    "input": {"prompt": "Now verify drag-drop behavior end to end."},
+                }],
+            },
+            {
+                "type": "assistant",
+                "blocks": [{
+                    "type": "tool_use",
+                    "id": "bash-2",
+                    "name": "Bash",
+                    "input": {"command": "agent-browser --session dnd drag \"Card A\" \"Done\""},
+                }],
+            },
+            {
+                "type": "assistant",
+                "blocks": [{
+                    "type": "tool_use",
+                    "id": "bash-3",
+                    "name": "Bash",
+                    "input": {"command": "agent-browser screenshot evidence/final.png"},
+                }],
+            },
+        ]
+        path.write_text("\n".join(json.dumps(rec) for rec in records) + "\n")
+
+        efficiency = summarize_browser_efficiency(
+            path,
+            certifier_mode="standard",
+            story_ids=["crud-lifecycle", "drag-drop"],
+        )
+
+        assert efficiency["calls_per_story"] == {
+            "crud-lifecycle": 2,
+            "drag-drop": 1,
+            "shared": 1,
+        }
+
+    def test_main_agent_browser_work_stays_in_shared_bucket(self, tmp_path):
+        path = tmp_path / "messages.jsonl"
+        records = [
+            {
+                "type": "assistant",
+                "blocks": [{
+                    "type": "tool_use",
+                    "id": "bash-1",
+                    "name": "Bash",
+                    "input": {"command": "agent-browser snapshot -i"},
+                }],
+            },
+            {
+                "type": "assistant",
+                "blocks": [{
+                    "type": "tool_use",
+                    "id": "bash-2",
+                    "name": "Bash",
+                    "input": {"command": "agent-browser click \"Continue\""},
+                }],
+            },
+            {
+                "type": "assistant",
+                "blocks": [{
+                    "type": "tool_use",
+                    "id": "bash-3",
+                    "name": "Bash",
+                    "input": {"command": "agent-browser eval \"return window.location.pathname\""},
+                }],
+            },
+        ]
+        path.write_text("\n".join(json.dumps(rec) for rec in records) + "\n")
+
+        efficiency = summarize_browser_efficiency(
+            path,
+            certifier_mode="standard",
+            story_ids=["first-experience", "crud-lifecycle"],
+        )
+
+        assert efficiency["calls_per_story"] == {
+            "first-experience": 0,
+            "crud-lifecycle": 0,
+            "shared": 3,
+        }
+
+    def test_outlier_heuristic_thresholds_by_mode(self):
+        assert browser_efficiency_outlier(
+            certifier_mode="fast",
+            total_browser_calls=21,
+            distinct_sessions=1,
+            story_count=1,
+        ) == (
+            True,
+            "fast-mode outlier: calls per story 21.0 > 20.0.",
+        )
+        assert browser_efficiency_outlier(
+            certifier_mode="standard",
+            total_browser_calls=91,
+            distinct_sessions=1,
+            story_count=2,
+        ) == (
+            True,
+            "standard-mode outlier: total browser calls 91 > 90; calls per story 45.5 > 40.0.",
+        )
+        assert browser_efficiency_outlier(
+            certifier_mode="standard",
+            total_browser_calls=10,
+            distinct_sessions=3,
+            story_count=2,
+            isolated_story_count=1,
+        ) == (False, "")
+        assert browser_efficiency_outlier(
+            certifier_mode="standard",
+            total_browser_calls=10,
+            distinct_sessions=4,
+            story_count=2,
+            isolated_story_count=1,
+        ) == (
+            True,
+            "standard-mode outlier: distinct sessions 4 > 3.",
+        )
+        assert browser_efficiency_outlier(
+            certifier_mode="thorough",
+            total_browser_calls=170,
+            distinct_sessions=4,
+            story_count=2,
+        ) == (
+            True,
+            "thorough-mode outlier: total browser calls 170 > 160; calls per story 85.0 > 80.0.",
+        )
+        assert browser_efficiency_outlier(
+            certifier_mode="standard",
+            total_browser_calls=167,
+            distinct_sessions=5,
+            story_count=6,
+        ) == (False, "")
+        assert browser_efficiency_outlier(
+            certifier_mode="thorough",
+            total_browser_calls=60,
+            distinct_sessions=4,
+            story_count=2,
+        ) == (False, "")
+        assert browser_efficiency_outlier(
+            certifier_mode="thorough",
+            total_browser_calls=60,
+            distinct_sessions=5,
+            story_count=2,
+        ) == (
+            True,
+            "thorough-mode outlier: distinct sessions 5 > 4.",
+        )
+        assert browser_efficiency_outlier(
+            certifier_mode="standard",
+            total_browser_calls=60,
+            distinct_sessions=3,
+            story_count=2,
+            isolated_story_count=1,
+        ) == (False, "")

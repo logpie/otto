@@ -415,7 +415,7 @@ async def build_agentic_v3(
 
     # Parse certification results from agent output
     from otto.markers import compact_story_results, parse_certifier_markers
-    parsed = parse_certifier_markers(text or "")
+    parsed = parse_certifier_markers(text or "", certifier_mode=certifier_mode)
     if final_status == "completed" and not skip_qa and not parsed.stories and not parsed.verdict_seen:
         from otto.markers import MalformedCertifierOutputError
 
@@ -542,6 +542,11 @@ async def build_agentic_v3(
             evidence_dir=evidence_dir_path,
             stories_tested=stories_tested,
             stories_passed=stories_passed,
+            coverage_observed=parsed.coverage_observed,
+            coverage_gaps=parsed.coverage_gaps,
+            coverage_emitted=(
+                parsed.coverage_observed_emitted or parsed.coverage_gaps_emitted
+            ),
             metric_value=parsed.metric_value,
             metric_met=parsed.metric_met,
             round_timings=round_timings,

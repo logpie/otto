@@ -33,6 +33,10 @@ STORY_RESULT: crud-lifecycle | PASS | Create, read, delete all work
 STORY_RESULT: search | PASS | Search by tag and title works
 STORY_RESULT: persistence | PASS | Data survives across sessions
 STORY_RESULT: edge-cases | PASS | Empty input, special chars handled
+COVERAGE_OBSERVED:
+- Exercised the mocked first-experience, CRUD, search, persistence, and edge-case stories
+COVERAGE_GAPS:
+- Did not model additional product-specific coverage in this mocked transcript
 VERDICT: PASS
 DIAGNOSIS: null
 """
@@ -49,6 +53,10 @@ STORY_RESULT: crud | PASS | CRUD works
 STORY_RESULT: auth | PASS | Auth works
 STORY_RESULT: isolation | FAIL | Users can see each other's data
 STORY_RESULT: edge | FAIL | Empty title accepted without validation
+COVERAGE_OBSERVED:
+- Exercised the mocked CRUD, auth, isolation, and edge stories
+COVERAGE_GAPS:
+- Did not model additional product-specific coverage in this mocked transcript
 VERDICT: FAIL
 DIAGNOSIS: Data isolation broken and input validation missing
 """
@@ -62,6 +70,10 @@ STORIES_PASSED: 2
 STORY_RESULT: crud | PASS | Works
 STORY_RESULT: auth | FAIL | Missing auth check on /toggle
 STORY_RESULT: edge | PASS | Edge cases handled
+COVERAGE_OBSERVED:
+- Exercised the mocked CRUD, auth, and edge stories in round 1
+COVERAGE_GAPS:
+- Did not model additional product-specific coverage in this mocked transcript
 VERDICT: FAIL
 DIAGNOSIS: Missing auth on toggle endpoint
 
@@ -73,6 +85,10 @@ STORIES_PASSED: 3
 STORY_RESULT: crud | PASS | Works
 STORY_RESULT: auth | PASS | Auth check added
 STORY_RESULT: edge | PASS | Edge cases handled
+COVERAGE_OBSERVED:
+- Re-exercised the mocked CRUD, auth, and edge stories in round 2
+COVERAGE_GAPS:
+- Did not model additional product-specific coverage in this mocked transcript
 VERDICT: PASS
 DIAGNOSIS: null
 """
@@ -85,6 +101,10 @@ STORIES_TESTED: 2
 STORIES_PASSED: 2
 STORY_RESULT: crud | PASS | Works
 STORY_RESULT: auth | PASS | Works
+COVERAGE_OBSERVED:
+- Exercised the mocked CRUD and auth stories in round 1
+COVERAGE_GAPS:
+- Did not model additional product-specific coverage in this mocked transcript
 VERDICT: PASS
 DIAGNOSIS: null
 
@@ -95,6 +115,10 @@ STORIES_TESTED: 2
 STORIES_PASSED: 2
 STORY_RESULT: crud | PASS | Still works
 STORY_RESULT: auth | PASS | Still works
+COVERAGE_OBSERVED:
+- Re-exercised the mocked CRUD and auth stories in round 2
+COVERAGE_GAPS:
+- Did not model additional product-specific coverage in this mocked transcript
 VERDICT: PASS
 DIAGNOSIS: null
 """
@@ -111,6 +135,10 @@ STORIES_TESTED: 2
 STORIES_PASSED: 2
 STORY_RESULT: p50-latency | PASS | Latency probe completed successfully
 STORY_RESULT: regression-suite | PASS | Existing behavior still passes
+COVERAGE_OBSERVED:
+- Exercised the mocked latency probe and regression stories
+COVERAGE_GAPS:
+- Did not model additional product-specific coverage in this mocked transcript
 METRIC_VALUE: 137ms
 METRIC_MET: NO
 VERDICT: PASS
@@ -125,6 +153,10 @@ STORIES_TESTED: 2
 STORIES_PASSED: 2
 STORY_RESULT: p50-latency | PASS | Latency probe completed successfully
 STORY_RESULT: regression-suite | PASS | Existing behavior still passes
+COVERAGE_OBSERVED:
+- Exercised the mocked latency probe and regression stories
+COVERAGE_GAPS:
+- Did not model additional product-specific coverage in this mocked transcript
 METRIC_VALUE: 82ms
 METRIC_MET: YES
 VERDICT: PASS
@@ -139,6 +171,10 @@ STORIES_TESTED: 2
 STORIES_PASSED: 2
 STORY_RESULT: crud | PASS | CRUD works
 STORY_RESULT: edge-cases | PASS | Edge cases handled
+COVERAGE_OBSERVED:
+- Exercised the mocked CRUD and edge-case stories
+COVERAGE_GAPS:
+- Did not model additional product-specific coverage in this mocked transcript
 METRIC_VALUE: 137ms
 VERDICT: PASS
 DIAGNOSIS: null
@@ -152,6 +188,10 @@ STORIES_TESTED: 2
 STORIES_PASSED: 2
 STORY_RESULT: p50-latency | PASS | Latency probe completed successfully
 STORY_RESULT: regression-suite | PASS | Existing behavior still passes
+COVERAGE_OBSERVED:
+- Exercised the mocked latency probe and regression stories
+COVERAGE_GAPS:
+- Did not model additional product-specific coverage in this mocked transcript
 METRIC_VALUE: 82ms
 VERDICT: PASS
 DIAGNOSIS: null
