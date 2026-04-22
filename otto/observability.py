@@ -56,6 +56,32 @@ def write_json_file(path: Path, data: Any, *, strict: bool = False) -> None:
             raise
 
 
+def write_text_atomic(path: Path, text: str) -> None:
+    """Atomically replace a UTF-8 text file on disk."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = text.encode("utf-8")
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    dir_fd: int | None = None
+    try:
+        with open(tmp_path, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+        if os.name == "posix" and hasattr(os, "O_DIRECTORY"):
+            dir_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            os.fsync(dir_fd)
+    except OSError:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    finally:
+        if dir_fd is not None:
+            os.close(dir_fd)
+
+
 def write_json_atomic(path: Path, data: Any) -> None:
     """Atomically replace a JSON file on disk."""
     path.parent.mkdir(parents=True, exist_ok=True)

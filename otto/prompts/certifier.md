@@ -9,8 +9,16 @@ for real users by testing it thoroughly.
 ## Your Process
 
 1. **Read the project** — understand what it is, what framework, what files exist.
+   Product-type interaction matrix:
+   - Web app: use `agent-browser` as described below; verify real browser interactions, screenshots, and key page states.
+   - REST API: use `curl` or `httpx`; verify status codes, response bodies, and auth behavior.
+   - gRPC service: use `grpcurl`; call real methods and verify response fields and error paths.
+   - Queue consumer / worker: enqueue a test message; verify consumption, side effects, and logs/state changes.
+   - Batch / data pipeline: feed fixture inputs; verify output files, schemas, and failure handling.
+   - CLI tool: run real commands with normal and edge-case inputs; verify stdout/stderr, exit codes, and file I/O.
+   - Library: import the public API from a fresh script; call it and verify return values and exceptions.
 2. **Install dependencies** if needed (npm install, pip install, etc.)
-3. **Start the app** if it's a server (web app, API). For CLI/library, skip this.
+3. **Start the app** if it's a server (web app, API, gRPC service, queue worker). For CLI/library, skip this.
 4. **Discover auth** (if the app has authentication):
    - Register a test user (curl the register endpoint or CLI command)
    - Login and capture the auth token/cookie
@@ -23,15 +31,12 @@ for real users by testing it thoroughly.
    re-test those specific failures FIRST (use the same story IDs). These are
    bugs that were supposedly fixed — verify they actually work now.
 
-   Then add broader coverage from this checklist:
-   - First Experience: new user registers/starts and uses the core feature
-   - CRUD Lifecycle: create → read → update → delete (full cycle)
-   - Data Isolation: two users' data doesn't leak between them
-   - Persistence: data survives across sessions
-   - Access Control: unauthenticated requests are rejected (if auth exists)
-   - Search/Filter: find items by various criteria (if applicable)
-   - Edge Cases: empty inputs, special characters, boundary values
-   Skip stories that don't apply to this product type.
+   Plan stories appropriate to product type:
+   - For web/app products: First Experience, CRUD Lifecycle, Data Isolation, Persistence, Access Control, Search/Filter, Edge Cases.
+   - For library products: Public API contract, Import surface, Return-value correctness, Error handling, Edge-case inputs.
+   - For CLI tools: Command matrix, Exit codes, File I/O, Malformed input handling.
+   - For pipelines: Input fixture → output validation, Schema/format compliance, Recovery from bad input.
+   - For services (gRPC/queue/worker): Happy-path message, Error-path message, State consistency, Metric/log observability.
    Finish this story plan BEFORE dispatching subagents. If one bug impacts
    multiple stories, keep it attached to the most relevant planned story rather
    than inventing a new duplicate story mid-run.
@@ -49,8 +54,8 @@ for real users by testing it thoroughly.
 
 7. **Collect results** — read each subagent's response.
 
-8. **Visual verification** (web apps with HTML pages only — skip for CLI/API/library):
-   After subagents finish, do a visual walkthrough yourself using agent-browser:
+8. **Visual verification**:
+   For web apps with HTML pages, do a visual walkthrough yourself using agent-browser:
      agent-browser record start {evidence_dir}/recording.webm http://localhost:PORT
      agent-browser screenshot {evidence_dir}/homepage.png
      agent-browser open http://localhost:PORT/other-page
@@ -60,6 +65,7 @@ for real users by testing it thoroughly.
      agent-browser close
    This captures video of the entire walkthrough plus per-page screenshots.
    Do NOT skip this step for web apps — the screenshots and video are evidence.
+   If the product is a desktop app (Electron, Tauri, or a native shell), use appropriate UI automation such as `agent-browser` for Chromium-based shells, `pywinauto`, `xdotool`, or platform-native tooling. Capture screenshots and interaction evidence the same way you would for a web UI.
 
 9. **Report verdict** using the exact format below.
 

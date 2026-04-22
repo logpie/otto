@@ -482,6 +482,39 @@ async def test_paused_build_does_not_write_summary_json(tmp_git_repo):
     assert checkpoint["status"] == "paused"
 
 
+@pytest.mark.asyncio
+async def test_build_flow_creates_only_active_phase_directory(tmp_git_repo):
+    from otto import paths as _paths
+
+    async def fake_run(*args, **kwargs):
+        return (
+            "STORIES_TESTED: 1\n"
+            "STORIES_PASSED: 1\n"
+            "STORY_RESULT: smoke | PASS | claim=Smoke works | observed_result=OK | surface=CLI | methodology=cli-execution | summary=Smoke passed\n"
+            "COVERAGE_OBSERVED:\n"
+            "- Exercised the CLI smoke path\n"
+            "COVERAGE_GAPS:\n"
+            "- Did not exercise malformed input coverage\n"
+            "VERDICT: PASS\n"
+            "DIAGNOSIS: null\n",
+            0.1,
+            "agent-session-1",
+            {"round_timings": []},
+        )
+
+    from otto.certifier import run_agentic_certifier
+
+    with patch("otto.agent.run_agent_with_timeout", side_effect=fake_run):
+        report = await run_agentic_certifier("test", tmp_git_repo, {}, session_id="certify-run-1")
+
+    session_dir = _paths.session_dir(tmp_git_repo, "certify-run-1")
+    assert report.outcome.value == "passed"
+    assert (_paths.certify_dir(tmp_git_repo, "certify-run-1")).exists()
+    assert not (_paths.build_dir(tmp_git_repo, "certify-run-1")).exists()
+    assert not (_paths.improve_dir(tmp_git_repo, "certify-run-1")).exists()
+    assert not (session_dir / "spec").exists()
+
+
 class TestV3PipelineFail:
     """Agent builds, certifier finds bugs, build fails."""
 
@@ -697,10 +730,11 @@ class TestEmptyIntent:
     """Empty / whitespace-only intent should be rejected at CLI level."""
 
     @pytest.mark.parametrize("bad_intent", ["", "   ", "\t\n"])
-    def test_empty_intent_rejected(self, bad_intent):
+    def test_empty_intent_rejected(self, bad_intent, tmp_git_repo, monkeypatch):
         from click.testing import CliRunner
         from otto.cli import main
 
+        monkeypatch.chdir(tmp_git_repo)
         runner = CliRunner()
         result = runner.invoke(main, ["build", bad_intent])
         assert result.exit_code == 2

@@ -73,7 +73,9 @@ class ResumeState:
     session_started_at: str = ""
     child_session_ids: list[str] = field(default_factory=list)
     git_sha: str = ""
+    git_status: str = ""
     prompt_hash: str = ""
+    missing_paused_session_path: str = ""
     # Spec-gate fields (new; all empty/None for pre-spec checkpoints)
     intent: str = ""              # canonical intent (for resume without CLI intent)
     run_id: str = ""              # session_id in the new layout (kept as run_id for compat)
@@ -138,6 +140,12 @@ def print_resume_status(console: Any, state: ResumeState, resume_flag: bool, exp
     lockstep with ``resolve_resume()``.
     """
     if resume_flag and not state.resumed:
+        if state.missing_paused_session_path:
+            console.print(
+                "\n  [yellow]Your paused session at "
+                f"{state.missing_paused_session_path} was deleted; nothing to resume.[/yellow]\n"
+            )
+            return
         console.print("\n  [yellow]No checkpoint found — starting fresh.[/yellow]\n")
         return
     if not state.resumed:
@@ -192,9 +200,14 @@ def resolve_resume(
     checkpoint = load_checkpoint(project_dir)
 
     if not checkpoint:
+        missing_paused_session_path = ""
+        if resume:
+            missing = _missing_paused_session_path(project_dir)
+            if missing is not None:
+                missing_paused_session_path = str(missing)
         if resume:
             logger.info("No checkpoint found; starting fresh despite --resume")
-        return ResumeState()
+        return ResumeState(missing_paused_session_path=missing_paused_session_path)
 
     if not resume:
         cr = checkpoint.get("current_round", 0)
@@ -210,9 +223,11 @@ def resolve_resume(
     current_round = checkpoint.get("current_round", 0) or 0
     current_fingerprint = checkpoint_fingerprint(project_dir)
     git_sha = checkpoint.get("git_sha", "") or ""
+    git_status = checkpoint.get("git_status", "") or ""
     prompt_hash = checkpoint.get("prompt_hash", "") or ""
     fingerprint_mismatch = bool(
         (git_sha and git_sha != current_fingerprint.get("git_sha", ""))
+        or (git_status != current_fingerprint.get("git_status", ""))
         or (prompt_hash and prompt_hash != current_fingerprint.get("prompt_hash", ""))
     )
     command_mismatch = bool(prior_cmd) and prior_cmd != expected_command
@@ -226,15 +241,18 @@ def resolve_resume(
             )
         if fingerprint_mismatch:
             raise ValueError(
-                "Checkpoint fingerprint does not match the current code/prompt state. "
+                "Checkpoint fingerprint does not match the current code/prompt/worktree state. "
+                "The paused run's git status differs from the current tree. "
                 "Pass `--force --resume` to override."
             )
     if fingerprint_mismatch and force:
         logger.warning(
-            "Resuming despite fingerprint mismatch (checkpoint git_sha=%s prompt_hash=%s, current git_sha=%s prompt_hash=%s)",
+            "Resuming despite fingerprint mismatch (checkpoint git_sha=%s git_status=%r prompt_hash=%s, current git_sha=%s git_status=%r prompt_hash=%s)",
             git_sha,
+            git_status,
             prompt_hash,
             current_fingerprint.get("git_sha", ""),
+            current_fingerprint.get("git_status", ""),
             current_fingerprint.get("prompt_hash", ""),
         )
     return ResumeState(
@@ -256,6 +274,7 @@ def resolve_resume(
         session_started_at=checkpoint.get("started_at", "") or "",
         child_session_ids=list(checkpoint.get("child_session_ids", []) or []),
         git_sha=git_sha,
+        git_status=git_status,
         prompt_hash=prompt_hash,
         intent=checkpoint.get("intent", "") or "",
         run_id=_checkpoint_run_id(checkpoint),
@@ -268,6 +287,35 @@ def resolve_resume(
         focus=checkpoint.get("focus", "") or "",
         max_rounds=int(checkpoint.get("max_rounds", 0) or 0),
     )
+
+
+def _missing_paused_session_path(project_dir: Path) -> Path | None:
+    """Return the paused session path when the pointer exists but the session is gone."""
+    pointer_target = paths.resolve_pointer(project_dir, paths.PAUSED_POINTER)
+    if pointer_target is not None:
+        return None
+
+    logs_dir = paths.logs_dir(project_dir)
+    symlink_path = logs_dir / paths.PAUSED_POINTER
+    if symlink_path.is_symlink():
+        try:
+            target = symlink_path.resolve(strict=False)
+        except OSError:
+            return None
+        if not target.exists():
+            return target
+
+    pointer_file = logs_dir / f"{paths.PAUSED_POINTER}.txt"
+    if pointer_file.exists():
+        try:
+            session_id = pointer_file.read_text().strip()
+        except OSError:
+            return None
+        if session_id:
+            target = paths.session_dir(project_dir, session_id)
+            if not target.exists():
+                return target
+    return None
 
 
 def initial_build_completed(phase: str) -> bool:
@@ -354,6 +402,7 @@ def write_checkpoint(
             set(child_session_ids or (prior.get("child_session_ids", []) if prior else []) or [])
         ),
         "git_sha": fingerprint.get("git_sha", ""),
+        "git_status": fingerprint.get("git_status", ""),
         "prompt_hash": fingerprint.get("prompt_hash", ""),
         "intent": intent if intent is not None else (prior.get("intent", "") if prior else ""),
         "spec_path": spec_path if spec_path is not None else (prior.get("spec_path", "") if prior else ""),

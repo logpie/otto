@@ -298,9 +298,24 @@ class TestDetectTestCommand:
         assert "pytest" not in result
 
     def test_detects_makefile_test_target(self, tmp_bare_git_repo):
-        (tmp_bare_git_repo / "Makefile").write_text("test:\n\tpytest\n")
+        (tmp_bare_git_repo / "Makefile").write_text("test:\n\t./scripts/run-tests.sh\n")
         result = detect_test_command(tmp_bare_git_repo)
         assert result == "make test"
+
+    def test_detects_pytest_from_pyproject_ini_options(self, tmp_bare_git_repo):
+        (tmp_bare_git_repo / "pyproject.toml").write_text(
+            "[tool.pytest.ini_options]\naddopts = \"-q\"\n"
+        )
+        result = detect_test_command(tmp_bare_git_repo)
+        assert result == "pytest"
+
+    def test_makefile_wrapper_does_not_duplicate_tox(self, tmp_bare_git_repo):
+        (tmp_bare_git_repo / "tests").mkdir()
+        (tmp_bare_git_repo / "tests" / "test_example.py").write_text("def test_x(): pass\n")
+        (tmp_bare_git_repo / "tox.ini").write_text("[tox]\nenvlist = py3\n")
+        (tmp_bare_git_repo / "Makefile").write_text("test:\n\ttox\n")
+        result = detect_test_command(tmp_bare_git_repo)
+        assert result == "tox"
 
 
 class TestDetectDefaultBranch:

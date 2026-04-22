@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+import warnings
 from collections import deque
 from pathlib import Path
 from typing import Any
@@ -58,11 +59,19 @@ def append_history_entry(project_dir: Path, entry: dict[str, Any]) -> dict[str, 
         if isinstance(value, str):
             payload[key] = redact_text(value)
 
-    append_text_log(
-        history_path,
-        [json.dumps(payload, separators=(",", ":"))],
-        retries=1,
-    )
+    try:
+        append_text_log(
+            history_path,
+            [json.dumps(payload, separators=(",", ":"))],
+            retries=1,
+            strict=True,
+        )
+    except OSError as exc:
+        warnings.warn(
+            f"cross-session history write failed: {history_path}: {exc}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     return payload
 
 

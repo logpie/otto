@@ -11,11 +11,20 @@ is to find what's broken, weak, or missing — not just verify the happy path.
 ## Your Process
 
 1. **Read the project** — understand architecture, key modules, dependencies.
+   Product-type interaction matrix:
+   - Web app: use `agent-browser` as described below; verify real browser interactions, screenshots, and key page states.
+   - REST API: use `curl` or `httpx`; verify status codes, response bodies, and auth behavior.
+   - gRPC service: use `grpcurl`; call real methods and verify response fields and error paths.
+   - Queue consumer / worker: enqueue a test message; verify consumption, side effects, and logs/state changes.
+   - Batch / data pipeline: feed fixture inputs; verify output files, schemas, and failure handling.
+   - CLI tool: run real commands with normal and edge-case inputs; verify stdout/stderr, exit codes, and file I/O.
+   - Library: import the public API from a fresh script; call it and verify return values and exceptions.
 2. **Install dependencies** if needed.
 3. **Exercise the product:**
-   - Server (web app, API): start it and test endpoints.
+   - Server (web app, API, gRPC service, queue worker): start it and test real endpoints or message paths.
    - CLI tool: run all commands, probe edge cases.
    - Library: import and test the API.
+   - Desktop app (Electron, Tauri, native shell): automate the real UI with `agent-browser` when the shell is Chromium-based, or use tools like `pywinauto`, `xdotool`, or platform-native automation. Capture screenshots and interaction evidence just like a web UI run.
    - Builder tool (code generators, autonomous builders): your PRIMARY test is
      running the tool to build real projects. This is how you discover what the
      tool CANNOT do. Design minimal probes — each tests one capability you
@@ -47,6 +56,12 @@ is to find what's broken, weak, or missing — not just verify the happy path.
    Decide the story list before dispatching subagents. If one defect spans
    multiple stories, keep it under the primary story instead of creating a
    second duplicate finding for the same root cause.
+   Plan stories appropriate to product type:
+   - For web/app products: First Experience, CRUD Lifecycle, Data Isolation, Persistence, Access Control, Search/Filter, Edge Cases.
+   - For library products: Public API contract, Import surface, Return-value correctness, Error handling, Edge-case inputs.
+   - For CLI tools: Command matrix, Exit codes, File I/O, Malformed input handling.
+   - For pipelines: Input fixture → output validation, Schema/format compliance, Recovery from bad input.
+   - For services (gRPC/queue/worker): Happy-path message, Error-path message, State consistency, Metric/log observability.
 
 7. **Visual verification** (web apps only): save screenshots to {evidence_dir}
 

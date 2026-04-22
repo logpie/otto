@@ -220,7 +220,7 @@ async def build_agentic_v3(
     """
     from otto.agent import make_agent_options, run_agent_with_timeout
     from otto import paths
-    from otto.config import validate_certifier_mode
+    from otto.config import ensure_safe_repo_state, validate_certifier_mode
     from otto.display import console
 
     # run_id is the unified session_id in the new layout. Older callers
@@ -236,6 +236,10 @@ async def build_agentic_v3(
 
     # Resumed SDK sessions already carry prior context; avoid polluting
     # intent.md or stdin when the user resumes without a fresh intent.
+    ensure_safe_repo_state(
+        project_dir,
+        allow_dirty=bool(config.get("allow_dirty_repo")),
+    )
     if record_intent:
         _append_intent(project_dir, intent, build_id)
     _commit_artifacts(project_dir)
@@ -406,7 +410,7 @@ async def build_agentic_v3(
         # Agent mode: preserve session_id from streaming so --resume can
         # continue the SDK conversation instead of starting fresh.
         text = f"BUILD ERROR: {err.reason}"
-        cost = 0.0
+        cost = float(err.total_cost_usd or 0.0)
         session_id = err.session_id or checkpoint_session_id
         breakdown_data = {"round_timings": [], "build_duration_s": None}
         if session_id:
@@ -874,6 +878,7 @@ async def run_certify_fix_loop(
 
     from otto.checkpoint import write_checkpoint as _write_cp
     from otto import paths as _paths
+    from otto.config import ensure_safe_repo_state
 
     # Unified session_id (was build_id). Allocate if caller didn't provide.
     build_id = session_id or _paths.new_session_id(project_dir)
@@ -902,6 +907,10 @@ async def run_certify_fix_loop(
 
     if record_intent:
         _append_intent(project_dir, intent, build_id)
+    ensure_safe_repo_state(
+        project_dir,
+        allow_dirty=bool(config.get("allow_dirty_repo")),
+    )
     _commit_artifacts(project_dir)
 
     def _save_cp(
@@ -973,6 +982,8 @@ async def run_certify_fix_loop(
             pending_resume_session_id = None
         except AgentCallError as err:
             build_phase_duration += time.monotonic() - build_call_start
+            total_cost += float(err.total_cost_usd or 0.0)
+            build_phase_cost += float(err.total_cost_usd or 0.0)
             logger.warning("Initial build hit budget/timeout: %s", err.reason)
             _save_cp(status="paused", phase="initial_build", session_id=err.session_id or "")
             return BuildResult(passed=False, build_id=build_id, total_cost=total_cost)
@@ -1250,6 +1261,12 @@ async def run_certify_fix_loop(
         except AgentCallError as err:
             # Budget exhausted or agent timed out mid-round. Don't run the
             # trailing complete_checkpoint path — return early with paused.
+            partial_cost = float(err.total_cost_usd or 0.0)
+            total_cost += partial_cost
+            if checkpoint_phase == "certify":
+                certify_phase_cost += partial_cost
+            else:
+                build_phase_cost += partial_cost
             logger.warning("Round %d paused (%s)", round_num, err.reason)
             try:
                 _save_cp(status="paused", session_id=err.session_id or "")

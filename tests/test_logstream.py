@@ -14,6 +14,8 @@ import json
 import re
 import time
 
+import pytest
+
 from otto.agent import (
     AssistantMessage,
     ResultMessage,
@@ -32,6 +34,7 @@ from otto.logstream import (
     normalize_phase_breakdown,
     summarize_browser_efficiency,
 )
+from otto.redaction import _TOKEN_PATTERNS
 
 
 _TS_RE = re.compile(r"^\[\+\d+:\d{2}\] ")
@@ -91,6 +94,33 @@ class TestJsonlWriter:
         rec = json.loads(path.read_text().strip())
         assert "sk-secretvalue1234567890" not in rec["result"]
         assert "[REDACTED:OPENAI_API_KEY]" in rec["result"]
+
+    @pytest.mark.parametrize(
+        ("secret_text", "expected"),
+        [
+            ("OPENAI_API_KEY=sk-secretvalue1234567890", "[REDACTED:OPENAI_API_KEY]"),
+            ("token sk-ant-abcdefghijklmnopqrstuvwxyz", "sk-ant-REDACTED"),
+            ("token ghp_abcdefghijklmnopqrstuvwxyz1234", "ghp_REDACTED"),
+            ("token github_pat_abcdefghijklmnopqrstuvwxyz_1234", "github_pat_REDACTED"),
+            ("token gho_abcdefghijklmnopqrstuvwxyz1234", "gho_REDACTED"),
+            ("token ghs_abcdefghijklmnopqrstuvwxyz1234", "ghs_REDACTED"),
+            ("token ghu_abcdefghijklmnopqrstuvwxyz1234", "ghu_REDACTED"),
+            ("token AIzaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "AIzaREDACTED"),
+            ("token sk-abcdefghijklmnopqrstuvwxyz123456", "sk-REDACTED"),
+        ],
+    )
+    def test_result_message_redacts_all_supported_secret_patterns(self, tmp_path, secret_text, expected):
+        path = tmp_path / "messages.jsonl"
+        w = JsonlMessageWriter(path)
+        w.write(ResultMessage(subtype="success", is_error=False, result=secret_text))
+        w.close()
+
+        rec = json.loads(path.read_text().strip())
+        assert expected in rec["result"]
+        for pattern, _replacement in _TOKEN_PATTERNS:
+            match = pattern.search(secret_text)
+            if match:
+                assert match.group(0) not in rec["result"]
 
     def test_result_message_records_structured_output(self, tmp_path):
         path = tmp_path / "messages.jsonl"

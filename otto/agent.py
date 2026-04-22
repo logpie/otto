@@ -180,11 +180,12 @@ class AgentCallError(Exception):
     blank the session_id and ``otto build --resume`` would start a fresh
     agent session instead of continuing the existing SDK conversation.
     """
-    def __init__(self, reason: str, session_id: str = ""):
+    def __init__(self, reason: str, session_id: str = "", total_cost_usd: float = 0.0):
         from otto.redaction import redact_text
 
         self.reason = redact_text(reason)
         self.session_id = session_id
+        self.total_cost_usd = float(total_cost_usd or 0.0)
         super().__init__(self.reason)
 
 
@@ -367,7 +368,11 @@ async def run_agent_with_timeout(
     narrative = callbacks.pop("_narrative")
     # Mutable bag — streaming handlers update it so timeout/crash paths can
     # recover the last-known session_id for a resumable checkpoint.
-    agent_state: dict[str, Any] = {"session_id": "", "child_session_ids": []}
+    agent_state: dict[str, Any] = {
+        "session_id": "",
+        "child_session_ids": [],
+        "total_cost_usd": 0.0,
+    }
 
     def _append_narrative(line: str) -> None:
         """Append a terminal-error marker to narrative.log for human debugging."""
@@ -428,7 +433,11 @@ async def run_agent_with_timeout(
             breakdown_data["recovered_tool_errors"] = int(
                 finalize_stats.get("recovered_tool_errors", 0)
             )
-            raise AgentCallError(str(reason), session_id=session_id)
+            raise AgentCallError(
+                str(reason),
+                session_id=session_id,
+                total_cost_usd=float(cost or 0.0),
+            )
         child_session_ids = [
             sid for sid in agent_state.get("child_session_ids", []) or []
             if sid and sid != session_id
@@ -505,6 +514,7 @@ async def run_agent_with_timeout(
         raise AgentCallError(
             f"Timed out after {timeout}s",
             session_id=agent_state.get("session_id", ""),
+            total_cost_usd=float(agent_state.get("total_cost_usd", 0.0) or 0.0),
         )
     except KeyboardInterrupt:
         _append_narrative("\u2501\u2501\u2501 KeyboardInterrupt")
@@ -525,6 +535,7 @@ async def run_agent_with_timeout(
         raise AgentCallError(
             f"Agent crashed: {exc}",
             session_id=agent_state.get("session_id", ""),
+            total_cost_usd=float(agent_state.get("total_cost_usd", 0.0) or 0.0),
         )
     finally:
         if heartbeat_task is not None:
@@ -801,15 +812,20 @@ async def _query_codex(
     opts = options or AgentOptions()
     env = dict(opts.env or {})
 
-    process = await asyncio.create_subprocess_exec(
-        *_codex_command(opts),
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        cwd=opts.cwd or None,
-        env=env,
-        start_new_session=True,
-    )
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *_codex_command(opts),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            cwd=opts.cwd or None,
+            env=env,
+            start_new_session=True,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "codex CLI not found in PATH; install it from https://github.com/openai/codex"
+        ) from exc
     if state is not None:
         state["process_group_id"] = process.pid
 
@@ -913,6 +929,18 @@ async def query(
         yield message
 
 
+def _usage_total_cost_usd(message: Any) -> float | None:
+    usage = getattr(message, "usage", None)
+    if isinstance(usage, dict):
+        raw = usage.get("total_cost_usd")
+        if isinstance(raw, (int, float)):
+            return float(raw)
+    raw = getattr(usage, "total_cost_usd", None)
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    return None
+
+
 def tool_use_summary(block) -> str:
     """One-line summary of a tool use block for logging."""
     def _unwrap_shell_command(cmd: str) -> str:
@@ -1002,6 +1030,11 @@ async def run_agent_query(
     message_iter = query(**query_kwargs)
 
     async for message in message_iter:
+        usage_cost = _usage_total_cost_usd(message)
+        if usage_cost is not None:
+            cost = max(cost, usage_cost)
+            if state is not None:
+                state["total_cost_usd"] = cost
         # Capture session_id eagerly. Every SDK message type carries it,
         # and we need it to build a resumable checkpoint even when the
         # stream is later cancelled (timeout) or crashes.
@@ -1027,6 +1060,8 @@ async def run_agent_query(
             raw_cost = getattr(message, "total_cost_usd", None)
             if isinstance(raw_cost, (int, float)):
                 cost = max(cost, float(raw_cost))
+                if state is not None:
+                    state["total_cost_usd"] = cost
             if on_result:
                 on_result(message)
         elif isinstance(message, (AssistantMessage, UserMessage)):
@@ -1055,6 +1090,7 @@ async def run_agent_query(
                             raise AgentCallError(
                                 "max_subagent dispatch cap reached; check for agent loops",
                                 session_id=(state or {}).get("session_id", ""),
+                                total_cost_usd=cost,
                             )
                     if on_tool:
                         on_tool(block)

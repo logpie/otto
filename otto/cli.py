@@ -1,9 +1,11 @@
 """Otto CLI — entrypoint for all otto commands."""
 
 import asyncio
+from contextlib import contextmanager
 import json
 import os
 import re
+import signal
 import sys
 import time
 import tomllib
@@ -119,6 +121,26 @@ def _record_cli_override(config: dict[str, Any], key: str, value: Any) -> None:
     overrides = config.setdefault("_cli_overrides", {})
     if isinstance(overrides, dict):
         overrides[key] = value
+
+
+@contextmanager
+def _signal_interrupt_guard() -> Any:
+    """Treat SIGTERM/SIGHUP like Ctrl-C so pause/cleanup paths stay consistent."""
+    installed: list[tuple[int, Any]] = []
+
+    def _raise_keyboard_interrupt(_signum, _frame) -> None:
+        raise KeyboardInterrupt
+
+    for signum in (signal.SIGTERM, getattr(signal, "SIGHUP", None)):
+        if signum is None:
+            continue
+        installed.append((signum, signal.getsignal(signum)))
+        signal.signal(signum, _raise_keyboard_interrupt)
+    try:
+        yield
+    finally:
+        for signum, previous in reversed(installed):
+            signal.signal(signum, previous)
 
 
 def _positive_budget_option(
@@ -811,8 +833,9 @@ def _exit_for_lock_busy(exc) -> None:
               default=None, help="Use a pre-written spec file (implies --yes)")
 @click.option("--yes", is_flag=True, help="Auto-approve the generated spec (for CI/scripts)")
 @click.option("--force", is_flag=True, help="Discard an active paused spec run and start fresh")
+@click.option("--allow-dirty", is_flag=True, help="Proceed even if the repo has local modifications or untracked files")
 @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
-def build(intent, no_qa, fast, standard_, thorough, split, rounds, budget, max_turns, model, provider, effort, strict, verbose, resume, spec, spec_file, yes, force, break_lock):
+def build(intent, no_qa, fast, standard_, thorough, split, rounds, budget, max_turns, model, provider, effort, strict, verbose, resume, spec, spec_file, yes, force, allow_dirty, break_lock):
     """Build a product from a natural language intent.
 
     One agent builds, certifies, and fixes autonomously. The certifier
@@ -839,12 +862,13 @@ def build(intent, no_qa, fast, standard_, thorough, split, rounds, budget, max_t
     from otto import paths as _paths
 
     try:
-        with _paths.project_lock(project_dir, "build", break_lock=break_lock):
-            _build_locked(
-                intent, no_qa, fast, standard_, thorough, split, rounds,
-                budget, max_turns, model, provider, effort, strict, verbose,
-                resume, spec, spec_file, yes, force, project_dir,
-            )
+        with _signal_interrupt_guard():
+            with _paths.project_lock(project_dir, "build", break_lock=break_lock):
+                _build_locked(
+                    intent, no_qa, fast, standard_, thorough, split, rounds,
+                    budget, max_turns, model, provider, effort, strict, verbose,
+                    resume, spec, spec_file, yes, force, allow_dirty, project_dir,
+                )
     except _paths.LockBreakError as exc:
         error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
         sys.exit(1)
@@ -872,6 +896,7 @@ def _build_locked(
     spec_file,
     yes,
     force,
+    allow_dirty,
     project_dir: Path,
 ):
     from otto import paths as _paths
@@ -884,6 +909,7 @@ def _build_locked(
         resolve_resume,
     )
     from otto.spec import read_spec_file
+    from otto.config import ensure_safe_repo_state
 
     if spec and spec_file:
         error_console.print("[error]--spec and --spec-file are mutually exclusive.[/error]")
@@ -945,6 +971,12 @@ def _build_locked(
         sys.exit(2)
     if resume_state.resumed and resume_state.split_mode is not None:
         split = resume_state.split_mode
+    if resume and not resume_state.resumed and resume_state.missing_paused_session_path and not intent:
+        error_console.print(
+            "[error]Your paused session at "
+            f"{resume_state.missing_paused_session_path} was deleted; nothing to resume.[/error]"
+        )
+        sys.exit(2)
     use_spec = (
         bool(spec or spec_file)
         or is_spec_phase(resume_state.phase)
@@ -1025,6 +1057,11 @@ def _build_locked(
     # when the yaml is absent.
     config_path = project_dir / "otto.yaml"
     config = _load_config_or_exit(config_path)
+    try:
+        ensure_safe_repo_state(project_dir, allow_dirty=allow_dirty)
+    except ConfigError as exc:
+        error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
+        sys.exit(2)
 
     resolved_skip_qa, skip_qa_source = _resolve_bool_setting(
         config=config,
@@ -1092,6 +1129,9 @@ def _build_locked(
     if strict:
         config["strict_mode"] = True
         sources["strict_mode"] = "--strict"
+    if allow_dirty:
+        config["allow_dirty_repo"] = True
+        sources["allow_dirty_repo"] = "--allow-dirty"
     config["_verbose"] = bool(verbose)
     from otto.config import get_max_rounds, get_max_turns_per_call
     try:
@@ -1311,13 +1351,14 @@ def certify(intent, thorough, fast, standard_, budget, max_turns, strict, model,
     intent = _normalize_intent(intent or "")
 
     try:
-        with _paths.project_lock(project_dir, "certify", break_lock=break_lock):
-            session_id = _new_run_id(project_dir)
-            _certify_locked(
-                intent, thorough, fast, standard_,
-                budget, max_turns, strict, model, provider, effort,
-                project_dir, session_id,
-            )
+        with _signal_interrupt_guard():
+            with _paths.project_lock(project_dir, "certify", break_lock=break_lock):
+                session_id = _new_run_id(project_dir)
+                _certify_locked(
+                    intent, thorough, fast, standard_,
+                    budget, max_turns, strict, model, provider, effort,
+                    project_dir, session_id,
+                )
     except _paths.LockBreakError as exc:
         error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
         sys.exit(1)

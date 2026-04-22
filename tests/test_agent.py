@@ -210,7 +210,23 @@ async def test_run_agent_query_streams_markers_without_retaining_full_tool_blob(
 
     assert "STORY_RESULT: smoke | PASS | ok" in text
     assert "VERDICT: PASS" in text
+    assert huge_blob not in text
     assert len(text) < 60_000
+
+
+@pytest.mark.asyncio
+async def test_codex_missing_binary_surfaces_provider_specific_hint(tmp_path, monkeypatch):
+    async def missing_codex(*args, **kwargs):
+        raise FileNotFoundError("codex")
+
+    monkeypatch.setattr("otto.agent.asyncio.create_subprocess_exec", missing_codex)
+
+    with pytest.raises(RuntimeError, match="codex CLI not found in PATH"):
+        async for _message in query(
+            prompt="List files",
+            options=ClaudeAgentOptions(provider="codex", cwd=str(tmp_path)),
+        ):
+            pass
 
 
 @pytest.mark.asyncio
