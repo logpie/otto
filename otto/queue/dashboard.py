@@ -25,6 +25,8 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container
+from textual.driver import Driver
+from textual.drivers.linux_driver import LinuxDriver
 from textual.screen import ModalScreen, Screen
 from textual.widgets import DataTable, Log, Static
 
@@ -402,31 +404,31 @@ class QueueModel:
         if manifest:
             mirror_of = manifest.get("mirror_of")
             if isinstance(mirror_of, str) and mirror_of:
-                candidate = Path(mirror_of).expanduser().resolve(strict=False)
+                candidate = Path(mirror_of).expanduser().absolute()
                 if candidate.exists():
                     return candidate
         if isinstance(task_state, dict):
             manifest_path = task_state.get("manifest_path")
             if isinstance(manifest_path, str) and manifest_path:
-                candidate = Path(manifest_path).expanduser().resolve(strict=False)
+                candidate = Path(manifest_path).expanduser().absolute()
                 if candidate.exists():
                     return candidate
         queue_manifest = queue_index_path_for(self.project_dir, task_id)
         if queue_manifest is not None and queue_manifest.exists():
-            return queue_manifest.resolve(strict=False)
+            return queue_manifest.absolute()
         if manifest:
             checkpoint_path = manifest.get("checkpoint_path")
             if isinstance(checkpoint_path, str) and checkpoint_path:
                 candidate = (
-                    Path(checkpoint_path).expanduser().resolve(strict=False).parent / "manifest.json"
+                    Path(checkpoint_path).expanduser().absolute().parent / "manifest.json"
                 )
                 if candidate.exists():
                     return candidate
         if isinstance(task_state, dict):
             manifest_path = task_state.get("manifest_path")
             if isinstance(manifest_path, str) and manifest_path:
-                return Path(manifest_path).expanduser().resolve(strict=False)
-        return queue_manifest.resolve(strict=False) if queue_manifest is not None else None
+                return Path(manifest_path).expanduser().absolute()
+        return queue_manifest.absolute() if queue_manifest is not None else None
 
     def resolve_session_id(
         self,
@@ -630,6 +632,15 @@ class HelpModal(ModalScreen[None]):
         self.dismiss(None)
 
 
+class OttoLinuxDriver(LinuxDriver):
+    """Skip focus-tracking enable when Otto leaves mouse support off."""
+
+    def write(self, data: str) -> None:
+        if not self._mouse and data == "\x1b[?1004h":
+            return
+        super().write(data)
+
+
 class OverviewScreen(Screen[None]):
     BINDINGS = [
         Binding("j", "cursor_down", "Down", show=False),
@@ -819,11 +830,13 @@ class OverviewScreen(Screen[None]):
             HelpModal(
                 "Overview bindings",
                 [
-                    "j / Down: move to next row",
-                    "k / Up: move to previous row",
+                    "j / Down / ↓: move to next row",
+                    "k / Up / ↑: move to previous row",
                     "Enter: open task detail",
                     "y: yank selected row to clipboard",
                     "c: queue cancel for selected running task",
+                    "?: open this help",
+                    "Esc: close this help overlay",
                     "q: hide dashboard; watcher continues until tasks complete (Ctrl-C to stop)",
                 ],
             )
@@ -904,13 +917,20 @@ class TaskDetailScreen(Screen[None]):
             return
         lines = [
             f"branch: {current.branch}",
-            f"log: {current.narrative_path if current.narrative_path is not None else '-'}",
-            f"manifest: {current.manifest_path if current.manifest_path is not None else '-'}",
+            f"log: {self._display_path(current.narrative_path)}",
+            f"manifest: {self._display_path(current.manifest_path)}",
         ]
         failure_reason = current.state.get("failure_reason")
         if current.status == "failed" and isinstance(failure_reason, str) and failure_reason:
             lines.append(f"failure: {failure_reason}")
-        info.update(Text("\n".join(lines)))
+        info.update(Text("\n".join(lines), overflow="fold", no_wrap=False))
+
+    @staticmethod
+    def _display_path(value: Path | None) -> str:
+        text = str(value) if value is not None else "-"
+        if text.startswith("/private/tmp/"):
+            text = text.removeprefix("/private")
+        return text
 
     def action_back(self) -> None:
         self.app.pop_screen()
@@ -1056,6 +1076,12 @@ class QueueApp(App[int]):
         self.runner = runner
         self.last_snapshot = QueueSnapshot([], None, "-", 0.0, 0, 0, 0, 0)
         self._recent_cancel_requests: dict[str, float] = {}
+
+    def get_driver_class(self) -> type[Driver]:
+        driver_class = super().get_driver_class()
+        if driver_class is LinuxDriver:
+            return OttoLinuxDriver
+        return driver_class
 
     async def on_mount(self) -> None:
         await self.push_screen(OverviewScreen())

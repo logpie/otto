@@ -21,6 +21,16 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from cast_utils import (
+    CURSOR_HIDE,
+    CURSOR_SHOW,
+    cast_output,
+    find_first_frame,
+    find_last_frame,
+    mouse_disable_codes,
+    mouse_enable_codes,
+)
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ARTIFACT_ROOT = REPO_ROOT / "bench-results" / "as-user"
@@ -29,6 +39,7 @@ DEFAULT_COLS = 120
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\\\)")
 QUICK_SCENARIOS = ["A1", "A2", "B1", "B3", "C1", "D2"]
 OTTO_BIN = REPO_ROOT / ".venv" / "bin" / "otto"
+FAKE_OTTO_BIN = REPO_ROOT / "scripts" / "fake-otto.sh"
 PYTHON_BIN = REPO_ROOT / ".venv" / "bin" / "python"
 LOCAL_ASCIINEMA = REPO_ROOT / ".venv" / "bin" / "asciinema"
 ASCIINEMA_SHIM = REPO_ROOT / "scripts" / "asciinema_shim.py"
@@ -275,6 +286,246 @@ def write_conflict_base(repo: Path) -> None:
     )
     (repo / "intent.md").write_text("A tiny Python helper library around tools.py.\n")
     commit_all(repo, "add tools base")
+
+
+UX_PRIMARY_TASK_ID = "build-add-ux-check"
+UX_SECONDARY_TASK_ID = "build-mul-ux-check"
+UX_QUEUED_TASK_ID = "build-sub-ux-check"
+UX_PRIMARY_BRANCH = "build/add-2026-04-21"
+UX_SECONDARY_BRANCH = "build/mul-2026-04-21"
+UX_PRIMARY_SESSION_ID = "2026-04-21-200030-aaa111"
+UX_SECONDARY_SESSION_ID = "2026-04-21-200100-bbb222"
+
+
+def scenario_env(**overrides: str) -> dict[str, str]:
+    env = dict(current_ctx().env)
+    for key, value in overrides.items():
+        env[key] = value
+    return env
+
+
+def prepend_path(env: dict[str, str], *entries: Path) -> dict[str, str]:
+    path_bits = [str(entry) for entry in entries if str(entry)]
+    path_bits.append(env.get("PATH", ""))
+    updated = dict(env)
+    updated["PATH"] = os.pathsep.join(path_bits)
+    return updated
+
+
+def write_queue_state_file(repo: Path, tasks: dict[str, Any], *, watcher: dict[str, Any] | None = None) -> None:
+    payload = {"schema_version": 1, "watcher": watcher, "tasks": tasks}
+    (repo / ".otto-queue-state.json").write_text(json.dumps(payload, indent=2) + "\n")
+
+
+def append_dashboard_task(
+    repo: Path,
+    *,
+    task_id: str,
+    branch: str,
+    intent: str,
+) -> None:
+    from otto.queue.schema import QueueTask, append_task
+
+    append_task(
+        repo,
+        QueueTask(
+            id=task_id,
+            command_argv=["build", "--fast", intent],
+            resumable=True,
+            added_at="2026-04-21T20:00:00Z",
+            resolved_intent=intent,
+            branch=branch,
+            worktree=f".worktrees/{task_id}",
+        ),
+    )
+
+
+def write_dashboard_task_artifacts(
+    repo: Path,
+    *,
+    task_id: str,
+    branch: str,
+    session_id: str,
+    narrative_text: str,
+) -> dict[str, str]:
+    worktree = repo / ".worktrees" / task_id
+    session_root = worktree / "otto_logs" / "sessions" / session_id
+    build_dir = session_root / "build"
+    build_dir.mkdir(parents=True, exist_ok=True)
+    narrative_path = build_dir / "narrative.log"
+    narrative_path.write_text(narrative_text)
+
+    manifest_path = repo / "otto_logs" / "queue" / task_id / "manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "command": "build",
+                "argv": ["build", "--fast", f"Build {task_id}.py CLI"],
+                "queue_task_id": task_id,
+                "run_id": session_id,
+                "branch": branch,
+                "checkpoint_path": str(session_root / "checkpoint.json"),
+                "proof_of_work_path": str(session_root / "certify" / "proof-of-work.json"),
+                "cost_usd": 0.0,
+                "duration_s": 0.0,
+                "started_at": "2026-04-21T20:00:30Z",
+                "finished_at": "2026-04-21T20:00:35Z",
+                "head_sha": None,
+                "resolved_intent": f"Build {task_id}.py CLI",
+                "focus": None,
+                "target": None,
+                "exit_status": "success",
+                "schema_version": 1,
+                "extra": {},
+                "mirror_of": str(session_root / "manifest.json"),
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    return {
+        "narrative_path": str(narrative_path.resolve(strict=False)),
+        "manifest_path": str(manifest_path.resolve(strict=False)),
+    }
+
+
+def setup_u_realistic(repo: Path, provider: str) -> None:
+    init_repo(repo)
+    write_otto_yaml(repo, provider=provider, certifier_mode="fast", extra_lines=["queue:", "  concurrent: 2"])
+    append_dashboard_task(
+        repo,
+        task_id=UX_PRIMARY_TASK_ID,
+        branch=UX_PRIMARY_BRANCH,
+        intent="Build add.py CLI",
+    )
+    append_dashboard_task(
+        repo,
+        task_id=UX_SECONDARY_TASK_ID,
+        branch=UX_SECONDARY_BRANCH,
+        intent="Build mul.py CLI",
+    )
+    append_dashboard_task(
+        repo,
+        task_id=UX_QUEUED_TASK_ID,
+        branch="build/sub-2026-04-21",
+        intent="Build sub.py CLI",
+    )
+    write_dashboard_task_artifacts(
+        repo,
+        task_id=UX_PRIMARY_TASK_ID,
+        branch=UX_PRIMARY_BRANCH,
+        session_id=UX_PRIMARY_SESSION_ID,
+        narrative_text=(
+            "[+0:00] BUILD starting for add\n"
+            "[+0:01] reading project layout\n"
+            "[+0:02] writing add.py with argparse\n"
+            "[+0:05] STORY_RESULT: smoke | PASS | python add.py works\n"
+        ),
+    )
+    write_dashboard_task_artifacts(
+        repo,
+        task_id=UX_SECONDARY_TASK_ID,
+        branch=UX_SECONDARY_BRANCH,
+        session_id=UX_SECONDARY_SESSION_ID,
+        narrative_text=(
+            "[+0:00] BUILD starting for mul\n"
+            "[+0:01] reading project layout\n"
+            "[+0:02] writing mul.py with argparse\n"
+            "[+0:05] STORY_RESULT: smoke | PASS | python mul.py works\n"
+        ),
+    )
+    write_dashboard_task_artifacts(
+        repo,
+        task_id=UX_QUEUED_TASK_ID,
+        branch="build/sub-2026-04-21",
+        session_id="2026-04-21-200130-ccc333",
+        narrative_text=(
+            "[+0:00] BUILD starting for sub\n"
+            "[+0:01] reading project layout\n"
+            "[+0:02] writing sub.py with argparse\n"
+            "[+0:05] STORY_RESULT: smoke | PASS | python sub.py works\n"
+        ),
+    )
+    write_queue_state_file(
+        repo,
+        {
+            UX_PRIMARY_TASK_ID: {
+                "status": "done",
+                "started_at": "2026-04-21T20:00:30Z",
+                "finished_at": "2026-04-21T20:00:35Z",
+                "child": None,
+                "manifest_path": str((repo / "otto_logs" / "queue" / UX_PRIMARY_TASK_ID / "manifest.json").resolve(strict=False)),
+                "cost_usd": 0.0,
+                "duration_s": 5.0,
+                "failure_reason": None,
+            },
+            UX_SECONDARY_TASK_ID: {
+                "status": "done",
+                "started_at": "2026-04-21T20:01:00Z",
+                "finished_at": "2026-04-21T20:01:05Z",
+                "child": None,
+                "manifest_path": str((repo / "otto_logs" / "queue" / UX_SECONDARY_TASK_ID / "manifest.json").resolve(strict=False)),
+                "cost_usd": 0.0,
+                "duration_s": 5.0,
+                "failure_reason": None,
+            },
+            UX_QUEUED_TASK_ID: {
+                "status": "done",
+                "started_at": "2026-04-21T20:01:30Z",
+                "finished_at": "2026-04-21T20:01:35Z",
+                "child": None,
+                "manifest_path": str((repo / "otto_logs" / "queue" / UX_QUEUED_TASK_ID / "manifest.json").resolve(strict=False)),
+                "cost_usd": 0.0,
+                "duration_s": 5.0,
+                "failure_reason": None,
+            },
+        },
+    )
+
+
+def install_clipboard_capture(root: Path, capture_path: Path) -> Path:
+    bindir = root / "mockbin"
+    bindir.mkdir(parents=True, exist_ok=True)
+    target = shlex.quote(str(capture_path))
+    wrappers = {
+        "pbcopy": f"#!/usr/bin/env bash\nset -euo pipefail\ncat > {target}\n",
+        "xclip": f"#!/usr/bin/env bash\nset -euo pipefail\ncat > {target}\n",
+        "wl-copy": f"#!/usr/bin/env bash\nset -euo pipefail\ncat > {target}\n",
+    }
+    for name, body in wrappers.items():
+        path = bindir / name
+        path.write_text(body)
+        path.chmod(0o755)
+    return bindir
+
+
+def spawn_placeholder_child(cwd: Path, *, sleep_s: int) -> tuple[subprocess.Popen[Any], dict[str, Any]]:
+    argv = ["/bin/sh", "-lc", f"sleep {sleep_s}"]
+    proc = subprocess.Popen(
+        argv,
+        cwd=cwd,
+        preexec_fn=os.setsid,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        import psutil
+
+        start_time_ns = int(psutil.Process(proc.pid).create_time() * 1_000_000_000)
+    except Exception:
+        start_time_ns = int(time.time() * 1_000_000_000)
+    return proc, {
+        "pid": proc.pid,
+        "pgid": proc.pid,
+        "start_time_ns": start_time_ns,
+        "argv": argv,
+        "cwd": str(cwd),
+    }
+
+
+def normalize_wrapped_text(text: str) -> str:
+    return "".join(line.strip() for line in text.splitlines())
 
 
 @dataclass
@@ -762,13 +1013,14 @@ def run_dashboard_session(
     actions: Callable[[PtySession], dict[str, Any]],
     no_dashboard: bool = False,
     extra_flags: list[str] | None = None,
+    env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     argv = [str(OTTO_BIN), "queue", "run", "--concurrent", str(concurrent)]
     if no_dashboard:
         argv.append("--no-dashboard")
     if extra_flags:
         argv.extend(extra_flags)
-    session = PtySession(argv, cwd=repo, env=current_ctx().env)
+    session = PtySession(argv, cwd=repo, env=env or current_ctx().env)
     try:
         details = actions(session)
     finally:
@@ -1368,9 +1620,17 @@ def run_c4(repo: Path, provider: str) -> RunResult:
 
 
 def verify_c4(repo: Path, run_result: RunResult) -> VerifyResult:
-    refused = strip_ansi(str(run_result.details.get("refused_output", "")))
-    if "allow-any-branch" not in refused and "not an otto-managed branch" not in refused.lower():
-        return VerifyResult(False, "C4 expected non-otto branch refusal message")
+    refused = strip_ansi(str(run_result.details.get("refused_output", ""))).lower()
+    # Real refusal message: "branch '<x>' is not a queue task or atomic-mode
+    # branch; ... otto-managed ... Use plain `git merge` ... --allow-any-branch ..."
+    refusal_signals = (
+        "not a queue task",
+        "not an otto-managed",
+        "otto merge only works",
+        "allow-any-branch",
+    )
+    if not any(signal in refused for signal in refusal_signals):
+        return VerifyResult(False, f"C4 expected non-otto branch refusal message; got: {refused[:300]!r}")
     if run_result.returncode != 0:
         return VerifyResult(False, "C4 expected --allow-any-branch merge to succeed")
     return VerifyResult(True, "merge refusal and --allow-any-branch override both verified")
@@ -1717,6 +1977,453 @@ def verify_e6(repo: Path, run_result: RunResult) -> VerifyResult:
     return VerifyResult(True, "queue concurrency extremes both drained successfully")
 
 
+def setup_u1(repo: Path, provider: str) -> None:
+    setup_b3(repo, provider)
+
+
+def run_u1(repo: Path, provider: str) -> RunResult:
+    del provider
+
+    def actions(session: PtySession) -> dict[str, Any]:
+        wait_for_screen_text(session, "No tasks queued.", timeout_s=10, label="u1-empty")
+        time.sleep(1.0)
+        session.send("q")
+        rc = session.wait(10.0)
+        if rc is None:
+            raise AssertionError("U1 empty queue dashboard did not exit")
+        return {"watcher_rc": rc}
+
+    details = run_dashboard_session(repo, concurrent=1, actions=actions)
+    return _base_result(0, **details)
+
+
+def verify_u1(repo: Path, run_result: RunResult) -> VerifyResult:
+    del repo
+    raw = cast_output(Path(run_result.recording_path))
+    matches = mouse_enable_codes(raw)
+    if matches:
+        return VerifyResult(False, f"U1 expected mouse capture OFF by default, saw {matches}")
+    return VerifyResult(True, "default dashboard session did not enable mouse capture")
+
+
+def setup_u2(repo: Path, provider: str) -> None:
+    setup_b3(repo, provider)
+
+
+def run_u2(repo: Path, provider: str) -> RunResult:
+    del provider
+
+    def actions(session: PtySession) -> dict[str, Any]:
+        wait_for_screen_text(session, "No tasks queued.", timeout_s=10, label="u2-empty")
+        time.sleep(1.0)
+        session.send("q")
+        rc = session.wait(10.0)
+        if rc is None:
+            raise AssertionError("U2 empty queue dashboard did not exit")
+        return {"watcher_rc": rc}
+
+    details = run_dashboard_session(
+        repo,
+        concurrent=1,
+        actions=actions,
+        extra_flags=["--dashboard-mouse"],
+    )
+    return _base_result(0, **details)
+
+
+def verify_u2(repo: Path, run_result: RunResult) -> VerifyResult:
+    del repo
+    raw = cast_output(Path(run_result.recording_path))
+    matches = mouse_enable_codes(raw)
+    if not matches:
+        return VerifyResult(False, "U2 expected mouse capture enable codes when --dashboard-mouse is passed")
+    return VerifyResult(True, f"dashboard mouse flag emitted enable codes ({', '.join(matches)})")
+
+
+def setup_u3(repo: Path, provider: str) -> None:
+    setup_u_realistic(repo, provider)
+
+
+def run_u3(repo: Path, provider: str) -> RunResult:
+    del provider
+    placeholder_proc, placeholder_child = spawn_placeholder_child(repo, sleep_s=4)
+    capture_path = current_ctx().artifact_dir / "clipboard.txt"
+    bindir = install_clipboard_capture(current_ctx().artifact_dir, capture_path)
+    env = prepend_path(scenario_env(), bindir)
+    write_queue_state_file(
+        repo,
+        {
+            UX_PRIMARY_TASK_ID: {
+                "status": "running",
+                "started_at": "2026-04-21T20:00:30Z",
+                "finished_at": None,
+                "child": placeholder_child,
+                "manifest_path": str((repo / "otto_logs" / "queue" / UX_PRIMARY_TASK_ID / "manifest.json").resolve(strict=False)),
+                "cost_usd": None,
+                "duration_s": None,
+                "failure_reason": None,
+            },
+            UX_SECONDARY_TASK_ID: {
+                "status": "done",
+                "started_at": "2026-04-21T20:01:00Z",
+                "finished_at": "2026-04-21T20:01:05Z",
+                "child": None,
+                "manifest_path": str((repo / "otto_logs" / "queue" / UX_SECONDARY_TASK_ID / "manifest.json").resolve(strict=False)),
+                "cost_usd": 0.0,
+                "duration_s": 5.0,
+                "failure_reason": None,
+            },
+            UX_QUEUED_TASK_ID: {
+                "status": "done",
+                "started_at": "2026-04-21T20:01:30Z",
+                "finished_at": "2026-04-21T20:01:35Z",
+                "child": None,
+                "manifest_path": str((repo / "otto_logs" / "queue" / UX_QUEUED_TASK_ID / "manifest.json").resolve(strict=False)),
+                "cost_usd": 0.0,
+                "duration_s": 5.0,
+                "failure_reason": None,
+            },
+        },
+    )
+    try:
+        def actions(session: PtySession) -> dict[str, Any]:
+            wait_for_screen_text(session, UX_PRIMARY_TASK_ID, timeout_s=10, label="u3-overview")
+            session.send("y")
+            wait_for(lambda: capture_path.exists(), timeout_s=10, label="clipboard capture")
+            time.sleep(0.5)
+            session.send("q")
+            rc = session.wait(15.0)
+            if rc is None:
+                raise AssertionError("U3 dashboard did not exit after clipboard yank")
+            return {"watcher_rc": rc}
+
+        details = run_dashboard_session(repo, concurrent=2, actions=actions, env=env)
+    finally:
+        if placeholder_proc.poll() is None:
+            placeholder_proc.terminate()
+            placeholder_proc.wait(timeout=10)
+    return _base_result(
+        0,
+        clipboard_path=str(capture_path),
+        expected_task_id=UX_PRIMARY_TASK_ID,
+        expected_branch=UX_PRIMARY_BRANCH,
+        expected_session_id=UX_PRIMARY_SESSION_ID,
+        expected_manifest_path=str((repo / "otto_logs" / "queue" / UX_PRIMARY_TASK_ID / "manifest.json").resolve(strict=False)),
+        **details,
+    )
+
+
+def verify_u3(repo: Path, run_result: RunResult) -> VerifyResult:
+    del repo
+    clipboard_path = Path(str(run_result.details.get("clipboard_path", "")))
+    if not clipboard_path.exists():
+        return VerifyResult(False, "U3 expected clipboard capture file to exist")
+    payload = clipboard_path.read_text()
+    for label in ("expected_task_id", "expected_branch", "expected_session_id", "expected_manifest_path"):
+        expected = str(run_result.details.get(label, ""))
+        if not expected or expected not in payload:
+            return VerifyResult(False, f"U3 clipboard payload missing {label.replace('expected_', '')}: {expected!r}")
+    if "…" in payload:
+        return VerifyResult(False, "U3 clipboard payload unexpectedly contained an ellipsis")
+    if "/otto_logs/" not in payload:
+        return VerifyResult(False, "U3 clipboard payload did not include an absolute otto_logs path")
+    return VerifyResult(True, "overview yank payload preserved full IDs, branch, session, and manifest path")
+
+
+def setup_u4(repo: Path, provider: str) -> None:
+    init_repo(repo)
+    write_otto_yaml(repo, provider=provider, certifier_mode="fast", extra_lines=["queue:", "  concurrent: 2"])
+    append_dashboard_task(repo, task_id="ad", branch=UX_PRIMARY_BRANCH, intent="Build add.py CLI")
+    append_dashboard_task(repo, task_id="mu", branch=UX_SECONDARY_BRANCH, intent="Build mul.py CLI")
+    write_dashboard_task_artifacts(
+        repo,
+        task_id="ad",
+        branch=UX_PRIMARY_BRANCH,
+        session_id="s",
+        narrative_text=(
+            "[+0:00] BUILD starting for add\n"
+            "[+0:01] reading project layout\n"
+            "[+0:02] writing add.py with argparse\n"
+            "[+0:05] STORY_RESULT: smoke | PASS | python add.py works\n"
+        ),
+    )
+    write_dashboard_task_artifacts(
+        repo,
+        task_id="mu",
+        branch=UX_SECONDARY_BRANCH,
+        session_id="t",
+        narrative_text=(
+            "[+0:00] BUILD starting for mul\n"
+            "[+0:01] reading project layout\n"
+            "[+0:02] writing mul.py with argparse\n"
+            "[+0:05] STORY_RESULT: smoke | PASS | python mul.py works\n"
+        ),
+    )
+    write_queue_state_file(
+        repo,
+        {
+            "ad": {
+                "status": "done",
+                "started_at": "2026-04-21T20:00:30Z",
+                "finished_at": "2026-04-21T20:00:35Z",
+                "child": None,
+                "manifest_path": None,
+                "cost_usd": 0.0,
+                "duration_s": 5.0,
+                "failure_reason": None,
+            },
+            "mu": {
+                "status": "done",
+                "started_at": "2026-04-21T20:01:00Z",
+                "finished_at": "2026-04-21T20:01:05Z",
+                "child": None,
+                "manifest_path": None,
+                "cost_usd": 0.0,
+                "duration_s": 5.0,
+                "failure_reason": None,
+            },
+        },
+    )
+
+
+def run_u4(repo: Path, provider: str) -> RunResult:
+    del provider
+    narrative_path = repo / ".worktrees" / "ad" / "otto_logs" / "sessions" / "s" / "build" / "narrative.log"
+    manifest_path = repo / "otto_logs" / "queue" / "ad" / "manifest.json"
+
+    def actions(session: PtySession) -> dict[str, Any]:
+        wait_for_screen_text(session, "ad", timeout_s=10, label="u4-overview")
+        session.send("\r")
+        wait_for_screen_text(session, "otto queue ▸", timeout_s=10, label="u4-detail")
+        time.sleep(2.5)
+        session.send("\x1b")
+        wait_for_screen_text(session, "ad", timeout_s=10, label="u4-overview-return")
+        session.send("q")
+        rc = session.wait(10.0)
+        if rc is None:
+            raise AssertionError("U4 dashboard did not exit")
+        return {"watcher_rc": rc}
+
+    details = run_dashboard_session(repo, concurrent=2, actions=actions)
+    return _base_result(
+        0,
+        expected_branch=UX_PRIMARY_BRANCH,
+        expected_narrative_path=str(narrative_path.absolute()),
+        expected_manifest_path=str(manifest_path.absolute()),
+        **details,
+    )
+
+
+def verify_u4(repo: Path, run_result: RunResult) -> VerifyResult:
+    del repo
+    cast_path = Path(run_result.recording_path)
+    frame = find_last_frame(cast_path, lambda text: "otto queue ▸" in text)
+    if frame is None:
+        return VerifyResult(False, "U4 did not find a detail-screen frame in the cast")
+    normalized = normalize_wrapped_text(frame.screen_text)
+    for label in ("expected_branch", "expected_narrative_path", "expected_manifest_path"):
+        expected = str(run_result.details.get(label, ""))
+        if expected not in normalized:
+            return VerifyResult(False, f"U4 detail frame missing {label.replace('expected_', '')}: {expected!r}")
+    if "…" in normalized and str(run_result.details.get("expected_branch", "")) not in normalized:
+        return VerifyResult(False, "U4 branch looked truncated in the detail frame")
+    return VerifyResult(True, "detail screen exposed full branch, narrative path, and manifest path")
+
+
+def setup_u5(repo: Path, provider: str) -> None:
+    setup_u_realistic(repo, provider)
+
+
+def run_u5(repo: Path, provider: str) -> RunResult:
+    del provider
+    narrative_path = repo / ".worktrees" / UX_PRIMARY_TASK_ID / "otto_logs" / "sessions" / UX_PRIMARY_SESSION_ID / "build" / "narrative.log"
+    narrative_path.write_text(
+        "\n".join(f"[+0:{index:02d}] scrolling line {index}" for index in range(200)) + "\n"
+    )
+
+    def actions(session: PtySession) -> dict[str, Any]:
+        wait_for_screen_text(session, UX_PRIMARY_TASK_ID, timeout_s=10, label="u5-overview")
+        session.send("\r")
+        wait_for_screen_text(session, "otto queue ▸", timeout_s=10, label="u5-detail")
+        time.sleep(1.0)
+        session.send("j" * 50)
+        time.sleep(0.5)
+        session.send("\x1b[F")
+        time.sleep(0.2)
+        session.send("\x1b[H")
+        time.sleep(0.2)
+        session.send("\x1b")
+        wait_for_screen_text(session, UX_PRIMARY_TASK_ID, timeout_s=10, label="u5-overview-return")
+        session.send("q")
+        rc = session.wait(10.0)
+        if rc is None:
+            raise AssertionError("U5 dashboard did not exit")
+        return {"watcher_rc": rc}
+
+    details = run_dashboard_session(repo, concurrent=2, actions=actions)
+    return _base_result(0, **details)
+
+
+def verify_u5(repo: Path, run_result: RunResult) -> VerifyResult:
+    del repo
+    raw = cast_output(Path(run_result.recording_path))
+    matches = mouse_enable_codes(raw)
+    if matches:
+        return VerifyResult(False, f"U5 expected keyboard-only detail scrolling; saw mouse enable codes {matches}")
+    return VerifyResult(True, "detail scrolling stayed keyboard-only without enabling mouse capture")
+
+
+def setup_u6(repo: Path, provider: str) -> None:
+    setup_b3(repo, provider)
+
+
+def run_u6(repo: Path, provider: str) -> RunResult:
+    del provider
+
+    def actions(session: PtySession) -> dict[str, Any]:
+        wait_for_screen_text(session, "No tasks queued.", timeout_s=10, label="u6-empty")
+        session.send("?")
+        wait_for_screen_text(session, "Overview bindings", timeout_s=10, label="u6-help")
+        time.sleep(2.0)
+        session.send("\x1b")
+        wait_for_screen_text(session, "No tasks queued.", timeout_s=10, label="u6-empty-return")
+        session.send("q")
+        rc = session.wait(10.0)
+        if rc is None:
+            raise AssertionError("U6 dashboard did not exit")
+        return {"watcher_rc": rc}
+
+    details = run_dashboard_session(repo, concurrent=1, actions=actions)
+    return _base_result(0, **details)
+
+
+def verify_u6(repo: Path, run_result: RunResult) -> VerifyResult:
+    del repo
+    frame = find_last_frame(Path(run_result.recording_path), lambda text: "Overview bindings" in text)
+    if frame is None:
+        return VerifyResult(False, "U6 help overlay was not found in the cast")
+    text = frame.screen_text
+    required = ["j", "k", "Enter", "Esc", "c", "y", "q", "?", "Up", "Down"]
+    missing = [token for token in required if token not in text]
+    if missing:
+        return VerifyResult(False, f"U6 help overlay missing bindings: {', '.join(missing)}")
+    return VerifyResult(True, "help overlay listed discoverable overview bindings and arrows")
+
+
+def setup_u7(repo: Path, provider: str) -> None:
+    setup_b3(repo, provider)
+
+
+def run_u7(repo: Path, provider: str) -> RunResult:
+    del provider
+
+    def actions(session: PtySession) -> dict[str, Any]:
+        wait_for_screen_text(session, "No tasks queued.", timeout_s=10, label="u7-empty")
+        time.sleep(1.0)
+        session.send("q")
+        rc = session.wait(10.0)
+        if rc is None:
+            raise AssertionError("U7 dashboard did not exit")
+        return {"watcher_rc": rc}
+
+    details = run_dashboard_session(repo, concurrent=1, actions=actions)
+    return _base_result(0, **details)
+
+
+def verify_u7(repo: Path, run_result: RunResult) -> VerifyResult:
+    del repo
+    frame = find_first_frame(Path(run_result.recording_path), lambda text: "No tasks queued." in text)
+    if frame is None:
+        return VerifyResult(False, "U7 empty-state frame was not found in the cast")
+    text = " ".join(frame.screen_text.lower().split())
+    for needle in ("build", "improve", "certify", "otto queue"):
+        if needle not in text:
+            return VerifyResult(False, f"U7 empty-state hint missing {needle!r}")
+    return VerifyResult(True, "empty-state hint mentioned all enqueue commands and otto queue")
+
+
+def setup_u8(repo: Path, provider: str) -> None:
+    init_repo(repo)
+    write_otto_yaml(repo, provider=provider, certifier_mode="fast", extra_lines=["queue:", "  concurrent: 2"])
+
+
+def run_u8(repo: Path, provider: str) -> RunResult:
+    queue_build(repo, "task1", provider, "Build task1 CLI", "--fast")
+    queue_build(repo, "task2", provider, "Build task2 CLI", "--fast")
+    env = scenario_env(
+        OTTO_BIN=str(FAKE_OTTO_BIN),
+        FAKE_OTTO_SLEEP="2",
+        FAKE_OTTO_PRINT="synthetic child stdout",
+        FAKE_OTTO_COST="0.00",
+        FAKE_OTTO_DURATION="2.0",
+    )
+    result = run_streaming(
+        [str(OTTO_BIN), "queue", "run", "--no-dashboard", "--concurrent", "2", "--exit-when-empty"],
+        cwd=repo,
+        env=env,
+        timeout_s=120,
+    )
+    return _base_result(result.rc, output=result.output, state=load_queue_state(repo))
+
+
+def verify_u8(repo: Path, run_result: RunResult) -> VerifyResult:
+    del repo
+    lines = [strip_ansi(line).rstrip() for line in run_result.output.splitlines() if strip_ansi(line).strip()]
+    if not any(line.startswith("[task1] ") for line in lines):
+        return VerifyResult(False, "U8 expected at least one [task1] stdout line")
+    if not any(line.startswith("[task2] ") for line in lines):
+        return VerifyResult(False, "U8 expected at least one [task2] stdout line")
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("[task1] ") or stripped.startswith("[task2] "):
+            continue
+        if stripped.startswith("[watcher] "):
+            continue
+        if stripped.startswith("[") and "]" in stripped[:12]:
+            continue
+        if stripped.startswith("Queue worker"):
+            continue
+        return VerifyResult(False, f"U8 found non-grep-friendly stdout line: {line!r}")
+    state = run_result.details.get("state", {}).get("tasks", {})
+    if state.get("task1", {}).get("status") != "done" or state.get("task2", {}).get("status") != "done":
+        return VerifyResult(False, "U8 expected both fake tasks to finish")
+    return VerifyResult(True, "no-dashboard stdout stayed grep-friendly with per-task prefixes")
+
+
+def setup_u9(repo: Path, provider: str) -> None:
+    setup_b3(repo, provider)
+
+
+def run_u9(repo: Path, provider: str) -> RunResult:
+    del provider
+
+    def actions(session: PtySession) -> dict[str, Any]:
+        wait_for_screen_text(session, "No tasks queued.", timeout_s=10, label="u9-empty")
+        time.sleep(1.0)
+        session.send("q")
+        rc = session.wait(10.0)
+        if rc is None:
+            raise AssertionError("U9 dashboard did not exit")
+        return {"watcher_rc": rc}
+
+    details = run_dashboard_session(repo, concurrent=1, actions=actions)
+    return _base_result(0, **details)
+
+
+def verify_u9(repo: Path, run_result: RunResult) -> VerifyResult:
+    del repo
+    raw = cast_output(Path(run_result.recording_path))
+    tail = raw[-4096:]
+    disable_matches = mouse_disable_codes(tail)
+    if not disable_matches:
+        return VerifyResult(False, "U9 expected mouse disable codes near the end of the cast")
+    hide_index = raw.find(CURSOR_HIDE)
+    show_index = raw.rfind(CURSOR_SHOW)
+    if hide_index != -1 and show_index <= hide_index:
+        return VerifyResult(False, "U9 saw cursor hide without a matching cursor show near exit")
+    return VerifyResult(True, "terminal teardown restored mouse/cursor mode on quit")
+
+
 SCENARIOS: dict[str, Scenario] = {
     "A1": Scenario("A1", "A", "atomic build happy path", True, 0.35, 90, False, setup_a1, run_a1, verify_a1),
     "A2": Scenario("A2", "A", "build --spec --yes auto-approves spec gate", True, 0.50, 120, False, setup_a2, run_a2, verify_a2),
@@ -1746,6 +2453,15 @@ SCENARIOS: dict[str, Scenario] = {
     "E4": Scenario("E4", "E", "memory:true records cross-run memory and persists it across certifies", False, 0.45, 150, False, setup_e4, run_e4, verify_e4),
     "E5": Scenario("E5", "E", "standalone certify --thorough runs the deeper certifier mode", False, 0.45, 180, False, setup_e5, run_e5, verify_e5),
     "E6": Scenario("E6", "E", "queue run handles both --concurrent 1 and --concurrent 10", False, 0.70, 220, False, setup_e6, run_e6, verify_e6),
+    "U1": Scenario("U1", "U", "dashboard leaves mouse capture off by default", False, 0.00, 15, True, setup_u1, run_u1, verify_u1),
+    "U2": Scenario("U2", "U", "dashboard enables mouse capture only when --dashboard-mouse is passed", False, 0.00, 15, True, setup_u2, run_u2, verify_u2),
+    "U3": Scenario("U3", "U", "overview yank copies complete row metadata without truncation", False, 0.00, 15, True, setup_u3, run_u3, verify_u3),
+    "U4": Scenario("U4", "U", "detail screen renders full branch and absolute log/manifest paths", False, 0.00, 15, True, setup_u4, run_u4, verify_u4),
+    "U5": Scenario("U5", "U", "detail scrolling stays keyboard-only and never enables mouse capture", False, 0.00, 15, True, setup_u5, run_u5, verify_u5),
+    "U6": Scenario("U6", "U", "help overlay lists the key bindings a developer needs to discover", False, 0.00, 15, True, setup_u6, run_u6, verify_u6),
+    "U7": Scenario("U7", "U", "empty-state hint names build, improve, certify, and otto queue", False, 0.00, 15, True, setup_u7, run_u7, verify_u7),
+    "U8": Scenario("U8", "U", "--no-dashboard stdout stays grep-friendly with per-task prefixes", False, 0.00, 20, True, setup_u8, run_u8, verify_u8),
+    "U9": Scenario("U9", "U", "quitting the dashboard restores terminal mouse/cursor mode", False, 0.00, 15, True, setup_u9, run_u9, verify_u9),
 }
 
 
@@ -1873,7 +2589,7 @@ def internal_run_scenario(scenario_id: str, repo_path: Path, artifact_dir: Path,
 
 def record_one_scenario(asciinema_bin: Path, scenario: Scenario, run_id: str, provider: str) -> ScenarioOutcome:
     artifact_dir = DEFAULT_ARTIFACT_ROOT / run_id / scenario.name
-    repo_path = Path(tempfile.mkdtemp(prefix=f"otto-as-user-{run_id}-{scenario.name.lower()}-"))
+    repo_path = Path(tempfile.mkdtemp(prefix=f"o{scenario.name.lower()}-", dir="/tmp"))
     artifact_dir.mkdir(parents=True, exist_ok=True)
     scenario.setup(repo_path, provider)
 
@@ -1944,7 +2660,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--mode", choices=["quick", "full"], default="quick")
     parser.add_argument("--provider", choices=["claude", "codex"], default="claude")
     parser.add_argument("--scenario", help="Comma-separated scenario ids, e.g. A1,B3,C1")
-    parser.add_argument("--group", help="Comma-separated group ids, e.g. A,B,D")
+    parser.add_argument("--group", help="Comma-separated group ids, e.g. A,B,D,U")
     parser.add_argument("--keep-failed-only", action="store_true")
     parser.add_argument("--bail-fast", action="store_true")
     parser.add_argument("--list", action="store_true")

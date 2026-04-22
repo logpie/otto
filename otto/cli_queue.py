@@ -843,6 +843,7 @@ def register_queue_commands(main: click.Group) -> None:
 
         # Install handlers so watcher's spawn/reap/cancel/heartbeat events
         # appear on stdout (and persist to otto_logs/queue/watcher.log).
+        rcfg.prefix_child_output = True
         _install_runner_logging(project_dir, quiet=quiet)
 
         try:
@@ -851,12 +852,10 @@ def register_queue_commands(main: click.Group) -> None:
             error_console.print(f"[error]Runner init failed: {rich_escape(str(exc))}[/error]")
             sys.exit(1)
 
-        console.print(
-            f"  [bold]Queue worker[/bold] — "
-            f"concurrent={rcfg.concurrent}, project={project_dir.name}"
-        )
-        console.print(f"  [dim]Event log: otto_logs/queue/watcher.log[/dim]")
-        console.print("  Press Ctrl-C to stop gracefully (twice for immediate)\n")
+        print("Queue worker", flush=True)
+        print(f"[watcher] concurrent={rcfg.concurrent}", flush=True)
+        print("[watcher] event_log=otto_logs/queue/watcher.log", flush=True)
+        print("[watcher] Ctrl-C=graceful Ctrl-C-twice=immediate\n", flush=True)
 
         try:
             exit_code = runner.run()

@@ -30,6 +30,7 @@ import logging
 import os
 import signal
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -69,6 +70,9 @@ class RunnerConfig:
     task_timeout_s: float | None = 1800.0
     # Exit the foreground watcher once the queue has no queued or in-flight work.
     exit_when_empty: bool = False
+    # When true, capture child stdout/stderr and prefix each emitted line with
+    # the queue task id for grep-friendly no-dashboard logs.
+    prefix_child_output: bool = False
 
 
 class WatcherAlreadyRunning(RuntimeError):
@@ -227,6 +231,8 @@ class Runner:
         self._lock_fh: Any = None
         self._watcher_started_at = now_iso()
         self._last_logged_cycles: set[frozenset[str]] | None = None
+        self._prefix_child_output = config.prefix_child_output
+        self._output_threads: dict[int, threading.Thread] = {}
 
     # ---- signal handlers (flag-only; NEVER touch state files) ----
 
@@ -617,6 +623,7 @@ class Runner:
                     self._finish_terminating(ts)
                 else:
                     self._finalize_task_from_manifest(ts, tid)
+                self._join_output_pump(pid)
                 logger.info("reaped %s: %s (observed dead after ECHILD)", tid, ts.get("status"))
                 continue
             if wpid == 0:
@@ -626,9 +633,11 @@ class Runner:
             if status == "terminating":
                 ts["exit_code"] = exit_code
                 self._finish_terminating(ts)
+                self._join_output_pump(pid)
                 logger.info("reaped %s: %s", tid, ts.get("status"))
                 continue
             self._finalize_task_from_manifest(ts, tid, exit_code=exit_code)
+            self._join_output_pump(pid)
             if ts.get("status") == "done":
                 logger.info(
                     "reaped %s: done (cost=$%.2f, duration=%.1fs)",
@@ -763,12 +772,20 @@ class Runner:
             # `manifest_path_for`.
             "OTTO_QUEUE_PROJECT_DIR": str(self.project_dir),
         }
-        proc = subprocess.Popen(
-            argv,
-            cwd=str(wt_path),
-            env=env,
-            preexec_fn=os.setsid,
-        )
+        popen_kwargs: dict[str, Any] = {
+            "cwd": str(wt_path),
+            "env": env,
+            "preexec_fn": os.setsid,
+        }
+        if self._prefix_child_output:
+            popen_kwargs.update(
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+        proc = subprocess.Popen(argv, **popen_kwargs)
+        self._start_output_pump(task.id, proc)
         # Capture identity for PID-reuse-safe future kills
         try:
             import psutil
@@ -794,6 +811,30 @@ class Runner:
             "failure_reason": None,
         }
         logger.info("spawned %s: pid=%d, branch=%s", task.id, proc.pid, branch)
+
+    def _start_output_pump(self, task_id: str, proc: subprocess.Popen[Any]) -> None:
+        stdout = getattr(proc, "stdout", None)
+        if not self._prefix_child_output or stdout is None:
+            return
+
+        def _pump() -> None:
+            try:
+                for raw_line in stdout:
+                    print(f"[{task_id}] {raw_line.rstrip()}", flush=True)
+            finally:
+                try:
+                    stdout.close()
+                except Exception:
+                    pass
+
+        thread = threading.Thread(target=_pump, name=f"otto-queue-{task_id}-stdout", daemon=True)
+        thread.start()
+        self._output_threads[proc.pid] = thread
+
+    def _join_output_pump(self, pid: int) -> None:
+        thread = self._output_threads.pop(pid, None)
+        if thread is not None:
+            thread.join(timeout=0.5)
 
     def _kill_all_in_flight(self) -> None:
         state = load_state(self.project_dir)
