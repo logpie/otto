@@ -403,6 +403,33 @@ def test_runner_respects_concurrent_cap(tmp_path: Path):
         runner._lock_fh.close()
 
 
+def test_runner_run_exits_when_queue_drains_with_exit_when_empty(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    fake_otto = _make_fake_otto(tmp_path, exit_code=0, sleep=0.1)
+    append_task(repo, QueueTask(
+        id="t1", command_argv=["build", "one"],
+        branch="build/t1-one", worktree=".worktrees/t1",
+    ))
+    append_task(repo, QueueTask(
+        id="t2", command_argv=["build", "two"],
+        branch="build/t2-two", worktree=".worktrees/t2",
+    ))
+    cfg = RunnerConfig(
+        concurrent=2,
+        poll_interval_s=0.05,
+        heartbeat_interval_s=10.0,
+        exit_when_empty=True,
+    )
+    runner = Runner(repo, cfg, otto_bin=str(fake_otto))
+
+    assert runner.run() == 0
+
+    state = load_state(repo)
+    statuses = {task_id: task["status"] for task_id, task in state["tasks"].items()}
+    assert statuses == {"t1": "done", "t2": "done"}
+    assert state.get("watcher") is None
+
+
 # ---------- dependencies (Phase 3) ----------
 
 

@@ -27,7 +27,7 @@ DEFAULT_ARTIFACT_ROOT = REPO_ROOT / "bench-results" / "as-user"
 DEFAULT_ROWS = 30
 DEFAULT_COLS = 120
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\\\)")
-QUICK_SCENARIOS = ["A1", "A2", "B3", "C1", "D2"]
+QUICK_SCENARIOS = ["A1", "A2", "B1", "B3", "C1", "D2"]
 OTTO_BIN = REPO_ROOT / ".venv" / "bin" / "otto"
 PYTHON_BIN = REPO_ROOT / ".venv" / "bin" / "python"
 LOCAL_ASCIINEMA = REPO_ROOT / ".venv" / "bin" / "asciinema"
@@ -1019,11 +1019,24 @@ def run_b1(repo: Path, provider: str) -> RunResult:
     queue_build(repo, "mul", provider, add_mul_intent("mul", "integer multiplication", "6"), "--fast")
 
     def actions(session: PtySession) -> dict[str, Any]:
-        wait_for(lambda: load_queue_state(repo).get("tasks", {}).get("add", {}).get("status") == "running", timeout_s=20, label="add running")
+        wait_for(
+            lambda: sum(
+                1
+                for task in load_queue_state(repo).get("tasks", {}).values()
+                if task.get("status") == "running"
+            ) == 2,
+            timeout_s=20,
+            label="both tasks running",
+        )
+        # Linger so quick-mode recordings capture the dashboard with live work
+        # before the drill-in / exit sequence starts.
+        time.sleep(2.5)
         session.send("\r")
         detail = wait_for_screen_text(session, "otto queue", timeout_s=10, label="detail open")
+        time.sleep(2.0)
         session.send("\x1b")
         wait_for_screen_text(session, "add", timeout_s=10, label="overview return")
+        time.sleep(2.0)
         session.send("q")
         notice = wait_for_screen_text(session, "Dashboard closed.", timeout_s=10, label="post quit")
         wait_for(
@@ -1042,7 +1055,7 @@ def run_b1(repo: Path, provider: str) -> RunResult:
         }
 
     started = now_iso()
-    details = run_dashboard_session(repo, concurrent=2, actions=actions)
+    details = run_dashboard_session(repo, concurrent=2, actions=actions, extra_flags=["--exit-when-empty"])
     return _base_result(0, started_at=started, finished_at=now_iso(), duration_s=0.0, **details)
 
 
@@ -1085,7 +1098,7 @@ def run_b2(repo: Path, provider: str) -> RunResult:
         rc = session.wait(30.0)
         return {"state": load_queue_state(repo), "watcher_rc": rc}
 
-    details = run_dashboard_session(repo, concurrent=3, actions=actions)
+    details = run_dashboard_session(repo, concurrent=3, actions=actions, extra_flags=["--exit-when-empty"])
     return _base_result(0, **details)
 
 
@@ -1104,6 +1117,9 @@ def setup_b3(repo: Path, provider: str) -> None:
 def run_b3(repo: Path, provider: str) -> RunResult:
     def actions(session: PtySession) -> dict[str, Any]:
         snap = wait_for_screen_text(session, "No tasks queued.", timeout_s=10, label="empty state")
+        # Linger so the dashboard frame is visible in playback (recording would
+        # otherwise flash for <1s and be useless for human review).
+        time.sleep(3.0)
         session.send("q")
         rc = session.wait(10.0)
         if rc is None:
@@ -1142,7 +1158,7 @@ def run_b4(repo: Path, provider: str) -> RunResult:
         rc = session.wait(180.0)
         return {"watcher_rc": rc, "narrative_path": str(narrative)}
 
-    details = run_dashboard_session(repo, concurrent=1, actions=actions)
+    details = run_dashboard_session(repo, concurrent=1, actions=actions, extra_flags=["--exit-when-empty"])
     return _base_result(0, **details)
 
 
@@ -1190,7 +1206,7 @@ def setup_b6(repo: Path, provider: str) -> None:
 
 def run_b6(repo: Path, provider: str) -> RunResult:
     queue_build(repo, "stdout", provider, add_mul_intent("stdout_task", "integer addition", "5"), "--fast")
-    result = run_queue(repo, "run", "--concurrent", "1", "--no-dashboard", timeout_s=600)
+    result = run_queue(repo, "run", "--concurrent", "1", "--no-dashboard", "--exit-when-empty", timeout_s=600)
     return _base_result(result.rc, output=result.output)
 
 
@@ -1249,7 +1265,7 @@ def setup_c1(repo: Path, provider: str) -> None:
 def run_c1(repo: Path, provider: str) -> RunResult:
     queue_build(repo, "add", provider, add_mul_intent("add", "integer addition", "5"), "--fast")
     queue_build(repo, "mul", provider, add_mul_intent("mul", "integer multiplication", "6"), "--fast")
-    watcher = run_queue(repo, "run", "--concurrent", "2", "--no-dashboard", timeout_s=900)
+    watcher = run_queue(repo, "run", "--concurrent", "2", "--no-dashboard", "--exit-when-empty", timeout_s=900)
     if watcher.rc != 0:
         return _base_result(watcher.rc, output=watcher.output)
     merge = run_merge(repo, "--all", "--cleanup-on-success", timeout_s=1800)
@@ -1295,7 +1311,7 @@ def run_c2(repo: Path, provider: str) -> RunResult:
         "Modify tools.py so render returns angle-bracket text `<value=<n>>` and update tests accordingly.",
         "--fast",
     )
-    watcher = run_queue(repo, "run", "--concurrent", "2", "--no-dashboard", timeout_s=1200)
+    watcher = run_queue(repo, "run", "--concurrent", "2", "--no-dashboard", "--exit-when-empty", timeout_s=1200)
     merge = run_merge(repo, "--all", timeout_s=2400)
     return _base_result(merge.rc, output=watcher.output + merge.output)
 
@@ -1319,7 +1335,7 @@ def setup_c3(repo: Path, provider: str) -> None:
 def run_c3(repo: Path, provider: str) -> RunResult:
     queue_build(repo, "add", provider, add_mul_intent("add_no_cert", "integer addition", "5"), "--fast")
     queue_build(repo, "mul", provider, add_mul_intent("mul_no_cert", "integer multiplication", "6"), "--fast")
-    watcher = run_queue(repo, "run", "--concurrent", "2", "--no-dashboard", timeout_s=900)
+    watcher = run_queue(repo, "run", "--concurrent", "2", "--no-dashboard", "--exit-when-empty", timeout_s=900)
     merge = run_merge(repo, "--all", "--no-certify", "--cleanup-on-success", timeout_s=1200)
     return _base_result(merge.rc, output=watcher.output + merge.output)
 
@@ -1674,7 +1690,7 @@ def run_e6(repo: Path, provider: str) -> RunResult:
     queue_build(repo, "one", provider, add_mul_intent("one", "integer addition", "5"), "--fast")
     queue_build(repo, "two", provider, add_mul_intent("two", "integer multiplication", "6"), "--fast")
     queue_build(repo, "three", provider, add_mul_intent("three", "integer subtraction", "-1"), "--fast")
-    serial = run_queue(repo, "run", "--concurrent", "1", "--no-dashboard", timeout_s=1200)
+    serial = run_queue(repo, "run", "--concurrent", "1", "--no-dashboard", "--exit-when-empty", timeout_s=1200)
 
     repo2 = current_ctx().artifact_dir / "concurrency-10-repo"
     init_repo(repo2)
@@ -1682,7 +1698,7 @@ def run_e6(repo: Path, provider: str) -> RunResult:
     queue_build(repo2, "one", provider, add_mul_intent("one", "integer addition", "5"), "--fast")
     queue_build(repo2, "two", provider, add_mul_intent("two", "integer multiplication", "6"), "--fast")
     queue_build(repo2, "three", provider, add_mul_intent("three", "integer subtraction", "-1"), "--fast")
-    wide = run_queue(repo2, "run", "--concurrent", "10", "--no-dashboard", timeout_s=1200)
+    wide = run_queue(repo2, "run", "--concurrent", "10", "--no-dashboard", "--exit-when-empty", timeout_s=1200)
     return _base_result(
         wide.rc if serial.rc == 0 else serial.rc,
         output=serial.output + wide.output,
@@ -1870,18 +1886,32 @@ def record_one_scenario(asciinema_bin: Path, scenario: Scenario, run_id: str, pr
         str(artifact_dir),
         provider,
     ]
+    cast_path = artifact_dir / "recording.cast"
     rec_launcher = [str(asciinema_bin)]
-    if asciinema_bin.suffix == ".py":
+    is_shim = asciinema_bin.suffix == ".py"
+    if is_shim:
         rec_launcher = [str(PYTHON_BIN if PYTHON_BIN.exists() else Path(sys.executable)), str(asciinema_bin)]
-    rec_cmd = [
-        *rec_launcher,
-        "rec",
-        "--command",
-        shell_join(internal_cmd),
-        "--output",
-        str(artifact_dir / "recording.cast"),
-        "--quiet",
-    ]
+        # Shim accepts v2-style args (--output, --quiet)
+        rec_cmd = [
+            *rec_launcher,
+            "rec",
+            "--command",
+            shell_join(internal_cmd),
+            "--output",
+            str(cast_path),
+            "--quiet",
+        ]
+    else:
+        # Real asciinema 3.x: positional file, no --quiet, use `record` (or `rec` alias)
+        rec_cmd = [
+            *rec_launcher,
+            "rec",
+            "--command",
+            shell_join(internal_cmd),
+            "--output-format",
+            "asciicast-v2",
+            str(cast_path),
+        ]
     result = subprocess.run(rec_cmd, cwd=REPO_ROOT, text=True)
     run_result_path = artifact_dir / "run_result.json"
     if run_result_path.exists():

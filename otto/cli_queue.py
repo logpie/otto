@@ -784,7 +784,18 @@ def register_queue_commands(main: click.Group) -> None:
                   help="Force the prefixed-stdout watcher instead of the Textual dashboard")
     @click.option("--dashboard-mouse", is_flag=True,
                   help="Enable mouse capture (loses terminal copy in most terminals)")
-    def run(concurrent: int | None, quiet: bool, no_dashboard: bool, dashboard_mouse: bool) -> None:
+    @click.option(
+        "--exit-when-empty",
+        is_flag=True,
+        help="Exit cleanly once the queue has no queued or in-flight tasks",
+    )
+    def run(
+        concurrent: int | None,
+        quiet: bool,
+        no_dashboard: bool,
+        dashboard_mouse: bool,
+        exit_when_empty: bool,
+    ) -> None:
         """Start the foreground queue watcher. Run in a tmux pane like `vite dev`."""
         from otto.config import load_config
         from otto.queue.runner import (
@@ -801,6 +812,7 @@ def register_queue_commands(main: click.Group) -> None:
         rcfg = runner_config_from_otto_config(cfg)
         if concurrent is not None:
             rcfg.concurrent = max(1, concurrent)
+        rcfg.exit_when_empty = exit_when_empty
         otto_bin = _resolve_otto_bin()
 
         use_tui = (

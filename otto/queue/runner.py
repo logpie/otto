@@ -67,6 +67,8 @@ class RunnerConfig:
     # would otherwise occupy its concurrency slot forever. None disables.
     # Default: 30 minutes — generous for thorough builds, fatal for hangs.
     task_timeout_s: float | None = 1800.0
+    # Exit the foreground watcher once the queue has no queued or in-flight work.
+    exit_when_empty: bool = False
 
 
 class WatcherAlreadyRunning(RuntimeError):
@@ -390,6 +392,9 @@ class Runner:
 
         # Persist state
         self._write_state_or_raise(state)
+        if self._should_exit_when_empty(tasks, state):
+            logger.info("queue drained; exiting watcher because --exit-when-empty is set")
+            self.shutdown_level = "graceful"
 
     # ---- startup reconciliation (Phase 2.8) ----
 
@@ -697,6 +702,18 @@ class Runner:
             1 for ts in state["tasks"].values()
             if ts.get("status") in IN_FLIGHT_STATUSES
         )
+
+    def _queued_count(self, tasks: list[QueueTask], state: dict[str, Any]) -> int:
+        return sum(
+            1
+            for task in tasks
+            if (state["tasks"].get(task.id) or {"status": "queued"}).get("status", "queued") == "queued"
+        )
+
+    def _should_exit_when_empty(self, tasks: list[QueueTask], state: dict[str, Any]) -> bool:
+        if not self.config.exit_when_empty or self.shutdown_level is not None:
+            return False
+        return self._queued_count(tasks, state) == 0 and self._count_in_flight(state) == 0
 
     def _has_in_flight(self) -> bool:
         state = load_state(self.project_dir)

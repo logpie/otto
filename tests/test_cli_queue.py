@@ -489,10 +489,12 @@ def test_resolve_otto_bin_fallback_returns_argv(monkeypatch, tmp_path: Path):
     assert cli_queue_module._resolve_otto_bin() == [str(fake_python), "-m", "otto.cli"]
 
 
-def test_queue_run_help_shows_dashboard_mouse_flag(tmp_path: Path):
+def test_queue_run_help_shows_dashboard_mouse_and_exit_flags(tmp_path: Path):
     repo = init_repo(tmp_path)
     code, out, _ = _run(["queue", "run", "--help"], cwd=repo)
-    help_text = " ".join(out.split())
+    help_text = " ".join(out.split()).replace("in- flight", "in-flight")
     assert code == 0
     assert "--dashboard-mouse" in help_text
     assert "loses terminal copy in most terminals" in help_text
+    assert "--exit-when-empty" in help_text
+    assert "Exit cleanly once the queue has no queued or in-flight tasks" in help_text
