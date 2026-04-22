@@ -486,3 +486,51 @@ async def test_run_agent_with_timeout_raises_on_error_result(tmp_path, monkeypat
             timeout=30,
             project_dir=tmp_path,
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "backend_attr"),
+    [("claude", "_query_claude"), ("codex", "_query_codex")],
+)
+async def test_run_agent_with_timeout_supports_debug_unredacted_for_all_providers(
+    tmp_path,
+    monkeypatch,
+    provider,
+    backend_attr,
+):
+    session_id = f"{provider}-session"
+    assistant_text = f"{provider} raw channel ok"
+
+    async def fake_provider_query(*, prompt, options=None, state=None):
+        assert prompt == "test"
+        assert options is not None
+        yield AssistantMessage(
+            content=[TextBlock(text=assistant_text)],
+            session_id=session_id,
+        )
+        yield ResultMessage(
+            subtype="success",
+            is_error=False,
+            session_id=session_id,
+            result=assistant_text,
+            total_cost_usd=0.25,
+            usage={"total_cost_usd": 0.25},
+        )
+
+    monkeypatch.setattr(f"otto.agent.{backend_attr}", fake_provider_query)
+
+    text, cost, returned_session_id, _breakdown = await run_agent_with_timeout(
+        "test",
+        AgentOptions(provider=provider, debug_unredacted=True),
+        log_dir=tmp_path / "build",
+        timeout=30,
+        project_dir=tmp_path,
+    )
+
+    assert text == assistant_text
+    assert cost == 0.25
+    assert returned_session_id == session_id
+    assert (tmp_path / "build" / "messages.jsonl").exists()
+    assert (tmp_path / "raw" / "messages.jsonl").exists()
+    assert assistant_text in (tmp_path / "raw" / "messages.jsonl").read_text(encoding="utf-8")

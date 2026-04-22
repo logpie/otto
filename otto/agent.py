@@ -1622,7 +1622,7 @@ def tool_use_summary(block) -> str:
 
 async def run_agent_query(
     prompt: str,
-    options: ClaudeAgentOptions,
+    options: AgentOptions,
     *,
     on_text: Callable[[str], Any] | None = None,
     on_tool: Callable[[Any], Any] | None = None,
@@ -1631,6 +1631,8 @@ async def run_agent_query(
     on_message: Callable[[Any], Any] | None = None,
     capture_tool_output: bool = False,
     state: dict[str, Any] | None = None,
+    _raw_jsonl: Any | None = None,
+    _raw_narrative: Any | None = None,
 ) -> tuple[str, float | None, Any]:
     """Run a provider query, dispatching normalized events to callbacks.
 
@@ -1646,7 +1648,13 @@ async def run_agent_query(
     soon as a session_id is seen on any streamed message. This lets callers
     that cancel the task (e.g. on timeout) still recover the session_id for
     a resumable checkpoint.
+
+    ``run_agent_with_timeout`` forwards a shared callback bag from the session
+    logger. The private raw-log writers are consumed by ``on_message`` there,
+    and are accepted here only so that debug-unredacted logging can pass
+    through this layer unchanged for both providers.
     """
+    _ = (_raw_jsonl, _raw_narrative)
     transcript = _TranscriptAccumulator(keep_tool_output=capture_tool_output)
     cost: float | None = None
     result_msg = None
