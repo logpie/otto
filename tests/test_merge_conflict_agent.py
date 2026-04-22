@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 from otto.merge import git_ops
 from otto.merge.conflict_agent import (
+    ConsolidatedConflictContext,
     _files_with_markers,
+    resolve_all_conflicts,
     validate_post_agent,
 )
 
@@ -206,3 +210,48 @@ def test_validate_post_agent_passes_clean_tree(tmp_path: Path):
         pre_head=head,
     )
     assert ok, f"clean tree should pass; got err={err}"
+
+
+def test_resolve_all_conflicts_uses_log_dir_for_agent_call(tmp_path: Path):
+    head = _init_repo(tmp_path)
+    ctx = ConsolidatedConflictContext(
+        target="main",
+        all_branches=["feat-a", "feat-b"],
+        all_intents={"feat-a": "change f", "feat-b": "change f differently"},
+        all_stories=[],
+        conflict_files=["tracked.py"],
+        conflict_diff="<<<<<<< ours\nA\n=======\nB\n>>>>>>> theirs\n",
+        test_command=None,
+    )
+    captured: dict[str, object] = {}
+    sentinel_options = object()
+
+    async def fake_run_agent_with_timeout(prompt, options, **kwargs):
+        captured["prompt"] = prompt
+        captured["options"] = options
+        captured["kwargs"] = kwargs
+        return ("done", 1.25, "session-123", {})
+
+    with patch("otto.agent.make_agent_options", return_value=sentinel_options), patch(
+        "otto.agent.run_agent_with_timeout", side_effect=fake_run_agent_with_timeout
+    ):
+        attempt = asyncio.run(resolve_all_conflicts(
+            project_dir=tmp_path,
+            config={"provider": "claude"},
+            ctx=ctx,
+            pre_head=head,
+            expected_uu_files=set(),
+            pre_untracked_files=set(),
+            pre_diff_files=set(),
+            budget=None,
+        ))
+
+    assert attempt.success is True
+    assert attempt.cost_usd == 1.25
+    assert captured["options"] is sentinel_options
+    kwargs = captured["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert kwargs["log_dir"] == tmp_path / "otto_logs" / "merge" / "conflict-agent-agentic"
+    assert "log_path" not in kwargs
+    assert kwargs["project_dir"] == tmp_path
+    assert kwargs["timeout"] is None

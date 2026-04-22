@@ -239,10 +239,10 @@ async def resolve_all_conflicts(
     timeout = budget.for_call() if budget is not None else None
 
     try:
-        text, cost, _session = await run_agent_with_timeout(
+        text, cost, _session, _breakdown = await run_agent_with_timeout(
             prompt,
             options,
-            log_path=project_dir / "otto_logs" / "merge" / "conflict-agent-agentic.log",
+            log_dir=project_dir / "otto_logs" / "merge" / "conflict-agent-agentic",
             timeout=timeout,
             project_dir=project_dir,
         )

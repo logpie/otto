@@ -266,7 +266,7 @@ def test_conflict_agent_cleans_new_untracked_files(tmp_path: Path, monkeypatch: 
         for f in repo.glob("f.txt"):
             f.write_text("resolved\n")
         (repo / "extra.txt").write_text("stray\n")
-        return ("done", 0.0, "")
+        return ("done", 0.0, "", {})
 
     with patch("otto.agent.run_agent_with_timeout", side_effect=fake_run_agent_with_timeout):
         result = asyncio.run(run_merge(
