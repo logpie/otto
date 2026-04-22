@@ -126,8 +126,11 @@ def session_summary(project_dir: Path, session_id: str) -> Path:
 
 
 def session_intent(project_dir: Path, session_id: str) -> Path:
-    """Archival copy of the intent at session start (project-root
-    intent.md is the runtime contract)."""
+    """Runtime snapshot of the resolved intent for one session.
+
+    Project-root `intent.md` is a user-owned product description input, not an
+    Otto-managed runtime log.
+    """
     return session_dir(project_dir, session_id) / "intent.txt"
 
 
@@ -135,19 +138,12 @@ def legacy_checkpoint(project_dir: Path) -> Path:
     return logs_dir(project_dir) / LEGACY_CHECKPOINT
 
 
-def legacy_run_history(project_dir: Path) -> Path:
-    return logs_dir(project_dir) / LEGACY_RUN_HISTORY
-
-
-def legacy_certifier_memory(project_dir: Path) -> Path:
-    return logs_dir(project_dir) / LEGACY_CERTIFIER_MEMORY
-
-
-def ensure_session_scaffold(project_dir: Path, session_id: str) -> Path:
-    """Create the session dir and its phase subdirs. Idempotent."""
+def ensure_session_scaffold(project_dir: Path, session_id: str, phase: str | None = None) -> Path:
+    """Create the session dir and optionally one phase subdir. Idempotent."""
     sess = session_dir(project_dir, session_id)
-    for sub in (sess, sess / "spec", sess / "build", sess / "certify", sess / "improve"):
-        sub.mkdir(parents=True, exist_ok=True)
+    sess.mkdir(parents=True, exist_ok=True)
+    if phase:
+        (sess / phase).mkdir(parents=True, exist_ok=True)
     return sess
 
 
@@ -207,28 +203,24 @@ def _pointer_link(logs_root: Path, name: str) -> Path:
     return logs_root / name
 
 
-def set_pointer(project_dir: Path, name: str, session_id: str) -> None:
+def _pointer_tmp_path(root: Path, name: str, suffix: str) -> Path:
+    token = f"{os.getpid()}.{uuid.uuid4().hex}"
+    return root / f".{name}.{token}.{suffix}.tmp"
+
+
+def set_pointer(project_dir: Path, name: str, session_id: str, *, strict: bool = False) -> None:
     """Atomically point `name` at sessions/<session_id>.
 
     Prefers an OS symlink. Falls back to a `.txt` pointer file if symlinks
-    are unsupported (Windows without admin, some CI volumes). Never raises
-    — a failure logs at WARNING and leaves the previous pointer (if any)
-    intact for the non-fallback path; the fallback path explicitly removes
-    any stale symlink before writing the `.txt`.
+    are unsupported (Windows without admin, some CI volumes).
     """
     root = logs_dir(project_dir)
     root.mkdir(parents=True, exist_ok=True)
     target = f"{SESSIONS_DIR_NAME}/{session_id}"
     link = _pointer_link(root, name)
-    tmp_link = root / f".{name}.link.tmp"
+    tmp_link = _pointer_tmp_path(root, name, "link")
 
     try:
-        # Clean any stale temp from a prior crash.
-        try:
-            if tmp_link.is_symlink() or tmp_link.exists():
-                tmp_link.unlink()
-        except OSError:
-            pass
         os.symlink(target, tmp_link)
         os.replace(tmp_link, link)
         # If a stale .txt fallback existed, remove it now that symlink is live.
@@ -249,12 +241,18 @@ def set_pointer(project_dir: Path, name: str, session_id: str) -> None:
     except OSError:
         pass
 
-    tmp_txt = root / f".{name}.txt.tmp"
+    tmp_txt = _pointer_tmp_path(root, name, "txt")
     try:
-        tmp_txt.write_text(session_id)
+        tmp_txt.write_text(session_id, encoding="utf-8")
         os.replace(tmp_txt, _pointer_text_file(root, name))
     except OSError as exc:
+        try:
+            tmp_txt.unlink(missing_ok=True)
+        except OSError:
+            pass
         logger.warning("pointer .txt fallback also failed for %s: %s", name, exc)
+        if strict:
+            raise
 
 
 def resolve_pointer(project_dir: Path, name: str) -> Path | None:
@@ -263,7 +261,6 @@ def resolve_pointer(project_dir: Path, name: str) -> Path | None:
     Try in order:
       1. symlink at otto_logs/<name>
       2. pointer file at otto_logs/<name>.txt
-      3. (paused only) scan sessions/*/checkpoint.json for resumable state.
 
     Returns absolute session dir path, or None if no pointer resolves.
     """
@@ -293,8 +290,10 @@ def resolve_pointer(project_dir: Path, name: str) -> Path | None:
         return session_path.exists()
 
     link = _pointer_link(root, name)
+    pointer_seen = False
     try:
         if link.is_symlink():
+            pointer_seen = True
             resolved = link.resolve(strict=False)
             if _is_valid_pointer_target(resolved):
                 return resolved
@@ -305,6 +304,7 @@ def resolve_pointer(project_dir: Path, name: str) -> Path | None:
 
     txt = _pointer_text_file(root, name)
     if txt.exists():
+        pointer_seen = True
         try:
             sid = txt.read_text().strip()
             if sid:
@@ -314,39 +314,37 @@ def resolve_pointer(project_dir: Path, name: str) -> Path | None:
         except OSError:
             pass
 
-    # Scan fallback — only for `paused` because it must never strand a
-    # resumable run. Covers both clean-pause (status=paused) and hard-crash
-    # (status=in_progress). Prefer paused; tie-break by newest updated_at.
-    if name == PAUSED_POINTER:
-        candidates: list[tuple[int, float, Path]] = []
-        for cp in sessions_root(project_dir).glob("*/checkpoint.json"):
+    if name == PAUSED_POINTER and pointer_seen:
+        sessions = sessions_root(project_dir)
+        if not sessions.exists():
+            return None
+
+        def _checkpoint_timestamp(checkpoint_path: Path) -> float:
             try:
-                data = json.loads(cp.read_text())
+                data = json.loads(checkpoint_path.read_text())
             except (OSError, json.JSONDecodeError):
-                continue
-            status = data.get("status", "")
-            if status not in ("paused", "in_progress"):
-                continue
-            updated = data.get("updated_at", "") or data.get("started_at", "")
-            if updated:
+                data = {}
+            updated_at = data.get("updated_at")
+            if isinstance(updated_at, str) and updated_at:
                 try:
-                    updated_ts = datetime.fromisoformat(
-                        updated.replace("Z", "+00:00")
-                    ).timestamp()
+                    return datetime.fromisoformat(updated_at.replace("Z", "+00:00")).timestamp()
                 except ValueError:
-                    updated_ts = cp.stat().st_mtime
-            else:
-                try:
-                    updated_ts = cp.stat().st_mtime
-                except OSError:
-                    updated_ts = 0.0
-            # Sort key: 0 for paused (higher priority), 1 for in_progress;
-            # then newest updated_ts (negative so smaller sorts first).
-            priority = 0 if status == "paused" else 1
-            candidates.append((priority, -updated_ts, cp.parent))
-        if candidates:
-            candidates.sort()
-            return candidates[0][2]
+                    pass
+            try:
+                return checkpoint_path.stat().st_mtime
+            except OSError:
+                return 0.0
+
+        best: tuple[float, Path] | None = None
+        for checkpoint_path in sessions.glob("*/checkpoint.json"):
+            session_path = checkpoint_path.parent
+            if not _valid_paused_target(session_path):
+                continue
+            candidate = (_checkpoint_timestamp(checkpoint_path), session_path)
+            if best is None or candidate[0] >= best[0]:
+                best = candidate
+        if best is not None:
+            return best[1]
 
     return None
 
@@ -370,12 +368,16 @@ class LockBusy(Exception):
     """Raised when another live PID holds the project lock."""
 
     def __init__(self, holder: dict):
-        self.holder = holder
+        self.holder = holder or {}
         super().__init__(
-            f"project lock held by pid={holder.get('pid')!r} "
-            f"command={holder.get('command')!r} "
-            f"started_at={holder.get('started_at')!r}"
+            f"project lock held by pid={self.holder.get('pid')!r} "
+            f"command={self.holder.get('command')!r} "
+            f"started_at={self.holder.get('started_at')!r}"
         )
+
+
+class LockBreakError(RuntimeError):
+    """Raised when --break-lock targets a live Unix flock holder."""
 
 
 @dataclass
@@ -498,9 +500,18 @@ def _read_lock_record_fd(fd: int) -> dict[str, object]:
     if not raw:
         return {}
     try:
-        return json.loads(raw.decode("utf-8"))
+        parsed = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _read_lock_record_path(path: Path) -> dict[str, object]:
+    try:
+        parsed = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _write_lock_record_fd(fd: int, record: dict[str, object]) -> None:
@@ -666,13 +677,54 @@ def acquire_project_lock(
 def break_project_lock(project_dir: Path) -> dict[str, object]:
     """Force-remove the project lock and return the prior holder record."""
     lock_path = logs_dir(project_dir) / LOCK_FILE_NAME
+    if not lock_path.exists():
+        return {}
+
+    holder = _read_lock_record_path(lock_path)
+    holder_pid = int(holder.get("pid", 0) or 0)
+
+    if fcntl is not None:
+        try:
+            fd = os.open(lock_path, os.O_RDWR)
+        except FileNotFoundError:
+            return {}
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                if _pid_alive(holder_pid):
+                    raise LockBreakError(
+                        f"Refusing to break a live lock held by pid={holder_pid} "
+                        f"command={holder.get('command')!r}."
+                    ) from exc
+                raise LockBreakError(
+                    f"Refusing to break lock {lock_path}: flock is still held "
+                    f"and pid={holder_pid} could not be proven dead."
+                ) from exc
+
+            if holder_pid and _pid_alive(holder_pid):
+                raise LockBreakError(
+                    f"Refusing to break a live lock held by pid={holder_pid} "
+                    f"command={holder.get('command')!r}."
+                )
+
+            if _path_points_to_fd(lock_path, fd):
+                os.unlink(lock_path)
+            return holder
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    if holder_pid and _pid_alive(holder_pid):
+        raise LockBreakError(
+            f"Refusing to break a live lock held by pid={holder_pid} "
+            f"command={holder.get('command')!r}."
+        )
+
     try:
-        holder = json.loads(lock_path.read_text()) if lock_path.exists() else {}
-    except (OSError, json.JSONDecodeError):
-        holder = {}
-    try:
-        if lock_path.exists():
-            lock_path.unlink()
+        lock_path.unlink()
     except OSError as exc:
         logger.warning("manual lock break failed: %s", exc)
         raise

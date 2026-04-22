@@ -50,9 +50,11 @@ Session id format: `<yyyy-mm-dd>-<HHMMSS>-<6hex>`.
 
 | File | Role |
 |------|------|
-| `intent.md` | Canonical product description (git-tracked, appended per build) |
+| `intent.md` | Canonical product description input (git-tracked, user-owned) |
 | `otto.yaml` | Project config |
 | `CLAUDE.md` | Agent instructions |
+
+Runtime intent snapshots live in `otto_logs/sessions/<session-id>/intent.txt` for debugging. Otto does not append runtime logs back into project-root `intent.md`.
 
 ### Legacy layout (pre-restructure)
 

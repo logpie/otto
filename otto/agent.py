@@ -6,9 +6,12 @@ import asyncio
 import json
 import os
 import re
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
+
+_SDK_IMPORT_ERROR_MESSAGE = ""
 
 try:
     from claude_agent_sdk import ClaudeAgentOptions as _SDKClaudeAgentOptions
@@ -19,6 +22,9 @@ try:
     from claude_agent_sdk.types import ToolResultBlock as _SDKToolResultBlock
     from claude_agent_sdk.types import ToolUseBlock as _SDKToolUseBlock
 except ImportError:
+    import sys
+
+    _SDK_IMPORT_ERROR_MESSAGE = str(sys.exc_info()[1] or "")
     _SDKClaudeAgentOptions = None
     _sdk_query = None
     _SDKAssistantMessage = None
@@ -111,6 +117,7 @@ class AgentOptions:
     provider: str | None = None
     disallowed_tools: list[str] | None = None
     output_format: dict[str, Any] | None = None
+    max_subagent_dispatches: int | None = None
 
 
 # Backward-compatible name used throughout the codebase and tests.
@@ -134,7 +141,13 @@ def make_agent_options(
     Pass keyword overrides for system_prompt, setting_sources, etc.
     """
     from otto.testing import _subprocess_env
-    from otto.config import agent_provider, agent_model, agent_effort
+    from otto.config import (
+        agent_effort,
+        agent_model,
+        agent_provider,
+        get_max_rounds,
+        get_max_turns_per_call,
+    )
     opts = AgentOptions(
         permission_mode="bypassPermissions",
         cwd=str(project_dir),
@@ -144,6 +157,11 @@ def make_agent_options(
         **overrides,
     )
     cfg = config or {}
+    if opts.max_turns is None:
+        opts.max_turns = get_max_turns_per_call(cfg)
+    if opts.max_subagent_dispatches is None:
+        max_rounds = int(cfg.get("max_certify_rounds", get_max_rounds(cfg)))
+        opts.max_subagent_dispatches = max(20, max_rounds * 20)
     opts.provider = agent_provider(cfg, agent_type)
     model = agent_model(cfg, agent_type)
     if model:
@@ -163,9 +181,97 @@ class AgentCallError(Exception):
     agent session instead of continuing the existing SDK conversation.
     """
     def __init__(self, reason: str, session_id: str = ""):
-        self.reason = reason
+        from otto.redaction import redact_text
+
+        self.reason = redact_text(reason)
         self.session_id = session_id
-        super().__init__(reason)
+        super().__init__(self.reason)
+
+
+class _TranscriptAccumulator:
+    """Keep structured markers plus bounded transcript tails."""
+
+    def __init__(self, *, keep_tool_output: bool) -> None:
+        self._assistant_parts: deque[str] = deque()
+        self._assistant_chars = 0
+        self._assistant_limit = 32_000
+        self._tool_parts: deque[str] = deque()
+        self._tool_chars = 0
+        self._tool_limit = 16_000
+        self._keep_tool_output = keep_tool_output
+        self._marker_lines: list[str] = []
+        self._carry = ""
+
+    def add_assistant_text(self, text: str) -> None:
+        self._append(self._assistant_parts, "_assistant_chars", self._assistant_limit, text)
+        self._collect_markers(text)
+
+    def add_tool_output(self, text: str) -> None:
+        self._collect_markers(text)
+        if self._keep_tool_output:
+            self._append(self._tool_parts, "_tool_chars", self._tool_limit, text)
+
+    def finalize_text(self) -> str:
+        self._flush_carry()
+        parts = [*self._assistant_parts]
+        if self._marker_lines:
+            parts.append("\n".join(self._marker_lines))
+        if self._keep_tool_output:
+            parts.extend(self._tool_parts)
+        return "\n\n".join(part for part in parts if part)
+
+    def _append(
+        self,
+        bucket: deque[str],
+        count_attr: str,
+        limit: int,
+        text: str,
+    ) -> None:
+        if not text:
+            return
+        setattr(self, count_attr, getattr(self, count_attr) + len(text))
+        bucket.append(text)
+        while bucket and getattr(self, count_attr) > limit:
+            removed = bucket.popleft()
+            setattr(self, count_attr, getattr(self, count_attr) - len(removed))
+
+    def _collect_markers(self, fragment: str) -> None:
+        if not fragment:
+            return
+        from otto.markers import _STORY_RESULT_RE, _VERDICT_RE
+
+        separator = "\n" if self._carry and not fragment.startswith(("\n", "\r")) else ""
+        combined = self._carry + separator + fragment
+        lines = combined.splitlines(keepends=True)
+        self._carry = ""
+        for raw_line in lines:
+            if not raw_line.endswith(("\n", "\r")):
+                self._carry = raw_line
+                continue
+            stripped = raw_line.strip()
+            if not stripped or stripped.startswith(">"):
+                continue
+            if (
+                stripped.startswith(
+                    (
+                        "CERTIFY_ROUND:",
+                        "STORIES_TESTED:",
+                        "STORIES_PASSED:",
+                        "DIAGNOSIS:",
+                        "METRIC_VALUE:",
+                        "METRIC_MET:",
+                    )
+                )
+                or _STORY_RESULT_RE.match(stripped)
+                or _VERDICT_RE.match(stripped)
+            ):
+                self._marker_lines.append(stripped)
+
+    def _flush_carry(self) -> None:
+        if not self._carry:
+            return
+        self._collect_markers(self._carry + "\n")
+        self._carry = ""
 
 
 async def run_agent_with_timeout(
@@ -209,13 +315,15 @@ async def run_agent_with_timeout(
     narrative = callbacks.pop("_narrative")
     # Mutable bag — streaming handlers update it so timeout/crash paths can
     # recover the last-known session_id for a resumable checkpoint.
-    agent_state: dict[str, str] = {"session_id": ""}
+    agent_state: dict[str, Any] = {"session_id": "", "child_session_ids": []}
 
     def _append_narrative(line: str) -> None:
         """Append a terminal-error marker to narrative.log for human debugging."""
+        from otto.redaction import redact_text
+
         try:
             with open(log_dir / "narrative.log", "a", encoding="utf-8") as fh:
-                fh.write(line + "\n")
+                fh.write(redact_text(line) + "\n")
         except OSError:
             pass
 
@@ -254,10 +362,30 @@ async def run_agent_with_timeout(
             timeout=timeout,
         )
         session_id = getattr(result_msg, "session_id", "") or agent_state.get("session_id", "")
+        if getattr(result_msg, "is_error", False) is True:
+            reason = getattr(result_msg, "result", None) or "agent returned an error result"
+            if "max_turn" in str(reason).lower() or "max turn" in str(reason).lower():
+                reason = "max_turns cap reached; raise --max-turns or check for agent loops"
+            breakdown_data = {
+                "round_timings": narrative.round_timings(),
+                "build_duration_s": narrative.build_duration_or_none(),
+                "recovered_tool_errors": 0,
+                "child_session_ids": [],
+            }
+            finalize_stats = narrative.finalize(None)
+            breakdown_data["recovered_tool_errors"] = int(
+                finalize_stats.get("recovered_tool_errors", 0)
+            )
+            raise AgentCallError(str(reason), session_id=session_id)
+        child_session_ids = [
+            sid for sid in agent_state.get("child_session_ids", []) or []
+            if sid and sid != session_id
+        ]
         breakdown_data = {
             "round_timings": narrative.round_timings(),
             "build_duration_s": narrative.build_duration_or_none(),
             "recovered_tool_errors": 0,
+            "child_session_ids": child_session_ids,
         }
         phase = (phase_name or "").lower()
         finalize_breakdown: dict[str, dict[str, float | int]] | None = None
@@ -306,11 +434,22 @@ async def run_agent_with_timeout(
             finalize_stats.get("recovered_tool_errors", 0)
         )
         return text, cost, session_id, breakdown_data
+    except AgentCallError:
+        from otto.pipeline import _cleanup_orphan_processes
+
+        _cleanup_orphan_processes(
+            project_dir,
+            process_group_id=agent_state.get("process_group_id"),
+        )
+        raise
     except asyncio.TimeoutError:
         log.error("Agent timed out after %ds", timeout)
         _append_narrative(f"\u2501\u2501\u2501 Timed out after {timeout}s")
         from otto.pipeline import _cleanup_orphan_processes
-        _cleanup_orphan_processes(project_dir)
+        _cleanup_orphan_processes(
+            project_dir,
+            process_group_id=agent_state.get("process_group_id"),
+        )
         raise AgentCallError(
             f"Timed out after {timeout}s",
             session_id=agent_state.get("session_id", ""),
@@ -318,13 +457,19 @@ async def run_agent_with_timeout(
     except KeyboardInterrupt:
         _append_narrative("\u2501\u2501\u2501 KeyboardInterrupt")
         from otto.pipeline import _cleanup_orphan_processes
-        _cleanup_orphan_processes(project_dir)
+        _cleanup_orphan_processes(
+            project_dir,
+            process_group_id=agent_state.get("process_group_id"),
+        )
         raise
     except Exception as exc:
         log.exception("Agent crashed")
         _append_narrative(f"\u2501\u2501\u2501 Agent crashed: {exc}")
         from otto.pipeline import _cleanup_orphan_processes
-        _cleanup_orphan_processes(project_dir)
+        _cleanup_orphan_processes(
+            project_dir,
+            process_group_id=agent_state.get("process_group_id"),
+        )
         raise AgentCallError(
             f"Agent crashed: {exc}",
             session_id=agent_state.get("session_id", ""),
@@ -526,15 +671,53 @@ def _normalize_message(message: Any) -> Any | None:
     return None
 
 
-async def _query_claude(*, prompt: str, options: AgentOptions | None = None):
+async def _query_claude(
+    *,
+    prompt: str,
+    options: AgentOptions | None = None,
+    state: dict[str, Any] | None = None,
+):
     if _sdk_query is None:
-        yield ResultMessage()
-        return
+        detail = _SDK_IMPORT_ERROR_MESSAGE or "unknown import error"
+        raise RuntimeError(
+            "claude_agent_sdk not importable: "
+            f"{detail}; run `uv pip install -e .[claude]`"
+        )
 
-    async for message in _sdk_query(prompt=prompt, options=_sdk_options(options)):
-        normalized = _normalize_message(message)
-        if normalized is not None:
-            yield normalized
+    opts = options or AgentOptions()
+    sdk_options = _sdk_options(opts)
+    saved_env = dict(os.environ)
+
+    try:
+        import claude_agent_sdk._internal.transport.subprocess_cli as _sdk_subprocess_cli
+    except Exception:  # pragma: no cover - SDK internals may move
+        _sdk_subprocess_cli = None
+
+    original_open_process = getattr(getattr(_sdk_subprocess_cli, "anyio", None), "open_process", None)
+
+    async def _open_process_with_session(*args: Any, **kwargs: Any) -> Any:
+        kwargs["start_new_session"] = True
+        process = await original_open_process(*args, **kwargs)
+        if state is not None:
+            pid = getattr(process, "pid", None)
+            if isinstance(pid, int):
+                state["process_group_id"] = pid
+        return process
+
+    os.environ.clear()
+    os.environ.update(opts.env or {})
+    try:
+        if original_open_process is not None:
+            _sdk_subprocess_cli.anyio.open_process = _open_process_with_session
+        async for message in _sdk_query(prompt=prompt, options=sdk_options):
+            normalized = _normalize_message(message)
+            if normalized is not None:
+                yield normalized
+    finally:
+        if original_open_process is not None:
+            _sdk_subprocess_cli.anyio.open_process = original_open_process
+        os.environ.clear()
+        os.environ.update(saved_env)
 
 
 def _codex_command(options: AgentOptions) -> list[str]:
@@ -557,11 +740,14 @@ def _codex_command(options: AgentOptions) -> list[str]:
     return command
 
 
-async def _query_codex(*, prompt: str, options: AgentOptions | None = None):
+async def _query_codex(
+    *,
+    prompt: str,
+    options: AgentOptions | None = None,
+    state: dict[str, Any] | None = None,
+):
     opts = options or AgentOptions()
-    env = dict(os.environ)
-    if opts.env:
-        env.update(opts.env)
+    env = dict(opts.env or {})
 
     process = await asyncio.create_subprocess_exec(
         *_codex_command(opts),
@@ -570,7 +756,10 @@ async def _query_codex(*, prompt: str, options: AgentOptions | None = None):
         stderr=asyncio.subprocess.STDOUT,
         cwd=opts.cwd or None,
         env=env,
+        start_new_session=True,
     )
+    if state is not None:
+        state["process_group_id"] = process.pid
 
     final_prompt = _codex_prompt(prompt, opts)
     stdout = process.stdout
@@ -655,15 +844,20 @@ async def _query_codex(*, prompt: str, options: AgentOptions | None = None):
             await process.wait()
 
 
-async def query(*, prompt: str, options: AgentOptions | None = None):
+async def query(
+    *,
+    prompt: str,
+    options: AgentOptions | None = None,
+    state: dict[str, Any] | None = None,
+):
     """Run an agent query against the configured provider."""
     provider = _provider_name(options)
     if provider == "codex":
-        async for message in _query_codex(prompt=prompt, options=options):
+        async for message in _query_codex(prompt=prompt, options=options, state=state):
             yield message
         return
 
-    async for message in _query_claude(prompt=prompt, options=options):
+    async for message in _query_claude(prompt=prompt, options=options, state=state):
         yield message
 
 
@@ -726,7 +920,7 @@ async def run_agent_query(
     on_result: Callable[[Any], Any] | None = None,
     on_message: Callable[[Any], Any] | None = None,
     capture_tool_output: bool = False,
-    state: dict[str, str] | None = None,
+    state: dict[str, Any] | None = None,
 ) -> tuple[str, float, Any]:
     """Run a provider query, dispatching normalized events to callbacks.
 
@@ -743,11 +937,19 @@ async def run_agent_query(
     that cancel the task (e.g. on timeout) still recover the session_id for
     a resumable checkpoint.
     """
-    text_parts: list[str] = []
+    transcript = _TranscriptAccumulator(keep_tool_output=capture_tool_output)
     cost = 0.0
     result_msg = None
+    subagent_dispatches = 0
+    max_subagent_dispatches = getattr(options, "max_subagent_dispatches", None)
 
-    async for message in query(prompt=prompt, options=options):
+    provider = _provider_name(options)
+    query_kwargs: dict[str, Any] = {"prompt": prompt, "options": options}
+    if state is not None:
+        query_kwargs["state"] = state
+    message_iter = query(**query_kwargs)
+
+    async for message in message_iter:
         # Capture session_id eagerly. Every SDK message type carries it,
         # and we need it to build a resumable checkpoint even when the
         # stream is later cancelled (timeout) or crashes.
@@ -755,6 +957,10 @@ async def run_agent_query(
             sid = getattr(message, "session_id", "") or ""
             if sid:
                 state["session_id"] = sid
+                seen = state.setdefault("seen_session_ids", set())
+                if isinstance(seen, set):
+                    seen.add(sid)
+                    state["child_session_ids"] = sorted(seen)
 
         if on_message is not None:
             try:
@@ -768,14 +974,14 @@ async def run_agent_query(
             result_msg = message
             raw_cost = getattr(message, "total_cost_usd", None)
             if isinstance(raw_cost, (int, float)):
-                cost += float(raw_cost)
+                cost = max(cost, float(raw_cost))
             if on_result:
                 on_result(message)
         elif isinstance(message, (AssistantMessage, UserMessage)):
             for block in message.content:
                 if isinstance(block, ToolResultBlock):
-                    if capture_tool_output and block.content:
-                        text_parts.append(block.content)
+                    if block.content:
+                        transcript.add_tool_output(block.content)
                     if on_tool_result:
                         on_tool_result(block)
                 elif isinstance(block, ThinkingBlock):
@@ -783,11 +989,22 @@ async def run_agent_query(
                     if thinking and on_text:
                         on_text(f"[thinking] {thinking}")
                 elif isinstance(block, TextBlock) and block.text:
-                    text_parts.append(block.text)
+                    transcript.add_assistant_text(block.text)
                     if on_text:
                         on_text(block.text)
                 elif isinstance(block, ToolUseBlock):
+                    if block.name == "Agent":
+                        subagent_dispatches += 1
+                        if (
+                            isinstance(max_subagent_dispatches, int)
+                            and max_subagent_dispatches > 0
+                            and subagent_dispatches > max_subagent_dispatches
+                        ):
+                            raise AgentCallError(
+                                "max_subagent dispatch cap reached; check for agent loops",
+                                session_id=(state or {}).get("session_id", ""),
+                            )
                     if on_tool:
                         on_tool(block)
 
-    return "".join(text_parts), cost, result_msg
+    return transcript.finalize_text(), cost, result_msg

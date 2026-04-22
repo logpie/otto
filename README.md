@@ -260,6 +260,7 @@ otto certify "notes API with auth, CRUD, and search"    # explicit intent
 otto certify --fast                                     # quick smoke test
 otto certify --standard                                 # subagents + screenshots, no adversarial probing
 otto certify --thorough                                 # adversarial: edge cases, code review
+otto certify --strict                                   # require two consecutive PASS runs
 ```
 
 Supported flags: `--fast`, `--standard`, `--thorough`, `--budget`, `--model`, `--provider`, `--effort`, `--break-lock`.
@@ -275,7 +276,7 @@ Find and fix bugs, edge cases, error handling gaps. Adversarial certifier tries 
 ```bash
 otto improve bugs                       # find and fix all bugs
 otto improve bugs "error handling"      # focus on error handling
-otto improve bugs -n 5                  # up to 5 rounds (default: 3)
+otto improve bugs -n 5                  # up to 5 rounds (default from otto.yaml or 8)
 otto improve bugs --split               # system-controlled loop (vs agent-driven)
 otto improve bugs --resume              # resume from last checkpoint
 ```
@@ -288,7 +289,7 @@ Suggest and implement product improvements. Evaluates the product as a real user
 otto improve feature                    # suggest and implement improvements
 otto improve feature "search UX"        # focus on search experience
 otto improve feature "mobile layout"    # focus on mobile
-otto improve feature -n 5              # up to 5 rounds (default: 3)
+otto improve feature -n 5              # up to 5 rounds (default from otto.yaml or 8)
 ```
 
 #### `otto improve target`
@@ -299,7 +300,7 @@ Optimize toward a measurable target. Measures a metric, compares to the target, 
 otto improve target "response time < 100ms"
 otto improve target "test coverage > 90%"
 otto improve target "bundle size < 500kb"
-otto improve target "lighthouse score > 95" -n 10    # up to 10 rounds (default: 5)
+otto improve target "lighthouse score > 95" -n 10    # up to 10 rounds (default from otto.yaml or 8)
 otto improve target "latency < 50ms" --resume         # resume interrupted run
 ```
 
@@ -420,11 +421,18 @@ provider: claude                  # claude | codex
 # effort: null                    # low | medium | high | max (provider-specific)
 
 # ─── Per-agent overrides (inherit global if not set) ─────────────────
-# agents:
-#   build:     {provider: null, model: null, effort: null}
-#   certifier: {provider: null, model: null, effort: null}
-#   spec:      {provider: null, model: null, effort: null}
-#   fix:       {provider: null, model: null, effort: null}
+agents:
+  build:
+    provider: claude
+    model: opus
+  certifier:
+    provider: claude
+    model: sonnet
+    effort: low                    # certifier doesn't need deep reasoning
+  spec:
+    provider: claude
+    model: sonnet
+#  fix:     {provider: null, model: null, effort: null}
 
 # ─── Budgets & caps ──────────────────────────────────────────────────
 run_budget_seconds: 3600      # total wall-clock (primary knob)

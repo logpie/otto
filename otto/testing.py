@@ -4,6 +4,46 @@ import os
 import sys
 from pathlib import Path
 
+_BASE_ENV_KEYS = {
+    "HOME",
+    "PATH",
+    "TERM",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "SHELL",
+    "USER",
+    "LOGNAME",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "VIRTUAL_ENV",
+    "PYTHONPATH",
+}
+_AGENT_ENV_PREFIXES = (
+    "ANTHROPIC_",
+    "CLAUDE_CODE_",
+    "CODEX_",
+    "OPENAI_",
+    "AZURE_OPENAI_",
+)
+_AGENT_ENV_KEYS = {
+    "GIT_ASKPASS",
+    "SSH_AUTH_SOCK",
+}
+
+
+def _allowed_parent_env() -> dict[str, str]:
+    """Return the subset of the parent env that child agents are allowed to inherit."""
+    allowed: dict[str, str] = {}
+    for key, value in os.environ.items():
+        if key in _BASE_ENV_KEYS or key in _AGENT_ENV_KEYS:
+            allowed[key] = value
+            continue
+        if any(key.startswith(prefix) for prefix in _AGENT_ENV_PREFIXES):
+            allowed[key] = value
+    return allowed
+
 
 def _subprocess_env(project_dir: Path | None = None) -> dict:
     """Return an env dict with Python/tooling paths tuned for the target project.
@@ -13,7 +53,7 @@ def _subprocess_env(project_dir: Path | None = None) -> dict:
     activate the virtualenv.
     """
     venv_bin = str(Path(sys.executable).parent)
-    env = os.environ.copy()
+    env = _allowed_parent_env()
     existing = env.get("PATH", "")
     if venv_bin not in existing.split(os.pathsep):
         env["PATH"] = venv_bin + os.pathsep + existing
@@ -42,5 +82,3 @@ def _subprocess_env(project_dir: Path | None = None) -> dict:
             if str(project_venv_bin) not in existing.split(os.pathsep):
                 env["PATH"] = str(project_venv_bin) + os.pathsep + existing
     return env
-
-

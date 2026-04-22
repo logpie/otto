@@ -25,8 +25,11 @@ from otto.agent import (
 from otto.logstream import (
     JsonlMessageWriter,
     NarrativeFormatter,
+    _parse_story_result_marker,
+    browser_efficiency_outlier,
     estimate_phase_costs,
     make_session_logger,
+    summarize_browser_efficiency,
 )
 
 
@@ -73,6 +76,20 @@ class TestJsonlWriter:
         assert rec["cost_usd"] == 0.42
         assert rec["usage"] == {"input_tokens": 100, "output_tokens": 50}
         assert rec["session_id"] == "sess-1"
+
+    def test_result_message_redacts_secret_text(self, tmp_path):
+        path = tmp_path / "messages.jsonl"
+        w = JsonlMessageWriter(path)
+        w.write(ResultMessage(
+            subtype="success",
+            is_error=False,
+            result="OPENAI_API_KEY=sk-secretvalue1234567890",
+        ))
+        w.close()
+
+        rec = json.loads(path.read_text().strip())
+        assert "sk-secretvalue1234567890" not in rec["result"]
+        assert "[REDACTED:OPENAI_API_KEY]" in rec["result"]
 
     def test_result_message_records_structured_output(self, tmp_path):
         path = tmp_path / "messages.jsonl"
@@ -154,6 +171,15 @@ class TestNarrativeFormatter:
         assert seen[2] == "[dim]  \u2014 CERTIFY ROUND 1 \u2014[/dim]"
         assert seen[3] == "[dim]  \u2014 CERTIFY ROUND 1 \u2192 PASS (1/1) \u2014[/dim]"
         assert all("[+" not in event for event in seen)
+
+    def test_story_result_marker_prefers_structured_summary_field(self):
+        story = _parse_story_result_marker(
+            "STORY_RESULT: smoke | PASS | claim=Health endpoint responds | "
+            "observed_result=Returned 200 OK | summary=Health check passed"
+        )
+
+        assert story is not None
+        assert story["summary"] == "Health check passed"
 
     def test_terminal_callback_ignores_quiet_events(self, tmp_path):
         path = tmp_path / "narrative.log"
@@ -301,6 +327,25 @@ class TestNarrativeFormatter:
         assert "\u2726 STORY_RESULT: s1 | PASS | welcome page loads" in content
         assert "\u2726 STORY_RESULT: s2 | FAIL | add-to-cart 500s" in content
         assert "\u2726 VERDICT: FAIL" in content
+
+    def test_tool_result_redacts_obvious_secrets(self, tmp_path):
+        path = tmp_path / "narrative.log"
+        f = NarrativeFormatter(path)
+        f.write_message(AssistantMessage(content=[
+            ToolResultBlock(
+                content=(
+                    "OPENAI_API_KEY=sk-testsecret1234567890\n"
+                    "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz123456\n"
+                ),
+                is_error=False,
+            ),
+        ]))
+        f.close()
+
+        content = path.read_text()
+        assert "sk-testsecret1234567890" not in content
+        assert "ghp_abcdefghijklmnopqrstuvwxyz123456" not in content
+        assert "[REDACTED:OPENAI_API_KEY]" in content
 
     def test_text_markers_elevated(self, tmp_path):
         """Markers embedded in TextBlock (not just ToolResult) also elevated."""
@@ -964,3 +1009,293 @@ class TestEstimatePhaseCosts:
         path.write_text("{not json}\n")
 
         assert estimate_phase_costs(path, 1.0) is None
+
+    def test_counts_user_tool_result_usage_inside_certify_round(self, tmp_path):
+        path = tmp_path / "messages.jsonl"
+        records = [
+            {
+                "type": "assistant",
+                "blocks": [{
+                    "type": "tool_use",
+                    "id": "cert-1",
+                    "name": "Agent",
+                    "input": {"prompt": "hello\n## Verdict Format\nbye"},
+                }],
+                "usage": {"output_tokens": 10},
+            },
+            {
+                "type": "user",
+                "blocks": [{
+                    "type": "tool_result",
+                    "tool_use_id": "cert-1",
+                    "content": "certifier output",
+                    "is_error": False,
+                }],
+                "usage": {"output_tokens": 90},
+            },
+        ]
+        path.write_text("\n".join(json.dumps(rec) for rec in records) + "\n")
+
+        estimated = estimate_phase_costs(path, 2.0)
+
+        assert estimated == {
+            "certify": {"cost_usd": 2.0, "estimated": True},
+        }
+
+
+class TestBrowserEfficiency:
+    def test_counts_browser_calls_sessions_and_verbs(self, tmp_path):
+        path = tmp_path / "messages.jsonl"
+        records = [
+            {
+                "type": "assistant",
+                "blocks": [{
+                    "type": "tool_use",
+                    "id": "agent-1",
+                    "name": "Agent",
+                    "input": {"prompt": "Verify story_id=first-experience and capture STORY_RESULT lines."},
+                }],
+            },
+            {
+                "type": "assistant",
+                "blocks": [
+                    {
+                        "type": "tool_use",
+                        "id": "bash-1",
+                        "name": "Bash",
+                        "input": {"command": "agent-browser --session main snapshot -i"},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "bash-2",
+                        "name": "Bash",
+                        "input": {"command": "agent-browser --session main eval \"return !!document.querySelector('#app')\""},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "bash-3",
+                        "name": "Bash",
+                        "input": {"command": "echo no-browser-here"},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "agent-generic",
+                        "name": "Agent",
+                        "input": {"prompt": "Summarize the browser evidence and collect screenshots."},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "bash-4",
+                        "name": "Bash",
+                        "input": {"command": "agent-browser click \"Add card\""},
+                    },
+                ],
+            },
+        ]
+        path.write_text("\n".join(json.dumps(rec) for rec in records) + "\n")
+
+        efficiency = summarize_browser_efficiency(
+            path,
+            certifier_mode="standard",
+            story_ids=["first-experience", "crud-lifecycle"],
+        )
+
+        assert efficiency["total_browser_calls"] == 3
+        assert efficiency["distinct_sessions"] == 2
+        assert efficiency["verb_counts"] == {"click": 1, "eval": 1, "snapshot": 1}
+        assert efficiency["calls_per_story"] == {
+            "first-experience": 2,
+            "crud-lifecycle": 0,
+            "shared": 1,
+        }
+
+    def test_calls_per_story_uses_direct_attribution_and_shared_bucket(self, tmp_path):
+        path = tmp_path / "messages.jsonl"
+        records = [
+            {
+                "type": "assistant",
+                "blocks": [{
+                    "type": "tool_use",
+                    "id": "agent-story-1",
+                    "name": "Agent",
+                    "input": {"description": "Run crud-lifecycle certifier story in the browser."},
+                }],
+            },
+            {
+                "type": "assistant",
+                "blocks": [{
+                    "type": "tool_use",
+                    "id": "bash-1",
+                    "name": "Bash",
+                    "input": {"command": "agent-browser --session crud-user snapshot -i"},
+                }],
+            },
+            {
+                "type": "assistant",
+                "blocks": [{
+                    "type": "tool_use",
+                    "id": "bash-1b",
+                    "name": "Bash",
+                    "input": {"command": "agent-browser --session crud-user eval \"return window.localStorage.length\""},
+                }],
+            },
+            {
+                "type": "assistant",
+                "blocks": [{
+                    "type": "tool_use",
+                    "id": "agent-story-2",
+                    "name": "Agent",
+                    "input": {"prompt": "Now verify drag-drop behavior end to end."},
+                }],
+            },
+            {
+                "type": "assistant",
+                "blocks": [{
+                    "type": "tool_use",
+                    "id": "bash-2",
+                    "name": "Bash",
+                    "input": {"command": "agent-browser --session dnd drag \"Card A\" \"Done\""},
+                }],
+            },
+            {
+                "type": "assistant",
+                "blocks": [{
+                    "type": "tool_use",
+                    "id": "bash-3",
+                    "name": "Bash",
+                    "input": {"command": "agent-browser screenshot evidence/final.png"},
+                }],
+            },
+        ]
+        path.write_text("\n".join(json.dumps(rec) for rec in records) + "\n")
+
+        efficiency = summarize_browser_efficiency(
+            path,
+            certifier_mode="standard",
+            story_ids=["crud-lifecycle", "drag-drop"],
+        )
+
+        assert efficiency["calls_per_story"] == {
+            "crud-lifecycle": 2,
+            "drag-drop": 1,
+            "shared": 1,
+        }
+
+    def test_main_agent_browser_work_stays_in_shared_bucket(self, tmp_path):
+        path = tmp_path / "messages.jsonl"
+        records = [
+            {
+                "type": "assistant",
+                "blocks": [{
+                    "type": "tool_use",
+                    "id": "bash-1",
+                    "name": "Bash",
+                    "input": {"command": "agent-browser snapshot -i"},
+                }],
+            },
+            {
+                "type": "assistant",
+                "blocks": [{
+                    "type": "tool_use",
+                    "id": "bash-2",
+                    "name": "Bash",
+                    "input": {"command": "agent-browser click \"Continue\""},
+                }],
+            },
+            {
+                "type": "assistant",
+                "blocks": [{
+                    "type": "tool_use",
+                    "id": "bash-3",
+                    "name": "Bash",
+                    "input": {"command": "agent-browser eval \"return window.location.pathname\""},
+                }],
+            },
+        ]
+        path.write_text("\n".join(json.dumps(rec) for rec in records) + "\n")
+
+        efficiency = summarize_browser_efficiency(
+            path,
+            certifier_mode="standard",
+            story_ids=["first-experience", "crud-lifecycle"],
+        )
+
+        assert efficiency["calls_per_story"] == {
+            "first-experience": 0,
+            "crud-lifecycle": 0,
+            "shared": 3,
+        }
+
+    def test_outlier_heuristic_thresholds_by_mode(self):
+        assert browser_efficiency_outlier(
+            certifier_mode="fast",
+            total_browser_calls=21,
+            distinct_sessions=1,
+            story_count=1,
+        ) == (
+            True,
+            "fast-mode outlier: calls per story 21.0 > 20.0.",
+        )
+        assert browser_efficiency_outlier(
+            certifier_mode="standard",
+            total_browser_calls=91,
+            distinct_sessions=1,
+            story_count=2,
+        ) == (
+            True,
+            "standard-mode outlier: total browser calls 91 > 90; calls per story 45.5 > 40.0.",
+        )
+        assert browser_efficiency_outlier(
+            certifier_mode="standard",
+            total_browser_calls=10,
+            distinct_sessions=3,
+            story_count=2,
+            isolated_story_count=1,
+        ) == (False, "")
+        assert browser_efficiency_outlier(
+            certifier_mode="standard",
+            total_browser_calls=10,
+            distinct_sessions=4,
+            story_count=2,
+            isolated_story_count=1,
+        ) == (
+            True,
+            "standard-mode outlier: distinct sessions 4 > 3.",
+        )
+        assert browser_efficiency_outlier(
+            certifier_mode="thorough",
+            total_browser_calls=170,
+            distinct_sessions=4,
+            story_count=2,
+        ) == (
+            True,
+            "thorough-mode outlier: total browser calls 170 > 160; calls per story 85.0 > 80.0.",
+        )
+        assert browser_efficiency_outlier(
+            certifier_mode="standard",
+            total_browser_calls=167,
+            distinct_sessions=5,
+            story_count=6,
+        ) == (False, "")
+        assert browser_efficiency_outlier(
+            certifier_mode="thorough",
+            total_browser_calls=60,
+            distinct_sessions=4,
+            story_count=2,
+        ) == (False, "")
+        assert browser_efficiency_outlier(
+            certifier_mode="thorough",
+            total_browser_calls=60,
+            distinct_sessions=5,
+            story_count=2,
+        ) == (
+            True,
+            "thorough-mode outlier: distinct sessions 5 > 4.",
+        )
+        assert browser_efficiency_outlier(
+            certifier_mode="standard",
+            total_browser_calls=60,
+            distinct_sessions=3,
+            story_count=2,
+            isolated_story_count=1,
+        ) == (False, "")

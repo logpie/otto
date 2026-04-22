@@ -33,3 +33,7 @@ summary.json
 bench-results/as-user/
 
 bench-results/demo/
+
+# Free-form log scratch dir (per-session, not for git)
+logs/
+

@@ -19,8 +19,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 import time
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Callable
 
@@ -36,6 +38,8 @@ from otto.agent import (
     UserMessage,
     tool_use_summary,
 )
+from otto.markers import _STORY_RESULT_RE, _VERDICT_RE, _parse_story_result_fields
+from otto.redaction import redact_text
 
 # Certifier-marker lines we elevate in the narrative so humans can scan
 # for them. Order matters — checked as startswith.
@@ -64,6 +68,52 @@ _WRITE_EDIT_BOILERPLATE_RE = re.compile(
 _TERMINAL_STAMP_RE = re.compile(r"^\[\+\d+:\d{2}(?::\d{2})?\]\s+")
 _TOOL_USE_ERROR_TAG_RE = re.compile(r"</?tool_use_error>")
 _SHELL_NOISE_SPLIT_RE = re.compile(r"\s*(?:\||&&|;|>|<)\s*")
+_AGENT_BROWSER_SESSION_RE = re.compile(r"(?:^|\s)--session\s+([^\s]+)")
+_DISPATCH_STORY_SECTION_RE = re.compile(r"(?is)\*\*Story:\s*([^\n*]+?)\*\*\s*(.*?)(?=\n\*\*Story:|\Z)")
+_SESSION_NAME_HINT_RE = re.compile(r"session name\s+[\"']?([a-zA-Z0-9._-]+)[\"']?", re.IGNORECASE)
+_WORD_TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
+_GENERIC_BROWSER_SESSIONS = {"anonymous", "default", "main"}
+_COMMON_TEXT_TOKENS = {
+    "agent",
+    "agent-browser",
+    "all",
+    "and",
+    "bash",
+    "browser",
+    "button",
+    "card",
+    "cards",
+    "capture",
+    "click",
+    "commands",
+    "description",
+    "end",
+    "eval",
+    "for",
+    "http",
+    "https",
+    "localstorage",
+    "open",
+    "page",
+    "pass",
+    "prompt",
+    "reload",
+    "report",
+    "result",
+    "run",
+    "screenshot",
+    "session",
+    "snapshot",
+    "stories",
+    "story",
+    "test",
+    "timeout",
+    "tool",
+    "type",
+    "use",
+    "verify",
+    "with",
+}
 
 
 def _iso_ts() -> str:
@@ -86,24 +136,34 @@ def _truncate_at_word(text: str, limit: int = _MAX_NARRATIVE_LINE) -> str:
 def _block_to_dict(block: Any) -> dict[str, Any]:
     """Serialize a normalized SDK block to a JSON-safe dict."""
     if isinstance(block, TextBlock):
-        return {"type": "text", "text": block.text}
+        return {"type": "text", "text": redact_text(block.text)}
     if isinstance(block, ThinkingBlock):
-        return {"type": "thinking", "thinking": block.thinking}
+        return {"type": "thinking", "thinking": redact_text(block.thinking)}
     if isinstance(block, ToolUseBlock):
         return {
             "type": "tool_use",
             "id": block.id,
             "name": block.name,
-            "input": block.input,
+            "input": _redact_obj(block.input),
         }
     if isinstance(block, ToolResultBlock):
         return {
             "type": "tool_result",
             "tool_use_id": block.tool_use_id,
-            "content": block.content,
+            "content": redact_text(block.content),
             "is_error": block.is_error,
         }
     return {"type": "unknown", "repr": str(block)[:500]}
+
+
+def _redact_obj(value: Any) -> Any:
+    if isinstance(value, str):
+        return redact_text(value)
+    if isinstance(value, list):
+        return [_redact_obj(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _redact_obj(item) for key, item in value.items()}
+    return value
 
 
 def _coerce_usage(usage: Any) -> Any:
@@ -148,7 +208,7 @@ class JsonlMessageWriter:
             record["subtype"] = message.subtype
             record["is_error"] = message.is_error
             if message.result:
-                record["result"] = message.result
+                record["result"] = redact_text(message.result)
             if message.structured_output is not None:
                 record["structured_output"] = message.structured_output
             if message.total_cost_usd is not None:
@@ -350,12 +410,14 @@ class NarrativeFormatter:
         return f"[+{self._elapsed_fmt()}]"
 
     def _write(self, line: str) -> None:
+        line = redact_text(line)
         if not line.endswith("\n"):
             line = line + "\n"
         self._fh.write(line)
         self._fh.flush()
 
     def _emit_terminal(self, line: str, *, style: str | None = None) -> None:
+        line = redact_text(line)
         self._last_terminal_event_monotonic = time.monotonic()
         if self._stdout_callback is None:
             return
@@ -748,6 +810,10 @@ class NarrativeFormatter:
 def _is_marker(line: str) -> bool:
     if not any(line.startswith(m) for m in _CERTIFY_MARKERS):
         return False
+    if line.startswith("VERDICT:") and not _VERDICT_RE.match(line):
+        return False
+    if line.startswith("STORY_RESULT:") and not _STORY_RESULT_RE.match(line):
+        return False
     # Skip template placeholders like `STORIES_TESTED: <number>` — they
     # appear in prompt examples, not real runs.
     if _PLACEHOLDER_RE.search(line):
@@ -886,7 +952,8 @@ def estimate_phase_costs(
                 if not line:
                     continue
                 rec = json.loads(line)
-                if rec.get("type") != "assistant":
+                rec_type = rec.get("type")
+                if rec_type not in {"assistant", "user"}:
                     continue
 
                 blocks = rec.get("blocks")
@@ -921,7 +988,7 @@ def estimate_phase_costs(
                     if isinstance(raw_tokens, int | float):
                         output_tokens = max(int(raw_tokens), 0)
 
-                if opens_certify or in_certify_round:
+                if opens_certify or closes_certify or in_certify_round:
                     certify_tokens += output_tokens
                 else:
                     build_tokens += output_tokens
@@ -953,20 +1020,464 @@ def estimate_phase_costs(
     return estimated or None
 
 
+def _iter_jsonl_records(messages_jsonl: Path) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    with messages_jsonl.open(encoding="utf-8") as fh:
+        for raw_line in fh:
+            line = raw_line.strip()
+            if not line:
+                continue
+            rec = json.loads(line)
+            if isinstance(rec, dict):
+                records.append(rec)
+    return records
+
+
+def _story_match_aliases(story_id: str) -> set[str]:
+    base = str(story_id or "").strip().lower()
+    if not base:
+        return set()
+    aliases = {base}
+    aliases.add(base.replace("_", "-"))
+    aliases.add(base.replace("-", " "))
+    aliases.add(base.replace("_", " "))
+    return {alias for alias in aliases if alias}
+
+
+def _normalize_match_text(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+
+def _keyword_tokens(value: str) -> set[str]:
+    tokens = {
+        token
+        for token in _WORD_TOKEN_RE.findall(_normalize_match_text(value))
+        if len(token) >= 3 and token not in _COMMON_TEXT_TOKENS and not token.isdigit()
+    }
+    return tokens
+
+
+def _story_specs(
+    story_ids: list[str],
+    story_claims: dict[str, str] | None,
+) -> dict[str, dict[str, Any]]:
+    specs: dict[str, dict[str, Any]] = {}
+    for story_id in story_ids:
+        claim = str((story_claims or {}).get(story_id) or "").strip()
+        specs[story_id] = {
+            "story_id": story_id,
+            "claim": claim,
+            "aliases": _story_match_aliases(story_id),
+            "id_tokens": _keyword_tokens(story_id),
+            "claim_tokens": _keyword_tokens(claim),
+        }
+    return specs
+
+
+def _story_match_score(text: str, spec: dict[str, Any]) -> int:
+    raw = str(text or "").strip().lower()
+    if not raw:
+        return 0
+    normalized = _normalize_match_text(raw)
+    text_tokens = _keyword_tokens(raw)
+    score = 0
+    for alias in spec["aliases"]:
+        alias_norm = _normalize_match_text(alias)
+        if alias in raw or (alias_norm and alias_norm in normalized):
+            score += 8 if alias == spec["story_id"] else 5
+    score += 3 * len(text_tokens & set(spec["id_tokens"]))
+    score += len(text_tokens & set(spec["claim_tokens"]))
+    return score
+
+
+def _pick_best_story_from_scores(
+    scores: dict[str, int],
+    *,
+    minimum_score: int = 1,
+) -> str | None:
+    ranked = sorted(
+        ((int(score), story_id) for story_id, score in scores.items() if int(score) >= minimum_score),
+        key=lambda item: (-item[0], item[1]),
+    )
+    if not ranked:
+        return None
+    if len(ranked) > 1 and ranked[0][0] == ranked[1][0]:
+        return None
+    return ranked[0][1]
+
+
+def _tool_input_text(tool_input: Any) -> str:
+    if not isinstance(tool_input, dict):
+        return ""
+    parts: list[str] = []
+    for key in ("description", "prompt", "summary", "task", "story_id", "name"):
+        value = tool_input.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip())
+    return "\n".join(parts)
+
+
+def _extract_dispatch_story_sections(
+    dispatch_text: str,
+    story_specs: dict[str, dict[str, Any]],
+) -> dict[str, str]:
+    sections: dict[str, str] = {}
+    for match in _DISPATCH_STORY_SECTION_RE.finditer(dispatch_text or ""):
+        heading = match.group(1).strip()
+        section_text = match.group(2).strip()
+        heading_scores = {
+            story_id: _story_match_score(heading, spec)
+            for story_id, spec in story_specs.items()
+        }
+        story_id = _pick_best_story_from_scores(heading_scores, minimum_score=3)
+        if story_id and section_text:
+            sections[story_id] = section_text
+    return sections
+
+
+def _extract_dispatch_session_hints(dispatch_text: str) -> set[str]:
+    hints = {
+        match.group(1).strip().strip("\"'").lower()
+        for match in _AGENT_BROWSER_SESSION_RE.finditer(dispatch_text or "")
+        if match.group(1).strip().strip("\"'")
+    }
+    hints.update(
+        match.group(1).strip().strip("\"'").lower()
+        for match in _SESSION_NAME_HINT_RE.finditer(dispatch_text or "")
+        if match.group(1).strip().strip("\"'")
+    )
+    return {hint for hint in hints if hint}
+
+
+def _find_story_hint(tool_input: Any, story_ids: list[str]) -> str | None:
+    if not isinstance(tool_input, dict) or not story_ids:
+        return None
+
+    parts: list[str] = []
+    for key in ("prompt", "description", "summary", "task", "story_id"):
+        value = tool_input.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip().lower())
+    if not parts:
+        return None
+
+    haystack = "\n".join(parts)
+    normalized = re.sub(r"[-_]+", " ", haystack)
+    for story_id in story_ids:
+        aliases = _story_match_aliases(story_id)
+        if any(alias in haystack or alias in normalized for alias in aliases):
+            return story_id
+    return None
+
+
+def _extract_agent_browser_session(command: str) -> str:
+    match = _AGENT_BROWSER_SESSION_RE.search(command)
+    if not match:
+        return "default"
+    session = match.group(1).strip().strip("\"'")
+    return session or "default"
+
+
+def _extract_agent_browser_verb(command: str) -> str:
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        tokens = command.split()
+
+    try:
+        browser_index = next(index for index, token in enumerate(tokens) if token == "agent-browser")
+    except StopIteration:
+        return "unknown"
+
+    expect_value = False
+    for token in tokens[browser_index + 1:]:
+        if expect_value:
+            expect_value = False
+            continue
+        if token.startswith("--"):
+            expect_value = token in {"--session"}
+            continue
+        if token.startswith("-"):
+            continue
+        return token
+    return "unknown"
+
+
+def _story_bucket_counts(
+    *,
+    direct_counts: dict[str, int],
+    shared_count: int,
+    story_ids: list[str],
+) -> dict[str, int]:
+    buckets = {story_id: int(direct_counts.get(story_id, 0)) for story_id in story_ids}
+    if shared_count <= 0:
+        return buckets
+    buckets["shared"] = shared_count
+    return buckets
+
+
+def _dispatch_story_scores(
+    dispatch_text: str,
+    story_specs: dict[str, dict[str, Any]],
+) -> dict[str, int]:
+    return {
+        story_id: _story_match_score(dispatch_text, spec)
+        for story_id, spec in story_specs.items()
+    }
+
+
+def _call_story_scores(
+    *,
+    browser_call: dict[str, Any],
+    dispatch: dict[str, Any],
+    story_specs: dict[str, dict[str, Any]],
+) -> dict[str, int]:
+    command = str(browser_call.get("command") or "")
+    verb = _extract_agent_browser_verb(command)
+    session = str(browser_call.get("session") or "").strip().lower()
+    command_tokens = _keyword_tokens(command)
+    scores: dict[str, int] = {}
+    for story_id, spec in story_specs.items():
+        section_text = str(dispatch.get("story_sections", {}).get(story_id) or "")
+        if section_text:
+            target_text = section_text
+            score = _story_match_score(section_text, spec) + 4
+        else:
+            target_text = str(dispatch.get("text") or "")
+            score = int(dispatch.get("story_scores", {}).get(story_id, 0))
+        if section_text:
+            score += 2
+        if target_text:
+            target_tokens = _keyword_tokens(target_text)
+            if verb != "unknown" and re.search(rf"\b{re.escape(verb)}\b", _normalize_match_text(target_text)):
+                score += 5 if section_text else 3
+            score += len(command_tokens & target_tokens)
+            if session and session not in _GENERIC_BROWSER_SESSIONS:
+                if f"--session {session}" in target_text.lower():
+                    score += 5
+                elif session in _extract_dispatch_session_hints(target_text):
+                    score += 4
+        score += 2 * len(command_tokens & set(spec["claim_tokens"]))
+        scores[story_id] = score
+    return scores
+
+
+def _browser_call_story_id(
+    *,
+    browser_call: dict[str, Any],
+    dispatches: list[dict[str, Any]],
+    story_specs: dict[str, dict[str, Any]],
+) -> str | None:
+    preceding = [dispatch for dispatch in dispatches if int(dispatch["index"]) < int(browser_call["index"])]
+    if not preceding or not story_specs:
+        return None
+
+    session = str(browser_call.get("session") or "").strip().lower()
+    session_specific = session and session not in _GENERIC_BROWSER_SESSIONS
+    dispatch: dict[str, Any] | None = None
+    if session_specific:
+        session_dispatches = [item for item in preceding if session in set(item.get("session_hints", set()))]
+        if session_dispatches:
+            dispatch = session_dispatches[-1]
+    generic_session_is_ambiguous = (not session_specific) and len(preceding) > 1
+    if dispatch is None:
+        if generic_session_is_ambiguous:
+            return None
+        dispatch = preceding[-1]
+
+    scores = _call_story_scores(
+        browser_call=browser_call,
+        dispatch=dispatch,
+        story_specs=story_specs,
+    )
+    story_id = _pick_best_story_from_scores(scores, minimum_score=4)
+    if story_id:
+        return story_id
+    if session_specific:
+        return dispatch.get("matched_story_id")
+    if len(preceding) == 1:
+        return dispatch.get("matched_story_id")
+    return None
+
+
+def browser_efficiency_outlier(
+    *,
+    certifier_mode: str,
+    total_browser_calls: int,
+    distinct_sessions: int,
+    story_count: int,
+    isolated_story_count: int = 0,
+) -> tuple[bool, str]:
+    story_count = max(int(story_count or 0), 0)
+    total_browser_calls = max(int(total_browser_calls or 0), 0)
+    distinct_sessions = max(int(distinct_sessions or 0), 0)
+    isolated_story_count = max(int(isolated_story_count or 0), 0)
+    if story_count <= 0:
+        return False, ""
+
+    avg_calls = float(total_browser_calls) / story_count
+    reasons: list[str] = []
+    if certifier_mode == "fast":
+        if total_browser_calls > 30:
+            reasons.append(f"total browser calls {total_browser_calls} > 30")
+        if avg_calls > 20:
+            reasons.append(f"calls per story {avg_calls:.1f} > 20.0")
+        return (bool(reasons), f"fast-mode outlier: {'; '.join(reasons)}." if reasons else "")
+
+    if certifier_mode == "thorough":
+        if total_browser_calls > 80 * story_count:
+            reasons.append(f"total browser calls {total_browser_calls} > {80 * story_count}")
+        session_limit = max(4, story_count + 1)
+        if distinct_sessions > session_limit:
+            reasons.append(f"distinct sessions {distinct_sessions} > {session_limit}")
+        if avg_calls > 80:
+            reasons.append(f"calls per story {avg_calls:.1f} > 80.0")
+        return (bool(reasons), f"thorough-mode outlier: {'; '.join(reasons)}." if reasons else "")
+
+    if total_browser_calls > 45 * story_count:
+        reasons.append(f"total browser calls {total_browser_calls} > {45 * story_count}")
+    session_limit = max(3, story_count)
+    if distinct_sessions > session_limit:
+        reasons.append(f"distinct sessions {distinct_sessions} > {session_limit}")
+    if avg_calls > 40:
+        reasons.append(f"calls per story {avg_calls:.1f} > 40.0")
+    return (bool(reasons), f"standard-mode outlier: {'; '.join(reasons)}." if reasons else "")
+
+
+def summarize_browser_efficiency(
+    messages_jsonl: Path,
+    *,
+    certifier_mode: str,
+    story_ids: list[str] | None = None,
+    story_claims: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    story_ids = [str(story_id).strip() for story_id in (story_ids or []) if str(story_id).strip()]
+    story_specs = _story_specs(story_ids, story_claims)
+    empty = {
+        "total_browser_calls": 0,
+        "distinct_sessions": 0,
+        "verb_counts": {},
+        "calls_per_story": _story_bucket_counts(direct_counts={}, shared_count=0, story_ids=story_ids),
+        "outlier": False,
+        "outlier_reason": "",
+    }
+    if not messages_jsonl.exists():
+        return empty
+
+    try:
+        records = _iter_jsonl_records(messages_jsonl)
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return empty
+
+    total_browser_calls = 0
+    sessions: set[str] = set()
+    verb_counts: Counter[str] = Counter()
+    direct_counts: dict[str, int] = defaultdict(int)
+    shared_count = 0
+    story_sessions: dict[str, set[str]] = defaultdict(set)
+    dispatches: list[dict[str, Any]] = []
+    browser_calls: list[dict[str, Any]] = []
+    tool_index = 0
+
+    for rec in records:
+        ts = str(rec.get("ts") or "")
+        blocks = rec.get("blocks")
+        if not isinstance(blocks, list):
+            continue
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") != "tool_use":
+                continue
+            tool_index += 1
+            tool_name = str(block.get("name") or "")
+            tool_input = block.get("input")
+
+            if tool_name == "Agent":
+                dispatch_text = _tool_input_text(tool_input)
+                story_scores = _dispatch_story_scores(dispatch_text, story_specs)
+                dispatches.append(
+                    {
+                        "index": tool_index,
+                        "ts": ts,
+                        "text": dispatch_text,
+                        "session_hints": _extract_dispatch_session_hints(dispatch_text),
+                        "story_sections": _extract_dispatch_story_sections(dispatch_text, story_specs),
+                        "story_scores": story_scores,
+                        "matched_story_id": _pick_best_story_from_scores(story_scores, minimum_score=3),
+                    }
+                )
+                continue
+
+            if tool_name != "Bash" or not isinstance(tool_input, dict):
+                continue
+
+            command = str(tool_input.get("command") or "")
+            if "agent-browser" not in command:
+                continue
+
+            total_browser_calls += 1
+            session = _extract_agent_browser_session(command)
+            sessions.add(session)
+            verb_counts[_extract_agent_browser_verb(command)] += 1
+            browser_calls.append(
+                {
+                    "index": tool_index,
+                    "browser_call_index": len(browser_calls),
+                    "ts": ts,
+                    "session": session,
+                    "command": command,
+                }
+            )
+
+    for browser_call in browser_calls:
+        story_id = _browser_call_story_id(
+            browser_call=browser_call,
+            dispatches=dispatches,
+            story_specs=story_specs,
+        )
+        if story_id:
+            direct_counts[story_id] += 1
+            story_sessions[story_id].add(str(browser_call["session"]))
+        else:
+            shared_count += 1
+
+    calls_per_story = _story_bucket_counts(
+        direct_counts=direct_counts,
+        shared_count=shared_count,
+        story_ids=story_ids,
+    )
+    isolated_story_count = sum(
+        1
+        for session_names in story_sessions.values()
+        if any(name not in {"default", "main", "anonymous"} for name in session_names)
+    )
+    outlier, outlier_reason = browser_efficiency_outlier(
+        certifier_mode=certifier_mode,
+        total_browser_calls=total_browser_calls,
+        distinct_sessions=len(sessions),
+        story_count=len(story_ids),
+        isolated_story_count=isolated_story_count,
+    )
+    return {
+        "total_browser_calls": total_browser_calls,
+        "distinct_sessions": len(sessions),
+        "verb_counts": dict(sorted(verb_counts.items(), key=lambda item: (-item[1], item[0]))),
+        "calls_per_story": calls_per_story,
+        "outlier": outlier,
+        "outlier_reason": outlier_reason,
+    }
+
+
 def _summarize_round(marker_lines: list[str]) -> tuple[str, int, int]:
     """Extract (verdict, passed_count, tested_count) from marker lines."""
     verdict = "?"
     passed = 0
     tested = 0
     for line in marker_lines:
-        if line.startswith("VERDICT:"):
-            v = line.split(":", 1)[1].strip().upper()
-            if "PASS" in v:
-                verdict = "PASS"
-            elif "FAIL" in v:
-                verdict = "FAIL"
-            elif "WARN" in v:
-                verdict = "WARN"
+        verdict_match = _VERDICT_RE.match(line)
+        if verdict_match:
+            verdict = verdict_match.group(1)
         elif line.startswith("STORIES_PASSED:"):
             try:
                 passed = int(line.split(":", 1)[1].strip())
@@ -1017,15 +1528,15 @@ def _extract_commit_line(content: str) -> str | None:
 
 
 def _parse_story_result_marker(line: str) -> dict[str, Any] | None:
-    if not line.startswith("STORY_RESULT:"):
+    match = _STORY_RESULT_RE.match(line)
+    if match is None:
         return None
-    parts = line[len("STORY_RESULT:"):].strip().split("|", 2)
-    if len(parts) < 2:
-        return None
-    summary = parts[2].strip() if len(parts) > 2 else ""
+    summary, fields = _parse_story_result_fields(match.group(3))
+    summary = summary or fields.get("observed_result", "") or match.group(3).strip()
+    verdict = match.group(2)
     return {
-        "story_id": parts[0].strip(),
-        "passed": "PASS" in parts[1].strip().upper(),
+        "story_id": match.group(1).strip(),
+        "passed": verdict in {"PASS", "WARN"},
         "summary": summary,
     }
 

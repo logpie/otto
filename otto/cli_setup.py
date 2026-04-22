@@ -8,7 +8,8 @@ from pathlib import Path
 import click
 
 from otto.agent import AssistantMessage, AgentOptions, ResultMessage, TextBlock, _safe_read, query
-from otto.config import create_config, ensure_bookkeeping_setup, load_config
+from otto.config import agent_provider, create_config, load_config, resolve_project_dir
+from otto.config import ensure_bookkeeping_setup
 from otto.display import CONTEXT_SETTINGS, console
 from otto.testing import _subprocess_env
 from otto.theme import error_console
@@ -84,7 +85,7 @@ async def _run_setup_query(prompt: str, project_dir: Path, config: dict | None =
         setting_sources=[],
         system_prompt="You are a project analyst. Output ONLY the markdown content for CLAUDE.md. No explanation, no preamble, no tool use.",
         env=_subprocess_env(project_dir),
-        provider=(config or {}).get("provider", "claude"),
+        provider=agent_provider(config or {}),
     )
     if config and config.get("model"):
         opts.model = config["model"]
@@ -108,7 +109,7 @@ def register_setup_command(main: click.Group) -> None:
         from otto.config import require_git
 
         require_git()
-        project_dir = Path.cwd()
+        project_dir = resolve_project_dir(Path.cwd())
 
         config_path = project_dir / "otto.yaml"
         if not config_path.exists():
@@ -182,6 +183,11 @@ Guidelines:
 Output ONLY the markdown content."""
 
         console.print("[dim]Generating CLAUDE.md...[/dim]")
+        try:
+            config = load_config(config_path)
+        except ValueError as exc:
+            error_console.print(f"[error]{exc}[/error]")
+            raise SystemExit(2) from exc
         result_text = asyncio.run(_run_setup_query(prompt, project_dir, config))
 
         if not result_text.strip() and claude_md.exists():

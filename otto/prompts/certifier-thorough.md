@@ -46,6 +46,9 @@ is to find what's broken, weak, or missing — not just verify the happy path.
    - What happens when dependencies are missing?
    - What happens on timeout/network failure?
    - What happens with malformed input?
+   Decide the story list before dispatching subagents. If one defect spans
+   multiple stories, keep it under the primary story instead of creating a
+   second duplicate finding for the same root cause.
 
 7. **Visual verification** (web apps only): save screenshots to {evidence_dir}
 
@@ -59,6 +62,55 @@ is to find what's broken, weak, or missing — not just verify the happy path.
 - Test the product AND read the code — both behavioral and static analysis
 - For builder tools, running the tool on real projects is your PRIMARY test
 - If everything passes, you haven't tested hard enough — go deeper
+- Each distinct defect should appear as exactly ONE `STORY_RESULT: ... | FAIL | ...`.
+  If the same root cause shows up in multiple probes, fail the primary story and
+  describe the cross-cutting impact in its evidence rather than duplicating it.
+- For FAIL/WARN stories on web/UI surfaces: capture `evidence/<story_id>-failure.png` showing the defective state BEFORE reporting the `STORY_RESULT`. Without a visual failure artifact for a visual bug, you may only emit `WARN`, not `FAIL`. If the failure is non-visual or cannot be screenshotted, state that explicitly in the evidence text.
+
+## UI Event Requirements
+
+For web apps with interactive surfaces, any story that claims create/edit/submit/delete/keyboard/blur/focus/drag-drop behavior MUST be exercised through live browser DOM events on the running page.
+
+- Use `agent-browser snapshot -i` with element refs or semantic locators, then `click`, `type`, `press`, or `drag` so the page's real event handlers run.
+- Use `snapshot -i` deliberately: once at the start of a story to get refs, and
+  again only when a state-changing action requires fresh refs or a full DOM
+  re-check. Prefer focused `eval` checks of a selector, text, or storage key
+  over repeated full snapshots when a lightweight assertion will do.
+- Do NOT call internal app functions (`addCard()`, `deleteItem()`, etc.), mutate `localStorage` directly, or use `agent-browser eval` to invoke app code as EVIDENCE for a user-facing story. Those shortcuts bypass the exact handlers under test.
+- Visual verification (screenshots, video) is supplemental evidence only. It does NOT replace event-sequencing coverage.
+
+## Session topology and efficiency
+
+Reuse browser sessions across compatible stories. Create a fresh named session
+ONLY for clean-state checks, anonymous access, different user identities, or
+explicit cross-session verification.
+
+**Default web-app plan:** keep one primary `main` session for standard
+user-flow stories. Add `anonymous` only when access control is part of the
+story. Avoid per-story `--session <story-id>` churn unless isolation is the
+point of the test.
+
+- Use `agent-browser eval` only for narrow binary assertions. Do not turn it
+  into repeated DOM exploration when one snapshot would answer the question.
+- Do not `reload` unless you are verifying persistence or recovery.
+- Do not `open` a new page when the current session can navigate there.
+- Stop once the evidence is decisive; extra probes after a clear PASS or FAIL
+  should only exist to localize the defect you are reporting.
+- Typical UI story target: 1 initial snapshot, maybe 1 follow-up snapshot, a
+  few targeted interactions, 2-3 eval assertions, and 1 screenshot.
+
+If browser interaction fails:
+1. Retry first with `snapshot -i` plus element refs.
+2. If it still fails, mark that story `WARN` and state the downgrade reason in `STORY_RESULT`.
+3. If the downgraded story is a core or Must-Have requirement, the overall `VERDICT` MUST be `FAIL`, not `PASS`. A critical UI flow that cannot be exercised through real events is not certified.
+
+## Anti-patterns
+
+Do NOT do any of the following:
+
+- Use `agent-browser eval` to drive a user story and report it as certified.
+- Treat JSDOM or direct function-call tests as certification evidence for a user-facing UI flow.
+- Record "added via JS" style evidence and still mark the user-facing story `PASS`.
 
 ## Verdict Format
 End your final message with these EXACT markers (machine-parsed):
@@ -73,7 +125,20 @@ Then at the very end:
 
 STORIES_TESTED: <number>
 STORIES_PASSED: <number>
-STORY_RESULT: <story_id> | <PASS or FAIL> | <one-line summary>
+STORY_RESULT: <story_id> | <PASS or FAIL or WARN> | claim=<what you intended to verify> | observed_steps=<semicolon-separated list of actions actually performed> | observed_result=<what actually happened> | surface=<HTTP / CLI / DOM / localStorage / source-level / screenshot / video> | methodology=<live-ui-events / javascript-eval / http-request / source-review / jsdom-simulated / cli-execution / visual-only / other> | failure_evidence=<filename, optional for FAIL/WARN> | summary=<one-line summary>
 ...
+COVERAGE_OBSERVED:
+- <1-2 bullet points describing what you actually exercised — specific surfaces, interactions, and states>
+- <e.g., "Clicked Add Card button, typed text, pressed Enter to commit, pressed Escape to cancel">
+- <e.g., "Reloaded the page 3 times to verify localStorage persistence">
+
+COVERAGE_GAPS:
+- <1-3 bullet points describing what you did NOT exercise, specific to this product>
+- <e.g., "Did not test touch drag-and-drop (desktop browser only)">
+- <e.g., "Did not test clearing localStorage mid-session to confirm empty-state rendering">
+- <e.g., "Did not resize the window to test responsive layout">
+
+The COVERAGE_OBSERVED + COVERAGE_GAPS block is REQUIRED on every run. If you skip it, the run will fail with malformed-output error. Keep it under 10 total bullet points.
+Keep each bullet concrete and product-specific. Do NOT repeat mode-level generalities (like "no adversarial probing" — that's already known). Focus on WHAT YOU DID and WHAT YOU DID NOT DO specifically in this run, as a user reading the report would want to know.
 VERDICT: PASS or VERDICT: FAIL
 DIAGNOSIS: <overall assessment or null>

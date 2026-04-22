@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import subprocess
@@ -20,6 +19,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger("otto.pipeline")
 
 
+class InfraFailureError(RuntimeError):
+    """Raised when split-mode infra retries are exhausted."""
+
+
 @dataclass
 class BuildResult:
     """Result of the entire build pipeline."""
@@ -27,6 +30,7 @@ class BuildResult:
     build_id: str
     rounds: int = 1
     total_cost: float = 0.0
+    total_duration: float = 0.0
     journeys: list[dict[str, Any]] = field(default_factory=list)
     tasks_passed: int = 0
     tasks_failed: int = 0
@@ -94,7 +98,11 @@ def _write_session_summary(
         summary["head_sha"] = head_sha
     if breakdown is not None:
         summary["breakdown"] = breakdown
-    write_json_file(paths.session_summary(project_dir, session_id), summary)
+    summary_path = paths.session_summary(project_dir, session_id)
+    try:
+        write_json_file(summary_path, summary, strict=True)
+    except (OSError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"Failed to write session summary {summary_path}: {exc}") from exc
 
 
 def _round_cost(value: float) -> float:
@@ -133,6 +141,51 @@ def _current_head_sha(project_dir: Path) -> str | None:
     return sha or None
 
 
+def _history_story_counts(stories: list[dict[str, Any]]) -> tuple[int, int, int]:
+    passed_count = sum(1 for story in stories if story.get("passed") and not story.get("warn"))
+    warn_count = sum(1 for story in stories if story.get("warn"))
+    failed_count = sum(1 for story in stories if not story.get("passed") and not story.get("warn"))
+    return passed_count, failed_count, warn_count
+
+
+def _append_session_history(
+    project_dir: Path,
+    *,
+    run_id: str,
+    command: str,
+    certifier_mode: str,
+    intent: str,
+    stories: list[dict[str, Any]],
+    passed: bool,
+    duration_s: float,
+    total_cost_usd: float,
+    certifier_cost_usd: float,
+    rounds: int,
+) -> None:
+    from otto.history import append_history_entry
+
+    passed_count, failed_count, warn_count = _history_story_counts(stories)
+    append_history_entry(
+        project_dir,
+        {
+            "run_id": run_id,
+            "command": command,
+            "certifier_mode": certifier_mode,
+            "intent": intent[:200],
+            "passed": passed,
+            "stories_passed": passed_count + warn_count,
+            "stories_tested": len(stories),
+            "passed_count": passed_count,
+            "failed_count": failed_count,
+            "warn_count": warn_count,
+            "certify_rounds": rounds,
+            "cost_usd": float(total_cost_usd),
+            "certifier_cost_usd": float(certifier_cost_usd),
+            "duration_s": duration_s,
+        },
+    )
+
+
 def _strict_mode_guidance(strict_mode: bool) -> str:
     if not strict_mode:
         return ""
@@ -158,6 +211,8 @@ async def build_agentic_v3(
     run_id: str | None = None,
     spec_cost: float = 0.0,
     spec_duration: float = 0.0,
+    prior_total_cost: float = 0.0,
+    prior_total_duration: float = 0.0,
     budget: "RunBudget | None" = None,
     is_improve_run: bool = False,
     strict_mode: bool = False,
@@ -193,13 +248,14 @@ async def build_agentic_v3(
     """
     from otto.agent import make_agent_options, run_agent_with_timeout
     from otto import paths
+    from otto.config import validate_certifier_mode
     from otto.display import console
 
     # run_id is the unified session_id in the new layout. Older callers
     # (e.g. some tests) may omit it; allocate one locally in that case so
     # the path plumbing never has to deal with an empty id.
     session_id = run_id or paths.new_session_id(project_dir)
-    paths.ensure_session_scaffold(project_dir, session_id)
+    paths.ensure_session_scaffold(project_dir, session_id, phase="build")
     build_id = session_id                 # kept as a local alias for logs
     checkpoint_run_id = session_id
     build_dir = paths.build_dir(project_dir, session_id)
@@ -216,13 +272,6 @@ async def build_agentic_v3(
     from otto.journal import _get_head_sha
     _head_before = _get_head_sha(project_dir)
 
-    # "code" prompt_mode = split-mode surgical fix; treat as the "fix" agent.
-    # Everything else (build, improve) is the "build" agent.
-    _agent_type = "fix" if prompt_mode == "code" else "build"
-    options = make_agent_options(project_dir, config, agent_type=_agent_type)
-    if resume_session_id:
-        options.resume = resume_session_id
-
     evidence_dir_path: Path | None = None
     skip_qa = bool(config.get("skip_product_qa"))
     strict_mode = bool(strict_mode or config.get("strict_mode"))
@@ -230,6 +279,15 @@ async def build_agentic_v3(
 
     if skip_qa:
         prompt_mode = "code"
+    else:
+        certifier_mode = validate_certifier_mode(certifier_mode)
+
+    # "code" prompt_mode = split-mode surgical fix; treat as the "fix" agent.
+    # Everything else (build, improve) is the "build" agent.
+    _agent_type = "fix" if prompt_mode == "code" else "build"
+    options = make_agent_options(project_dir, config, agent_type=_agent_type)
+    if resume_session_id:
+        options.resume = resume_session_id
 
     if resume_existing_session and resume_session_id:
         prompt = ""
@@ -273,7 +331,7 @@ async def build_agentic_v3(
                 "thorough": "certifier-thorough.md",
                 "hillclimb": "certifier-hillclimb.md",
                 "target": "certifier-target.md",
-            }.get(certifier_mode, "certifier.md")
+            }[certifier_mode]
             filled_certifier = render_prompt(
                 certifier_filename,
                 intent=safe_intent,
@@ -296,10 +354,14 @@ async def build_agentic_v3(
     from otto.checkpoint import load_checkpoint, write_checkpoint
 
     checkpoint_session_id = resume_session_id or ""
-    total_run_cost = float(spec_cost or 0.0)
+    base_prior_cost = float(prior_total_cost if prior_total_cost else (spec_cost or 0.0))
+    base_prior_duration = float(
+        prior_total_duration if prior_total_duration else (spec_duration or 0.0)
+    )
+    total_run_cost = base_prior_cost
     if manage_checkpoint and not checkpoint_session_id:
         try:
-            checkpoint_data = load_checkpoint(project_dir) or {}
+            checkpoint_data = load_checkpoint(project_dir, run_id=checkpoint_run_id) or {}
             checkpoint_session_id = (
                 checkpoint_data.get("agent_session_id")
                 or checkpoint_data.get("session_id", "")
@@ -314,6 +376,8 @@ async def build_agentic_v3(
         phase: str = "build",
         current_round: int = 0,
         rounds: list[dict[str, Any]] | None = None,
+        child_session_ids: list[str] | None = None,
+        total_duration: float | None = None,
     ) -> None:
         if not manage_checkpoint:
             return
@@ -330,8 +394,13 @@ async def build_agentic_v3(
                 phase=phase,
                 current_round=current_round,
                 rounds=rounds or [],
+                child_session_ids=child_session_ids,
+                total_duration=float(
+                    base_prior_duration if total_duration is None else total_duration
+                ),
                 intent=intent,
                 spec_cost=float(spec_cost or 0.0),
+                split_mode=False,
             )
         except Exception as exc:
             logger.warning("Failed to write checkpoint: %s", exc)
@@ -377,7 +446,7 @@ async def build_agentic_v3(
             logger.warning("Agent failed with no session_id — --resume will start fresh")
     total_run_cost += float(cost or 0)
 
-    total_duration = round(time.monotonic() - start_time, 1)
+    total_duration = round(base_prior_duration + (time.monotonic() - start_time), 1)
 
     # Determine final status. Actual checkpoint write happens after we parse
     # certification markers so round history is captured in the checkpoint.
@@ -390,7 +459,13 @@ async def build_agentic_v3(
 
     # Parse certification results from agent output
     from otto.markers import compact_story_results, parse_certifier_markers
-    parsed = parse_certifier_markers(text or "")
+    parsed = parse_certifier_markers(text or "", certifier_mode=certifier_mode)
+    if final_status == "completed" and not skip_qa and not parsed.stories and not parsed.verdict_seen:
+        from otto.markers import MalformedCertifierOutputError
+
+        raise MalformedCertifierOutputError(
+            "Certifier produced no structured output — see narrative.log"
+        )
     stories_tested = parsed.stories_tested
     stories_passed = parsed.stories_passed
     story_results = compact_story_results(parsed.stories)
@@ -458,6 +533,8 @@ async def build_agentic_v3(
         session_id=session_id,
         current_round=len(certify_rounds),
         rounds=_checkpoint_rounds,
+        child_session_ids=list(breakdown_data.get("child_session_ids", []) or []),
+        total_duration=total_duration,
     )
 
     # When QA is skipped (--no-qa), the agent won't produce certification markers.
@@ -479,76 +556,46 @@ async def build_agentic_v3(
 
     journeys = _stories_to_journeys(story_results)
 
+    certifier_cost = float(cost or 0)
+
     # Write PoW report
     try:
-        from otto.certifier import _generate_agentic_html_pow
+        from otto.certifier import _build_pow_report_data, _write_pow_report
         # NB: `session_id` here is the SDK session, not the otto session_id
         # (that's `build_id` in this function scope).
         report_dir = paths.certify_dir(project_dir, build_id)
         report_dir.mkdir(parents=True, exist_ok=True)
 
-        certifier_cost = float(cost or 0)
-        pow_data = {
-            "generated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "outcome": "passed" if passed else "failed",
-            "duration_s": total_duration,
-            # certifier-only cost — the cost of the agent call that drove certification.
-            "certifier_cost_usd": certifier_cost,
-            # total run cost — full precision (spec + agent).
-            "total_cost_usd": total_run_cost,
-            "stories": story_results,
-            "certify_rounds": len(certify_rounds),
-            "mode": "agentic_v3",
-        }
-        # Build round history once, reuse for JSON and HTML
-        round_history = [
-            {"round": r.get("round", i+1), "verdict": r.get("verdict"),
-             "stories_count": len(r.get("stories", [])),
-             "passed_count": r.get("passed_count", sum(1 for s in r.get("stories", []) if s.get("passed")))}
-            for i, r in enumerate(certify_rounds)
-        ] if certify_rounds else []
-        pow_data["round_history"] = round_history if len(certify_rounds) > 1 else []
-
-        from otto.observability import write_json_file
-        write_json_file(report_dir / "proof-of-work.json", pow_data)
-
-        _generate_agentic_html_pow(
-            report_dir, story_results,
-            "passed" if passed else "failed",
-            total_duration, total_run_cost,
-            stories_passed, stories_tested,
+        pow_data = _build_pow_report_data(
+            project_dir=project_dir,
+            report_dir=report_dir,
+            log_dir=build_dir,
+            run_id=build_id,
+            session_id=session_id,
+            pipeline_mode="agentic_v3",
+            certifier_mode=certifier_mode,
+            outcome="passed" if passed else "failed",
+            story_results=story_results,
             diagnosis=overall_diagnosis,
-            round_history=round_history,
+            certify_rounds=certify_rounds,
+            duration_s=total_duration,
+            certifier_cost_usd=certifier_cost,
+            total_cost_usd=total_run_cost,
+            intent=intent,
+            options=options,
             evidence_dir=evidence_dir_path,
-            certifier_cost=certifier_cost,
+            stories_tested=stories_tested,
+            stories_passed=stories_passed,
+            coverage_observed=parsed.coverage_observed,
+            coverage_gaps=parsed.coverage_gaps,
+            coverage_emitted=(
+                parsed.coverage_observed_emitted or parsed.coverage_gaps_emitted
+            ),
+            metric_value=parsed.metric_value,
+            metric_met=parsed.metric_met,
+            round_timings=round_timings,
         )
-
-        # Markdown PoW — complements .html/.json with a text-only summary.
-        costs_differ = abs(total_run_cost - certifier_cost) > 1e-9
-        if costs_differ:
-            cost_line = (
-                f"> **Cost:** Certifier ${certifier_cost:.2f}, "
-                f"Total ${total_run_cost:.2f}"
-            )
-        else:
-            cost_line = f"> **Cost:** ${total_run_cost:.2f}"
-        md_lines = [
-            "# Proof-of-Work Certification Report",
-            "",
-            f"> **Generated:** {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
-            f"> **Outcome:** {'passed' if passed else 'failed'}",
-            f"> **Duration:** {total_duration:.0f}s",
-            cost_line,
-            f"> **Stories:** {stories_passed}/{stories_tested}",
-            f"> **Rounds:** {len(certify_rounds) or 1}",
-            "",
-        ]
-        for s in story_results:
-            status = "WARN" if s.get("warn") else ("PASS" if s["passed"] else "FAIL")
-            md_lines.append(f"- **{status}** {s.get('story_id', '?')}: {s.get('summary', '')}")
-        if overall_diagnosis:
-            md_lines += ["", "## Diagnosis", "", overall_diagnosis]
-        (report_dir / "proof-of-work.md").write_text("\n".join(md_lines) + "\n")
+        _write_pow_report(report_dir, pow_data)
     except Exception as exc:
         logger.warning("Failed to write PoW: %s", exc)
 
@@ -568,7 +615,12 @@ async def build_agentic_v3(
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     from otto.observability import write_json_file
-    write_json_file(build_dir / "checkpoint.json", checkpoint)
+
+    checkpoint_path = build_dir / "checkpoint.json"
+    try:
+        write_json_file(checkpoint_path, checkpoint, strict=True)
+    except (OSError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"Failed to write checkpoint {checkpoint_path}: {exc}") from exc
     if manage_checkpoint and final_status == "completed":
         _write_session_summary(
             project_dir,
@@ -606,33 +658,31 @@ async def build_agentic_v3(
         except Exception as exc:
             logger.warning("Failed to write session report: %s", exc)
 
-    # Append to run history (one line per build for `otto history`)
-    from otto.observability import append_text_log
-    history_path = paths.history_jsonl(project_dir)
-    history_path.parent.mkdir(parents=True, exist_ok=True)
-    history_entry = json.dumps({
-        "build_id": build_id,
-        "intent": intent[:200],
-        "passed": passed,
-        "stories_passed": stories_passed,
-        "stories_tested": stories_tested,
-        "certify_rounds": len(certify_rounds),
-        "cost_usd": float(total_run_cost),
-        "duration_s": total_duration,
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    })
-    append_text_log(history_path, [history_entry])
+    _append_session_history(
+        project_dir,
+        run_id=build_id,
+        command=command,
+        certifier_mode=certifier_mode,
+        intent=intent,
+        stories=story_results,
+        passed=passed,
+        duration_s=total_duration,
+        total_cost_usd=total_run_cost,
+        certifier_cost_usd=certifier_cost,
+        rounds=max(len(certify_rounds), 1),
+    )
 
     # Record cross-run memory (only if certification produced stories)
     if story_results and not skip_qa:
+        from otto.history import normalize_command_label
         from otto.memory import record_run
         record_run(
             project_dir,
             run_id=build_id,
-            command="build",
+            command=normalize_command_label(command),
             certifier_mode=certifier_mode,
             stories=story_results,
-            cost=float(cost or 0),
+            cost=certifier_cost,
         )
 
     return BuildResult(
@@ -640,6 +690,7 @@ async def build_agentic_v3(
         build_id=build_id,
         rounds=max(len(certify_rounds), 1),
         total_cost=total_run_cost,
+        total_duration=total_duration,
         journeys=journeys,
         tasks_passed=sum(1 for j in journeys if j["passed"]),
         tasks_failed=sum(1 for j in journeys if not j["passed"]),
@@ -763,57 +814,48 @@ def _write_improvement_report(
     lines.append("")
 
     # Caller passes the target dir (improve_dir(session_id) for `otto improve`,
-    # legacy build dir for older callers). Rename: session-report.md.
+    # legacy build dir for older callers).
     build_dir.mkdir(parents=True, exist_ok=True)
-    report_path = build_dir / "session-report.md"
+    report_path = build_dir / "improvement-report.md"
     report_path.write_text("\n".join(lines))
 
 
-def _cleanup_orphan_processes(project_dir: Path) -> None:
-    """Kill orphan processes (servers, watchers) left by the agent after timeout/crash."""
+def _cleanup_orphan_processes(project_dir: Path, process_group_id: int | None = None) -> None:
+    """Kill the spawned agent process group after timeout/crash."""
+    if process_group_id is None:
+        logger.debug("Orphan-process cleanup skipped: no tracked process group for %s", project_dir)
+        return
     try:
-        # Find processes with cwd in the project directory
         import signal
-        result = subprocess.run(
-            ["lsof", "-ti", "-sTCP:LISTEN"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if result.stdout.strip():
-            for pid_str in result.stdout.strip().split("\n"):
-                try:
-                    pid = int(pid_str.strip())
-                    # Check if process cwd matches project
-                    cwd_check = subprocess.run(
-                        ["lsof", "-p", str(pid), "-Fn"],
-                        capture_output=True, text=True, timeout=5,
-                    )
-                    if str(project_dir) in cwd_check.stdout:
-                        os.kill(pid, signal.SIGTERM)
-                        logger.info("Killed orphan process %d", pid)
-                except (ValueError, ProcessLookupError, PermissionError):
-                    pass
-    except (OSError, subprocess.SubprocessError) as exc:
-        logger.debug("Orphan-process cleanup skipped: %s", exc)
+
+        os.killpg(process_group_id, signal.SIGTERM)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(process_group_id, 0)
+            except ProcessLookupError:
+                logger.info("Cleaned up agent process group %d", process_group_id)
+                return
+            except PermissionError:
+                return
+            time.sleep(0.1)
+        os.killpg(process_group_id, signal.SIGKILL)
+        logger.warning("Force-killed agent process group %d", process_group_id)
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        logger.debug("Process-group cleanup skipped: permission denied for %d", process_group_id)
+    except OSError as exc:
+        logger.debug("Process-group cleanup skipped: %s", exc)
 
 
 
 def _append_intent(project_dir: Path, intent: str, build_id: str) -> None:
-    """Append intent to cumulative log. Preserves history across builds."""
-    intent_path = project_dir / "intent.md"
-    ts = time.strftime("%Y-%m-%d %H:%M")
-    entry = f"\n## {ts} ({build_id})\n{intent}\n"
-    if intent_path.exists():
-        existing = intent_path.read_text()
-        # Check per-section, not substring — prevents "build X" blocking "build X and Y"
-        existing_intents = set()
-        for section in existing.split("\n## "):
-            lines = section.strip().split("\n", 1)
-            if len(lines) > 1:
-                existing_intents.add(lines[1].strip())
-        if intent.strip() not in existing_intents:
-            intent_path.write_text(existing.rstrip() + "\n" + entry)
-    else:
-        intent_path.write_text(f"# Build Intents\n{entry}")
+    """Persist the runtime intent snapshot under the session dir only."""
+    from otto import paths
+
+    paths.ensure_session_scaffold(project_dir, build_id)
+    paths.session_intent(project_dir, build_id).write_text(intent.rstrip() + "\n")
 
 
 async def run_certify_fix_loop(
@@ -827,7 +869,9 @@ async def run_certify_fix_loop(
     skip_initial_build: bool = False,
     start_round: int = 1,
     resume_cost: float = 0.0,
+    resume_duration: float = 0.0,
     resume_rounds: list[dict[str, Any]] | None = None,
+    resume_session_id: str | None = None,
     command: str = "improve",
     record_intent: bool = True,
     budget: "RunBudget | None" = None,
@@ -853,7 +897,6 @@ async def run_certify_fix_loop(
     Used by: ``otto improve bugs``, ``otto improve feature``, ``otto improve target``.
     """
     from otto.certifier import run_agentic_certifier
-    from otto.certifier.report import CertificationOutcome
     from otto.display import console
     from otto.journal import (
         append_journal, init_round, record_build, record_certifier,
@@ -865,7 +908,7 @@ async def run_certify_fix_loop(
 
     # Unified session_id (was build_id). Allocate if caller didn't provide.
     build_id = session_id or _paths.new_session_id(project_dir)
-    _paths.ensure_session_scaffold(project_dir, build_id)
+    _paths.ensure_session_scaffold(project_dir, build_id, phase="improve")
     _paths.set_pointer(project_dir, _paths.LATEST_POINTER, build_id)
     total_cost = resume_cost
     loop_start = time.monotonic()
@@ -886,12 +929,18 @@ async def run_certify_fix_loop(
     certify_phase_cost = 0.0
     certify_phase_rounds = 0
     spec_cost_remaining = float(spec_cost or 0.0)
+    pending_resume_session_id = resume_session_id or None
 
     if record_intent:
         _append_intent(project_dir, intent, build_id)
     _commit_artifacts(project_dir)
 
-    def _save_cp(status: str = "in_progress", *, phase: str | None = None) -> None:
+    def _save_cp(
+        status: str = "in_progress",
+        *,
+        phase: str | None = None,
+        session_id: str = "",
+    ) -> None:
         """Write checkpoint with current loop state."""
         nonlocal checkpoint_phase
         if phase is not None:
@@ -901,10 +950,13 @@ async def run_certify_fix_loop(
                 project_dir,
                 run_id=build_id, command=command,
                 certifier_mode=certifier_mode,
+                split_mode=True,
                 focus=focus, target=target,
                 max_rounds=max_rounds, phase=checkpoint_phase,
                 current_round=last_completed_round,
                 total_cost=total_cost, rounds=checkpoint_rounds,
+                total_duration=round(resume_duration + (time.monotonic() - loop_start), 1),
+                session_id=session_id,
                 status=status,
                 intent=intent,
             )
@@ -944,16 +996,19 @@ async def run_certify_fix_loop(
                 intent, project_dir, build_config,
                 manage_checkpoint=False,
                 run_id=build_id,
+                resume_session_id=pending_resume_session_id,
+                resume_existing_session=bool(pending_resume_session_id),
                 spec=spec,
                 spec_cost=spec_cost,
                 spec_duration=spec_duration,
                 budget=budget,
                 verbose=verbose,
             )
+            pending_resume_session_id = None
         except AgentCallError as err:
             build_phase_duration += time.monotonic() - build_call_start
             logger.warning("Initial build hit budget/timeout: %s", err.reason)
-            _save_cp(status="paused", phase="initial_build")
+            _save_cp(status="paused", phase="initial_build", session_id=err.session_id or "")
             return BuildResult(passed=False, build_id=build_id, total_cost=total_cost)
         build_phase_duration += time.monotonic() - build_call_start
         total_cost += result.total_cost
@@ -998,6 +1053,7 @@ async def run_certify_fix_loop(
                         budget=budget,
                         session_id=build_id,
                         write_session_summary=False,
+                        write_history=False,
                         verbose=verbose,
                     )
                     certify_phase_duration += time.monotonic() - certify_call_start
@@ -1015,24 +1071,15 @@ async def run_certify_fix_loop(
                                        round_num, attempt + 1, err)
                         continue
                     logger.error("Certify round %d failed after %d attempts", round_num, MAX_RETRIES + 1)
-
-            if report is None:
-                append_journal(project_dir, round_id, f"certify round {round_num}",
-                               "ERROR (all retries failed)", 0.0, session_id=build_id)
-                break
+                    raise InfraFailureError(
+                        f"Certify round {round_num} failed after {MAX_RETRIES + 1} attempts: {err}"
+                    ) from err
 
             total_cost += report.cost_usd
             stories = report.story_results
             last_stories = stories
 
             record_certifier(project_dir, round_id, report, stories, session_id=build_id)
-
-            # Infra error — certifier crashed/timed out
-            if getattr(report, "outcome", None) == CertificationOutcome.INFRA_ERROR:
-                logger.warning("Certify-fix loop: infra error on round %d", round_num)
-                append_journal(project_dir, round_id, f"certify round {round_num}",
-                               "INFRA_ERROR", report.cost_usd, session_id=build_id)
-                break
 
             # Empty stories — certifier produced no results
             if not stories:
@@ -1152,7 +1199,7 @@ async def run_certify_fix_loop(
                 fix_lines.append(f"### {sid}")
                 fix_lines.append(f"**Symptom:** {summary}")
                 if evidence:
-                    fix_lines.append(f"**Evidence:**\n```\n{evidence[:500]}\n```")
+                    fix_lines.append(f"**Evidence:**\n```\n{evidence}\n```")
                 fix_lines.append("")
             fix_lines.append(
                 "Diagnose the root causes in the code and fix them. "
@@ -1179,10 +1226,13 @@ async def run_certify_fix_loop(
                         "\n".join(fix_lines), project_dir, fix_config,
                         manage_checkpoint=False,
                         run_id=build_id,
+                        resume_session_id=pending_resume_session_id,
+                        resume_existing_session=bool(pending_resume_session_id),
                         spec=spec,
                         budget=budget,
                         verbose=verbose,
                     )
+                    pending_resume_session_id = None
                     build_phase_duration += time.monotonic() - fix_call_start
                     break
                 except AgentCallError:
@@ -1196,6 +1246,9 @@ async def run_certify_fix_loop(
                                        round_num, attempt + 1, err)
                         continue
                     logger.error("Fix round %d failed after %d attempts", round_num, MAX_RETRIES + 1)
+                    raise InfraFailureError(
+                        f"Fix round {round_num} failed after {MAX_RETRIES + 1} attempts: {err}"
+                    ) from err
 
             if fix_result:
                 total_cost += fix_result.total_cost
@@ -1233,7 +1286,7 @@ async def run_certify_fix_loop(
             # trailing complete_checkpoint path — return early with paused.
             logger.warning("Round %d paused (%s)", round_num, err.reason)
             try:
-                _save_cp(status="paused")
+                _save_cp(status="paused", session_id=err.session_id or "")
             except OSError as exc:
                 logger.warning("Failed to mark checkpoint paused: %s", exc)
             return BuildResult(
@@ -1244,7 +1297,7 @@ async def run_certify_fix_loop(
         except KeyboardInterrupt:
             logger.info("Paused at round %d", round_num)
             try:
-                _save_cp(status="paused")
+                _save_cp(status="paused", session_id=pending_resume_session_id or "")
             except OSError as exc:
                 logger.warning("Failed to mark checkpoint paused: %s", exc)
             raise
@@ -1259,15 +1312,15 @@ async def run_certify_fix_loop(
     # forensic reads of the completed checkpoint reflect real history
     # (otherwise the checkpoint shows `current_round: 0, rounds: []` even
     # after multiple rounds actually ran).
-    try:
-        from otto.checkpoint import complete_checkpoint
-        complete_checkpoint(
-            project_dir, total_cost,
-            current_round=last_completed_round,
-            rounds=list(checkpoint_rounds),
-        )
-    except Exception as exc:
-        logger.warning("Failed to mark checkpoint completed: %s", exc)
+    from otto.checkpoint import complete_checkpoint
+
+    complete_checkpoint(
+        project_dir, total_cost,
+        run_id=build_id,
+        total_duration=round(resume_duration + (time.monotonic() - loop_start), 1),
+        current_round=last_completed_round,
+        rounds=list(checkpoint_rounds),
+    )
 
     journeys = _stories_to_journeys(last_stories)
     if build_phase_duration > 0.0:
@@ -1289,7 +1342,7 @@ async def run_certify_fix_loop(
         verdict="passed" if passed else "failed",
         passed=passed,
         cost=total_cost,
-        duration=round(time.monotonic() - loop_start, 1),
+        duration=round(resume_duration + (time.monotonic() - loop_start), 1),
         stories_passed=sum(1 for j in journeys if j.get("passed")),
         stories_tested=len(journeys),
         rounds=actual_rounds,
@@ -1297,12 +1350,26 @@ async def run_certify_fix_loop(
         command=command,
         breakdown=split_breakdown or None,
     )
+    _append_session_history(
+        project_dir,
+        run_id=build_id,
+        command=command,
+        certifier_mode=certifier_mode,
+        intent=intent,
+        stories=last_stories,
+        passed=passed,
+        duration_s=round(resume_duration + (time.monotonic() - loop_start), 1),
+        total_cost_usd=total_cost,
+        certifier_cost_usd=certify_phase_cost,
+        rounds=actual_rounds,
+    )
 
     return BuildResult(
         passed=passed,
         build_id=build_id,
         rounds=actual_rounds,
         total_cost=total_cost,
+        total_duration=round(resume_duration + (time.monotonic() - loop_start), 1),
         journeys=journeys,
         tasks_passed=sum(1 for j in journeys if j.get("passed")),
         tasks_failed=sum(1 for j in journeys if not j.get("passed")),
@@ -1314,6 +1381,7 @@ async def run_certify_fix_loop(
 def _commit_artifacts(project_dir: Path) -> None:
     """Commit otto artifacts (intent.md, etc.) so agents see them."""
     git_timeout = 30  # seconds — prevent hang on locked repo
+    files_to_stage = ["intent.md", "otto.yaml"]
     files_to_stage = ["intent.md", "otto.yaml"]
     if os.environ.get("OTTO_INTERNAL_QUEUE_RUNNER") == "1":
         from otto.config import DEFAULT_CONFIG, load_config
@@ -1327,19 +1395,28 @@ def _commit_artifacts(project_dir: Path) -> None:
     if not files_to_stage:
         return
     try:
-        subprocess.run(
+        from otto.display import console
+
+        add_result = subprocess.run(
             ["git", "add", *files_to_stage],
             cwd=project_dir, capture_output=True, timeout=git_timeout,
         )
+        if add_result.returncode != 0:
+            stderr = (add_result.stderr or b"").decode() if isinstance(add_result.stderr, bytes) else (add_result.stderr or "")
+            console.print(f"  [yellow]Warning: `git add` for otto artifacts failed: {stderr.strip() or 'unknown git error'}[/yellow]")
+            return
         # Only commit if there are staged changes
         result = subprocess.run(
             ["git", "diff", "--cached", "--quiet"],
             cwd=project_dir, capture_output=True, timeout=git_timeout,
         )
         if result.returncode != 0:
-            subprocess.run(
+            commit_result = subprocess.run(
                 ["git", "commit", "-q", "-m", "otto: commit artifacts"],
                 cwd=project_dir, capture_output=True, timeout=git_timeout,
             )
+            if commit_result.returncode != 0:
+                stderr = (commit_result.stderr or b"").decode() if isinstance(commit_result.stderr, bytes) else (commit_result.stderr or "")
+                console.print(f"  [yellow]Warning: `git commit` for otto artifacts failed: {stderr.strip() or 'unknown git error'}[/yellow]")
     except (OSError, subprocess.SubprocessError) as exc:
         logger.debug("_commit_artifacts skipped: %s", exc)

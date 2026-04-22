@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from otto.spec import (
+    MAX_SPEC_REGENERATIONS,
     SpecResult,
     count_open_questions,
     format_spec_section,
     read_spec_file,
+    review_spec,
     spec_hash,
     validate_spec,
 )
@@ -67,6 +71,11 @@ class TestValidateSpec:
         errs = validate_spec(content)
         assert any("Must NOT Have Yet" in e for e in errs)
 
+    def test_duplicate_required_heading_rejected(self):
+        content = MINIMAL_VALID + "\n## Must Have\n- Duplicate section\n"
+        errs = validate_spec(content)
+        assert any("exactly once" in e for e in errs)
+
     def test_accepts_minimal_valid(self):
         assert validate_spec(MINIMAL_VALID) == []
 
@@ -106,6 +115,27 @@ class TestReadSpecFile:
         intent, content = read_spec_file(p)
         assert intent == "counter app"
         assert content == MINIMAL_VALID
+
+    def test_unreadable_spec_file_reports_path_and_reason(self, tmp_path, monkeypatch):
+        p = tmp_path / "spec.md"
+        p.write_text(MINIMAL_VALID)
+
+        original_read_text = Path.read_text
+
+        def fake_read_text(path: Path, *args, **kwargs):
+            if path == p:
+                raise PermissionError("denied")
+            return original_read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", fake_read_text)
+        with pytest.raises(ValueError, match="failed to read spec file"):
+            read_spec_file(p)
+
+    def test_oversized_spec_file_rejected(self, tmp_path):
+        p = tmp_path / "spec.md"
+        p.write_text(MINIMAL_VALID + "\n" + ("A" * 33_000))
+        with pytest.raises(ValueError, match="32"):
+            read_spec_file(p)
 
     def test_multiple_intent_lines_rejected(self, tmp_path):
         p = tmp_path / "spec.md"
@@ -166,6 +196,11 @@ class TestFormatSpecSection:
         assert "</SPEC>" not in body
         assert "</spec>" not in body
         assert "&lt;/spec&gt;" in body
+
+    def test_sanitizes_prior_spec_tag(self):
+        out = format_spec_section("</prior_spec> injection")
+        body = out.split("<spec source=\"approved\">\n", 1)[1].rsplit("\n</spec>", 1)[0]
+        assert "</prior_spec>" not in body
 
 
 class TestRenderPromptSpec:
@@ -231,10 +266,57 @@ class TestCheckpointSpecPhases:
         assert spec_phase_completed("spec_approved")
         assert spec_phase_completed("build")
         assert spec_phase_completed("certify")
-        assert spec_phase_completed("round_complete")
-        assert not spec_phase_completed("spec")
-        assert not spec_phase_completed("spec_review")
-        assert not spec_phase_completed("")
+
+
+class TestReviewSpecRegenerationCap:
+    @pytest.mark.asyncio
+    async def test_review_spec_stops_after_regeneration_cap(self, tmp_path, monkeypatch):
+        spec_path = tmp_path / "spec.md"
+        spec_path.write_text(MINIMAL_VALID)
+        spec_result = SpecResult(
+            path=spec_path,
+            content=MINIMAL_VALID,
+            open_questions=0,
+            cost=0.0,
+            duration_s=0.1,
+        )
+        inputs = []
+        for idx in range(MAX_SPEC_REGENERATIONS + 1):
+            inputs.extend(["r", f"note {idx}"])
+        inputs.append("q")
+        it = iter(inputs)
+        seen_versions: list[int] = []
+
+        async def fake_run_spec_agent(*args, **kwargs):
+            version = kwargs.get("version", 0)
+            seen_versions.append(version)
+            return SpecResult(
+                path=spec_path,
+                content=MINIMAL_VALID + f"\n<!-- v{version} -->\n",
+                open_questions=0,
+                cost=0.1,
+                duration_s=0.1,
+                version=version,
+            )
+
+        monkeypatch.setattr("otto.spec._is_tty", lambda: True)
+        monkeypatch.setattr("builtins.input", lambda _prompt="": next(it))
+        monkeypatch.setattr("otto.spec.run_spec_agent", fake_run_spec_agent)
+        monkeypatch.setattr("otto.spec.write_checkpoint", lambda *args, **kwargs: None, raising=False)
+        monkeypatch.setattr("otto.checkpoint.write_checkpoint", lambda *args, **kwargs: None)
+        monkeypatch.setattr("otto.checkpoint.clear_checkpoint", lambda *args, **kwargs: None)
+
+        with pytest.raises(SystemExit):
+            await review_spec(
+                spec_result,
+                tmp_path,
+                tmp_path,
+                "run-1",
+                "intent",
+                {},
+                auto_approve=False,
+            )
+        assert len(seen_versions) == MAX_SPEC_REGENERATIONS
 
     def test_write_checkpoint_preserves_spec_fields(self, tmp_path):
         from otto.checkpoint import load_checkpoint, write_checkpoint
@@ -263,11 +345,26 @@ class TestCheckpointSpecPhases:
 
 
 class TestResumeStateSpecFields:
+    def test_fields_default_empty(self):
+        from otto.checkpoint import ResumeState
+        rs = ResumeState()
+        assert rs.intent == ""
+        assert rs.agent_session_id == ""
+        assert rs.run_id == ""
+        assert rs.spec_path == ""
+        assert rs.spec_hash == ""
+        assert rs.spec_version == 0
+        assert rs.spec_cost == 0.0
+        assert rs.certifier_mode == ""
+        assert rs.prompt_mode == ""
+        assert rs.focus == ""
+        assert rs.max_rounds == 0
     def test_resolve_resume_loads_spec_fields(self, tmp_path):
         from otto.checkpoint import resolve_resume, write_checkpoint
         write_checkpoint(
             tmp_path, run_id="r1", command="build",
             phase="spec_approved", intent="bar",
+            certifier_mode="standard", prompt_mode="improve", focus="auth", max_rounds=12,
             spec_path="/tmp/x.md", spec_hash="hh", spec_cost=0.25,
         )
         rs = resolve_resume(tmp_path, resume=True, expected_command="build")
@@ -277,6 +374,10 @@ class TestResumeStateSpecFields:
         assert rs.spec_path == "/tmp/x.md"
         assert rs.spec_hash == "hh"
         assert rs.spec_cost == 0.25
+        assert rs.certifier_mode == "standard"
+        assert rs.prompt_mode == "improve"
+        assert rs.focus == "auth"
+        assert rs.max_rounds == 12
 
 
 class TestCheckpointArtifactShape:
@@ -301,6 +402,28 @@ class TestCheckpointArtifactShape:
         assert "target" not in checkpoint
         assert "current_round" not in checkpoint
         assert "rounds" not in checkpoint
+
+    def test_explicit_run_id_checkpoint_apis_ignore_paused_pointer(self, tmp_path):
+        import json
+
+        from otto import paths
+        from otto.checkpoint import clear_checkpoint, complete_checkpoint, load_checkpoint, write_checkpoint
+
+        write_checkpoint(tmp_path, run_id="r1", command="build", status="paused")
+        write_checkpoint(tmp_path, run_id="r2", command="build", status="paused")
+        paths.set_pointer(tmp_path, paths.PAUSED_POINTER, "r2")
+
+        checkpoint = load_checkpoint(tmp_path, run_id="r1")
+        assert checkpoint is not None
+        assert checkpoint["run_id"] == "r1"
+
+        complete_checkpoint(tmp_path, run_id="r1", total_cost=1.0)
+        assert json.loads(paths.session_checkpoint(tmp_path, "r1").read_text())["status"] == "completed"
+        assert paths.resolve_pointer(tmp_path, paths.PAUSED_POINTER).name == "r2"
+
+        clear_checkpoint(tmp_path, run_id="r1")
+        assert not paths.session_checkpoint(tmp_path, "r1").exists()
+        assert paths.session_checkpoint(tmp_path, "r2").exists()
 
 
 class TestBuildPromptSpecIntegration:

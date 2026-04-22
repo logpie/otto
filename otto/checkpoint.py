@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -27,6 +26,7 @@ from typing import Any
 from otto import paths
 from otto.display import rich_escape
 from otto.theme import error_console
+from otto.config import checkpoint_fingerprint
 
 logger = logging.getLogger("otto.checkpoint")
 
@@ -34,7 +34,7 @@ logger = logging.getLogger("otto.checkpoint")
 # written by new code.
 LEGACY_CHECKPOINT_FILE = "otto_logs/checkpoint.json"
 
-POST_INITIAL_BUILD_PHASES = frozenset({"certify", "fix", "round_complete", "complete"})
+POST_INITIAL_BUILD_PHASES = frozenset({"certify", "fix", "round_complete"})
 # Phases that belong to the new spec-gate pre-build flow. Treated specially
 # for --force / --resume semantics: clearing or overwriting them without
 # explicit user intent loses potentially user-edited spec content.
@@ -63,13 +63,20 @@ class ResumeState:
     agent_session_id: str = ""
     start_round: int = 1
     total_cost: float = 0.0
+    total_duration: float = 0.0
     rounds: list[dict[str, Any]] = field(default_factory=list)
     resumed: bool = False
     prior_command: str = ""       # command that wrote the checkpoint (e.g. "build")
     command_mismatch: bool = False  # True if prior_command differs from expected
+    fingerprint_mismatch: bool = False
     current_round: int = 0        # last completed round from the checkpoint
     phase: str = ""               # current phase for split-mode resume
+    split_mode: bool | None = None  # resolved split mode; None for legacy checkpoints
     target: str = ""              # persisted target goal for improve.target resume
+    session_started_at: str = ""
+    child_session_ids: list[str] = field(default_factory=list)
+    git_sha: str = ""
+    prompt_hash: str = ""
     # Spec-gate fields (new; all empty/None for pre-spec checkpoints)
     intent: str = ""              # canonical intent (for resume without CLI intent)
     run_id: str = ""              # session_id in the new layout (kept as run_id for compat)
@@ -80,6 +87,10 @@ class ResumeState:
     completed_session_id: str = ""
     completed_verdict: str = ""
     completed_command: str = ""
+    certifier_mode: str = ""
+    prompt_mode: str = ""
+    focus: str = ""
+    max_rounds: int = 0
 
     @property
     def session_id(self) -> str:
@@ -119,6 +130,8 @@ def _prune_checkpoint_defaults(data: dict[str, Any]) -> dict[str, Any]:
         data.pop("current_round", None)
     if not data.get("rounds"):
         data.pop("rounds", None)
+    if not data.get("child_session_ids"):
+        data.pop("child_session_ids", None)
     return data
 
 
@@ -163,6 +176,11 @@ def print_resume_status(console: Any, state: ResumeState, resume_flag: bool, exp
         f"\n  [info]{status} "
         f"(${state.total_cost:.2f} spent so far)[/info]\n"
     )
+    if state.child_session_ids:
+        console.print(
+            "  [yellow]Prior child subagent sessions may still be orphaned; "
+            "Otto will start fresh subagents on resume.[/yellow]"
+        )
 
 
 def _command_family(command: str) -> str:
@@ -262,6 +280,9 @@ def resolve_resume(
     project_dir: Path,
     resume: bool,
     expected_command: str,
+    *,
+    force: bool = False,
+    reject_incompatible: bool = False,
 ) -> ResumeState:
     """Inspect the checkpoint and return resume state for the pipeline.
 
@@ -298,29 +319,72 @@ def resolve_resume(
         cost = checkpoint.get("total_cost", 0)
         cmd = checkpoint.get("command", "?")
         logger.info("Clearing stale checkpoint from `%s` (round %s, $%.2f)", cmd, cr, cost)
-        clear_checkpoint(project_dir)
+        run_id = _checkpoint_run_id(checkpoint)
+        clear_checkpoint(project_dir, run_id=run_id or None)
         return ResumeState()
 
     # resume=True and checkpoint exists
     prior_cmd = checkpoint.get("command", "") or ""
     current_round = checkpoint.get("current_round", 0) or 0
+    current_fingerprint = checkpoint_fingerprint(project_dir)
+    git_sha = checkpoint.get("git_sha", "") or ""
+    prompt_hash = checkpoint.get("prompt_hash", "") or ""
+    fingerprint_mismatch = bool(
+        (git_sha and git_sha != current_fingerprint.get("git_sha", ""))
+        or (prompt_hash and prompt_hash != current_fingerprint.get("prompt_hash", ""))
+    )
+    command_mismatch = bool(prior_cmd) and prior_cmd != expected_command
+    if reject_incompatible and not force:
+        if command_mismatch:
+            display_expected = expected_command.replace(".", " ")
+            raise ValueError(
+                f"Checkpoint is not from `{display_expected}`. "
+                f"(found `{prior_cmd}` instead). "
+                "Pass `--force --resume` to override."
+            )
+        if fingerprint_mismatch:
+            raise ValueError(
+                "Checkpoint fingerprint does not match the current code/prompt state. "
+                "Pass `--force --resume` to override."
+            )
+    if fingerprint_mismatch and force:
+        logger.warning(
+            "Resuming despite fingerprint mismatch (checkpoint git_sha=%s prompt_hash=%s, current git_sha=%s prompt_hash=%s)",
+            git_sha,
+            prompt_hash,
+            current_fingerprint.get("git_sha", ""),
+            current_fingerprint.get("prompt_hash", ""),
+        )
     return ResumeState(
         agent_session_id=_checkpoint_agent_session_id(checkpoint),
         start_round=current_round + 1,
         total_cost=float(checkpoint.get("total_cost", 0.0) or 0.0),
+        total_duration=float(
+            checkpoint.get("total_duration_so_far", checkpoint.get("total_duration", 0.0)) or 0.0
+        ),
         rounds=list(checkpoint.get("rounds", []) or []),
         resumed=True,
         prior_command=prior_cmd,
-        command_mismatch=bool(prior_cmd) and prior_cmd != expected_command,
+        command_mismatch=command_mismatch,
+        fingerprint_mismatch=fingerprint_mismatch,
         current_round=current_round,
         phase=checkpoint.get("phase", "") or "",
+        split_mode=(bool(checkpoint["split_mode"]) if "split_mode" in checkpoint else None),
         target=checkpoint.get("target", "") or "",
+        session_started_at=checkpoint.get("started_at", "") or "",
+        child_session_ids=list(checkpoint.get("child_session_ids", []) or []),
+        git_sha=git_sha,
+        prompt_hash=prompt_hash,
         intent=checkpoint.get("intent", "") or "",
         run_id=_checkpoint_run_id(checkpoint),
         spec_path=checkpoint.get("spec_path", "") or "",
         spec_hash=checkpoint.get("spec_hash", "") or "",
         spec_version=int(checkpoint.get("spec_version", 0) or 0),
         spec_cost=float(checkpoint.get("spec_cost", 0.0) or 0.0),
+        certifier_mode=checkpoint.get("certifier_mode", "") or "",
+        prompt_mode=checkpoint.get("prompt_mode", "") or "",
+        focus=checkpoint.get("focus", "") or "",
+        max_rounds=int(checkpoint.get("max_rounds", 0) or 0),
     )
 
 
@@ -346,10 +410,13 @@ def write_checkpoint(
     max_rounds: int = 8,
     status: str = "in_progress",
     phase: str = "",
+    split_mode: bool | None = None,
     session_id: str = "",
     current_round: int = 0,
     total_cost: float = 0.0,
+    total_duration: float = 0.0,
     rounds: list[dict[str, Any]] | None = None,
+    child_session_ids: list[str] | None = None,
     # Spec-gate fields (optional, preserved across writes via merge-with-prior)
     intent: str | None = None,
     spec_path: str | None = None,
@@ -376,6 +443,12 @@ def write_checkpoint(
 
     # Merge spec fields with prior on-disk state (preserve across writes).
     prior = _read_prior(checkpoint_path)
+    fingerprint = checkpoint_fingerprint(project_dir)
+    split_mode_value = (
+        bool(split_mode)
+        if split_mode is not None
+        else (bool(prior.get("split_mode")) if prior and "split_mode" in prior else None)
+    )
 
     # Cost fields stored at full precision — rounding only at display time.
     data = {
@@ -391,7 +464,15 @@ def write_checkpoint(
         "agent_session_id": session_id,
         "current_round": current_round,
         "total_cost": float(total_cost),
+        "total_cost_so_far": float(total_cost),
+        "total_duration": float(total_duration),
+        "total_duration_so_far": float(total_duration),
         "rounds": rounds or [],
+        "child_session_ids": sorted(
+            set(child_session_ids or (prior.get("child_session_ids", []) if prior else []) or [])
+        ),
+        "git_sha": fingerprint.get("git_sha", ""),
+        "prompt_hash": fingerprint.get("prompt_hash", ""),
         "intent": intent if intent is not None else (prior.get("intent", "") if prior else ""),
         "spec_path": spec_path if spec_path is not None else (prior.get("spec_path", "") if prior else ""),
         "spec_hash": spec_hash if spec_hash is not None else (prior.get("spec_hash", "") if prior else ""),
@@ -403,6 +484,8 @@ def write_checkpoint(
         "started_at": _read_started_at(checkpoint_path),
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
+    if split_mode_value is not None:
+        data["split_mode"] = split_mode_value
     if status == "completed":
         data = _prune_checkpoint_defaults(data)
 
@@ -412,7 +495,7 @@ def write_checkpoint(
     # without a clean transition, and resolve_pointer preferentially returns
     # paused over in_progress when scanning.
     if status in ("in_progress", "paused"):
-        paths.set_pointer(project_dir, paths.PAUSED_POINTER, run_id)
+        paths.set_pointer(project_dir, paths.PAUSED_POINTER, run_id, strict=True)
     elif status == "completed":
         paths.clear_pointer(project_dir, paths.PAUSED_POINTER)
     logger.debug("Checkpoint written: round %d, status=%s, phase=%s", current_round, status, phase)
@@ -442,15 +525,24 @@ def _load_legacy_checkpoint(project_dir: Path) -> dict[str, Any] | None:
     return data
 
 
-def load_checkpoint(project_dir: Path) -> dict[str, Any] | None:
+def load_checkpoint(project_dir: Path, run_id: str | None = None) -> dict[str, Any] | None:
     """Load checkpoint if one exists and is active (in_progress or paused).
 
     Tries in order:
-      1. `paused` pointer → session_dir/checkpoint.json
-      2. Scan fallback (built into resolve_pointer) over sessions/
+      1. explicit run_id (if provided)
+      2. `paused` pointer → session_dir/checkpoint.json
       3. Legacy otto_logs/checkpoint.json (for upgrade safety)
     """
-    # 1 & 2: new layout via pointer + scan fallback.
+    if run_id:
+        cp_path = _checkpoint_path_for(project_dir, run_id)
+        try:
+            data = json.loads(cp_path.read_text())
+            if data.get("status") in ("in_progress", "paused", "completed"):
+                return _normalize_checkpoint_data(data)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return None
+
+    # 1 & 2: new layout via pointer.
     session_path = paths.resolve_pointer(project_dir, paths.PAUSED_POINTER)
     if session_path is not None:
         cp_path = session_path / "checkpoint.json"
@@ -469,25 +561,32 @@ def load_checkpoint(project_dir: Path) -> dict[str, Any] | None:
     return None
 
 
-def clear_checkpoint(project_dir: Path) -> None:
+def clear_checkpoint(project_dir: Path, run_id: str | None = None) -> None:
     """Remove checkpoint file and the `paused` pointer.
 
     Also removes the legacy checkpoint file for complete upgrade-clean state.
     """
-    # New layout: locate the active session checkpoint and remove it.
-    session_path = paths.resolve_pointer(project_dir, paths.PAUSED_POINTER)
-    if session_path is not None:
-        cp_path = session_path / "checkpoint.json"
-        if cp_path.exists():
-            try:
-                cp_path.unlink()
-            except OSError as exc:
-                logger.warning("Failed to unlink %s: %s", cp_path, exc)
-    paths.clear_pointer(project_dir, paths.PAUSED_POINTER)
+    cp_path: Path | None = None
+    if run_id:
+        cp_path = _checkpoint_path_for(project_dir, run_id)
+    else:
+        session_path = paths.resolve_pointer(project_dir, paths.PAUSED_POINTER)
+        if session_path is not None:
+            cp_path = session_path / "checkpoint.json"
+
+    if cp_path is not None and cp_path.exists():
+        try:
+            cp_path.unlink()
+        except OSError as exc:
+            logger.warning("Failed to unlink %s: %s", cp_path, exc)
+
+    paused_target = paths.resolve_pointer(project_dir, paths.PAUSED_POINTER)
+    if paused_target is not None and (run_id is None or paused_target.name == run_id):
+        paths.clear_pointer(project_dir, paths.PAUSED_POINTER)
 
     # Legacy file, if still present (upgrade path).
     legacy_path = paths.legacy_checkpoint(project_dir)
-    if legacy_path.exists():
+    if run_id is None and legacy_path.exists():
         try:
             legacy_path.unlink()
         except OSError as exc:
@@ -500,6 +599,8 @@ def complete_checkpoint(
     project_dir: Path,
     total_cost: float = 0.0,
     *,
+    run_id: str | None = None,
+    total_duration: float | None = None,
     current_round: int | None = None,
     rounds: list[dict[str, Any]] | None = None,
 ) -> None:
@@ -517,6 +618,10 @@ def complete_checkpoint(
         data.update(_normalize_checkpoint_data(data))
         data["status"] = "completed"
         data["total_cost"] = float(total_cost)
+        data["total_cost_so_far"] = float(total_cost)
+        if total_duration is not None:
+            data["total_duration"] = float(total_duration)
+            data["total_duration_so_far"] = float(total_duration)
         if current_round is not None:
             data["current_round"] = current_round
         if rounds is not None:
@@ -524,9 +629,15 @@ def complete_checkpoint(
         data["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         _prune_checkpoint_defaults(data)
 
-    session_path = paths.resolve_pointer(project_dir, paths.PAUSED_POINTER)
-    if session_path is not None:
-        cp_path = session_path / "checkpoint.json"
+    cp_path: Path | None = None
+    if run_id:
+        cp_path = _checkpoint_path_for(project_dir, run_id)
+    else:
+        session_path = paths.resolve_pointer(project_dir, paths.PAUSED_POINTER)
+        if session_path is not None:
+            cp_path = session_path / "checkpoint.json"
+
+    if cp_path is not None:
         if cp_path.exists():
             try:
                 data = _normalize_checkpoint_data(json.loads(cp_path.read_text()))
@@ -534,7 +645,9 @@ def complete_checkpoint(
                 _write_checkpoint_file(cp_path, data)
             except (json.JSONDecodeError, OSError):
                 pass
-        paths.clear_pointer(project_dir, paths.PAUSED_POINTER)
+        paused_target = paths.resolve_pointer(project_dir, paths.PAUSED_POINTER)
+        if paused_target is not None and paused_target.name == cp_path.parent.name:
+            paths.clear_pointer(project_dir, paths.PAUSED_POINTER)
         return
 
     # Legacy fallback: update the legacy file in place.
@@ -560,21 +673,8 @@ def _read_started_at(checkpoint_path: Path) -> str:
             pass
     return now_iso
 
-
-def _checkpoint_tmp_path(checkpoint_path: Path) -> Path:
-    return checkpoint_path.with_name(checkpoint_path.name + ".tmp")
-
-
 def _write_checkpoint_file(checkpoint_path: Path, data: dict[str, Any]) -> None:
     """Atomically replace the checkpoint file on disk."""
-    tmp_path = _checkpoint_tmp_path(checkpoint_path)
-    try:
-        tmp_path.write_text(json.dumps(data, indent=2))
-        os.replace(tmp_path, checkpoint_path)
-    except OSError:
-        try:
-            if tmp_path.exists():
-                tmp_path.unlink()
-        except OSError:
-            pass
-        raise
+    from otto.observability import write_json_atomic
+
+    write_json_atomic(checkpoint_path, data)

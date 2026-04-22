@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import secrets
 import subprocess
 import sys
 import time
@@ -10,7 +11,46 @@ from pathlib import Path
 import click
 
 from otto.display import CONTEXT_SETTINGS, console, rich_escape
+from otto.config import require_git, resolve_project_dir
 from otto.theme import error_console
+
+
+def _positive_budget_option(
+    _ctx: click.Context,
+    _param: click.Parameter,
+    value: int | None,
+) -> int | None:
+    if value is not None and value <= 0:
+        raise click.BadParameter("must be > 0")
+    return value
+
+
+def _rounds_option(
+    _ctx: click.Context,
+    _param: click.Parameter,
+    value: int | None,
+) -> int | None:
+    if value is None:
+        return None
+    if value <= 0:
+        raise click.BadParameter("must be >= 1")
+    if value > 50:
+        raise click.BadParameter("must be <= 50")
+    return value
+
+
+def _max_turns_option(
+    _ctx: click.Context,
+    _param: click.Parameter,
+    value: int | None,
+) -> int | None:
+    if value is None:
+        return None
+    if value < 1:
+        raise click.BadParameter("must be >= 1")
+    if value > 200:
+        raise click.BadParameter("must be <= 200")
+    return value
 
 
 def _exit_for_lock_busy(exc) -> None:
@@ -28,7 +68,11 @@ def _exit_for_lock_busy(exc) -> None:
 def _resolve_intent(project_dir: Path) -> str | None:
     """Resolve product description from intent.md or README.md."""
     from otto.config import _normalize_intent, resolve_intent
-    intent = _normalize_intent(resolve_intent(project_dir) or "")
+    try:
+        intent = _normalize_intent(resolve_intent(project_dir) or "")
+    except Exception as exc:
+        error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
+        sys.exit(2)
     if intent:
         console.print("  [dim]Intent from project files[/dim]")
     return intent
@@ -37,7 +81,7 @@ def _resolve_intent(project_dir: Path) -> str | None:
 
 def _create_improve_branch(project_dir: Path) -> str:
     """Create an improvement branch and switch to it. Returns branch name."""
-    branch = f"improve/{time.strftime('%Y-%m-%d')}"
+    branch = f"improve/{time.strftime('%Y-%m-%d')}-{secrets.token_hex(3)}"
     # Check if already on an improve branch
     result = subprocess.run(
         ["git", "branch", "--show-current"],
@@ -47,16 +91,19 @@ def _create_improve_branch(project_dir: Path) -> str:
     if current.startswith("improve/"):
         return current  # already on an improve branch
 
-    # Create and switch — if branch exists (from earlier run today), switch to it
+    # Create and switch to a unique per-run branch.
     result = subprocess.run(
         ["git", "checkout", "-b", branch],
         cwd=project_dir, capture_output=True, text=True,
     )
     if result.returncode != 0:
-        subprocess.run(
-            ["git", "checkout", branch],
-            cwd=project_dir, capture_output=True, text=True,
+        stderr = (result.stderr or "").strip()
+        stdout = (result.stdout or "").strip()
+        error_console.print(
+            "[error]Failed to create improvement branch "
+            f"{branch}: {stderr or stdout or 'unknown git error'}[/error]"
         )
+        sys.exit(1)
 
     current_branch = subprocess.run(
         ["git", "branch", "--show-current"],
@@ -70,6 +117,24 @@ def _create_improve_branch(project_dir: Path) -> str:
         sys.exit(1)
 
     return branch
+
+
+def _resolve_improve_certifier_mode(
+    *,
+    default_mode: str,
+    fast: bool = False,
+    standard: bool = False,
+    thorough: bool = False,
+) -> str:
+    from otto.config import resolve_certifier_mode
+
+    if sum(bool(x) for x in (fast, standard, thorough)) > 1:
+        error_console.print(
+            "[error]--fast, --standard, and --thorough are mutually exclusive.[/error]"
+        )
+        sys.exit(2)
+    cli_mode = "fast" if fast else ("standard" if standard else ("thorough" if thorough else None))
+    return resolve_certifier_mode({"certifier_mode": default_mode}, cli_mode=cli_mode)
 
 
 def _run_improve(
@@ -88,6 +153,7 @@ def _run_improve(
     force_cross_command_resume: bool = False,
     in_worktree: bool = False,
     break_lock: bool = False,
+    force: bool = False,
     cli_overrides: dict | None = None,
 ) -> None:
     """CLI wrapper: branch creation, display, and report around the shared loop.
@@ -107,7 +173,19 @@ def _run_improve(
     command_id = f"improve.{subcommand}"
     config = load_config(project_dir / "otto.yaml") if (project_dir / "otto.yaml").exists() else {}
     if resume_state is None:
-        resume_state = resolve_resume(project_dir, resume, expected_command=command_id)
+        resume_state = resolve_resume(
+            project_dir,
+            resume,
+            expected_command=command_id,
+            force=force,
+            reject_incompatible=False,
+        )
+    if resume_state.fingerprint_mismatch and not force:
+        error_console.print(
+            "[error]Checkpoint fingerprint does not match the current code/prompt state.[/error]\n"
+            "  Pass `--force --resume` to override."
+        )
+        sys.exit(2)
     enforce_resume_available(
         resume_state,
         resume_flag=resume,
@@ -173,6 +251,9 @@ def _run_improve(
                 in_worktree=in_worktree,
                 cli_overrides=cli_overrides or {},
             )
+    except _paths.LockBreakError as exc:
+        error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
+        sys.exit(1)
     except _paths.LockBusy as exc:
         _exit_for_lock_busy(exc)
 
@@ -196,69 +277,100 @@ def _run_improve_locked(
     cli_overrides: dict | None = None,
 ) -> None:
     from otto import paths as _paths
-    from otto.config import load_config
+    from otto.cli import _load_config_or_exit, _print_config_banner, _record_cli_override
+    from otto.config import get_max_rounds, get_max_turns_per_call
     from otto.pipeline import build_agentic_v3, run_certify_fix_loop
 
-    # Branch: --in-worktree already created one; otherwise make the improve/... branch now.
+    config_path = project_dir / "otto.yaml"
+    config = _load_config_or_exit(config_path)
+    resume_rounds = getattr(resume_state, "max_rounds", 0) or 0
+    if rounds is not None:
+        resolved_rounds = rounds
+    elif resume_state.resumed and resume_rounds:
+        resolved_rounds = resume_rounds
+    else:
+        resolved_rounds = get_max_rounds(config)
+    resolved_split = bool(split or config.get("split_mode"))
+    if resume_state.resumed and resume_state.split_mode is not None:
+        resolved_split = resume_state.split_mode
+    if resume_state.resumed and not focus and getattr(resume_state, "focus", ""):
+        focus = resume_state.focus
+    if (
+        resume_state.resumed
+        and not (cli_overrides or {}).get("certifier_mode_explicit")
+        and getattr(resume_state, "certifier_mode", "")
+        and subcommand == "bugs"
+    ):
+        certifier_mode = resume_state.certifier_mode
+
     if in_worktree:
         from otto.branching import current_branch as _cb
+
         branch = _cb(project_dir)
     else:
         branch = _create_improve_branch(project_dir)
-    mode_label = "split" if split else "agentic"
+    mode_label = "split" if resolved_split else "agentic"
     console.print(f"\n  [bold]{command_label}[/bold] ({mode_label}) — branch: [info]{branch}[/info]")
     if focus:
         console.print(f"  Focus: {rich_escape(focus)}")
     if target:
         console.print(f"  Target: {rich_escape(target)}")
-    console.print(f"  Rounds: up to {rounds}")
+    console.print(f"  Rounds: up to {resolved_rounds}")
     console.print()
 
-    config_path = project_dir / "otto.yaml"
-    config = load_config(config_path)
-    config["max_certify_rounds"] = max(1, rounds)
+    config["max_certify_rounds"] = resolved_rounds
+    config["split_mode"] = resolved_split
+    config["certifier_mode"] = certifier_mode
 
     # Apply CLI overrides to the loaded config.
     overrides = cli_overrides or {}
     sources: dict[str, str] = {}
+    if rounds is not None:
+        sources["max_certify_rounds"] = "--rounds"
+    elif resume_state.resumed and resume_rounds:
+        sources["max_certify_rounds"] = "checkpoint"
+    if (
+        resume_state.resumed
+        and not overrides.get("certifier_mode_explicit")
+        and getattr(resume_state, "certifier_mode", "")
+        and subcommand == "bugs"
+    ):
+        sources["certifier_mode"] = "checkpoint"
     if overrides.get("budget") is not None:
         config["run_budget_seconds"] = overrides["budget"]
         sources["run_budget_seconds"] = "--budget"
+    if overrides.get("max_turns") is not None:
+        config["max_turns_per_call"] = overrides["max_turns"]
+        sources["max_turns_per_call"] = "--max-turns"
     if overrides.get("model"):
         config["model"] = overrides["model"]
         sources["model"] = "--model"
+        _record_cli_override(config, "model", overrides["model"])
     if overrides.get("provider"):
         config["provider"] = overrides["provider"]
         sources["provider"] = "--provider"
+        _record_cli_override(config, "provider", overrides["provider"])
     if overrides.get("effort"):
         config["effort"] = overrides["effort"]
         sources["effort"] = "--effort"
+        _record_cli_override(config, "effort", overrides["effort"])
     if overrides.get("strict"):
         config["strict_mode"] = True
         sources["strict_mode"] = "--strict"
     config["_verbose"] = bool(overrides.get("verbose"))
-
-    # Give improve modes a larger wall-clock budget by default, since
-    # multi-round fix loops legitimately take longer than a single build.
-    # User-set `run_budget_seconds` wins.
-    if not config.get("run_budget_seconds") or config["run_budget_seconds"] == 3600:
-        if "run_budget_seconds" not in sources:
-            # No CLI --budget and no explicit yaml override → use improve default.
-            import yaml as _yaml
-            raw = {}
-            if config_path.exists():
-                try:
-                    raw = _yaml.safe_load(config_path.read_text()) or {}
-                except Exception:
-                    pass
-            if "run_budget_seconds" not in raw:
-                config["run_budget_seconds"] = 7200  # 2h default for improve
-
-    from otto.cli import _print_config_banner
+    try:
+        config["max_certify_rounds"] = get_max_rounds(config)
+        config["max_turns_per_call"] = get_max_turns_per_call(config)
+    except Exception as exc:
+        error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
+        sys.exit(2)
     _print_config_banner(console, config, sources, config_path)
 
     from otto.budget import RunBudget
-    budget = RunBudget.start_from(config)
+    budget = RunBudget.start_from(
+        config,
+        session_started_at=resume_state.session_started_at or None,
+    )
 
     # Pass target to config for prompt filling
     if target:
@@ -273,7 +385,7 @@ def _run_improve_locked(
 
     start = time.time()
     try:
-        if split:
+        if resolved_split:
             # System-driven: Python controls certify→fix loop
             result = asyncio.run(run_certify_fix_loop(
                 intent=intent,
@@ -285,7 +397,9 @@ def _run_improve_locked(
                 skip_initial_build=True,
                 start_round=resume_state.start_round,
                 resume_cost=resume_state.total_cost,
+                resume_duration=resume_state.total_duration,
                 resume_rounds=resume_state.rounds,
+                resume_session_id=resume_state.agent_session_id or None,
                 command=command_id,
                 session_id=resume_state.run_id or run_id,
                 budget=budget,
@@ -303,6 +417,8 @@ def _run_improve_locked(
                 resume_session_id=resume_state.agent_session_id or None,
                 command=command_id,
                 run_id=resume_state.run_id or run_id,
+                prior_total_cost=resume_state.total_cost,
+                prior_total_duration=resume_state.total_duration,
                 budget=budget,
                 strict_mode=bool(config.get("strict_mode")),
                 verbose=bool(config.get("_verbose")),
@@ -314,7 +430,8 @@ def _run_improve_locked(
         error_console.print(f"[error]{command_label} failed: {rich_escape(str(e))}[/error]")
         sys.exit(1)
 
-    duration = time.time() - start
+    duration = result.total_duration or (time.time() - start)
+    default_branch = str(config.get("default_branch") or "main")
 
     # --- Write report ---
     report_lines = [
@@ -347,14 +464,25 @@ def _run_improve_locked(
     report_lines.append(f"- **Cost:** ${result.total_cost:.2f}")
     report_lines.append(f"- **Duration:** {duration / 60:.1f} min")
     report_lines.append("")
-    report_lines.append(f"Review: `git diff main...{branch}`")
+    report_lines.append(f"Review: `git diff {default_branch}...{branch}`")
     report_lines.append(f"Merge: `git merge {branch}`")
     report_lines.append("")
 
     # Under the new layout the report lives inside the improve session dir.
     report_path = _paths.improve_dir(project_dir, result.build_id) / "improvement-report.md"
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text("\n".join(report_lines))
+    report_text = "\n".join(report_lines)
+    try:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(report_text)
+    except OSError as exc:
+        console.print()
+        console.print(f"  [bold]{command_label} complete[/bold]")
+        console.print(f"  Rounds: {result.rounds}")
+        console.print(f"  Cost: ${result.total_cost:.2f}")
+        console.print(f"  Duration: {duration / 60:.1f} min")
+        console.print(f"  [yellow]Warning: could not write report file {report_path}: {exc}[/yellow]")
+        console.print()
+        sys.exit(0 if result.passed else 1)
 
     # Per-run manifest. The canonical record always lives at the session root;
     # queue-backed runs also mirror it into otto_logs/queue/<task-id>/.
@@ -402,7 +530,7 @@ def _run_improve_locked(
     console.print(f"  Duration: {duration / 60:.1f} min")
     console.print(f"  Report: {report_path}")
     console.print()
-    console.print(f"  Review: [info]git diff main...{branch}[/info]")
+    console.print(f"  Review: [info]git diff {default_branch}...{branch}[/info]")
     console.print(f"  Merge:  [info]git merge {branch}[/info]")
     console.print()
 
@@ -450,7 +578,7 @@ def register_improve_commands(main: click.Group) -> None:
 
     @improve.command(context_settings=CONTEXT_SETTINGS)
     @click.argument("focus", required=False)
-    @click.option("--rounds", "-n", default=3, help="Maximum rounds (default: 3)")
+    @click.option("--rounds", "-n", default=None, type=int, callback=_rounds_option, help="Maximum rounds, 1-50 (default from otto.yaml or 8)")
     @click.option("--split", is_flag=True, help="System-controlled loop (vs agent-driven)")
     @click.option("--resume", is_flag=True, help="Resume from last checkpoint")
     @click.option(
@@ -460,14 +588,19 @@ def register_improve_commands(main: click.Group) -> None:
     )
     @click.option("--in-worktree", "in_worktree", is_flag=True,
                   help="Run in an isolated git worktree (./.worktrees/improve-bugs-<slug>-<date>/)")
-    @click.option("--budget", default=None, type=int, help="Total wall-clock budget in seconds (default from otto.yaml or 7200 for improve)")
+    @click.option("--budget", default=None, type=int, callback=_positive_budget_option, help="Total wall-clock budget in seconds, must be > 0 (default from otto.yaml or 3600)")
+    @click.option("--max-turns", default=None, type=int, callback=_max_turns_option, help="Max agent turns per call, 1-200 (default from otto.yaml or 200)")
     @click.option("--model", default=None, help="Override model for every agent (e.g. sonnet, haiku, gpt-5)")
     @click.option("--provider", default=None, help="Override provider for every agent: claude | codex")
     @click.option("--effort", default=None, help="Override effort level for every agent: low | medium | high | max")
+    @click.option("--fast", is_flag=True, help="Downgrade bug certification to fast mode")
+    @click.option("--standard", is_flag=True, help="Downgrade bug certification to standard mode")
+    @click.option("--thorough", is_flag=True, help="Bug certification depth (default)")
     @click.option("--strict", is_flag=True, help="Require two consecutive PASS rounds before stopping")
     @click.option("--verbose", is_flag=True, help="Show detailed live progress, including tool-call counts")
     @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
-    def bugs(focus, rounds, split, resume, force_cross_command_resume, in_worktree, budget, model, provider, effort, strict, verbose, break_lock):
+    @click.option("--force", is_flag=True, help="Override resume checkpoint mismatch checks")
+    def bugs(focus, rounds, split, resume, force_cross_command_resume, in_worktree, budget, max_turns, model, provider, effort, fast, standard, thorough, strict, verbose, break_lock, force):
         """Find and fix bugs, edge cases, and error handling gaps.
 
         One agent certifies, reads findings, fixes, and re-certifies
@@ -480,14 +613,20 @@ def register_improve_commands(main: click.Group) -> None:
             otto improve bugs -n 5             # 5 rounds
             otto improve bugs --split          # system-controlled loop
         """
-        project_dir = Path.cwd()
+        require_git()
+        project_dir = resolve_project_dir(Path.cwd())
         intent = _require_intent(project_dir)
         _run_improve(
             project_dir=project_dir,
             intent=intent,
             rounds=rounds,
             focus=focus,
-            certifier_mode="thorough",
+            certifier_mode=_resolve_improve_certifier_mode(
+                default_mode="thorough",
+                fast=fast,
+                standard=standard,
+                thorough=thorough,
+            ),
             command_label="Bug fixing",
             subcommand="bugs",
             split=split,
@@ -495,19 +634,22 @@ def register_improve_commands(main: click.Group) -> None:
             force_cross_command_resume=force_cross_command_resume,
             in_worktree=in_worktree,
             break_lock=break_lock,
+            force=force,
             cli_overrides={
                 "budget": budget,
+                "max_turns": max_turns,
                 "model": model,
                 "provider": provider,
                 "effort": effort,
                 "strict": strict,
                 "verbose": verbose,
+                "certifier_mode_explicit": bool(fast or standard or thorough),
             },
         )
 
     @improve.command(context_settings=CONTEXT_SETTINGS)
     @click.argument("focus", required=False)
-    @click.option("--rounds", "-n", default=3, help="Maximum rounds (default: 3)")
+    @click.option("--rounds", "-n", default=None, type=int, callback=_rounds_option, help="Maximum rounds, 1-50 (default from otto.yaml or 8)")
     @click.option("--split", is_flag=True, help="System-controlled loop (vs agent-driven)")
     @click.option("--resume", is_flag=True, help="Resume from last checkpoint")
     @click.option(
@@ -517,14 +659,16 @@ def register_improve_commands(main: click.Group) -> None:
     )
     @click.option("--in-worktree", "in_worktree", is_flag=True,
                   help="Run in an isolated git worktree (./.worktrees/improve-feature-<slug>-<date>/)")
-    @click.option("--budget", default=None, type=int, help="Total wall-clock budget in seconds (default from otto.yaml or 7200 for improve)")
+    @click.option("--budget", default=None, type=int, callback=_positive_budget_option, help="Total wall-clock budget in seconds, must be > 0 (default from otto.yaml or 3600)")
+    @click.option("--max-turns", default=None, type=int, callback=_max_turns_option, help="Max agent turns per call, 1-200 (default from otto.yaml or 200)")
     @click.option("--model", default=None, help="Override model for every agent (e.g. sonnet, haiku, gpt-5)")
     @click.option("--provider", default=None, help="Override provider for every agent: claude | codex")
     @click.option("--effort", default=None, help="Override effort level for every agent: low | medium | high | max")
     @click.option("--strict", is_flag=True, help="Require two consecutive PASS rounds before stopping")
     @click.option("--verbose", is_flag=True, help="Show detailed live progress, including tool-call counts")
     @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
-    def feature(focus, rounds, split, resume, force_cross_command_resume, in_worktree, budget, model, provider, effort, strict, verbose, break_lock):
+    @click.option("--force", is_flag=True, help="Override resume checkpoint mismatch checks")
+    def feature(focus, rounds, split, resume, force_cross_command_resume, in_worktree, budget, max_turns, model, provider, effort, strict, verbose, break_lock, force):
         """Suggest and implement product improvements.
 
         One agent evaluates the product, identifies improvements, implements
@@ -536,7 +680,8 @@ def register_improve_commands(main: click.Group) -> None:
             otto improve feature "search UX"   # focus on search experience
             otto improve feature -n 5          # 5 rounds
         """
-        project_dir = Path.cwd()
+        require_git()
+        project_dir = resolve_project_dir(Path.cwd())
         intent = _require_intent(project_dir)
         _run_improve(
             project_dir=project_dir,
@@ -551,8 +696,10 @@ def register_improve_commands(main: click.Group) -> None:
             force_cross_command_resume=force_cross_command_resume,
             in_worktree=in_worktree,
             break_lock=break_lock,
+            force=force,
             cli_overrides={
                 "budget": budget,
+                "max_turns": max_turns,
                 "model": model,
                 "provider": provider,
                 "effort": effort,
@@ -563,7 +710,7 @@ def register_improve_commands(main: click.Group) -> None:
 
     @improve.command(context_settings=CONTEXT_SETTINGS)
     @click.argument("goal", required=False)
-    @click.option("--rounds", "-n", default=5, help="Maximum rounds (default: 5)")
+    @click.option("--rounds", "-n", default=None, type=int, callback=_rounds_option, help="Maximum rounds, 1-50 (default from otto.yaml or 8)")
     @click.option("--split", is_flag=True, help="System-controlled loop (vs agent-driven)")
     @click.option("--resume", is_flag=True, help="Resume from last checkpoint")
     @click.option(
@@ -573,14 +720,16 @@ def register_improve_commands(main: click.Group) -> None:
     )
     @click.option("--in-worktree", "in_worktree", is_flag=True,
                   help="Run in an isolated git worktree (./.worktrees/improve-target-<slug>-<date>/)")
-    @click.option("--budget", default=None, type=int, help="Total wall-clock budget in seconds (default from otto.yaml or 7200 for improve)")
+    @click.option("--budget", default=None, type=int, callback=_positive_budget_option, help="Total wall-clock budget in seconds, must be > 0 (default from otto.yaml or 3600)")
+    @click.option("--max-turns", default=None, type=int, callback=_max_turns_option, help="Max agent turns per call, 1-200 (default from otto.yaml or 200)")
     @click.option("--model", default=None, help="Override model for every agent (e.g. sonnet, haiku, gpt-5)")
     @click.option("--provider", default=None, help="Override provider for every agent: claude | codex")
     @click.option("--effort", default=None, help="Override effort level for every agent: low | medium | high | max")
     @click.option("--strict", is_flag=True, help="Require two consecutive PASS rounds before stopping")
     @click.option("--verbose", is_flag=True, help="Show detailed live progress, including tool-call counts")
     @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
-    def target(goal, rounds, split, resume, force_cross_command_resume, in_worktree, budget, model, provider, effort, strict, verbose, break_lock):
+    @click.option("--force", is_flag=True, help="Override resume checkpoint mismatch checks")
+    def target(goal, rounds, split, resume, force_cross_command_resume, in_worktree, budget, max_turns, model, provider, effort, strict, verbose, break_lock, force):
         """Optimize toward a measurable target.
 
         Measures a metric, compares to the target, and iterates until met.
@@ -593,7 +742,8 @@ def register_improve_commands(main: click.Group) -> None:
             otto improve target "test coverage > 90%"
             otto improve target "lighthouse score > 95" -n 10
         """
-        project_dir = Path.cwd()
+        require_git()
+        project_dir = resolve_project_dir(Path.cwd())
         from otto.checkpoint import (
             enforce_resume_available,
             enforce_resume_command_match,
@@ -601,8 +751,18 @@ def register_improve_commands(main: click.Group) -> None:
         )
 
         resume_state = resolve_resume(
-            project_dir, resume, expected_command="improve.target"
+            project_dir,
+            resume,
+            expected_command="improve.target",
+            force=force,
+            reject_incompatible=False,
         )
+        if resume_state.fingerprint_mismatch and not force:
+            error_console.print(
+                "[error]Checkpoint fingerprint does not match the current code/prompt state.[/error]\n"
+                "  Pass `--force --resume` to override."
+            )
+            sys.exit(2)
         enforce_resume_available(
             resume_state,
             resume_flag=resume,
@@ -654,8 +814,10 @@ def register_improve_commands(main: click.Group) -> None:
             force_cross_command_resume=force_cross_command_resume,
             in_worktree=in_worktree,
             break_lock=break_lock,
+            force=force,
             cli_overrides={
                 "budget": budget,
+                "max_turns": max_turns,
                 "model": model,
                 "provider": provider,
                 "effort": effort,

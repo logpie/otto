@@ -11,20 +11,16 @@ class CertificationOutcome(Enum):
     """Top-level certification result."""
     PASSED = "passed"
     FAILED = "failed"
-    INFRA_ERROR = "infra_error"
 
 
 @dataclass
 class CertificationReport:
     """Complete certification report.
 
-    story_results / metric_value / metric_met are populated by the certifier
-    after parsing agent output. They're optional so INFRA_ERROR / crash
-    reports can be constructed without them.
+    after parsing agent output. Infra failures propagate as exceptions rather
+    than synthetic outcome values.
 
-    run_id (Phase 1.4): the standalone certifier's per-invocation directory
-    name, e.g. ``certify-1734567890-12345``. Used by `otto certify` to locate
-    the proof-of-work artifact when writing the manifest.
+    run_id is the standalone certifier's per-invocation session directory name.
     """
     outcome: CertificationOutcome = CertificationOutcome.FAILED
     cost_usd: float = 0.0
