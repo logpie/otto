@@ -214,7 +214,23 @@ class _TranscriptAccumulator:
     def finalize_text(self) -> str:
         self._flush_carry()
         parts = [*self._assistant_parts]
-        if self._marker_lines:
+        assistant_text = "\n\n".join(part for part in self._assistant_parts if part)
+        assistant_has_markers = any(
+            line.startswith(
+                (
+                    "CERTIFY_ROUND:",
+                    "STORIES_TESTED:",
+                    "STORIES_PASSED:",
+                    "STORY_RESULT:",
+                    "VERDICT:",
+                    "DIAGNOSIS:",
+                    "METRIC_VALUE:",
+                    "METRIC_MET:",
+                )
+            )
+            for line in assistant_text.splitlines()
+        )
+        if self._marker_lines and not assistant_has_markers:
             parts.append("\n".join(self._marker_lines))
         if self._keep_tool_output:
             parts.extend(self._tool_parts)
