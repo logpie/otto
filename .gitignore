@@ -32,3 +32,4 @@ summary.json
 # Behavioral E2E artifacts (per-run, kept for forensics)
 bench-results/as-user/
 
+bench-results/demo/

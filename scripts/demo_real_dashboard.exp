@@ -1,0 +1,111 @@
+#!/usr/bin/env expect -f
+# Real-LLM dashboard demo: 3 parallel builds → drill in to watch logs stream
+# → back → another drill → quit → merge → history.
+#
+# Wrap with: asciinema rec --command "expect demo_real_dashboard.exp <repo>" out.cast
+# Usage: ./demo_real_dashboard.exp /path/to/empty/git/repo
+
+set timeout 900
+set repo [lindex $argv 0]
+set OTTO "/Users/yuxuan/work/cc-autonomous/.worktrees/parallel-otto/.venv/bin/otto"
+
+if { $repo eq "" } {
+    puts "usage: demo_real_dashboard.exp <repo-dir>"
+    exit 2
+}
+
+cd $repo
+
+# Helper: spawn a command, wait for clean EOF + close, so the next spawn
+# doesn't race on a stale spawn id.
+proc run_clean {args} {
+    eval spawn $args
+    expect eof
+    catch close
+    catch wait
+}
+
+puts "\n========= STEP 1/4: enqueue 3 builds =========\n"
+
+run_clean $OTTO queue build "Build add.py with argparse: python add.py A B prints A+B integer addition. Include test_add.py with pytest." --as add -- --fast
+run_clean $OTTO queue build "Build mul.py with argparse: python mul.py A B prints A*B integer multiplication. Include test_mul.py with pytest." --as mul -- --fast
+run_clean $OTTO queue build "Build sub.py with argparse: python sub.py A B prints A-B integer subtraction. Include test_sub.py with pytest." --as sub -- --fast
+
+puts "\n========= STEP 2/4: launch dashboard (concurrent=2) =========\n"
+
+spawn $OTTO queue run --concurrent 2 --exit-when-empty
+
+# Wait for dashboard to render initial state
+sleep 3
+
+# Show overview navigation: move down, then back
+send "j"
+sleep 1
+send "j"
+sleep 1
+send "k"
+sleep 1
+
+# Wait for the build agents to actually start producing log output before
+# drilling in. Otherwise the detail screen sits empty while Claude SDK boots.
+puts "\n(waiting 25s for build agents to start streaming narrative...)\n"
+sleep 25
+
+# Drill into highlighted row to see live narrative tail
+puts "\n(opening detail view to watch narrative tail)\n"
+send "\r"
+
+# Linger long enough to actually SEE logs streaming live
+sleep 12
+
+# Yank current detail buffer to clipboard (notify visible at top of pane)
+send "y"
+sleep 2
+
+# Open help overlay to demo binding discoverability
+send "?"
+sleep 4
+
+# Close help, back to detail
+send "\033"
+sleep 1
+
+# Back to overview
+send "\033"
+sleep 2
+
+# Drill into another row to watch a different task's narrative
+send "j"
+sleep 1
+send "\r"
+sleep 10
+
+# Yank again
+send "y"
+sleep 2
+
+# Back to overview
+send "\033"
+sleep 2
+
+# Watch overview while tasks complete + queue drains.
+# --exit-when-empty closes the dashboard automatically when both done.
+puts "\n(waiting for queue to drain; dashboard will exit on its own)\n"
+
+expect {
+    -timeout 600
+    eof { puts "\n========= dashboard exited via --exit-when-empty =========\n" }
+    timeout { puts "\n========= TIMEOUT waiting for drain =========\n"; send "q" }
+}
+catch close
+catch wait
+
+puts "\n========= STEP 3/4: merge --all --cleanup-on-success --no-certify =========\n"
+
+run_clean $OTTO merge --all --cleanup-on-success --no-certify
+
+puts "\n========= STEP 4/4: otto history =========\n"
+
+run_clean $OTTO history
+
+puts "\n========= DEMO COMPLETE =========\n"
