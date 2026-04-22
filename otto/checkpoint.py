@@ -87,6 +87,14 @@ class ResumeState:
     prompt_mode: str = ""
     focus: str = ""
     max_rounds: int = 0
+    last_activity: str = ""
+    last_tool_name: str = ""
+    last_tool_args_summary: str = ""
+    last_story_id: str = ""
+    last_operation_started_at: str = ""
+    last_round_failures: list[str] = field(default_factory=list)
+    last_diagnosis: str = ""
+    dirty_files: list[str] = field(default_factory=list)
 
     @property
     def session_id(self) -> str:
@@ -170,6 +178,14 @@ def print_resume_status(console: Any, state: ResumeState, resume_flag: bool, exp
         f"\n  [info]{status} "
         f"(${state.total_cost:.2f} spent so far)[/info]\n"
     )
+    if state.last_activity or state.last_operation_started_at:
+        activity = state.last_activity or "unknown activity"
+        when = state.last_operation_started_at or "unknown time"
+        failures = ", ".join(state.last_round_failures) if state.last_round_failures else "none"
+        console.print(
+            "  [dim]resuming from: "
+            f"{activity} at {when}, last round had: {failures}[/dim]"
+        )
     if state.child_session_ids:
         console.print(
             "  [yellow]Prior child subagent sessions may still be orphaned; "
@@ -286,6 +302,14 @@ def resolve_resume(
         prompt_mode=checkpoint.get("prompt_mode", "") or "",
         focus=checkpoint.get("focus", "") or "",
         max_rounds=int(checkpoint.get("max_rounds", 0) or 0),
+        last_activity=checkpoint.get("last_activity", "") or "",
+        last_tool_name=checkpoint.get("last_tool_name", "") or "",
+        last_tool_args_summary=checkpoint.get("last_tool_args_summary", "") or "",
+        last_story_id=checkpoint.get("last_story_id", "") or "",
+        last_operation_started_at=checkpoint.get("last_operation_started_at", "") or "",
+        last_round_failures=list(checkpoint.get("last_round_failures", []) or []),
+        last_diagnosis=checkpoint.get("last_diagnosis", "") or "",
+        dirty_files=list(checkpoint.get("dirty_files", []) or []),
     )
 
 
@@ -353,6 +377,14 @@ def write_checkpoint(
     spec_hash: str | None = None,
     spec_version: int | None = None,
     spec_cost: float | None = None,
+    last_activity: str | None = None,
+    last_tool_name: str | None = None,
+    last_tool_args_summary: str | None = None,
+    last_story_id: str | None = None,
+    last_operation_started_at: str | None = None,
+    last_round_failures: list[str] | None = None,
+    last_diagnosis: str | None = None,
+    dirty_files: list[str] | None = None,
 ) -> None:
     """Write checkpoint to disk. Called after each round.
 
@@ -411,6 +443,28 @@ def write_checkpoint(
         "spec_cost": float(
             spec_cost if spec_cost is not None
             else (prior.get("spec_cost", 0.0) if prior else 0.0)
+        ),
+        "last_activity": last_activity if last_activity is not None else (prior.get("last_activity", "") if prior else ""),
+        "last_tool_name": last_tool_name if last_tool_name is not None else (prior.get("last_tool_name", "") if prior else ""),
+        "last_tool_args_summary": (
+            last_tool_args_summary if last_tool_args_summary is not None
+            else (prior.get("last_tool_args_summary", "") if prior else "")
+        ),
+        "last_story_id": last_story_id if last_story_id is not None else (prior.get("last_story_id", "") if prior else ""),
+        "last_operation_started_at": (
+            last_operation_started_at if last_operation_started_at is not None
+            else (prior.get("last_operation_started_at", "") if prior else "")
+        ),
+        "last_round_failures": (
+            list(last_round_failures)
+            if last_round_failures is not None
+            else list(prior.get("last_round_failures", []) if prior else [])
+        ),
+        "last_diagnosis": last_diagnosis if last_diagnosis is not None else (prior.get("last_diagnosis", "") if prior else ""),
+        "dirty_files": (
+            list(dirty_files)
+            if dirty_files is not None
+            else list(prior.get("dirty_files", []) if prior else [])
         ),
         "started_at": _read_started_at(checkpoint_path),
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

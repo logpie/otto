@@ -38,6 +38,7 @@ class BuildResult:
     tasks_failed: int = 0
     breakdown: dict[str, dict[str, Any]] = field(default_factory=dict)
     cost: dict[str, Any] | None = None
+    child_session_ids: list[str] = field(default_factory=list)
 
 
 def _stories_to_journeys(stories: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -66,6 +67,7 @@ def _write_session_summary(
     command: str = "build",
     breakdown: dict[str, dict[str, Any]] | None = None,
     cost_info: dict[str, Any] | None = None,
+    runtime_path: str = "",
 ) -> None:
     """Write the canonical summary artifact for a completed session.
 
@@ -99,6 +101,8 @@ def _write_session_summary(
         resolved_cost = build_cost_payload(provider="claude", total_cost_usd=float(cost))
     if resolved_cost is not None:
         summary["cost"] = resolved_cost
+    if runtime_path:
+        summary["runtime_path"] = runtime_path
     if breakdown is not None:
         primary_phase = "build"
         if "build" not in breakdown:
@@ -122,6 +126,78 @@ def _write_session_summary(
 
 def _round_cost(value: float) -> float:
     return round(float(value), 4)
+
+
+def _runtime_metadata(project_dir: Path) -> dict[str, Any]:
+    from otto import __version__
+    from otto.observability import gather_runtime_metadata
+
+    runtime = gather_runtime_metadata(project_dir)
+    runtime["otto_version"] = __version__
+    if not runtime.get("otto_commit"):
+        runtime["otto_commit"] = runtime.get("git_commit", "")
+    return runtime
+
+
+def _intent_provenance_payload(intent: str, config: dict[str, Any]) -> dict[str, Any]:
+    from otto.observability import sha256_text
+
+    return {
+        "source": str(config.get("_intent_source") or "cli-argument"),
+        "fallback_reason": str(config.get("_intent_fallback_reason") or ""),
+        "resolved_text": intent,
+        "sha256": sha256_text(intent),
+    }
+
+
+def _spec_provenance_payload(spec: str | None, config: dict[str, Any]) -> dict[str, Any]:
+    from otto.observability import sha256_text
+
+    if not spec:
+        return {"source": "none", "path": "", "sha256": ""}
+    return {
+        "source": str(config.get("_spec_source") or "spec-agent"),
+        "path": str(config.get("_spec_path") or ""),
+        "sha256": sha256_text(spec),
+    }
+
+
+def _record_prompt_provenance(
+    project_dir: Path,
+    session_id: str,
+    *,
+    template: str,
+    rendered_text: str,
+    intent: str,
+    spec: str | None,
+    config: dict[str, Any],
+) -> None:
+    from otto import paths
+    from otto.observability import save_rendered_prompt, update_input_provenance
+
+    session_dir = paths.session_dir(project_dir, session_id)
+    prompt_entry = save_rendered_prompt(
+        session_dir / "prompts",
+        template=template,
+        rendered_text=rendered_text,
+    )
+    update_input_provenance(
+        session_dir,
+        intent=_intent_provenance_payload(intent, config),
+        spec=_spec_provenance_payload(spec, config),
+        prompts=[prompt_entry],
+    )
+
+
+def _write_runtime_artifact(project_dir: Path, session_id: str) -> str:
+    from otto import paths
+    from otto.observability import write_runtime_metadata
+
+    runtime_path = write_runtime_metadata(
+        paths.session_dir(project_dir, session_id),
+        _runtime_metadata(project_dir),
+    )
+    return str(runtime_path)
 
 
 def _history_story_counts(stories: list[dict[str, Any]]) -> tuple[int, int, int]:
@@ -244,6 +320,7 @@ async def build_agentic_v3(
     build_dir = paths.build_dir(project_dir, session_id)
     # Point `latest` at this session so users can `tail -f $(readlink latest)/build/live.log`.
     paths.set_pointer(project_dir, paths.LATEST_POINTER, session_id)
+    runtime_path = _write_runtime_artifact(project_dir, session_id)
 
     # Resumed SDK sessions already carry prior context; avoid polluting
     # intent.md or stdin when the user resumes without a fresh intent.
@@ -278,6 +355,7 @@ async def build_agentic_v3(
 
     if resume_existing_session and resume_session_id:
         prompt = ""
+        main_prompt_template = ""
     else:
         # Spec-aware prompt rendering via safe render_prompt helper.
         from otto.prompts import render_prompt
@@ -286,10 +364,12 @@ async def build_agentic_v3(
 
         # Select prompt based on mode
         if prompt_mode == "code":
+            main_prompt_template = "code.md"
             prompt = render_prompt("code.md", spec_section=spec_section) + f"\n\nBuild this product:\n\n{intent}"
         elif prompt_mode == "improve":
             from otto.config import get_max_rounds
             max_certify_rounds = get_max_rounds(config)
+            main_prompt_template = "improve.md"
             prompt = render_prompt("improve.md",
                                    max_certify_rounds=str(max_certify_rounds),
                                    spec_section=spec_section,
@@ -299,6 +379,7 @@ async def build_agentic_v3(
             # Default: build mode
             from otto.config import get_max_rounds
             max_certify_rounds = get_max_rounds(config)
+            main_prompt_template = "build.md"
             prompt = render_prompt("build.md",
                                    max_certify_rounds=str(max_certify_rounds),
                                    spec_section=spec_section,
@@ -330,10 +411,29 @@ async def build_agentic_v3(
             prompt += (f"\n\n## Pre-filled Certifier Prompt\n"
                        f"When you dispatch the certifier agent, use this EXACT prompt:\n"
                        f"<certifier_prompt>\n{filled_certifier}\n</certifier_prompt>")
+            _record_prompt_provenance(
+                project_dir,
+                session_id,
+                template=certifier_filename,
+                rendered_text=filled_certifier,
+                intent=intent,
+                spec=spec,
+                config=config,
+            )
 
         # Inject cross-run memory (opt-in via config)
         from otto.memory import inject_memory
         prompt = inject_memory(prompt, project_dir, config)
+        if main_prompt_template:
+            _record_prompt_provenance(
+                project_dir,
+                session_id,
+                template=main_prompt_template,
+                rendered_text=prompt,
+                intent=intent,
+                spec=spec,
+                config=config,
+            )
 
     logger.info("Starting agentic v3 build: %s", build_id)
     start_time = time.monotonic()
@@ -365,6 +465,13 @@ async def build_agentic_v3(
         rounds: list[dict[str, Any]] | None = None,
         child_session_ids: list[str] | None = None,
         total_duration: float | None = None,
+        last_activity: str | None = None,
+        last_tool_name: str | None = None,
+        last_tool_args_summary: str | None = None,
+        last_story_id: str | None = None,
+        last_operation_started_at: str | None = None,
+        last_round_failures: list[str] | None = None,
+        last_diagnosis: str | None = None,
     ) -> None:
         if not manage_checkpoint:
             return
@@ -387,6 +494,13 @@ async def build_agentic_v3(
             child_session_ids=child_session_ids,
             intent=intent,
             spec_cost=float(spec_cost or 0.0),
+            last_activity=last_activity,
+            last_tool_name=last_tool_name,
+            last_tool_args_summary=last_tool_args_summary,
+            last_story_id=last_story_id,
+            last_operation_started_at=last_operation_started_at,
+            last_round_failures=last_round_failures,
+            last_diagnosis=last_diagnosis,
         )
 
     # Pre-write an in_progress checkpoint so Ctrl-C/crash before the agent
@@ -423,7 +537,16 @@ async def build_agentic_v3(
         text = f"BUILD ERROR: {err.reason}"
         cost = float(err.total_cost_usd or 0.0)
         session_id = err.session_id or checkpoint_session_id
-        breakdown_data = {"round_timings": [], "build_duration_s": None}
+        breakdown_data = {
+            "round_timings": [],
+            "build_duration_s": None,
+            "last_activity": getattr(err, "last_activity", ""),
+            "last_tool_name": getattr(err, "last_tool_name", ""),
+            "last_tool_args_summary": getattr(err, "last_tool_args_summary", ""),
+            "last_story_id": getattr(err, "last_story_id", ""),
+            "last_operation_started_at": getattr(err, "last_operation_started_at", ""),
+            "phase_usage": {},
+        }
         if session_id:
             logger.info("Agent failed but session_id preserved (%s) — --resume supported", session_id)
         else:
@@ -469,34 +592,75 @@ async def build_agentic_v3(
     rounds = len(round_timings)
     total_certify_s = sum(end - start for start, end in round_timings)
     build_duration_s = breakdown_data.get("build_duration_s")
-    if rounds > 0:
-        breakdown["certify"] = {
-            "duration_s": round(total_certify_s, 1),
-            "rounds": rounds,
-        }
+    phase_usage = {
+        str(name): dict(value)
+        for name, value in (breakdown_data.get("phase_usage", {}) or {}).items()
+        if isinstance(value, dict)
+    }
+    if phase_usage:
+        for phase_name, usage in phase_usage.items():
+            phase_entry: dict[str, Any] = {}
+            if isinstance(usage.get("duration_s"), (int, float)):
+                phase_entry["duration_s"] = round(float(usage["duration_s"]), 1)
+            if isinstance(usage.get("cost_usd"), (int, float)) and float(usage["cost_usd"]) > 0:
+                phase_entry["cost_usd"] = _round_cost(float(usage["cost_usd"]))
+            if isinstance(usage.get("input_tokens"), (int, float)):
+                phase_entry["input_tokens"] = int(usage["input_tokens"])
+            if isinstance(usage.get("output_tokens"), (int, float)):
+                phase_entry["output_tokens"] = int(usage["output_tokens"])
+            if phase_name == "certify":
+                phase_entry["rounds"] = max(rounds, 1) if rounds > 0 else 1
+            if phase_entry:
+                breakdown[phase_name] = phase_entry
+        if (
+            not any(
+                isinstance(item.get("cost_usd"), (int, float))
+                for item in breakdown.values()
+                if isinstance(item, dict)
+            )
+            and not skip_qa
+            and isinstance(cost, (int, float))
+        ):
+            from otto.logstream import estimate_phase_costs
 
-    if isinstance(build_duration_s, int | float):
-        breakdown["build"] = {"duration_s": round(float(build_duration_s), 1)}
-    elif rounds > 0:
-        breakdown["build"] = {"duration_s": round(max(total_duration - total_certify_s, 0.0), 1)}
+            estimated_phase_costs = estimate_phase_costs(build_dir / "messages.jsonl", cost)
+            if estimated_phase_costs:
+                for phase_name, phase_costs in estimated_phase_costs.items():
+                    breakdown.setdefault(phase_name, {})
+                    cost_value = phase_costs.get("cost_usd")
+                    if isinstance(cost_value, int | float):
+                        breakdown[phase_name]["cost_usd"] = _round_cost(float(cost_value))
+                    if phase_costs.get("estimated") is True:
+                        breakdown[phase_name]["estimated"] = True
     else:
-        breakdown["build"] = {"duration_s": round(total_duration, 1)}
+        if rounds > 0:
+            breakdown["certify"] = {
+                "duration_s": round(total_certify_s, 1),
+                "rounds": rounds,
+            }
 
-    estimated_phase_costs = None
-    if not skip_qa and isinstance(cost, (int, float)):
-        from otto.logstream import estimate_phase_costs
+        if isinstance(build_duration_s, int | float):
+            breakdown["build"] = {"duration_s": round(float(build_duration_s), 1)}
+        elif rounds > 0:
+            breakdown["build"] = {"duration_s": round(max(total_duration - total_certify_s, 0.0), 1)}
+        else:
+            breakdown["build"] = {"duration_s": round(total_duration, 1)}
 
-        estimated_phase_costs = estimate_phase_costs(build_dir / "messages.jsonl", cost)
-    if estimated_phase_costs:
-        for phase_name, phase_costs in estimated_phase_costs.items():
-            phase_entry = breakdown.get(phase_name)
-            if not phase_entry:
-                continue
-            cost_value = phase_costs.get("cost_usd")
-            if isinstance(cost_value, int | float):
-                phase_entry["cost_usd"] = _round_cost(float(cost_value))
-            if phase_costs.get("estimated") is True:
-                phase_entry["estimated"] = True
+        estimated_phase_costs = None
+        if not skip_qa and isinstance(cost, (int, float)):
+            from otto.logstream import estimate_phase_costs
+
+            estimated_phase_costs = estimate_phase_costs(build_dir / "messages.jsonl", cost)
+        if estimated_phase_costs:
+            for phase_name, phase_costs in estimated_phase_costs.items():
+                phase_entry = breakdown.get(phase_name)
+                if not phase_entry:
+                    continue
+                cost_value = phase_costs.get("cost_usd")
+                if isinstance(cost_value, int | float):
+                    phase_entry["cost_usd"] = _round_cost(float(cost_value))
+                if phase_costs.get("estimated") is True:
+                    phase_entry["estimated"] = True
 
     # Summarize certify rounds for the checkpoint so forensic reads see real
     # history instead of `current_round: 0, rounds: []`.
@@ -509,6 +673,16 @@ async def build_agentic_v3(
                 "passed_count",
                 sum(1 for s in r.get("stories", []) if s.get("passed")),
             ),
+            "failing_story_ids": [
+                s.get("story_id", "")
+                for s in r.get("stories", []) or []
+                if not s.get("passed")
+            ],
+            "diagnosis": r.get("diagnosis", ""),
+            "fix_commits": list(r.get("fix_commits", []) or []),
+            "fix_diff_stat": r.get("fix_diff_stat", ""),
+            "still_failing_after_fix": list(r.get("still_failing_after_fix", []) or []),
+            "subagent_errors": list(r.get("subagent_errors", []) or []),
         }
         for i, r in enumerate(certify_rounds)
     ]
@@ -519,6 +693,17 @@ async def build_agentic_v3(
         rounds=_checkpoint_rounds,
         child_session_ids=list(breakdown_data.get("child_session_ids", []) or []),
         total_duration=total_duration,
+        last_activity=str(breakdown_data.get("last_activity", "") or ""),
+        last_tool_name=str(breakdown_data.get("last_tool_name", "") or ""),
+        last_tool_args_summary=str(breakdown_data.get("last_tool_args_summary", "") or ""),
+        last_story_id=str(breakdown_data.get("last_story_id", "") or ""),
+        last_operation_started_at=str(breakdown_data.get("last_operation_started_at", "") or ""),
+        last_round_failures=[
+            story.get("story_id", "")
+            for story in story_results
+            if not story.get("passed")
+        ],
+        last_diagnosis=overall_diagnosis,
     )
 
     # When QA is skipped (--no-qa), the agent won't produce certification markers.
@@ -626,6 +811,7 @@ async def build_agentic_v3(
             command=command,
             breakdown=breakdown or None,
             cost_info=total_cost_info,
+            runtime_path=runtime_path,
         )
 
     logger.info("Agentic v3 done: %s, %d/%d stories, %.1fs, $%.2f",
@@ -686,6 +872,7 @@ async def build_agentic_v3(
         tasks_failed=sum(1 for j in journeys if not j["passed"]),
         breakdown=breakdown,
         cost=total_cost_info,
+        child_session_ids=list(breakdown_data.get("child_session_ids", []) or []),
     )
 
 
@@ -902,6 +1089,7 @@ async def run_certify_fix_loop(
     build_id = session_id or _paths.new_session_id(project_dir)
     _paths.ensure_session_scaffold(project_dir, build_id, phase="improve")
     _paths.set_pointer(project_dir, _paths.LATEST_POINTER, build_id)
+    runtime_path = _write_runtime_artifact(project_dir, build_id)
     total_cost = resume_cost
     loop_start = time.monotonic()
     from otto.config import get_max_rounds
@@ -922,6 +1110,14 @@ async def run_certify_fix_loop(
     certify_phase_rounds = 0
     spec_cost_remaining = float(spec_cost or 0.0)
     pending_resume_session_id = resume_session_id or None
+    improve_dir = _paths.improve_dir(project_dir, build_id)
+    attempt_history_path = improve_dir / "attempt-history.json"
+    from otto.observability import load_attempt_history, update_input_provenance, write_attempt_history
+    update_input_provenance(
+        _paths.session_dir(project_dir, build_id),
+        intent=_intent_provenance_payload(intent, config),
+        spec=_spec_provenance_payload(spec, config),
+    )
 
     if record_intent:
         _append_intent(project_dir, intent, build_id)
@@ -936,6 +1132,14 @@ async def run_certify_fix_loop(
         *,
         phase: str | None = None,
         session_id: str = "",
+        child_session_ids: list[str] | None = None,
+        last_activity: str | None = None,
+        last_tool_name: str | None = None,
+        last_tool_args_summary: str | None = None,
+        last_story_id: str | None = None,
+        last_operation_started_at: str | None = None,
+        last_round_failures: list[str] | None = None,
+        last_diagnosis: str | None = None,
     ) -> None:
         """Write checkpoint with current loop state."""
         nonlocal checkpoint_phase
@@ -954,14 +1158,34 @@ async def run_certify_fix_loop(
             session_id=session_id,
             intent=intent,
             status=status,
+            child_session_ids=child_session_ids,
+            last_activity=last_activity,
+            last_tool_name=last_tool_name,
+            last_tool_args_summary=last_tool_args_summary,
+            last_story_id=last_story_id,
+            last_operation_started_at=last_operation_started_at,
+            last_round_failures=last_round_failures,
+            last_diagnosis=last_diagnosis,
         )
 
     # --- Certify + fix loop state (declared early so _paused_result can close over it) ---
     last_stories: list[dict[str, Any]] = []
+    last_diagnosis_text = ""
+    child_session_ids_seen: set[str] = set()
 
     def _paused_result(phase: str, *, use_rounds: int = 1) -> BuildResult:
         logger.warning("Run budget exhausted before %s — pausing", phase)
-        _save_cp(status="paused", phase=phase)
+        _save_cp(
+            status="paused",
+            phase=phase,
+            child_session_ids=sorted(child_session_ids_seen),
+            last_round_failures=[
+                story.get("story_id", "?")
+                for story in last_stories
+                if not story.get("passed")
+            ],
+            last_diagnosis=last_diagnosis_text,
+        )
         return BuildResult(
             passed=False, build_id=build_id, total_cost=total_cost,
             rounds=use_rounds,
@@ -979,7 +1203,16 @@ async def run_certify_fix_loop(
         build_config["skip_product_qa"] = True
 
         logger.info("Certify-fix loop: initial build")
-        _save_cp(phase="initial_build")
+        _save_cp(
+            phase="initial_build",
+            child_session_ids=sorted(child_session_ids_seen),
+            last_round_failures=[
+                story.get("story_id", "?")
+                for story in last_stories
+                if not story.get("passed")
+            ],
+            last_diagnosis=last_diagnosis_text,
+        )
         # Pre-check budget before initial build.
         if budget is not None and budget.exhausted():
             return _paused_result("initial_build")
@@ -1003,20 +1236,42 @@ async def run_certify_fix_loop(
             total_cost += float(err.total_cost_usd or 0.0)
             build_phase_cost += float(err.total_cost_usd or 0.0)
             logger.warning("Initial build hit budget/timeout: %s", err.reason)
-            _save_cp(status="paused", phase="initial_build", session_id=err.session_id or "")
+            _save_cp(
+                status="paused",
+                phase="initial_build",
+                session_id=err.session_id or "",
+                child_session_ids=sorted(child_session_ids_seen),
+                last_activity=getattr(err, "last_activity", ""),
+                last_tool_name=getattr(err, "last_tool_name", ""),
+                last_tool_args_summary=getattr(err, "last_tool_args_summary", ""),
+                last_story_id=getattr(err, "last_story_id", ""),
+                last_operation_started_at=getattr(err, "last_operation_started_at", ""),
+                last_round_failures=[
+                    story.get("story_id", "?")
+                    for story in last_stories
+                    if not story.get("passed")
+                ],
+                last_diagnosis=last_diagnosis_text,
+            )
             return BuildResult(passed=False, build_id=build_id, total_cost=total_cost)
         build_phase_duration += time.monotonic() - build_call_start
         total_cost += result.total_cost
         build_cost = max(float(result.total_cost) - spec_cost_remaining, 0.0)
         build_phase_cost += build_cost
         spec_cost_remaining = 0.0
+        child_session_ids_seen.update(result.child_session_ids)
         record_build(project_dir, round_id, result, session_id=build_id)
 
     # --- Certify + fix loop ---
     passed = False
     actual_rounds = 0
     consecutive_passes = 0
-    previous_attempts: list[dict[str, Any]] = []
+    previous_attempts: list[dict[str, Any]] = load_attempt_history(attempt_history_path)
+    round_history_by_round: dict[int, dict[str, Any]] = {
+        int(item.get("round", 0) or 0): item
+        for item in checkpoint_rounds
+        if isinstance(item, dict) and int(item.get("round", 0) or 0) > 0
+    }
     MAX_RETRIES = 2
 
     for round_num in range(start_round, max_rounds + 1):
@@ -1026,7 +1281,16 @@ async def run_certify_fix_loop(
             # Each certify round gets its own round_id
             round_id = init_round(project_dir, f"certify round {round_num}", session_id=build_id)
 
-            _save_cp(phase="certify")
+            _save_cp(
+                phase="certify",
+                child_session_ids=sorted(child_session_ids_seen),
+                last_round_failures=[
+                    story.get("story_id", "?")
+                    for story in last_stories
+                    if not story.get("passed")
+                ],
+                last_diagnosis=last_diagnosis_text,
+            )
 
             # Pre-check budget before entering the certify call.
             if budget is not None and budget.exhausted():
@@ -1073,6 +1337,7 @@ async def run_certify_fix_loop(
             total_cost += report.cost_usd
             stories = report.story_results
             last_stories = stories
+            child_session_ids_seen.update(getattr(report, "child_session_ids", []) or [])
 
             record_certifier(project_dir, round_id, report, stories, session_id=build_id)
 
@@ -1088,6 +1353,15 @@ async def run_certify_fix_loop(
                                  f"certify round {round_num}", session_id=build_id)
 
             failures = [s for s in stories if not s.get("passed")]
+            failing_story_ids = [s.get("story_id", "?") for s in failures]
+            diagnosis_text = str(getattr(report, "diagnosis", "") or "")
+            last_diagnosis_text = diagnosis_text
+            if previous_attempts and previous_attempts[-1].get("round") == round_num - 1:
+                previous_attempts[-1]["still_failing_after_fix"] = list(failing_story_ids)
+                write_attempt_history(attempt_history_path, previous_attempts)
+                prior_round = round_history_by_round.get(round_num - 1)
+                if prior_round is not None:
+                    prior_round["still_failing_after_fix"] = list(failing_story_ids)
             result_str = (f"FAIL {len(stories) - len(failures)}/{len(stories)}"
                           if failures else
                           f"PASS {len(stories) - len(failures)}/{len(stories)}")
@@ -1111,14 +1385,27 @@ async def run_certify_fix_loop(
                 "stories_tested": len(stories),
                 "stories_passed": len(stories) - len(failures),
                 "cost": float(report.cost_usd),
+                "result": result_str,
+                "failing_story_ids": list(failing_story_ids),
+                "diagnosis": diagnosis_text,
+                "fix_commits": [],
+                "fix_diff_stat": "",
+                "still_failing_after_fix": [],
+                "subagent_errors": list(getattr(report, "subagent_errors", []) or []),
             }
+            round_history_by_round[round_num] = round_summary
 
             # Determine if we should stop
             if certifier_mode == "target":
                 if metric_met is True:
                     checkpoint_rounds.append(round_summary)
                     last_completed_round = round_num
-                    _save_cp(phase="round_complete")
+                    _save_cp(
+                        phase="round_complete",
+                        child_session_ids=sorted(child_session_ids_seen),
+                        last_round_failures=list(failing_story_ids),
+                        last_diagnosis=diagnosis_text,
+                    )
                     consecutive_passes += 1
                     if strict_mode and consecutive_passes < 2 and round_num < max_rounds:
                         console.print(
@@ -1135,7 +1422,12 @@ async def run_certify_fix_loop(
                 if metric_met is None:
                     checkpoint_rounds.append(round_summary)
                     last_completed_round = round_num
-                    _save_cp(phase="round_complete")
+                    _save_cp(
+                        phase="round_complete",
+                        child_session_ids=sorted(child_session_ids_seen),
+                        last_round_failures=list(failing_story_ids),
+                        last_diagnosis=diagnosis_text,
+                    )
                     logger.warning(
                         "Certify-fix loop: stopping on round %d because certifier omitted METRIC_MET",
                         round_num,
@@ -1144,7 +1436,12 @@ async def run_certify_fix_loop(
             elif not failures:
                 checkpoint_rounds.append(round_summary)
                 last_completed_round = round_num
-                _save_cp(phase="round_complete")
+                _save_cp(
+                    phase="round_complete",
+                    child_session_ids=sorted(child_session_ids_seen),
+                    last_round_failures=list(failing_story_ids),
+                    last_diagnosis=diagnosis_text,
+                )
                 consecutive_passes += 1
                 if strict_mode and consecutive_passes < 2 and round_num < max_rounds:
                     console.print(
@@ -1162,13 +1459,23 @@ async def run_certify_fix_loop(
             if round_num >= max_rounds:
                 checkpoint_rounds.append(round_summary)
                 last_completed_round = round_num
-                _save_cp(phase="round_complete")
+                _save_cp(
+                    phase="round_complete",
+                    child_session_ids=sorted(child_session_ids_seen),
+                    last_round_failures=list(failing_story_ids),
+                    last_diagnosis=diagnosis_text,
+                )
                 logger.info("Certify-fix loop: max rounds (%d) reached", max_rounds)
                 break
 
             # --- Fix round with retry ---
             round_id = init_round(project_dir, f"fix round {round_num}", session_id=build_id)
-            _save_cp(phase="fix")
+            _save_cp(
+                phase="fix",
+                child_session_ids=sorted(child_session_ids_seen),
+                last_round_failures=list(failing_story_ids),
+                last_diagnosis=diagnosis_text,
+            )
 
             fix_lines = [
                 "Fix these issues found by the certifier.\n",
@@ -1179,11 +1486,14 @@ async def run_certify_fix_loop(
                 fix_lines.append("## Previous Attempts (DO NOT repeat these)")
                 for attempt in previous_attempts:
                     fix_lines.append(f"\n### Round {attempt['round']}")
-                    fix_lines.append(f"**Tried:** {attempt['commits']}")
-                    fix_lines.append(f"**Changed:** {attempt['diff_stat']}")
-                    still_failing = attempt.get("still_failing", [])
+                    fix_lines.append(f"**Tried:** {attempt.get('fix_commit_sha') or '(no commits)'}")
+                    fix_lines.append(f"**Changed:** {attempt.get('fix_diff_stat') or '(no changes)'}")
+                    still_failing = attempt.get("still_failing_after_fix", [])
                     if still_failing:
                         fix_lines.append(f"**Still failing:** {', '.join(still_failing)}")
+                    diagnosis = attempt.get("diagnosis")
+                    if diagnosis:
+                        fix_lines.append(f"**Diagnosis:** {diagnosis}")
                 fix_lines.append("")
 
             fix_lines.append("## Current Failures\n")
@@ -1248,6 +1558,7 @@ async def run_certify_fix_loop(
             if fix_result:
                 total_cost += fix_result.total_cost
                 build_phase_cost += float(fix_result.total_cost)
+                child_session_ids_seen.update(fix_result.child_session_ids)
                 record_build(project_dir, round_id, fix_result, session_id=build_id)
                 append_journal(project_dir, round_id, f"fix round {round_num}",
                                "done" if fix_result.passed else "warning",
@@ -1266,15 +1577,27 @@ async def run_certify_fix_loop(
                     ["git", "diff", "--stat", head_before_fix, head_after_fix],
                     cwd=str(project_dir), capture_output=True, text=True,
                 ).stdout.strip().split("\n")[-1].strip()
-            previous_attempts.append({
+            fix_commit_sha = head_after_fix if head_before_fix and head_after_fix and head_before_fix != head_after_fix else ""
+            attempt_record = {
                 "round": round_num,
-                "commits": commits or "(no commits)",
-                "diff_stat": diff_stat,
-                "still_failing": [f.get("story_id", "?") for f in failures],
-            })
+                "failing_story_ids": list(failing_story_ids),
+                "diagnosis": diagnosis_text,
+                "fix_commit_sha": fix_commit_sha,
+                "fix_diff_stat": diff_stat,
+                "still_failing_after_fix": [],
+            }
+            previous_attempts.append(attempt_record)
+            write_attempt_history(attempt_history_path, previous_attempts)
+            round_summary["fix_commits"] = [fix_commit_sha] if fix_commit_sha else []
+            round_summary["fix_diff_stat"] = diff_stat
             checkpoint_rounds.append(round_summary)
             last_completed_round = round_num
-            _save_cp(phase="round_complete")
+            _save_cp(
+                phase="round_complete",
+                child_session_ids=sorted(child_session_ids_seen),
+                last_round_failures=list(failing_story_ids),
+                last_diagnosis=diagnosis_text,
+            )
 
         except AgentCallError as err:
             # Budget exhausted or agent timed out mid-round. Don't run the
@@ -1287,7 +1610,22 @@ async def run_certify_fix_loop(
                 build_phase_cost += partial_cost
             logger.warning("Round %d paused (%s)", round_num, err.reason)
             try:
-                _save_cp(status="paused", session_id=err.session_id or "")
+                _save_cp(
+                    status="paused",
+                    session_id=err.session_id or "",
+                    child_session_ids=sorted(child_session_ids_seen),
+                    last_activity=getattr(err, "last_activity", ""),
+                    last_tool_name=getattr(err, "last_tool_name", ""),
+                    last_tool_args_summary=getattr(err, "last_tool_args_summary", ""),
+                    last_story_id=getattr(err, "last_story_id", ""),
+                    last_operation_started_at=getattr(err, "last_operation_started_at", ""),
+                    last_round_failures=[
+                        story.get("story_id", "?")
+                        for story in last_stories
+                        if not story.get("passed")
+                    ],
+                    last_diagnosis=last_diagnosis_text,
+                )
             except OSError as exc:
                 logger.warning("Failed to mark checkpoint paused: %s", exc)
             return BuildResult(
@@ -1298,7 +1636,17 @@ async def run_certify_fix_loop(
         except KeyboardInterrupt:
             logger.info("Paused at round %d", round_num)
             try:
-                _save_cp(status="paused", session_id=pending_resume_session_id or "")
+                _save_cp(
+                    status="paused",
+                    session_id=pending_resume_session_id or "",
+                    child_session_ids=sorted(child_session_ids_seen),
+                    last_round_failures=[
+                        story.get("story_id", "?")
+                        for story in last_stories
+                        if not story.get("passed")
+                    ],
+                    last_diagnosis=last_diagnosis_text,
+                )
             except OSError as exc:
                 logger.warning("Failed to mark checkpoint paused: %s", exc)
             raise
@@ -1350,6 +1698,7 @@ async def run_certify_fix_loop(
         intent=intent,
         command=command,
         breakdown=split_breakdown or None,
+        runtime_path=runtime_path,
     )
     _append_session_history(
         project_dir,
@@ -1375,6 +1724,7 @@ async def run_certify_fix_loop(
         tasks_passed=sum(1 for j in journeys if j.get("passed")),
         tasks_failed=sum(1 for j in journeys if not j.get("passed")),
         breakdown=split_breakdown,
+        child_session_ids=sorted(child_session_ids_seen),
     )
 
 

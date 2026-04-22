@@ -9,12 +9,14 @@ import os
 import re
 import signal
 import tempfile
+import traceback
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
 from otto.costs import build_cost_payload, normalize_usage
+from otto.observability import iso_timestamp, write_crash_artifact
 
 _SDK_IMPORT_ERROR_MESSAGE = ""
 
@@ -123,6 +125,7 @@ class AgentOptions:
     disallowed_tools: list[str] | None = None
     output_format: dict[str, Any] | None = None
     max_subagent_dispatches: int | None = None
+    debug_unredacted: bool | None = None
 
 
 # Backward-compatible name used throughout the codebase and tests.
@@ -184,6 +187,8 @@ def make_agent_options(
     if opts.max_subagent_dispatches is None:
         max_rounds = int(cfg.get("max_certify_rounds", get_max_rounds(cfg)))
         opts.max_subagent_dispatches = max(20, max_rounds * 20)
+    if opts.debug_unredacted is None:
+        opts.debug_unredacted = bool(cfg.get("debug_unredacted"))
     opts.provider = agent_provider(cfg, agent_type)
     model = agent_model(cfg, agent_type)
     if model:
@@ -207,6 +212,11 @@ class AgentCallError(Exception):
         reason: str,
         session_id: str = "",
         total_cost_usd: float | None = None,
+        *,
+        crash_path: str = "",
+        traceback_text: str = "",
+        last_events: list[dict[str, Any]] | None = None,
+        last_provider_stderr: str = "",
     ):
         from otto.redaction import redact_text
 
@@ -215,6 +225,15 @@ class AgentCallError(Exception):
         self.total_cost_usd = (
             float(total_cost_usd) if isinstance(total_cost_usd, (int, float)) else None
         )
+        self.crash_path = crash_path
+        self.traceback_text = traceback_text
+        self.last_events = list(last_events or [])
+        self.last_provider_stderr = last_provider_stderr
+        self.last_activity = ""
+        self.last_tool_name = ""
+        self.last_tool_args_summary = ""
+        self.last_story_id = ""
+        self.last_operation_started_at = ""
         super().__init__(self.reason)
 
 
@@ -392,15 +411,18 @@ async def run_agent_with_timeout(
         verbose=verbose,
         strict_mode=strict_mode,
         project_dir=project_dir,
+        debug_unredacted=bool(getattr(options, "debug_unredacted", False) or False),
     )
     close_fh = callbacks.pop("_close")
     narrative = callbacks.pop("_narrative")
+    jsonl_writer = callbacks.pop("_jsonl")
     # Mutable bag — streaming handlers update it so timeout/crash paths can
     # recover the last-known session_id for a resumable checkpoint.
     agent_state: dict[str, Any] = {
         "session_id": "",
         "child_session_ids": [],
         "total_cost_usd": None,
+        "provider_stderr": "",
     }
 
     def _append_narrative(line: str) -> None:
@@ -425,6 +447,28 @@ async def run_agent_with_timeout(
         if mins:
             return f"{hours}h {mins:02d}m {seconds:02d}s"
         return f"{hours}h 00m {seconds:02d}s"
+
+    def _write_crash_details(
+        exc: BaseException,
+        *,
+        traceback_text: str = "",
+    ) -> str:
+        session_dir = log_dir.parent
+        payload = {
+            "occurred_at": iso_timestamp(),
+            "phase": (phase_name or "").strip().lower() or "build",
+            "exception_class": exc.__class__.__name__,
+            "exception_message": str(exc),
+            "traceback": traceback_text,
+            "provider": _provider_name(options),
+            "model": getattr(options, "model", None) or "",
+            "agent_session_id": agent_state.get("session_id", ""),
+            "last_n_events": jsonl_writer.last_records(20),
+            "last_provider_stderr": agent_state.get("provider_stderr", "") or "",
+        }
+        crash_path = write_crash_artifact(session_dir, payload)
+        _append_narrative(f"crash details: {crash_path}")
+        return str(crash_path)
 
     heartbeat_task: asyncio.Task[None] | None = None
     if on_terminal_event is not None:
@@ -457,16 +501,29 @@ async def run_agent_with_timeout(
                 "build_duration_s": narrative.build_duration_or_none(),
                 "recovered_tool_errors": 0,
                 "child_session_ids": [],
+                "last_activity": narrative.latest_activity(),
+                "last_tool_name": narrative.latest_tool_name(),
+                "last_tool_args_summary": narrative.latest_tool_args_summary(),
+                "last_story_id": narrative.current_story_id(),
+                "last_operation_started_at": narrative.last_operation_started_at(),
+                "subagent_errors": [
+                    item for item in jsonl_writer.last_records(40)
+                    if item.get("type") == "subagent_error"
+                ],
             }
             finalize_stats = narrative.finalize(None)
             breakdown_data["recovered_tool_errors"] = int(
                 finalize_stats.get("recovered_tool_errors", 0)
             )
-            raise AgentCallError(
+            err = AgentCallError(
                 str(reason),
                 session_id=session_id,
                 total_cost_usd=cost,
             )
+            err.crash_path = _write_crash_details(err)
+            err.last_events = jsonl_writer.last_records(20)
+            err.last_provider_stderr = agent_state.get("provider_stderr", "") or ""
+            raise err
         child_session_ids = [
             sid for sid in agent_state.get("child_session_ids", []) or []
             if sid and sid != session_id
@@ -482,6 +539,16 @@ async def run_agent_with_timeout(
             "recovered_tool_errors": 0,
             "child_session_ids": child_session_ids,
             "cost": cost_payload,
+            "phase_usage": jsonl_writer.phase_breakdown(),
+            "last_activity": narrative.latest_activity(),
+            "last_tool_name": narrative.latest_tool_name(),
+            "last_tool_args_summary": narrative.latest_tool_args_summary(),
+            "last_story_id": narrative.current_story_id(),
+            "last_operation_started_at": narrative.last_operation_started_at(),
+            "subagent_errors": [
+                item for item in jsonl_writer.last_records(40)
+                if item.get("type") == "subagent_error"
+            ],
         }
         phase = (phase_name or "").lower()
         finalize_breakdown: dict[str, dict[str, float | int]] | None = None
@@ -531,14 +598,26 @@ async def run_agent_with_timeout(
             finalize_stats.get("recovered_tool_errors", 0)
         )
         return text, cost, session_id, breakdown_data
-    except AgentCallError:
+    except AgentCallError as err:
         from otto.pipeline import _cleanup_orphan_processes
 
         _cleanup_orphan_processes(
             project_dir,
             process_group_id=agent_state.get("process_group_id"),
         )
-        raise
+        err.session_id = err.session_id or agent_state.get("session_id", "")
+        if err.total_cost_usd is None and agent_state.get("total_cost_usd") is not None:
+            err.total_cost_usd = float(agent_state.get("total_cost_usd"))
+        if not err.crash_path:
+            err.crash_path = _write_crash_details(err, traceback_text=err.traceback_text)
+        err.last_events = jsonl_writer.last_records(20)
+        err.last_provider_stderr = agent_state.get("provider_stderr", "") or ""
+        err.last_activity = narrative.latest_activity()
+        err.last_tool_name = narrative.latest_tool_name()
+        err.last_tool_args_summary = narrative.latest_tool_args_summary()
+        err.last_story_id = narrative.current_story_id()
+        err.last_operation_started_at = narrative.last_operation_started_at()
+        raise err
     except asyncio.TimeoutError:
         log.error("Agent timed out after %ds", timeout)
         _append_narrative(f"\u2501\u2501\u2501 Timed out after {timeout}s")
@@ -547,11 +626,20 @@ async def run_agent_with_timeout(
             project_dir,
             process_group_id=agent_state.get("process_group_id"),
         )
-        raise AgentCallError(
+        err = AgentCallError(
             f"Timed out after {timeout}s",
             session_id=agent_state.get("session_id", ""),
             total_cost_usd=agent_state.get("total_cost_usd"),
         )
+        err.crash_path = _write_crash_details(err)
+        err.last_events = jsonl_writer.last_records(20)
+        err.last_provider_stderr = agent_state.get("provider_stderr", "") or ""
+        err.last_activity = narrative.latest_activity()
+        err.last_tool_name = narrative.latest_tool_name()
+        err.last_tool_args_summary = narrative.latest_tool_args_summary()
+        err.last_story_id = narrative.current_story_id()
+        err.last_operation_started_at = narrative.last_operation_started_at()
+        raise err
     except KeyboardInterrupt:
         _append_narrative("\u2501\u2501\u2501 KeyboardInterrupt")
         from otto.pipeline import _cleanup_orphan_processes
@@ -568,11 +656,22 @@ async def run_agent_with_timeout(
             project_dir,
             process_group_id=agent_state.get("process_group_id"),
         )
-        raise AgentCallError(
+        tb = traceback.format_exc()
+        err = AgentCallError(
             f"Agent crashed: {exc}",
             session_id=agent_state.get("session_id", ""),
             total_cost_usd=agent_state.get("total_cost_usd"),
         )
+        err.traceback_text = tb
+        err.crash_path = _write_crash_details(err, traceback_text=tb)
+        err.last_events = jsonl_writer.last_records(20)
+        err.last_provider_stderr = agent_state.get("provider_stderr", "") or ""
+        err.last_activity = narrative.latest_activity()
+        err.last_tool_name = narrative.latest_tool_name()
+        err.last_tool_args_summary = narrative.latest_tool_args_summary()
+        err.last_story_id = narrative.current_story_id()
+        err.last_operation_started_at = narrative.last_operation_started_at()
+        raise err
     finally:
         if heartbeat_task is not None:
             heartbeat_task.cancel()
@@ -1207,6 +1306,8 @@ async def _query_codex(
             if not line:
                 continue
             raw_lines.append(line)
+            if state is not None:
+                state["provider_stderr"] = "\n".join(raw_lines[-50:])
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
@@ -1416,6 +1517,8 @@ async def _query_codex(
         if not saw_result or return_code != 0:
             error_lines = raw_lines[-20:]
             error_text = "\n".join(error_lines) or f"codex exited with code {return_code}"
+            if state is not None:
+                state["provider_stderr"] = error_text
             yield ResultMessage(
                 subtype="error",
                 is_error=True,

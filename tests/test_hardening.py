@@ -2914,6 +2914,75 @@ class TestCheckpointRegression:
         assert checkpoint["agent_session_id"] == "sdk-split-123"
 
     @pytest.mark.asyncio
+    async def test_split_loop_persists_attempt_history_and_rich_round_state(self, tmp_git_repo):
+        from otto import paths as _paths
+        from otto.pipeline import run_certify_fix_loop
+
+        reports = [
+            type("Report", (), {
+                "cost_usd": 0.2,
+                "story_results": [{"story_id": "auth", "summary": "auth fails", "passed": False}],
+                "metric_met": None,
+                "metric_value": "",
+                "diagnosis": "Missing auth check",
+                "child_session_ids": ["child-cert-1"],
+                "subagent_errors": [],
+            })(),
+            type("Report", (), {
+                "cost_usd": 0.2,
+                "story_results": [{"story_id": "auth", "summary": "auth fails", "passed": False}],
+                "metric_met": None,
+                "metric_value": "",
+                "diagnosis": "Still missing auth check",
+                "child_session_ids": ["child-cert-2"],
+                "subagent_errors": [],
+            })(),
+        ]
+
+        async def fake_certifier(*args, **kwargs):
+            return reports.pop(0)
+
+        async def fake_fix(*args, **kwargs):
+            return BuildResult(
+                passed=True,
+                build_id="split-run-1",
+                total_cost=0.1,
+                child_session_ids=["child-fix-1"],
+            )
+
+        with patch("otto.certifier.run_agentic_certifier", side_effect=fake_certifier), \
+             patch("otto.pipeline.build_agentic_v3", side_effect=fake_fix):
+            result = await run_certify_fix_loop(
+                "split improve",
+                tmp_git_repo,
+                {"max_certify_rounds": 2},
+                skip_initial_build=True,
+                session_id="split-run-1",
+                command="improve.bugs",
+            )
+
+        assert result.passed is False
+
+        attempt_history = json.loads(
+            (_paths.improve_dir(tmp_git_repo, "split-run-1") / "attempt-history.json").read_text()
+        )
+        assert attempt_history == [{
+            "round": 1,
+            "failing_story_ids": ["auth"],
+            "diagnosis": "Missing auth check",
+            "fix_commit_sha": "",
+            "fix_diff_stat": "(no changes)",
+            "still_failing_after_fix": ["auth"],
+        }]
+
+        checkpoint = json.loads(_paths.session_checkpoint(tmp_git_repo, "split-run-1").read_text())
+        assert checkpoint["child_session_ids"] == ["child-cert-1", "child-cert-2", "child-fix-1"]
+        assert checkpoint["rounds"][0]["failing_story_ids"] == ["auth"]
+        assert checkpoint["rounds"][0]["diagnosis"] == "Missing auth check"
+        assert checkpoint["rounds"][0]["fix_diff_stat"] == "(no changes)"
+        assert checkpoint["rounds"][0]["still_failing_after_fix"] == ["auth"]
+
+    @pytest.mark.asyncio
     async def test_split_resume_reuses_paused_agent_session_id(self, tmp_git_repo):
         from otto.pipeline import run_certify_fix_loop
 

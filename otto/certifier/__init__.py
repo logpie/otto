@@ -787,6 +787,10 @@ def _round_history(
         round_diagnosis = _diagnosis_text(round_data.get("diagnosis", ""), verdict_text)
         duration_s = durations[index] if index < len(durations) else 0.0
         cost_usd = raw_costs[index] if index < len(raw_costs) else 0.0
+        fix_commits = list(round_data.get("fix_commits", []) or [])
+        fix_diff_stat = str(round_data.get("fix_diff_stat", "") or "")
+        still_failing_after_fix = list(round_data.get("still_failing_after_fix", []) or [])
+        subagent_errors = list(round_data.get("subagent_errors", []) or [])
         history.append(
             {
                 "round": round_data.get("round", index + 1),
@@ -802,6 +806,10 @@ def _round_history(
                 "duration_human": _human_duration(duration_s),
                 "cost_usd": round(cost_usd, 4),
                 "cost_estimated": not bool(round_timings),
+                "fix_commits": fix_commits,
+                "fix_diff_stat": fix_diff_stat,
+                "still_failing_after_fix": still_failing_after_fix,
+                "subagent_errors": subagent_errors,
             }
         )
     return history
@@ -931,6 +939,7 @@ def _artifacts(
         _artifact_entry(report_dir, "proof-of-work.json", report_dir / "proof-of-work.json", present=True),
         _artifact_entry(report_dir, "narrative.log", log_dir / "narrative.log"),
         _artifact_entry(report_dir, "messages.jsonl", log_dir / "messages.jsonl"),
+        _artifact_entry(report_dir, "runtime.json", session_dir / "runtime.json"),
         _artifact_entry(report_dir, "session", session_dir),
     ]
     if spec_path:
@@ -1917,6 +1926,15 @@ async def run_agentic_certifier(
     ]
     paths.ensure_session_scaffold(project_dir, session_id, phase="certify")
     paths.set_pointer(project_dir, paths.LATEST_POINTER, session_id)
+    from otto.pipeline import _runtime_metadata
+    from otto.observability import update_input_provenance, write_runtime_metadata, sha256_text
+
+    write_runtime_metadata(paths.session_dir(project_dir, session_id), _runtime_metadata(project_dir))
+    update_input_provenance(
+        paths.session_dir(project_dir, session_id),
+        intent={"source": "cli-argument", "fallback_reason": "", "resolved_text": intent, "sha256": sha256_text(intent)},
+        spec={"source": "none", "path": "", "sha256": ""},
+    )
     run_id = session_id
     report_dir = paths.certify_dir(project_dir, session_id)
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -1974,6 +1992,9 @@ async def run_agentic_certifier(
         story_results=story_results,
         metric_value=parsed.metric_value,
         metric_met=parsed.metric_met,
+        diagnosis=parsed.diagnosis,
+        child_session_ids=list(breakdown.get("child_session_ids", []) or []),
+        subagent_errors=list(breakdown.get("subagent_errors", []) or []),
     )
     total_cost_info = coerce_cost_payload(
         breakdown.get("cost"),

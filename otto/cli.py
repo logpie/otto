@@ -454,6 +454,9 @@ async def _run_spec_phase(
         spec_hash,
         validate_spec,
     )
+    from otto.observability import sha256_text, update_input_provenance
+    from otto.pipeline import _runtime_metadata
+    from otto.observability import write_runtime_metadata
 
     from otto import paths as _paths
     # Determine run_id (unified session_id): resume preserves, otherwise fresh.
@@ -462,6 +465,17 @@ async def _run_spec_phase(
     run_dir = _paths.spec_dir(project_dir, run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
     _paths.set_pointer(project_dir, _paths.LATEST_POINTER, run_id)
+    write_runtime_metadata(_paths.session_dir(project_dir, run_id), _runtime_metadata(project_dir))
+    update_input_provenance(
+        _paths.session_dir(project_dir, run_id),
+        intent={
+            "source": str(config.get("_intent_source") or "cli-argument"),
+            "fallback_reason": str(config.get("_intent_fallback_reason") or ""),
+            "resolved_text": intent,
+            "sha256": sha256_text(intent),
+        },
+        spec={"source": "none", "path": "", "sha256": ""},
+    )
 
     # Resume fast-path: already approved.
     if resume_state.resumed and spec_phase_completed(resume_state.phase):
@@ -507,6 +521,8 @@ async def _run_spec_phase(
 
     try:
         if spec_file:
+            config["_spec_source"] = "--spec-file"
+            config["_spec_path"] = str(spec_file)
             # External spec: load, validate, skip agent.
             spec_path_out = run_dir / "spec.md"
             run_dir.mkdir(parents=True, exist_ok=True)
@@ -541,6 +557,10 @@ async def _run_spec_phase(
                 spec_version=current_spec_version,
                 spec_cost=spec_cost,
             )
+            update_input_provenance(
+                _paths.session_dir(project_dir, run_id),
+                spec={"source": "--spec-file", "path": str(spec_path_out), "sha256": current_spec_hash},
+            )
         elif resume_mid_review or resume_mid_spec_with_file:
             # Re-open the review gate using existing on-disk spec.
             existing_path = Path(resume_state.spec_path)
@@ -560,6 +580,8 @@ async def _run_spec_phase(
                     intent, project_dir, run_dir, config,
                     version=resume_state.spec_version, budget=budget,
                 )
+                config["_spec_source"] = "spec-agent"
+                config["_spec_path"] = str(spec_result.path)
                 spec_cost += spec_result.cost
                 spec_duration += spec_result.duration_s
                 current_phase = "spec_review"
@@ -571,6 +593,10 @@ async def _run_spec_phase(
                     split_mode=split_mode,
                     intent=intent, spec_path=str(spec_result.path),
                     spec_hash=current_spec_hash, spec_version=current_spec_version, spec_cost=spec_cost,
+                )
+                update_input_provenance(
+                    _paths.session_dir(project_dir, run_id),
+                    spec={"source": "spec-agent", "path": str(spec_result.path), "sha256": current_spec_hash},
                 )
             else:
                 spec_result = SpecResult(
@@ -598,6 +624,8 @@ async def _run_spec_phase(
             spec_result = await run_spec_agent(
                 intent, project_dir, run_dir, config, budget=budget,
             )
+            config["_spec_source"] = "spec-agent"
+            config["_spec_path"] = str(spec_result.path)
             spec_cost += spec_result.cost
             spec_duration += spec_result.duration_s
             current_phase = "spec_review"
@@ -609,6 +637,10 @@ async def _run_spec_phase(
                 split_mode=split_mode,
                 intent=intent, spec_path=str(spec_result.path),
                 spec_hash=current_spec_hash, spec_version=current_spec_version, spec_cost=spec_cost,
+            )
+            update_input_provenance(
+                _paths.session_dir(project_dir, run_id),
+                spec={"source": "spec-agent", "path": str(spec_result.path), "sha256": current_spec_hash},
             )
 
         # Review gate
@@ -631,6 +663,10 @@ async def _run_spec_phase(
             split_mode=split_mode,
             intent=intent, spec_path=str(approved.path),
             spec_hash=current_spec_hash, spec_version=current_spec_version, spec_cost=spec_cost,
+        )
+        update_input_provenance(
+            _paths.session_dir(project_dir, run_id),
+            spec={"source": str(config.get("_spec_source") or "spec-agent"), "path": str(approved.path), "sha256": current_spec_hash},
         )
         return run_id, approved.content, spec_cost, spec_duration
 
@@ -779,6 +815,8 @@ def _print_build_result(
     from otto import paths as _paths
 
     pow_html = _paths.certify_dir(project_dir, result.build_id) / "proof-of-work.html"
+    runtime_json = _paths.session_dir(project_dir, result.build_id) / "runtime.json"
+    crash_json = _paths.session_dir(project_dir, result.build_id) / "crash.json"
 
     if result.passed:
         console.print()
@@ -803,6 +841,19 @@ def _print_build_result(
     else:
         console.print(f"  Tasks: {result.tasks_passed} passed, {result.tasks_failed} failed")
     console.print(f"  {_spent_line(result, build_duration)}")
+    if runtime_json.exists():
+        try:
+            runtime = json.loads(runtime_json.read_text())
+            console.print(
+                "  Runtime: "
+                f"otto {runtime.get('otto_version', '?')}, "
+                f"python {runtime.get('python_version', '?')}, "
+                f"{str(runtime.get('platform', '?')).split()[0]} — see runtime.json"
+            )
+        except Exception:
+            console.print("  Runtime: see otto_logs/latest/runtime.json")
+    if crash_json.exists():
+        console.print(f"  crash details: {crash_json}")
     if pow_html.exists():
         console.print("  View report:  otto_logs/latest/certify/proof-of-work.html")
     console.print("  Tail live log:  otto_logs/latest/build/narrative.log")
@@ -839,6 +890,7 @@ def _exit_for_lock_busy(exc) -> None:
 @click.option("--effort", default=None, help="Override effort level for every agent: low | medium | high | max")
 @click.option("--strict", is_flag=True, help="Require two consecutive PASS rounds before stopping")
 @click.option("--verbose", is_flag=True, help="Show detailed live progress, including tool-call counts")
+@click.option("--debug-unredacted", is_flag=True, help="Also write unredacted raw logs under sessions/<id>/raw/ (do not share)")
 @click.option("--resume", is_flag=True, help="Resume from last checkpoint (requires an in-progress run)")
 @click.option("--spec", is_flag=True, help="Generate a reviewable spec before building")
 @click.option("--spec-file", type=click.Path(exists=False, dir_okay=False, path_type=Path),
@@ -847,7 +899,7 @@ def _exit_for_lock_busy(exc) -> None:
 @click.option("--force", is_flag=True, help="Discard an active paused spec run and start fresh")
 @click.option("--allow-dirty", is_flag=True, help="Proceed even if the repo has tracked modifications, staged changes, or an in-progress git operation")
 @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
-def build(intent, no_qa, fast, standard_, thorough, split, rounds, budget, max_turns, model, provider, effort, strict, verbose, resume, spec, spec_file, yes, force, allow_dirty, break_lock):
+def build(intent, no_qa, fast, standard_, thorough, split, rounds, budget, max_turns, model, provider, effort, strict, verbose, debug_unredacted, resume, spec, spec_file, yes, force, allow_dirty, break_lock):
     """Build a product from a natural language intent.
 
     One agent builds, certifies, and fixes autonomously. The certifier
@@ -878,7 +930,7 @@ def build(intent, no_qa, fast, standard_, thorough, split, rounds, budget, max_t
             with _paths.project_lock(project_dir, "build", break_lock=break_lock):
                 _build_locked(
                     intent, no_qa, fast, standard_, thorough, split, rounds,
-                    budget, max_turns, model, provider, effort, strict, verbose,
+                    budget, max_turns, model, provider, effort, strict, verbose, debug_unredacted,
                     resume, spec, spec_file, yes, force, allow_dirty, project_dir,
                 )
     except _paths.LockBreakError as exc:
@@ -903,6 +955,7 @@ def _build_locked(
     effort,
     strict,
     verbose,
+    debug_unredacted,
     resume,
     spec,
     spec_file,
@@ -1031,9 +1084,10 @@ def _build_locked(
                 intent = _normalize_intent(resume_state.intent)
                 display_intent = intent
             elif split and not no_qa:
-                from otto.config import resolve_intent
+                from otto.config import resolve_intent_provenance
                 try:
-                    intent = _normalize_intent(resolve_intent(project_dir) or "")
+                    intent_meta = resolve_intent_provenance(project_dir)
+                    intent = _normalize_intent(intent_meta.get("resolved_text", "") or "")
                 except (ConfigError, ValueError) as exc:
                     error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
                     sys.exit(2)
@@ -1069,9 +1123,58 @@ def _build_locked(
     # when the yaml is absent.
     config_path = project_dir / "otto.yaml"
     config = _load_config_or_exit(config_path)
+    config["_intent_source"] = "cli-argument"
+    config["_intent_fallback_reason"] = ""
+    if resume_without_intent and intent:
+        try:
+            from otto.config import resolve_intent_provenance
+
+            intent_meta = resolve_intent_provenance(project_dir)
+        except Exception:
+            intent_meta = {}
+        if intent_meta.get("resolved_text"):
+            config["_intent_source"] = intent_meta.get("source") or "cli-argument"
+            config["_intent_fallback_reason"] = intent_meta.get("fallback_reason") or ""
+    elif not resume_without_intent and not spec_file and not cp and (project_dir / "intent.md").exists() and not intent:
+        config["_intent_source"] = "intent.md"
+    if spec_file:
+        config["_intent_source"] = "cli-argument"
     try:
         ensure_safe_repo_state(project_dir, allow_dirty=allow_dirty)
     except ConfigError as exc:
+        if resume_state.run_id:
+            try:
+                from otto.checkpoint import load_checkpoint, write_checkpoint
+                from otto.observability import dirty_worktree_files
+
+                prior_cp = load_checkpoint(project_dir, run_id=resume_state.run_id) or {}
+                write_checkpoint(
+                    project_dir,
+                    run_id=resume_state.run_id,
+                    command=prior_cp.get("command", "build") or "build",
+                    certifier_mode=prior_cp.get("certifier_mode", "thorough") or "thorough",
+                    prompt_mode=prior_cp.get("prompt_mode", "build") or "build",
+                    focus=prior_cp.get("focus"),
+                    target=prior_cp.get("target"),
+                    max_rounds=int(prior_cp.get("max_rounds", 8) or 8),
+                    status=prior_cp.get("status", "paused") or "paused",
+                    phase=prior_cp.get("phase", "") or "",
+                    split_mode=prior_cp.get("split_mode"),
+                    session_id=prior_cp.get("agent_session_id", "") or "",
+                    current_round=int(prior_cp.get("current_round", 0) or 0),
+                    total_cost=float(prior_cp.get("total_cost", 0.0) or 0.0),
+                    total_duration=float(prior_cp.get("total_duration", 0.0) or 0.0),
+                    rounds=list(prior_cp.get("rounds", []) or []),
+                    child_session_ids=list(prior_cp.get("child_session_ids", []) or []),
+                    intent=prior_cp.get("intent"),
+                    spec_path=prior_cp.get("spec_path"),
+                    spec_hash=prior_cp.get("spec_hash"),
+                    spec_version=int(prior_cp.get("spec_version", 0) or 0),
+                    spec_cost=float(prior_cp.get("spec_cost", 0.0) or 0.0),
+                    dirty_files=dirty_worktree_files(project_dir),
+                )
+            except Exception:
+                pass
         error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
         sys.exit(2)
 
@@ -1144,6 +1247,9 @@ def _build_locked(
     if allow_dirty:
         config["allow_dirty_repo"] = True
         sources["allow_dirty_repo"] = "--allow-dirty"
+    if debug_unredacted:
+        config["debug_unredacted"] = True
+        sources["debug_unredacted"] = "--debug-unredacted"
     config["_verbose"] = bool(verbose)
     from otto.config import get_max_rounds, get_max_turns_per_call
     try:
@@ -1155,6 +1261,8 @@ def _build_locked(
 
     _print_config_banner(console, config, sources, config_path)
     _print_startup_context(console, project_dir, run_id)
+    if debug_unredacted:
+        console.print("  [bold red]UNREDACTED LOGS — do not share[/bold red]")
 
     from otto.pipeline import build_agentic_v3, run_certify_fix_loop, BuildResult
     from otto.budget import RunBudget
@@ -1248,21 +1356,28 @@ def _build_locked(
         console.print("\n  [yellow]Paused. Run `otto build --resume` to continue.[/yellow]")
         sys.exit(0)
     except Exception as e:
+        crash_details_line = f"  crash details: {e.crash_path}\n" if isinstance(e, AgentCallError) and getattr(e, "crash_path", "") else ""
         if isinstance(e, AgentCallError) and e.reason.startswith("Timed out after"):
             error_console.print(
-                f"[error]Run timed out after {rich_escape(e.reason.removeprefix('Timed out after ').strip())} "
-                "(run_budget_seconds).[/error]\n"
-                f"  Narrative log: {build_dir / 'narrative.log'}\n"
-                "  Resume:        otto build --resume"
+                (
+                    f"[error]Run timed out after {rich_escape(e.reason.removeprefix('Timed out after ').strip())} "
+                    "(run_budget_seconds).[/error]\n"
+                    f"  Narrative log: {build_dir / 'narrative.log'}\n"
+                    f"{crash_details_line}"
+                    "  Resume:        otto build --resume"
+                )
             )
             sys.exit(1)
         if isinstance(e, AgentCallError) and e.reason.startswith("Agent crashed"):
             crash_reason = e.reason.removeprefix("Agent crashed:").strip()
             error_console.print(
-                f"[error]Agent crashed: {rich_escape(crash_reason)}[/error]\n"
-                f"  Narrative log: {build_dir / 'narrative.log'}  "
-                "(last events may be incomplete)\n"
-                "  Resume:        otto build --resume"
+                (
+                    f"[error]Agent crashed: {rich_escape(crash_reason)}[/error]\n"
+                    f"  Narrative log: {build_dir / 'narrative.log'}  "
+                    "(last events may be incomplete)\n"
+                    f"{crash_details_line}"
+                    "  Resume:        otto build --resume"
+                )
             )
             sys.exit(1)
         error_console.print(

@@ -23,8 +23,10 @@ import shlex
 import subprocess
 import time
 from collections import Counter, defaultdict
-from pathlib import Path
+from copy import deepcopy
+from datetime import datetime, timezone
 from typing import Any, Callable
+from pathlib import Path
 
 from rich.markup import escape as rich_escape
 
@@ -134,36 +136,40 @@ def _truncate_at_word(text: str, limit: int = _MAX_NARRATIVE_LINE) -> str:
     return text[:cut] + "..."
 
 
-def _block_to_dict(block: Any) -> dict[str, Any]:
+def _block_to_dict(block: Any, *, redact: bool = True) -> dict[str, Any]:
     """Serialize a normalized SDK block to a JSON-safe dict."""
     if isinstance(block, TextBlock):
-        return {"type": "text", "text": redact_text(block.text)}
+        return {"type": "text", "text": _maybe_redact_text(block.text, redact=redact)}
     if isinstance(block, ThinkingBlock):
-        return {"type": "thinking", "thinking": redact_text(block.thinking)}
+        return {"type": "thinking", "thinking": _maybe_redact_text(block.thinking, redact=redact)}
     if isinstance(block, ToolUseBlock):
         return {
             "type": "tool_use",
             "id": block.id,
             "name": block.name,
-            "input": _redact_obj(block.input),
+            "input": _redact_obj(block.input, redact=redact),
         }
     if isinstance(block, ToolResultBlock):
         return {
             "type": "tool_result",
             "tool_use_id": block.tool_use_id,
-            "content": redact_text(block.content),
+            "content": _maybe_redact_text(block.content, redact=redact),
             "is_error": block.is_error,
         }
     return {"type": "unknown", "repr": str(block)[:500]}
 
 
-def _redact_obj(value: Any) -> Any:
+def _maybe_redact_text(value: str, *, redact: bool) -> str:
+    return redact_text(value) if redact else value
+
+
+def _redact_obj(value: Any, *, redact: bool = True) -> Any:
     if isinstance(value, str):
-        return redact_text(value)
+        return _maybe_redact_text(value, redact=redact)
     if isinstance(value, list):
-        return [_redact_obj(item) for item in value]
+        return [_redact_obj(item, redact=redact) for item in value]
     if isinstance(value, dict):
-        return {key: _redact_obj(item) for key, item in value.items()}
+        return {key: _redact_obj(item, redact=redact) for key, item in value.items()}
     return value
 
 
@@ -260,11 +266,33 @@ class JsonlMessageWriter:
     lose events and `tail -f | jq` works during a run.
     """
 
-    def __init__(self, path: Path) -> None:
+    def __init__(
+        self,
+        path: Path,
+        *,
+        phase_name: str = "BUILD",
+        redact: bool = True,
+        emit_phase_events: bool = False,
+    ) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._path = path
         self._fh = open(path, "a", encoding="utf-8")
         self._start = time.monotonic()
+        self._redact = redact
+        self._emit_phase_events = emit_phase_events
+        self._phase_name = (phase_name or "BUILD").strip().lower()
+        self._phase = self._phase_name if self._phase_name in {"build", "certify", "spec"} else "build"
+        self._phase_started_monotonic = self._start
+        self._phase_usage_current = {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}
+        self._phase_usage_totals: dict[str, dict[str, float | int]] = {}
+        self._last_usage_seen: dict[str, float] | None = None
+        self._tool_by_id: dict[str, str] = {}
+        self._agent_input_by_id: dict[str, dict[str, Any]] = {}
+        self._subagent_retry_counts: dict[str, int] = {}
+        self._last_records: list[dict[str, Any]] = []
+        self._closed = False
+        if self._emit_phase_events:
+            self._write_phase_event("phase_start", self._phase)
 
     def write(self, message: Any) -> None:
         record: dict[str, Any] = {
@@ -277,7 +305,7 @@ class JsonlMessageWriter:
             record["subtype"] = message.subtype
             record["is_error"] = message.is_error
             if message.result:
-                record["result"] = redact_text(message.result)
+                record["result"] = _maybe_redact_text(message.result, redact=self._redact)
             if message.structured_output is not None:
                 record["structured_output"] = message.structured_output
             if message.total_cost_usd is not None:
@@ -286,26 +314,176 @@ class JsonlMessageWriter:
                 record["usage"] = _coerce_usage(message.usage)
         elif isinstance(message, UserMessage):
             record["type"] = "user"
-            record["blocks"] = [_block_to_dict(b) for b in message.content]
+            record["blocks"] = [_block_to_dict(b, redact=self._redact) for b in message.content]
             if message.usage is not None:
                 record["usage"] = _coerce_usage(message.usage)
         elif isinstance(message, AssistantMessage):
             record["type"] = "assistant"
-            record["blocks"] = [_block_to_dict(b) for b in message.content]
+            record["blocks"] = [_block_to_dict(b, redact=self._redact) for b in message.content]
             if message.usage is not None:
                 record["usage"] = _coerce_usage(message.usage)
         else:
             record["type"] = "unknown"
             record["repr"] = str(message)[:500]
-        self._fh.write(json.dumps(record, ensure_ascii=False, default=str))
-        self._fh.write("\n")
-        self._fh.flush()
+        self._record_tool_metadata(message)
+        self._record_usage(record)
+        self._write_record(record)
+        self._advance_phase(record)
+
+    def emit_event(self, event: dict[str, Any]) -> None:
+        record = {
+            "ts": _iso_ts(),
+            "elapsed_s": round(time.monotonic() - self._start, 3),
+            **event,
+        }
+        self._write_record(record)
+
+    def phase_breakdown(self, *, include_open: bool = True) -> dict[str, dict[str, float | int]]:
+        data = deepcopy(self._phase_usage_totals)
+        if include_open and not self._closed:
+            current = data.setdefault(
+                self._phase,
+                {"duration_s": 0.0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0},
+            )
+            current["duration_s"] = float(current.get("duration_s", 0.0)) + max(
+                time.monotonic() - self._phase_started_monotonic,
+                0.0,
+            )
+            current["input_tokens"] = int(current.get("input_tokens", 0) or 0) + int(self._phase_usage_current.get("input_tokens", 0) or 0)
+            current["output_tokens"] = int(current.get("output_tokens", 0) or 0) + int(self._phase_usage_current.get("output_tokens", 0) or 0)
+            current["cost_usd"] = float(current.get("cost_usd", 0.0) or 0.0) + float(self._phase_usage_current.get("cost_usd", 0.0) or 0.0)
+        return data
+
+    def last_records(self, limit: int = 20) -> list[dict[str, Any]]:
+        if limit <= 0:
+            return []
+        return deepcopy(self._last_records[-limit:])
 
     def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
         try:
+            if self._emit_phase_events:
+                self._end_phase(self._phase)
             self._fh.close()
         except OSError:
             pass
+
+    def _write_record(self, record: dict[str, Any]) -> None:
+        self._fh.write(json.dumps(record, ensure_ascii=False, default=str))
+        self._fh.write("\n")
+        self._fh.flush()
+        self._last_records.append(deepcopy(record))
+        if len(self._last_records) > 40:
+            self._last_records = self._last_records[-40:]
+
+    def _write_phase_event(
+        self,
+        event_type: str,
+        phase: str,
+        *,
+        duration_s: float | None = None,
+        usage: dict[str, float | int] | None = None,
+    ) -> None:
+        event: dict[str, Any] = {"type": event_type, "phase": phase, "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
+        if duration_s is not None:
+            event["duration_s"] = round(float(duration_s), 3)
+        if usage is not None:
+            clean_usage = {
+                "input_tokens": int(usage.get("input_tokens", 0) or 0),
+                "output_tokens": int(usage.get("output_tokens", 0) or 0),
+            }
+            cost_value = usage.get("cost_usd")
+            if isinstance(cost_value, int | float):
+                clean_usage["cost_usd"] = round(float(cost_value), 4)
+            event["usage"] = clean_usage
+        self._write_record(event)
+
+    def _record_tool_metadata(self, message: Any) -> None:
+        if not isinstance(message, (AssistantMessage, UserMessage)):
+            return
+        for block in getattr(message, "content", []) or []:
+            if isinstance(block, ToolUseBlock) and block.id:
+                self._tool_by_id[block.id] = block.name or ""
+                if block.name == "Agent":
+                    self._agent_input_by_id[block.id] = dict(block.input or {})
+
+    def _usage_delta(self, usage: dict[str, Any] | None) -> dict[str, float | int]:
+        if not isinstance(usage, dict):
+            return {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}
+        current = {
+            "input_tokens": max(int(usage.get("input_tokens", usage.get("tokens_in", 0)) or 0), 0),
+            "output_tokens": max(int(usage.get("output_tokens", usage.get("tokens_out", 0)) or 0), 0),
+            "cost_usd": float(usage.get("total_cost_usd", 0.0) or 0.0),
+        }
+        previous = self._last_usage_seen
+        self._last_usage_seen = current
+        if previous is None:
+            return current
+        monotonic = all(current[key] >= previous.get(key, 0) for key in current)
+        if monotonic and any(current[key] > previous.get(key, 0) for key in current):
+            return {
+                key: (current[key] - previous.get(key, 0))
+                for key in current
+            }
+        return current
+
+    def _record_usage(self, record: dict[str, Any]) -> None:
+        delta = self._usage_delta(record.get("usage"))
+        self._phase_usage_current["input_tokens"] += int(delta.get("input_tokens", 0) or 0)
+        self._phase_usage_current["output_tokens"] += int(delta.get("output_tokens", 0) or 0)
+        self._phase_usage_current["cost_usd"] += float(delta.get("cost_usd", 0.0) or 0.0)
+
+    def _end_phase(self, phase: str) -> None:
+        duration_s = max(time.monotonic() - self._phase_started_monotonic, 0.0)
+        usage = dict(self._phase_usage_current)
+        if self._emit_phase_events:
+            self._write_phase_event("phase_end", phase, duration_s=duration_s, usage=usage)
+        totals = self._phase_usage_totals.setdefault(
+            phase,
+            {"duration_s": 0.0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0},
+        )
+        totals["duration_s"] = float(totals.get("duration_s", 0.0)) + duration_s
+        totals["input_tokens"] = int(totals.get("input_tokens", 0) or 0) + int(usage.get("input_tokens", 0) or 0)
+        totals["output_tokens"] = int(totals.get("output_tokens", 0) or 0) + int(usage.get("output_tokens", 0) or 0)
+        totals["cost_usd"] = float(totals.get("cost_usd", 0.0) or 0.0) + float(usage.get("cost_usd", 0.0) or 0.0)
+        self._phase_usage_current = {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}
+
+    def _start_phase(self, phase: str) -> None:
+        self._phase = phase
+        self._phase_started_monotonic = time.monotonic()
+        if self._emit_phase_events:
+            self._write_phase_event("phase_start", phase)
+
+    def _advance_phase(self, record: dict[str, Any]) -> None:
+        blocks = record.get("blocks")
+        if not isinstance(blocks, list):
+            return
+        opens_certify = False
+        closes_certify = False
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            if (
+                block.get("type") == "tool_use"
+                and block.get("name") == "Agent"
+                and _looks_like_certifier_prompt(block.get("input"))
+            ):
+                opens_certify = True
+            elif (
+                block.get("type") == "tool_result"
+                and self._tool_by_id.get(str(block.get("tool_use_id") or ""), "") == "Agent"
+                and not block.get("is_error")
+                and self._phase == "certify"
+            ):
+                closes_certify = True
+        if opens_certify and self._phase == "build":
+            self._end_phase("build")
+            self._start_phase("certify")
+        elif closes_certify and self._phase == "certify" and self._phase_name == "build":
+            self._end_phase("certify")
+            self._start_phase("build")
 
 
 class NarrativeFormatter:
@@ -330,9 +508,11 @@ class NarrativeFormatter:
         *,
         phase_name: str = "BUILD",
         stdout_callback: Callable[[str], None] | None = None,
+        event_callback: Callable[[dict[str, Any]], None] | None = None,
         verbose: bool = False,
         strict_mode: bool = False,
         project_dir: Path | None = None,
+        redact: bool = True,
     ) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._path = path
@@ -340,9 +520,11 @@ class NarrativeFormatter:
         self._start = time.monotonic()
         self._phase_name = (phase_name or "BUILD").upper()
         self._stdout_callback = stdout_callback
+        self._event_callback = event_callback
         self._verbose = verbose
         self._strict_mode = strict_mode
         self._project_dir = project_dir
+        self._redact = redact
         # tool_use_id -> tool name, so ToolResultBlock renderers can
         # tailor output (Glob=>"(N files)", Read=>"(N lines)", Agent=>
         # subagent glyph).
@@ -370,6 +552,9 @@ class NarrativeFormatter:
         self._phase_started_monotonic = self._start
         self._latest_activity: str | None = None
         self._latest_activity_tool_name: str | None = None
+        self._latest_tool_args_summary: str | None = None
+        self._current_story_id: str | None = None
+        self._last_operation_started_at: str | None = None
         self._streamed_story_keys: set[tuple[int, str]] = set()
         self._git_context_label_cache: str | None = None
         self._in_certify_round = False
@@ -485,14 +670,14 @@ class NarrativeFormatter:
         return f"[+{self._elapsed_fmt()}]"
 
     def _write(self, line: str) -> None:
-        line = redact_text(line)
+        line = _maybe_redact_text(line, redact=self._redact)
         if not line.endswith("\n"):
             line = line + "\n"
         self._fh.write(line)
         self._fh.flush()
 
     def _emit_terminal(self, line: str, *, style: str | None = None) -> None:
-        line = redact_text(line)
+        line = _maybe_redact_text(line, redact=self._redact)
         self._last_terminal_event_monotonic = time.monotonic()
         if self._stdout_callback is None:
             return
@@ -515,6 +700,21 @@ class NarrativeFormatter:
 
     def phase_elapsed_seconds(self) -> float:
         return time.monotonic() - self._phase_started_monotonic
+
+    def latest_activity(self) -> str:
+        return self._latest_activity or self._current_phase_label
+
+    def latest_tool_name(self) -> str:
+        return self._latest_activity_tool_name or ""
+
+    def latest_tool_args_summary(self) -> str:
+        return self._latest_tool_args_summary or ""
+
+    def current_story_id(self) -> str:
+        return self._current_story_id or ""
+
+    def last_operation_started_at(self) -> str:
+        return self._last_operation_started_at or ""
 
     def write_heartbeat(self, elapsed: str) -> None:
         label = self._current_phase_label
@@ -550,10 +750,14 @@ class NarrativeFormatter:
             self._tool_call_count += 1
             self._latest_activity = _tool_activity_label(block)
             self._latest_activity_tool_name = block.name or ""
+            self._latest_tool_args_summary = tool_use_summary(block) or ""
+            self._last_operation_started_at = _iso_ts()
             # Remember the tool name so tool_result renderers can look
             # up the originator by tool_use_id.
             if block.id:
                 self._tool_by_id[block.id] = block.name or ""
+                if block.name == "Agent":
+                    self._current_story_id = _find_story_hint(block.input, self._story_ids_seen()) or self._extract_story_id_from_tool_input(block.input)
             # Certify-phase banners — Agent dispatches with a
             # certifier-shaped prompt open a new round.
             if block.name == "Agent" and _looks_like_certifier_prompt(block.input):
@@ -777,8 +981,12 @@ class NarrativeFormatter:
         pending = {
             "tool_name": tool_name or "unknown",
             "reason": self._tool_error_reason(content),
+            "raw_reason": content or "",
+            "story_id": self._current_story_id or "",
+            "child_session_id": self._extract_child_session_id(content),
         }
         if self._pending_tool_error is not None:
+            self._pending_tool_error["_final_effect_on_verdict"] = "FAIL"
             self._emit_tool_warning(self._pending_tool_error)
         self._pending_tool_error = pending
         self._tool_error_chain_count += 1
@@ -786,6 +994,9 @@ class NarrativeFormatter:
     def _recover_tool_errors(self) -> None:
         if self._tool_error_chain_count <= 0:
             return
+        if self._pending_tool_error is not None and self._pending_tool_error.get("tool_name") == "Agent":
+            self._pending_tool_error["_final_effect_on_verdict"] = "WARN"
+            self._emit_tool_warning(self._pending_tool_error)
         self._recovered_tool_errors += self._tool_error_chain_count
         self._tool_error_chain_count = 0
         self._pending_tool_error = None
@@ -794,6 +1005,18 @@ class NarrativeFormatter:
         ts = self._stamp()
         tool_name = pending.get("tool_name", "unknown")
         reason = pending.get("reason", "(empty)")
+        final_effect = str(pending.get("_final_effect_on_verdict") or "FAIL")
+        if tool_name == "Agent" and self._event_callback is not None:
+            self._event_callback(
+                {
+                    "type": "subagent_error",
+                    "story_id": pending.get("story_id", ""),
+                    "child_session_id": pending.get("child_session_id", ""),
+                    "reason": self._classify_subagent_reason(pending.get("raw_reason", reason)),
+                    "retry_count": int(self._tool_error_chain_count or 1),
+                    "final_effect_on_verdict": final_effect,
+                }
+            )
         self._write_terminal_event(
             f"{ts} {self._GLYPH_WARNING} tool {tool_name} retry: {reason}",
             style="dim",
@@ -856,6 +1079,7 @@ class NarrativeFormatter:
         self._summary_written = True
 
         if self._pending_tool_error is not None:
+            self._pending_tool_error["_final_effect_on_verdict"] = "FAIL"
             self._emit_tool_warning(self._pending_tool_error)
             self._pending_tool_error = None
 
@@ -887,6 +1111,47 @@ class NarrativeFormatter:
             self._fh.close()
         except OSError:
             pass
+
+    def _story_ids_seen(self) -> list[str]:
+        story_ids = {
+            story_id
+            for _round, story_id in self._streamed_story_keys
+            if story_id
+        }
+        return sorted(story_ids)
+
+    def _extract_story_id_from_tool_input(self, tool_input: Any) -> str:
+        if not isinstance(tool_input, dict):
+            return ""
+        for key in ("story_id", "name"):
+            value = tool_input.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        prompt = str(tool_input.get("prompt") or tool_input.get("description") or "")
+        match = re.search(r"\*\*Story:\s*([^\n*]+)", prompt)
+        if match:
+            return match.group(1).strip()
+        return ""
+
+    def _extract_child_session_id(self, content: str) -> str:
+        if not content:
+            return ""
+        for pattern in (
+            re.compile(r"session[_ -]?id[:=]\s*([a-zA-Z0-9._-]+)", re.IGNORECASE),
+            re.compile(r"child[_ -]?session[_ -]?id[:=]\s*([a-zA-Z0-9._-]+)", re.IGNORECASE),
+        ):
+            match = pattern.search(content)
+            if match:
+                return match.group(1).strip()
+        return ""
+
+    def _classify_subagent_reason(self, text: str) -> str:
+        lowered = str(text or "").lower()
+        if "timeout" in lowered or "timed out" in lowered:
+            return "timeout"
+        if "crash" in lowered or "killed" in lowered:
+            return "crash"
+        return "tool-error"
 
 
 def _is_marker(line: str) -> bool:
@@ -1673,6 +1938,7 @@ def make_session_logger(
     verbose: bool = False,
     strict_mode: bool = False,
     project_dir: Path | None = None,
+    debug_unredacted: bool = False,
 ) -> dict[str, Any]:
     """Open messages.jsonl + narrative.log in ``log_dir`` and return the
     callback dict for run_agent_with_timeout / run_agent_query.
@@ -1688,16 +1954,42 @@ def make_session_logger(
       _narrative  — NarrativeFormatter for post-run timing inspection/finalize.
     """
     log_dir.mkdir(parents=True, exist_ok=True)
-    jsonl = JsonlMessageWriter(log_dir / "messages.jsonl")
+    jsonl = JsonlMessageWriter(
+        log_dir / "messages.jsonl",
+        phase_name=phase_name,
+        redact=True,
+        emit_phase_events=True,
+    )
+    raw_jsonl: JsonlMessageWriter | None = None
+    raw_narr: NarrativeFormatter | None = None
+    if debug_unredacted:
+        raw_dir = log_dir.parent / "raw"
+        raw_jsonl = JsonlMessageWriter(
+            raw_dir / "messages.jsonl",
+            phase_name=phase_name,
+            redact=False,
+            emit_phase_events=True,
+        )
+        raw_narr = NarrativeFormatter(
+            raw_dir / "narrative.log",
+            phase_name=phase_name,
+            verbose=verbose,
+            strict_mode=strict_mode,
+            project_dir=project_dir,
+            redact=False,
+        )
     narr = NarrativeFormatter(
         log_dir / "narrative.log",
         phase_name=phase_name,
         stdout_callback=stdout_callback,
+        event_callback=jsonl.emit_event,
         verbose=verbose,
         strict_mode=strict_mode,
         project_dir=project_dir,
     )
     narr.start()
+    if raw_narr is not None:
+        raw_narr.start()
 
     live = log_dir / "live.log"
     try:
@@ -1710,9 +2002,24 @@ def make_session_logger(
     def _on_message(message: Any) -> None:
         jsonl.write(message)
         narr.write_message(message)
+        if raw_jsonl is not None:
+            raw_jsonl.write(message)
+        if raw_narr is not None:
+            raw_narr.write_message(message)
 
     def _close() -> None:
-        jsonl.close()
         narr.close()
+        jsonl.close()
+        if raw_narr is not None:
+            raw_narr.close()
+        if raw_jsonl is not None:
+            raw_jsonl.close()
 
-    return {"on_message": _on_message, "_close": _close, "_narrative": narr}
+    return {
+        "on_message": _on_message,
+        "_close": _close,
+        "_narrative": narr,
+        "_jsonl": jsonl,
+        "_raw_jsonl": raw_jsonl,
+        "_raw_narrative": raw_narr,
+    }

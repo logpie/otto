@@ -5,6 +5,7 @@ prompt construction → result parsing → PoW writing → checkpoint → BuildR
 """
 
 import json
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -300,8 +301,24 @@ class TestV3PipelinePass:
         assert summary["status"] == "completed"
         assert summary["stories_passed"] == 5
         assert summary["stories_tested"] == 5
+        assert summary["runtime_path"].endswith("runtime.json")
         assert summary["breakdown"]["build"]["duration_s"] >= 0
         assert summary["breakdown"].get("certify", {}).get("rounds", 0) == 0
+        runtime = json.loads((_paths.session_dir(tmp_git_repo, result.build_id) / "runtime.json").read_text())
+        assert runtime["otto_version"]
+        assert runtime["python_version"]
+        assert runtime["platform"]
+        assert runtime["git_branch"]
+
+        provenance = json.loads((_paths.session_dir(tmp_git_repo, result.build_id) / "input-provenance.json").read_text())
+        assert provenance["intent"]["source"] == "cli-argument"
+        assert provenance["intent"]["resolved_text"] == intent
+        assert provenance["intent"]["sha256"]
+        assert provenance["spec"]["source"] == "none"
+        assert len(provenance["prompts"]) >= 2
+        for prompt_entry in provenance["prompts"]:
+            assert Path(prompt_entry["rendered_path"]).exists()
+            assert prompt_entry["rendered_sha256"]
 
         # --- PoW (proof-of-work) ---
         certifier_dir = _paths.certify_dir(tmp_git_repo, result.build_id)
@@ -556,6 +573,41 @@ async def test_paused_build_does_not_write_summary_json(tmp_git_repo):
         _paths.session_checkpoint(tmp_git_repo, result.build_id).read_text()
     )
     assert checkpoint["status"] == "paused"
+
+
+@pytest.mark.asyncio
+async def test_crash_artifact_and_checkpoint_capture_last_activity(tmp_git_repo):
+    async def crashing_query(_prompt, _options, **kwargs):
+        from otto.agent import AssistantMessage, TextBlock, ToolUseBlock
+
+        on_message = kwargs.get("on_message")
+        if on_message is not None:
+            on_message(AssistantMessage(content=[TextBlock(text="starting work")]))
+            on_message(AssistantMessage(content=[
+                ToolUseBlock(name="Read", input={"file_path": "app/main.py"}, id="read-1")
+            ]))
+        raise RuntimeError("agent exploded")
+
+    with patch("otto.agent.run_agent_query", side_effect=crashing_query):
+        result = await build_agentic_v3("test", tmp_git_repo, {})
+
+    from otto import paths as _paths
+
+    session_dir = _paths.session_dir(tmp_git_repo, result.build_id)
+    crash = json.loads((session_dir / "crash.json").read_text())
+    checkpoint = json.loads((session_dir / "checkpoint.json").read_text())
+
+    assert crash["exception_class"] == "AgentCallError"
+    assert "Agent crashed" in crash["exception_message"]
+    assert crash["phase"] == "build"
+    assert crash["agent_session_id"] == ""
+    assert crash["last_n_events"]
+
+    assert checkpoint["status"] == "paused"
+    assert checkpoint["last_activity"] == "reading app/main.py"
+    assert checkpoint["last_tool_name"] == "Read"
+    assert checkpoint["last_tool_args_summary"] == "app/main.py"
+    assert checkpoint["last_operation_started_at"]
 
 
 @pytest.mark.asyncio

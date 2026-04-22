@@ -27,3 +27,6 @@ class CertificationReport:
     story_results: list[dict[str, Any]] = field(default_factory=list)
     metric_value: str = ""
     metric_met: bool | None = None  # None = not a target run
+    diagnosis: str = ""
+    child_session_ids: list[str] = field(default_factory=list)
+    subagent_errors: list[dict[str, Any]] = field(default_factory=list)

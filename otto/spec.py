@@ -240,6 +240,7 @@ async def run_spec_agent(
     """
     from otto.agent import make_agent_options, run_agent_with_timeout
     from otto.display import console
+    from otto.observability import save_rendered_prompt, sha256_text, update_input_provenance
     from otto.prompts import render_prompt
 
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -264,6 +265,22 @@ async def run_spec_agent(
         intent=intent,
         spec_path=str(spec_path),
         prior_spec_section=prior_block,
+    )
+    prompt_entry = save_rendered_prompt(
+        run_dir.parent / "prompts",
+        template="spec-light.md",
+        rendered_text=prompt,
+    )
+    update_input_provenance(
+        run_dir.parent,
+        intent={
+            "source": str(config.get("_intent_source") or "cli-argument"),
+            "fallback_reason": str(config.get("_intent_fallback_reason") or ""),
+            "resolved_text": intent,
+            "sha256": sha256_text(intent),
+        },
+        spec={"source": str(config.get("_spec_source") or "spec-agent"), "path": str(spec_path), "sha256": ""},
+        prompts=[prompt_entry],
     )
 
     options = make_agent_options(project_dir, config, agent_type="spec")

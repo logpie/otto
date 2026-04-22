@@ -23,6 +23,7 @@ from otto.agent import (
     ThinkingBlock,
     ToolResultBlock,
     ToolUseBlock,
+    UserMessage,
 )
 from otto.logstream import (
     JsonlMessageWriter,
@@ -1075,8 +1076,81 @@ class TestMakeSessionLogger:
         finally:
             cbs["_close"]()
 
-        rec = json.loads((tmp_path / "messages.jsonl").read_text().strip())
-        assert rec["type"] == "unknown"
+        records = [
+            json.loads(line)
+            for line in (tmp_path / "messages.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        assert records[0]["type"] == "phase_start"
+        assert records[1]["type"] == "unknown"
+        assert records[-1]["type"] == "phase_end"
+
+    def test_emits_phase_boundary_events(self, tmp_path):
+        cbs = make_session_logger(tmp_path)
+        try:
+            cbs["on_message"](AssistantMessage(content=[TextBlock(text="hello")], usage={"output_tokens": 10}))
+            cbs["on_message"](AssistantMessage(content=[
+                ToolUseBlock(
+                    name="Agent",
+                    id="cert-1",
+                    input={"prompt": "Please certify.\n## Verdict Format\nVERDICT: PASS|FAIL"},
+                )
+            ], usage={"output_tokens": 5}))
+            cbs["on_message"](UserMessage(content=[
+                ToolResultBlock(tool_use_id="cert-1", content="done", is_error=False)
+            ], usage={"output_tokens": 7}))
+        finally:
+            cbs["_close"]()
+
+        records = [
+            json.loads(line)
+            for line in (tmp_path / "messages.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        phase_events = [rec for rec in records if rec.get("type") in {"phase_start", "phase_end"}]
+        assert [event["type"] for event in phase_events] == [
+            "phase_start",
+            "phase_end",
+            "phase_start",
+            "phase_end",
+            "phase_start",
+            "phase_end",
+        ]
+        assert [event["phase"] for event in phase_events] == [
+            "build",
+            "build",
+            "certify",
+            "certify",
+            "build",
+            "build",
+        ]
+
+    def test_subagent_error_event_is_written(self, tmp_path):
+        cbs = make_session_logger(tmp_path)
+        try:
+            cbs["on_message"](AssistantMessage(content=[
+                ToolUseBlock(
+                    name="Agent",
+                    id="agent-1",
+                    input={"prompt": "**Story: auth**\n## Verdict Format\nVERDICT: PASS|FAIL"},
+                )
+            ]))
+            cbs["on_message"](UserMessage(content=[
+                ToolResultBlock(tool_use_id="agent-1", content="Timed out after 30s", is_error=True)
+            ]))
+        finally:
+            cbs["_close"]()
+
+        records = [
+            json.loads(line)
+            for line in (tmp_path / "messages.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        subagent_errors = [rec for rec in records if rec.get("type") == "subagent_error"]
+        assert len(subagent_errors) == 1
+        assert subagent_errors[0]["story_id"] == "auth"
+        assert subagent_errors[0]["reason"] == "timeout"
+        assert subagent_errors[0]["final_effect_on_verdict"] == "FAIL"
 
 
 class TestEstimatePhaseCosts:

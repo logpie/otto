@@ -369,6 +369,53 @@ def resolve_intent(project_dir: Path) -> str | None:
     return None
 
 
+def resolve_intent_provenance(project_dir: Path) -> dict[str, str]:
+    """Return intent text plus the source/fallback metadata used to resolve it."""
+    intent_path = project_dir / "intent.md"
+    readme_path = project_dir / "README.md"
+    fallback_reason = ""
+    source = ""
+    resolved_text = ""
+
+    if intent_path.exists():
+        try:
+            intent = intent_path.read_text().strip()
+        except (UnicodeDecodeError, IsADirectoryError, PermissionError, OSError) as exc:
+            fallback_reason = f"intent.md was unreadable: {exc}"
+        else:
+            if intent and not _looks_like_intent_log(intent):
+                return {
+                    "source": "intent.md",
+                    "fallback_reason": "",
+                    "resolved_text": validate_text_limit(
+                        intent,
+                        kind="intent",
+                        source=str(intent_path),
+                        max_chars=MAX_INTENT_CHARS,
+                    ),
+                }
+            fallback_reason = "intent.md was empty or looked like an Otto-generated intent log"
+
+    if readme_path.exists():
+        try:
+            readme = readme_path.read_text().strip()
+        except (UnicodeDecodeError, IsADirectoryError, PermissionError, OSError) as exc:
+            raise ConfigError(f"Failed to read {readme_path}: {exc}") from exc
+        if readme:
+            source = "README.md"
+            resolved_text = validate_text_limit(
+                readme,
+                kind="intent",
+                source=str(readme_path),
+                max_chars=MAX_INTENT_CHARS,
+            )
+    return {
+        "source": source,
+        "fallback_reason": fallback_reason,
+        "resolved_text": resolved_text,
+    }
+
+
 def _looks_like_intent_log(text: str) -> bool:
     stripped = text.lstrip()
     if stripped.startswith("# Build Intents"):
@@ -430,6 +477,7 @@ def repo_preflight_issues(project_dir: Path) -> dict[str, list[str]]:
     """Return dirty-vs-blocking repo-state issues before build/improve runs."""
     dirty_issues: list[str] = []
     blocking_issues: list[str] = []
+    dirty_files: list[str] = []
 
     worktree = _run_git(project_dir, "diff", "--quiet")
     if worktree.returncode == 1:
@@ -471,7 +519,22 @@ def repo_preflight_issues(project_dir: Path) -> dict[str, list[str]]:
             if (current_git_dir / name).exists():
                 blocking_issues.append(f"repository has {label}")
 
-    return {"dirty": dirty_issues, "blocking": blocking_issues}
+    if dirty_issues:
+        try:
+            status = _run_git(project_dir, "status", "--porcelain")
+            if status.returncode == 0:
+                for line in (status.stdout or "").splitlines():
+                    path = line[3:].strip() if len(line) > 3 else line.strip()
+                    if " -> " in path:
+                        path = path.split(" -> ", 1)[1].strip()
+                    if path:
+                        dirty_files.append(path)
+                    if len(dirty_files) >= 20:
+                        break
+        except Exception:
+            dirty_files = []
+
+    return {"dirty": dirty_issues, "blocking": blocking_issues, "dirty_files": dirty_files}
 
 
 def ensure_safe_repo_state(project_dir: Path, *, allow_dirty: bool = False) -> None:
@@ -482,6 +545,10 @@ def ensure_safe_repo_state(project_dir: Path, *, allow_dirty: bool = False) -> N
     problems = [*blocking, *dirty]
     if not problems:
         return
+    dirty_files = list(issues.get("dirty_files", []) or [])
+    dirty_suffix = ""
+    if dirty_files:
+        dirty_suffix = "\nFirst dirty files:\n" + "\n".join(f"- {path}" for path in dirty_files)
     suffix = (
         "Resolve the repo state above before running Otto."
         if allow_dirty and blocking
@@ -490,6 +557,7 @@ def ensure_safe_repo_state(project_dir: Path, *, allow_dirty: bool = False) -> N
     raise ConfigError(
         "Refusing to run Otto in the current git state:\n"
         + "\n".join(f"- {item}" for item in problems)
+        + dirty_suffix
         + f"\n{suffix}"
     )
 
