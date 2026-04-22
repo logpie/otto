@@ -2969,9 +2969,19 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--provider", choices=["claude", "codex"], default="claude")
     parser.add_argument("--scenario", help="Comma-separated scenario ids, e.g. A1,B3,C1")
     parser.add_argument("--group", help="Comma-separated group ids, e.g. A,B,D,U")
-    parser.add_argument("--scenario-delay", type=float, default=DEFAULT_SCENARIO_DELAY_S)
-    parser.add_argument("--keep-failed-only", action="store_true")
-    parser.add_argument("--bail-fast", action="store_true")
+    parser.add_argument(
+        "--scenario-delay", type=float, default=DEFAULT_SCENARIO_DELAY_S,
+        help=f"Seconds to sleep between scenarios (default: {DEFAULT_SCENARIO_DELAY_S}s; "
+             "reduces subscription rate-limit pressure when running batches; 0 disables)",
+    )
+    parser.add_argument(
+        "--keep-failed-only", action="store_true",
+        help="Only keep artifacts (cast, logs) for FAIL/INFRA scenarios; clean up PASS ones",
+    )
+    parser.add_argument(
+        "--bail-fast", action="store_true",
+        help="Stop on first real FAIL (INFRA failures don't trigger bail)",
+    )
     parser.add_argument("--list", action="store_true")
     parser.add_argument("_internal", nargs="*", help=argparse.SUPPRESS)
     return parser.parse_args(argv)

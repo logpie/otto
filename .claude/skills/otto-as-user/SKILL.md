@@ -29,6 +29,7 @@ From the repo root:
 .venv/bin/python scripts/otto_as_user.py --group B,D
 .venv/bin/python scripts/otto_as_user.py --keep-failed-only
 .venv/bin/python scripts/otto_as_user.py --bail-fast
+.venv/bin/python scripts/otto_as_user.py --mode quick --scenario-delay 10  # slower, less rate-limit risk
 ```
 
 Provider mapping:
@@ -76,7 +77,22 @@ agg bench-results/as-user/<run-id>/<scenario>/recording.cast out.gif
 
 Or upload the `.cast` to an asciinema-compatible player.
 
-## Common failure modes
+## Result categories
+
+Each scenario reports one of three outcomes:
+
+- `PASS` — verification succeeded
+- `FAIL` — real Otto bug (or test bug); investigate `recording.cast` + `debug.log` + `verify.json`
+- `INFRA` — transient infra issue (subscription rate-limit, auth degradation, network). Auto-retried once after 30s; if the retry also INFRAs, the scenario is reported as INFRA. Process exits 0 if all failures are INFRA-only — INFRA does NOT count as a real failure for CI purposes.
+
+Common INFRA signatures the harness detects:
+- `Not logged in · Please run /login` in narrative.log (subscription token under load)
+- `rate limit` / `429` near throttle wording
+- `Command failed with exit code 1` + zero-cost + sub-2s duration (the smoking-gun "transient agent crash" pattern)
+
+To reduce INFRA frequency in batch runs: increase `--scenario-delay` (default 5s) or run scenarios in smaller batches.
+
+## Common failure modes (real FAIL)
 
 - `asciinema` missing or install failed before the run starts
 - `otto` invoked from the wrong interpreter instead of this repo's `.venv`
@@ -84,7 +100,7 @@ Or upload the `.cast` to an asciinema-compatible player.
 - Resume scenarios failing because the interrupted run completed before the signal landed
 - Cross-run memory verification writing the memory file but not exposing the prompt marker in `messages.jsonl`
 
-When a scenario fails, review `recording.cast` first, then `debug.log`, then `verify.json`.
+When a scenario fails (FAIL, not INFRA), review `recording.cast` first, then `debug.log`, then `verify.json`.
 
 ## Adding new scenarios
 
