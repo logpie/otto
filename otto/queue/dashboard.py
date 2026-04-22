@@ -40,6 +40,7 @@ _CANCEL_DEDUPE_WINDOW_S = 2.0
 _PHASE_BUILD = "BUILD"
 _PHASE_CERTIFY = "CERTIFY"
 _STATUS_CANCELABLE = {"running"}
+_LOG_UNAVAILABLE_PLACEHOLDER = "<log file no longer available>"
 
 
 def _now_utc() -> datetime:
@@ -98,11 +99,16 @@ def infer_phase_from_narrative(lines: Sequence[str], *, default: str) -> str:
         line = raw.strip()
         if not line:
             continue
-        if "CERTIFY ROUND" in line or "CERTIFY_ROUND:" in line:
+        upper = line.upper()
+        if (
+            "— CERTIFY" in upper
+            or "CERTIFY_ROUND" in upper
+            or "CERTIFY STARTING" in upper
+            or "CERT IN PROGRESS" in upper
+            or "VERDICT" in upper
+        ):
             return _PHASE_CERTIFY
-        if line.startswith("[+") and "VERDICT:" in line:
-            return _PHASE_CERTIFY
-        if "BUILD starting" in line or "RUN SUMMARY:" in line:
+        if "— BUILD" in upper or "BUILD STARTING" in upper or "RUN SUMMARY:" in upper:
             return _PHASE_BUILD
     return default
 
@@ -185,7 +191,7 @@ class QueueModel:
         for task in tasks:
             task_state = state_tasks.get(task.id, {}) if isinstance(state_tasks.get(task.id), dict) else {}
             status = str(task_state.get("status") or "queued")
-            manifest = self._read_manifest(task.id) if status != "running" else None
+            manifest = self._read_manifest(task.id)
             narrative_path = self.resolve_narrative_path(task, task_state, manifest)
             manifest_path = self.resolve_manifest_path(task.id, task_state, manifest)
             session_id = self.resolve_session_id(manifest, narrative_path, manifest_path)
@@ -249,17 +255,22 @@ class QueueModel:
     ) -> Path | None:
         phase_dir = "certify" if _command_phase(task) == _PHASE_CERTIFY else "build"
 
+        for worktree_dir in self._candidate_worktree_dirs(task, task_state):
+            candidate = self._resolve_worktree_narrative_path(worktree_dir, phase_dir)
+            if candidate is not None:
+                return candidate
+
         if manifest:
-            mirror_of = manifest.get("mirror_of")
-            if isinstance(mirror_of, str) and mirror_of:
-                manifest_dir = Path(mirror_of).expanduser().resolve(strict=False).parent
-                candidate = manifest_dir / phase_dir / "narrative.log"
-                if candidate.exists():
-                    return candidate
             checkpoint_path = manifest.get("checkpoint_path")
             if isinstance(checkpoint_path, str) and checkpoint_path:
                 session_dir = Path(checkpoint_path).expanduser().resolve(strict=False).parent
                 candidate = session_dir / phase_dir / "narrative.log"
+                if candidate.exists():
+                    return candidate
+            mirror_of = manifest.get("mirror_of")
+            if isinstance(mirror_of, str) and mirror_of:
+                manifest_dir = Path(mirror_of).expanduser().resolve(strict=False).parent
+                candidate = manifest_dir / phase_dir / "narrative.log"
                 if candidate.exists():
                     return candidate
             proof = manifest.get("proof_of_work_path")
@@ -271,11 +282,28 @@ class QueueModel:
                     candidate = proof_path.parent.parent / phase_dir / "narrative.log"
                 if candidate.exists():
                     return candidate
+        return None
 
+    def _candidate_worktree_dirs(
+        self,
+        task: QueueTask,
+        task_state: dict[str, Any] | None = None,
+    ) -> list[Path]:
+        candidates: list[Path] = []
         worktree = task.worktree or ""
-        if not worktree:
-            return None
-        worktree_dir = self.project_dir / worktree
+        if worktree:
+            candidates.append(self.project_dir / worktree)
+        child = (task_state or {}).get("child") if isinstance(task_state, dict) else None
+        if isinstance(child, dict):
+            cwd = child.get("cwd")
+            if isinstance(cwd, str) and cwd:
+                alt_worktree = Path(cwd)
+                if alt_worktree not in candidates:
+                    candidates.append(alt_worktree)
+        return candidates
+
+    @staticmethod
+    def _resolve_worktree_narrative_path(worktree_dir: Path, phase_dir: str) -> Path | None:
         latest = paths.resolve_pointer(worktree_dir, paths.LATEST_POINTER)
         if latest is not None:
             candidate = latest / phase_dir / "narrative.log"
@@ -290,17 +318,6 @@ class QueueModel:
                     candidates,
                     key=lambda path: path.stat().st_mtime if path.exists() else 0.0,
                 )
-
-        child = (task_state or {}).get("child") if isinstance(task_state, dict) else None
-        if isinstance(child, dict):
-            cwd = child.get("cwd")
-            if isinstance(cwd, str) and cwd:
-                alt_worktree = Path(cwd)
-                latest = paths.resolve_pointer(alt_worktree, paths.LATEST_POINTER)
-                if latest is not None:
-                    candidate = latest / phase_dir / "narrative.log"
-                    if candidate.exists():
-                        return candidate
         return None
 
     def _load_queue_cached(self) -> list[QueueTask]:
@@ -353,15 +370,31 @@ class QueueModel:
         if manifest:
             mirror_of = manifest.get("mirror_of")
             if isinstance(mirror_of, str) and mirror_of:
-                return Path(mirror_of).expanduser().resolve(strict=False)
+                candidate = Path(mirror_of).expanduser().resolve(strict=False)
+                if candidate.exists():
+                    return candidate
+        if isinstance(task_state, dict):
+            manifest_path = task_state.get("manifest_path")
+            if isinstance(manifest_path, str) and manifest_path:
+                candidate = Path(manifest_path).expanduser().resolve(strict=False)
+                if candidate.exists():
+                    return candidate
+        queue_manifest = queue_index_path_for(self.project_dir, task_id)
+        if queue_manifest is not None and queue_manifest.exists():
+            return queue_manifest.resolve(strict=False)
+        if manifest:
+            checkpoint_path = manifest.get("checkpoint_path")
+            if isinstance(checkpoint_path, str) and checkpoint_path:
+                candidate = (
+                    Path(checkpoint_path).expanduser().resolve(strict=False).parent / "manifest.json"
+                )
+                if candidate.exists():
+                    return candidate
         if isinstance(task_state, dict):
             manifest_path = task_state.get("manifest_path")
             if isinstance(manifest_path, str) and manifest_path:
                 return Path(manifest_path).expanduser().resolve(strict=False)
-        queue_manifest = queue_index_path_for(self.project_dir, task_id)
-        if queue_manifest is None:
-            return None
-        return queue_manifest.resolve(strict=False)
+        return queue_manifest.resolve(strict=False) if queue_manifest is not None else None
 
     def resolve_session_id(
         self,
@@ -438,7 +471,10 @@ class QueueModel:
 
         lines = [line.strip() for line in chunk.splitlines() if line.strip()]
         last_line = lines[-1] if lines else "-"
-        phase = infer_phase_from_narrative(lines, default=default_phase)
+        phase = infer_phase_from_narrative(
+            lines,
+            default=cached.phase if cached is not None else default_phase,
+        )
         self._narrative_cache[path] = _NarrativeCacheEntry(
             mtime=stat.st_mtime,
             size=stat.st_size,
@@ -492,24 +528,32 @@ class NarrativeTailer:
     def poll(self) -> tuple[bool, list[str]]:
         path = self._path_resolver()
         if path is None:
+            if self._path is not None:
+                self._reset(clear_path=True)
+                return True, [_LOG_UNAVAILABLE_PLACEHOLDER]
             return False, []
         if self._path is None or path != self._path:
             self._path = path
-            self._offset = 0
-            self._pending = ""
-            self._mtime = None
+            self._reset(clear_path=False)
             return self._read_new(clear=True)
         return self._read_new(clear=False)
+
+    def _reset(self, *, clear_path: bool) -> None:
+        if clear_path:
+            self._path = None
+        self._offset = 0
+        self._pending = ""
+        self._mtime = None
 
     def _read_new(self, *, clear: bool) -> tuple[bool, list[str]]:
         assert self._path is not None
         try:
             stat = self._path.stat()
         except OSError:
-            return clear, []
+            self._reset(clear_path=True)
+            return True, [_LOG_UNAVAILABLE_PLACEHOLDER]
         if stat.st_size < self._offset:
-            self._offset = 0
-            self._pending = ""
+            self._reset(clear_path=False)
             clear = True
         if stat.st_size == self._offset and self._mtime == stat.st_mtime:
             return clear, []

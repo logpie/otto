@@ -20,10 +20,13 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from otto import paths
+from otto.display import rich_escape
+from otto.theme import error_console
 
 logger = logging.getLogger("otto.checkpoint")
 
@@ -74,6 +77,9 @@ class ResumeState:
     spec_hash: str = ""           # sha256 of normalized spec content
     spec_version: int = 0         # regeneration counter (0 = never regenerated)
     spec_cost: float = 0.0        # cost of spec phase (subset of total_cost)
+    completed_session_id: str = ""
+    completed_verdict: str = ""
+    completed_command: str = ""
 
     @property
     def session_id(self) -> str:
@@ -125,6 +131,14 @@ def print_resume_status(console: Any, state: ResumeState, resume_flag: bool, exp
     lockstep with ``resolve_resume()``.
     """
     if resume_flag and not state.resumed:
+        if state.completed_session_id:
+            console.print(
+                "\n  [yellow]Last run completed "
+                f"(session {state.completed_session_id}, verdict {state.completed_verdict or '?'}). "
+                f"Nothing to resume — start a new run with `{_resume_fresh_command_hint(expected_command)}`."
+                "[/yellow]\n"
+            )
+            return
         console.print("\n  [yellow]No checkpoint found — starting fresh.[/yellow]\n")
         return
     if not state.resumed:
@@ -151,6 +165,99 @@ def print_resume_status(console: Any, state: ResumeState, resume_flag: bool, exp
     )
 
 
+def _command_family(command: str) -> str:
+    if command.startswith("improve."):
+        return "improve"
+    return command
+
+
+def _resume_fresh_command_hint(expected_command: str) -> str:
+    if expected_command == "build":
+        return "otto build <intent>"
+    if expected_command == "improve.target":
+        return "otto improve target <goal>"
+    if expected_command.startswith("improve."):
+        return f"otto improve {expected_command.split('.', 1)[1]}"
+    return f"otto {expected_command}"
+
+
+def enforce_resume_command_match(
+    state: ResumeState,
+    expected_command: str,
+    *,
+    force_cross_command_resume: bool = False,
+) -> None:
+    """Reject cross-command resume unless the caller explicitly opts in."""
+    if not state.resumed or not state.command_mismatch or force_cross_command_resume:
+        return
+    error_console.print(
+        "[error]Checkpoint command mismatch.[/error]\n"
+        f"  Checkpoint command: `{rich_escape(state.prior_command or '?')}`\n"
+        f"  Requested command:  `{rich_escape(expected_command)}`\n"
+        "  Resume with the original command, or pass `--force-cross-command-resume` to override."
+    )
+    raise SystemExit(2)
+
+
+def enforce_resume_available(state: ResumeState, *, resume_flag: bool, expected_command: str) -> None:
+    """Reject `--resume` when the latest matching run has already completed."""
+    if not resume_flag or state.resumed or not state.completed_session_id:
+        return
+    verdict = state.completed_verdict or "?"
+    error_console.print(
+        "[error]Nothing to resume.[/error]\n"
+        f"  Last run completed (session {state.completed_session_id}, verdict {rich_escape(verdict)}).\n"
+        f"  Start a new run with `{_resume_fresh_command_hint(expected_command)}`."
+    )
+    raise SystemExit(2)
+
+
+def _summary_timestamp(summary_path: Path, data: dict[str, Any]) -> float:
+    completed_at = data.get("completed_at")
+    if isinstance(completed_at, str) and completed_at:
+        try:
+            return datetime.fromisoformat(completed_at.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            pass
+    try:
+        return summary_path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _find_recent_completed_session(
+    project_dir: Path,
+    *,
+    expected_command: str,
+) -> tuple[str, str, str] | None:
+    root = paths.sessions_root(project_dir)
+    if not root.exists():
+        return None
+    family = _command_family(expected_command)
+    latest: tuple[float, str, str, str] | None = None
+    for summary_path in root.glob("*/summary.json"):
+        try:
+            data = json.loads(summary_path.read_text())
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            continue
+        if data.get("status") != "completed":
+            continue
+        command = str(data.get("command") or "")
+        if _command_family(command) != family:
+            continue
+        session_id = str(data.get("run_id") or summary_path.parent.name or "")
+        if not session_id:
+            continue
+        verdict = str(data.get("verdict") or "")
+        candidate = (_summary_timestamp(summary_path, data), session_id, verdict, command)
+        if latest is None or candidate[0] >= latest[0]:
+            latest = candidate
+    if latest is None:
+        return None
+    _, session_id, verdict, command = latest
+    return session_id, verdict, command
+
+
 def resolve_resume(
     project_dir: Path,
     resume: bool,
@@ -173,6 +280,17 @@ def resolve_resume(
     if not checkpoint:
         if resume:
             logger.info("No checkpoint found; starting fresh despite --resume")
+            completed = _find_recent_completed_session(
+                project_dir,
+                expected_command=expected_command,
+            )
+            if completed is not None:
+                session_id, verdict, command = completed
+                return ResumeState(
+                    completed_session_id=session_id,
+                    completed_verdict=verdict,
+                    completed_command=command,
+                )
         return ResumeState()
 
     if not resume:

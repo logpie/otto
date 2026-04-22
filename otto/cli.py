@@ -768,6 +768,11 @@ def _exit_for_lock_busy(exc) -> None:
 @click.option("--strict", is_flag=True, help="Require two consecutive PASS rounds before stopping")
 @click.option("--verbose", is_flag=True, help="Show detailed live progress, including tool-call counts")
 @click.option("--resume", is_flag=True, help="Resume from last checkpoint (requires an in-progress run)")
+@click.option(
+    "--force-cross-command-resume",
+    is_flag=True,
+    help="Allow --resume to reuse a checkpoint written by a different otto command",
+)
 @click.option("--spec", is_flag=True, help="Generate a reviewable spec before building")
 @click.option("--spec-file", type=click.Path(exists=False, dir_okay=False, path_type=Path),
               default=None, help="Use a pre-written spec file (implies --yes)")
@@ -777,7 +782,7 @@ def _exit_for_lock_busy(exc) -> None:
               help="Run in an isolated git worktree (./.worktrees/build-<slug>-<date>/) "
                    "instead of modifying the current working tree")
 @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
-def build(intent, no_qa, fast, standard_, thorough, split, rounds, budget, model, provider, effort, strict, verbose, resume, spec, spec_file, yes, force, in_worktree, break_lock):
+def build(intent, no_qa, fast, standard_, thorough, split, rounds, budget, model, provider, effort, strict, verbose, resume, force_cross_command_resume, spec, spec_file, yes, force, in_worktree, break_lock):
     """Build a product from a natural language intent.
 
     One agent builds, certifies, and fixes autonomously. The certifier
@@ -806,7 +811,7 @@ def build(intent, no_qa, fast, standard_, thorough, split, rounds, budget, model
             _build_locked(
                 intent, no_qa, fast, standard_, thorough, split, rounds,
                 budget, model, provider, effort, strict, verbose,
-                resume, spec, spec_file, yes, force, in_worktree, project_dir,
+                resume, force_cross_command_resume, spec, spec_file, yes, force, in_worktree, project_dir,
             )
     except _paths.LockBusy as exc:
         _exit_for_lock_busy(exc)
@@ -827,6 +832,7 @@ def _build_locked(
     strict,
     verbose,
     resume,
+    force_cross_command_resume,
     spec,
     spec_file,
     yes,
@@ -837,6 +843,8 @@ def _build_locked(
     from otto import paths as _paths
 
     from otto.checkpoint import (
+        enforce_resume_available,
+        enforce_resume_command_match,
         initial_build_completed,
         load_checkpoint,
         is_spec_phase,
@@ -892,6 +900,16 @@ def _build_locked(
         cp = None
 
     resume_state = resolve_resume(project_dir, resume, expected_command="build")
+    enforce_resume_available(
+        resume_state,
+        resume_flag=resume,
+        expected_command="build",
+    )
+    enforce_resume_command_match(
+        resume_state,
+        "build",
+        force_cross_command_resume=force_cross_command_resume,
+    )
     use_spec = (
         bool(spec or spec_file)
         or is_spec_phase(resume_state.phase)
@@ -928,6 +946,17 @@ def _build_locked(
                 )
                 sys.exit(2)
         intent = file_intent
+
+    checkpoint_intent = _normalize_intent(resume_state.intent or "")
+    if resume and resume_state.resumed and intent and checkpoint_intent and intent != checkpoint_intent:
+        error_console.print(
+            "[error]Intent mismatch on resume.[/error]\n"
+            f"  checkpoint intent: '{rich_escape(checkpoint_intent)}'\n"
+            f"  CLI intent:        '{rich_escape(intent)}'\n"
+            "  Resume preserves the checkpoint intent. Omit INTENT on resume, or run "
+            "`otto build <new intent>` to start a fresh run."
+        )
+        sys.exit(2)
 
     resume_without_intent = bool(resume and resume_state.resumed and not intent)
     display_intent = intent or "(resumed run)"

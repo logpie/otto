@@ -271,10 +271,35 @@ def resolve_pointer(project_dir: Path, name: str) -> Path | None:
     if not root.exists():
         return None
 
+    def _valid_paused_target(session_path: Path) -> bool:
+        if not session_path.exists():
+            return False
+        checkpoint_path = session_path / "checkpoint.json"
+        if not checkpoint_path.exists():
+            return False
+        summary_path = session_path / "summary.json"
+        if summary_path.exists():
+            try:
+                summary = json.loads(summary_path.read_text())
+            except (OSError, json.JSONDecodeError):
+                return False
+            if summary.get("status") == "completed":
+                return False
+        return True
+
+    def _is_valid_pointer_target(session_path: Path) -> bool:
+        if name == PAUSED_POINTER:
+            return _valid_paused_target(session_path)
+        return session_path.exists()
+
     link = _pointer_link(root, name)
     try:
         if link.is_symlink():
-            return link.resolve(strict=False)
+            resolved = link.resolve(strict=False)
+            if _is_valid_pointer_target(resolved):
+                return resolved
+            if name != PAUSED_POINTER:
+                return None
     except OSError:
         pass
 
@@ -284,7 +309,7 @@ def resolve_pointer(project_dir: Path, name: str) -> Path | None:
             sid = txt.read_text().strip()
             if sid:
                 sess = session_dir(project_dir, sid)
-                if sess.exists():
+                if _is_valid_pointer_target(sess):
                     return sess
         except OSError:
             pass

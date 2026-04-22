@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 
+from otto import paths as _paths
 import otto.queue.runner as runner_module
 from otto.queue.runner import (
     Runner,
@@ -1099,6 +1100,43 @@ def test_reconcile_requeues_when_checkpoint_exists(tmp_path: Path):
         state2 = load_state(repo)
         assert state2["tasks"]["b2"]["status"] == "queued"
         assert state2["tasks"]["b2"].get("resumed_from_checkpoint") is True
+    finally:
+        runner._lock_fh.close()
+
+
+def test_reconcile_ignores_stale_paused_pointer_and_scans_for_valid_session(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    append_task(repo, QueueTask(
+        id="b3", command_argv=["build", "x"], resumable=True,
+        branch="build/b3", worktree=".worktrees/b3",
+    ))
+    wt = repo / ".worktrees" / "b3"
+    stale_sid = "2026-04-20-170100-aaaaaa"
+    valid_sid = "2026-04-20-170200-bbbbbb"
+    _paths.ensure_session_scaffold(wt, stale_sid)
+    _paths.ensure_session_scaffold(wt, valid_sid)
+    _paths.set_pointer(wt, _paths.PAUSED_POINTER, stale_sid)
+    _paths.session_checkpoint(wt, valid_sid).write_text(json.dumps({
+        "status": "paused",
+        "run_id": valid_sid,
+        "updated_at": "2026-04-20T17:02:00Z",
+    }))
+
+    state = load_state(repo)
+    state["tasks"]["b3"] = {
+        "status": "running",
+        "child": {"pid": 1, "pgid": 1, "start_time_ns": 0,
+                  "argv": ["nonexistent"], "cwd": "/tmp"},
+    }
+    write_state(repo, state)
+    cfg = RunnerConfig(on_watcher_restart="resume", poll_interval_s=0.1)
+    runner = Runner(repo, cfg, otto_bin="/bin/true")
+    runner._lock_fh = acquire_lock(repo)
+    try:
+        runner._reconcile_on_startup()
+        state2 = load_state(repo)
+        assert state2["tasks"]["b3"]["status"] == "queued"
+        assert state2["tasks"]["b3"].get("resumed_from_checkpoint") is True
     finally:
         runner._lock_fh.close()
 

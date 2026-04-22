@@ -39,13 +39,22 @@ def _write_narrative(repo: Path, task_id: str, text: str, *, phase_dir: str = "b
     path.write_text(text)
 
 
-def _write_queue_manifest(repo: Path, task_id: str, *, session_id: str) -> Path:
+def _write_queue_manifest(
+    repo: Path,
+    task_id: str,
+    *,
+    session_id: str,
+    checkpoint_path: Path | None = None,
+    mirror_of: str | None = None,
+) -> Path:
     session_root = repo / ".worktrees" / task_id / "otto_logs" / "sessions" / session_id
     manifest_path = session_root / "manifest.json"
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = checkpoint_path or (session_root / "checkpoint.json")
     manifest_payload = {
         "run_id": session_id,
-        "mirror_of": str(manifest_path.resolve()),
+        "mirror_of": mirror_of or str(manifest_path.resolve()),
+        "checkpoint_path": str(checkpoint_path.resolve(strict=False)),
         "cost_usd": 1.25,
         "duration_s": 5.0,
     }
@@ -75,6 +84,10 @@ def _write_queue_state(repo: Path, tasks: dict[str, dict]) -> None:
 
 def _build_app(repo: Path, *, cancel_callback=None) -> QueueApp:
     return QueueApp(repo, concurrent=2, cancel_callback=cancel_callback)
+
+
+def _log_text(widget: Log) -> str:
+    return "\n".join(str(line) for line in widget.lines)
 
 
 @pytest.mark.asyncio
@@ -136,6 +149,25 @@ async def test_overview_updates_when_state_changes(tmp_path: Path):
         status = app.screen.query_one("#overview-status", Static)
         assert table.get_row_at(0)[1] == "RUNNING"
         assert "1 running" in str(status.content)
+
+
+def test_queue_model_infers_certify_phase_from_certify_banner(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    append_task(repo, _queue_task("alpha", branch="build/alpha", worktree=".worktrees/alpha"))
+    _write_narrative(
+        repo,
+        "alpha",
+        "[+0:00] — BUILD starting —\n[+0:10] — CERTIFY starting —\n[+0:11] cert in progress …\n",
+        phase_dir="build",
+    )
+    _write_queue_state(
+        repo,
+        {"alpha": {"status": "running", "started_at": "2026-04-21T20:00:01Z"}},
+    )
+
+    snapshot = QueueModel(repo).snapshot()
+
+    assert snapshot.tasks[0].phase == "CERTIFY"
 
 
 @pytest.mark.asyncio
@@ -292,6 +324,96 @@ async def test_detail_uses_log_and_end_resumes_follow(tmp_path: Path):
         assert log_widget.scroll_y == log_widget.max_scroll_y
 
 
+@pytest.mark.asyncio
+async def test_detail_follows_relocated_running_session_via_manifest_fallback(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    append_task(repo, _queue_task("alpha", branch="build/alpha", worktree=".worktrees/alpha"))
+    old_narrative = (
+        repo
+        / ".worktrees"
+        / "alpha"
+        / "otto_logs"
+        / "sessions"
+        / "session-alpha"
+        / "build"
+        / "narrative.log"
+    )
+    old_narrative.parent.mkdir(parents=True, exist_ok=True)
+    old_narrative.write_text("[+0:00] old home\n")
+    _write_queue_state(
+        repo,
+        {"alpha": {"status": "running", "started_at": "2026-04-21T20:00:01Z"}},
+    )
+
+    app = _build_app(repo)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause(0.3)
+
+        assert isinstance(app.screen, TaskDetailScreen)
+        log_widget = app.screen.query_one("#detail-log", Log)
+        assert "old home" in _log_text(log_widget)
+
+        relocated_session = repo / "relocated" / "otto_logs" / "sessions" / "session-alpha-relocated"
+        relocated_narrative = relocated_session / "build" / "narrative.log"
+        relocated_narrative.parent.mkdir(parents=True, exist_ok=True)
+        relocated_narrative.write_text("[+0:01] relocated home\n")
+        queue_manifest = repo / "otto_logs" / "queue" / "alpha" / "manifest.json"
+        queue_manifest.parent.mkdir(parents=True, exist_ok=True)
+        queue_manifest.write_text(json.dumps({
+            "run_id": "session-alpha-relocated",
+            "checkpoint_path": str((relocated_session / "checkpoint.json").resolve(strict=False)),
+        }))
+        old_narrative.unlink()
+        await pilot.pause(0.6)
+
+        info = app.screen.query_one("#detail-info", Static)
+        rendered = _log_text(log_widget)
+        assert "relocated home" in rendered
+        assert "old home" not in rendered
+        assert str(relocated_narrative) in str(info.content)
+
+
+@pytest.mark.asyncio
+async def test_detail_clears_when_narrative_disappears(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    append_task(repo, _queue_task("alpha", branch="build/alpha", worktree=".worktrees/alpha"))
+    narrative_path = (
+        repo
+        / ".worktrees"
+        / "alpha"
+        / "otto_logs"
+        / "sessions"
+        / "session-alpha"
+        / "build"
+        / "narrative.log"
+    )
+    narrative_path.parent.mkdir(parents=True, exist_ok=True)
+    narrative_path.write_text("[+0:00] still here\n")
+    _write_queue_state(
+        repo,
+        {"alpha": {"status": "running", "started_at": "2026-04-21T20:00:01Z"}},
+    )
+
+    app = _build_app(repo)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause(0.3)
+
+        assert isinstance(app.screen, TaskDetailScreen)
+        log_widget = app.screen.query_one("#detail-log", Log)
+        assert "still here" in _log_text(log_widget)
+
+        narrative_path.unlink()
+        await pilot.pause(0.6)
+
+        rendered = _log_text(log_widget)
+        assert "still here" not in rendered
+        assert "<log file no longer available>" in rendered
+
+
 def test_narrative_tailer_reads_new_bytes(tmp_path: Path):
     narrative = tmp_path / "narrative.log"
     narrative.write_text("[+0:00] start\n")
@@ -307,6 +429,24 @@ def test_narrative_tailer_reads_new_bytes(tmp_path: Path):
     clear, lines = tailer.poll()
     assert clear is False
     assert lines == ["[+0:01] next line"]
+
+
+def test_resolve_manifest_path_falls_back_when_mirror_is_stale(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    append_task(repo, _queue_task("alpha", branch="build/alpha", worktree=".worktrees/alpha"))
+    queue_manifest = _write_queue_manifest(
+        repo,
+        "alpha",
+        session_id="session-alpha",
+        mirror_of=str((repo / "missing" / "manifest.json").resolve(strict=False)),
+    )
+
+    model = QueueModel(repo)
+    manifest = json.loads((repo / "otto_logs" / "queue" / "alpha" / "manifest.json").read_text())
+
+    resolved = model.resolve_manifest_path("alpha", manifest=manifest)
+
+    assert resolved == (repo / "otto_logs" / "queue" / "alpha" / "manifest.json").resolve(strict=False)
 
 
 @pytest.mark.asyncio

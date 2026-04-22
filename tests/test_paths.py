@@ -172,6 +172,23 @@ class TestResolvePointerScanFallback:
         assert resolved is not None
         assert resolved.name == newer_paused, "paused must win over in_progress"
 
+    def test_stale_paused_pointer_falls_through_to_valid_session(self, project_dir):
+        stale_sid = "2026-04-20-170100-aaaaaa"
+        valid_sid = "2026-04-20-170200-bbbbbb"
+        paths.ensure_session_scaffold(project_dir, stale_sid)
+        paths.ensure_session_scaffold(project_dir, valid_sid)
+        paths.set_pointer(project_dir, paths.PAUSED_POINTER, stale_sid)
+        paths.session_checkpoint(project_dir, valid_sid).write_text(json.dumps({
+            "status": "paused",
+            "run_id": valid_sid,
+            "updated_at": "2026-04-20T17:02:00Z",
+        }))
+
+        resolved = paths.resolve_pointer(project_dir, paths.PAUSED_POINTER)
+
+        assert resolved is not None
+        assert resolved.name == valid_sid
+
 
 class TestProjectLock:
     def test_lock_acquired_and_released(self, project_dir):

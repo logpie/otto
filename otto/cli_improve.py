@@ -85,6 +85,7 @@ def _run_improve(
     split: bool = False,
     resume: bool = False,
     resume_state=None,
+    force_cross_command_resume: bool = False,
     in_worktree: bool = False,
     break_lock: bool = False,
     cli_overrides: dict | None = None,
@@ -95,13 +96,28 @@ def _run_improve(
     checkpoint as ``command="improve.<subcommand>"`` so resuming preserves the
     exact intent and the mismatch warning can fire if the user switches modes.
     """
-    from otto.checkpoint import print_resume_status, resolve_resume
+    from otto.checkpoint import (
+        enforce_resume_available,
+        enforce_resume_command_match,
+        print_resume_status,
+        resolve_resume,
+    )
     from otto.config import load_config
 
     command_id = f"improve.{subcommand}"
     config = load_config(project_dir / "otto.yaml") if (project_dir / "otto.yaml").exists() else {}
     if resume_state is None:
         resume_state = resolve_resume(project_dir, resume, expected_command=command_id)
+    enforce_resume_available(
+        resume_state,
+        resume_flag=resume,
+        expected_command=command_id,
+    )
+    enforce_resume_command_match(
+        resume_state,
+        command_id,
+        force_cross_command_resume=force_cross_command_resume,
+    )
     print_resume_status(console, resume_state, resume, expected_command=command_id)
 
     # --in-worktree creates an isolated worktree before branching.
@@ -437,6 +453,11 @@ def register_improve_commands(main: click.Group) -> None:
     @click.option("--rounds", "-n", default=3, help="Maximum rounds (default: 3)")
     @click.option("--split", is_flag=True, help="System-controlled loop (vs agent-driven)")
     @click.option("--resume", is_flag=True, help="Resume from last checkpoint")
+    @click.option(
+        "--force-cross-command-resume",
+        is_flag=True,
+        help="Allow --resume to reuse a checkpoint written by a different otto command",
+    )
     @click.option("--in-worktree", "in_worktree", is_flag=True,
                   help="Run in an isolated git worktree (./.worktrees/improve-bugs-<slug>-<date>/)")
     @click.option("--budget", default=None, type=int, help="Total wall-clock budget in seconds (default from otto.yaml or 7200 for improve)")
@@ -446,7 +467,7 @@ def register_improve_commands(main: click.Group) -> None:
     @click.option("--strict", is_flag=True, help="Require two consecutive PASS rounds before stopping")
     @click.option("--verbose", is_flag=True, help="Show detailed live progress, including tool-call counts")
     @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
-    def bugs(focus, rounds, split, resume, in_worktree, budget, model, provider, effort, strict, verbose, break_lock):
+    def bugs(focus, rounds, split, resume, force_cross_command_resume, in_worktree, budget, model, provider, effort, strict, verbose, break_lock):
         """Find and fix bugs, edge cases, and error handling gaps.
 
         One agent certifies, reads findings, fixes, and re-certifies
@@ -471,6 +492,7 @@ def register_improve_commands(main: click.Group) -> None:
             subcommand="bugs",
             split=split,
             resume=resume,
+            force_cross_command_resume=force_cross_command_resume,
             in_worktree=in_worktree,
             break_lock=break_lock,
             cli_overrides={
@@ -488,6 +510,11 @@ def register_improve_commands(main: click.Group) -> None:
     @click.option("--rounds", "-n", default=3, help="Maximum rounds (default: 3)")
     @click.option("--split", is_flag=True, help="System-controlled loop (vs agent-driven)")
     @click.option("--resume", is_flag=True, help="Resume from last checkpoint")
+    @click.option(
+        "--force-cross-command-resume",
+        is_flag=True,
+        help="Allow --resume to reuse a checkpoint written by a different otto command",
+    )
     @click.option("--in-worktree", "in_worktree", is_flag=True,
                   help="Run in an isolated git worktree (./.worktrees/improve-feature-<slug>-<date>/)")
     @click.option("--budget", default=None, type=int, help="Total wall-clock budget in seconds (default from otto.yaml or 7200 for improve)")
@@ -497,7 +524,7 @@ def register_improve_commands(main: click.Group) -> None:
     @click.option("--strict", is_flag=True, help="Require two consecutive PASS rounds before stopping")
     @click.option("--verbose", is_flag=True, help="Show detailed live progress, including tool-call counts")
     @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
-    def feature(focus, rounds, split, resume, in_worktree, budget, model, provider, effort, strict, verbose, break_lock):
+    def feature(focus, rounds, split, resume, force_cross_command_resume, in_worktree, budget, model, provider, effort, strict, verbose, break_lock):
         """Suggest and implement product improvements.
 
         One agent evaluates the product, identifies improvements, implements
@@ -521,6 +548,7 @@ def register_improve_commands(main: click.Group) -> None:
             subcommand="feature",
             split=split,
             resume=resume,
+            force_cross_command_resume=force_cross_command_resume,
             in_worktree=in_worktree,
             break_lock=break_lock,
             cli_overrides={
@@ -538,6 +566,11 @@ def register_improve_commands(main: click.Group) -> None:
     @click.option("--rounds", "-n", default=5, help="Maximum rounds (default: 5)")
     @click.option("--split", is_flag=True, help="System-controlled loop (vs agent-driven)")
     @click.option("--resume", is_flag=True, help="Resume from last checkpoint")
+    @click.option(
+        "--force-cross-command-resume",
+        is_flag=True,
+        help="Allow --resume to reuse a checkpoint written by a different otto command",
+    )
     @click.option("--in-worktree", "in_worktree", is_flag=True,
                   help="Run in an isolated git worktree (./.worktrees/improve-target-<slug>-<date>/)")
     @click.option("--budget", default=None, type=int, help="Total wall-clock budget in seconds (default from otto.yaml or 7200 for improve)")
@@ -547,7 +580,7 @@ def register_improve_commands(main: click.Group) -> None:
     @click.option("--strict", is_flag=True, help="Require two consecutive PASS rounds before stopping")
     @click.option("--verbose", is_flag=True, help="Show detailed live progress, including tool-call counts")
     @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
-    def target(goal, rounds, split, resume, in_worktree, budget, model, provider, effort, strict, verbose, break_lock):
+    def target(goal, rounds, split, resume, force_cross_command_resume, in_worktree, budget, model, provider, effort, strict, verbose, break_lock):
         """Optimize toward a measurable target.
 
         Measures a metric, compares to the target, and iterates until met.
@@ -561,10 +594,24 @@ def register_improve_commands(main: click.Group) -> None:
             otto improve target "lighthouse score > 95" -n 10
         """
         project_dir = Path.cwd()
-        from otto.checkpoint import resolve_resume
+        from otto.checkpoint import (
+            enforce_resume_available,
+            enforce_resume_command_match,
+            resolve_resume,
+        )
 
         resume_state = resolve_resume(
             project_dir, resume, expected_command="improve.target"
+        )
+        enforce_resume_available(
+            resume_state,
+            resume_flag=resume,
+            expected_command="improve.target",
+        )
+        enforce_resume_command_match(
+            resume_state,
+            "improve.target",
+            force_cross_command_resume=force_cross_command_resume,
         )
         from otto.config import _normalize_intent
 
@@ -572,12 +619,6 @@ def register_improve_commands(main: click.Group) -> None:
         requested_goal = _normalize_intent(goal or "")
 
         if resume and resume_state.resumed:
-            if resume_state.prior_command != "improve.target":
-                error_console.print(
-                    "[error]Checkpoint is not from `improve target`. "
-                    "Run without --resume to start a new target-improvement run.[/error]"
-                )
-                sys.exit(2)
             if requested_goal:
                 if checkpoint_goal and requested_goal != checkpoint_goal:
                     error_console.print(
@@ -610,6 +651,7 @@ def register_improve_commands(main: click.Group) -> None:
             split=split,
             resume=resume,
             resume_state=resume_state,
+            force_cross_command_resume=force_cross_command_resume,
             in_worktree=in_worktree,
             break_lock=break_lock,
             cli_overrides={

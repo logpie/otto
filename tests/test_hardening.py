@@ -420,7 +420,9 @@ class TestImproveCLIHardening:
             )
 
         assert result.exit_code == 2
-        assert "not from `improve target`" in result.output
+        assert "Checkpoint command mismatch" in result.output
+        assert "improve.bugs" in result.output
+        assert "improve.target" in result.output
         assert run_improve.call_count == 0
 
 
@@ -1548,6 +1550,78 @@ class TestBuildResume:
         # intent is required.
         r = CliRunner().invoke(main, ["build", "--resume"])
         assert r.exit_code == 2
+
+    def test_build_resume_rejects_cross_command_checkpoint(self, tmp_git_repo, monkeypatch):
+        from click.testing import CliRunner
+        from otto.checkpoint import write_checkpoint
+        from otto.cli import main
+
+        write_checkpoint(
+            tmp_git_repo,
+            run_id="r1",
+            command="improve.bugs",
+            status="paused",
+        )
+
+        monkeypatch.chdir(tmp_git_repo)
+        with patch("otto.pipeline.build_agentic_v3") as build_agent:
+            result = CliRunner().invoke(main, ["build", "--resume"], catch_exceptions=False)
+
+        assert result.exit_code == 2
+        assert "Checkpoint command mismatch" in result.output
+        assert "improve.bugs" in result.output
+        assert build_agent.call_count == 0
+
+    def test_build_resume_rejects_cli_intent_change(self, tmp_git_repo, monkeypatch):
+        from click.testing import CliRunner
+        from otto.checkpoint import write_checkpoint
+        from otto.cli import main
+
+        write_checkpoint(
+            tmp_git_repo,
+            run_id="r1",
+            command="build",
+            status="paused",
+            intent="old intent",
+        )
+
+        monkeypatch.chdir(tmp_git_repo)
+        with patch("otto.pipeline.build_agentic_v3") as build_agent:
+            result = CliRunner().invoke(
+                main,
+                ["build", "new intent", "--resume"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 2
+        assert "Intent mismatch on resume" in result.output
+        assert "checkpoint intent: 'old intent'" in result.output
+        assert "CLI intent:        'new intent'" in result.output
+        assert build_agent.call_count == 0
+
+    def test_build_resume_reports_completed_last_run(self, tmp_git_repo, monkeypatch):
+        from click.testing import CliRunner
+        from otto import paths as _paths
+        from otto.cli import main
+
+        session_id = "2026-04-21-200000-abcdef"
+        _paths.ensure_session_scaffold(tmp_git_repo, session_id)
+        _paths.session_summary(tmp_git_repo, session_id).write_text(json.dumps({
+            "run_id": session_id,
+            "command": "build",
+            "status": "completed",
+            "verdict": "passed",
+            "completed_at": "2026-04-21T20:05:00Z",
+        }))
+
+        monkeypatch.chdir(tmp_git_repo)
+        with patch("otto.pipeline.build_agentic_v3") as build_agent:
+            result = CliRunner().invoke(main, ["build", "--resume"], catch_exceptions=False)
+
+        assert result.exit_code == 2
+        assert f"Last run completed (session {session_id}, verdict passed)." in result.output
+        assert "Nothing to resume" in result.output
+        assert build_agent.call_count == 0
 
     def test_reject_spec_and_spec_file_mutex(self, tmp_git_repo, monkeypatch):
         from click.testing import CliRunner
