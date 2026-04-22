@@ -1980,6 +1980,35 @@ class TestCriticalWriteFailures:
                     rounds=1,
                 )
 
+    def test_session_summary_normalizes_breakdown_to_total_duration(self, tmp_path):
+        from otto import paths as _paths
+        from otto.pipeline import _write_session_summary
+
+        _write_session_summary(
+            tmp_path,
+            "run-1",
+            verdict="passed",
+            passed=True,
+            cost=2.96,
+            duration=1084.127,
+            stories_passed=24,
+            stories_tested=24,
+            rounds=2,
+            breakdown={
+                "build": {"duration_s": 155.255},
+                "certify": {"duration_s": 769.748, "rounds": 2},
+            },
+        )
+
+        summary = json.loads(_paths.session_summary(tmp_path, "run-1").read_text())
+        total = sum(
+            float(entry["duration_s"])
+            for entry in summary["breakdown"].values()
+            if isinstance(entry.get("duration_s"), int | float)
+        )
+        assert abs(total - 1084.127) < 0.01
+        assert abs(float(summary["breakdown"]["build"]["duration_s"]) - 314.379) < 0.01
+
 
 # -- Test: cross-run memory --
 

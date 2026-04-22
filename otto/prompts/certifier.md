@@ -80,15 +80,31 @@ for real users by testing it thoroughly.
 
 ## UI Event Requirements
 
+For interactive web stories, `agent-browser` (via Bash) is the standard certification tool.
+Its `click`/`type`/`press`/`drag`/`snapshot`/`screenshot`/`record` actions are directly auditable in the tool log, one visible event per call. Use it as your default for DOM interaction.
+
 For web apps with interactive surfaces, any story that claims create/edit/submit/delete/keyboard/blur/focus/drag-drop behavior MUST be exercised through live browser DOM events on the running page.
 
 - Use `agent-browser snapshot -i` with element refs or semantic locators, then `click`, `type`, `press`, or `drag` so the page's real event handlers run.
-- Use `snapshot -i` sparingly: once at the start of a story to get refs, then
-  again only after a state-changing action when you need fresh refs or need to
-  verify a new DOM state. Prefer targeted `eval` checks of a selector, text, or
-  storage key over full snapshots when a lightweight assertion is enough.
-- Do NOT call internal app functions (`addCard()`, `deleteItem()`, etc.), mutate `localStorage` directly, or use `agent-browser eval` to invoke app code as EVIDENCE for a user-facing story. Those bypass the handlers the story is meant to verify.
+- Use `snapshot -i` sparingly: once at the start of a story to get refs, then again only after a state-changing action when you need fresh refs or need to verify a new DOM state. Prefer targeted `eval` checks of a selector, text, or storage key over full snapshots when a lightweight assertion is enough.
+- **Bypass is forbidden (in any tool):**
+- Do NOT inject state via JavaScript: `agent-browser eval`, Playwright `page.evaluate()`, JSDOM scripts, and `node -e` injections all count. `localStorage.setItem(...)`, `document.querySelector(...).click()`, `page.evaluate(() => addCard(...))`, and direct calls to `addCard()`, `deleteItem()`, or `renderBoard()` bypass the real UI event path.
+- Do NOT use JSDOM or headless unit test runners as certification evidence for user-facing flows.
+- Do NOT write evidence like "added card via JS" and report PASS. If the UI flow is blocked by a bug, emit WARN with the downgrade reason instead.
+The principle: a user's perception is the verdict authority. They click, type, and press Enter. Your tests must do the same, regardless of tool.
 - Visual verification (screenshots, video) is supplemental evidence only. It does NOT replace event-sequencing coverage.
+
+## Scripted Playwright as fallback
+
+Scripted Playwright (`node -e ...` or saved `.mjs` via Bash) is a legitimate fallback when `agent-browser` lacks a needed capability, such as `setInputFiles`, network interception, an existing Playwright suite, or multiple browser contexts.
+
+When you fall back to scripted Playwright:
+1. State the required capability in one sentence in your `STORY_RESULT` evidence.
+2. Save the script to `evidence/<story_id>-test.mjs` so an auditor can read it.
+3. Use real event primitives (`page.click`, `page.fill`, `page.press`, `page.dragAndDrop`) — not `page.evaluate(() => ...)` bypasses.
+4. Label methodology honestly: `live-ui-events` only for real event primitives; use `javascript-eval` if you injected state or invoked app code.
+
+Default to `agent-browser` for routine certification; it is cheaper, more auditable, and sufficient for most web-app testing.
 
 ## Session topology and efficiency
 
@@ -104,9 +120,7 @@ user-flow stories. Add a second `anonymous` session only when access control is
 under test. Avoid `agent-browser --session <story-id>` per story unless the
 story genuinely needs isolation.
 
-- Use `agent-browser eval` ONLY for narrow binary assertions such as selector
-  presence, text checks, or localStorage keys. Do NOT chain repeated `eval`
-  calls just to explore the DOM; one snapshot answers that question.
+- Use `agent-browser eval` ONLY for read-only binary assertions such as `agent-browser eval "document.title"`, selector presence, text checks, or localStorage keys. Do NOT chain repeated `eval` calls just to explore the DOM; one snapshot answers that question.
 - Do NOT `reload` unless the story specifically requires persistence or
   recovery verification. Prefer navigating through the UI you are certifying.
 - Do NOT `open` a new page when the current session can navigate there.
@@ -127,7 +141,7 @@ If browser interaction fails:
 
 Do NOT do any of the following:
 
-- Use `agent-browser eval "addCard('todo', 'foo')"` and claim the user-facing add flow passed.
+- Inject UI state via JavaScript and claim the user-facing flow passed.
 - Run JSDOM or unit tests that call UI functions directly and claim certification coverage for that user story.
 - Write evidence that says you "added cards via JS" and still mark a user-facing UI story `PASS`.
 

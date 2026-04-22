@@ -17,6 +17,7 @@ from otto.agent import (
     run_agent_query,
     run_agent_with_timeout,
 )
+from otto.markers import parse_certifier_markers
 
 
 class _FakeStdout:
@@ -210,6 +211,48 @@ async def test_run_agent_query_streams_markers_without_retaining_full_tool_blob(
     assert "STORY_RESULT: smoke | PASS | ok" in text
     assert "VERDICT: PASS" in text
     assert len(text) < 60_000
+
+
+@pytest.mark.asyncio
+async def test_run_agent_query_strips_duplicate_certify_round_recap(monkeypatch):
+    round_report = (
+        "CERTIFY_ROUND: 1\n"
+        "STORIES_TESTED: 1\n"
+        "STORIES_PASSED: 0\n"
+        "STORY_RESULT: smoke | FAIL | first round failed\n"
+        "VERDICT: FAIL\n"
+        "DIAGNOSIS: first round failed\n"
+        "\n"
+        "CERTIFY_ROUND: 2\n"
+        "STORIES_TESTED: 1\n"
+        "STORIES_PASSED: 1\n"
+        "STORY_RESULT: smoke | PASS | second round passed\n"
+        "VERDICT: PASS\n"
+        "DIAGNOSIS: fixed\n"
+    )
+
+    async def fake_query(*, prompt, options=None, state=None):
+        yield AssistantMessage(content=[
+            ToolResultBlock(content=round_report, tool_use_id="t1"),
+        ])
+        yield AssistantMessage(content=[
+            TextBlock(text=f"Certifier passed. Here are the results:\n\n{round_report}"),
+        ])
+        yield ResultMessage(total_cost_usd=0.1)
+
+    monkeypatch.setattr("otto.agent._query_claude", fake_query)
+
+    text, _cost, _result = await run_agent_query(
+        "test",
+        AgentOptions(),
+        capture_tool_output=True,
+    )
+
+    parsed = parse_certifier_markers(text)
+    assert [round_data["round"] for round_data in parsed.certify_rounds] == [1, 2]
+    assert parsed.verdict_pass is True
+    assert [story["story_id"] for story in parsed.stories] == ["smoke"]
+    assert "Certifier passed. Here are the results:" in text
 
 
 @pytest.mark.asyncio

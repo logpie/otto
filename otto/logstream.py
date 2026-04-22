@@ -184,6 +184,74 @@ def _coerce_usage(usage: Any) -> Any:
         return usage
 
 
+def normalize_phase_breakdown(
+    total_elapsed: float,
+    breakdown: dict[str, dict[str, Any]] | None,
+    *,
+    primary_phase: str | None = None,
+) -> dict[str, dict[str, Any]] | None:
+    """Return a copy of ``breakdown`` whose durations sum to ``total_elapsed``.
+
+    Build/improve transcripts can alternate between build and certify multiple
+    times. Some legacy paths only captured the pre-first-certify build span,
+    which omits later fix/build work. This normalizer assigns all remaining
+    non-certify wall-clock time to the primary phase so phase totals stay
+    consistent with the session total.
+    """
+    if breakdown is None:
+        return None
+
+    normalized = {
+        str(phase): dict(data)
+        for phase, data in breakdown.items()
+        if isinstance(data, dict)
+    }
+    if not normalized:
+        return None
+
+    total_elapsed = max(float(total_elapsed), 0.0)
+    duration_entries = {
+        phase: float(data["duration_s"])
+        for phase, data in normalized.items()
+        if isinstance(data.get("duration_s"), int | float)
+    }
+    if not duration_entries:
+        return normalized
+
+    if primary_phase is None or primary_phase not in normalized:
+        for candidate in ("build", "spec", "certify"):
+            if candidate in normalized:
+                primary_phase = candidate
+                break
+        else:
+            primary_phase = next(iter(normalized))
+
+    other_total = sum(
+        duration
+        for phase, duration in duration_entries.items()
+        if phase != primary_phase
+    )
+    if other_total <= total_elapsed:
+        normalized.setdefault(primary_phase, {})
+        normalized[primary_phase]["duration_s"] = max(total_elapsed - other_total, 0.0)
+    else:
+        total_phase_duration = sum(duration_entries.values())
+        scale = (total_elapsed / total_phase_duration) if total_phase_duration > 0 else 0.0
+        for phase, duration in duration_entries.items():
+            normalized[phase]["duration_s"] = max(duration * scale, 0.0)
+
+    normalized_total = sum(
+        float(data.get("duration_s", 0.0))
+        for data in normalized.values()
+        if isinstance(data.get("duration_s"), int | float)
+    )
+    if abs(normalized_total - total_elapsed) > 0.01:
+        raise AssertionError(
+            f"phase breakdown must sum to total duration: {normalized_total:.3f}s != {total_elapsed:.3f}s"
+        )
+    return normalized
+
+
 class JsonlMessageWriter:
     """Append one JSON object per SDK message event.
 
@@ -378,6 +446,11 @@ class NarrativeFormatter:
     ) -> str:
         if breakdown is None:
             breakdown = self._fallback_breakdown(total_elapsed)
+        breakdown = normalize_phase_breakdown(
+            total_elapsed,
+            breakdown,
+            primary_phase=self._summary_label(),
+        )
 
         parts: list[str] = []
         for phase in ("spec", "build", "certify"):

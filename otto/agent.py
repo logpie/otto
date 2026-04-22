@@ -203,8 +203,14 @@ class _TranscriptAccumulator:
         self._carry = ""
 
     def add_assistant_text(self, text: str) -> None:
-        self._append(self._assistant_parts, "_assistant_chars", self._assistant_limit, text)
-        self._collect_markers(text)
+        text_to_store = self._strip_redundant_marker_recap(text)
+        self._append(
+            self._assistant_parts,
+            "_assistant_chars",
+            self._assistant_limit,
+            text_to_store,
+        )
+        self._collect_markers(text_to_store)
 
     def add_tool_output(self, text: str) -> None:
         self._collect_markers(text)
@@ -214,10 +220,21 @@ class _TranscriptAccumulator:
     def finalize_text(self) -> str:
         self._flush_carry()
         parts = [*self._assistant_parts]
-        if self._marker_lines:
-            parts.append("\n".join(self._marker_lines))
         if self._keep_tool_output:
+            retained_lines = {
+                line.strip()
+                for part in [*self._assistant_parts, *self._tool_parts]
+                for line in part.splitlines()
+                if line.strip()
+            }
+            missing_marker_lines = [
+                line for line in self._marker_lines if line not in retained_lines
+            ]
+            if missing_marker_lines:
+                parts.append("\n".join(missing_marker_lines))
             parts.extend(self._tool_parts)
+        elif self._marker_lines:
+            parts.append("\n".join(self._marker_lines))
         return "\n\n".join(part for part in parts if part)
 
     def _append(
@@ -234,6 +251,41 @@ class _TranscriptAccumulator:
         while bucket and getattr(self, count_attr) > limit:
             removed = bucket.popleft()
             setattr(self, count_attr, getattr(self, count_attr) - len(removed))
+
+    def _strip_redundant_marker_recap(self, text: str) -> str:
+        """Drop duplicated marker blocks from closing recap prose.
+
+        Improve/build runs capture certifier marker lines from subagent tool
+        output so they can be parsed later. If the parent agent then echoes the
+        same `CERTIFY_ROUND` block in a closing assistant summary, parsing the
+        combined transcript sees `1, 2, 1, 2` and trips the non-monotonic guard
+        even though the underlying certifier output was valid.
+
+        Keep the prose, but strip marker lines only when we've already seen
+        round markers earlier in the transcript.
+        """
+        if (
+            "CERTIFY_ROUND:" not in text
+            or not any(line.startswith("CERTIFY_ROUND:") for line in self._marker_lines)
+        ):
+            return text
+
+        prose_lines = [
+            line for line in text.splitlines()
+            if line.strip() and not line.strip().startswith(
+                (
+                    "CERTIFY_ROUND:",
+                    "STORIES_TESTED:",
+                    "STORIES_PASSED:",
+                    "DIAGNOSIS:",
+                    "METRIC_VALUE:",
+                    "METRIC_MET:",
+                    "STORY_RESULT:",
+                    "VERDICT:",
+                )
+            )
+        ]
+        return "\n".join(prose_lines)
 
     def _collect_markers(self, fragment: str) -> None:
         if not fragment:

@@ -29,6 +29,7 @@ from otto.logstream import (
     browser_efficiency_outlier,
     estimate_phase_costs,
     make_session_logger,
+    normalize_phase_breakdown,
     summarize_browser_efficiency,
 )
 
@@ -503,7 +504,7 @@ class TestNarrativeFormatter:
         f.close()
 
         lines = [_strip_ts(line) for line in path.read_text().splitlines()]
-        assert "RUN SUMMARY: build=0:30, certify=0:40 (2 rounds), total=$1.23 1:40" in lines[0]
+        assert "RUN SUMMARY: build=1:00, certify=0:40 (2 rounds), total=$1.23 1:40" in lines[0]
         assert "SUCCESS $1.23 in 1:40" in lines[1]
 
     def test_finalize_with_phase_costs_emits_cost_annotated_summary(self, tmp_path):
@@ -522,7 +523,7 @@ class TestNarrativeFormatter:
 
         lines = [_strip_ts(line) for line in path.read_text().splitlines()]
         assert (
-            "RUN SUMMARY: build=$0.49 2:18, certify=$0.41 1:51 (2 rounds), "
+            "RUN SUMMARY: build=$0.49 2:40, certify=$0.41 1:51 (2 rounds), "
             "total=$0.98 4:31"
         ) in lines[0]
         assert "SUCCESS $0.98 in 4:31" in lines[1]
@@ -542,7 +543,7 @@ class TestNarrativeFormatter:
         f.close()
 
         summary = _strip_ts(path.read_text().splitlines()[0])
-        assert "RUN SUMMARY: build=2:18, certify=1:51 (2 rounds), total=$0.98 4:31" in summary
+        assert "RUN SUMMARY: build=2:40, certify=1:51 (2 rounds), total=$0.98 4:31" in summary
         assert "build=$" not in summary
         assert "certify=$" not in summary
 
@@ -567,9 +568,89 @@ class TestNarrativeFormatter:
 
         summary = _strip_ts(path.read_text().splitlines()[0])
         assert (
-            "RUN SUMMARY: build=~$0.49 2:18, certify=~$0.41 1:51 (2 rounds), "
+            "RUN SUMMARY: build=~$0.49 2:40, certify=~$0.41 1:51 (2 rounds), "
             "total=$0.98 4:31"
         ) in summary
+
+    def test_finalize_reassigns_non_certify_time_from_synthetic_transcript(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        path = tmp_path / "narrative.log"
+        now = [1000.0]
+
+        monkeypatch.setattr(time, "monotonic", lambda: now[0])
+
+        f = NarrativeFormatter(path)
+        f.start()
+
+        now[0] = 1005.0
+        f.write_message(AssistantMessage(content=[TextBlock(text="initial build work")]))
+
+        now[0] = 1010.0
+        f.write_message(AssistantMessage(content=[
+            ToolUseBlock(
+                name="Agent",
+                input={"prompt": "Please certify.\n## Verdict Format\nVERDICT: PASS|FAIL"},
+                id="cert-1",
+            ),
+        ]))
+
+        now[0] = 1030.0
+        f.write_message(AssistantMessage(content=[
+            ToolResultBlock(
+                tool_use_id="cert-1",
+                content="STORIES_TESTED: 1\nSTORIES_PASSED: 0\nVERDICT: FAIL\n",
+            ),
+        ]))
+
+        now[0] = 1045.0
+        f.write_message(AssistantMessage(content=[TextBlock(text="fix/build work between rounds")]))
+
+        now[0] = 1050.0
+        f.write_message(AssistantMessage(content=[
+            ToolUseBlock(
+                name="Agent",
+                input={"prompt": "Please certify.\n## Verdict Format\nVERDICT: PASS|FAIL"},
+                id="cert-2",
+            ),
+        ]))
+
+        now[0] = 1070.0
+        f.write_message(AssistantMessage(content=[
+            ToolResultBlock(
+                tool_use_id="cert-2",
+                content="STORIES_TESTED: 1\nSTORIES_PASSED: 1\nVERDICT: PASS\n",
+            ),
+        ]))
+
+        now[0] = 1084.0
+        f.write_message(ResultMessage(
+            subtype="success",
+            is_error=False,
+            session_id="x",
+            total_cost_usd=1.00,
+        ))
+        f.close()
+
+        lines = [_strip_ts(line) for line in path.read_text().splitlines()]
+        assert "RUN SUMMARY: build=0:44, certify=0:40 (2 rounds), total=$1.00 1:24" in lines[-2]
+
+    def test_normalize_phase_breakdown_sums_to_total(self):
+        normalized = normalize_phase_breakdown(
+            1084.127,
+            {
+                "build": {"duration_s": 155.255},
+                "certify": {"duration_s": 769.748, "rounds": 2},
+            },
+            primary_phase="build",
+        )
+
+        assert normalized is not None
+        total = sum(float(entry["duration_s"]) for entry in normalized.values())
+        assert abs(total - 1084.127) < 0.01
+        assert abs(float(normalized["build"]["duration_s"]) - 314.379) < 0.01
 
     def test_finalize_no_qa_shape_omits_certify_entry(self, tmp_path):
         path = tmp_path / "narrative.log"

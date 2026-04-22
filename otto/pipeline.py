@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from otto.agent import AgentCallError
+from otto.logstream import normalize_phase_breakdown
 
 if TYPE_CHECKING:
     from otto.budget import RunBudget
@@ -88,7 +89,19 @@ def _write_session_summary(
         "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     if breakdown is not None:
-        summary["breakdown"] = breakdown
+        primary_phase = "build"
+        if "build" not in breakdown:
+            if "spec" in breakdown:
+                primary_phase = "spec"
+            elif "certify" in breakdown:
+                primary_phase = "certify"
+        normalized_breakdown = normalize_phase_breakdown(
+            float(duration),
+            breakdown,
+            primary_phase=primary_phase,
+        )
+        if normalized_breakdown is not None:
+            summary["breakdown"] = normalized_breakdown
     summary_path = paths.session_summary(project_dir, session_id)
     try:
         write_json_file(summary_path, summary, strict=True)
