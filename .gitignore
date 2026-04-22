@@ -28,3 +28,7 @@ summary.json
 .otto-queue-commands.jsonl
 .otto-queue-commands.jsonl.lock
 .watcher.log
+
+# Behavioral E2E artifacts (per-run, kept for forensics)
+bench-results/as-user/
+
