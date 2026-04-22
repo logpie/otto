@@ -266,15 +266,25 @@ class TestV3PipelinePass:
         # --- PoW (proof-of-work) ---
         certifier_dir = _paths.certify_dir(tmp_git_repo, result.build_id)
         pow_data = json.loads((certifier_dir / "proof-of-work.json").read_text())
+        assert pow_data["schema_version"] == 1
         assert pow_data["outcome"] == "passed"
+        assert pow_data["pipeline_mode"] == "agentic_v3"
+        assert pow_data["mode"] == "agentic_v3"
+        assert pow_data["certifier_mode"] == "thorough"
+        assert pow_data["passed_count"] == 5
+        assert pow_data["failed_count"] == 0
+        assert pow_data["warn_count"] == 0
         assert len(pow_data["stories"]) == 5
         assert all("warn" not in story for story in pow_data["stories"])
-        assert all("evidence" not in story for story in pow_data["stories"])
+        assert all("claim" in story for story in pow_data["stories"])
+        assert all("observed_result" in story for story in pow_data["stories"])
+        assert all("has_evidence" in story for story in pow_data["stories"])
+        assert all(story["has_evidence"] is False for story in pow_data["stories"])
+        assert len(pow_data["round_history"]) == 1
         assert (certifier_dir / "proof-of-work.html").exists()
 
-        # --- Cumulative logs ---
-        intent_md = (tmp_git_repo / "intent.md").read_text()
-        assert intent in intent_md
+        # --- Session intent snapshot ---
+        assert _paths.session_intent(tmp_git_repo, result.build_id).read_text().strip() == intent
         entry = json.loads(
             _paths.history_jsonl(tmp_git_repo).read_text().strip().split("\n")[-1]
         )
@@ -311,6 +321,49 @@ async def test_completed_checkpoint_total_cost_and_run_id_match_build_result(tmp
     assert checkpoint["total_cost"] == pytest.approx(0.75)
     assert result.total_cost == pytest.approx(0.75)
     assert _paths.resolve_pointer(tmp_git_repo, _paths.PAUSED_POINTER) is None
+
+
+@pytest.mark.asyncio
+async def test_resume_totals_include_prior_cost_and_duration(tmp_git_repo):
+    from otto import paths as _paths
+
+    with patch("otto.agent.run_agent_query", side_effect=_make_mock_query(AGENT_OUTPUT_PASS)):
+        result = await build_agentic_v3(
+            "test",
+            tmp_git_repo,
+            {},
+            run_id="resume-123",
+            prior_total_cost=1.25,
+            prior_total_duration=9.5,
+        )
+
+    summary = json.loads(_paths.session_summary(tmp_git_repo, result.build_id).read_text())
+    checkpoint = json.loads(_paths.session_checkpoint(tmp_git_repo, result.build_id).read_text())
+    assert result.total_cost == pytest.approx(1.75)
+    assert result.total_duration >= 9.5
+    assert summary["cost_usd"] == pytest.approx(1.75)
+    assert summary["duration_s"] >= 9.5
+    assert checkpoint["total_cost_so_far"] == pytest.approx(1.75)
+    assert checkpoint["total_duration_so_far"] >= 9.5
+
+
+@pytest.mark.asyncio
+async def test_summary_duration_includes_spec_duration(tmp_git_repo):
+    from otto import paths as _paths
+
+    with patch("otto.agent.run_agent_query", side_effect=_make_mock_query(AGENT_OUTPUT_PASS)):
+        result = await build_agentic_v3(
+            "test",
+            tmp_git_repo,
+            {},
+            spec_cost=0.25,
+            spec_duration=12.0,
+        )
+
+    summary = json.loads(_paths.session_summary(tmp_git_repo, result.build_id).read_text())
+    assert result.total_duration >= 12.0
+    assert summary["duration_s"] >= 12.0
+    assert summary["breakdown"]["spec"]["duration_s"] == 12.0
 
 
 @pytest.mark.asyncio
@@ -461,8 +514,9 @@ class TestV3FixLoop:
             (_paths.certify_dir(tmp_git_repo, result.build_id) / "proof-of-work.json").read_text()
         )
         assert pow_data["outcome"] == "passed"
-        # Should have round history
-        assert pow_data.get("certify_rounds", 0) >= 2
+        assert len(pow_data["round_history"]) == 2
+        assert pow_data["round_history"][0]["verdict"] == "failed"
+        assert pow_data["round_history"][1]["verdict"] == "passed"
 
     @pytest.mark.asyncio
     async def test_strict_mode_requires_two_consecutive_passes(self, tmp_git_repo):
@@ -498,13 +552,13 @@ class TestV3EdgeCases:
     """Edge cases: no markers, empty output, retry context."""
 
     @pytest.mark.asyncio
-    async def test_no_verdict_markers_fails(self, tmp_git_repo):
+    async def test_no_verdict_markers_raises_malformed_output(self, tmp_git_repo):
+        from otto.markers import MalformedCertifierOutputError
+
         with patch("otto.agent.run_agent_query",
                     side_effect=_make_mock_query(AGENT_OUTPUT_NO_MARKERS)):
-            result = await build_agentic_v3("test", tmp_git_repo, {})
-
-        # No VERDICT marker → treated as fail
-        assert result.passed is False
+            with pytest.raises(MalformedCertifierOutputError, match="no structured output"):
+                await build_agentic_v3("test", tmp_git_repo, {})
 
     @pytest.mark.asyncio
     async def test_cross_run_memory_injected_when_enabled(self, tmp_git_repo):
@@ -540,19 +594,21 @@ class TestV3EdgeCases:
         assert "Previous Certification History" not in captured_prompts[0]
 
     @pytest.mark.asyncio
-    async def test_intent_appends_not_overwrites(self, tmp_git_repo):
-        """Multiple builds should append to intent.md, not overwrite."""
+    async def test_each_run_writes_its_own_session_intent_snapshot(self, tmp_git_repo):
+        """Runtime intent belongs to the session dir, not project-root intent.md."""
         with patch("otto.agent.run_agent_query",
                     side_effect=_make_mock_query(AGENT_OUTPUT_PASS)):
-            await build_agentic_v3("feature one", tmp_git_repo, {})
+            first = await build_agentic_v3("feature one", tmp_git_repo, {})
 
         with patch("otto.agent.run_agent_query",
                     side_effect=_make_mock_query(AGENT_OUTPUT_PASS)):
-            await build_agentic_v3("feature two", tmp_git_repo, {})
+            second = await build_agentic_v3("feature two", tmp_git_repo, {})
 
-        intent_md = (tmp_git_repo / "intent.md").read_text()
-        assert "feature one" in intent_md
-        assert "feature two" in intent_md
+        from otto import paths as _paths
+
+        assert _paths.session_intent(tmp_git_repo, first.build_id).read_text().strip() == "feature one"
+        assert _paths.session_intent(tmp_git_repo, second.build_id).read_text().strip() == "feature two"
+        assert not (tmp_git_repo / "intent.md").exists()
 
 
 class TestV3SkipQA:

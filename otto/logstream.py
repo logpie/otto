@@ -36,6 +36,8 @@ from otto.agent import (
     UserMessage,
     tool_use_summary,
 )
+from otto.markers import _STORY_RESULT_RE, _VERDICT_RE, _parse_story_result_fields
+from otto.redaction import redact_text
 
 # Certifier-marker lines we elevate in the narrative so humans can scan
 # for them. Order matters — checked as startswith.
@@ -86,24 +88,34 @@ def _truncate_at_word(text: str, limit: int = _MAX_NARRATIVE_LINE) -> str:
 def _block_to_dict(block: Any) -> dict[str, Any]:
     """Serialize a normalized SDK block to a JSON-safe dict."""
     if isinstance(block, TextBlock):
-        return {"type": "text", "text": block.text}
+        return {"type": "text", "text": redact_text(block.text)}
     if isinstance(block, ThinkingBlock):
-        return {"type": "thinking", "thinking": block.thinking}
+        return {"type": "thinking", "thinking": redact_text(block.thinking)}
     if isinstance(block, ToolUseBlock):
         return {
             "type": "tool_use",
             "id": block.id,
             "name": block.name,
-            "input": block.input,
+            "input": _redact_obj(block.input),
         }
     if isinstance(block, ToolResultBlock):
         return {
             "type": "tool_result",
             "tool_use_id": block.tool_use_id,
-            "content": block.content,
+            "content": redact_text(block.content),
             "is_error": block.is_error,
         }
     return {"type": "unknown", "repr": str(block)[:500]}
+
+
+def _redact_obj(value: Any) -> Any:
+    if isinstance(value, str):
+        return redact_text(value)
+    if isinstance(value, list):
+        return [_redact_obj(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _redact_obj(item) for key, item in value.items()}
+    return value
 
 
 def _coerce_usage(usage: Any) -> Any:
@@ -148,7 +160,7 @@ class JsonlMessageWriter:
             record["subtype"] = message.subtype
             record["is_error"] = message.is_error
             if message.result:
-                record["result"] = message.result
+                record["result"] = redact_text(message.result)
             if message.structured_output is not None:
                 record["structured_output"] = message.structured_output
             if message.total_cost_usd is not None:
@@ -350,12 +362,14 @@ class NarrativeFormatter:
         return f"[+{self._elapsed_fmt()}]"
 
     def _write(self, line: str) -> None:
+        line = redact_text(line)
         if not line.endswith("\n"):
             line = line + "\n"
         self._fh.write(line)
         self._fh.flush()
 
     def _emit_terminal(self, line: str, *, style: str | None = None) -> None:
+        line = redact_text(line)
         self._last_terminal_event_monotonic = time.monotonic()
         if self._stdout_callback is None:
             return
@@ -748,6 +762,10 @@ class NarrativeFormatter:
 def _is_marker(line: str) -> bool:
     if not any(line.startswith(m) for m in _CERTIFY_MARKERS):
         return False
+    if line.startswith("VERDICT:") and not _VERDICT_RE.match(line):
+        return False
+    if line.startswith("STORY_RESULT:") and not _STORY_RESULT_RE.match(line):
+        return False
     # Skip template placeholders like `STORIES_TESTED: <number>` — they
     # appear in prompt examples, not real runs.
     if _PLACEHOLDER_RE.search(line):
@@ -886,7 +904,8 @@ def estimate_phase_costs(
                 if not line:
                     continue
                 rec = json.loads(line)
-                if rec.get("type") != "assistant":
+                rec_type = rec.get("type")
+                if rec_type not in {"assistant", "user"}:
                     continue
 
                 blocks = rec.get("blocks")
@@ -921,7 +940,7 @@ def estimate_phase_costs(
                     if isinstance(raw_tokens, int | float):
                         output_tokens = max(int(raw_tokens), 0)
 
-                if opens_certify or in_certify_round:
+                if opens_certify or closes_certify or in_certify_round:
                     certify_tokens += output_tokens
                 else:
                     build_tokens += output_tokens
@@ -959,14 +978,9 @@ def _summarize_round(marker_lines: list[str]) -> tuple[str, int, int]:
     passed = 0
     tested = 0
     for line in marker_lines:
-        if line.startswith("VERDICT:"):
-            v = line.split(":", 1)[1].strip().upper()
-            if "PASS" in v:
-                verdict = "PASS"
-            elif "FAIL" in v:
-                verdict = "FAIL"
-            elif "WARN" in v:
-                verdict = "WARN"
+        verdict_match = _VERDICT_RE.match(line)
+        if verdict_match:
+            verdict = verdict_match.group(1)
         elif line.startswith("STORIES_PASSED:"):
             try:
                 passed = int(line.split(":", 1)[1].strip())
@@ -1017,15 +1031,15 @@ def _extract_commit_line(content: str) -> str | None:
 
 
 def _parse_story_result_marker(line: str) -> dict[str, Any] | None:
-    if not line.startswith("STORY_RESULT:"):
+    match = _STORY_RESULT_RE.match(line)
+    if match is None:
         return None
-    parts = line[len("STORY_RESULT:"):].strip().split("|", 2)
-    if len(parts) < 2:
-        return None
-    summary = parts[2].strip() if len(parts) > 2 else ""
+    summary, fields = _parse_story_result_fields(match.group(3))
+    summary = summary or fields.get("observed_result", "") or match.group(3).strip()
+    verdict = match.group(2)
     return {
-        "story_id": parts[0].strip(),
-        "passed": "PASS" in parts[1].strip().upper(),
+        "story_id": match.group(1).strip(),
+        "passed": verdict in {"PASS", "WARN"},
         "summary": summary,
     }
 

@@ -2,10 +2,13 @@
 resume, certifier behavior, cross-run memory, and CLI guards."""
 
 import asyncio
+import contextlib
 import json
 import subprocess
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import click
 import pytest
 
 from otto.pipeline import build_agentic_v3, BuildResult
@@ -74,6 +77,38 @@ DIAGNOSIS: Auth remains broken after fix attempt
 
         # The last VERDICT is FAIL — should not pick up the earlier PASS
         assert result.passed is False
+
+
+class TestMarkerParsingHardening:
+    def test_exact_marker_tokens_only(self):
+        from otto.markers import parse_certifier_markers
+
+        parsed = parse_certifier_markers(
+            "VERDICT: BYPASS\n"
+            "STORY_RESULT: fake | NOTPASS | ignore me\n"
+            "STORY_RESULT: real | PASS | works\n"
+            "VERDICT: PASS\n"
+        )
+
+        assert parsed.verdict_seen is True
+        assert [story["story_id"] for story in parsed.stories] == ["real"]
+
+    def test_frontmatter_and_blockquotes_are_ignored(self):
+        from otto.markers import parse_certifier_markers
+
+        parsed = parse_certifier_markers(
+            "---\n"
+            "VERDICT: FAIL\n"
+            "STORY_RESULT: fake | FAIL | hidden in frontmatter\n"
+            "---\n"
+            "> VERDICT: FAIL\n"
+            "> STORY_RESULT: quoted | FAIL | hidden in quote\n"
+            "STORY_RESULT: real | PASS | visible marker\n"
+            "VERDICT: PASS\n"
+        )
+
+        assert parsed.verdict_pass is True
+        assert [story["story_id"] for story in parsed.stories] == ["real"]
 
 
 # -- Test: BuildResult.rounds reflects actual count --
@@ -147,6 +182,19 @@ class TestTimeoutEnforcement:
         narr = (build_dir / "narrative.log").read_text()
         assert "Timed out" in narr, f"Timeout not reported in narrative.log: {narr[:200]}"
 
+    def test_resumed_budget_uses_original_session_start(self):
+        from datetime import datetime, timedelta, timezone
+
+        from otto.budget import RunBudget
+
+        started_at = (datetime.now(timezone.utc) - timedelta(seconds=90)).isoformat()
+        budget = RunBudget.start_from(
+            {"run_budget_seconds": 60},
+            session_started_at=started_at,
+        )
+
+        assert budget.exhausted() is True
+
 
 # -- Test: CLAUDECODE env var --
 
@@ -159,6 +207,19 @@ class TestSubprocessEnv:
         assert env["CLAUDECODE"] == ""
         assert env["GIT_TERMINAL_PROMPT"] == "0"
         assert env["CI"] == "true"
+
+    def test_parent_env_is_allowlisted(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-allowedsecret1234567890")
+        monkeypatch.setenv("PATH", "/usr/bin")
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "dont-pass-through")
+        monkeypatch.setenv("CUSTOM_PASSWORD", "dont-pass-through")
+
+        env = _subprocess_env()
+
+        assert env["OPENAI_API_KEY"] == "sk-allowedsecret1234567890"
+        assert env["PATH"]
+        assert "AWS_SECRET_ACCESS_KEY" not in env
+        assert "CUSTOM_PASSWORD" not in env
 
 
 # (TestAgentOptions removed — it tested that @dataclass defaults work,
@@ -235,11 +296,11 @@ DIAGNOSIS: null
 # -- Test: Cost accumulation across multiple ResultMessages --
 
 class TestCostAccumulation:
-    """Cost should be accumulated, not overwritten, across messages."""
+    """Provider result costs are cumulative for a run and must not be re-summed."""
 
     @pytest.mark.asyncio
-    async def test_cost_sums_across_messages(self):
-        """When a provider yields multiple ResultMessages, sum their costs."""
+    async def test_cost_uses_last_cumulative_total(self):
+        """When a provider yields multiple ResultMessages, take the cumulative max."""
         from otto.agent import (
             AssistantMessage, ResultMessage, TextBlock,
             run_agent_query, AgentOptions,
@@ -247,18 +308,38 @@ class TestCostAccumulation:
 
         async def multi_result_query(*, prompt, options=None):
             yield AssistantMessage(content=[TextBlock(text="part 1")])
-            yield ResultMessage(total_cost_usd=1.50)
-            yield AssistantMessage(content=[TextBlock(text="part 2")])
             yield ResultMessage(total_cost_usd=0.75)
+            yield AssistantMessage(content=[TextBlock(text="part 2")])
+            yield ResultMessage(total_cost_usd=1.50)
 
         with patch("otto.agent.query", side_effect=multi_result_query):
             text, cost, result_msg = await run_agent_query(
                 "test", AgentOptions()
             )
 
-        assert cost == pytest.approx(2.25)
+        assert cost == pytest.approx(1.50)
         assert "part 1" in text
         assert "part 2" in text
+        assert result_msg.total_cost_usd == pytest.approx(1.50)
+
+    @pytest.mark.asyncio
+    async def test_diagnosis_marker_stops_at_message_boundary(self):
+        from otto.agent import (
+            AssistantMessage, AgentOptions, ResultMessage, TextBlock, run_agent_query,
+        )
+        from otto.markers import parse_certifier_markers
+
+        async def diagnosis_query(*, prompt, options=None):
+            yield AssistantMessage(content=[TextBlock(text="VERDICT: FAIL\nDIAGNOSIS: Missing blur handler")])
+            yield AssistantMessage(content=[TextBlock(text="Extra narration after the diagnosis marker.")])
+            yield ResultMessage(total_cost_usd=0.25)
+
+        with patch("otto.agent.query", side_effect=diagnosis_query):
+            text, _cost, _result_msg = await run_agent_query("test", AgentOptions())
+
+        parsed = parse_certifier_markers(text)
+        assert parsed.diagnosis == "Missing blur handler"
+        assert "Extra narration" not in parsed.diagnosis
 
 
 # -- Test: otto certify loads otto.yaml and passes it to the certifier --
@@ -292,6 +373,108 @@ class TestCertifyPassesConfig:
         assert captured_config, "run_agentic_certifier was not called"
         assert captured_config[0].get("spec_timeout") == 1200
 
+    def test_certify_resolves_mode_with_cli_yaml_default_precedence(self, tmp_bare_git_repo):
+        from click.testing import CliRunner
+        from otto.cli import main
+        from otto.certifier.report import CertificationOutcome, CertificationReport
+
+        captured_modes: list[str] = []
+
+        async def mock_certifier(intent, project_dir, config=None, mode=None, **kwargs):
+            captured_modes.append(mode)
+            return CertificationReport(
+                outcome=CertificationOutcome.PASSED,
+                cost_usd=0.0,
+                duration_s=1.0,
+            )
+
+        (tmp_bare_git_repo / "intent.md").write_text("test intent")
+        runner = CliRunner()
+
+        with patch("otto.certifier.run_agentic_certifier", side_effect=mock_certifier), \
+             patch("pathlib.Path.cwd", return_value=tmp_bare_git_repo):
+            result = runner.invoke(main, ["certify"], catch_exceptions=False)
+        assert result.exit_code == 0
+        assert captured_modes.pop() == "fast"
+
+        (tmp_bare_git_repo / "otto.yaml").write_text("certifier_mode: standard\n")
+        with patch("otto.certifier.run_agentic_certifier", side_effect=mock_certifier), \
+             patch("pathlib.Path.cwd", return_value=tmp_bare_git_repo):
+            result = runner.invoke(main, ["certify"], catch_exceptions=False)
+        assert result.exit_code == 0
+        assert captured_modes.pop() == "standard"
+
+        with patch("otto.certifier.run_agentic_certifier", side_effect=mock_certifier), \
+             patch("pathlib.Path.cwd", return_value=tmp_bare_git_repo):
+            result = runner.invoke(main, ["certify", "--fast"], catch_exceptions=False)
+        assert result.exit_code == 0
+        assert captured_modes.pop() == "fast"
+
+
+class TestHistoryWrites:
+    @pytest.mark.asyncio
+    async def test_standalone_certify_appends_history_entry(self, tmp_git_repo):
+        from otto import paths
+        from otto.certifier import run_agentic_certifier
+
+        async def mock_run(*args, **kwargs):
+            return (
+                "STORIES_TESTED: 1\n"
+                "STORIES_PASSED: 1\n"
+                "STORY_RESULT: smoke | PASS | claim=Smoke works | observed_result=OK | surface=HTTP | methodology=http-request | summary=Smoke passed\n"
+                "VERDICT: PASS\n"
+                "DIAGNOSIS: null\n",
+                0.42,
+                "agent-session-1",
+                {"round_timings": []},
+            )
+
+        with patch("otto.agent.run_agent_with_timeout", side_effect=mock_run):
+            await run_agentic_certifier("test intent", tmp_git_repo, {}, session_id="run-certify-1")
+
+        entry = json.loads(paths.history_jsonl(tmp_git_repo).read_text().strip())
+        assert entry["run_id"] == "run-certify-1"
+        assert entry["build_id"] == "run-certify-1"
+        assert entry["command"] == "certify"
+        assert entry["certifier_mode"] == "standard"
+        assert entry["mode"] == "standard"
+        assert entry["certifier_cost_usd"] == pytest.approx(0.42)
+
+    @pytest.mark.asyncio
+    async def test_split_improve_appends_history_entry(self, tmp_git_repo):
+        from otto import paths
+        from otto.certifier.report import CertificationOutcome, CertificationReport
+        from otto.pipeline import run_certify_fix_loop
+
+        async def mock_certifier(*args, **kwargs):
+            return CertificationReport(
+                outcome=CertificationOutcome.PASSED,
+                cost_usd=0.25,
+                duration_s=1.0,
+                story_results=[{
+                    "story_id": "smoke",
+                    "passed": True,
+                    "summary": "Smoke passed",
+                }],
+            )
+
+        with patch("otto.certifier.run_agentic_certifier", side_effect=mock_certifier):
+            result = await run_certify_fix_loop(
+                "test improve",
+                tmp_git_repo,
+                {},
+                certifier_mode="thorough",
+                skip_initial_build=True,
+                command="improve.bugs",
+                session_id="run-improve-1",
+            )
+
+        assert result.passed is True
+        entry = json.loads(paths.history_jsonl(tmp_git_repo).read_text().strip())
+        assert entry["run_id"] == "run-improve-1"
+        assert entry["command"] == "improve bugs"
+        assert entry["certifier_mode"] == "thorough"
+
 
 class TestImproveCLIHardening:
     """The improve CLI should treat infra and build failures as failures."""
@@ -315,10 +498,9 @@ class TestImproveCLIHardening:
 
         assert exc.value.code == 1
 
-    def test_improve_stops_on_certifier_infra_error(self, tmp_git_repo):
-        """INFRA_ERROR must stop the loop — build agent should never be called."""
+    def test_improve_stops_on_certifier_infra_failure(self, tmp_git_repo):
+        """Infra failures must stop the loop before any fix/build round runs."""
         from click.testing import CliRunner
-        from otto.certifier.report import CertificationOutcome, CertificationReport
         from otto.cli import main
         (tmp_git_repo / "intent.md").write_text("test intent")
 
@@ -327,11 +509,7 @@ class TestImproveCLIHardening:
         async def mock_certifier(intent, project_dir, config=None, **kwargs):
             nonlocal certifier_calls
             certifier_calls += 1
-            return CertificationReport(
-                outcome=CertificationOutcome.INFRA_ERROR,
-                cost_usd=0.0,
-                duration_s=1.0,
-            )
+            raise RuntimeError("socket died")
 
         mock_build = AsyncMock()
 
@@ -351,7 +529,7 @@ class TestImproveCLIHardening:
         # click wiring bug exited before entering the loop).
         assert certifier_calls >= 1, \
             f"certifier was never called — test doesn't exercise loop. Output: {result.output!r}"
-        # Core invariant: INFRA_ERROR short-circuits before any build/fix agent runs
+        # Core invariant: exhausted infra retries short-circuit before any build/fix agent runs
         assert mock_build.await_count == 0
         # Result should indicate failure, not success
         assert result.exit_code != 0
@@ -408,6 +586,151 @@ class TestImproveCLIHardening:
         # glyph is cosmetic and lives alongside.
         assert "Login broken" in result.output, \
             f"Expected failing-story summary in output: {result.output!r}"
+
+    def test_improve_warns_when_report_write_fails(self, tmp_git_repo):
+        from click.testing import CliRunner
+        from otto.cli import main
+
+        (tmp_git_repo / "intent.md").write_text("test intent")
+
+        async def fake_loop(*args, **kwargs):
+            return BuildResult(
+                passed=True,
+                build_id="run-1",
+                rounds=1,
+                total_cost=0.5,
+                total_duration=12.0,
+                journeys=[{"name": "Smoke works", "passed": True}],
+                tasks_passed=1,
+                tasks_failed=0,
+            )
+
+        real_write_text = Path.write_text
+
+        def fake_write_text(self, content, *args, **kwargs):
+            if self.name == "improvement-report.md":
+                raise OSError("disk full")
+            return real_write_text(self, content, *args, **kwargs)
+
+        with patch("otto.cli_improve._create_improve_branch", return_value="improve/2026-04-13"), \
+             patch("otto.pipeline.run_certify_fix_loop", side_effect=fake_loop), \
+             patch("pathlib.Path.write_text", fake_write_text), \
+             patch("pathlib.Path.cwd", return_value=tmp_git_repo):
+            runner = CliRunner()
+            result = runner.invoke(
+                main, ["improve", "feature", "--rounds", "1", "--split"], catch_exceptions=False
+            )
+
+        assert result.exit_code == 0
+        assert "could not write report file" in result.output
+
+    @pytest.mark.asyncio
+    async def test_invalid_certifier_mode_raises_instead_of_falling_back(self, tmp_git_repo):
+        with pytest.raises(ValueError, match="Expected one of"):
+            await build_agentic_v3("test", tmp_git_repo, {}, certifier_mode="bogus")
+
+    @pytest.mark.asyncio
+    async def test_split_mode_retry_exhaustion_raises_infra_failure(self, tmp_git_repo):
+        from otto.pipeline import InfraFailureError, run_certify_fix_loop
+
+        async def broken_certifier(*args, **kwargs):
+            raise RuntimeError("socket died")
+
+        with patch("otto.certifier.run_agentic_certifier", side_effect=broken_certifier):
+            with pytest.raises(InfraFailureError, match="socket died"):
+                await run_certify_fix_loop(
+                    "split improve",
+                    tmp_git_repo,
+                    {},
+                    skip_initial_build=True,
+                    command="improve.feature",
+                )
+
+    @pytest.mark.asyncio
+    async def test_split_mode_nested_certifier_disables_history_writes(self, tmp_git_repo):
+        from otto.certifier.report import CertificationOutcome, CertificationReport
+        from otto.pipeline import run_certify_fix_loop
+
+        seen_kwargs = []
+
+        async def fake_certifier(*args, **kwargs):
+            seen_kwargs.append(kwargs)
+            return CertificationReport(
+                outcome=CertificationOutcome.PASSED,
+                cost_usd=0.1,
+                duration_s=1.0,
+                story_results=[{"story_id": "smoke", "passed": True, "summary": "ok"}],
+            )
+
+        with patch("otto.certifier.run_agentic_certifier", side_effect=fake_certifier):
+            result = await run_certify_fix_loop(
+                "split improve",
+                tmp_git_repo,
+                {"max_certify_rounds": 1},
+                skip_initial_build=True,
+                command="improve.feature",
+            )
+
+        assert result.passed is True
+        assert seen_kwargs, "split loop never called the certifier"
+        assert all(kwargs.get("write_history") is False for kwargs in seen_kwargs)
+
+    @pytest.mark.asyncio
+    async def test_fix_prompt_keeps_full_evidence(self, tmp_git_repo):
+        from otto.certifier.report import CertificationOutcome, CertificationReport
+        from otto.pipeline import run_certify_fix_loop
+
+        long_evidence = "0123456789" * 80
+        fail_report = CertificationReport(
+            outcome=CertificationOutcome.FAILED,
+            cost_usd=0.1,
+            duration_s=1.0,
+            story_results=[
+                {
+                    "story_id": "auth",
+                    "passed": False,
+                    "summary": "Login broken",
+                    "evidence": long_evidence,
+                }
+            ],
+        )
+        pass_report = CertificationReport(
+            outcome=CertificationOutcome.PASSED,
+            cost_usd=0.1,
+            duration_s=1.0,
+            story_results=[
+                {
+                    "story_id": "auth",
+                    "passed": True,
+                    "summary": "Login fixed",
+                    "evidence": "",
+                }
+            ],
+        )
+        captured = {}
+
+        async def fake_build(intent, project_dir, config, **kwargs):
+            captured["prompt"] = intent
+            return BuildResult(
+                passed=True,
+                build_id="fix-run",
+                total_cost=0.0,
+                tasks_passed=1,
+                tasks_failed=0,
+            )
+
+        with patch("otto.certifier.run_agentic_certifier", side_effect=[fail_report, pass_report]), \
+             patch("otto.pipeline.build_agentic_v3", side_effect=fake_build):
+            result = await run_certify_fix_loop(
+                "split improve",
+                tmp_git_repo,
+                {"max_certify_rounds": 2},
+                skip_initial_build=True,
+                command="improve.feature",
+            )
+
+        assert result.passed is True
+        assert long_evidence in captured["prompt"]
 
     def test_improve_target_resume_rejects_non_target_checkpoint(
         self, tmp_git_repo, monkeypatch
@@ -680,6 +1003,153 @@ def test_flat_parser_fallback_only_without_certify_round_markers():
     assert parsed.verdict_pass is False
 
 
+def test_parser_accepts_structured_story_result_fields():
+    from otto.markers import parse_certifier_markers
+
+    parsed = parse_certifier_markers(
+        "STORY_EVIDENCE_START: smoke\n"
+        "curl -i http://localhost:8000/health\n"
+        "HTTP/1.1 200 OK\n"
+        "STORY_EVIDENCE_END: smoke\n"
+        "STORIES_TESTED: 1\n"
+        "STORIES_PASSED: 1\n"
+        "STORY_RESULT: smoke | PASS | claim=Health endpoint responds | observed_steps=GET /health; inspect status code | observed_result=Returned 200 OK | surface=HTTP | summary=Health check passed\n"
+        "VERDICT: PASS\n"
+        "DIAGNOSIS: null\n"
+    )
+
+    assert len(parsed.stories) == 1
+    story = parsed.stories[0]
+    assert story["claim"] == "Health endpoint responds"
+    assert story["observed_steps"] == ["GET /health", "inspect status code"]
+    assert story["observed_result"] == "Returned 200 OK"
+    assert story["surface"] == "HTTP"
+    assert "200 OK" in story["evidence"]
+
+
+def test_parser_ignores_evidence_markers_inside_frontmatter_and_fenced_code():
+    from otto.markers import parse_certifier_markers
+
+    parsed = parse_certifier_markers(
+        "---\n"
+        "STORY_EVIDENCE_START: frontmatter\n"
+        "secret frontmatter evidence\n"
+        "STORY_EVIDENCE_END: frontmatter\n"
+        "---\n"
+        "```txt\n"
+        "STORY_EVIDENCE_START: fenced\n"
+        "secret fenced evidence\n"
+        "STORY_EVIDENCE_END: fenced\n"
+        "```\n"
+        "STORY_EVIDENCE_START: real\n"
+        "curl -i http://localhost:8000/health\n"
+        "HTTP/1.1 200 OK\n"
+        "STORY_EVIDENCE_END: real\n"
+        "STORIES_TESTED: 1\n"
+        "STORIES_PASSED: 1\n"
+        "STORY_RESULT: real | PASS | Health check passed\n"
+        "VERDICT: PASS\n"
+        "DIAGNOSIS: null\n"
+    )
+
+    assert len(parsed.stories) == 1
+    assert parsed.stories[0]["evidence"] == (
+        "curl -i http://localhost:8000/health\nHTTP/1.1 200 OK"
+    )
+
+
+def test_parser_tracks_methodology_and_defaults_implicit_round_to_one():
+    from otto.markers import parse_certifier_markers
+
+    parsed = parse_certifier_markers(
+        "STORIES_TESTED: 1\n"
+        "STORIES_PASSED: 1\n"
+        "STORY_RESULT: add-card | PASS | claim=Card create flow works | observed_steps=click + Add Card; type title; press Enter | observed_result=Card was created | surface=DOM | methodology=live-ui-events | summary=Create flow passed\n"
+        "VERDICT: PASS\n"
+        "DIAGNOSIS: null\n"
+    )
+
+    assert len(parsed.certify_rounds) == 1
+    assert parsed.certify_rounds[0]["round"] == 1
+    assert parsed.stories[0]["methodology"] == "live-ui-events"
+
+
+def test_parser_accepts_failure_evidence_field():
+    from otto.markers import parse_certifier_markers
+
+    parsed = parse_certifier_markers(
+        "STORIES_TESTED: 1\n"
+        "STORIES_PASSED: 0\n"
+        "STORY_RESULT: crud-lifecycle | FAIL | claim=Create card once | observed_result=Duplicate card rendered | "
+        "surface=DOM | methodology=live-ui-events | failure_evidence=crud-lifecycle-failure.png | summary=Duplicate create bug\n"
+        "VERDICT: FAIL\n"
+        "DIAGNOSIS: Duplicate create bug still reproduces\n"
+    )
+
+    assert parsed.stories[0]["failure_evidence"] == "crud-lifecycle-failure.png"
+
+
+def test_parser_ignores_markers_inside_code_blocks():
+    from otto.markers import parse_certifier_markers
+
+    parsed = parse_certifier_markers(
+        "```text\n"
+        "VERDICT: FAIL\n"
+        "STORY_RESULT: fake | FAIL | should be ignored\n"
+        "```\n"
+        "    DIAGNOSIS: also ignored\n"
+        "CERTIFY_ROUND: 1\n"
+        "STORIES_TESTED: 1\n"
+        "STORIES_PASSED: 1\n"
+        "STORY_RESULT: real | PASS | actual result\n"
+        "VERDICT: PASS\n"
+        "DIAGNOSIS: null\n"
+    )
+
+    assert parsed.verdict_pass is True
+    assert [story["story_id"] for story in parsed.stories] == ["real"]
+
+
+def test_parser_rejects_non_monotonic_round_numbers():
+    from otto.markers import parse_certifier_markers
+
+    with pytest.raises(ValueError, match="Non-monotonic"):
+        parse_certifier_markers(
+            "CERTIFY_ROUND: 2\n"
+            "VERDICT: FAIL\n"
+            "CERTIFY_ROUND: 1\n"
+            "VERDICT: PASS\n"
+        )
+
+
+def test_parser_uses_metric_met_without_metric_value():
+    from otto.markers import parse_certifier_markers
+
+    parsed = parse_certifier_markers(
+        "CERTIFY_ROUND: 1\n"
+        "METRIC_MET: YES\n"
+        "VERDICT: PASS\n"
+        "DIAGNOSIS: null\n"
+    )
+
+    assert parsed.metric_met is True
+    assert parsed.metric_value == ""
+
+
+def test_parser_preserves_non_placeholder_diagnosis_prefix():
+    from otto.markers import parse_certifier_markers
+
+    parsed = parse_certifier_markers(
+        "STORIES_TESTED: 1\n"
+        "STORIES_PASSED: 0\n"
+        "STORY_RESULT: crash | FAIL | segfault\n"
+        "VERDICT: FAIL\n"
+        "DIAGNOSIS: null pointer dereference\n"
+    )
+
+    assert parsed.diagnosis == "null pointer dereference"
+
+
 # -- Test: result_msg init guards against UnboundLocalError on early return --
 
 class TestResultMsgInit:
@@ -772,37 +1242,29 @@ class TestSessionIdPreservedOnFailure:
         assert cp["status"] == "paused"
 
 
-# -- Test: _append_intent per-section dedup, not substring --
+# -- Test: runtime intent snapshots stay out of project-root intent.md --
 
-class TestAppendIntentDedup:
-    """_append_intent should compare per-section, not substring."""
+class TestSessionIntentSnapshots:
+    """Runtime intent should be recorded per session, not appended to intent.md."""
 
-    def test_similar_intents_both_appended(self, tmp_path):
-        """'build X' should not block 'build X and Y' from being appended."""
+    def test_runtime_intent_writes_session_file(self, tmp_path):
+        from otto import paths
+        from otto.pipeline import _append_intent
+
+        _append_intent(tmp_path, "build X", "build-1")
+
+        assert paths.session_intent(tmp_path, "build-1").read_text().strip() == "build X"
+        assert not (tmp_path / "intent.md").exists()
+
+    def test_second_run_does_not_overwrite_first_session_snapshot(self, tmp_path):
+        from otto import paths
         from otto.pipeline import _append_intent
 
         _append_intent(tmp_path, "build X", "build-1")
         _append_intent(tmp_path, "build X and Y", "build-2")
 
-        content = (tmp_path / "intent.md").read_text()
-        assert "build X and Y" in content
-        assert content.count("build X") >= 2  # both entries present
-
-    def test_exact_duplicate_blocked(self, tmp_path):
-        """Exact same intent should not be appended twice."""
-        from otto.pipeline import _append_intent
-
-        _append_intent(tmp_path, "build X", "build-1")
-        _append_intent(tmp_path, "build X", "build-2")
-
-        content = (tmp_path / "intent.md").read_text()
-        # "build X" appears once in the intent body (deduped)
-        # The section header also contains "build-1" but not "build-2"
-        assert "build-2" not in content
-
-    # (test_first_intent_creates_file removed — `test_similar_intents_both_appended`
-    # and `test_exact_duplicate_blocked` both implicitly verify that the file
-    # gets created on first write.)
+        assert paths.session_intent(tmp_path, "build-1").read_text().strip() == "build X"
+        assert paths.session_intent(tmp_path, "build-2").read_text().strip() == "build X and Y"
 
 
 class TestRunBudget:
@@ -934,9 +1396,21 @@ class TestSpecTimeoutTolerance:
         assert report.outcome == CertificationOutcome.PASSED
         assert report.story_results and report.story_results[0]["story_id"] == "x"
 
+    @pytest.mark.asyncio
+    async def test_certifier_raises_on_unstructured_output(self, tmp_git_repo):
+        from otto.certifier import run_agentic_certifier
+        from otto.markers import MalformedCertifierOutputError
+
+        async def mock_query(prompt, options, **kwargs):
+            return "just narration, no markers", 0.1, MagicMock()
+
+        with patch("otto.agent.run_agent_query", side_effect=mock_query):
+            with pytest.raises(MalformedCertifierOutputError, match="no structured output"):
+                await run_agentic_certifier("test", tmp_git_repo, config={})
+
 
 class TestProofOfWorkRendering:
-    def test_html_omits_empty_visual_evidence_and_diagnosis_sections(self, tmp_path):
+    def test_html_renders_explicit_absence_notes_for_visual_evidence_and_diagnosis(self, tmp_path):
         from otto.certifier import _generate_agentic_html_pow
 
         evidence_dir = tmp_path / "evidence"
@@ -955,8 +1429,211 @@ class TestProofOfWorkRendering:
         )
 
         html = (tmp_path / "proof-of-work.html").read_text()
-        assert "Visual Evidence" not in html
-        assert "Overall Diagnosis" not in html
+        assert "Visual Evidence" in html
+        assert "Visual evidence: not collected (mode=standard)" in html
+        assert "<h2>Diagnosis</h2>" not in html
+        assert "<h2>Story Summary</h2>" in html
+        assert "<h2>Coverage and Limitations</h2>" in html
+        assert "provider-default" not in html
+        assert "not recorded" not in html
+        assert "not present" not in html
+        assert "not used (run without --spec)" in html
+        assert "$0.10" in html
+        assert "certifier $0.1000" not in html
+
+    def test_html_surfaces_methodology_caveat_for_ui_story(self, tmp_path):
+        from otto.certifier import _generate_agentic_html_pow
+
+        _generate_agentic_html_pow(
+            tmp_path,
+            [{
+                "story_id": "add-card",
+                "passed": True,
+                "claim": "Add-card button creates a card in the UI",
+                "summary": "Card added",
+                "surface": "DOM",
+                "methodology": "javascript-eval",
+            }],
+            "passed",
+            1.0,
+            0.1,
+            1,
+            1,
+            diagnosis="",
+        )
+
+        html = (tmp_path / "proof-of-work.html").read_text()
+        assert "All stories verified via javascript-eval." in html
+        assert "<strong>Methodology</strong>" not in html
+        assert "UI event handlers were not verified" in html
+
+    def test_html_avoids_inline_onclick_for_evidence(self, tmp_path):
+        from otto.certifier import _generate_agentic_html_pow
+
+        _generate_agentic_html_pow(
+            tmp_path,
+            [{
+                "story_id": "story'quoted",
+                "passed": False,
+                "summary": "bad",
+                "evidence": "secret-free evidence",
+            }],
+            "failed",
+            1.0,
+            0.1,
+            0,
+            1,
+            diagnosis="",
+        )
+
+        html = (tmp_path / "proof-of-work.html").read_text()
+        assert "onclick=" not in html
+        assert "data-story-id=" in html
+        assert "querySelectorAll('.evidence-toggle')" in html
+
+    def test_report_caps_visible_stories_at_200(self, tmp_path):
+        from otto.certifier import _build_pow_report_data
+
+        options = type("Opts", (), {"provider": "", "model": None, "effort": None})()
+        stories = [
+            {"story_id": f"s{i}", "passed": True, "summary": f"story {i}"}
+            for i in range(205)
+        ]
+        report = _build_pow_report_data(
+            project_dir=tmp_path,
+            report_dir=tmp_path,
+            log_dir=tmp_path,
+            run_id="run-1",
+            session_id="sdk-1",
+            pipeline_mode="agentic_certifier",
+            certifier_mode="standard",
+            outcome="passed",
+            story_results=stories,
+            diagnosis="",
+            certify_rounds=[],
+            duration_s=1.0,
+            certifier_cost_usd=0.1,
+            total_cost_usd=0.1,
+            intent="intent",
+            options=options,
+            evidence_dir=None,
+            stories_tested=205,
+            stories_passed=205,
+        )
+
+        assert len(report["stories"]) == 200
+        assert report["stories_hidden_count"] == 5
+
+    def test_pow_outputs_slim_markdown_and_grouped_visual_evidence(self, tmp_path):
+        from otto.certifier import _build_pow_report_data, _write_pow_report
+
+        evidence_dir = tmp_path / "evidence"
+        evidence_dir.mkdir()
+        for name in (
+            "recording.webm",
+            "crud-lifecycle-failure.png",
+            "crud-lifecycle.png",
+            "drag-drop.png",
+        ):
+            (evidence_dir / name).write_bytes(b"test")
+
+        (tmp_path / "narrative.log").write_text("narrative")
+        (tmp_path / "messages.jsonl").write_text("{}\n")
+
+        options = type("Opts", (), {"provider": "", "model": None, "effort": None})()
+        report = _build_pow_report_data(
+            project_dir=tmp_path,
+            report_dir=tmp_path,
+            log_dir=tmp_path,
+            run_id="run-1",
+            session_id="sdk-session-1",
+            pipeline_mode="agentic_certifier",
+            certifier_mode="standard",
+            outcome="failed",
+            story_results=[
+                {
+                    "story_id": "crud-lifecycle",
+                    "passed": False,
+                    "claim": "Create one card from the UI",
+                    "observed_steps": ["click Add card", "type title", "press Enter"],
+                    "observed_result": "A duplicate card appeared after one submit.",
+                    "surface": "DOM",
+                    "methodology": "live-ui-events",
+                    "summary": "Duplicate create bug reproduced",
+                    "evidence": "Clicked Add card once and two cards appeared.",
+                    "failure_evidence": "crud-lifecycle-failure.png",
+                },
+                {
+                    "story_id": "drag-drop",
+                    "passed": True,
+                    "claim": "Cards can be reordered by drag and drop",
+                    "observed_result": "Card moved into the target column.",
+                    "surface": "DOM",
+                    "methodology": "live-ui-events",
+                    "summary": "Drag and drop passed",
+                    "evidence": "Dragged card A into Done and order updated.",
+                },
+            ],
+            diagnosis="Submitting the add-card flow still creates duplicate cards.",
+            certify_rounds=None,
+            duration_s=12.0,
+            certifier_cost_usd=0.4,
+            total_cost_usd=0.4,
+            intent="Verify card creation and drag-drop behavior.",
+            options=options,
+            evidence_dir=evidence_dir,
+            stories_tested=2,
+            stories_passed=1,
+        )
+        _write_pow_report(tmp_path, report)
+
+        md = (tmp_path / "proof-of-work.md").read_text()
+        html = (tmp_path / "proof-of-work.html").read_text()
+
+        assert "## Hero" in md
+        assert "## Story Summary" in md
+        assert "## Diagnosis" in md
+        assert "## Next Actions" in md
+        assert "## Artifacts & Metadata" in md
+        assert "## Coverage and Limitations" not in md
+        assert "## Visual Evidence" not in md
+        assert "## Run Context" not in md
+        assert "## Story Details" not in md
+
+        assert html.index("<h2>Story Summary</h2>") < html.index("<h2>Diagnosis</h2>")
+        assert html.index("<h2>Diagnosis</h2>") < html.index("<h2>Failing Story Detail</h2>")
+        assert html.index("<h2>Failing Story Detail</h2>") < html.index("<h2>Coverage and Limitations</h2>")
+        assert html.index("<h2>Coverage and Limitations</h2>") < html.index("<h2>Remaining Story Details</h2>")
+        assert html.index("<h2>Remaining Story Details</h2>") < html.index("<h2>Visual Evidence</h2>")
+        assert html.index("<h2>Visual Evidence</h2>") < html.index("<h2>Run Context</h2>")
+        assert html.index("<h2>Run Context</h2>") < html.index("<h2>Artifacts &amp; Metadata</h2>")
+
+        assert "recording.webm" in html
+        assert "crud-lifecycle-failure.png" in html
+        assert "failure captured" in html
+        assert "drag-drop.png" in html
+        assert "All stories verified via live-ui-events." in html
+        assert "Jump to failing stories" in html
+        assert "Open narrative log" not in html
+        assert "agentic_certifier" not in html
+        assert "Session ID" in html
+
+    def test_certifier_prompts_require_failure_evidence(self):
+        standard = (Path(__file__).resolve().parents[1] / "otto" / "prompts" / "certifier.md").read_text()
+        thorough = (Path(__file__).resolve().parents[1] / "otto" / "prompts" / "certifier-thorough.md").read_text()
+
+        for text in (standard, thorough):
+            assert "failure_evidence=<filename" in text
+            assert "Without a visual failure artifact for a visual bug, you may only emit `WARN`, not `FAIL`." in text
+
+    def test_intent_excerpt_strips_markdown_headings(self):
+        from otto.certifier import _intent_excerpt
+
+        excerpt = _intent_excerpt(
+            "# Build Intents\n\n## 2026-04-21 09:30 (run-1)\nShip the actual feature, not the heading.\n"
+        )
+
+        assert excerpt == "Ship the actual feature, not the heading."
 
 
 # -- Test: run_test_suite handles git worktree add failure --
@@ -986,6 +1663,40 @@ class TestCommitArtifactsTimeout:
             f"Expected all git calls to have timeout, got: {calls_with_timeout}"
 
 
+class TestCriticalWriteFailures:
+    @pytest.mark.asyncio
+    async def test_build_checkpoint_write_fails_closed(self, tmp_git_repo):
+        from otto.observability import write_json_file as real_write_json_file
+
+        def fake_write_json_file(path, data, *, strict=False):
+            if path.name == "checkpoint.json":
+                raise OSError("disk full")
+            return real_write_json_file(path, data, strict=strict)
+
+        with patch("otto.agent.run_agent_query", side_effect=_make_mock_query(
+            "STORY_RESULT: smoke | PASS | ok\nVERDICT: PASS\n"
+        )), patch("otto.observability.write_json_file", side_effect=fake_write_json_file):
+            with pytest.raises(RuntimeError, match="Failed to write checkpoint"):
+                await build_agentic_v3("test", tmp_git_repo, {})
+
+    def test_session_summary_write_fails_closed(self, tmp_path):
+        from otto.pipeline import _write_session_summary
+
+        with patch("otto.observability.write_json_file", side_effect=OSError("read-only fs")):
+            with pytest.raises(RuntimeError, match="Failed to write session summary"):
+                _write_session_summary(
+                    tmp_path,
+                    "run-1",
+                    verdict="passed",
+                    passed=True,
+                    cost=0.1,
+                    duration=1.0,
+                    stories_passed=1,
+                    stories_tested=1,
+                    rounds=1,
+                )
+
+
 # -- Test: cross-run memory --
 
 class TestCrossRunMemory:
@@ -1006,7 +1717,6 @@ class TestCrossRunMemory:
             ],
             cost=1.50,
         )
-
         entries = load_history(tmp_path)
         assert len(entries) == 1
         assert entries[0]["run_id"] == "run-1"
@@ -1014,6 +1724,41 @@ class TestCrossRunMemory:
         assert entries[0]["tested"] == 2
         assert entries[0]["passed"] == 1
         assert len(entries[0]["findings"]) == 2
+
+
+class TestCliValidation:
+    def test_build_rejects_nonpositive_budget(self, tmp_git_repo):
+        from click.testing import CliRunner
+        from otto.cli import main
+
+        runner = CliRunner()
+        with patch("os.getcwd", return_value=str(tmp_git_repo)):
+            result = runner.invoke(main, ["build", "intent", "--budget", "0"])
+
+        assert result.exit_code == 2
+        assert "Invalid value for '--budget'" in result.output
+
+    def test_build_rejects_rounds_above_cap(self, tmp_git_repo):
+        from click.testing import CliRunner
+        from otto.cli import main
+
+        runner = CliRunner()
+        with patch("os.getcwd", return_value=str(tmp_git_repo)):
+            result = runner.invoke(main, ["build", "intent", "--rounds", "51"])
+
+        assert result.exit_code == 2
+        assert "Invalid value for '--rounds'" in result.output
+
+    def test_improve_rejects_nonpositive_rounds(self, tmp_git_repo):
+        from click.testing import CliRunner
+        from otto.cli import main
+
+        runner = CliRunner()
+        with patch("os.getcwd", return_value=str(tmp_git_repo)):
+            result = runner.invoke(main, ["improve", "bugs", "--rounds", "0"])
+
+        assert result.exit_code == 2
+        assert "Invalid value for '--rounds'" in result.output
 
     def test_format_for_prompt_empty(self, tmp_path):
         """No history → empty string."""
@@ -1123,6 +1868,103 @@ class TestHistoryOrdering:
             "new-run",
         ]
 
+    def test_load_history_entries_prefers_run_id_and_command_family(self, tmp_path):
+        from otto.cli_logs import _load_history_entries
+        from otto import paths
+
+        new_path = paths.history_jsonl(tmp_path)
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        new_path.write_text(json.dumps({
+            "run_id": "run-123",
+            "command": "improve bugs",
+            "timestamp": "2026-04-20T12:00:00Z",
+            "intent": "new",
+        }) + "\n")
+
+        legacy_path = tmp_path / "otto_logs" / "run-history.jsonl"
+        legacy_path.parent.mkdir(parents=True, exist_ok=True)
+        legacy_path.write_text(json.dumps({
+            "build_id": "run-123",
+            "timestamp": "2026-04-20T11:00:00Z",
+            "intent": "legacy",
+        }) + "\n")
+
+        entries = _load_history_entries(tmp_path)
+        assert len(entries) == 1
+        assert entries[0]["run_id"] == "run-123"
+        assert entries[0]["command"] == "improve bugs"
+
+    def test_load_history_entries_keeps_same_run_id_across_distinct_commands(self, tmp_path):
+        from otto.cli_logs import _load_history_entries
+        from otto import paths
+
+        history_path = paths.history_jsonl(tmp_path)
+        history_path.parent.mkdir(parents=True, exist_ok=True)
+        history_path.write_text(
+            json.dumps({
+                "run_id": "run-123",
+                "command": "build",
+                "timestamp": "2026-04-20T12:00:00Z",
+                "intent": "outer build",
+            })
+            + "\n"
+            + json.dumps({
+                "run_id": "run-123",
+                "command": "certify",
+                "timestamp": "2026-04-20T12:01:00Z",
+                "intent": "nested certify",
+            })
+            + "\n"
+        )
+
+        entries = _load_history_entries(tmp_path)
+        assert [(entry["run_id"], entry["command"]) for entry in entries] == [
+            ("run-123", "build"),
+            ("run-123", "certify"),
+        ]
+
+    def test_history_command_shows_cmd_column_and_filter(self, tmp_git_repo):
+        from click.testing import CliRunner
+        from otto.cli import main
+        from otto import paths
+
+        history_path = paths.history_jsonl(tmp_git_repo)
+        history_path.parent.mkdir(parents=True, exist_ok=True)
+        history_path.write_text(
+            json.dumps({
+                "run_id": "run-build",
+                "build_id": "run-build",
+                "command": "build",
+                "passed": True,
+                "stories_passed": 1,
+                "stories_tested": 1,
+                "cost_usd": 0.5,
+                "duration_s": 10,
+                "intent": "build project",
+                "timestamp": "2026-04-20T12:00:00Z",
+            }) + "\n" +
+            json.dumps({
+                "run_id": "run-certify",
+                "build_id": "run-certify",
+                "command": "certify",
+                "passed": False,
+                "stories_passed": 0,
+                "stories_tested": 1,
+                "cost_usd": 0.2,
+                "duration_s": 5,
+                "intent": "certify project",
+                "timestamp": "2026-04-20T13:00:00Z",
+            }) + "\n"
+        )
+
+        with patch("pathlib.Path.cwd", return_value=tmp_git_repo):
+            result = CliRunner().invoke(main, ["history", "--command", "certify"], catch_exceptions=False)
+
+        assert result.exit_code == 0
+        assert "Cmd" in result.output
+        assert "certify" in result.output
+        assert "build project" not in result.output
+
 
 class TestResolveResume:
     """resolve_resume handles the four checkpoint states consistently."""
@@ -1182,6 +2024,36 @@ class TestResolveResume:
         assert state.resumed
         assert state.command_mismatch
         assert state.prior_command == "improve"
+
+    def test_resume_rejects_command_mismatch_without_force(self, tmp_path):
+        from otto.checkpoint import resolve_resume, write_checkpoint
+
+        write_checkpoint(
+            tmp_path, run_id="r1", command="improve.bugs", status="paused",
+        )
+        with pytest.raises(ValueError, match="not from `build`"):
+            resolve_resume(
+                tmp_path,
+                resume=True,
+                expected_command="build",
+                reject_incompatible=True,
+            )
+
+    def test_resume_rejects_fingerprint_mismatch_without_force(self, tmp_path, monkeypatch):
+        from otto.checkpoint import resolve_resume, write_checkpoint
+
+        write_checkpoint(tmp_path, run_id="r1", command="build", status="paused")
+        monkeypatch.setattr(
+            "otto.checkpoint.checkpoint_fingerprint",
+            lambda _project_dir: {"git_sha": "different", "prompt_hash": "different"},
+        )
+        with pytest.raises(ValueError, match="fingerprint"):
+            resolve_resume(
+                tmp_path,
+                resume=True,
+                expected_command="build",
+                reject_incompatible=True,
+            )
 
     def test_completed_checkpoint_not_resumed(self, tmp_path):
         """Completed checkpoints should be ignored even with --resume."""
@@ -1297,6 +2169,13 @@ class TestPhaseBuildResumeFix:
         """After a successful build, the session checkpoint should carry
         phase='build' so resume treats it as past spec_approved."""
         from otto import paths as _paths
+        from otto.checkpoint import write_checkpoint as real_write_checkpoint
+
+        seen_phases: list[tuple[str, str]] = []
+
+        def spy_write_checkpoint(*args, **kwargs):
+            seen_phases.append((kwargs.get("status", ""), kwargs.get("phase", "")))
+            return real_write_checkpoint(*args, **kwargs)
 
         async def ok_agent(prompt, options, **kwargs):
             return (
@@ -1306,9 +2185,11 @@ class TestPhaseBuildResumeFix:
                 MagicMock(session_id="sdk-sid-abc"),
             )
 
-        with patch("otto.agent.run_agent_query", side_effect=ok_agent):
+        with patch("otto.checkpoint.write_checkpoint", side_effect=spy_write_checkpoint), \
+             patch("otto.agent.run_agent_query", side_effect=ok_agent):
             result = await build_agentic_v3("test", tmp_git_repo, {})
         assert result.passed
+        assert ("in_progress", "build") in seen_phases
 
         # The session dir exists; checkpoint was marked completed and
         # removed, but the summary.json in build/ records the session.
@@ -1406,11 +2287,13 @@ class TestCheckpointRegression:
         assert checkpoint["status"] == "in_progress"
         assert checkpoint["phase"] == "initial_build"
         assert checkpoint["current_round"] == 0
+        assert checkpoint["split_mode"] is True
 
         state = resolve_resume(tmp_git_repo, resume=True, expected_command="build")
         assert state.resumed
         assert state.phase == "initial_build"
         assert state.start_round == 1
+        assert state.split_mode is True
 
         clear_checkpoint(tmp_git_repo)
 
@@ -1432,11 +2315,75 @@ class TestCheckpointRegression:
         assert checkpoint["status"] == "paused"
         assert checkpoint["phase"] == "certify"
         assert checkpoint["current_round"] == 0
+        assert checkpoint["split_mode"] is True
 
         state = resolve_resume(tmp_git_repo, resume=True, expected_command="improve.feature")
         assert state.resumed
         assert state.phase == "certify"
         assert state.start_round == 1
+        assert state.split_mode is True
+
+    @pytest.mark.asyncio
+    async def test_split_checkpoint_persists_intent_and_paused_session_id(self, tmp_git_repo):
+        from otto.checkpoint import load_checkpoint
+        from otto.pipeline import run_certify_fix_loop
+        from otto.agent import AgentCallError
+
+        async def paused_build(*args, **kwargs):
+            raise AgentCallError("Timed out after 30s", session_id="sdk-split-123")
+
+        with patch("otto.pipeline.build_agentic_v3", side_effect=paused_build):
+            result = await run_certify_fix_loop(
+                "split build intent",
+                tmp_git_repo,
+                {},
+                skip_initial_build=False,
+                command="build",
+            )
+
+        checkpoint = load_checkpoint(tmp_git_repo)
+        assert result.passed is False
+        assert checkpoint["intent"] == "split build intent"
+        assert checkpoint["agent_session_id"] == "sdk-split-123"
+
+    @pytest.mark.asyncio
+    async def test_split_resume_reuses_paused_agent_session_id(self, tmp_git_repo):
+        from otto.pipeline import run_certify_fix_loop
+
+        captured: dict[str, str | None] = {}
+
+        async def resumed_build(*args, **kwargs):
+            captured["resume_session_id"] = kwargs.get("resume_session_id")
+            return MagicMock(
+                total_cost=0.2,
+                total_duration=1.0,
+                passed=True,
+                build_id=kwargs.get("run_id", "run-1"),
+            )
+
+        async def passing_certifier(*args, **kwargs):
+            report = MagicMock()
+            report.outcome = MagicMock(value="passed")
+            report.story_results = [{"story_id": "smoke", "passed": True, "summary": "ok"}]
+            report.cost_usd = 0.1
+            report.duration_s = 1.0
+            report.metric_met = None
+            report.metric_value = ""
+            return report
+
+        with patch("otto.pipeline.build_agentic_v3", side_effect=resumed_build), patch(
+            "otto.certifier.run_agentic_certifier", side_effect=passing_certifier
+        ):
+            await run_certify_fix_loop(
+                "split resume intent",
+                tmp_git_repo,
+                {},
+                skip_initial_build=False,
+                command="build",
+                resume_session_id="sdk-split-123",
+            )
+
+        assert captured["resume_session_id"] == "sdk-split-123"
 
 
 class TestBuildResume:
@@ -1488,6 +2435,63 @@ class TestBuildResume:
 
         assert result.exit_code == 0
         assert captured["intent"] == "a kanban board: localStorage"
+
+
+class TestCliProjectRootResolution:
+    def test_build_uses_repo_root_from_subdirectory(self, tmp_git_repo, monkeypatch):
+        from click.testing import CliRunner
+        from otto.cli import main
+
+        nested = tmp_git_repo / "src" / "nested"
+        nested.mkdir(parents=True)
+        captured: dict[str, Path] = {}
+        monkeypatch.chdir(nested)
+
+        def fake_build_locked(*args, **kwargs):
+            captured["project_dir"] = args[-1]
+
+        with patch("otto.paths.project_lock", return_value=contextlib.nullcontext()), patch(
+            "otto.cli._build_locked", side_effect=fake_build_locked
+        ):
+            result = CliRunner().invoke(main, ["build", "test intent"], catch_exceptions=False)
+
+        assert result.exit_code == 0
+        assert captured["project_dir"] == tmp_git_repo.resolve()
+
+    def test_improve_uses_repo_root_from_subdirectory(self, tmp_git_repo, monkeypatch):
+        from click.testing import CliRunner
+        from otto.cli import main
+
+        nested = tmp_git_repo / "src" / "nested"
+        nested.mkdir(parents=True)
+        monkeypatch.chdir(nested)
+
+        with patch("otto.cli_improve._require_intent", return_value="intent"), patch(
+            "otto.cli_improve._run_improve"
+        ) as run_improve:
+            result = CliRunner().invoke(main, ["improve", "bugs"], catch_exceptions=False)
+
+        assert result.exit_code == 0
+        assert run_improve.call_args.kwargs["project_dir"] == tmp_git_repo.resolve()
+
+    def test_history_and_replay_use_repo_root_from_subdirectory(self, tmp_git_repo, monkeypatch):
+        from click.testing import CliRunner
+        from otto.cli import main
+
+        nested = tmp_git_repo / "src" / "nested"
+        nested.mkdir(parents=True)
+        monkeypatch.chdir(nested)
+
+        with patch("otto.cli_logs._load_history_entries", return_value=[]) as load_history, patch(
+            "otto.replay.replay_session", return_value=[]
+        ) as replay_session:
+            history_result = CliRunner().invoke(main, ["history"], catch_exceptions=False)
+            replay_result = CliRunner().invoke(main, ["replay", "session-123"], catch_exceptions=False)
+
+        assert history_result.exit_code == 0
+        assert replay_result.exit_code == 0
+        assert load_history.call_args.args[0] == tmp_git_repo.resolve()
+        assert replay_session.call_args.args[0] == tmp_git_repo.resolve()
 
     def test_certify_cli_normalizes_multiline_intent(self, tmp_git_repo, monkeypatch):
         from click.testing import CliRunner
@@ -1598,6 +2602,35 @@ class TestBuildResume:
 
         assert result.exit_code == 2
         assert "Intent mismatch" in result.output
+
+    def test_build_spec_rejects_yaml_skip_product_qa(self, tmp_git_repo, monkeypatch):
+        from click.testing import CliRunner
+        from otto.cli import main
+
+        (tmp_git_repo / "otto.yaml").write_text("skip_product_qa: true\n")
+
+        monkeypatch.chdir(tmp_git_repo)
+        result = CliRunner().invoke(
+            main,
+            ["build", "counter app", "--spec"],
+        )
+
+        assert result.exit_code == 2
+        assert "skip_product_qa is" in result.output
+        assert "otto.yaml: skip_product_qa: true" in result.output
+
+    def test_build_reports_malformed_yaml_cleanly(self, tmp_git_repo, monkeypatch):
+        from click.testing import CliRunner
+        from otto.cli import main
+
+        (tmp_git_repo / "otto.yaml").write_text("- invalid\n- root\n")
+
+        monkeypatch.chdir(tmp_git_repo)
+        result = CliRunner().invoke(main, ["build", "counter app"])
+
+        assert result.exit_code == 2
+        assert "Malformed config" in result.output
+        assert "expected a YAML mapping" in result.output
 
     def test_build_resume_without_intent_skips_placeholder_prompt_and_append(
         self, tmp_git_repo, monkeypatch
@@ -1724,6 +2757,61 @@ class TestBuildResume:
         assert captured["spec_cost"] == 1.25
         assert captured["spec_duration"] == 12.0
 
+    def test_build_uses_yaml_split_mode_and_resume_preserves_it(
+        self, tmp_git_repo, monkeypatch
+    ):
+        from click.testing import CliRunner
+        from otto.checkpoint import write_checkpoint
+        from otto.cli import main
+
+        (tmp_git_repo / "otto.yaml").write_text("split_mode: true\n")
+        captured = {}
+
+        async def fake_loop(intent, project_dir, config, **kwargs):
+            captured.update(kwargs)
+            return BuildResult(
+                passed=True,
+                build_id="split-run-1",
+                total_cost=0.0,
+                tasks_passed=1,
+                tasks_failed=0,
+            )
+
+        monkeypatch.chdir(tmp_git_repo)
+        with patch("otto.pipeline.run_certify_fix_loop", side_effect=fake_loop), \
+             patch("otto.pipeline.build_agentic_v3", new=AsyncMock(side_effect=AssertionError("agentic path should not run"))):
+            result = CliRunner().invoke(
+                main,
+                ["build", "split build"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0
+        assert captured["session_id"]
+        assert captured["command"] == "build"
+
+        write_checkpoint(
+            tmp_git_repo,
+            run_id="split-run-1",
+            command="build",
+            status="paused",
+            phase="certify",
+            split_mode=True,
+        )
+        captured.clear()
+
+        monkeypatch.chdir(tmp_git_repo)
+        with patch("otto.pipeline.run_certify_fix_loop", side_effect=fake_loop), \
+             patch("otto.pipeline.build_agentic_v3", new=AsyncMock(side_effect=AssertionError("agentic path should not run"))):
+            result = CliRunner().invoke(
+                main,
+                ["build", "split build", "--resume"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0
+        assert captured["command"] == "build"
+
     def test_build_cli_certification_failure_prints_report_and_narrative(
         self, tmp_git_repo, monkeypatch
     ):
@@ -1735,6 +2823,8 @@ class TestBuildResume:
         _paths.ensure_session_scaffold(tmp_git_repo, run_id)
         build_dir = _paths.build_dir(tmp_git_repo, run_id)
         certify_dir = _paths.certify_dir(tmp_git_repo, run_id)
+        build_dir.mkdir(parents=True, exist_ok=True)
+        certify_dir.mkdir(parents=True, exist_ok=True)
         (build_dir / "narrative.log").write_text("build narrative\n")
         (certify_dir / "proof-of-work.html").write_text("<html>fail</html>")
 
@@ -1776,6 +2866,7 @@ class TestBuildResume:
         run_id = "run-pass-123"
         _paths.ensure_session_scaffold(tmp_bare_git_repo, run_id)
         (tmp_bare_git_repo / "index.html").write_text("<!doctype html><title>app</title>")
+        _paths.certify_dir(tmp_bare_git_repo, run_id).mkdir(parents=True, exist_ok=True)
         (_paths.certify_dir(tmp_bare_git_repo, run_id) / "proof-of-work.html").write_text("<html>pass</html>")
 
         async def fake_build(intent, project_dir, config, **kwargs):
@@ -1856,6 +2947,59 @@ class TestBuildResume:
         assert captured["strict_mode"] is True
         assert captured["verbose"] is True
 
+    def test_cli_max_turns_callbacks_reject_values_above_cap(self):
+        from otto.cli import _max_turns_option as build_max_turns_option
+        from otto.cli_improve import _max_turns_option as improve_max_turns_option
+
+        with pytest.raises(click.BadParameter, match="<= 200"):
+            build_max_turns_option(None, None, 201)
+        with pytest.raises(click.BadParameter, match="<= 200"):
+            improve_max_turns_option(None, None, 201)
+
+    def test_build_resume_uses_checkpoint_max_rounds_when_flag_omitted(self, tmp_git_repo, monkeypatch):
+        from click.testing import CliRunner
+        from otto.checkpoint import write_checkpoint
+        from otto.cli import main
+
+        write_checkpoint(
+            tmp_git_repo,
+            run_id="build-run-123",
+            command="build",
+            status="paused",
+            phase="certify",
+            split_mode=True,
+            current_round=9,
+            total_cost=1.5,
+            max_rounds=20,
+            intent="resume me",
+            session_id="sdk-build-1",
+        )
+
+        captured = {}
+
+        async def fake_loop(intent, project_dir, config, **kwargs):
+            captured["max_certify_rounds"] = config["max_certify_rounds"]
+            captured.update(kwargs)
+            return BuildResult(
+                passed=True,
+                build_id="build-run-123",
+                total_cost=1.5,
+                tasks_passed=1,
+                tasks_failed=0,
+            )
+
+        monkeypatch.chdir(tmp_git_repo)
+        with patch("otto.pipeline.run_certify_fix_loop", side_effect=fake_loop):
+            result = CliRunner().invoke(
+                main,
+                ["build", "--resume"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0
+        assert captured["max_certify_rounds"] == 20
+        assert captured["start_round"] == 10
+
     def test_improve_resume_threads_run_id_into_split_and_agentic(
         self, tmp_git_repo, monkeypatch
     ):
@@ -1869,6 +3013,9 @@ class TestBuildResume:
             tmp_git_repo,
             run_id="improve-run-123",
             command="improve.bugs",
+            certifier_mode="standard",
+            focus="error handling",
+            max_rounds=12,
             status="paused",
             phase="certify",
             current_round=1,
@@ -1880,6 +3027,7 @@ class TestBuildResume:
         agentic_captured = {}
 
         async def fake_loop(intent, project_dir, config, **kwargs):
+            split_captured["config"] = config
             split_captured.update(kwargs)
             return BuildResult(
                 passed=True,
@@ -1890,6 +3038,7 @@ class TestBuildResume:
             )
 
         async def fake_build(intent, project_dir, config, **kwargs):
+            agentic_captured["intent"] = intent
             agentic_captured.update(kwargs)
             return BuildResult(
                 passed=True,
@@ -1909,6 +3058,9 @@ class TestBuildResume:
             )
         assert result.exit_code == 0
         assert split_captured["session_id"] == "improve-run-123"
+        assert split_captured["focus"] == "error handling"
+        assert split_captured["certifier_mode"] == "standard"
+        assert split_captured["config"]["max_certify_rounds"] == 12
 
         monkeypatch.chdir(tmp_git_repo)
         with patch("otto.cli_improve._create_improve_branch", return_value="improve/2026-04-20"), \
@@ -1920,3 +3072,64 @@ class TestBuildResume:
             )
         assert result.exit_code == 0
         assert agentic_captured["run_id"] == "improve-run-123"
+        assert agentic_captured["certifier_mode"] == "standard"
+        assert "## Improvement Focus\nerror handling" in agentic_captured["intent"]
+
+    def test_improve_bugs_uses_yaml_rounds_when_flag_omitted(self, tmp_git_repo, monkeypatch):
+        from click.testing import CliRunner
+        from otto.cli import main
+
+        (tmp_git_repo / "intent.md").write_text("test intent")
+        (tmp_git_repo / "otto.yaml").write_text("max_certify_rounds: 6\n")
+        captured = {}
+
+        async def fake_build(intent, project_dir, config, **kwargs):
+            captured["max_certify_rounds"] = config["max_certify_rounds"]
+            return BuildResult(
+                passed=True,
+                build_id="improve-yaml-rounds",
+                total_cost=0.0,
+                tasks_passed=1,
+                tasks_failed=0,
+            )
+
+        monkeypatch.chdir(tmp_git_repo)
+        with patch("otto.cli_improve._create_improve_branch", return_value="improve/2026-04-21-abcdef"), \
+             patch("otto.pipeline.build_agentic_v3", side_effect=fake_build):
+            result = CliRunner().invoke(
+                main,
+                ["improve", "bugs"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0
+        assert captured["max_certify_rounds"] == 6
+
+    def test_improve_bugs_allows_standard_override(self, tmp_git_repo, monkeypatch):
+        from click.testing import CliRunner
+        from otto.cli import main
+
+        (tmp_git_repo / "intent.md").write_text("test intent")
+        captured = {}
+
+        async def fake_build(intent, project_dir, config, **kwargs):
+            captured["certifier_mode"] = kwargs["certifier_mode"]
+            return BuildResult(
+                passed=True,
+                build_id="improve-standard",
+                total_cost=0.0,
+                tasks_passed=1,
+                tasks_failed=0,
+            )
+
+        monkeypatch.chdir(tmp_git_repo)
+        with patch("otto.cli_improve._create_improve_branch", return_value="improve/2026-04-21-abcdef"), \
+             patch("otto.pipeline.build_agentic_v3", side_effect=fake_build):
+            result = CliRunner().invoke(
+                main,
+                ["improve", "bugs", "--standard"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0
+        assert captured["certifier_mode"] == "standard"

@@ -55,7 +55,7 @@ You are a senior developer. Work autonomously.
    CERTIFY_ROUND: <round number — 1 for first attempt, 2 for after first fix, etc.>
    STORIES_TESTED: <N>
    STORIES_PASSED: <N>
-   STORY_RESULT: <id> | PASS or FAIL | <one-line summary>
+   STORY_RESULT: <id> | PASS or FAIL or WARN | claim=<what was verified> | observed_steps=<semicolon-separated list of actions actually performed> | observed_result=<what happened> | surface=<HTTP / CLI / DOM / localStorage / source-level / screenshot / video> | summary=<one-line summary>
    ...
    VERDICT: PASS or FAIL
    DIAGNOSIS: <assessment or null>

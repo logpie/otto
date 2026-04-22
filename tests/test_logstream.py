@@ -25,6 +25,7 @@ from otto.agent import (
 from otto.logstream import (
     JsonlMessageWriter,
     NarrativeFormatter,
+    _parse_story_result_marker,
     estimate_phase_costs,
     make_session_logger,
 )
@@ -73,6 +74,20 @@ class TestJsonlWriter:
         assert rec["cost_usd"] == 0.42
         assert rec["usage"] == {"input_tokens": 100, "output_tokens": 50}
         assert rec["session_id"] == "sess-1"
+
+    def test_result_message_redacts_secret_text(self, tmp_path):
+        path = tmp_path / "messages.jsonl"
+        w = JsonlMessageWriter(path)
+        w.write(ResultMessage(
+            subtype="success",
+            is_error=False,
+            result="OPENAI_API_KEY=sk-secretvalue1234567890",
+        ))
+        w.close()
+
+        rec = json.loads(path.read_text().strip())
+        assert "sk-secretvalue1234567890" not in rec["result"]
+        assert "[REDACTED:OPENAI_API_KEY]" in rec["result"]
 
     def test_result_message_records_structured_output(self, tmp_path):
         path = tmp_path / "messages.jsonl"
@@ -154,6 +169,15 @@ class TestNarrativeFormatter:
         assert seen[2] == "[dim]  \u2014 CERTIFY ROUND 1 \u2014[/dim]"
         assert seen[3] == "[dim]  \u2014 CERTIFY ROUND 1 \u2192 PASS (1/1) \u2014[/dim]"
         assert all("[+" not in event for event in seen)
+
+    def test_story_result_marker_prefers_structured_summary_field(self):
+        story = _parse_story_result_marker(
+            "STORY_RESULT: smoke | PASS | claim=Health endpoint responds | "
+            "observed_result=Returned 200 OK | summary=Health check passed"
+        )
+
+        assert story is not None
+        assert story["summary"] == "Health check passed"
 
     def test_terminal_callback_ignores_quiet_events(self, tmp_path):
         path = tmp_path / "narrative.log"
@@ -301,6 +325,25 @@ class TestNarrativeFormatter:
         assert "\u2726 STORY_RESULT: s1 | PASS | welcome page loads" in content
         assert "\u2726 STORY_RESULT: s2 | FAIL | add-to-cart 500s" in content
         assert "\u2726 VERDICT: FAIL" in content
+
+    def test_tool_result_redacts_obvious_secrets(self, tmp_path):
+        path = tmp_path / "narrative.log"
+        f = NarrativeFormatter(path)
+        f.write_message(AssistantMessage(content=[
+            ToolResultBlock(
+                content=(
+                    "OPENAI_API_KEY=sk-testsecret1234567890\n"
+                    "GITHUB_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz123456\n"
+                ),
+                is_error=False,
+            ),
+        ]))
+        f.close()
+
+        content = path.read_text()
+        assert "sk-testsecret1234567890" not in content
+        assert "ghp_abcdefghijklmnopqrstuvwxyz123456" not in content
+        assert "[REDACTED:OPENAI_API_KEY]" in content
 
     def test_text_markers_elevated(self, tmp_path):
         """Markers embedded in TextBlock (not just ToolResult) also elevated."""
@@ -964,3 +1007,35 @@ class TestEstimatePhaseCosts:
         path.write_text("{not json}\n")
 
         assert estimate_phase_costs(path, 1.0) is None
+
+    def test_counts_user_tool_result_usage_inside_certify_round(self, tmp_path):
+        path = tmp_path / "messages.jsonl"
+        records = [
+            {
+                "type": "assistant",
+                "blocks": [{
+                    "type": "tool_use",
+                    "id": "cert-1",
+                    "name": "Agent",
+                    "input": {"prompt": "hello\n## Verdict Format\nbye"},
+                }],
+                "usage": {"output_tokens": 10},
+            },
+            {
+                "type": "user",
+                "blocks": [{
+                    "type": "tool_result",
+                    "tool_use_id": "cert-1",
+                    "content": "certifier output",
+                    "is_error": False,
+                }],
+                "usage": {"output_tokens": 90},
+            },
+        ]
+        path.write_text("\n".join(json.dumps(rec) for rec in records) + "\n")
+
+        estimated = estimate_phase_costs(path, 2.0)
+
+        assert estimated == {
+            "certify": {"cost_usd": 2.0, "estimated": True},
+        }

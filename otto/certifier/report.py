@@ -11,7 +11,6 @@ class CertificationOutcome(Enum):
     """Top-level certification result."""
     PASSED = "passed"
     FAILED = "failed"
-    INFRA_ERROR = "infra_error"
 
 
 @dataclass
@@ -19,8 +18,8 @@ class CertificationReport:
     """Complete certification report.
 
     story_results / metric_value / metric_met are populated by the certifier
-    after parsing agent output. They're optional so INFRA_ERROR / crash
-    reports can be constructed without them.
+    after parsing agent output. Infra failures propagate as exceptions rather
+    than synthetic outcome values.
     """
     outcome: CertificationOutcome = CertificationOutcome.FAILED
     cost_usd: float = 0.0

@@ -1,6 +1,7 @@
 """Otto configuration — load/create otto.yaml, auto-detect project settings."""
 
 import json
+import hashlib
 import re
 import subprocess
 from pathlib import Path
@@ -22,6 +23,9 @@ import yaml
 # ---------------------------------------------------------------------------
 
 AGENT_TYPES = ("build", "certifier", "spec", "fix")
+MAX_INTENT_CHARS = 8 * 1024
+MAX_SPEC_CHARS = 32 * 1024
+MAX_CERTIFY_ROUNDS = 50
 
 DEFAULTS: dict[str, Any] = {
     # Project setup (auto-detected if None)
@@ -45,6 +49,7 @@ DEFAULTS: dict[str, Any] = {
     "run_budget_seconds":     3600,
     "spec_timeout":           600,
     "max_certify_rounds":     8,
+    "max_turns_per_call":     200,
 
     # Per-invocation defaults (CLI typically overrides)
     "certifier_mode":         "fast",    # fast | standard | thorough
@@ -61,11 +66,72 @@ DEFAULTS: dict[str, Any] = {
 DEFAULT_CONFIG: dict[str, Any] = DEFAULTS
 
 SUPPORTED_PROVIDERS = {"claude", "codex"}
+SUPPORTED_CERTIFIER_MODES = ("fast", "standard", "thorough", "hillclimb", "target")
+
+
+class ConfigError(ValueError):
+    """User-facing configuration error."""
 
 
 def _normalize_intent(s: str) -> str:
     """Collapse shell-wrapped or multiline intent input to one clean line."""
     return re.sub(r"\s+", " ", s).strip()
+
+
+def resolve_project_dir(start_dir: Path | None = None) -> Path:
+    """Return the canonical git worktree root for a path.
+
+    Uses ``git rev-parse --show-toplevel`` so running Otto from a subdirectory
+    of the same repo still resolves to one shared runtime root.
+    """
+    cwd = Path.cwd() if start_dir is None else Path(start_dir)
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+        )
+    except OSError as exc:
+        if isinstance(exc, FileNotFoundError) or exc.errno == 2:
+            raise ConfigError("git is not installed or not on PATH") from exc
+        raise ConfigError(f"Failed to resolve git worktree root from {cwd}: {exc}") from exc
+
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        raise ConfigError(
+            f"Not a git repository: {cwd}. "
+            f"{stderr or 'Run `git init` first.'}"
+        )
+
+    root = (result.stdout or "").strip()
+    if not root:
+        raise ConfigError(f"Git did not return a worktree root for {cwd}")
+    return Path(root).resolve()
+
+
+def resolve_certifier_mode(
+    config: dict[str, Any] | None,
+    cli_mode: str | None = None,
+) -> str:
+    """Resolve certifier mode with CLI > config > DEFAULTS precedence."""
+    if cli_mode:
+        return validate_certifier_mode(cli_mode, key="CLI certifier mode")
+    resolved = (config or {}).get("certifier_mode")
+    if resolved:
+        return validate_certifier_mode(resolved)
+    return str(DEFAULTS["certifier_mode"])
+
+
+def validate_certifier_mode(value: str | None, *, key: str = "certifier_mode") -> str:
+    """Normalize certifier mode strings and reject unsupported values."""
+    mode = str(value or "").strip().lower()
+    if not mode:
+        return str(DEFAULTS["certifier_mode"])
+    if mode not in SUPPORTED_CERTIFIER_MODES:
+        choices = ", ".join(SUPPORTED_CERTIFIER_MODES)
+        raise ValueError(f"Invalid {key}: {value!r}. Expected one of: {choices}")
+    return mode
 
 
 def normalize_provider(
@@ -87,10 +153,17 @@ def normalize_provider(
 def agent_provider(config: dict[str, Any], agent_type: str | None = None) -> str:
     """Return the effective provider for a given agent.
 
-    Resolution order: per-agent override > global config > built-in default.
+    Resolution order: CLI override > per-agent override > global config > built-in default.
     ``agent_type`` is one of AGENT_TYPES (build, certifier, spec, fix).
     If None, returns the global provider only.
     """
+    cli_override = ((config.get("_cli_overrides") or {}) if isinstance(config, dict) else {}).get("provider")
+    if cli_override:
+        return normalize_provider(
+            cli_override,
+            default=DEFAULTS["provider"],
+            key="provider",
+        ) or DEFAULTS["provider"]
     if agent_type:
         per_agent = (config.get("agents", {}) or {}).get(agent_type, {}) or {}
         override = per_agent.get("provider")
@@ -108,8 +181,11 @@ def agent_provider(config: dict[str, Any], agent_type: str | None = None) -> str
 def agent_model(config: dict[str, Any], agent_type: str | None = None) -> str | None:
     """Return the effective model for a given agent, or None for provider default.
 
-    Resolution: per-agent override > global config.model > None.
+    Resolution: CLI override > per-agent override > global config.model > None.
     """
+    cli_override = ((config.get("_cli_overrides") or {}) if isinstance(config, dict) else {}).get("model")
+    if cli_override:
+        return str(cli_override)
     if agent_type:
         per_agent = (config.get("agents", {}) or {}).get(agent_type, {}) or {}
         if per_agent.get("model"):
@@ -120,8 +196,11 @@ def agent_model(config: dict[str, Any], agent_type: str | None = None) -> str | 
 def agent_effort(config: dict[str, Any], agent_type: str | None = None) -> str | None:
     """Return the effective effort level for a given agent.
 
-    Resolution: per-agent override > global config.effort > None.
+    Resolution: CLI override > per-agent override > global config.effort > None.
     """
+    cli_override = ((config.get("_cli_overrides") or {}) if isinstance(config, dict) else {}).get("effort")
+    if cli_override:
+        return str(cli_override)
     if agent_type:
         per_agent = (config.get("agents", {}) or {}).get(agent_type, {}) or {}
         if per_agent.get("effort"):
@@ -150,6 +229,23 @@ def get_run_budget(config: dict[str, Any]) -> int:
     return value
 
 
+def get_spec_timeout(config: dict[str, Any]) -> int:
+    """Read `spec_timeout` from config. Default 600."""
+    import logging
+    _logger = logging.getLogger("otto.config")
+    default = int(DEFAULT_CONFIG["spec_timeout"])
+    raw = config.get("spec_timeout", default)
+    try:
+        value = int(raw)
+    except (ValueError, TypeError):
+        _logger.warning("Invalid spec_timeout (%r), using default %ds", raw, default)
+        return default
+    if value <= 0:
+        _logger.warning("spec_timeout must be positive, using default %ds", default)
+        return default
+    return value
+
+
 def get_max_rounds(config: dict[str, Any]) -> int:
     """Read max_certify_rounds from config with validation."""
     import logging
@@ -160,25 +256,96 @@ def get_max_rounds(config: dict[str, Any]) -> int:
     except (ValueError, TypeError):
         _logger.warning("Invalid max_certify_rounds, using default %d", default)
         return default
-    return max(1, value)
+    if value < 1:
+        raise ConfigError("max_certify_rounds must be at least 1")
+    if value > MAX_CERTIFY_ROUNDS:
+        raise ConfigError(f"max_certify_rounds must be <= {MAX_CERTIFY_ROUNDS}")
+    return value
+
+
+def get_max_turns_per_call(config: dict[str, Any]) -> int:
+    """Read max_turns_per_call from config with validation."""
+    import logging
+    _logger = logging.getLogger("otto.config")
+    default = int(DEFAULT_CONFIG.get("max_turns_per_call", 200))
+    try:
+        value = int(config.get("max_turns_per_call", default))
+    except (ValueError, TypeError):
+        _logger.warning("Invalid max_turns_per_call, using default %d", default)
+        return default
+    if value < 1:
+        raise ConfigError("max_turns_per_call must be at least 1")
+    if value > default:
+        raise ConfigError(f"max_turns_per_call must be <= {default}")
+    return value
+
+
+def validate_text_limit(text: str, *, kind: str, source: str, max_chars: int) -> str:
+    """Reject oversized user-controlled text before prompt rendering."""
+    if len(text) <= max_chars:
+        return text
+    raise ConfigError(
+        f"{kind} exceeds the {max_chars}-character limit ({source}). "
+        "Trim the source content and try again."
+    )
 
 
 def resolve_intent(project_dir: Path) -> str | None:
-    """Resolve product description from intent.md or README.md.
+    """Resolve the user-owned product description from intent.md or README.md.
 
-    Returns the intent string, or None if no intent file found or content empty.
+    Runtime snapshots belong in `otto_logs/sessions/<id>/intent.txt`; project-root
+    `intent.md` is treated as a single curated product description. Legacy
+    cumulative otto-generated intent logs are ignored and we fall back to README.md.
     """
     intent_path = project_dir / "intent.md"
     readme_path = project_dir / "README.md"
     if intent_path.exists():
-        intent = intent_path.read_text().strip()
-        if intent:
-            return intent
+        try:
+            intent = intent_path.read_text().strip()
+        except (UnicodeDecodeError, IsADirectoryError, PermissionError, OSError) as exc:
+            if readme_path.exists():
+                try:
+                    readme = readme_path.read_text().strip()
+                except (UnicodeDecodeError, IsADirectoryError, PermissionError, OSError) as readme_exc:
+                    raise ConfigError(
+                        f"Failed to read {intent_path}: {exc}. "
+                        f"Fallback {readme_path} also failed: {readme_exc}"
+                    ) from exc
+                if readme:
+                    return validate_text_limit(
+                        readme,
+                        kind="intent",
+                        source=str(readme_path),
+                        max_chars=MAX_INTENT_CHARS,
+                    )
+            raise ConfigError(f"Failed to read {intent_path}: {exc}") from exc
+        if intent and not _looks_like_intent_log(intent):
+            return validate_text_limit(
+                intent,
+                kind="intent",
+                source=str(intent_path),
+                max_chars=MAX_INTENT_CHARS,
+            )
     if readme_path.exists():
-        intent = readme_path.read_text().strip()[:2000]
+        try:
+            intent = readme_path.read_text().strip()
+        except (UnicodeDecodeError, IsADirectoryError, PermissionError, OSError) as exc:
+            raise ConfigError(f"Failed to read {readme_path}: {exc}") from exc
         if intent:
-            return intent
+            return validate_text_limit(
+                intent,
+                kind="intent",
+                source=str(readme_path),
+                max_chars=MAX_INTENT_CHARS,
+            )
     return None
+
+
+def _looks_like_intent_log(text: str) -> bool:
+    stripped = text.lstrip()
+    if stripped.startswith("# Build Intents"):
+        return True
+    return bool(re.search(r"(?m)^## \d{4}-\d{2}-\d{2} \d{2}:\d{2} \([^)]+\)$", text))
 
 
 def git_meta_dir(project_dir: Path) -> Path:
@@ -250,11 +417,22 @@ def load_config(config_path: Path) -> dict[str, Any]:
     if not config_path.exists():
         config = _merge_defaults({})
     else:
-        raw = yaml.safe_load(config_path.read_text()) or {}
-        config = _merge_defaults(raw if isinstance(raw, dict) else {})
+        try:
+            raw = yaml.safe_load(config_path.read_text())
+        except yaml.YAMLError as exc:
+            raise ConfigError(f"Malformed config at {config_path}: YAML parse error: {exc}") from exc
+        if raw is None:
+            raw = {}
+        if not isinstance(raw, dict):
+            raise ConfigError(
+                f"Malformed config at {config_path}: expected a YAML mapping at the document root, "
+                f"found {type(raw).__name__}."
+            )
+        config = _merge_defaults(raw)
 
     # Normalize + validate the global provider string.
     config["provider"] = agent_provider(config)
+    config["certifier_mode"] = resolve_certifier_mode(config)
 
     # Auto-detect project-specific values when yaml didn't set them.
     if not config.get("test_command"):
@@ -430,6 +608,7 @@ provider: {provider}                  # claude | codex
 run_budget_seconds: {run_budget_seconds}      # total wall-clock (primary knob)
 # spec_timeout: {spec_timeout}                # cap on the spec-agent call only
 # max_certify_rounds: {max_certify_rounds}    # max certify→fix loop iterations
+# max_turns_per_call: {max_turns_per_call}    # guardrail for agent loops
 
 # ─── Per-invocation defaults (CLI typically overrides) ───────────────
 # certifier_mode: {certifier_mode}            # fast | standard | thorough
@@ -460,6 +639,7 @@ def create_config(project_dir: Path) -> Path:
         run_budget_seconds=DEFAULTS["run_budget_seconds"],
         spec_timeout=DEFAULTS["spec_timeout"],
         max_certify_rounds=DEFAULTS["max_certify_rounds"],
+        max_turns_per_call=DEFAULTS["max_turns_per_call"],
         certifier_mode=DEFAULTS["certifier_mode"],
     ))
 
@@ -481,11 +661,44 @@ def create_config(project_dir: Path) -> Path:
 def require_git() -> None:
     """Exit with a friendly error if not in a git repo."""
     import sys
-    result = subprocess.run(
-        ["git", "rev-parse", "--git-dir"],
-        capture_output=True, cwd=Path.cwd(),
-    )
-    if result.returncode != 0:
+    try:
+        resolve_project_dir(Path.cwd())
+    except ConfigError as exc:
         from otto.theme import error_console
-        error_console.print("Error: not a git repository. Run 'git init' first.", style="error")
+        message = str(exc)
+        if "git is not installed or not on PATH" in message:
+            error_console.print("Error: git is not installed or not on PATH.", style="error")
+        else:
+            error_console.print("Error: not a git repository. Run 'git init' first.", style="error")
         sys.exit(2)
+
+
+def checkpoint_fingerprint(project_dir: Path) -> dict[str, str]:
+    """Capture a lightweight resume fingerprint for the current workspace."""
+    try:
+        git_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.strip()
+    except OSError:
+        git_sha = ""
+
+    prompt_dir = Path(__file__).resolve().parent / "prompts"
+    digest = hashlib.sha256()
+    try:
+        for prompt_path in sorted(prompt_dir.glob("*.md")):
+            digest.update(prompt_path.name.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(prompt_path.read_bytes())
+            digest.update(b"\0")
+        prompt_hash = digest.hexdigest()
+    except OSError:
+        prompt_hash = ""
+
+    return {
+        "git_sha": git_sha,
+        "prompt_hash": prompt_hash,
+    }

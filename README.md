@@ -21,7 +21,7 @@ otto improve target "latency < 100ms"             # optimize toward a metric
 5. **Fix** — if certification fails, reads findings, fixes code, re-certifies
 6. **Ship** — commits when certification passes
 
-Optionally, a **spec gate** runs first: `otto build "intent" --spec` generates a short reviewable spec (What It Does / Must Have / Must NOT Have Yet / Success Criteria), pauses for you to approve, then hands the approved spec to both the build agent and certifier — so scope creep and "Must NOT Have" features are flagged by the certifier as FAIL.
+Optionally, a **spec gate** runs first: `otto build "intent" --spec` generates a short reviewable spec (What It Does / Must Have / Must NOT Have Yet / Success Criteria), pauses for you to approve, then hands the approved spec to both the build agent and certifier — so scope creep and "Must NOT Have" features are flagged by the certifier as WARN.
 
 **`otto certify`** runs independently on any project — regardless of how it was built:
 
@@ -240,6 +240,7 @@ otto certify                                            # reads intent.md or REA
 otto certify "notes API with auth, CRUD, and search"    # explicit intent
 otto certify --standard                                 # subagents + screenshots, no adversarial probing
 otto certify --thorough                                 # adversarial: edge cases, code review
+otto certify --strict                                   # require two consecutive PASS runs
 ```
 
 Same override flags as `otto build`: `--model`, `--provider`, `--effort`, `--budget`, `--verbose`, `--strict`.
@@ -255,7 +256,7 @@ Find and fix bugs, edge cases, error handling gaps. Adversarial certifier tries 
 ```bash
 otto improve bugs                       # find and fix all bugs
 otto improve bugs "error handling"      # focus on error handling
-otto improve bugs -n 5                  # up to 5 rounds (default: 3)
+otto improve bugs -n 5                  # up to 5 rounds (default from otto.yaml or 8)
 otto improve bugs --split               # system-controlled loop (vs agent-driven)
 otto improve bugs --resume              # resume from last checkpoint
 ```
@@ -268,7 +269,7 @@ Suggest and implement product improvements. Evaluates the product as a real user
 otto improve feature                    # suggest and implement improvements
 otto improve feature "search UX"        # focus on search experience
 otto improve feature "mobile layout"    # focus on mobile
-otto improve feature -n 5              # up to 5 rounds (default: 3)
+otto improve feature -n 5              # up to 5 rounds (default from otto.yaml or 8)
 ```
 
 #### `otto improve target`
@@ -279,7 +280,7 @@ Optimize toward a measurable target. Measures a metric, compares to the target, 
 otto improve target "response time < 100ms"
 otto improve target "test coverage > 90%"
 otto improve target "bundle size < 500kb"
-otto improve target "lighthouse score > 95" -n 10    # up to 10 rounds (default: 5)
+otto improve target "lighthouse score > 95" -n 10    # up to 10 rounds (default from otto.yaml or 8)
 otto improve target "latency < 50ms" --resume         # resume interrupted run
 ```
 
@@ -334,16 +335,20 @@ effort: medium                         # low | medium | high (provider reasoning
 
 # Per-agent overrides — YAML-only (no CLI flags). Each falls back to the
 # top-level provider/model/effort above when unset.
-build:
-  provider: claude
-  model: opus
-certifier:
-  provider: claude
-  model: sonnet
-  effort: low                          # certifier doesn't need deep reasoning
-spec:
-  provider: claude
-  model: sonnet
+# Note: `agents.certifier.*` applies to standalone certify and split-mode
+# loops. Default agentic `otto build` verification runs inside the build
+# agent session, so its provider/model/effort still come from the build agent.
+agents:
+  build:
+    provider: claude
+    model: opus
+  certifier:
+    provider: claude
+    model: sonnet
+    effort: low                        # certifier doesn't need deep reasoning
+  spec:
+    provider: claude
+    model: sonnet
 
 # Budget + certification
 run_budget_seconds: 3600               # total wall-clock for the whole invocation
@@ -468,7 +473,7 @@ otto_logs/
         proof-of-work.{html,json,md}        Human + machine-readable reports
         evidence/                           Screenshots, recordings, transcripts
       improve/                              Only for otto improve runs
-        session-report.md                   Final summary + merge instructions
+        improvement-report.md               Final summary + merge instructions
         build-journal.md                    Round-by-round index
         current-state.md                    Latest findings (handoff to fix agent)
         rounds/<round-id>/                  Per-round evidence

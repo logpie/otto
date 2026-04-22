@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Any
 
 from otto import paths
+from otto.history import tail_jsonl_entries
+from otto.redaction import redact_text
 
 logger = logging.getLogger("otto.memory")
 MAX_ENTRIES = 5
@@ -82,7 +84,7 @@ def _record_run_impl(
         findings.append({
             "id": s.get("story_id", ""),
             "status": "passed" if s.get("passed") else "failed",
-            "summary": s.get("summary", "")[:120],
+            "summary": redact_text(s.get("summary", "")[:120]),
         })
 
     entry = {
@@ -122,25 +124,20 @@ def load_history(project_dir: Path) -> list[dict[str, Any]]:
             fallback_ts = path.stat().st_mtime
         except OSError:
             fallback_ts = 0.0
-        try:
-            for line_index, line in enumerate(path.read_text().splitlines()):
-                line = line.strip()
-                if line:
-                    try:
-                        entry = json.loads(line)
-                        entries.append((
-                            _history_sort_key(
-                                entry,
-                                fallback_ts=fallback_ts,
-                                source_index=source_index,
-                                line_index=line_index,
-                            ),
-                            entry,
-                        ))
-                    except json.JSONDecodeError:
-                        continue
-        except OSError:
-            continue
+        for line_index, line in tail_jsonl_entries(path, limit=MAX_ENTRIES):
+            try:
+                entry = json.loads(line)
+                entries.append((
+                    _history_sort_key(
+                        entry,
+                        fallback_ts=fallback_ts,
+                        source_index=source_index,
+                        line_index=line_index,
+                    ),
+                    entry,
+                ))
+            except json.JSONDecodeError:
+                continue
 
     entries.sort(key=lambda item: item[0])
     return [entry for _, entry in entries[-MAX_ENTRIES:]]

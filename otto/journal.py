@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from otto import paths
+from otto.observability import write_json_file
 
 
 def _rounds_dir(project_dir: Path, session_id: str | None) -> Path:
@@ -61,8 +62,7 @@ def init_round(project_dir: Path, action: str, session_id: str | None = None) ->
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "commit_before": sha,
     }
-    (round_dir / "round-manifest.json").write_text(
-        json.dumps(manifest, indent=2))
+    write_json_file(round_dir / "round-manifest.json", manifest)
 
     return round_id
 
@@ -87,8 +87,7 @@ def record_certifier(
     }
     if hasattr(outcome["outcome"], "value"):
         outcome["outcome"] = outcome["outcome"].value
-    (round_dir / "outcome.json").write_text(
-        json.dumps(outcome, indent=2, default=str))
+    write_json_file(round_dir / "outcome.json", outcome)
 
     # Human-readable findings
     lines = ["# Certifier Findings\n"]
@@ -158,7 +157,7 @@ def record_build(
         m["completed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ")
         m["cost_usd"] = getattr(build_result, "total_cost", 0.0)
         m["passed"] = getattr(build_result, "passed", False)
-        manifest_path.write_text(json.dumps(m, indent=2, default=str))
+        write_json_file(manifest_path, m)
 
 
 def update_current_state(

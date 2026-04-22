@@ -32,6 +32,9 @@ for real users by testing it thoroughly.
    - Search/Filter: find items by various criteria (if applicable)
    - Edge Cases: empty inputs, special characters, boundary values
    Skip stories that don't apply to this product type.
+   Finish this story plan BEFORE dispatching subagents. If one bug impacts
+   multiple stories, keep it attached to the most relevant planned story rather
+   than inventing a new duplicate story mid-run.
 
 6. **Execute tests using subagents for parallelism:**
 
@@ -70,6 +73,35 @@ for real users by testing it thoroughly.
 - If a command appears slow, check its output or artifacts before assuming it is hung
 - Run build/test commands at most once — do not retry or start a duplicate unless the first has definitively failed
 - For each failure: report WHAT is wrong and WHERE (symptom + evidence). Do NOT suggest fixes.
+- Each distinct defect gets exactly ONE `STORY_RESULT: ... | FAIL | ...`. If the
+  same root cause appears in multiple stories, fail the primary story and note
+  the broader impact in its evidence instead of emitting duplicate FAIL rows.
+- For FAIL/WARN stories on web/UI surfaces: capture `evidence/<story_id>-failure.png` showing the defective state BEFORE reporting the `STORY_RESULT`. Without a visual failure artifact for a visual bug, you may only emit `WARN`, not `FAIL`. If the failure is non-visual or cannot be screenshotted, state that explicitly in the evidence text.
+
+## UI Event Requirements
+
+For web apps with interactive surfaces, any story that claims create/edit/submit/delete/keyboard/blur/focus/drag-drop behavior MUST be exercised through live browser DOM events on the running page.
+
+- Use `agent-browser snapshot -i` with element refs or semantic locators, then `click`, `type`, `press`, or `drag` so the page's real event handlers run.
+- Use `snapshot -i` sparingly: once at the start of a story to get refs, then
+  again only after a state-changing action when you need fresh refs or need to
+  verify a new DOM state. Prefer targeted `eval` checks of a selector, text, or
+  storage key over full snapshots when a lightweight assertion is enough.
+- Do NOT call internal app functions (`addCard()`, `deleteItem()`, etc.), mutate `localStorage` directly, or use `agent-browser eval` to invoke app code as EVIDENCE for a user-facing story. Those bypass the handlers the story is meant to verify.
+- Visual verification (screenshots, video) is supplemental evidence only. It does NOT replace event-sequencing coverage.
+
+If browser interaction fails:
+1. Retry first with `snapshot -i` plus element refs.
+2. If it still fails, mark that story `WARN` and state the downgrade reason in `STORY_RESULT`.
+3. If the downgraded story is a core or Must-Have requirement, the overall `VERDICT` MUST be `FAIL`, not `PASS`. A critical UI flow that cannot be exercised through real events is not certified.
+
+## Anti-patterns
+
+Do NOT do any of the following:
+
+- Use `agent-browser eval "addCard('todo', 'foo')"` and claim the user-facing add flow passed.
+- Run JSDOM or unit tests that call UI functions directly and claim certification coverage for that user story.
+- Write evidence that says you "added cards via JS" and still mark a user-facing UI story `PASS`.
 
 ## Verdict Format
 End your final message with these EXACT markers (machine-parsed):
@@ -84,7 +116,7 @@ Then at the very end:
 
 STORIES_TESTED: <number>
 STORIES_PASSED: <number>
-STORY_RESULT: <story_id> | <PASS or FAIL> | <one-line summary>
+STORY_RESULT: <story_id> | <PASS or FAIL or WARN> | claim=<what you intended to verify> | observed_steps=<semicolon-separated list of actions actually performed> | observed_result=<what actually happened> | surface=<HTTP / CLI / DOM / localStorage / source-level / screenshot / video> | methodology=<live-ui-events / javascript-eval / http-request / source-review / jsdom-simulated / cli-execution / visual-only / other> | failure_evidence=<filename, optional for FAIL/WARN> | summary=<one-line summary>
 ...
 VERDICT: PASS or VERDICT: FAIL
 DIAGNOSIS: <overall assessment or null>

@@ -48,7 +48,7 @@ Then at the very end:
 
 STORIES_TESTED: <number>
 STORIES_PASSED: <number of improvements that are already adequate>
-STORY_RESULT: <improvement_id> | <PASS or FAIL> | <one-line description>
+STORY_RESULT: <improvement_id> | <PASS or FAIL or WARN> | claim=<the user expectation you evaluated> | observed_steps=<semicolon-separated list of actions actually performed> | observed_result=<what the current product experience was> | surface=<DOM / CLI / HTTP / source-level / screenshot> | summary=<one-line description>
 ...
 VERDICT: PASS or VERDICT: FAIL
 DIAGNOSIS: <overall product quality assessment>

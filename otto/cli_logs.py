@@ -9,7 +9,8 @@ from pathlib import Path
 import click
 
 from otto.display import CONTEXT_SETTINGS, console, format_cost, format_duration, rich_escape
-from otto.theme import error_console
+from otto.config import require_git, resolve_project_dir
+from otto.history import command_family, history_run_id, normalize_command_label, tail_jsonl_entries
 from otto import paths
 
 logger = logging.getLogger("otto.cli_logs")
@@ -19,10 +20,10 @@ logger = logging.getLogger("otto.cli_logs")
 LEGACY_HISTORY_FILE = "otto_logs/run-history.jsonl"
 
 
-def _load_history_entries(project_dir: Path) -> list[dict]:
+def _load_history_entries(project_dir: Path, *, limit_hint: int = 50) -> list[dict]:
     """Read history entries from new, legacy, and archived sources.
 
-    Preserves chronological order (append-only); de-dups by session_id/build_id.
+    Preserves chronological order (append-only); de-dups by run_id/session_id/build_id.
     """
     sources: list[Path] = [
         paths.history_jsonl(project_dir),
@@ -31,7 +32,8 @@ def _load_history_entries(project_dir: Path) -> list[dict]:
     for archive in paths.archived_pre_restructure_dirs(project_dir):
         sources.append(archive / paths.LEGACY_RUN_HISTORY)
 
-    seen_ids: set[str] = set()
+    seen_ids: set[tuple[str, str]] = set()
+    seen_run_ids: set[str] = set()
     entries: list[tuple[tuple[float, int, int], dict]] = []
     for source_index, src in enumerate(sources):
         if not src.exists():
@@ -40,32 +42,29 @@ def _load_history_entries(project_dir: Path) -> list[dict]:
             fallback_ts = src.stat().st_mtime
         except OSError:
             fallback_ts = 0.0
-        try:
-            for line_index, line in enumerate(src.read_text().splitlines()):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                # De-dup: prefer first occurrence (new file wins over legacy).
-                key = entry.get("session_id") or entry.get("build_id") or ""
-                if key and key in seen_ids:
-                    continue
-                if key:
-                    seen_ids.add(key)
-                entries.append((
-                    _history_sort_key(
-                        entry,
-                        fallback_ts=fallback_ts,
-                        source_index=source_index,
-                        line_index=line_index,
-                    ),
+        for line_index, line in tail_jsonl_entries(src, limit=limit_hint):
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            # De-dup: prefer first occurrence (new file wins over legacy).
+            run_id = history_run_id(entry)
+            raw_command = str(entry.get("command") or "").strip()
+            key = (run_id, normalize_command_label(raw_command) if raw_command else "")
+            if run_id and (key in seen_ids or (not raw_command and run_id in seen_run_ids)):
+                continue
+            if run_id:
+                seen_ids.add(key)
+                seen_run_ids.add(run_id)
+            entries.append((
+                _history_sort_key(
                     entry,
-                ))
-        except OSError:
-            continue
+                    fallback_ts=fallback_ts,
+                    source_index=source_index,
+                    line_index=line_index,
+                ),
+                entry,
+            ))
     entries.sort(key=lambda item: item[0])
     return [entry for _, entry in entries]
 
@@ -97,17 +96,35 @@ def register_history_command(main: click.Group) -> None:
 
     @main.command(context_settings=CONTEXT_SETTINGS)
     @click.option("-n", "--limit", "limit_", default=20, help="Number of builds to show")
-    def history(limit_):
+    @click.option(
+        "--command",
+        "command_filter",
+        type=click.Choice(["all", "build", "certify", "improve"], case_sensitive=False),
+        default="all",
+        show_default=True,
+        help="Filter history by command family",
+    )
+    def history(limit_, command_filter):
         """Show build history."""
         from rich.table import Table
         from rich.text import Text
 
-        project_dir = Path.cwd()
-        entries = _load_history_entries(project_dir)
+        require_git()
+        project_dir = resolve_project_dir(Path.cwd())
+        entries = _load_history_entries(project_dir, limit_hint=max(limit_ * 3, 50))
 
         if not entries:
             console.print("[dim]No build history. Run 'otto build' to get started.[/dim]")
             return
+
+        if command_filter != "all":
+            entries = [
+                entry for entry in entries
+                if command_family(entry.get("command") or "build") == command_filter
+            ]
+            if not entries:
+                console.print(f"[dim]No {command_filter} history found.[/dim]")
+                return
 
         entries.reverse()
         entries = entries[:limit_]
@@ -115,6 +132,7 @@ def register_history_command(main: click.Group) -> None:
         table = Table(show_header=True, box=None, pad_edge=False, show_edge=False, expand=False)
         table.add_column("#", width=3, justify="right")
         table.add_column("Date", width=12)
+        table.add_column("Cmd", width=14)
         table.add_column("Result", width=10)
         table.add_column("Stories", width=8, justify="right")
         table.add_column("Cost", width=8, justify="right", style="dim")
@@ -131,12 +149,16 @@ def register_history_command(main: click.Group) -> None:
 
             # v3 format (stories) or legacy format (tasks)
             stories_tested = entry.get("stories_tested", entry.get("tasks_total", 0))
-            stories_passed = entry.get("stories_passed", entry.get("tasks_passed", 0))
+            stories_passed = entry.get(
+                "stories_passed",
+                entry.get("tasks_passed", entry.get("passed_count", 0) + entry.get("warn_count", 0)),
+            )
             passed = entry.get("passed", stories_passed == stories_tested and stories_tested > 0)
             cost = entry.get("cost_usd", 0.0)
             duration = entry.get("duration_s", entry.get("time_s", 0.0))
             intent = entry.get("intent", entry.get("failure_summary", ""))
             rounds = entry.get("certify_rounds", 1)
+            command_label = normalize_command_label(entry.get("command") or "build")
 
             result_text = "PASS" if passed else "FAIL"
             result_style = "success" if passed else "red"
@@ -153,6 +175,7 @@ def register_history_command(main: click.Group) -> None:
             table.add_row(
                 str(num),
                 ts_str,
+                rich_escape(command_label[:14]),
                 Text(result_text, style=result_style),
                 stories_str,
                 cost_str,
@@ -179,7 +202,8 @@ def register_replay_command(main: click.Group) -> None:
         Without an argument, replays the most recent session. Writes
         narrative.regenerated.log alongside each messages.jsonl.
         """
-        project_dir = Path.cwd()
+        require_git()
+        project_dir = resolve_project_dir(Path.cwd())
         from otto import paths as _paths
         from otto.replay import replay_session
 

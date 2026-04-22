@@ -32,7 +32,7 @@ Session id format: `<yyyy-mm-dd>-<HHMMSS>-<6hex>`.
 | `certify/proof-of-work.md` | Markdown summary |
 | `certify/evidence/*.png` | Browser screenshots |
 | `certify/evidence/recording.webm` | Browser walkthrough video |
-| `improve/session-report.md` | Final `otto improve` summary + merge instructions |
+| `improve/improvement-report.md` | Final `otto improve` summary + merge instructions |
 | `improve/build-journal.md` | Round-by-round index: action, result, cost |
 | `improve/current-state.md` | Latest certifier findings (handoff to fix agent) |
 | `improve/rounds/<round-id>/` | Per-round evidence: certifier findings, builder summary |
@@ -48,9 +48,11 @@ Session id format: `<yyyy-mm-dd>-<HHMMSS>-<6hex>`.
 
 | File | Role |
 |------|------|
-| `intent.md` | Canonical product description (git-tracked, appended per build) |
+| `intent.md` | Canonical product description input (git-tracked, user-owned) |
 | `otto.yaml` | Project config |
 | `CLAUDE.md` | Agent instructions |
+
+Runtime intent snapshots live in `otto_logs/sessions/<session-id>/intent.txt` for debugging. Otto does not append runtime logs back into project-root `intent.md`.
 
 ### Legacy layout (pre-restructure)
 

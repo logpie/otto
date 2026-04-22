@@ -4,13 +4,18 @@
 import pytest
 
 from otto.agent import (
+    AgentCallError,
+    AgentOptions,
     AssistantMessage,
     ClaudeAgentOptions,
     ResultMessage,
     TextBlock,
     ToolResultBlock,
     ToolUseBlock,
+    make_agent_options,
     query,
+    run_agent_query,
+    run_agent_with_timeout,
 )
 
 
@@ -149,3 +154,102 @@ def test_codex_resume_command_uses_resume_subcommand_shape():
     assert "--color" not in command
     assert "-C" not in command
     assert command[-2:] == ["thread-123", "-"]
+
+
+def test_make_agent_options_cli_overrides_beat_per_agent_yaml(tmp_path):
+    config = {
+        "provider": "claude",
+        "model": "sonnet",
+        "effort": "medium",
+        "agents": {
+            "build": {"provider": "codex", "model": "gpt-5.3", "effort": "high"},
+        },
+        "_cli_overrides": {
+            "provider": "claude",
+            "model": "haiku",
+            "effort": "low",
+        },
+    }
+
+    options = make_agent_options(tmp_path, config, agent_type="build")
+
+    assert options.provider == "claude"
+    assert options.model == "haiku"
+    assert options.effort == "low"
+
+
+def test_make_agent_options_sets_default_max_turns(tmp_path):
+    options = make_agent_options(tmp_path, {})
+
+    assert options.max_turns == 200
+    assert options.max_subagent_dispatches == 160
+
+
+@pytest.mark.asyncio
+async def test_run_agent_query_streams_markers_without_retaining_full_tool_blob(monkeypatch):
+    huge_blob = "x" * 100_000
+
+    async def fake_query(*, prompt, options=None, state=None):
+        yield AssistantMessage(content=[
+            TextBlock(text="Planning"),
+            ToolResultBlock(
+                content=f"STORY_RESULT: smoke | PASS | ok\nVERDICT: PASS\n{huge_blob}",
+                tool_use_id="t1",
+            ),
+        ])
+        yield ResultMessage(total_cost_usd=0.1)
+
+    monkeypatch.setattr("otto.agent._query_claude", fake_query)
+
+    text, _cost, _result = await run_agent_query(
+        "test",
+        AgentOptions(),
+        capture_tool_output=True,
+    )
+
+    assert "STORY_RESULT: smoke | PASS | ok" in text
+    assert "VERDICT: PASS" in text
+    assert len(text) < 60_000
+
+
+@pytest.mark.asyncio
+async def test_run_agent_query_limits_subagent_dispatches(monkeypatch):
+    async def fake_query(*, prompt, options=None, state=None):
+        for idx in range(3):
+            yield AssistantMessage(content=[ToolUseBlock(name="Agent", input={"prompt": f"round {idx}"})])
+        yield ResultMessage(total_cost_usd=0.1)
+
+    monkeypatch.setattr("otto.agent._query_claude", fake_query)
+
+    with pytest.raises(AgentCallError, match="max_subagent dispatch cap reached"):
+        await run_agent_query(
+            "test",
+            AgentOptions(max_subagent_dispatches=2),
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_agent_with_timeout_raises_on_error_result(tmp_path, monkeypatch):
+    result = ResultMessage(
+        subtype="error",
+        is_error=True,
+        session_id="sid-1",
+        result="provider-side failure",
+    )
+
+    async def fake_run_agent_query(*args, **kwargs):
+        on_message = kwargs.get("on_message")
+        if on_message is not None:
+            on_message(result)
+        return "", 0.0, result
+
+    monkeypatch.setattr("otto.agent.run_agent_query", fake_run_agent_query)
+
+    with pytest.raises(AgentCallError, match="provider-side failure"):
+        await run_agent_with_timeout(
+            "test",
+            AgentOptions(),
+            log_dir=tmp_path,
+            timeout=30,
+            project_dir=tmp_path,
+        )

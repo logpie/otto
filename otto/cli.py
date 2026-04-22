@@ -18,7 +18,17 @@ os.environ.pop("CLAUDECODE", None)
 import click
 
 from otto.agent import AgentCallError
-from otto.config import _normalize_intent, load_config, require_git
+from otto.config import (
+    ConfigError,
+    _normalize_intent,
+    agent_effort,
+    agent_model,
+    agent_provider,
+    load_config,
+    require_git,
+    resolve_project_dir,
+    resolve_certifier_mode,
+)
 from otto.display import CONTEXT_SETTINGS, console, rich_escape
 from otto.theme import error_console
 
@@ -95,6 +105,93 @@ def _load_yaml_raw(config_path: Path) -> dict[str, Any]:
     except Exception:
         return {}
     return raw if isinstance(raw, dict) else {}
+
+
+def _load_config_or_exit(config_path: Path) -> dict[str, Any]:
+    try:
+        return load_config(config_path)
+    except (ConfigError, ValueError) as exc:
+        error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
+        sys.exit(2)
+
+
+def _record_cli_override(config: dict[str, Any], key: str, value: Any) -> None:
+    overrides = config.setdefault("_cli_overrides", {})
+    if isinstance(overrides, dict):
+        overrides[key] = value
+
+
+def _positive_budget_option(
+    _ctx: click.Context,
+    _param: click.Parameter,
+    value: int | None,
+) -> int | None:
+    if value is not None and value <= 0:
+        raise click.BadParameter("must be > 0")
+    return value
+
+
+def _rounds_option(
+    _ctx: click.Context,
+    _param: click.Parameter,
+    value: int | None,
+) -> int | None:
+    if value is None:
+        return None
+    if value <= 0:
+        raise click.BadParameter("must be >= 1")
+    if value > 50:
+        raise click.BadParameter("must be <= 50")
+    return value
+
+
+def _max_turns_option(
+    _ctx: click.Context,
+    _param: click.Parameter,
+    value: int | None,
+) -> int | None:
+    if value is None:
+        return None
+    if value < 1:
+        raise click.BadParameter("must be >= 1")
+    if value > 200:
+        raise click.BadParameter("must be <= 200")
+    return value
+
+
+def _resolve_bool_setting(
+    *,
+    config: dict[str, Any],
+    config_path: Path,
+    key: str,
+    cli_enabled: bool,
+    cli_label: str,
+) -> tuple[bool, str]:
+    yaml_raw = _load_yaml_raw(config_path)
+    if cli_enabled:
+        return True, cli_label
+    if key in yaml_raw:
+        return bool(config.get(key)), "yaml"
+    return bool(config.get(key)), "default"
+
+
+def _agent_setting_source(
+    *,
+    yaml_raw: dict[str, Any],
+    cli_sources: dict[str, str],
+    agent_type: str,
+    key: str,
+) -> str:
+    if key in cli_sources:
+        return cli_sources[key]
+    raw_agents = yaml_raw.get("agents", {})
+    if isinstance(raw_agents, dict):
+        raw_agent = raw_agents.get(agent_type, {})
+        if isinstance(raw_agent, dict) and raw_agent.get(key) not in (None, ""):
+            return f"agents.{agent_type}.{key}"
+    if key in yaml_raw:
+        return "yaml"
+    return "default"
 
 
 def _format_elapsed_compact(seconds: float) -> str:
@@ -188,6 +285,7 @@ def _print_config_banner(
         ("Time budget", _format_budget_value(config.get("run_budget_seconds")), "run_budget_seconds"),
         ("Provider", config.get("provider"), "provider"),
         ("Max build rounds", config.get("max_certify_rounds"), "max_certify_rounds"),
+        ("Max turns", config.get("max_turns_per_call"), "max_turns_per_call"),
     ]
     if model_value:
         rows.insert(3, ("Model", model_value, "model"))
@@ -229,6 +327,46 @@ def _print_config_banner(
         table.add_row(*row)
 
     console_.print(table)
+
+    for key, label, resolver in (
+        ("provider", "Agent providers", agent_provider),
+        ("model", "Agent models", agent_model),
+        ("effort", "Agent efforts", agent_effort),
+    ):
+        global_value = resolver(config)
+        if key == "model" and not global_value:
+            global_value = _runtime_model_name(agent_provider(config))
+        entries: list[str] = []
+        for agent_type in ("build", "certifier", "spec", "fix"):
+            value = resolver(config, agent_type)
+            if key == "model" and not value:
+                value = _runtime_model_name(agent_provider(config, agent_type))
+            if value == global_value:
+                continue
+            source = _agent_setting_source(
+                yaml_raw=yaml_raw,
+                cli_sources=cli_sources,
+                agent_type=agent_type,
+                key=key,
+            )
+            entries.append(
+                f"{agent_type}={_render_config_value(value, source, show_default_suffix=not all_default)}"
+            )
+        if entries:
+            console_.print(f"  {label}: " + ", ".join(entries))
+
+    if config.get("memory"):
+        try:
+            from otto.memory import load_history
+
+            findings_count = sum(len(entry.get("findings", []) or []) for entry in load_history(config_path.parent))
+        except Exception:
+            findings_count = 0
+        if findings_count > 0:
+            source = _config_source("memory", cli_sources, yaml_raw)
+            source_label = "otto.yaml:memory: true" if source == "yaml" else "memory: true"
+            console_.print(f"  • cross-run memory: {findings_count} prior findings loaded ({source_label})")
+
     if all_default:
         console_.print("  [dim](all defaults — override with --model, --budget, --rounds, etc.)[/dim]")
 
@@ -268,6 +406,7 @@ async def _run_spec_phase(
     auto_approve: bool,
     resume_state,
     config: dict,
+    split_mode: bool,
     run_id: str | None = None,
     budget=None,
 ) -> tuple[str, str, float, float]:
@@ -286,7 +425,6 @@ async def _run_spec_phase(
     from otto.spec import (
         SpecResult,
         count_open_questions,
-        format_spec_section,
         read_spec_file,
         review_spec,
         run_spec_agent,
@@ -297,7 +435,7 @@ async def _run_spec_phase(
     from otto import paths as _paths
     # Determine run_id (unified session_id): resume preserves, otherwise fresh.
     run_id = run_id or resume_state.run_id or _new_run_id(project_dir)
-    _paths.ensure_session_scaffold(project_dir, run_id)
+    _paths.ensure_session_scaffold(project_dir, run_id, phase="spec")
     run_dir = _paths.spec_dir(project_dir, run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
     _paths.set_pointer(project_dir, _paths.LATEST_POINTER, run_id)
@@ -373,6 +511,7 @@ async def _run_spec_phase(
                 run_id=run_id,
                 command="build",
                 phase="spec_review",
+                split_mode=split_mode,
                 intent=intent,
                 spec_path=str(spec_path_out),
                 spec_hash=current_spec_hash,
@@ -391,6 +530,7 @@ async def _run_spec_phase(
                 current_phase = "spec"
                 write_checkpoint(
                     project_dir, run_id=run_id, command="build", phase="spec",
+                    split_mode=split_mode,
                     intent=intent, spec_cost=spec_cost, spec_version=resume_state.spec_version,
                 )
                 spec_result = await run_spec_agent(
@@ -405,6 +545,7 @@ async def _run_spec_phase(
                 current_spec_version = spec_result.version
                 write_checkpoint(
                     project_dir, run_id=run_id, command="build", phase="spec_review",
+                    split_mode=split_mode,
                     intent=intent, spec_path=str(spec_result.path),
                     spec_hash=current_spec_hash, spec_version=current_spec_version, spec_cost=spec_cost,
                 )
@@ -427,6 +568,7 @@ async def _run_spec_phase(
             current_phase = "spec"
             write_checkpoint(
                 project_dir, run_id=run_id, command="build", phase="spec",
+                split_mode=split_mode,
                 intent=intent, spec_cost=spec_cost, spec_version=resume_state.spec_version,
             )
             console.print("  [bold]Spec phase[/bold] — generating product spec...\n")
@@ -441,6 +583,7 @@ async def _run_spec_phase(
             current_spec_version = spec_result.version
             write_checkpoint(
                 project_dir, run_id=run_id, command="build", phase="spec_review",
+                split_mode=split_mode,
                 intent=intent, spec_path=str(spec_result.path),
                 spec_hash=current_spec_hash, spec_version=current_spec_version, spec_cost=spec_cost,
             )
@@ -462,6 +605,7 @@ async def _run_spec_phase(
         # Record approved state
         write_checkpoint(
             project_dir, run_id=run_id, command="build", phase="spec_approved",
+            split_mode=split_mode,
             intent=intent, spec_path=str(approved.path),
             spec_hash=current_spec_hash, spec_version=current_spec_version, spec_cost=spec_cost,
         )
@@ -471,12 +615,13 @@ async def _run_spec_phase(
         error_console.print(f"[error]{exc}[/error]")
         sys.exit(2)
     except KeyboardInterrupt:
-        prior_cp = load_checkpoint(project_dir) or {}
+        prior_cp = load_checkpoint(project_dir, run_id=run_id) or {}
         write_checkpoint(
             project_dir,
             run_id=run_id,
             command="build",
             phase=(prior_cp.get("phase", "") or current_phase),
+            split_mode=bool(prior_cp.get("split_mode", split_mode)),
             intent=intent,
             status="paused",
             spec_path=(prior_cp.get("spec_path", "") or current_spec_path),
@@ -487,7 +632,7 @@ async def _run_spec_phase(
         raise
     except Exception as exc:
         if isinstance(exc, AgentCallError):
-            prior_cp = load_checkpoint(project_dir) or {}
+            prior_cp = load_checkpoint(project_dir, run_id=run_id) or {}
             session_id = (
                 exc.session_id
                 or prior_cp.get("agent_session_id")
@@ -496,6 +641,7 @@ async def _run_spec_phase(
             write_checkpoint(
                 project_dir, run_id=run_id, command="build",
                 status="paused", phase=current_phase,
+                split_mode=bool(prior_cp.get("split_mode", split_mode)),
                 intent=intent,
                 spec_path=current_spec_path or None,
                 spec_hash=current_spec_hash or None,
@@ -514,7 +660,7 @@ async def _run_spec_phase(
         # --force for a checkpoint that couldn't be resumed anyway.
         from otto.checkpoint import clear_checkpoint
         try:
-            clear_checkpoint(project_dir)
+            clear_checkpoint(project_dir, run_id=run_id)
         except Exception:
             pass
         error_console.print(
@@ -651,8 +797,9 @@ def _exit_for_lock_busy(exc) -> None:
 @click.option("--standard", "standard_", is_flag=True, help="Standard certification — Must-Have + generic CRUD/edge/access checklist")
 @click.option("--thorough", is_flag=True, help="Thorough certification — adversarial edge cases + code review")
 @click.option("--split", is_flag=True, help="Split mode: system-controlled certify loop with build journal")
-@click.option("--rounds", "-n", default=None, type=int, help="Max certification rounds (default from otto.yaml or 8)")
-@click.option("--budget", default=None, type=int, help="Total wall-clock budget in seconds (default from otto.yaml or 3600)")
+@click.option("--rounds", "-n", default=None, type=int, callback=_rounds_option, help="Max certification rounds, 1-50 (default from otto.yaml or 8)")
+@click.option("--budget", default=None, type=int, callback=_positive_budget_option, help="Total wall-clock budget in seconds, must be > 0 (default from otto.yaml or 3600)")
+@click.option("--max-turns", default=None, type=int, callback=_max_turns_option, help="Max agent turns per call, 1-200 (default from otto.yaml or 200)")
 @click.option("--model", default=None, help="Override model for every agent (e.g. sonnet, haiku, gpt-5)")
 @click.option("--provider", default=None, help="Override provider for every agent: claude | codex")
 @click.option("--effort", default=None, help="Override effort level for every agent: low | medium | high | max")
@@ -665,7 +812,7 @@ def _exit_for_lock_busy(exc) -> None:
 @click.option("--yes", is_flag=True, help="Auto-approve the generated spec (for CI/scripts)")
 @click.option("--force", is_flag=True, help="Discard an active paused spec run and start fresh")
 @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
-def build(intent, no_qa, fast, standard_, thorough, split, rounds, budget, model, provider, effort, strict, verbose, resume, spec, spec_file, yes, force, break_lock):
+def build(intent, no_qa, fast, standard_, thorough, split, rounds, budget, max_turns, model, provider, effort, strict, verbose, resume, spec, spec_file, yes, force, break_lock):
     """Build a product from a natural language intent.
 
     One agent builds, certifies, and fixes autonomously. The certifier
@@ -684,18 +831,23 @@ def build(intent, no_qa, fast, standard_, thorough, split, rounds, budget, model
         otto build "CLI tool that converts CSV to JSON" --no-qa
 
         otto build --resume                     # continue interrupted run
+
+    Limits: intent text is capped at 8KB, approved specs at 32KB.
     """
     require_git()
-    project_dir = Path.cwd()
+    project_dir = resolve_project_dir(Path.cwd())
     from otto import paths as _paths
 
     try:
         with _paths.project_lock(project_dir, "build", break_lock=break_lock):
             _build_locked(
                 intent, no_qa, fast, standard_, thorough, split, rounds,
-                budget, model, provider, effort, strict, verbose,
+                budget, max_turns, model, provider, effort, strict, verbose,
                 resume, spec, spec_file, yes, force, project_dir,
             )
+    except _paths.LockBreakError as exc:
+        error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
+        sys.exit(1)
     except _paths.LockBusy as exc:
         _exit_for_lock_busy(exc)
 
@@ -709,6 +861,7 @@ def _build_locked(
     split,
     rounds,
     budget,
+    max_turns,
     model,
     provider,
     effort,
@@ -756,13 +909,14 @@ def _build_locked(
             session_dir = _paths.session_dir(project_dir, run_id_to_archive)
             if session_dir.exists():
                 try:
-                    import json as _json
+                    from otto.observability import write_json_atomic
+
                     summary_path = session_dir / "summary.json"
-                    summary_path.write_text(_json.dumps({
+                    write_json_atomic(summary_path, {
                         "status": "abandoned",
                         "abandoned_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
                         "run_id": run_id_to_archive,
-                    }, indent=2))
+                    })
                     console.print(f"  [yellow]Marked prior session as abandoned: {session_dir}[/yellow]")
                 except OSError as exc:
                     console.print(f"  [yellow]Could not mark prior session abandoned: {exc}[/yellow]")
@@ -775,21 +929,27 @@ def _build_locked(
                     console.print(f"  [yellow]Archived legacy spec run to {legacy_abandoned}[/yellow]")
                 except OSError as exc:
                     console.print(f"  [yellow]Could not archive legacy spec run: {exc}[/yellow]")
-        clear_checkpoint(project_dir)
+        clear_checkpoint(project_dir, run_id=run_id_to_archive or None)
         cp = None
 
-    resume_state = resolve_resume(project_dir, resume, expected_command="build")
+    try:
+        resume_state = resolve_resume(
+            project_dir,
+            resume,
+            expected_command="build",
+            force=force,
+            reject_incompatible=True,
+        )
+    except ValueError as exc:
+        error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
+        sys.exit(2)
+    if resume_state.resumed and resume_state.split_mode is not None:
+        split = resume_state.split_mode
     use_spec = (
         bool(spec or spec_file)
         or is_spec_phase(resume_state.phase)
         or bool(resume_state.spec_path)
     )
-    if use_spec and no_qa:
-        error_console.print(
-            "[error]--spec requires the certifier (Must-NOT-Have scope check); "
-            "--no-qa is incompatible.[/error]"
-        )
-        sys.exit(2)
 
     intent = _normalize_intent(intent or "")
 
@@ -828,7 +988,11 @@ def _build_locked(
                 display_intent = intent
             elif split and not no_qa:
                 from otto.config import resolve_intent
-                intent = _normalize_intent(resolve_intent(project_dir) or "")
+                try:
+                    intent = _normalize_intent(resolve_intent(project_dir) or "")
+                except (ConfigError, ValueError) as exc:
+                    error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
+                    sys.exit(2)
                 if not intent:
                     error_console.print(
                         "[error]Resume needs a product description for split mode. "
@@ -840,6 +1004,17 @@ def _build_locked(
             sys.exit(2)
 
     display_intent = intent or display_intent
+    from otto.config import MAX_INTENT_CHARS, validate_text_limit
+    try:
+        intent = validate_text_limit(
+            intent,
+            kind="intent",
+            source="CLI argument" if not resume_without_intent else "resolved intent",
+            max_chars=MAX_INTENT_CHARS,
+        )
+    except ConfigError as exc:
+        error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
+        sys.exit(2)
     print_resume_status(console, resume_state, resume, expected_command="build")
     run_id: str = resume_state.run_id or ""
     if not run_id:
@@ -849,10 +1024,34 @@ def _build_locked(
     # `load_config` returns built-in defaults + auto-detected project values
     # when the yaml is absent.
     config_path = project_dir / "otto.yaml"
-    config = load_config(config_path)
+    config = _load_config_or_exit(config_path)
 
-    if no_qa:
-        config["skip_product_qa"] = True
+    resolved_skip_qa, skip_qa_source = _resolve_bool_setting(
+        config=config,
+        config_path=config_path,
+        key="skip_product_qa",
+        cli_enabled=no_qa,
+        cli_label="--no-qa",
+    )
+    config["skip_product_qa"] = resolved_skip_qa
+    resolved_split, _split_source = _resolve_bool_setting(
+        config=config,
+        config_path=config_path,
+        key="split_mode",
+        cli_enabled=split,
+        cli_label="--split",
+    )
+    split = bool(resolved_split)
+    if resume_state.resumed and resume_state.split_mode is not None:
+        split = resume_state.split_mode
+
+    if use_spec and resolved_skip_qa:
+        source_text = "--no-qa" if skip_qa_source == "--no-qa" else "otto.yaml: skip_product_qa: true"
+        error_console.print(
+            "[error]--spec requires the certifier (Must-NOT-Have scope check); "
+            f"skip_product_qa is enabled via {rich_escape(source_text)}.[/error]"
+        )
+        sys.exit(2)
     if sum(bool(x) for x in (fast, standard_, thorough)) > 1:
         error_console.print(
             "[error]--fast, --standard, and --thorough are mutually exclusive.[/error]"
@@ -869,29 +1068,48 @@ def _build_locked(
     if rounds is not None:
         config["max_certify_rounds"] = rounds
         sources["max_certify_rounds"] = "--rounds"
+    elif resume_state.resumed and resume_state.max_rounds:
+        config["max_certify_rounds"] = resume_state.max_rounds
+        sources["max_certify_rounds"] = "checkpoint"
     if budget is not None:
         config["run_budget_seconds"] = budget
         sources["run_budget_seconds"] = "--budget"
+    if max_turns is not None:
+        config["max_turns_per_call"] = max_turns
+        sources["max_turns_per_call"] = "--max-turns"
     if model:
         config["model"] = model
         sources["model"] = "--model"
+        _record_cli_override(config, "model", model)
     if provider:
         config["provider"] = provider
         sources["provider"] = "--provider"
+        _record_cli_override(config, "provider", provider)
     if effort:
         config["effort"] = effort
         sources["effort"] = "--effort"
+        _record_cli_override(config, "effort", effort)
     if strict:
         config["strict_mode"] = True
         sources["strict_mode"] = "--strict"
     config["_verbose"] = bool(verbose)
+    from otto.config import get_max_rounds, get_max_turns_per_call
+    try:
+        config["max_certify_rounds"] = get_max_rounds(config)
+        config["max_turns_per_call"] = get_max_turns_per_call(config)
+    except ConfigError as exc:
+        error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
+        sys.exit(2)
 
     _print_config_banner(console, config, sources, config_path)
     _print_startup_context(console, project_dir, run_id)
 
     from otto.pipeline import build_agentic_v3, run_certify_fix_loop, BuildResult
     from otto.budget import RunBudget
-    run_budget = RunBudget.start_from(config)
+    run_budget = RunBudget.start_from(
+        config,
+        session_started_at=resume_state.session_started_at or None,
+    )
 
     # --- Spec phase (if --spec or --spec-file) ---
     # Start timer BEFORE spec so reported duration matches budget accounting.
@@ -909,6 +1127,7 @@ def _build_locked(
                 auto_approve=yes,
                 resume_state=resume_state,
                 config=config,
+                split_mode=split,
                 run_id=run_id or None,
                 budget=run_budget,
             ))
@@ -924,10 +1143,13 @@ def _build_locked(
     # Priority: CLI flag (stored in _certifier_mode) > otto.yaml (certifier_mode)
     # > "fast" fallback (cheap default for quick iteration; users who want real
     # QA set `certifier_mode: standard` or `thorough` in otto.yaml).
-    certifier_mode = config.pop("_certifier_mode", None) or config.get("certifier_mode", "fast")
+    certifier_mode = resolve_certifier_mode(
+        config,
+        cli_mode=config.pop("_certifier_mode", None),
+    )
 
     try:
-        if split and not no_qa:
+        if split and not resolved_skip_qa:
             console.print("  [bold]Split mode[/bold] \u2014 system-controlled certify loop\n")
             # Resume skips the initial build only after it has completed.
             skip_initial_build = resume_state.resumed and initial_build_completed(
@@ -939,7 +1161,9 @@ def _build_locked(
                                      skip_initial_build=skip_initial_build,
                                      start_round=resume_state.start_round,
                                      resume_cost=resume_state.total_cost,
+                                     resume_duration=resume_state.total_duration,
                                      resume_rounds=resume_state.rounds,
+                                     resume_session_id=resume_state.agent_session_id or None,
                                      session_id=run_id or None,
                                      command="build",
                                      record_intent=not resume_without_intent,
@@ -960,6 +1184,8 @@ def _build_locked(
                                  resume_existing_session=resume_without_intent,
                                  spec=spec_content,
                                  run_id=run_id or None,
+                                 prior_total_cost=resume_state.total_cost,
+                                 prior_total_duration=resume_state.total_duration,
                                  budget=run_budget,
                                  spec_cost=spec_cost_total,
                                  spec_duration=spec_duration_total,
@@ -1050,13 +1276,15 @@ def _build_locked(
 @click.argument("intent", required=False)
 @click.option("--thorough", is_flag=True, help="Thorough mode — adversarial edge cases + code review")
 @click.option("--fast", is_flag=True, help="Fast mode — happy path smoke test only")
-@click.option("--standard", "standard_", is_flag=True, help="Standard mode — Must-Have + generic CRUD/edge/access checklist (default when no flag given)")
-@click.option("--budget", default=None, type=int, help="Total wall-clock budget in seconds (default from otto.yaml or 3600)")
+@click.option("--standard", "standard_", is_flag=True, help="Standard mode — Must-Have + generic CRUD/edge/access checklist")
+@click.option("--budget", default=None, type=int, callback=_positive_budget_option, help="Total wall-clock budget in seconds, must be > 0 (default from otto.yaml or 3600)")
+@click.option("--max-turns", default=None, type=int, callback=_max_turns_option, help="Max agent turns per call, 1-200 (default from otto.yaml or 200)")
+@click.option("--strict", is_flag=True, help="Require two consecutive PASS runs before reporting success")
 @click.option("--model", default=None, help="Override model for every agent (e.g. sonnet, haiku, gpt-5)")
 @click.option("--provider", default=None, help="Override provider for every agent: claude | codex")
 @click.option("--effort", default=None, help="Override effort level for every agent: low | medium | high | max")
 @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
-def certify(intent, thorough, fast, standard_, budget, model, provider, effort, break_lock):
+def certify(intent, thorough, fast, standard_, budget, max_turns, strict, model, provider, effort, break_lock):
     """Certify a product — independent, builder-blind verification.
 
     Tests the product in the current directory as a real user. Works on
@@ -1065,11 +1293,14 @@ def certify(intent, thorough, fast, standard_, budget, model, provider, effort, 
     If no intent is given, reads intent.md or README.md from the project.
 
     Examples:
-        otto certify                   # standard mode (default)
+        otto certify                   # mode from otto.yaml or built-in fast default
         otto certify --fast            # quick smoke test (~1-2 min)
         otto certify --thorough        # adversarial deep inspection
+
+    Limits: intent text is capped at 8KB.
     """
-    project_dir = Path.cwd()
+    require_git()
+    project_dir = resolve_project_dir(Path.cwd())
     from otto import paths as _paths
 
     if sum(bool(x) for x in (fast, standard_, thorough)) > 1:
@@ -1084,61 +1315,95 @@ def certify(intent, thorough, fast, standard_, budget, model, provider, effort, 
             session_id = _new_run_id(project_dir)
             _certify_locked(
                 intent, thorough, fast, standard_,
-                budget, model, provider, effort,
+                budget, max_turns, strict, model, provider, effort,
                 project_dir, session_id,
             )
+    except _paths.LockBreakError as exc:
+        error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
+        sys.exit(1)
     except _paths.LockBusy as exc:
         _exit_for_lock_busy(exc)
 
 
 def _certify_locked(
     intent, thorough, fast, standard_,
-    budget, model, provider, effort,
+    budget, max_turns, strict, model, provider, effort,
     project_dir: Path, session_id: str,
 ):
 
     # Load config so run_budget_seconds and other settings are respected
     config_path = project_dir / "otto.yaml"
-    config = load_config(config_path)
+    config = _load_config_or_exit(config_path)
 
     sources: dict[str, str] = {}
     if budget is not None:
         config["run_budget_seconds"] = budget
         sources["run_budget_seconds"] = "cli"
+    if max_turns is not None:
+        config["max_turns_per_call"] = max_turns
+        sources["max_turns_per_call"] = "cli"
+    if strict:
+        config["strict_mode"] = True
+        sources["strict_mode"] = "cli"
     if model:
         config["model"] = model
         sources["model"] = "cli"
+        _record_cli_override(config, "model", model)
     if provider:
         config["provider"] = provider
         sources["provider"] = "cli"
+        _record_cli_override(config, "provider", provider)
     if effort:
         config["effort"] = effort
         sources["effort"] = "cli"
+        _record_cli_override(config, "effort", effort)
     mode_flag = "fast" if fast else ("standard" if standard_ else ("thorough" if thorough else None))
     if mode_flag:
         config["certifier_mode"] = mode_flag
         sources["certifier_mode"] = "cli"
+    from otto.config import get_max_turns_per_call
+    try:
+        config["max_turns_per_call"] = get_max_turns_per_call(config)
+    except ConfigError as exc:
+        error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
+        sys.exit(2)
     _print_config_banner(console, config, sources, config_path)
 
     # Resolve intent: argument > intent.md > README.md
     if not intent:
         from otto.config import resolve_intent
-        intent = _normalize_intent(resolve_intent(project_dir) or "")
+        try:
+            intent = _normalize_intent(resolve_intent(project_dir) or "")
+        except (ConfigError, ValueError) as exc:
+            error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
+            sys.exit(2)
         if intent:
             console.print("  [dim]Intent from project files[/dim]")
         else:
             error_console.print("[error]No intent provided. Pass as argument or create intent.md[/error]")
             sys.exit(2)
+    else:
+        from otto.config import MAX_INTENT_CHARS, validate_text_limit
 
-    if fast:
+        try:
+            intent = validate_text_limit(
+                intent,
+                kind="intent",
+                source="CLI argument",
+                max_chars=MAX_INTENT_CHARS,
+            )
+        except ConfigError as exc:
+            error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
+            sys.exit(2)
+
+    _mode = resolve_certifier_mode(config, cli_mode=mode_flag)
+
+    if _mode == "fast":
         mode_label = "happy-path only (Must-Have stories, ~30s)"
-        _mode = "fast"
-    elif thorough:
+    elif _mode == "thorough":
         mode_label = "adversarial (Must-Have + edge probes + code review)"
-        _mode = "thorough"
     else:
         mode_label = "standard (Must-Have + generic checklist: CRUD, edge cases, access control)"
-        _mode = "standard"
     console.print(f"\n  [bold]Certifying[/bold] \u2014 {mode_label}\n")
 
     from otto.certifier import run_agentic_certifier
@@ -1147,29 +1412,57 @@ def _certify_locked(
 
     start = time.time()
     try:
-        report = asyncio.run(run_agentic_certifier(
-            intent=intent,
-            project_dir=project_dir,
-            config=config,
-            mode=_mode,
-            budget=budget,
-            session_id=session_id,
-        ))
+        report = None
+        total_certify_cost = 0.0
+        required_passes = 2 if strict else 1
+        completed_passes = 0
+        while completed_passes < required_passes:
+            active_session_id = session_id if completed_passes == 0 else _new_run_id(project_dir)
+            report = asyncio.run(run_agentic_certifier(
+                intent=intent,
+                project_dir=project_dir,
+                config=config,
+                mode=_mode,
+                budget=budget,
+                session_id=active_session_id,
+            ))
+            total_certify_cost += float(report.cost_usd or 0.0)
+            if report.outcome.value != "passed":
+                break
+            completed_passes += 1
+            if completed_passes < required_passes:
+                console.print(
+                    f"  [dim]\u2713 pass {completed_passes}/{required_passes} "
+                    "\u2014 re-running verification for consistency (strict mode)[/dim]"
+                )
     except KeyboardInterrupt:
         console.print("\n  Aborted.")
         sys.exit(1)
     except Exception as e:
+        from otto.markers import MalformedCertifierOutputError
+
         if isinstance(e, AgentCallError):
+            message = str(e)
+            if message.startswith("Timed out after"):
+                error_console.print(
+                    f"[error]{rich_escape(message)}.[/error]\n"
+                    "  Raise `--budget` or `run_budget_seconds` in otto.yaml. "
+                    "Standalone certify has no resume — rerun the command."
+                )
+                sys.exit(1)
             error_console.print(
-                f"[error]Run budget exhausted ({e.reason}).[/error]\n"
-                "  Raise `run_budget_seconds` in otto.yaml. Standalone "
-                "certify has no resume — rerun the command."
+                f"[error]{rich_escape(message)}[/error]\n"
+                "  Standalone certify has no resume — rerun the command."
             )
+            sys.exit(1)
+        if isinstance(e, MalformedCertifierOutputError):
+            error_console.print(f"[error]{rich_escape(str(e))}[/error]")
             sys.exit(1)
         error_console.print(f"[error]Certification failed: {rich_escape(str(e))}[/error]")
         sys.exit(1)
 
     duration = time.time() - start
+    assert report is not None
     story_results = report.story_results
     passed_count = sum(1 for s in story_results if s.get("passed"))
 
@@ -1186,7 +1479,7 @@ def _certify_locked(
     else:
         console.print(f"  [red bold]FAILED[/red bold] \u2014 {passed_count}/{len(story_results)} stories")
 
-    console.print(f"  Cost: ${report.cost_usd:.2f}  Duration: {duration:.0f}s")
+    console.print(f"  Cost: ${total_certify_cost:.2f}  Duration: {duration:.0f}s")
 
     # PoW report location — new layout uses session-scoped paths, pointed
     # to by the `latest` symlink. Fall back to the legacy certifier/latest

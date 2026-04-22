@@ -2,7 +2,7 @@
 
 Covers the invariants Codex flagged during Plan Gate review:
   - atomic pointer writes (no stale state on fallback)
-  - scan fallback when `paused` pointer missing but session checkpoint exists
+  - `paused` pointer is authoritative for resume discovery
   - session_id collision retry
   - project lock refuses concurrent invocations
 """
@@ -123,10 +123,30 @@ class TestPointerAtomicity:
         assert resolved.name == sid2
 
 
-class TestResolvePointerScanFallback:
-    def test_scan_finds_paused_session_without_pointer(self, project_dir):
-        """If `paused` pointer is missing (e.g., crash before set_pointer),
-        resolve_pointer('paused') scans sessions/ for status=paused."""
+class TestSessionScaffold:
+    def test_scaffold_creates_session_root_only_by_default(self, project_dir):
+        sid = "2026-04-20-170200-abcdef"
+        paths.ensure_session_scaffold(project_dir, sid)
+
+        sess = paths.session_dir(project_dir, sid)
+        assert sess.exists()
+        assert not (sess / "build").exists()
+        assert not (sess / "certify").exists()
+        assert not (sess / "improve").exists()
+
+    def test_scaffold_creates_only_requested_phase(self, project_dir):
+        sid = "2026-04-20-170200-abcdef"
+        paths.ensure_session_scaffold(project_dir, sid, phase="certify")
+
+        sess = paths.session_dir(project_dir, sid)
+        assert sess.exists()
+        assert (sess / "certify").exists()
+        assert not (sess / "build").exists()
+        assert not (sess / "improve").exists()
+
+
+class TestResolvePointerPausedPointer:
+    def test_missing_paused_pointer_does_not_scan_sessions(self, project_dir):
         sid = "2026-04-20-170200-abcdef"
         paths.ensure_session_scaffold(project_dir, sid)
         cp = paths.session_checkpoint(project_dir, sid)
@@ -135,42 +155,16 @@ class TestResolvePointerScanFallback:
             "run_id": sid,
             "updated_at": "2026-04-20T17:02:00Z",
         }))
-        # No pointer file / symlink — only the session checkpoint exists.
-        resolved = paths.resolve_pointer(project_dir, "paused")
-        assert resolved is not None
-        assert resolved.name == sid
+        assert paths.resolve_pointer(project_dir, "paused") is None
 
-    def test_scan_also_finds_in_progress(self, project_dir):
-        """Hard-crashed sessions have status=in_progress (not paused).
-        resolve_pointer must still find them so --resume works after SIGKILL."""
+    def test_missing_paused_pointer_does_not_scan_in_progress_sessions(self, project_dir):
         sid = "2026-04-20-170300-ddeeff"
         paths.ensure_session_scaffold(project_dir, sid)
         paths.session_checkpoint(project_dir, sid).write_text(json.dumps({
             "status": "in_progress",
             "run_id": sid,
         }))
-        resolved = paths.resolve_pointer(project_dir, "paused")
-        assert resolved is not None
-
-    def test_scan_prefers_paused_over_in_progress(self, project_dir):
-        """When both exist, paused (clean pause) wins over in_progress (crash)."""
-        older_in_prog = "2026-04-20-170000-111111"
-        newer_paused = "2026-04-20-170200-222222"
-        paths.ensure_session_scaffold(project_dir, older_in_prog)
-        paths.ensure_session_scaffold(project_dir, newer_paused)
-        paths.session_checkpoint(project_dir, older_in_prog).write_text(json.dumps({
-            "status": "in_progress",
-            "run_id": older_in_prog,
-            "updated_at": "2026-04-20T17:01:00Z",
-        }))
-        paths.session_checkpoint(project_dir, newer_paused).write_text(json.dumps({
-            "status": "paused",
-            "run_id": newer_paused,
-            "updated_at": "2026-04-20T17:02:00Z",
-        }))
-        resolved = paths.resolve_pointer(project_dir, "paused")
-        assert resolved is not None
-        assert resolved.name == newer_paused, "paused must win over in_progress"
+        assert paths.resolve_pointer(project_dir, "paused") is None
 
 
 class TestProjectLock:
@@ -219,24 +213,39 @@ class TestProjectLock:
             assert after["session_id"] is None
             assert "lock now bound to session 2026-04-20-170200-abcdef" in caplog.text
 
-    def test_break_lock_forcibly_clears_existing_holder(self, project_dir):
-        """Manual break-lock should remove even a live holder before reacquiring."""
+    def test_break_lock_refuses_live_holder(self, project_dir):
+        """Manual break-lock must never unlink a live Unix flock holder."""
         first = paths.acquire_project_lock(project_dir, "build")
         try:
-            with paths.project_lock(project_dir, "certify", break_lock=True):
-                record = json.loads((paths.logs_dir(project_dir) / paths.LOCK_FILE_NAME).read_text())
-                assert record["command"] == "certify"
+            with pytest.raises(paths.LockBreakError):
+                with paths.project_lock(project_dir, "certify", break_lock=True):
+                    pass
         finally:
             first.release()
 
+    def test_break_lock_clears_stale_holder(self, project_dir):
+        """Manual break-lock may clear a stale lock after confirming pid is dead."""
+        lock_path = paths.logs_dir(project_dir) / paths.LOCK_FILE_NAME
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        stale = {
+            "pid": 999999,
+            "started_at": "2026-04-20T17:02:01+00:00",
+            "command": "build",
+            "nonce": "stale-nonce",
+            "session_id": None,
+        }
+        lock_path.write_text(json.dumps(stale))
+
+        prior = paths.break_project_lock(project_dir)
+        assert prior == stale
+        assert not lock_path.exists()
+
     def test_release_does_not_unlink_replaced_lock(self, project_dir, caplog):
-        """Old holders must not remove a lock recreated by --break-lock."""
+        """Old holders must not remove a lock record recreated on a new inode."""
         first = paths.acquire_project_lock(project_dir, "build")
         try:
-            prior = paths.break_project_lock(project_dir)
-            assert prior["nonce"] == first._nonce
-
             lock_path = paths.logs_dir(project_dir) / paths.LOCK_FILE_NAME
+            lock_path.unlink()
             replacement = {
                 "pid": 424242,
                 "started_at": "2026-04-20T17:02:01+00:00",
@@ -263,10 +272,8 @@ class TestProjectLock:
         try:
             assert first._fd is None
 
-            prior = paths.break_project_lock(project_dir)
-            assert prior["nonce"] == first._nonce
-
             lock_path = paths.logs_dir(project_dir) / paths.LOCK_FILE_NAME
+            lock_path.unlink()
             replacement = {
                 "pid": 424242,
                 "started_at": "2026-04-20T17:02:01+00:00",

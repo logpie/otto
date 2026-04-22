@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from otto.budget import RunBudget
 
 logger = logging.getLogger("otto.spec")
+MAX_SPEC_REGENERATIONS = 5
 
 # Required section headings (exact match after stripping whitespace). The
 # spec prompt is constrained to produce these — validation catches drift.
@@ -34,6 +35,7 @@ _REQUIRED_HEADINGS = (
     "## Must NOT Have Yet",
     "## Success Criteria",
 )
+_TOP_LEVEL_HEADING = re.compile(r"^##\s+.+$", re.MULTILINE)
 
 _INTENT_LINE = re.compile(r"^\s*\*\*Intent:\*\*\s+(?P<value>\S.*?)\s*$", re.MULTILINE)
 _BULLET_LINE = re.compile(r"^(?:[-*]|\d+\.)\s+(.*)")
@@ -75,9 +77,13 @@ def validate_spec(content: str) -> list[str]:
     elif len(intents) > 1:
         errors.append(f"multiple `**Intent:**` lines found ({len(intents)}); expected exactly 1")
 
+    headings = [line.strip() for line in _TOP_LEVEL_HEADING.findall(content)]
     for heading in _REQUIRED_HEADINGS:
-        if heading not in content:
+        count = sum(1 for candidate in headings if candidate == heading)
+        if count == 0:
             errors.append(f"missing required heading: `{heading}`")
+        elif count > 1:
+            errors.append(f"required heading must appear exactly once: `{heading}` (found {count})")
 
     return errors
 
@@ -102,9 +108,24 @@ def read_spec_file(path: Path) -> tuple[str, str]:
     """
     if not path.exists():
         raise ValueError(f"spec file not found: {path}")
-    content = path.read_text()
+    try:
+        content = path.read_text()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(f"failed to read spec file {path}: {exc}") from exc
     if not content.strip():
         raise ValueError(f"spec file is empty: {path}")
+
+    from otto.config import MAX_SPEC_CHARS, validate_text_limit
+
+    try:
+        content = validate_text_limit(
+            content,
+            kind="spec",
+            source=str(path),
+            max_chars=MAX_SPEC_CHARS,
+        )
+    except Exception as exc:
+        raise ValueError(str(exc)) from exc
 
     errors = validate_spec(content)
     if errors:
@@ -153,6 +174,8 @@ def spec_hash(content: str) -> str:
 _DANGEROUS_TOKENS = (
     "</certifier_prompt>",
     "<certifier_prompt>",
+    "</prior_spec>",
+    "<prior_spec>",
     "</spec>",
     "<spec>",
     "</intent>",
@@ -248,10 +271,8 @@ async def run_spec_agent(
     # Spec-agent timeout: `spec_timeout` caps this specific phase (spec is
     # expected to be fast — 1-3 min in practice). With a run budget active,
     # the tighter of the two bounds this call.
-    try:
-        spec_cap = int(config.get("spec_timeout", 600))
-    except (ValueError, TypeError):
-        spec_cap = 600
+    from otto.config import get_spec_timeout
+    spec_cap = get_spec_timeout(config)
     timeout: int = min(budget.for_call(), spec_cap) if budget is not None else spec_cap
 
     # Per-version log subdir so regens don't overwrite each other.
@@ -276,6 +297,14 @@ async def run_spec_agent(
         )
 
     content = spec_path.read_text()
+    from otto.config import MAX_SPEC_CHARS, validate_text_limit
+
+    content = validate_text_limit(
+        content,
+        kind="spec",
+        source=str(spec_path),
+        max_chars=MAX_SPEC_CHARS,
+    )
     errors = validate_spec(content)
     if errors:
         raise RuntimeError(
@@ -441,6 +470,12 @@ async def review_spec(
             continue
 
         if action == "r":
+            if regen_count >= MAX_SPEC_REGENERATIONS:
+                print(
+                    f"  [error] regeneration limit reached ({MAX_SPEC_REGENERATIONS}). "
+                    "Quit and rerun with a revised intent if you want another pass."
+                )
+                continue
             try:
                 note = input("  One-line note (what to change): ").strip()
             except EOFError:
@@ -503,7 +538,7 @@ async def review_spec(
             continue
 
         if action == "q":
-            clear_checkpoint(project_dir)
+            clear_checkpoint(project_dir, run_id=run_id)
             print("  Aborted.")
             sys.exit(0)
 

@@ -50,7 +50,7 @@ Then at the very end:
 
 STORIES_TESTED: <number of areas measured>
 STORIES_PASSED: <number that meet expectations>
-STORY_RESULT: <finding_id> | <PASS or FAIL> | <one-line description>
+STORY_RESULT: <finding_id> | <PASS or FAIL or WARN> | claim=<what you intended to measure or verify> | observed_steps=<semicolon-separated list of measurements actually run> | observed_result=<what the measurements showed> | surface=<benchmark / CLI / HTTP / source-level / profiler> | summary=<one-line description>
 ...
 VERDICT: PASS or VERDICT: FAIL
 DIAGNOSIS: <what needs to change to meet the target, or "target met">

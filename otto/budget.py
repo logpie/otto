@@ -21,7 +21,8 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from dataclasses import dataclass
 from typing import Any
 
 logger = logging.getLogger("otto.budget")
@@ -32,16 +33,39 @@ class RunBudget:
     """Wall-clock budget tracker for a single otto invocation."""
 
     total: float                    # seconds allotted for the whole run
-    start: float = field(default_factory=time.monotonic)
+    start: float | None = None
+    session_started_at: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.start is None and self.session_started_at is None:
+            self.session_started_at = time.time()
 
     @classmethod
-    def start_from(cls, config: dict[str, Any]) -> RunBudget:
+    def start_from(
+        cls,
+        config: dict[str, Any],
+        *,
+        session_started_at: str | float | None = None,
+    ) -> RunBudget:
         """Build a RunBudget from config. Reads `run_budget_seconds`."""
         from otto.config import get_run_budget
-        return cls(total=float(get_run_budget(config)))
+        started = time.time()
+        if isinstance(session_started_at, int | float):
+            started = float(session_started_at)
+        elif isinstance(session_started_at, str) and session_started_at:
+            try:
+                started = datetime.fromisoformat(
+                    session_started_at.replace("Z", "+00:00")
+                ).astimezone(timezone.utc).timestamp()
+            except ValueError:
+                started = time.time()
+        return cls(total=float(get_run_budget(config)), session_started_at=started)
 
     def elapsed(self) -> float:
-        return time.monotonic() - self.start
+        if self.start is not None:
+            return max(0.0, time.monotonic() - self.start)
+        started = self.session_started_at if self.session_started_at is not None else time.time()
+        return max(0.0, time.time() - started)
 
     def remaining(self) -> float:
         return max(0.0, self.total - self.elapsed())

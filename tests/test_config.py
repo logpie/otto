@@ -1,19 +1,29 @@
 """Tests for otto.config module."""
 
 import json
+import re
+from pathlib import Path
 
 import pytest
 import yaml
 
 from otto.config import (
+    ConfigError,
     DEFAULT_CONFIG,
     _normalize_intent,
     agent_provider,
     create_config,
     detect_default_branch,
     detect_test_command,
+    get_max_rounds,
+    get_max_turns_per_call,
+    get_spec_timeout,
     git_meta_dir,
     load_config,
+    resolve_project_dir,
+    resolve_intent,
+    resolve_certifier_mode,
+    validate_certifier_mode,
 )
 
 
@@ -38,6 +48,24 @@ class TestGitMetaDir:
             ["git", "worktree", "remove", str(wt_path)],
             cwd=tmp_bare_git_repo, capture_output=True,
         )
+
+
+class TestResolveProjectDir:
+    def test_resolves_repo_root_from_subdirectory(self, tmp_bare_git_repo):
+        nested = tmp_bare_git_repo / "src" / "feature"
+        nested.mkdir(parents=True)
+
+        assert resolve_project_dir(nested) == tmp_bare_git_repo.resolve()
+
+    def test_reports_missing_git_binary(self, tmp_path, monkeypatch):
+        import subprocess
+
+        def fake_run(*args, **kwargs):
+            raise FileNotFoundError("git")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(ConfigError, match="git is not installed"):
+            resolve_project_dir(tmp_path)
 
 
 class TestLoadConfig:
@@ -84,6 +112,12 @@ class TestLoadConfig:
         with pytest.raises(ValueError, match="Invalid provider"):
             load_config(config_path)
 
+    def test_rejects_non_mapping_yaml_root(self, tmp_bare_git_repo):
+        config_path = tmp_bare_git_repo / "otto.yaml"
+        config_path.write_text("- not\n- a\n- mapping\n")
+        with pytest.raises(ConfigError, match="expected a YAML mapping"):
+            load_config(config_path)
+
 
 class TestProviderHelpers:
     def test_agent_provider_defaults_to_claude(self):
@@ -92,8 +126,99 @@ class TestProviderHelpers:
     def test_default_config_exposes_spec_timeout(self):
         assert DEFAULT_CONFIG["spec_timeout"] == 600
 
+    def test_default_config_exposes_max_turns(self):
+        assert DEFAULT_CONFIG["max_turns_per_call"] == 200
+
     def test_normalize_intent_collapses_multiline_whitespace(self):
         assert _normalize_intent("a kanban board:\n  localStorage") == "a kanban board: localStorage"
+
+    def test_resolve_certifier_mode_defaults_to_fast(self):
+        assert resolve_certifier_mode({}) == "fast"
+
+    def test_resolve_certifier_mode_uses_yaml_value(self):
+        assert resolve_certifier_mode({"certifier_mode": "standard"}) == "standard"
+
+    def test_resolve_certifier_mode_cli_overrides_yaml(self):
+        assert resolve_certifier_mode({"certifier_mode": "standard"}, cli_mode="fast") == "fast"
+
+    def test_resolve_certifier_mode_rejects_unknown_value(self):
+        with pytest.raises(ValueError, match="Expected one of"):
+            validate_certifier_mode("turbo")
+
+    def test_get_spec_timeout_uses_default(self):
+        assert get_spec_timeout({}) == 600
+
+    def test_get_max_turns_per_call_uses_default(self):
+        assert get_max_turns_per_call({}) == 200
+
+    def test_get_max_turns_per_call_rejects_values_above_cap(self):
+        with pytest.raises(ConfigError, match="<= 200"):
+            get_max_turns_per_call({"max_turns_per_call": 201})
+
+    def test_get_max_rounds_rejects_values_above_cap(self):
+        with pytest.raises(ConfigError, match="<= 50"):
+            get_max_rounds({"max_certify_rounds": 51})
+
+    def test_readme_fallback_is_not_truncated(self, tmp_bare_git_repo):
+        (tmp_bare_git_repo / "README.md").write_text("A" * 2500)
+        assert len(resolve_intent(tmp_bare_git_repo) or "") == 2500
+
+    def test_oversized_readme_is_rejected(self, tmp_bare_git_repo):
+        (tmp_bare_git_repo / "README.md").write_text("A" * 9000)
+        with pytest.raises(ConfigError, match="8"):
+            resolve_intent(tmp_bare_git_repo)
+
+    def test_legacy_runtime_intent_log_is_ignored_in_favor_of_readme(self, tmp_bare_git_repo):
+        (tmp_bare_git_repo / "intent.md").write_text(
+            "# Build Intents\n\n## 2026-04-20 12:00 (run-1)\nold runtime entry\n"
+        )
+        (tmp_bare_git_repo / "README.md").write_text("canonical product description")
+        assert resolve_intent(tmp_bare_git_repo) == "canonical product description"
+
+    def test_intent_read_error_falls_back_to_readme(self, tmp_bare_git_repo, monkeypatch):
+        (tmp_bare_git_repo / "intent.md").write_text("canonical intent")
+        (tmp_bare_git_repo / "README.md").write_text("readme fallback")
+
+        original_read_text = Path.read_text
+
+        def fake_read_text(path: Path, *args, **kwargs):
+            if path == tmp_bare_git_repo / "intent.md":
+                raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad byte")
+            return original_read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", fake_read_text)
+        assert resolve_intent(tmp_bare_git_repo) == "readme fallback"
+
+    def test_readme_read_error_raises_config_error(self, tmp_bare_git_repo, monkeypatch):
+        (tmp_bare_git_repo / "README.md").write_text("canonical readme")
+
+        original_read_text = Path.read_text
+
+        def fake_read_text(path: Path, *args, **kwargs):
+            if path == tmp_bare_git_repo / "README.md":
+                raise PermissionError("denied")
+            return original_read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", fake_read_text)
+        with pytest.raises(ConfigError, match="README.md"):
+            resolve_intent(tmp_bare_git_repo)
+
+    def test_readme_otto_yaml_example_loads_with_nested_agents(self, tmp_bare_git_repo):
+        readme = (Path(__file__).resolve().parents[1] / "README.md").read_text()
+        match = re.search(
+            r"## Configuration \(`otto\.yaml`\).*?```yaml\n(.*?)\n```",
+            readme,
+            re.DOTALL,
+        )
+        assert match, "README otto.yaml example not found"
+
+        config_path = tmp_bare_git_repo / "otto.yaml"
+        config_path.write_text(match.group(1))
+        cfg = load_config(config_path)
+
+        assert cfg["agents"]["build"]["model"] == "opus"
+        assert cfg["agents"]["certifier"]["model"] == "sonnet"
+        assert cfg["agents"]["spec"]["model"] == "sonnet"
 
 
 class TestDetectTestCommand:
