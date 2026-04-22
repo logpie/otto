@@ -23,7 +23,8 @@ Session id format: `<yyyy-mm-dd>-<HHMMSS>-<6hex>`.
 | `checkpoint.json` | Resume state — exists only while running/paused |
 | `intent.txt` | Archival copy of the intent at session start |
 | `spec/spec.md` | Approved spec (spec-gate); versioned `spec-v1.md…` |
-| `spec/agent.log` | Spec agent trace |
+| `spec/agent/narrative.log` | Initial spec-agent trace |
+| `spec/agent-vN/narrative.log` | Regeneration traces; prior versions are preserved |
 | `build/narrative.log` | Human-readable streamed event log (tail -f during run). Tool calls, results, thinking, STORY_RESULT / VERDICT markers elevated |
 | `build/messages.jsonl` | Lossless normalized SDK event stream — one JSON per event. Machine-consumable (`jq`, future `otto replay`) |
 | `build/live.log` | Symlink to `narrative.log` (back-compat for one release) |
@@ -32,7 +33,8 @@ Session id format: `<yyyy-mm-dd>-<HHMMSS>-<6hex>`.
 | `certify/proof-of-work.md` | Markdown summary |
 | `certify/evidence/*.png` | Browser screenshots |
 | `certify/evidence/recording.webm` | Browser walkthrough video |
-| `improve/session-report.md` | Final `otto improve` summary + merge instructions |
+| `improve/improvement-report.md` | Final `otto improve` summary + merge instructions |
+| `improve/session-report.md` | Detailed per-run summary from the certify/fix loop |
 | `improve/build-journal.md` | Round-by-round index: action, result, cost |
 | `improve/current-state.md` | Latest certifier findings (handoff to fix agent) |
 | `improve/rounds/<round-id>/` | Per-round evidence: certifier findings, builder summary |
@@ -65,7 +67,8 @@ command; clean up by `rm`-ing legacy subdirs if desired.
 
 **"Why did the build fail?"**
 → Read `otto_logs/latest/build/narrative.log` — scan for `STORY_RESULT:` and `VERDICT:` markers.
-→ For full replay: `jq -r '.blocks[]' otto_logs/latest/build/messages.jsonl`.
+→ Preferred: `otto replay <session-id>` to regenerate readable narrative logs from `messages.jsonl`.
+→ Raw block stream: `jq -c 'select(has("blocks")) | .blocks[]' otto_logs/latest/build/messages.jsonl`.
 
 **"What did the certifier test?"**
 → Read `otto_logs/latest/certify/proof-of-work.json`.

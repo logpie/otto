@@ -23,7 +23,7 @@ otto merge --all                                  # land done branches into main
 5. **Fix** — if certification fails, reads findings, fixes code, re-certifies
 6. **Ship** — commits when certification passes
 
-Optionally, a **spec gate** runs first: `otto build "intent" --spec` generates a short reviewable spec (What It Does / Must Have / Must NOT Have Yet / Success Criteria), pauses for you to approve, then hands the approved spec to both the build agent and certifier — so scope creep and "Must NOT Have" features are flagged by the certifier as FAIL.
+Optionally, a **spec gate** runs first: `otto build "intent" --spec` generates a short reviewable spec (What It Does / Must Have / Must NOT Have Yet / Success Criteria), pauses for you to approve, then hands the approved spec to both the build agent and certifier — so scope creep and "Must NOT Have" features are flagged by the certifier as WARN.
 
 **`otto certify`** runs independently on any project — regardless of how it was built:
 
@@ -64,7 +64,7 @@ Each mode creates an improvement branch, runs up to N rounds, and writes a repor
 ```bash
 otto queue build "csv export"               # enqueue
 otto queue build "settings redesign"        # enqueue another (parallel-safe)
-otto queue improve bugs --rounds 3          # enqueue an improve run
+otto queue improve bugs "error handling" -- --rounds 3   # enqueue an improve run
 otto queue run --concurrent 3               # foreground watcher dispatches up to 3 at a time
 
 otto merge --all                            # land all done tasks into main
@@ -89,7 +89,8 @@ The certifier is a **builder-blind** agent that tests the product as a real user
 Most autonomous tools silently cut scope to finish. Otto makes scope explicit and enforces it:
 - `--spec` generates a reviewable `spec.md` (Must Have / **Must NOT Have Yet** / Success Criteria / Open Questions).
 - You `[a]pprove / [e]dit / [r]egenerate / [q]uit` before any code is written.
-- The approved spec is handed to both the builder **and** the certifier. Features in "Must NOT Have Yet" get flagged `STORY_RESULT: scope-creep-<slug> | FAIL` — you can't hide scope creep in a passing test suite.
+- The approved spec is handed to both the builder **and** the certifier. Features in "Must NOT Have Yet" are flagged `STORY_RESULT: scope-creep-<slug> | WARN` so you see scope creep without turning it into a hard failure by default.
+- Today that WARN is advisory only; `--strict` still means "require two consecutive PASS rounds," not "block on WARN."
 
 ### Autonomous but resumable
 
@@ -125,7 +126,7 @@ Legend: `✓` documented · `~` partial or different approach · `✗` absent or
 | | Otto | Symphony | Devin | Cursor | Factory |
 |---|---|---|---|---|---|
 | Builder-blind LLM agent tests the product as a user (not code review, not pre-written CI) | ✓ | ✗ CI runs fixed tests | ✗ same agent self-reviews | ✗ | ~ Review Droid reviews code, not product |
-| Spec as enforceable contract — verifier flags features beyond scope as FAIL | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Spec as enforceable contract — verifier flags features beyond scope as WARN | ✓ | ✗ | ✗ | ✗ | ✗ |
 | Hill-climb to a measurable target (`improve target "metric < X"`) | ✓ | ✗ | ✗ | ✗ | ✗ |
 | Phase-level checkpoint + session_id resume on crash / Ctrl-C | ✓ | ~ retry whole run from queue | ~ session pause (human takeover) | ✗ (open community request) | ✗ |
 | Graceful pause on budget exhaustion (resumable, not hard-stopped) | ✓ | ✗ | ✗ spend caps hard-stop | ✗ spend caps hard-stop | ✗ |
@@ -165,12 +166,12 @@ Closed fix-loops are table stakes — what differs is **what runs inside the ver
 | Drives running product as a user | ✓ Playwright / curl / shell | ✓ Linux desktop | ✓ browser + VM | ✓ real browser | ✗ diff review |
 | Generates test stories from intent/spec | ✓ | ✗ | ✗ | ✗ | ✗ |
 | Adversarial mode (XSS / SQLi / auth bypass) | ✓ `--thorough` | ✗ | ✗ | ✗ | ~ flags diff bugs |
-| Scope-creep FAIL (features beyond spec) | ✓ | ✗ | ✗ | ✗ | ✗ |
+| Scope-creep WARN (features beyond spec) | ✓ | ✗ | ✗ | ✗ | ✗ |
 | Standalone on any project | ✓ `otto certify` | ✗ | ✗ | ✗ | ~ any PR |
 
 Each peer matches otto on one axis: **Devin / Cursor / Replit** all drive the running product via computer-use or browser — but the same agent that built it self-verifies. **Factory** runs an independent reviewer — but reviews the code diff, not the live product. **Symphony** and **Copilot / Amazon Q** use CI as the gate (different category — not LLM-agent verification).
 
-What's specific to otto: a separate LLM agent that generates its own test stories from the approved spec, drives the product as a user, runs adversarial probes on demand, flags features outside the spec as FAIL, and works standalone (`otto certify`) on projects it didn't build.
+What's specific to otto: a separate LLM agent that generates its own test stories from the approved spec, drives the product as a user, runs adversarial probes on demand, flags features outside the spec as WARN, and works standalone (`otto certify`) on projects it didn't build.
 
 ## Quick start
 
@@ -234,15 +235,18 @@ otto build "add dark mode toggle to the settings page"   # incremental
 | `--budget SECONDS` | Total wall-clock budget for the run (default 3600) |
 | `--model MODEL` | Override the coding model for this run (e.g. `sonnet`, `opus`) |
 | `--provider {claude\|codex}` | Override the agent provider for this run |
-| `--effort {low\|medium\|high}` | Provider-specific reasoning effort hint |
+| `--effort {low\|medium\|high\|max}` | Provider-specific reasoning effort hint |
 | `--verbose` | Show tool-call counts in heartbeat + extra detail in terminal |
-| `--resume` | Resume from last checkpoint; intent inherited from checkpoint |
+| `--resume` | Resume only an in-progress checkpoint; intent is inherited from the checkpoint |
+| `--force-cross-command-resume` | Allow `--resume` to reuse a checkpoint written by a different otto command |
 
 **Certifier mode selection**: CLI flag > `otto.yaml` > `fast` fallback. No flag + no yaml setting → `fast`. Projects that want real verification by default set `certifier_mode: standard` (or `thorough`) in `otto.yaml`.
 
 **Precedence**: CLI flag > `otto.yaml` > built-in `DEFAULTS`. Everything is optional — run without any config at all and you get sane defaults for a quick dev loop.
 
 **Spec gate**: `--spec` generates `otto_logs/sessions/<session-id>/spec/spec.md` with sections _Intent / What It Does / Core User Journey / Must Have / Must NOT Have Yet / Success Criteria / Open Questions_. Pauses for `[a]pprove / [e]dit / [r]egenerate / [q]uit`. Approved spec flows into build.md + the certifier prompt — the certifier flags features found in "Must NOT Have Yet" as scope-creep WARNings (non-failing).
+
+**Resume contract**: `--resume` only continues an in-progress checkpoint. It inherits the checkpoint intent, refuses cross-command resume unless you pass `--force-cross-command-resume`, and if the last matching run already completed Otto exits with `Nothing to resume` plus the last session/verdict.
 
 ### `otto certify`
 
@@ -251,13 +255,14 @@ Certify any project — independent, builder-blind verification. Tests the produ
 The intent describes what the product should do. The certifier generates test stories from it.
 
 ```bash
-otto certify                                            # reads intent.md or README.md — fast mode
+otto certify                                            # reads intent.md or README.md — standard mode (default)
 otto certify "notes API with auth, CRUD, and search"    # explicit intent
+otto certify --fast                                     # quick smoke test
 otto certify --standard                                 # subagents + screenshots, no adversarial probing
 otto certify --thorough                                 # adversarial: edge cases, code review
 ```
 
-Same override flags as `otto build`: `--model`, `--provider`, `--effort`, `--budget`, `--verbose`, `--strict`.
+Supported flags: `--fast`, `--standard`, `--thorough`, `--budget`, `--model`, `--provider`, `--effort`, `--break-lock`.
 
 ### `otto improve`
 
@@ -298,6 +303,8 @@ otto improve target "lighthouse score > 95" -n 10    # up to 10 rounds (default:
 otto improve target "latency < 50ms" --resume         # resume interrupted run
 ```
 
+All three improve modes support `--resume`; cross-command resume is blocked unless you pass `--force-cross-command-resume`. `otto improve target` also preserves the checkpoint goal.
+
 ### `otto queue`
 
 Schedule multiple `otto build` / `improve` / `certify` runs as parallel tasks. Each task gets its own git worktree under `.worktrees/<task-id>/` and its own branch (e.g. `build/csv-export-2026-04-20`), so tasks can't stomp on each other's commits.
@@ -305,8 +312,9 @@ Schedule multiple `otto build` / `improve` / `certify` runs as parallel tasks. E
 ```bash
 otto queue build "add csv export"            # enqueue (auto-slugs id from intent)
 otto queue build "settings redesign" --as redesign --after csv-export   # depends on csv-export
-otto queue improve bugs --rounds 3            # enqueue an improve run
-otto queue certify --thorough                 # enqueue a certify run
+otto queue build "add csv export" -- --fast   # pass flags through to inner `otto build`
+otto queue improve bugs "error handling" -- --rounds 3
+otto queue certify "release candidate" -- --thorough
 
 otto queue ls                                 # show all tasks + status
 otto queue show csv-export                    # full details for one task
@@ -318,6 +326,8 @@ otto queue cleanup --done                     # remove worktrees of done tasks
 ```
 
 The watcher (`otto queue run`) is a foreground process — run it in a tmux pane like a dev server. It picks tasks off `.otto-queue.yml`, spawns one `otto` subprocess per task into the worktree, and reaps results into per-task manifests. It exits cleanly on SIGINT and supports `on_watcher_restart: resume` (default) or `fail` via `otto.yaml`.
+
+Queue wrapper syntax is strict: the positional intent/focus/goal comes before `--`, and anything after `--` is passed through to the inner `otto build` / `otto improve` / `otto certify` command.
 
 | Flag | What it does |
 |---|---|
@@ -331,6 +341,7 @@ Land queued / built branches into the target branch. Uses Python-driven `git mer
 ```bash
 otto merge --all                              # merge all done queue tasks into target
 otto merge build/csv-export build/redesign    # explicit branches
+otto merge --allow-any-branch feature/csv-export   # permit arbitrary local branches
 otto merge --all --target develop             # target other than default_branch
 otto merge --all --no-certify                 # skip post-merge story verification
 otto merge --all --fast                       # pure git merge, bail on first conflict (no LLM)
@@ -347,6 +358,7 @@ After all branches are merged, the certifier runs once against the post-merge tr
 | `--no-certify` | Skip post-merge story verification |
 | `--full-verify` | Verify all stories (no skip-likely-safe optimization) |
 | `--cleanup-on-success` | Graduate each task's session to main, then remove the worktree |
+| `--allow-any-branch` | Allow arbitrary local branches, not just otto-managed queue/build branches |
 
 **Session graduation.** With `--cleanup-on-success`, each merged task's full session (`narrative.log`, `messages.jsonl`, `proof-of-work.*`, screenshots, recording) is moved from the worktree into the main repo's canonical `otto_logs/sessions/<id>/` before the worktree is removed. `summary.json` gets `merge_commit_sha` + `merged_at` amended in place, so later you can run `git log <merge_commit_sha>^..<merge_commit_sha>^2` to see exactly which commits a given graduated session contributed. No evidence is destroyed. If graduation fails for any reason, that task's worktree is left intact (safe default).
 
@@ -395,47 +407,46 @@ Print the installed otto version, git commit, branch, and source path. Useful wh
 **Precedence**: CLI flag > `otto.yaml` > `DEFAULTS`.
 
 ```yaml
-# Auto-detected (you usually don't need to set these)
-default_branch: main
-test_command: pytest                   # auto-detected from project files
+# This is the canonical commented template `otto setup` writes.
+# `default_branch` and `test_command` are auto-detected per repo.
 
-# Provider — which coding agent to use
-provider: claude                       # "claude" (default) or "codex"
-model: null                            # override model (e.g. "sonnet", "opus", "gpt-5")
-                                       # if null, uses the provider's default
-effort: medium                         # low | medium | high (provider reasoning effort)
+# ─── Project setup ───────────────────────────────────────────────────
+default_branch: <detected-default-branch>      # detected
+test_command: <detected-test-command>          # detected; set explicitly if wrong
 
-# Per-agent overrides — YAML-only (no CLI flags). Each falls back to the
-# top-level provider/model/effort above when unset.
-build:
-  provider: claude
-  model: opus
-certifier:
-  provider: claude
-  model: sonnet
-  effort: low                          # certifier doesn't need deep reasoning
-spec:
-  provider: claude
-  model: sonnet
+# ─── Global agent defaults (applied to every agent) ──────────────────
+provider: claude                  # claude | codex
+# model: null                     # override provider model (e.g. sonnet, haiku, gpt-5)
+# effort: null                    # low | medium | high | max (provider-specific)
 
-# Budget + certification
-run_budget_seconds: 3600               # total wall-clock for the whole invocation
-certifier_mode: fast                   # fast | standard | thorough
-                                       # CLI no-flag default is `fast` (cheap dev loop)
-max_certify_rounds: 8                  # max certify→fix attempts before giving up
-strict_mode: false                     # true = require two consecutive PASSes (opt-in via --strict)
-spec_timeout: 600                      # cap on the spec-agent call specifically
-# memory: true                         # cross-run certifier memory (opt-in)
+# ─── Per-agent overrides (inherit global if not set) ─────────────────
+# agents:
+#   build:     {provider: null, model: null, effort: null}
+#   certifier: {provider: null, model: null, effort: null}
+#   spec:      {provider: null, model: null, effort: null}
+#   fix:       {provider: null, model: null, effort: null}
 
-# Queue + merge (otto queue / otto merge)
-queue:
-  concurrent: 3                        # default --concurrent for `otto queue run`
-  worktree_dir: .worktrees             # where per-task worktrees live (relative to project)
-  on_watcher_restart: resume           # resume | fail — when watcher restarts mid-flight
-  task_timeout_s: 1800                 # SIGTERM a queue task after N seconds (null disables)
-  bookkeeping_files:                   # files queue tasks should NOT commit to their branches
-    - intent.md
-    - otto.yaml
+# ─── Budgets & caps ──────────────────────────────────────────────────
+run_budget_seconds: 3600      # total wall-clock (primary knob)
+# spec_timeout: 600                # cap on the spec-agent call only
+# max_certify_rounds: 8            # max certify→fix loop iterations
+
+# ─── Per-invocation defaults (CLI typically overrides) ───────────────
+# certifier_mode: fast             # fast | standard | thorough
+# skip_product_qa: false           # --no-qa equivalent
+# split_mode: false                # --split equivalent
+
+# ─── Features ────────────────────────────────────────────────────────
+# memory: false                    # cross-run certifier memory (opt-in)
+
+# ─── Queue + merge (used by `otto queue` and `otto merge`) ───────────
+# queue:
+#   concurrent: 3                  # default --concurrent for `otto queue run`
+#   worktree_dir: .worktrees       # where per-task worktrees live
+#   on_watcher_restart: resume     # resume | fail
+#   bookkeeping_files:             # NOT committed to task branches
+#     - intent.md
+#     - otto.yaml
 ```
 
 ### Timeout semantics
@@ -457,7 +468,9 @@ Previous `certifier_timeout` and `agent_timeout` keys have been removed — `run
 | `standard` | `certifier.md` — subagents + screenshots, ~2 min | Real verification without adversarial probing |
 | `thorough` | `certifier-thorough.md` — adversarial, edge cases, code review, ~5 min | Production-grade QA |
 
-All three modes respect the spec (if `--spec` was used): scope-creep features in "Must NOT Have Yet" are reported as `STORY_RESULT: scope-creep-<slug> | FAIL` in any mode.
+`otto build` defaults to `fast` unless a mode flag or `otto.yaml` override says otherwise. Standalone `otto certify` defaults to `standard` when no mode flag is given.
+
+All three modes respect the spec (if `--spec` was used): scope-creep features in "Must NOT Have Yet" are reported as `STORY_RESULT: scope-creep-<slug> | WARN` in any mode.
 
 ### Providers
 
@@ -525,6 +538,8 @@ otto build --resume              # picks up from the last checkpoint phase
                                  # (spec / spec_review / spec_approved / build / certify / round_complete)
 ```
 
+Resume preserves the checkpoint intent, refuses cross-command resume unless you pass `--force-cross-command-resume`, and exits with `Nothing to resume` if the latest matching run already completed.
+
 ### Parallel features (queue + merge)
 
 Run several `otto build` jobs concurrently in their own worktrees, then land the successful ones together:
@@ -533,7 +548,7 @@ Run several `otto build` jobs concurrently in their own worktrees, then land the
 # 1. Enqueue (each gets its own .worktrees/<id>/ and build/<id>-<date> branch)
 otto queue build "csv export"
 otto queue build "settings redesign"
-otto queue improve bugs --rounds 3
+otto queue improve bugs "error handling" -- --rounds 3
 
 # 2. Run the watcher in a tmux pane (foreground)
 otto queue run --concurrent 3
@@ -562,7 +577,10 @@ otto_logs/
       spec/                                 Only for --spec runs
         spec.md                             Approved spec
         spec-v1.md, spec-v2.md              Regen history
-        agent.log                           Spec agent trace
+        agent/                              Initial spec-agent trace
+          narrative.log
+          messages.jsonl
+        agent-v1/, agent-v2/                Regenerated spec-agent traces
       build/                                Coding agent artifacts
         narrative.log                       Human-readable streamed event log
         messages.jsonl                      Lossless SDK event stream (JSON)
@@ -571,7 +589,8 @@ otto_logs/
         proof-of-work.{html,json,md}        Human + machine-readable reports
         evidence/                           Screenshots, recordings, transcripts
       improve/                              Only for otto improve runs
-        session-report.md                   Final summary + merge instructions
+        improvement-report.md               Final summary + merge instructions
+        session-report.md                   Detailed per-run summary
         build-journal.md                    Round-by-round index
         current-state.md                    Latest findings (handoff to fix agent)
         rounds/<round-id>/                  Per-round evidence
@@ -613,7 +632,7 @@ the conflict agent runs project tests.
 ## Project structure
 
 ```
-otto/                        ~10,600 lines
+otto/                        ~16k lines
   pipeline.py                Build pipeline, certify-fix loop
   paths.py                   Single choke point for all otto_logs/ paths + project lock
   logstream.py               Streaming SDK event normalizer → narrative.log + messages.jsonl
@@ -645,7 +664,7 @@ otto/                        ~10,600 lines
     stories.py               Collect stories from merged branches + manifests
     state.py                 BranchOutcome + per-merge state.json
   worktree.py                Atomic-CLI worktree setup (--in-worktree path)
-tests/                       430+ tests, ~7,000 lines
+tests/                       575 tests, ~10k lines
   _helpers.py                Shared init_repo factory used across test files
 ```
 

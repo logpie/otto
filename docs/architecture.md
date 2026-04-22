@@ -2,7 +2,7 @@
 
 ## Overview
 
-Otto is ~11,000 lines of Python. It builds, certifies, and improves software
+Otto is roughly 16,000 lines of Python. It builds, certifies, and improves software
 products using LLM agents — and runs many such jobs in parallel via a queue +
 merge subsystem.
 
@@ -12,7 +12,7 @@ otto certify                           # standalone verification
 otto improve bugs                      # find and fix bugs
 otto improve feature "search UX"       # suggest and implement improvements
 otto improve target "latency < 100ms"  # optimize toward a metric
-otto queue build/improve/certify ...   # enqueue parallel tasks (each in own worktree)
+otto queue build "csv export" -- --fast   # enqueue parallel work (wrapper syntax)
 otto queue run                         # foreground watcher, dispatches up to N at a time
 otto merge --all                       # land done branches into target (with conflict agent + post-merge certify)
 ```
@@ -100,7 +100,7 @@ otto build "bookmark manager with tags"
         markers.py: parse STORY_RESULT, VERDICT, CERTIFY_ROUND
                     │
                     ▼
-        Write: agent.log, proof-of-work.{json,html}, checkpoint.json
+        Write: narrative.log, proof-of-work.{json,html}, checkpoint.json
 ```
 
 ## Improve Flow (Split Mode)
@@ -200,6 +200,10 @@ otto improve bugs "error handling" -n 5
 
 **Key invariants:**
 
+- Queue CLI is wrapper syntax: the positional intent/focus/goal comes before
+  `--`, and anything after `--` is passed through to the inner
+  `otto build` / `otto improve` / `otto certify` command.
+
 - `.otto-queue.yml` is the only source of truth for what's enqueued.
   `state.json` tracks per-task status and child metadata (pid, pgid,
   start_time_ns, argv, cwd) so PID-reuse can't cause us to signal an
@@ -210,8 +214,9 @@ otto improve bugs "error handling" -n 5
   branch (`build/<slug>-<date>` or `improve/...`). Bookkeeping files
   (`intent.md`, `otto.yaml`) are NOT committed to task branches —
   they're shared project state, not per-task work.
-- Per-task wall-clock timeout (`queue.task_timeout_s`, default 1800s)
-  SIGTERMs hung children so they free their concurrency slot.
+- Watcher supports an optional per-task wall-clock timeout
+  (`queue.task_timeout_s`; unset in the default template, 1800s fallback in
+  the runner) that SIGTERMs hung children so they free their concurrency slot.
 - On watcher restart, in-flight tasks are either resumed (default,
   `on_watcher_restart: resume`) by reconciling state.json against live PIDs
   or marked failed (`fail`).
@@ -266,6 +271,7 @@ with a clear "another otto merge is in progress" error.
 ```
                   otto merge --all        otto merge build/x build/y
                   otto merge --target     otto merge --fast / --no-certify
+                  otto merge --allow-any-branch feature/x
                                 ▼
                     ┌──────────────────────┐
                     │ orchestrator.run_merge│
@@ -411,10 +417,15 @@ otto improve bugs --split -n 50
 - Inner `build_agentic_v3` calls from `run_certify_fix_loop` pass
   `manage_checkpoint=False` so they don't stomp the outer loop's checkpoint.
 - Command attribution is fine-grained: checkpoints record
-  `improve.bugs`/`.feature`/`.target` not just `improve`, so a mismatch
-  warning fires if you resume under a different subcommand.
+  `improve.bugs`/`.feature`/`.target` not just `improve`, so resume
+  hard-fails if you switch subcommands unless the user explicitly passes
+  `--force-cross-command-resume`.
+- `otto build --resume` preserves the checkpoint intent and rejects a new CLI
+  intent on resume.
 - `otto improve target --resume` inherits the goal from the checkpoint and
   hard-fails if the prior run wasn't `improve.target`.
+- `--resume` against an already-completed matching run exits with
+  `Nothing to resume` and reports the last session id + verdict.
 
 Error retry: certifier/build retried up to 2x on failure before moving on.
 
@@ -543,7 +554,7 @@ User intent
         ┌─────▼─────┐          ┌─────▼─────┐
         │   Logs    │          │  Reports  │
         │           │          │           │
-        │ agent.log │          │ PoW.html  │
+        │ narrative.log │      │ PoW.html  │
         │ live.log  │          │ PoW.json  │
         │ history   │          │ journal   │
         └───────────┘          └───────────┘
