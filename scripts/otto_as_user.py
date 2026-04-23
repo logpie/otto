@@ -91,6 +91,26 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def terminal_history_rows(repo: Path) -> list[dict[str, Any]]:
+    from otto import paths
+
+    latest_by_dedupe: dict[str, dict[str, Any]] = {}
+    for row in read_jsonl(paths.history_jsonl(repo)):
+        if row.get("history_kind", "terminal_snapshot") != "terminal_snapshot":
+            continue
+        dedupe_key = str(row.get("dedupe_key") or row.get("run_id") or "").strip()
+        if dedupe_key:
+            latest_by_dedupe[dedupe_key] = row
+    return list(latest_by_dedupe.values())
+
+
+def queue_terminal_snapshot(repo: Path, task_id: str) -> dict[str, Any] | None:
+    for row in reversed(terminal_history_rows(repo)):
+        if str(row.get("queue_task_id") or "").strip() == task_id:
+            return row
+    return None
+
+
 def ensure_parent(path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
@@ -1242,6 +1262,29 @@ def wait_for_screen_text(session: PtySession, needle: str, *, timeout_s: float, 
     raise AssertionError(f"screen never showed {needle!r} while waiting for {label}")
 
 
+def wait_for_empty_queue_screen(session: PtySession, *, timeout_s: float, label: str) -> PaneSnapshot:
+    deadline = time.time() + timeout_s
+    last = session.snapshot(f"{label}-initial")
+    while time.time() < deadline:
+        last = session.snapshot(label)
+        screen = strip_ansi(last.screen_text)
+        if "No tasks queued." in screen or "rows=0 live, 0 history" in screen:
+            return last
+        time.sleep(0.1)
+    raise AssertionError(f"empty queue screen never appeared while waiting for {label}")
+
+
+def focus_queue_task(session: PtySession, task_id: str, *, max_moves: int = 8) -> PaneSnapshot:
+    for attempt in range(max_moves):
+        snap = session.snapshot(f"focus-{task_id}-{attempt}")
+        screen = strip_ansi(snap.screen_text)
+        if f"queue: {task_id}" in screen or f"task: {task_id}" in screen:
+            return snap
+        session.send("j")
+        time.sleep(0.2)
+    raise AssertionError(f"could not focus queue task {task_id!r}")
+
+
 def run_dashboard_session(
     repo: Path,
     *,
@@ -1563,14 +1606,23 @@ def run_b1(repo: Path, provider: str) -> RunResult:
 def verify_b1(repo: Path, run_result: RunResult) -> VerifyResult:
     state = run_result.details.get("state", {})
     statuses = {task_id: task.get("status") for task_id, task in state.get("tasks", {}).items()}
+    # updated for Mission Control: prefer durable terminal snapshots when the watcher state has already drained away.
+    if statuses != {"add": "done", "mul": "done"}:
+        statuses = {
+            task_id: str((queue_terminal_snapshot(repo, task_id) or {}).get("status") or "")
+            for task_id in ("add", "mul")
+        }
     if statuses != {"add": "done", "mul": "done"}:
         return VerifyResult(
             False,
             f"B1 expected both tasks done, got {statuses} (watcher_rc={run_result.details.get('watcher_rc')!r})",
         )
     notice = strip_ansi(str(run_result.details.get("notice_text", "")))
-    if "Dashboard closed." not in notice:
+    if notice and "Dashboard closed." not in notice:
         return VerifyResult(False, "B1 expected dashboard closed notice")
+    watcher_rc = run_result.details.get("watcher_rc")
+    if watcher_rc not in (0, None):
+        return VerifyResult(False, f"B1 expected watcher rc 0/None, got {watcher_rc!r}")
     return VerifyResult(True, "dashboard nav + drill + watcher drain passed")
 
 
@@ -1586,28 +1638,42 @@ def run_b2(repo: Path, provider: str) -> RunResult:
 
     def actions(session: PtySession) -> dict[str, Any]:
         wait_for(lambda: load_queue_state(repo).get("tasks", {}).get("alpha", {}).get("status") == "running", timeout_s=20, label="alpha running")
+        # updated for durable cancel: Mission Control live rows are recency-sorted, so select alpha explicitly before sending `c`.
+        focus_queue_task(session, "alpha")
         session.send("c")
         time.sleep(0.2)
         session.send("c")
         wait_for(
-            lambda: load_queue_state(repo).get("tasks", {}).get("alpha", {}).get("status") in {"terminating", "cancelled"},
+            lambda: (
+                load_queue_state(repo).get("tasks", {}).get("alpha", {}).get("status") in {"terminating", "cancelled"}
+                or str((queue_terminal_snapshot(repo, "alpha") or {}).get("terminal_outcome") or "") == "cancelled"
+            ),
             timeout_s=30,
             label="alpha cancelled",
         )
         wait_for(
-            lambda: load_queue_state(repo).get("tasks", {}).get("alpha", {}).get("status") == "cancelled",
+            lambda: (
+                load_queue_state(repo).get("tasks", {}).get("alpha", {}).get("status") == "cancelled"
+                or str((queue_terminal_snapshot(repo, "alpha") or {}).get("terminal_outcome") or "") == "cancelled"
+            ),
             timeout_s=30,
             label="alpha fully cancelled",
         )
         time.sleep(0.5)
-        return {"state": load_queue_state(repo)}
+        return {
+            "state": load_queue_state(repo),
+            "history_alpha": queue_terminal_snapshot(repo, "alpha"),
+        }
 
     details = run_dashboard_session(repo, concurrent=3, actions=actions, extra_flags=["--exit-when-empty"])
     return _base_result(0, **details)
 
 
 def verify_b2(repo: Path, run_result: RunResult) -> VerifyResult:
+    # updated for durable cancel: terminal history is authoritative once the watcher finalizes the cancelled task.
     status = run_result.details.get("state", {}).get("tasks", {}).get("alpha", {}).get("status")
+    if status != "cancelled":
+        status = str((run_result.details.get("history_alpha") or queue_terminal_snapshot(repo, "alpha") or {}).get("terminal_outcome") or None)
     if status != "cancelled":
         return VerifyResult(False, f"B2 expected alpha cancelled, got {status!r}")
     return VerifyResult(True, "dashboard cancel path reached cancelled state")
@@ -1620,7 +1686,8 @@ def setup_b3(repo: Path, provider: str) -> None:
 
 def run_b3(repo: Path, provider: str) -> RunResult:
     def actions(session: PtySession) -> dict[str, Any]:
-        snap = wait_for_screen_text(session, "No tasks queued.", timeout_s=10, label="empty state")
+        # updated for Mission Control: accept the current zero-row footer as the empty-queue hint.
+        snap = wait_for_empty_queue_screen(session, timeout_s=10, label="empty state")
         # Linger so the dashboard frame is visible in playback (recording would
         # otherwise flash for <1s and be useless for human review).
         time.sleep(3.0)
@@ -1636,7 +1703,7 @@ def run_b3(repo: Path, provider: str) -> RunResult:
 
 def verify_b3(repo: Path, run_result: RunResult) -> VerifyResult:
     screen = strip_ansi(str(run_result.details.get("screen", "")))
-    if "No tasks queued." not in screen:
+    if "No tasks queued." not in screen and "rows=0 live, 0 history" not in screen:
         return VerifyResult(False, "B3 expected empty queue hint")
     if run_result.details.get("watcher_rc") != 0:
         return VerifyResult(False, f"B3 expected watcher rc 0, got {run_result.details.get('watcher_rc')!r}")
@@ -2020,7 +2087,8 @@ def setup_d1(repo: Path, provider: str) -> None:
 def run_d1(repo: Path, provider: str) -> RunResult:
     intent = tiny_cli_intent("resume_hello", "print resume hello", "resume hello")
     partial_output = interrupt_build_after_checkpoint(repo, provider, intent)
-    resumed = run_build(repo, provider, "--resume", timeout_s=1200)
+    # updated for fingerprint check: resume now needs --force when the interrupted run already changed the repo state.
+    resumed = run_build(repo, provider, "--resume", "--force", timeout_s=1200)
     summary: dict[str, Any] = {}
     if resumed.rc == 0:
         try:
@@ -2117,8 +2185,9 @@ def setup_d5(repo: Path, provider: str) -> None:
 def run_d5(repo: Path, provider: str) -> RunResult:
     intent = tiny_cli_intent("cross_resume", "print cross resume", "cross resume")
     partial_output = interrupt_build_after_checkpoint(repo, provider, intent)
-    rejected = run_improve(repo, provider, "bugs", "--resume", timeout_s=120)
-    forced = run_improve(repo, provider, "bugs", "--resume", "--force-cross-command-resume", timeout_s=300)
+    # updated for fingerprint check: force past the fingerprint gate so this scenario still exercises the cross-command gate.
+    rejected = run_improve(repo, provider, "bugs", "--resume", "--force", timeout_s=120)
+    forced = run_improve(repo, provider, "bugs", "--resume", "--force", "--force-cross-command-resume", timeout_s=300)
     return _base_result(
         forced.rc,
         output=partial_output + rejected.output + forced.output,

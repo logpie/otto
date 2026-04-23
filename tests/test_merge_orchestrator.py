@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 import pytest
 
+import otto.merge.orchestrator as orchestrator_module
 from otto import paths
 from otto.certifier.report import CertificationOutcome, CertificationReport
 from otto.merge import conflict_agent
@@ -376,6 +377,83 @@ def test_consolidated_merge_upgrades_conflicted_branch_outcomes(
     assert persisted_by_branch["feat-b"].status == "conflict_resolved"
     assert persisted_by_branch["feat-c"].status == "conflict_resolved"
     assert "(consolidated)" not in persisted_by_branch
+
+
+def test_conflict_resolved_merge_still_runs_cleanup_on_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    repo = _init_repo_with_gitattributes(tmp_path)
+    (repo / "shared.txt").write_text("base\n")
+    subprocess.run(["git", "add", "shared.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "add shared fixture"], cwd=repo, check=True)
+
+    subprocess.run(["git", "checkout", "-b", "feat-a"], cwd=repo, capture_output=True, check=True)
+    (repo / "shared.txt").write_text("feat-a\n")
+    subprocess.run(["git", "add", "shared.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "feat-a change"], cwd=repo, check=True)
+    subprocess.run(["git", "checkout", "main"], cwd=repo, capture_output=True, check=True)
+
+    subprocess.run(["git", "checkout", "-b", "feat-b"], cwd=repo, capture_output=True, check=True)
+    (repo / "shared.txt").write_text("feat-b\n")
+    subprocess.run(["git", "add", "shared.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "feat-b change"], cwd=repo, check=True)
+    subprocess.run(["git", "checkout", "main"], cwd=repo, capture_output=True, check=True)
+
+    append_task(
+        repo,
+        QueueTask(
+            id="task-a",
+            command_argv=["build", "task-a"],
+            added_at="2026-04-23T00:00:00Z",
+            branch="feat-a",
+            worktree=".worktrees/task-a",
+        ),
+    )
+    append_task(
+        repo,
+        QueueTask(
+            id="task-b",
+            command_argv=["build", "task-b"],
+            added_at="2026-04-23T00:00:00Z",
+            branch="feat-b",
+            worktree=".worktrees/task-b",
+        ),
+    )
+    lock_path = repo / ".otto-queue.yml.lock"
+    if lock_path.exists():
+        lock_path.unlink()
+    subprocess.run(["git", "add", ".otto-queue.yml"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "seed queue tasks"], cwd=repo, check=True)
+
+    async def fake_resolve_all_conflicts(*, project_dir: Path, config: dict[str, Any], ctx, **kwargs):
+        del config, kwargs
+        assert ctx.conflict_files == ["shared.txt"]
+        (project_dir / "shared.txt").write_text("resolved\n")
+        return conflict_agent.ConflictResolutionAttempt(
+            success=True,
+            note="resolved for cleanup test",
+            cost_usd=1.23,
+            edited_files={"shared.txt"},
+        )
+
+    cleanup_calls: list[dict[str, str]] = []
+
+    def fake_graduate(project_dir: Path, queue_lookup: dict[str, str]) -> None:
+        assert project_dir == repo
+        cleanup_calls.append(dict(queue_lookup))
+
+    monkeypatch.setattr(conflict_agent, "resolve_all_conflicts", fake_resolve_all_conflicts)
+    monkeypatch.setattr(orchestrator_module, "_graduate_merged_task_sessions", fake_graduate)
+
+    result = asyncio.run(run_merge(
+        project_dir=repo,
+        config=_config_no_bookkeeping(),
+        options=MergeOptions(target="main", no_certify=True, cleanup_on_success=True),
+        explicit_ids_or_branches=["task-a", "task-b"],
+    ))
+
+    assert result.success, result.note
+    assert cleanup_calls == [{"feat-a": "task-a", "feat-b": "task-b"}]
 
 
 # ---------- bookkeeping precondition ----------

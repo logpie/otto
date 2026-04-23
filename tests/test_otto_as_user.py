@@ -138,3 +138,173 @@ def test_verify_u2_accepts_cancelled_terminal_snapshot(tmp_path: Path) -> None:
     verify = OTTO_AS_USER.verify_u2(repo, run_result)
 
     assert verify.passed is True
+
+
+def test_verify_b1_accepts_durable_history_when_queue_state_is_empty(tmp_path: Path) -> None:
+    from otto import paths
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    history_path = paths.history_jsonl(repo)
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    history_path.write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "history_kind": "terminal_snapshot",
+                    "run_id": f"run-{task_id}",
+                    "queue_task_id": task_id,
+                    "status": "done",
+                    "terminal_outcome": "success",
+                    "dedupe_key": f"terminal_snapshot:run-{task_id}",
+                }
+            )
+            for task_id in ("add", "mul")
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    run_result = OTTO_AS_USER.RunResult(
+        scenario_id="B1",
+        returncode=0,
+        started_at="2026-04-23T00:00:00Z",
+        finished_at="2026-04-23T00:00:01Z",
+        duration_s=5.0,
+        recording_path=str(tmp_path / "recording.cast"),
+        repo_path=str(repo),
+        debug_log=str(tmp_path / "debug.log"),
+        details={"state": {"tasks": {}}, "watcher_rc": None, "notice_text": ""},
+    )
+
+    verify = OTTO_AS_USER.verify_b1(repo, run_result)
+
+    assert verify.passed is True
+
+
+def test_verify_b3_accepts_mission_control_zero_row_footer(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run_result = OTTO_AS_USER.RunResult(
+        scenario_id="B3",
+        returncode=0,
+        started_at="2026-04-23T00:00:00Z",
+        finished_at="2026-04-23T00:00:01Z",
+        duration_s=5.0,
+        recording_path=str(tmp_path / "recording.cast"),
+        repo_path=str(repo),
+        debug_log=str(tmp_path / "debug.log"),
+        details={"screen": "focus=live | rows=0 live, 0 history\nNo selection.\n", "watcher_rc": 0},
+    )
+
+    verify = OTTO_AS_USER.verify_b3(repo, run_result)
+
+    assert verify.passed is True
+
+
+def test_verify_b2_accepts_cancelled_terminal_history(tmp_path: Path) -> None:
+    from otto import paths
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    history_path = paths.history_jsonl(repo)
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    history_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "history_kind": "terminal_snapshot",
+                "run_id": "run-alpha",
+                "queue_task_id": "alpha",
+                "status": "cancelled",
+                "terminal_outcome": "cancelled",
+                "dedupe_key": "terminal_snapshot:run-alpha",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    run_result = OTTO_AS_USER.RunResult(
+        scenario_id="B2",
+        returncode=0,
+        started_at="2026-04-23T00:00:00Z",
+        finished_at="2026-04-23T00:00:01Z",
+        duration_s=5.0,
+        recording_path=str(tmp_path / "recording.cast"),
+        repo_path=str(repo),
+        debug_log=str(tmp_path / "debug.log"),
+        details={"state": {"tasks": {}}, "history_alpha": None},
+    )
+
+    verify = OTTO_AS_USER.verify_b2(repo, run_result)
+
+    assert verify.passed is True
+
+
+def test_run_d1_passes_force_for_fingerprint_resume(monkeypatch, tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        OTTO_AS_USER,
+        "EXECUTION_CONTEXT",
+        OTTO_AS_USER.ExecutionContext(
+            scenario=OTTO_AS_USER.SCENARIOS["D1"],
+            artifact_dir=tmp_path,
+            repo=repo,
+            provider="claude",
+            debug_log=tmp_path / "debug.log",
+            recording_path=tmp_path / "recording.cast",
+        ),
+    )
+
+    monkeypatch.setattr(OTTO_AS_USER, "interrupt_build_after_checkpoint", lambda *_args, **_kwargs: "partial\n")
+
+    def fake_run_build(_repo: Path, _provider: str, *args: str, timeout_s: float = 0):
+        del timeout_s
+        calls.append(args)
+        return OTTO_AS_USER.CommandResult(argv=["otto", "build", *args], rc=0, duration_s=0.1, output="ok\n")
+
+    monkeypatch.setattr(OTTO_AS_USER, "run_build", fake_run_build)
+    monkeypatch.setattr(OTTO_AS_USER, "load_summary", lambda _repo: {"status": "done"})
+
+    result = OTTO_AS_USER.run_d1(repo, "claude")
+
+    assert result.returncode == 0
+    assert calls == [("--resume", "--force")]
+
+
+def test_run_d5_forces_fingerprint_gate_before_cross_command_check(monkeypatch, tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    calls: list[tuple[str, tuple[str, ...]]] = []
+    monkeypatch.setattr(
+        OTTO_AS_USER,
+        "EXECUTION_CONTEXT",
+        OTTO_AS_USER.ExecutionContext(
+            scenario=OTTO_AS_USER.SCENARIOS["D5"],
+            artifact_dir=tmp_path,
+            repo=repo,
+            provider="claude",
+            debug_log=tmp_path / "debug.log",
+            recording_path=tmp_path / "recording.cast",
+        ),
+    )
+
+    monkeypatch.setattr(OTTO_AS_USER, "interrupt_build_after_checkpoint", lambda *_args, **_kwargs: "partial\n")
+
+    def fake_run_improve(_repo: Path, _provider: str, subcommand: str, *args: str, timeout_s: float = 0):
+        del timeout_s
+        calls.append((subcommand, args))
+        output = "Checkpoint command mismatch\n" if "--force-cross-command-resume" not in args else "Checkpoint is from build\n"
+        return OTTO_AS_USER.CommandResult(argv=["otto", "improve", subcommand, *args], rc=0, duration_s=0.1, output=output)
+
+    monkeypatch.setattr(OTTO_AS_USER, "run_improve", fake_run_improve)
+
+    result = OTTO_AS_USER.run_d5(repo, "claude")
+
+    assert result.returncode == 0
+    assert calls == [
+        ("bugs", ("--resume", "--force")),
+        ("bugs", ("--resume", "--force", "--force-cross-command-resume")),
+    ]

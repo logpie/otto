@@ -537,6 +537,11 @@ def test_queue_cleanup_preserves_session_artifacts_and_repairs_history(tmp_path:
     assert queue_manifest_data["proof_of_work_path"] == str((dst_session / "certify" / "proof-of-work.json").resolve())
 
     rows = read_history_rows(paths.history_jsonl(repo))
+    matching_rows = [
+        row for row in rows
+        if row.get("dedupe_key") == f"terminal_snapshot:{run_id}"
+    ]
+    assert len(matching_rows) == 1
     history_row = next(
         row for row in reversed(rows)
         if row.get("dedupe_key") == f"terminal_snapshot:{run_id}"

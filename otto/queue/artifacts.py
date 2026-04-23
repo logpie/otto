@@ -11,7 +11,6 @@ from typing import Any
 
 from otto import paths
 from otto.manifest import queue_index_path_for
-from otto.runs.history import append_history_snapshot, read_history_rows
 
 _ARTIFACT_PATH_KEYS = (
     "session_dir",
@@ -179,16 +178,49 @@ def _rewrite_history_snapshot(
     old_session_dir: Path,
     new_session_dir: Path,
 ) -> None:
-    dedupe_key = f"terminal_snapshot:{run_id}"
-    latest: dict[str, Any] | None = None
-    for row in reversed(read_history_rows(paths.history_jsonl(project_dir))):
-        if str(row.get("dedupe_key") or "") == dedupe_key:
-            latest = dict(row)
-            break
-    if latest is None:
+    history_path = paths.history_jsonl(project_dir)
+    if not history_path.exists():
         return
+    dedupe_key = f"terminal_snapshot:{run_id}"
+    try:
+        raw_lines = history_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    except OSError:
+        return
+    changed = False
+    matched = False
+    rewritten_lines: list[str] = []
+    for raw_line in raw_lines:
+        stripped = raw_line.strip()
+        if not stripped:
+            rewritten_lines.append(raw_line)
+            continue
+        try:
+            row = json.loads(stripped)
+        except json.JSONDecodeError:
+            rewritten_lines.append(raw_line)
+            continue
+        if not isinstance(row, dict) or str(row.get("dedupe_key") or "") != dedupe_key:
+            rewritten_lines.append(raw_line)
+            continue
+        matched = True
+        repaired, row_changed = _repair_history_snapshot_row(
+            row,
+            old_session_dir=old_session_dir,
+            new_session_dir=new_session_dir,
+        )
+        changed = changed or row_changed
+        rewritten_lines.append(json.dumps(repaired, separators=(",", ":"), sort_keys=False) + "\n")
+    if matched and changed:
+        _atomic_write_text(history_path, "".join(rewritten_lines))
 
-    repaired = dict(latest)
+
+def _repair_history_snapshot_row(
+    row: dict[str, Any],
+    *,
+    old_session_dir: Path,
+    new_session_dir: Path,
+) -> tuple[dict[str, Any], bool]:
+    repaired = dict(row)
     artifacts = dict(repaired.get("artifacts") or {})
     changed = False
 
@@ -225,9 +257,7 @@ def _rewrite_history_snapshot(
         artifacts["extra_log_paths"] = relocated_extra_logs
         changed = True
     repaired["artifacts"] = artifacts
-
-    if changed:
-        append_history_snapshot(project_dir, repaired, strict=True)
+    return repaired, changed
 
 
 def _queue_run_id(queue_manifest: dict[str, Any]) -> str | None:
@@ -312,6 +342,23 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, indent=2, sort_keys=False))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _atomic_write_text(path: Path, payload: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, path)
