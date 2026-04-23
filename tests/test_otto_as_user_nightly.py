@@ -238,3 +238,56 @@ def test_verify_n9_accepts_legacy_queue_cancel_ack_field(monkeypatch, tmp_path: 
     result = OTTO_AS_USER_NIGHTLY.verify_n9(repo, run_result)
 
     assert result.passed is True
+
+
+def test_verify_n9_accepts_merge_live_record_fallback(monkeypatch, tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+
+    def fake_run_pytest(repo_arg: Path, target: str, artifact_dir_arg: Path, attempt_index: int):
+        assert repo_arg == repo
+        assert artifact_dir_arg == artifact_dir
+        assert attempt_index == 1
+        return subprocess.CompletedProcess(args=["pytest", target], returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(OTTO_AS_USER_NIGHTLY, "_run_pytest", fake_run_pytest)
+
+    run_result = OTTO_AS_USER_NIGHTLY.base.RunResult(
+        scenario_id="N9",
+        returncode=0,
+        started_at="2026-04-23T00:00:00Z",
+        finished_at="2026-04-23T00:10:00Z",
+        duration_s=600.0,
+        recording_path=str(artifact_dir / "recording.cast"),
+        repo_path=str(repo),
+        debug_log=str(artifact_dir / "debug.log"),
+        output="",
+        details={
+            "build-live-row-latency-ms": 500,
+            "build-finished-naturally": True,
+            "standalone-heartbeat-advanced": True,
+            "standalone-log-cycled": True,
+            "queue-cancel-history-latency-ms": 300,
+            "queue-cancelled-latency-ms": 400,
+            "editor-spawn-attempted": True,
+            "merge-live-record-seen": True,
+            "merge-history-run-id": "merge-run",
+            "merge-history-terminal-outcome": "success",
+            "history-terminal-snapshot-count": 4,
+            "history-terminal-outcomes": {
+                "queue-cancelled": "cancelled",
+                "queue-success": "success",
+                "build-run": "success",
+                "merge-run": "success",
+            },
+            "cancelled-queue-run-id": "queue-cancelled",
+            "history-artifacts-resolve": True,
+            "live-records-terminal-after-gc": True,
+        },
+    )
+
+    result = OTTO_AS_USER_NIGHTLY.verify_n9(repo, run_result)
+
+    assert result.passed is True

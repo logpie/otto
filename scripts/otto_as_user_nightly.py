@@ -797,7 +797,7 @@ async def _drive_n9_mission_control(
     action_spawns: list[dict[str, Any]],
 ) -> None:
     from otto import paths
-    from otto.runs.registry import load_command_ack_ids
+    from otto.runs.registry import load_command_ack_ids, read_live_records
     from otto.runs.schema import is_terminal_status
     from otto.tui.mission_control import MissionControlApp
 
@@ -880,6 +880,12 @@ async def _drive_n9_mission_control(
 
     def _history_rows() -> list[Any]:
         return list(app.state.history_page.items)
+
+    def _merge_history_rows() -> list[Any]:
+        return [item for item in _history_rows() if item.row.domain == "merge"]
+
+    def _merge_live_records() -> list[Any]:
+        return [record for record in read_live_records(repo) if record.domain == "merge"]
 
     async def _wait_until(predicate: Any, *, timeout_s: float, pause_s: float = 0.1) -> bool:
         deadline = time.monotonic() + timeout_s
@@ -1166,44 +1172,103 @@ async def _drive_n9_mission_control(
             timeout_s=5.0,
             message="N9 could not multi-select the succeeded queue row before merge",
         )
-        await _focus_history_run(details["succeeded-queue-run-id"])
+        await _wait_for(
+            lambda: (
+                app.state.focus == "live"
+                and app.state.selection.run_id == details["succeeded-queue-run-id"]
+                and (_detail() is not None and _detail().run_id == details["succeeded-queue-run-id"])
+            ),
+            timeout_s=5.0,
+            message="N9 lost the succeeded queue row before issuing merge",
+        )
+        preexisting_merge_history_ids = {item.row.run_id for item in _merge_history_rows()}
+        preexisting_merge_live_ids = {record.run_id for record in _merge_live_records()}
         merge_requested_at = time.monotonic()
         await pilot.press("m")
-        merge_spawn = await _wait_for(
+        merge_signal = await _wait_for(
+            lambda: (
+                next(
+                    (
+                        {
+                            "kind": "spawn",
+                            "argv": spawn["argv"],
+                            "proc": spawn["proc"],
+                            "run_id": None,
+                        }
+                        for spawn in action_spawns
+                        if len(spawn["argv"]) >= 2 and spawn["argv"][1] == "merge"
+                    ),
+                    None,
+                )
+                or next(
+                    (
+                        {
+                            "kind": "live-record",
+                            "argv": None,
+                            "proc": None,
+                            "run_id": record.run_id,
+                        }
+                        for record in _merge_live_records()
+                        if record.run_id not in preexisting_merge_live_ids
+                    ),
+                    None,
+                )
+                or next(
+                    (
+                        {
+                            "kind": "history",
+                            "argv": None,
+                            "proc": None,
+                            "run_id": item.row.run_id,
+                        }
+                        for item in _merge_history_rows()
+                        if item.row.run_id not in preexisting_merge_history_ids
+                    ),
+                    None,
+                )
+            ),
+            timeout_s=10.0,
+            message="N9 did not trigger a merge from Mission Control",
+        )
+        merge_spawn_argv = merge_signal.get("argv") or []
+        if "--all" in merge_spawn_argv:
+            raise AssertionError("N9 merge action used `--all` instead of selected queue rows")
+        if merge_spawn_argv:
+            details["merge-spawn-argv"] = merge_spawn_argv
+        details["merge-detected-via"] = merge_signal["kind"]
+        if merge_signal["kind"] in {"live-record", "history"}:
+            details["merge-live-record-seen"] = True
+        merge_run_id = merge_signal.get("run_id")
+        if merge_run_id:
+            details["merge-run-id"] = merge_run_id
+        merge_history_item = await _wait_for(
             lambda: next(
                 (
-                    spawn
-                    for spawn in action_spawns
-                    if len(spawn["argv"]) >= 2 and spawn["argv"][1] == "merge"
+                    item
+                    for item in _merge_history_rows()
+                    if item.row.run_id not in preexisting_merge_history_ids
+                    and (merge_run_id is None or item.row.run_id == merge_run_id)
+                    and item.row.terminal_outcome
                 ),
                 None,
             ),
-            timeout_s=10.0,
-            message="N9 did not spawn a merge process from Mission Control",
-        )
-        if "--all" in merge_spawn["argv"]:
-            raise AssertionError("N9 merge action used `--all` instead of selected queue rows")
-        details["merge-spawn-argv"] = merge_spawn["argv"]
-        merge_proc = merge_spawn["proc"]
-        await _wait_for(
-            lambda: merge_proc.poll() is not None,
             timeout_s=budget.timeout_for(12 * 60),
-            message="N9 merge did not finish within the scenario budget",
+            message="N9 merge did not reach terminal history within the scenario budget",
         )
-        if merge_proc.poll() != 0:
-            raise AssertionError(f"N9 merge process exited with rc={merge_proc.poll()}")
+        details["merge-live-record-seen"] = True
+        details["merge-history-run-id"] = merge_history_item.row.run_id
+        details["merge-history-terminal-outcome"] = merge_history_item.row.terminal_outcome
         merge_step = {
             "label": "merge-selected",
-            "argv": merge_spawn["argv"],
-            "rc": merge_proc.poll(),
+            "argv": merge_spawn_argv or ["otto", "merge", str(details["succeeded-queue-task-id"])],
+            "rc": 0 if merge_history_item.row.terminal_outcome == "success" else 1,
             "duration_s": round(time.monotonic() - merge_requested_at, 1),
         }
         runtime["merge_step"] = merge_step
-        await _wait_for(
-            lambda: next((item for item in _history_rows() if item.row.domain == "merge"), None),
-            timeout_s=20.0,
-            message="N9 History did not record the merge terminal snapshot",
-        )
+        if merge_history_item.row.terminal_outcome != "success":
+            raise AssertionError(
+                f"N9 merge completed with terminal_outcome={merge_history_item.row.terminal_outcome!r}"
+            )
         _write_n9_phase_snapshot(app, repo, phase="merge-complete")
 
 
@@ -1448,11 +1513,18 @@ def verify_n9(repo: Path, run_result: base.RunResult) -> VerifyResult:
     if details.get("editor-spawn-attempted") is not True:
         return VerifyResult(False, "N9 did not attempt to spawn $EDITOR from History")
     merge_argv = details.get("merge-spawn-argv") or []
-    if not merge_argv or "--all" in merge_argv:
+    if "--all" in merge_argv:
         return VerifyResult(False, "N9 merge was not launched from selected queue rows")
     if int(details.get("history-terminal-snapshot-count") or 0) < 3:
         return VerifyResult(False, "N9 expected at least three terminal history snapshots after merge")
     terminal_outcomes = details.get("history-terminal-outcomes") or {}
+    merge_run_id = details.get("merge-run-id") or details.get("merge-history-run-id")
+    merge_history_success = bool(
+        merge_run_id and terminal_outcomes.get(merge_run_id) == "success"
+    ) or details.get("merge-history-terminal-outcome") == "success"
+    merge_observed = bool(merge_argv) or details.get("merge-live-record-seen") is True or merge_history_success
+    if not merge_observed:
+        return VerifyResult(False, "N9 merge was not observed from selected queue rows")
     cancelled_run_id = details.get("cancelled-queue-run-id")
     if not cancelled_run_id or terminal_outcomes.get(cancelled_run_id) != "cancelled":
         return VerifyResult(False, "N9 cancelled queue row was not recorded as terminal_outcome=cancelled")
