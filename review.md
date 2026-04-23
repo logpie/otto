@@ -416,3 +416,24 @@ bugs" rule.
 - APPROVED. No new issues.
 
 Final state: 790 tests passing. Commits 0ea657fb5, fb24488c5, 4f194f71e.
+
+## Implementation Gate — 2026-04-23 — Phase 2 (universal viewer)
+
+### Round 1 — Codex
+- [CRITICAL] Scenario A (old watcher + new viewer) not implemented — fixed by Codex
+- [IMPORTANT] History pane ignored legacy/archived sources — fixed by Codex
+- [IMPORTANT] Enter/Esc origin pane tracking broken — fixed by Codex
+- [IMPORTANT] Adapter boundary violated for actions — fixed by Codex
+- [NOTE] `/` substring filter UI missing — fixed by Codex
+
+### Round 2 — Codex
+- [IMPORTANT] load_project_history_rows() dropped limit_hint — fixed by Codex
+- [NOTE] Queue-specific compat logic still in shared model — fixed by Codex
+
+### Round 3 — Codex
+- [IMPORTANT] Adapter-owned compat introduced double registry read — fixed by Codex
+
+### Round 4 — Codex re-reviewed Round 3 fix
+- APPROVED. No new issues.
+
+Final state: 786 tests passing. Commits b0251805d, 7fb53ce57, 03d41b2f6, 2ee8e7466.
