@@ -79,6 +79,29 @@ def test_n9_merge_spawn_matcher_accepts_direct_and_module_argv() -> None:
     assert OTTO_AS_USER_NIGHTLY._argv_invokes_otto_subcommand(["true", "intent.txt"], "merge") is False
 
 
+def test_checkout_main_before_merge_step_uses_checked_helper(monkeypatch, tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    calls: list[tuple[str, list[str], Path]] = []
+
+    def fake_run_checked_step(label: str, argv: list[str], *, repo: Path, env=None):
+        calls.append((label, argv, repo))
+        return {"label": label, "argv": argv, "rc": 0}
+
+    monkeypatch.setattr(OTTO_AS_USER_NIGHTLY, "_run_checked_step", fake_run_checked_step)
+
+    step = OTTO_AS_USER_NIGHTLY._checkout_main_before_merge_step(repo)
+
+    assert step == {
+        "label": "git-checkout-main-before-merge",
+        "argv": ["git", "checkout", "main"],
+        "rc": 0,
+    }
+    assert calls == [
+        ("git-checkout-main-before-merge", ["git", "checkout", "main"], repo),
+    ]
+
+
 def test_record_one_scenario_honors_classification_override(monkeypatch, tmp_path: Path) -> None:
     scenario = OTTO_AS_USER_NIGHTLY.SCENARIOS["N9"]
     run_result = OTTO_AS_USER_NIGHTLY.base.RunResult(

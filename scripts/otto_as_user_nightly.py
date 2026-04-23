@@ -318,6 +318,14 @@ def _run_checked_step(
     )
 
 
+def _checkout_main_before_merge_step(repo: Path) -> dict[str, Any]:
+    return _run_checked_step(
+        "git-checkout-main-before-merge",
+        ["git", "checkout", "main"],
+        repo=repo,
+    )
+
+
 def _failed_run_result(
     scenario_id: str,
     repo: Path,
@@ -803,6 +811,7 @@ async def _drive_n9_mission_control(
     runtime: dict[str, Any],
     start_build_flow: Any,
     start_queue_flow: Any,
+    checkout_main_before_merge: Any,
     budget: ScenarioBudget,
     action_spawns: list[dict[str, Any]],
 ) -> None:
@@ -1234,6 +1243,7 @@ async def _drive_n9_mission_control(
         details["merge-focus-task-id"] = str(focused_live_item.record.identity.get("queue_task_id") or "")
         _write_n9_phase_snapshot(app, repo, phase="live-pre-merge-focus")
 
+        checkout_main_before_merge()
         await pilot.press("space")
         selected_run_ids_after_space = await _wait_for(
             lambda: (
@@ -1396,6 +1406,9 @@ def run_n9(repo: Path, provider: str) -> base.RunResult:
     }
     old_editor = os.environ.get("EDITOR")
 
+    def _checkout_main_before_merge() -> None:
+        steps.append(_checkout_main_before_merge_step(repo))
+
     def _start_queue_flow() -> None:
         if runtime["watcher_proc"] is not None:
             return
@@ -1487,6 +1500,7 @@ def run_n9(repo: Path, provider: str) -> base.RunResult:
                     runtime=runtime,
                     start_build_flow=_start_build_flow,
                     start_queue_flow=_start_queue_flow,
+                    checkout_main_before_merge=_checkout_main_before_merge,
                     budget=budget,
                     action_spawns=action_spawns,
                 )
