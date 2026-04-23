@@ -92,10 +92,9 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def terminal_history_rows(repo: Path) -> list[dict[str, Any]]:
-    from otto import paths
-
+    history_path = repo / "otto_logs" / "cross-sessions" / "history.jsonl"
     latest_by_dedupe: dict[str, dict[str, Any]] = {}
-    for row in read_jsonl(paths.history_jsonl(repo)):
+    for row in read_jsonl(history_path):
         if row.get("history_kind", "terminal_snapshot") != "terminal_snapshot":
             continue
         dedupe_key = str(row.get("dedupe_key") or row.get("run_id") or "").strip()
