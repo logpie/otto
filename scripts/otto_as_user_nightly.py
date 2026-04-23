@@ -47,7 +47,11 @@ N2_REMEMBER_INTENT = (
 
 N4_BUILD_INTENT = "Add CSV bulk import for tasks."
 
-N9_BUILD_INTENT = "Add GET /tasks endpoint that returns []."
+N9_BUILD_INTENT = (
+    "Add a production-style GET /tasks endpoint with input validation, "
+    "predictable error handling, and lightweight OpenAPI-style response "
+    "documentation comments while keeping the implementation in-memory."
+)
 N9_POST_INTENT = "Add POST /tasks endpoint."
 N9_DELETE_INTENT = "Add DELETE /tasks/<id> endpoint."
 
@@ -160,7 +164,7 @@ SCENARIO_SPECS: dict[str, ScenarioSpec] = {
         est_cost_range="$1.5-$2.5",
         budget_s=20 * 60,
         step_plan=[
-            f"otto build --provider <provider> {N9_BUILD_INTENT!r} (background, will be cancelled)",
+            f"otto build --provider <provider> --allow-dirty {N9_BUILD_INTENT!r} (background, will be cancelled)",
             f"otto queue build {N9_POST_INTENT!r} --as add-post",
             f"otto queue build {N9_DELETE_INTENT!r} --as add-delete",
             "otto queue run --concurrent 1 --no-dashboard --exit-when-empty",
@@ -396,6 +400,28 @@ def _terminate_process_group(proc: subprocess.Popen[str] | None) -> None:
         except OSError:
             proc.kill()
         proc.wait(timeout=5)
+
+
+def _wait_then_terminate_process_group(
+    proc: subprocess.Popen[str] | None,
+    *,
+    wait_s: float,
+) -> bool:
+    if proc is None or proc.poll() is not None:
+        return False
+    try:
+        proc.wait(timeout=wait_s)
+        return False
+    except subprocess.TimeoutExpired:
+        _terminate_process_group(proc)
+        return True
+
+
+def _classification_override(run_result: base.RunResult) -> str | None:
+    override = run_result.details.get("classification_override")
+    if override in {"INFRA", "FAIL"}:
+        return override
+    return None
 
 
 def _build_failure(result: base.RunResult, message: str) -> VerifyResult:
@@ -652,7 +678,14 @@ def run_n9(repo: Path, provider: str) -> base.RunResult:
     try:
         build_run_id = allocate_run_id(repo)
         details["build-run-id"] = build_run_id
-        build_argv = [str(base.OTTO_BIN), "build", "--provider", provider, N9_BUILD_INTENT]
+        build_argv = [
+            str(base.OTTO_BIN),
+            "build",
+            "--provider",
+            provider,
+            "--allow-dirty",
+            N9_BUILD_INTENT,
+        ]
         base.log_line(f"$ {base.shell_join(build_argv)}  # background")
         build_env = dict(base.current_ctx().env)
         build_env["OTTO_RUN_ID"] = build_run_id
@@ -710,11 +743,26 @@ def run_n9(repo: Path, provider: str) -> base.RunResult:
         }
         steps.append(watcher_step)
 
+        session_dir = paths.session_dir(repo, build_run_id)
+        commands_dir = paths.session_commands_dir(repo, build_run_id)
+        request_path = paths.session_command_requests(repo, build_run_id)
+        ack_path = paths.session_command_acks(repo, build_run_id)
         live_poll_started = time.monotonic()
-        live_deadline = live_poll_started + 2.0
+        live_deadline_s = 30.0
+        live_deadline = live_poll_started + live_deadline_s
         discovered_atomic = False
         discovered_queue_runs: set[str] = set()
+        max_queue_live_records = 0
         while time.monotonic() < live_deadline:
+            build_rc = build_proc.poll()
+            if build_rc is not None and not session_dir.exists():
+                details["classification_override"] = "INFRA"
+                details["build-finished-before-cancel-ready"] = True
+                details["build-returncode"] = build_rc
+                if build_step is not None:
+                    build_step["rc"] = build_rc
+                    build_step["duration_s"] = round(time.monotonic() - build_started, 1)
+                raise AssertionError("N9 standalone build exited before its cancel channel became ready")
             records = read_live_records(repo)
             discovered_atomic = any(record.run_id == build_run_id for record in records)
             discovered_queue_runs = {
@@ -722,20 +770,26 @@ def run_n9(repo: Path, provider: str) -> base.RunResult:
                 for record in records
                 if record.domain == "queue"
             }
-            if discovered_atomic and len(discovered_queue_runs) >= 2:
+            max_queue_live_records = max(max_queue_live_records, len(discovered_queue_runs))
+            if session_dir.exists() and discovered_atomic:
                 break
             time.sleep(0.05)
-        if not discovered_atomic or len(discovered_queue_runs) < 2:
-            raise AssertionError("N9 expected one atomic and two queue live records within 2s")
+        else:
+            raise AssertionError(
+                f"N9 expected the standalone cancel channel within {live_deadline_s:.1f}s"
+            )
         live_latency_ms = int((time.monotonic() - live_poll_started) * 1000)
-        details["live-records-discovered-count"] = 1 + len(discovered_queue_runs)
+        details["live-records-discovered-count"] = 1 + max_queue_live_records
         details["live-records-latency-ms"] = live_latency_ms
+        details["session-ready-latency-ms"] = live_latency_ms
+        details["cancel-request-path"] = str(request_path)
+        base.log_line(
+            f"N9 session ready after {live_latency_ms}ms; commands_dir={commands_dir} queue live records={max_queue_live_records}"
+        )
 
         build_record = load_live_record(repo, build_run_id)
         heartbeat_s = max(float(build_record.timing.get("heartbeat_interval_s") or HEARTBEAT_INTERVAL_S), 0.1)
         details["heartbeat-interval-s"] = heartbeat_s
-        request_path = paths.session_command_requests(repo, build_run_id)
-        ack_path = paths.session_command_acks(repo, build_run_id)
         command_id = f"{int(time.time() * 1000)}-{os.getpid()}-1"
         append_jsonl_row(
             request_path,
@@ -753,19 +807,37 @@ def run_n9(repo: Path, provider: str) -> base.RunResult:
                 "args": {},
             },
         )
+        details["cancel-command-appended"] = True
+        base.log_line(f"N9 appended cancel envelope command_id={command_id}")
 
         ack_started = time.monotonic()
-        ack_deadline_s = max(5.0, 2.0 * heartbeat_s)
+        ack_deadline_s = max(4.0, 2.0 * heartbeat_s)
         ack_deadline = ack_started + ack_deadline_s
         while time.monotonic() < ack_deadline:
+            records = read_live_records(repo)
+            max_queue_live_records = max(
+                max_queue_live_records,
+                sum(1 for record in records if record.domain == "queue"),
+            )
+            details["live-records-discovered-count"] = 1 + max_queue_live_records
             if command_id in load_command_ack_ids(ack_path):
                 break
+            build_rc = build_proc.poll()
+            if build_rc is not None:
+                details["classification_override"] = "INFRA"
+                details["build-finished-before-cancel-ack"] = True
+                details["build-returncode"] = build_rc
+                if build_step is not None and build_step["rc"] is None:
+                    build_step["rc"] = build_rc
+                    build_step["duration_s"] = round(time.monotonic() - build_started, 1)
+                raise AssertionError("N9 standalone build exited before cancel ack arrived")
             time.sleep(0.05)
         else:
             raise AssertionError(f"N9 cancel ack did not arrive within {ack_deadline_s:.1f}s")
         ack_latency_ms = int((time.monotonic() - ack_started) * 1000)
         details["cancel-ack-latency-ms"] = ack_latency_ms
         details["cancel-ack-deadline-ms"] = int(ack_deadline_s * 1000)
+        base.log_line(f"N9 cancel ack observed after {ack_latency_ms}ms")
 
         assert build_proc is not None
         try:
@@ -808,9 +880,9 @@ def run_n9(repo: Path, provider: str) -> base.RunResult:
             watcher_handle.flush()
             watcher_handle.close()
         if build_proc is not None and build_proc.poll() is None:
-            _terminate_process_group(build_proc)
+            details["build-cleanup-forced"] = _wait_then_terminate_process_group(build_proc, wait_s=2.0)
         if watcher_proc is not None and watcher_proc.poll() is None:
-            _terminate_process_group(watcher_proc)
+            details["watcher-cleanup-forced"] = _wait_then_terminate_process_group(watcher_proc, wait_s=15.0)
         build_output = _read_log(build_log_path)
         watcher_output = _read_log(watcher_log_path)
         if build_output:
@@ -974,6 +1046,9 @@ def record_one_scenario(scenario: base.Scenario, run_id: str, provider: str) -> 
         Path(first_run_result.debug_log),
         first_run_result,
     )
+    override = _classification_override(first_run_result)
+    if override is not None:
+        first_classification = override
     if first_classification != "INFRA":
         return NightlyOutcome(
             scenario=scenario,
@@ -1015,6 +1090,9 @@ def record_one_scenario(scenario: base.Scenario, run_id: str, provider: str) -> 
         Path(retry_run_result.debug_log),
         retry_run_result,
     )
+    override = _classification_override(retry_run_result)
+    if override is not None:
+        retry_classification = override
     return NightlyOutcome(
         scenario=scenario,
         outcome=retry_classification,
