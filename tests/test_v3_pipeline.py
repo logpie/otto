@@ -978,6 +978,7 @@ async def test_build_startup_repairs_missing_terminal_history_from_summary(tmp_g
     _paths.session_summary(tmp_git_repo, repaired_run_id).write_text(json.dumps({
         "run_id": repaired_run_id,
         "command": "build",
+        "status": "completed",
         "intent": "repair missing history",
         "passed": True,
         "cost_usd": 1.5,
@@ -1029,6 +1030,44 @@ async def test_build_startup_repairs_missing_terminal_history_from_summary(tmp_g
     assert repaired["certifier_cost_usd"] == pytest.approx(0.4)
 
 
+def test_repair_atomic_history_skips_abandoned_and_repairs_proved_terminal_summary(tmp_git_repo):
+    from otto.runs.atomic_repair import repair_atomic_history
+    from otto.runs.history import read_history_rows
+
+    abandoned_run_id = "abandoned-spec"
+    _paths.ensure_session_scaffold(tmp_git_repo, abandoned_run_id, phase="spec")
+    _paths.session_summary(tmp_git_repo, abandoned_run_id).write_text(json.dumps({
+        "status": "abandoned",
+        "run_id": abandoned_run_id,
+    }))
+
+    repaired_run_id = "proved-terminal-build"
+    repaired_session_dir = _paths.ensure_session_scaffold(tmp_git_repo, repaired_run_id, phase="build")
+    _paths.session_summary(tmp_git_repo, repaired_run_id).write_text(json.dumps({
+        "run_id": repaired_run_id,
+        "command": "build",
+        "status": "completed",
+        "completed_at": "2026-04-23T12:00:12Z",
+        "passed": True,
+    }))
+    (repaired_session_dir / "manifest.json").write_text(json.dumps({
+        "run_id": repaired_run_id,
+        "command": "build",
+        "started_at": "2026-04-23T12:00:00Z",
+        "finished_at": "2026-04-23T12:00:12Z",
+        "exit_status": "success",
+    }))
+
+    repair_atomic_history(tmp_git_repo)
+
+    rows = read_history_rows(_paths.history_jsonl(tmp_git_repo))
+    assert not any(row.get("run_id") == abandoned_run_id for row in rows)
+    repaired = next(row for row in rows if row["run_id"] == repaired_run_id)
+    assert repaired["command"] == "build"
+    assert repaired["status"] == "done"
+    assert repaired["terminal_outcome"] == "success"
+
+
 @pytest.mark.asyncio
 async def test_run_agentic_certifier_startup_repairs_missing_standalone_history_with_existing_history(
     tmp_git_repo,
@@ -1045,6 +1084,7 @@ async def test_run_agentic_certifier_startup_repairs_missing_standalone_history_
     _paths.session_summary(tmp_git_repo, repaired_run_id).write_text(json.dumps({
         "run_id": repaired_run_id,
         "command": "certify",
+        "status": "completed",
         "intent": "verify release",
         "passed": False,
         "cost_usd": 0.9,
