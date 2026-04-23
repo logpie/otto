@@ -681,6 +681,9 @@ def run_n9(repo: Path, provider: str) -> base.RunResult:
     details: dict[str, Any] = {
         "steps": steps,
         "live-records-discovered-count": 0,
+        "build_record_latency_ms": None,
+        "queue_record_1_latency_ms": None,
+        "queue_record_2_latency_ms": None,
         "cancel-ack-latency-ms": None,
         "build-terminated-via-cancel": False,
     }
@@ -768,13 +771,35 @@ def run_n9(repo: Path, provider: str) -> base.RunResult:
         commands_dir = paths.session_commands_dir(repo, build_run_id)
         request_path = paths.session_command_requests(repo, build_run_id)
         ack_path = paths.session_command_acks(repo, build_run_id)
-        live_poll_started = time.monotonic()
-        live_deadline_s = 30.0
-        live_deadline = live_poll_started + live_deadline_s
+        build_record_deadline_s = 5.0
+        queue_record_deadline_s = 30.0
+        build_record_deadline = build_started + build_record_deadline_s
+        queue_record_deadline = watcher_started + queue_record_deadline_s
+        session_ready_latency_ms: int | None = None
         discovered_atomic = False
         discovered_queue_runs: set[str] = set()
-        max_queue_live_records = 0
-        while time.monotonic() < live_deadline:
+        queue_record_order: list[str] = []
+
+        def refresh_live_records(now: float | None = None) -> None:
+            nonlocal discovered_atomic
+            if now is None:
+                now = time.monotonic()
+            records = read_live_records(repo)
+            if not discovered_atomic and any(record.run_id == build_run_id for record in records):
+                discovered_atomic = True
+                details["build_record_latency_ms"] = int((now - build_started) * 1000)
+            for record in records:
+                if record.domain != "queue" or record.run_id in discovered_queue_runs:
+                    continue
+                discovered_queue_runs.add(record.run_id)
+                queue_record_order.append(record.run_id)
+                queue_index = len(queue_record_order)
+                if queue_index <= 2:
+                    details[f"queue_record_{queue_index}_latency_ms"] = int((now - watcher_started) * 1000)
+            details["live-records-discovered-count"] = int(discovered_atomic) + len(discovered_queue_runs)
+
+        while time.monotonic() < build_record_deadline:
+            now = time.monotonic()
             build_rc = build_proc.poll()
             if build_rc is not None and not session_dir.exists():
                 details["classification_override"] = "INFRA"
@@ -782,30 +807,25 @@ def run_n9(repo: Path, provider: str) -> base.RunResult:
                 details["build-returncode"] = build_rc
                 if build_step is not None:
                     build_step["rc"] = build_rc
-                    build_step["duration_s"] = round(time.monotonic() - build_started, 1)
+                    build_step["duration_s"] = round(now - build_started, 1)
                 raise AssertionError("N9 standalone build exited before its cancel channel became ready")
-            records = read_live_records(repo)
-            discovered_atomic = any(record.run_id == build_run_id for record in records)
-            discovered_queue_runs = {
-                record.run_id
-                for record in records
-                if record.domain == "queue"
-            }
-            max_queue_live_records = max(max_queue_live_records, len(discovered_queue_runs))
+            refresh_live_records(now)
             if session_dir.exists() and discovered_atomic:
+                session_ready_latency_ms = int((now - build_started) * 1000)
                 break
             time.sleep(0.05)
         else:
             raise AssertionError(
-                f"N9 expected the standalone cancel channel within {live_deadline_s:.1f}s"
+                f"N9 expected the standalone build live record within {build_record_deadline_s:.1f}s"
             )
-        live_latency_ms = int((time.monotonic() - live_poll_started) * 1000)
-        details["live-records-discovered-count"] = 1 + max_queue_live_records
-        details["live-records-latency-ms"] = live_latency_ms
-        details["session-ready-latency-ms"] = live_latency_ms
+        refresh_live_records()
+        details["live-records-latency-ms"] = details["build_record_latency_ms"]
+        details["session-ready-latency-ms"] = session_ready_latency_ms
         details["cancel-request-path"] = str(request_path)
         base.log_line(
-            f"N9 session ready after {live_latency_ms}ms; commands_dir={commands_dir} queue live records={max_queue_live_records}"
+            "N9 session ready after "
+            f"{session_ready_latency_ms}ms; commands_dir={commands_dir} "
+            f"queue live records={len(discovered_queue_runs)}"
         )
 
         build_record = load_live_record(repo, build_run_id)
@@ -835,12 +855,7 @@ def run_n9(repo: Path, provider: str) -> base.RunResult:
         ack_deadline_s = max(4.0, 2.0 * heartbeat_s)
         ack_deadline = ack_started + ack_deadline_s
         while time.monotonic() < ack_deadline:
-            records = read_live_records(repo)
-            max_queue_live_records = max(
-                max_queue_live_records,
-                sum(1 for record in records if record.domain == "queue"),
-            )
-            details["live-records-discovered-count"] = 1 + max_queue_live_records
+            refresh_live_records()
             if command_id in load_command_ack_ids(ack_path):
                 break
             build_rc = build_proc.poll()
@@ -877,6 +892,18 @@ def run_n9(repo: Path, provider: str) -> base.RunResult:
                 repo=repo,
             )
         )
+
+        while len(discovered_queue_runs) < 2 and time.monotonic() < queue_record_deadline:
+            refresh_live_records()
+            time.sleep(0.05)
+        refresh_live_records()
+        if len(discovered_queue_runs) < 2:
+            missing_queue_records = 2 - len(discovered_queue_runs)
+            raise AssertionError(
+                "N9 queue live records did not all appear within "
+                f"{queue_record_deadline_s:.1f}s of watcher start "
+                f"(missing {missing_queue_records})"
+            )
 
         assert watcher_proc is not None
         watcher_rc = watcher_proc.wait(timeout=budget.timeout_for(10 * 60))
@@ -941,8 +968,15 @@ def verify_n9(repo: Path, run_result: base.RunResult) -> VerifyResult:
     details = run_result.details
     if run_result.returncode != 0:
         return _build_failure(run_result, "N9 mission-control flow failed before verification")
-    if details.get("live-records-discovered-count", 0) < 3:
-        return VerifyResult(False, "N9 did not observe all three live records")
+    build_record_latency_ms = details.get("build_record_latency_ms")
+    if build_record_latency_ms is None or build_record_latency_ms > 5000:
+        return VerifyResult(False, "N9 standalone build live record was missing or late")
+    queue_record_1_latency_ms = details.get("queue_record_1_latency_ms")
+    if queue_record_1_latency_ms is None or queue_record_1_latency_ms > 30000:
+        return VerifyResult(False, "N9 first queue live record was missing or late")
+    queue_record_2_latency_ms = details.get("queue_record_2_latency_ms")
+    if queue_record_2_latency_ms is None or queue_record_2_latency_ms > 30000:
+        return VerifyResult(False, "N9 second queue live record was missing or late")
     ack_latency_ms = details.get("cancel-ack-latency-ms")
     ack_deadline_ms = details.get("cancel-ack-deadline-ms", 0)
     if ack_latency_ms is None or ack_latency_ms > ack_deadline_ms:
