@@ -457,3 +457,21 @@ Final state: 786 tests passing. Commits b0251805d, 7fb53ce57, 03d41b2f6, 2ee8e74
 - APPROVED. No new issues.
 
 Final state: 814 tests passing. Commits 7f8718742, 7b226b639, 7990b0c96.
+
+## FINAL Implementation Gate — 2026-04-23 — Holistic TUI Mission Control review
+
+Reviewed full diff 99a53ccfe..HEAD (15558 lines, 45 files) — entire 5-phase work + audit fix pass.
+
+### Round 1 — Codex
+- [IMPORTANT] Merge restart repair incomplete — fixed by Codex
+- [IMPORTANT] Old terminal queue attempts resurrected after GC — fixed by Codex
+- [IMPORTANT] Build/improve had no startup history repair (Exit E gap) — fixed by Codex (otto/runs/atomic_repair.py)
+- [NOTE] _repair_standalone_certify_history early-returned on existing history — fixed by Codex
+
+### Round 2 — Codex
+- [IMPORTANT] Atomic repair invented history from abandoned/non-terminal sessions — fixed by Codex (gate on proved terminal truth)
+
+### Round 3 — Codex re-reviewed Round 2 fix
+- APPROVED. No remaining cross-phase regressions, Repair Precedence violations, or missing gate-exit blockers.
+
+Final state: 844 tests passing. All 5 design gate exits (A/B/C/D/E) verified.
