@@ -148,6 +148,16 @@ def test_cli_history_loader_threads_limit_hint(tmp_path: Path) -> None:
 
 
 def test_terminal_history_writers_emit_v2_snapshots_for_all_domains(tmp_path: Path) -> None:
+    build_session = paths.ensure_session_scaffold(tmp_path, "build-run", phase="build")
+    (build_session / "build" / "narrative.log").write_text("", encoding="utf-8")
+    (build_session / "spec.md").write_text("# spec\n", encoding="utf-8")
+
+    improve_session = paths.ensure_session_scaffold(tmp_path, "improve-run", phase="improve")
+    (improve_session / "improve" / "narrative.log").write_text("", encoding="utf-8")
+
+    certify_session = paths.ensure_session_scaffold(tmp_path, "certify-run", phase="certify")
+    (certify_session / "certify" / "narrative.log").write_text("", encoding="utf-8")
+
     _append_session_history(
         tmp_path,
         run_id="build-run",
@@ -198,6 +208,10 @@ def test_terminal_history_writers_emit_v2_snapshots_for_all_domains(tmp_path: Pa
         branch="main",
     )
 
+    queue_worktree = tmp_path / ".worktrees" / "task-1"
+    queue_session = paths.ensure_session_scaffold(queue_worktree, "queue-run", phase="build")
+    (queue_session / "build" / "narrative.log").write_text("", encoding="utf-8")
+
     runner = Runner(tmp_path, RunnerConfig(), otto_bin="otto")
     task = QueueTask(
         id="task-1",
@@ -221,6 +235,10 @@ def test_terminal_history_writers_emit_v2_snapshots_for_all_domains(tmp_path: Pa
         status="done",
         terminal_outcome="success",
     )
+
+    merge_run_dir = paths.merge_dir(tmp_path) / "merge-run"
+    merge_run_dir.mkdir(parents=True, exist_ok=True)
+    (merge_run_dir / "state.json").write_text("{}", encoding="utf-8")
 
     _append_merge_history(
         tmp_path,

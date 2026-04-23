@@ -546,7 +546,60 @@ async def test_cancelled_atomic_run_appends_terminal_history_snapshot(tmp_git_re
     assert history_row["terminal_outcome"] == "cancelled"
     assert history_row["resumable"] is True
     assert history_row["run_id"] == run_id
+    assert history_row["manifest_path"] is None
     assert history_row["summary_path"] == str(_paths.session_summary(tmp_git_repo, run_id))
+    assert history_row["checkpoint_path"] == str(_paths.session_checkpoint(tmp_git_repo, run_id))
+    assert history_row["artifacts"]["manifest_path"] is None
+    assert history_row["artifacts"]["summary_path"] == str(_paths.session_summary(tmp_git_repo, run_id))
+    assert history_row["artifacts"]["checkpoint_path"] == str(_paths.session_checkpoint(tmp_git_repo, run_id))
+
+
+def test_build_terminal_snapshot_nulls_missing_artifact_paths(tmp_path):
+    from otto.runs.history import build_terminal_snapshot
+
+    session_dir = tmp_path / "sessions" / "run-123"
+    build_dir = session_dir / "build"
+    build_dir.mkdir(parents=True)
+    summary_path = session_dir / "summary.json"
+    checkpoint_path = session_dir / "checkpoint.json"
+    primary_log_path = build_dir / "narrative.log"
+    extra_log_path = build_dir / "events.log"
+    summary_path.write_text("{}", encoding="utf-8")
+    checkpoint_path.write_text("{}", encoding="utf-8")
+    primary_log_path.write_text("", encoding="utf-8")
+    extra_log_path.write_text("", encoding="utf-8")
+
+    snapshot = build_terminal_snapshot(
+        run_id="run-123",
+        domain="atomic",
+        run_type="build",
+        command="build",
+        intent_meta={"summary": "test"},
+        status="cancelled",
+        terminal_outcome="cancelled",
+        artifacts={
+            "session_dir": str(session_dir),
+            "manifest_path": str(session_dir / "manifest.json"),
+            "summary_path": str(summary_path),
+            "checkpoint_path": str(checkpoint_path),
+            "primary_log_path": str(primary_log_path),
+            "extra_log_paths": [
+                str(extra_log_path),
+                str(build_dir / "missing.log"),
+            ],
+        },
+    )
+
+    assert snapshot["manifest_path"] is None
+    assert snapshot["summary_path"] == str(summary_path)
+    assert snapshot["checkpoint_path"] == str(checkpoint_path)
+    assert snapshot["primary_log_path"] == str(primary_log_path)
+    assert snapshot["extra_log_paths"] == [str(extra_log_path)]
+    assert snapshot["artifacts"]["manifest_path"] is None
+    assert snapshot["artifacts"]["summary_path"] == str(summary_path)
+    assert snapshot["artifacts"]["checkpoint_path"] == str(checkpoint_path)
+    assert snapshot["artifacts"]["primary_log_path"] == str(primary_log_path)
+    assert snapshot["artifacts"]["extra_log_paths"] == [str(extra_log_path)]
 
 
 @pytest.mark.asyncio

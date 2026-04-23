@@ -180,14 +180,14 @@ def _normalize_artifacts(artifacts: dict[str, Any] | None) -> dict[str, Any]:
         extra_log_paths = []
     return {
         "session_dir": _string_or_none(data.get("session_dir")),
-        "manifest_path": _string_or_none(data.get("manifest_path")),
-        "checkpoint_path": _string_or_none(data.get("checkpoint_path")),
-        "summary_path": _string_or_none(data.get("summary_path")),
-        "primary_log_path": _string_or_none(data.get("primary_log_path")),
+        "manifest_path": _present_or_none(data.get("manifest_path")),
+        "checkpoint_path": _present_or_none(data.get("checkpoint_path")),
+        "summary_path": _present_or_none(data.get("summary_path")),
+        "primary_log_path": _present_or_none(data.get("primary_log_path")),
         "extra_log_paths": [
-            str(path).strip()
+            resolved
             for path in extra_log_paths
-            if str(path).strip()
+            if (resolved := _present_or_none(path))
         ],
     }
 
@@ -195,6 +195,16 @@ def _normalize_artifacts(artifacts: dict[str, Any] | None) -> dict[str, Any]:
 def _string_or_none(value: Any) -> str | None:
     text = str(value or "").strip()
     return text or None
+
+
+def _present_or_none(path: Any) -> str | None:
+    text = _string_or_none(path)
+    if not text:
+        return None
+    try:
+        return text if Path(text).expanduser().exists() else None
+    except OSError:
+        return None
 
 
 def _float_or_none(value: Any) -> float | None:
