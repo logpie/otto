@@ -20,6 +20,7 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Literal
 
+from otto import paths
 
 MERGE_STATE_SCHEMA_VERSION = 1
 BranchStatus = Literal[
@@ -72,7 +73,7 @@ class MergeState:
 
 
 def merge_dir(project_dir: Path, merge_id: str) -> Path:
-    return project_dir / "otto_logs" / "merge" / merge_id
+    return paths.merge_dir(project_dir) / merge_id
 
 
 def state_path(project_dir: Path, merge_id: str) -> Path:
@@ -109,7 +110,7 @@ def load_state(project_dir: Path, merge_id: str) -> MergeState:
 
 def find_latest_merge_id(project_dir: Path) -> str | None:
     """Return the most recent merge_id with state.json present, or None."""
-    merges_dir = project_dir / "otto_logs" / "merge"
+    merges_dir = paths.merge_dir(project_dir)
     if not merges_dir.exists():
         return None
     candidates = []

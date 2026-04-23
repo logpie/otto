@@ -42,9 +42,12 @@ from otto.queue.runtime import (
     INTERRUPTED_STATUS,
     checkpoint_path_for_task,
 )
+from otto.queue import schema as queue_schema
 from otto.queue.schema import (
     QueueTask,
-    drain_commands,
+    append_command_ack,
+    begin_command_drain,
+    finish_command_drain,
     load_queue,
     load_state,
     lock_path,
@@ -52,6 +55,13 @@ from otto.queue.schema import (
     write_state,
 )
 from otto.queue.ids import detect_cycles
+from otto.runs.registry import (
+    allocate_run_id,
+    finalize_record,
+    make_run_record,
+    update_record,
+    write_record,
+)
 
 logger = logging.getLogger("otto.queue.runner")
 
@@ -356,8 +366,9 @@ class Runner:
 
     def _tick(self) -> None:
         """One main-loop iteration: drain commands, reap children, dispatch new."""
+        commands: list[dict[str, Any]] = []
         try:
-            commands = drain_commands(self.project_dir)
+            commands = begin_command_drain(self.project_dir)
         except (OSError, ValueError) as exc:
             # IO failures or malformed JSONL — log loudly so user sees it.
             # A real bug (e.g. import error) is a different exception type
@@ -388,8 +399,10 @@ class Runner:
         # Apply commands
         state = load_state(self.project_dir)
         cycle_ids = {tid for cycle in cycles for tid in cycle}
+        applied_commands: list[dict[str, Any]] = []
         for cmd in commands:
             self._apply_command(cmd, state)
+            applied_commands.append(cmd)
 
         # Reap finished children
         self._reap_children(state)
@@ -400,6 +413,16 @@ class Runner:
 
         # Persist state
         self._write_state_or_raise(state)
+        for cmd in applied_commands:
+            append_command_ack(
+                self.project_dir,
+                cmd,
+                writer_id=f"queue:{os.getpid()}",
+                state_version=int(state.get("version") or 0),
+            )
+        if commands:
+            finish_command_drain(self.project_dir)
+        self._refresh_queue_run_records(tasks, state)
         if self._should_exit_when_empty(tasks, state):
             logger.info("queue drained; exiting watcher because --exit-when-empty is set")
             self.shutdown_level = "graceful"
@@ -415,6 +438,13 @@ class Runner:
           fail   → mark failed
         """
         state = load_state(self.project_dir)
+        try:
+            commands = begin_command_drain(self.project_dir)
+        except (OSError, ValueError) as exc:
+            logger.error("startup reconcile: failed to drain commands: %s", exc)
+            commands = []
+        for cmd in commands:
+            self._apply_command(cmd, state)
         tasks_by_id = {t.id: t for t in self._load_queue_or_empty(context="startup reconcile")}
         policy = self.config.on_watcher_restart
         for tid, ts in list(state.get("tasks", {}).items()):
@@ -486,6 +516,16 @@ class Runner:
             else:
                 _mark_failed(ts, "watcher restart: child gone, no checkpoint")
         self._write_state_or_raise(state)
+        for cmd in commands:
+            append_command_ack(
+                self.project_dir,
+                cmd,
+                writer_id=f"queue:{os.getpid()}",
+                state_version=int(state.get("version") or 0),
+            )
+        if commands:
+            finish_command_drain(self.project_dir)
+        self._refresh_queue_run_records(list(tasks_by_id.values()), state)
 
     # ---- command application ----
 
@@ -630,6 +670,7 @@ class Runner:
                     self._finish_terminating(ts)
                 else:
                     self._finalize_task_from_manifest(ts, tid)
+                self._finalize_queue_attempt(tid, ts)
                 self._join_output_pump(pid)
                 logger.info("reaped %s: %s (observed dead after ECHILD)", tid, ts.get("status"))
                 continue
@@ -640,10 +681,12 @@ class Runner:
             if status == "terminating":
                 ts["exit_code"] = exit_code
                 self._finish_terminating(ts)
+                self._finalize_queue_attempt(tid, ts)
                 self._join_output_pump(pid)
                 logger.info("reaped %s: %s", tid, ts.get("status"))
                 continue
             self._finalize_task_from_manifest(ts, tid, exit_code=exit_code)
+            self._finalize_queue_attempt(tid, ts)
             self._join_output_pump(pid)
             if ts.get("status") == "done":
                 logger.info(
@@ -764,15 +807,31 @@ class Runner:
         # Build argv: <otto_bin> <task argv...> [+ --resume if respawning from checkpoint]
         argv = list(self.otto_bin) + list(task.command_argv)
         ts_existing = state["tasks"].get(task.id, {})
+        attempt_run_id = str(ts_existing.get("attempt_run_id") or "").strip()
+        if not attempt_run_id:
+            attempt_run_id = allocate_run_id(self.project_dir)
         if ts_existing.get("resumed_from_checkpoint"):
             argv.append("--resume")
             ts_existing.pop("resumed_from_checkpoint", None)
+
+        state["tasks"][task.id] = {
+            **ts_existing,
+            "status": "starting",
+            "started_at": now_iso(),
+            "finished_at": None,
+            "attempt_run_id": attempt_run_id,
+            "child": None,
+            "failure_reason": None,
+        }
+        queue_schema.write_state(self.project_dir, state)
+        self._write_queue_run_record(task, state["tasks"][task.id], status="starting")
 
         # Spawn with own process group (setsid) so cancel can killpg cleanly
         env = {
             **os.environ,
             "OTTO_INTERNAL_QUEUE_RUNNER": "1",
             "OTTO_QUEUE_TASK_ID": task.id,
+            "OTTO_RUN_ID": attempt_run_id,
             # Anchor manifest writes to the MAIN project so the watcher (whose
             # cwd is the main project) and the child (whose cwd is the
             # worktree) resolve to the same path. See otto/manifest.py
@@ -804,6 +863,7 @@ class Runner:
             "status": "running",
             "started_at": now_iso(),
             "finished_at": None,
+            "attempt_run_id": attempt_run_id,
             "exit_code": None,
             "child": {
                 "pid": proc.pid,
@@ -817,7 +877,96 @@ class Runner:
             "duration_s": None,
             "failure_reason": None,
         }
+        self._write_queue_run_record(task, state["tasks"][task.id], status="running")
         logger.info("spawned %s: pid=%d, branch=%s", task.id, proc.pid, branch)
+
+    def _queue_run_artifacts(self, task: QueueTask, ts: dict[str, Any]) -> dict[str, Any]:
+        attempt_run_id = str(ts.get("attempt_run_id") or "")
+        wt_path = self._worktree_for(task)
+        session_dir = wt_path / "otto_logs" / "sessions" / attempt_run_id
+        manifest_path = ts.get("manifest_path") or (session_dir / "manifest.json")
+        return {
+            "session_dir": str(session_dir),
+            "manifest_path": str(manifest_path) if manifest_path else None,
+            "checkpoint_path": str(session_dir / "checkpoint.json"),
+            "summary_path": str(session_dir / "summary.json"),
+            "primary_log_path": str(session_dir / "build" / "narrative.log"),
+            "extra_log_paths": [],
+        }
+
+    def _write_queue_run_record(self, task: QueueTask, ts: dict[str, Any], *, status: str) -> None:
+        attempt_run_id = str(ts.get("attempt_run_id") or "").strip()
+        if not attempt_run_id:
+            return
+        command = " ".join(task.command_argv[:2]) if task.command_argv else "queue"
+        child = ts.get("child") or {}
+        record = make_run_record(
+            project_dir=self.project_dir,
+            run_id=attempt_run_id,
+            domain="queue",
+            run_type="queue",
+            command=command,
+            display_name=f"{task.id}: {command}",
+            status=status,
+            cwd=self._worktree_for(task),
+            writer_id=f"queue:{os.getpid()}:{attempt_run_id}",
+            identity={
+                "queue_task_id": task.id,
+                "merge_id": None,
+                "parent_run_id": None,
+                "child_run_id": ts.get("child_run_id"),
+                "expected_child_run_id": attempt_run_id,
+                "compatibility_warning": ts.get("compatibility_warning"),
+            },
+            source={
+                "invoked_via": "queue",
+                "argv": list(task.command_argv),
+                "resumable": bool(task.resumable),
+            },
+            git={"branch": task.branch, "worktree": task.worktree, "target_branch": None, "head_sha": None},
+            intent={"summary": task.resolved_intent or task.id, "intent_path": None, "spec_path": task.spec_file_path},
+            artifacts=self._queue_run_artifacts(task, ts),
+            metrics={"cost_usd": ts.get("cost_usd"), "stories_passed": None, "stories_tested": None},
+            adapter_key="queue.attempt",
+            last_event=str(ts.get("failure_reason") or status),
+        )
+        if child:
+            record.writer.update({
+                "pid": child.get("pid"),
+                "pgid": child.get("pgid"),
+                "process_start_time_ns": child.get("start_time_ns"),
+            })
+        write_record(self.project_dir, record)
+
+    def _refresh_queue_run_records(self, tasks: list[QueueTask], state: dict[str, Any]) -> None:
+        tasks_by_id = {task.id: task for task in tasks}
+        for task_id, ts in state.get("tasks", {}).items():
+            task = tasks_by_id.get(task_id)
+            if task is None:
+                continue
+            attempt_run_id = str(ts.get("attempt_run_id") or "").strip()
+            if not attempt_run_id:
+                continue
+            status = str(ts.get("status") or "queued")
+            if status == "starting":
+                status = "running"
+            try:
+                update_record(
+                    self.project_dir,
+                    attempt_run_id,
+                    {
+                        "status": status,
+                        "artifacts": self._queue_run_artifacts(task, ts),
+                        "metrics": {"cost_usd": ts.get("cost_usd")},
+                        "last_event": str(ts.get("failure_reason") or status),
+                    },
+                    heartbeat=status in IN_FLIGHT_STATUSES,
+                )
+            except Exception:
+                try:
+                    self._write_queue_run_record(task, ts, status=status)
+                except Exception as exc:
+                    logger.debug("failed to refresh queue run record for %s: %s", task_id, exc)
 
     def _start_output_pump(self, task_id: str, proc: subprocess.Popen[Any]) -> None:
         stdout = getattr(proc, "stdout", None)
@@ -979,6 +1128,67 @@ class Runner:
         ts["status"] = ts.pop("terminal_status", "cancelled")
         ts["finished_at"] = now_iso()
         ts["child"] = None
+
+    def _finalize_queue_attempt(self, task_id: str, ts: dict[str, Any]) -> None:
+        attempt_run_id = str(ts.get("attempt_run_id") or "").strip()
+        if not attempt_run_id or ts.get("history_appended"):
+            return
+        status = str(ts.get("status") or "")
+        if status not in {"done", "failed", "cancelled", "removed", INTERRUPTED_STATUS}:
+            return
+        tasks = {task.id: task for task in self._load_queue_or_empty(context="queue attempt finalize")}
+        task = tasks.get(task_id)
+        if task is None:
+            return
+        terminal_outcome = "success" if status == "done" else status
+        try:
+            finalize_record(
+                self.project_dir,
+                attempt_run_id,
+                status=status,
+                terminal_outcome=terminal_outcome,
+                updates={
+                    "artifacts": self._queue_run_artifacts(task, ts),
+                    "metrics": {"cost_usd": ts.get("cost_usd")},
+                    "last_event": str(ts.get("failure_reason") or status),
+                },
+            )
+        except Exception:
+            try:
+                self._write_queue_run_record(task, ts, status=status)
+                finalize_record(
+                    self.project_dir,
+                    attempt_run_id,
+                    status=status,
+                    terminal_outcome=terminal_outcome,
+                )
+            except Exception as exc:
+                logger.debug("failed to finalize queue run record for %s: %s", task_id, exc)
+        try:
+            from otto.history import append_history_entry
+
+            append_history_entry(
+                self.project_dir,
+                {
+                    "run_id": attempt_run_id,
+                    "domain": "queue",
+                    "run_type": "queue",
+                    "command": " ".join(task.command_argv[:2]) if task.command_argv else "queue",
+                    "queue_task_id": task_id,
+                    "intent": (task.resolved_intent or task_id)[:200],
+                    "passed": status == "done",
+                    "status": status,
+                    "terminal_outcome": terminal_outcome,
+                    "cost_usd": float(ts.get("cost_usd") or 0.0),
+                    "duration_s": float(ts.get("duration_s") or 0.0),
+                    "manifest_path": ts.get("manifest_path"),
+                    "primary_log_path": self._queue_run_artifacts(task, ts).get("primary_log_path"),
+                    "timestamp": ts.get("finished_at") or now_iso(),
+                },
+            )
+            ts["history_appended"] = True
+        except Exception as exc:
+            logger.debug("failed to append queue history for %s: %s", task_id, exc)
 
     def _write_state_or_raise(self, state: dict[str, Any]) -> None:
         try:

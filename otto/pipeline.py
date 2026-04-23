@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -274,6 +275,116 @@ def _append_session_history(
     )
 
 
+def _atomic_artifacts(project_dir: Path, run_id: str, *, primary_phase: str) -> dict[str, Any]:
+    from otto import paths
+
+    session_dir = paths.session_dir(project_dir, run_id)
+    primary_log = session_dir / primary_phase / "narrative.log"
+    return {
+        "session_dir": str(session_dir),
+        "manifest_path": str(session_dir / "manifest.json"),
+        "checkpoint_path": str(paths.session_checkpoint(project_dir, run_id)),
+        "summary_path": str(paths.session_summary(project_dir, run_id)),
+        "primary_log_path": str(primary_log),
+        "extra_log_paths": [],
+    }
+
+
+def _atomic_publisher(
+    *,
+    project_dir: Path,
+    run_id: str,
+    command: str,
+    intent: str,
+    primary_phase: str,
+    cwd: Path | None = None,
+) -> Any:
+    from otto.runs.registry import RunPublisher, make_run_record
+
+    command_label = command.replace(".", " ")
+    record = make_run_record(
+        project_dir=project_dir,
+        run_id=run_id,
+        domain="atomic",
+        run_type=command_label.split(" ", 1)[0] or "build",
+        command=command,
+        display_name=f"{command_label}: {intent[:80]}".strip(),
+        status="running",
+        cwd=cwd or project_dir,
+        identity={
+            "queue_task_id": os.environ.get("OTTO_QUEUE_TASK_ID"),
+            "merge_id": None,
+            "parent_run_id": None,
+        },
+        source={
+            "invoked_via": "queue" if os.environ.get("OTTO_INTERNAL_QUEUE_RUNNER") == "1" else "cli",
+            "argv": list(sys.argv[1:]),
+            "resumable": command != "certify",
+        },
+        git={
+            "branch": _current_branch_name(project_dir),
+            "worktree": None,
+            "target_branch": None,
+            "head_sha": _current_head_sha(project_dir),
+        },
+        intent={"summary": intent[:200], "intent_path": str(project_dir / "intent.md"), "spec_path": None},
+        artifacts=_atomic_artifacts(project_dir, run_id, primary_phase=primary_phase),
+        adapter_key=f"atomic.{command_label.split(' ', 1)[0] or 'build'}",
+        last_event="starting",
+    )
+    return RunPublisher(project_dir, record)
+
+
+def _finalize_atomic_publisher(
+    publisher: Any,
+    *,
+    passed: bool,
+    total_cost: float,
+    duration_s: float,
+    stories_passed: int,
+    stories_tested: int,
+    last_event: str,
+) -> None:
+    if publisher is None:
+        return
+    publisher.finalize(
+        status="done" if passed else "failed",
+        terminal_outcome="success" if passed else "failure",
+        updates={
+            "metrics": {
+                "cost_usd": float(total_cost or 0.0),
+                "stories_passed": stories_passed,
+                "stories_tested": stories_tested,
+            },
+            "last_event": last_event,
+        },
+    )
+
+
+def _ack_atomic_cancel_commands(project_dir: Path, run_id: str) -> bool:
+    from otto import paths
+    from otto.runs.registry import append_command_ack, begin_command_drain, finish_command_drain
+
+    commands = begin_command_drain(
+        paths.session_command_requests(project_dir, run_id),
+        paths.session_command_requests_processing(project_dir, run_id),
+        paths.session_command_acks(project_dir, run_id),
+    )
+    cancelled = False
+    for cmd in commands:
+        if str(cmd.get("kind") or cmd.get("cmd") or "") == "cancel":
+            cancelled = True
+        append_command_ack(
+            paths.session_command_acks(project_dir, run_id),
+            cmd,
+            writer_id=f"atomic:{run_id}",
+            outcome="applied" if cancelled else "ignored",
+        )
+    if commands:
+        finish_command_drain(paths.session_command_requests_processing(project_dir, run_id))
+    return cancelled
+
+
 def _strict_mode_guidance(strict_mode: bool) -> str:
     if not strict_mode:
         return ""
@@ -342,7 +453,10 @@ async def build_agentic_v3(
     # run_id is the unified session_id in the new layout. Older callers
     # (e.g. some tests) may omit it; allocate one locally in that case so
     # the path plumbing never has to deal with an empty id.
-    session_id = run_id or paths.new_session_id(project_dir)
+    session_id = run_id or os.environ.get("OTTO_RUN_ID", "").strip()
+    if not session_id:
+        from otto.runs.registry import allocate_run_id
+        session_id = allocate_run_id(project_dir)
     paths.ensure_session_scaffold(project_dir, session_id, phase="build")
     build_id = session_id                 # kept as a local alias for logs
     checkpoint_run_id = session_id
@@ -350,6 +464,16 @@ async def build_agentic_v3(
     # Point `latest` at this session so users can `tail -f $(readlink latest)/build/live.log`.
     paths.set_pointer(project_dir, paths.LATEST_POINTER, session_id)
     runtime_path = _write_runtime_artifact(project_dir, session_id)
+    publisher = None
+    if manage_checkpoint:
+        publisher = _atomic_publisher(
+            project_dir=project_dir,
+            run_id=session_id,
+            command=command,
+            intent=intent,
+            primary_phase="build",
+        )
+        publisher.__enter__()
 
     # Resumed SDK sessions already carry prior context; avoid polluting
     # intent.md or stdin when the user resumes without a fresh intent.
@@ -539,6 +663,8 @@ async def build_agentic_v3(
     # returns leaves a resumable marker. On resumed runs, preserve the prior
     # session_id so a second crash is still resumable.
     _cp("in_progress", session_id=checkpoint_session_id)
+    if _ack_atomic_cancel_commands(project_dir, build_id):
+        raise KeyboardInterrupt("cancelled by command")
 
     # One agent call — the agent drives everything.
     # capture_tool_output=True so subagent output (certifier results) is included
@@ -584,6 +710,8 @@ async def build_agentic_v3(
         else:
             logger.warning("Agent failed with no session_id — --resume will start fresh")
     total_run_cost += float(cost or 0)
+    if _ack_atomic_cancel_commands(project_dir, build_id):
+        raise KeyboardInterrupt("cancelled by command")
 
     total_duration = round(base_prior_duration + (time.monotonic() - start_time), 1)
 
@@ -873,6 +1001,15 @@ async def build_agentic_v3(
         certifier_cost_usd=certifier_cost,
         rounds=max(len(certify_rounds), 1),
     )
+    _finalize_atomic_publisher(
+        publisher,
+        passed=passed,
+        total_cost=total_run_cost,
+        duration_s=total_duration,
+        stories_passed=stories_passed,
+        stories_tested=stories_tested,
+        last_event="completed" if passed else "failed",
+    )
 
     # Record cross-run memory (only if certification produced stories)
     if story_results and not skip_qa:
@@ -1111,10 +1248,21 @@ async def run_certify_fix_loop(
     from otto.config import ensure_safe_repo_state
 
     # Unified session_id (was build_id). Allocate if caller didn't provide.
-    build_id = session_id or _paths.new_session_id(project_dir)
+    build_id = session_id or os.environ.get("OTTO_RUN_ID", "").strip()
+    if not build_id:
+        from otto.runs.registry import allocate_run_id
+        build_id = allocate_run_id(project_dir)
     _paths.ensure_session_scaffold(project_dir, build_id, phase="improve")
     _paths.set_pointer(project_dir, _paths.LATEST_POINTER, build_id)
     runtime_path = _write_runtime_artifact(project_dir, build_id)
+    publisher = _atomic_publisher(
+        project_dir=project_dir,
+        run_id=build_id,
+        command=command,
+        intent=intent,
+        primary_phase="improve",
+    )
+    publisher.__enter__()
     total_cost = resume_cost
     loop_start = time.monotonic()
     from otto.config import get_max_rounds
@@ -1151,6 +1299,8 @@ async def run_certify_fix_loop(
         allow_dirty=bool(config.get("allow_dirty_repo")),
     )
     _commit_artifacts(project_dir)
+    if _ack_atomic_cancel_commands(project_dir, build_id):
+        raise KeyboardInterrupt("cancelled by command")
 
     def _save_cp(
         status: str = "in_progress",
@@ -1214,6 +1364,8 @@ async def run_certify_fix_loop(
             ],
             last_diagnosis=last_diagnosis_text,
         )
+        publisher.update({"status": "paused", "last_event": f"paused before {phase}"})
+        publisher.stop()
         return BuildResult(
             passed=False, build_id=build_id, total_cost=total_cost,
             rounds=use_rounds,
@@ -1281,6 +1433,8 @@ async def run_certify_fix_loop(
                 ],
                 last_diagnosis=last_diagnosis_text,
             )
+            publisher.update({"status": "paused", "last_event": "paused during initial build"})
+            publisher.stop()
             return BuildResult(passed=False, build_id=build_id, total_cost=total_cost)
         build_phase_duration += time.monotonic() - build_call_start
         total_cost += result.total_cost
@@ -1656,6 +1810,8 @@ async def run_certify_fix_loop(
                 )
             except OSError as exc:
                 logger.warning("Failed to mark checkpoint paused: %s", exc)
+            publisher.update({"status": "paused", "last_event": f"paused during round {round_num}"})
+            publisher.stop()
             return BuildResult(
                 passed=False, build_id=build_id, rounds=actual_rounds,
                 total_cost=total_cost,
@@ -1677,6 +1833,8 @@ async def run_certify_fix_loop(
                 )
             except OSError as exc:
                 logger.warning("Failed to mark checkpoint paused: %s", exc)
+            publisher.update({"status": "paused", "last_event": f"paused during round {round_num}"})
+            publisher.stop()
             raise
 
     # Final journal entry gets its own round_id so attribution is unambiguous
@@ -1740,6 +1898,15 @@ async def run_certify_fix_loop(
         total_cost_usd=total_cost,
         certifier_cost_usd=certify_phase_cost,
         rounds=actual_rounds,
+    )
+    _finalize_atomic_publisher(
+        publisher,
+        passed=passed,
+        total_cost=total_cost,
+        duration_s=round(resume_duration + (time.monotonic() - loop_start), 1),
+        stories_passed=sum(1 for j in journeys if j.get("passed")),
+        stories_tested=len(journeys),
+        last_event="completed" if passed else "failed",
     )
 
     return BuildResult(

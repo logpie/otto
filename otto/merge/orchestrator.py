@@ -22,6 +22,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -38,6 +39,14 @@ from otto.merge.state import (
     write_state,
 )
 from otto.merge.stories import collect_stories_from_branches, dedupe_stories, find_manifest_for_branch
+from otto.runs.registry import (
+    RunPublisher,
+    append_command_ack,
+    begin_command_drain,
+    finalize_record,
+    finish_command_drain,
+    make_run_record,
+)
 
 logger = logging.getLogger("otto.merge.orchestrator")
 
@@ -236,6 +245,40 @@ def _validate_managed_branch(
     )
 
 
+def _merge_artifacts(project_dir: Path, merge_id: str) -> dict[str, Any]:
+    merge_run_dir = paths.merge_dir(project_dir) / merge_id
+    return {
+        "session_dir": str(merge_run_dir),
+        "manifest_path": None,
+        "checkpoint_path": None,
+        "summary_path": None,
+        "primary_log_path": str(paths.merge_dir(project_dir) / "merge.log"),
+        "extra_log_paths": [str(merge_run_dir / "state.json")],
+    }
+
+
+def _drain_merge_cancel_commands(project_dir: Path, merge_id: str) -> bool:
+    commands = begin_command_drain(
+        paths.merge_command_requests(project_dir),
+        paths.merge_command_requests_processing(project_dir),
+        paths.merge_command_acks(project_dir),
+    )
+    cancelled = False
+    for cmd in commands:
+        kind = str(cmd.get("kind") or cmd.get("cmd") or "")
+        if kind == "cancel" and str(cmd.get("run_id") or merge_id) == merge_id:
+            cancelled = True
+        append_command_ack(
+            paths.merge_command_acks(project_dir),
+            cmd,
+            writer_id=f"merge:{merge_id}",
+            outcome="applied" if cancelled else "ignored",
+        )
+    if commands:
+        finish_command_drain(paths.merge_command_requests_processing(project_dir))
+    return cancelled
+
+
 async def run_merge(
     *,
     project_dir: Path,
@@ -317,10 +360,43 @@ async def run_merge(
         outcomes=[],
     )
     write_state(project_dir, state)
+    publisher = RunPublisher(
+        project_dir,
+        make_run_record(
+            project_dir=project_dir,
+            run_id=merge_id,
+            domain="merge",
+            run_type="merge",
+            command="merge",
+            display_name=f"merge: {len(branches)} branch(es)",
+            status="running",
+            cwd=project_dir,
+            identity={"queue_task_id": None, "merge_id": merge_id, "parent_run_id": None},
+            source={"invoked_via": "cli", "argv": list(sys.argv[1:]), "resumable": False},
+            git={"branch": cur, "worktree": None, "target_branch": options.target, "head_sha": target_head_before},
+            intent={"summary": f"merge {len(branches)} branch(es)", "intent_path": str(project_dir / "intent.md"), "spec_path": None},
+            artifacts=_merge_artifacts(project_dir, merge_id),
+            adapter_key="merge.run",
+            last_event="starting",
+        ),
+    )
+    publisher.__enter__()
 
     logger.info("merge %s starting: target=%s, branches=%s", merge_id, options.target, branches)
+    if _drain_merge_cancel_commands(project_dir, merge_id):
+        publisher.finalize(
+            status="cancelled",
+            terminal_outcome="cancelled",
+            updates={"last_event": "cancelled before merge start"},
+        )
+        return MergeRunResult(
+            success=False,
+            merge_id=merge_id,
+            state=state,
+            note="merge cancelled before start",
+        )
 
-    return await _run_consolidated_agentic_merge(
+    result = await _run_consolidated_agentic_merge(
         project_dir=project_dir,
         config=config,
         options=options,
@@ -331,6 +407,38 @@ async def run_merge(
         target_head_before=target_head_before,
         budget=budget,
     )
+    publisher.finalize(
+        status="done" if result.success else "failed",
+        terminal_outcome="success" if result.success else "failure",
+        updates={
+            "artifacts": _merge_artifacts(project_dir, merge_id),
+            "last_event": result.note or ("completed" if result.success else "failed"),
+        },
+    )
+    try:
+        from otto.history import append_history_entry
+
+        append_history_entry(
+            project_dir,
+            {
+                "run_id": merge_id,
+                "domain": "merge",
+                "run_type": "merge",
+                "command": "merge",
+                "intent": f"merge {len(branches)} branch(es)",
+                "passed": result.success,
+                "status": "done" if result.success else "failed",
+                "terminal_outcome": "success" if result.success else "failure",
+                "merge_id": merge_id,
+                "manifest_path": None,
+                "summary_path": None,
+                "primary_log_path": str(paths.merge_dir(project_dir) / "merge.log"),
+                "timestamp": _now_iso(),
+            },
+        )
+    except Exception as exc:
+        logger.debug("failed to append merge history for %s: %s", merge_id, exc)
+    return result
 
 
 def _update_consolidated_conflict_outcomes(

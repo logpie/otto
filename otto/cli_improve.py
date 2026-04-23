@@ -236,7 +236,10 @@ def _run_improve(
             with _paths.project_lock(project_dir, command_id, break_lock=break_lock):
                 run_id = resume_state.run_id or ""
                 if not run_id:
-                    run_id = _paths.new_session_id(project_dir)
+                    run_id = os.environ.get("OTTO_RUN_ID", "").strip()
+                if not run_id:
+                    from otto.runs.registry import allocate_run_id
+                    run_id = allocate_run_id(project_dir)
                 _run_improve_locked(
                     project_dir=project_dir,
                     intent=intent,

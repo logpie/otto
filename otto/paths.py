@@ -59,6 +59,15 @@ LATEST_POINTER = "latest"
 PAUSED_POINTER = "paused"
 HISTORY_FILE_NAME = "history.jsonl"
 CERTIFIER_MEMORY_FILE_NAME = "certifier-memory.jsonl"
+RUNS_DIR_NAME = "runs"
+LIVE_RUNS_DIR_NAME = "live"
+RUN_GC_DIR_NAME = "gc"
+RUN_GC_TOMBSTONES_FILE_NAME = "tombstones.jsonl"
+COMMANDS_DIR_NAME = "commands"
+REQUESTS_FILE_NAME = "requests.jsonl"
+REQUESTS_PROCESSING_FILE_NAME = "requests.jsonl.processing"
+ACKS_FILE_NAME = "acks.jsonl"
+MERGE_DIR_NAME = "merge"
 
 # Legacy (pre-restructure) path constants — reader fallback only.
 LEGACY_CHECKPOINT = "checkpoint.json"
@@ -135,6 +144,26 @@ def certifier_memory_jsonl(project_dir: Path) -> Path:
     return cross_sessions_dir(project_dir) / CERTIFIER_MEMORY_FILE_NAME
 
 
+def runs_dir(project_dir: Path) -> Path:
+    return cross_sessions_dir(project_dir) / RUNS_DIR_NAME
+
+
+def live_runs_dir(project_dir: Path) -> Path:
+    return runs_dir(project_dir) / LIVE_RUNS_DIR_NAME
+
+
+def live_run_path(project_dir: Path, run_id: str) -> Path:
+    return live_runs_dir(project_dir) / f"{run_id}.json"
+
+
+def run_gc_dir(project_dir: Path) -> Path:
+    return runs_dir(project_dir) / RUN_GC_DIR_NAME
+
+
+def run_gc_tombstones_jsonl(project_dir: Path) -> Path:
+    return run_gc_dir(project_dir) / RUN_GC_TOMBSTONES_FILE_NAME
+
+
 def session_checkpoint(project_dir: Path, session_id: str) -> Path:
     """Per-session resume checkpoint (only exists while in-flight/paused)."""
     return session_dir(project_dir, session_id) / "checkpoint.json"
@@ -152,6 +181,58 @@ def session_intent(project_dir: Path, session_id: str) -> Path:
     Otto-managed runtime log.
     """
     return session_dir(project_dir, session_id) / "intent.txt"
+
+
+def session_commands_dir(project_dir: Path, run_id: str) -> Path:
+    return session_dir(project_dir, run_id) / COMMANDS_DIR_NAME
+
+
+def session_command_requests(project_dir: Path, run_id: str) -> Path:
+    return session_commands_dir(project_dir, run_id) / REQUESTS_FILE_NAME
+
+
+def session_command_requests_processing(project_dir: Path, run_id: str) -> Path:
+    return session_commands_dir(project_dir, run_id) / REQUESTS_PROCESSING_FILE_NAME
+
+
+def session_command_acks(project_dir: Path, run_id: str) -> Path:
+    return session_commands_dir(project_dir, run_id) / ACKS_FILE_NAME
+
+
+def merge_dir(project_dir: Path) -> Path:
+    return logs_dir(project_dir) / MERGE_DIR_NAME
+
+
+def merge_commands_dir(project_dir: Path) -> Path:
+    return merge_dir(project_dir) / COMMANDS_DIR_NAME
+
+
+def merge_command_requests(project_dir: Path) -> Path:
+    return merge_commands_dir(project_dir) / REQUESTS_FILE_NAME
+
+
+def merge_command_requests_processing(project_dir: Path) -> Path:
+    return merge_commands_dir(project_dir) / REQUESTS_PROCESSING_FILE_NAME
+
+
+def merge_command_acks(project_dir: Path) -> Path:
+    return merge_commands_dir(project_dir) / ACKS_FILE_NAME
+
+
+def queue_state_path(project_dir: Path) -> Path:
+    return Path(project_dir) / ".otto-queue-state.json"
+
+
+def queue_commands_path(project_dir: Path) -> Path:
+    return Path(project_dir) / ".otto-queue-commands.jsonl"
+
+
+def queue_commands_processing_path(project_dir: Path) -> Path:
+    return Path(project_dir) / ".otto-queue-commands.jsonl.processing"
+
+
+def queue_command_acks_path(project_dir: Path) -> Path:
+    return Path(project_dir) / ".otto-queue-commands.acks.jsonl"
 
 
 def legacy_checkpoint(project_dir: Path) -> Path:

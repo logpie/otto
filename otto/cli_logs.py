@@ -45,9 +45,7 @@ def _load_history_entries(project_dir: Path, *, limit_hint: int = 50) -> list[di
     for archive in paths.archived_pre_restructure_dirs(project_dir):
         sources.append(archive / paths.LEGACY_RUN_HISTORY)
 
-    seen_ids: set[tuple[str, str]] = set()
-    seen_run_ids: set[str] = set()
-    entries: list[tuple[tuple[float, int, int], dict]] = []
+    entries: list[tuple[tuple[float, int, int], int, int, dict]] = []
     for source_index, src in enumerate(sources):
         if not src.exists():
             continue
@@ -60,15 +58,6 @@ def _load_history_entries(project_dir: Path, *, limit_hint: int = 50) -> list[di
                 entry = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            # De-dup: prefer first occurrence (new file wins over legacy).
-            run_id = history_run_id(entry)
-            raw_command = str(entry.get("command") or "").strip()
-            key = (run_id, normalize_command_label(raw_command) if raw_command else "")
-            if run_id and (key in seen_ids or (not raw_command and run_id in seen_run_ids)):
-                continue
-            if run_id:
-                seen_ids.add(key)
-                seen_run_ids.add(run_id)
             entries.append((
                 _history_sort_key(
                     entry,
@@ -76,10 +65,51 @@ def _load_history_entries(project_dir: Path, *, limit_hint: int = 50) -> list[di
                     source_index=source_index,
                     line_index=line_index,
                 ),
+                source_index,
+                line_index,
                 entry,
             ))
-    entries.sort(key=lambda item: item[0])
-    return [entry for _, entry in entries]
+    selected = _dedupe_history_entries(entries)
+    selected.sort(key=lambda item: item[0])
+    return [entry for _, _, _, entry in selected]
+
+
+def _dedupe_history_entries(
+    entries: list[tuple[tuple[float, int, int], int, int, dict]],
+) -> list[tuple[tuple[float, int, int], int, int, dict]]:
+    selected: list[tuple[tuple[float, int, int], int, int, dict]] = []
+    selected_keys: set[tuple[str, str]] = set()
+    selected_no_command_run_ids: set[str] = set()
+    selected_command_run_ids: set[str] = set()
+
+    def preference(item: tuple[tuple[float, int, int], int, int, dict]) -> tuple[int, int, float, int]:
+        sort_key, source_index, line_index, entry = item
+        is_snapshot = (
+            entry.get("schema_version") == 2
+            and entry.get("history_kind") == "terminal_snapshot"
+        )
+        return (1 if is_snapshot else 0, -source_index, sort_key[0], line_index)
+
+    for item in sorted(entries, key=preference, reverse=True):
+        _, _, _, entry = item
+        run_id = history_run_id(entry)
+        raw_command = str(entry.get("command") or "").strip()
+        command = normalize_command_label(raw_command) if raw_command else ""
+        dedupe_key = str(entry.get("dedupe_key") or "").strip()
+        key = ("dedupe", dedupe_key) if dedupe_key else ("run-command", f"{run_id}:{command}")
+        if key in selected_keys:
+            continue
+        if run_id and not command and run_id in selected_command_run_ids:
+            continue
+        if run_id and command and run_id in selected_no_command_run_ids:
+            continue
+        selected.append(item)
+        selected_keys.add(key)
+        if run_id and command:
+            selected_command_run_ids.add(run_id)
+        elif run_id:
+            selected_no_command_run_ids.add(run_id)
+    return selected
 
 
 def _history_sort_key(

@@ -25,9 +25,13 @@ from typing import Any
 
 import yaml
 
+from otto import paths as otto_paths
+from otto.runs.registry import append_jsonl_row, read_jsonl_rows, utc_now_iso
+
 QUEUE_FILE = ".otto-queue.yml"
 STATE_FILE = ".otto-queue-state.json"
 COMMANDS_FILE = ".otto-queue-commands.jsonl"
+COMMAND_ACKS_FILE = ".otto-queue-commands.acks.jsonl"
 LOCK_FILE = ".otto-queue.lock"
 
 QUEUE_SCHEMA_VERSION = 1
@@ -67,11 +71,19 @@ def queue_path(project_dir: Path) -> Path:
 
 
 def state_path(project_dir: Path) -> Path:
-    return project_dir / STATE_FILE
+    return otto_paths.queue_state_path(project_dir)
 
 
 def commands_path(project_dir: Path) -> Path:
-    return project_dir / COMMANDS_FILE
+    return otto_paths.queue_commands_path(project_dir)
+
+
+def commands_processing_path(project_dir: Path) -> Path:
+    return otto_paths.queue_commands_processing_path(project_dir)
+
+
+def command_acks_path(project_dir: Path) -> Path:
+    return otto_paths.queue_command_acks_path(project_dir)
 
 
 def commands_lock_path(project_dir: Path) -> Path:
@@ -323,6 +335,84 @@ def drain_commands(project_dir: Path) -> list[dict[str, Any]]:
             continue
     proc_path.unlink()
     return out
+
+
+def load_command_ack_ids(project_dir: Path) -> set[str]:
+    return {
+        str(row.get("command_id") or "")
+        for row in read_jsonl_rows(command_acks_path(project_dir))
+        if row.get("command_id")
+    }
+
+
+def append_command_ack(
+    project_dir: Path,
+    cmd: dict[str, Any],
+    *,
+    writer_id: str,
+    outcome: str = "applied",
+    state_version: int | None = None,
+    note: str | None = None,
+) -> dict[str, Any] | None:
+    command_id = str(cmd.get("command_id") or "").strip()
+    if not command_id:
+        return None
+    row = {
+        "schema_version": 1,
+        "command_id": command_id,
+        "run_id": cmd.get("run_id"),
+        "acked_at": utc_now_iso(),
+        "writer_id": writer_id,
+        "outcome": outcome,
+        "state_version": state_version,
+        "note": note,
+    }
+    return append_jsonl_row(command_acks_path(project_dir), row)
+
+
+def begin_command_drain(project_dir: Path) -> list[dict[str, Any]]:
+    """Drain request logs into `.processing` and return unacked commands."""
+    path = commands_path(project_dir)
+    proc_path = commands_processing_path(project_dir)
+    lock_target = commands_lock_path(project_dir)
+    with open(lock_target, "w") as lf:
+        fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+        try:
+            if proc_path.exists():
+                if path.exists():
+                    with open(proc_path, "a") as pf:
+                        pf.write(path.read_text())
+                        pf.flush()
+                        os.fsync(pf.fileno())
+                    path.unlink()
+            elif path.exists():
+                path.rename(proc_path)
+            else:
+                return []
+        finally:
+            fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+
+    acked = load_command_ack_ids(project_dir)
+    out: list[dict[str, Any]] = []
+    for line in proc_path.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            cmd = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(cmd, dict):
+            continue
+        command_id = str(cmd.get("command_id") or "")
+        if command_id and command_id in acked:
+            continue
+        out.append(cmd)
+    return out
+
+
+def finish_command_drain(project_dir: Path) -> None:
+    commands_processing_path(project_dir).unlink(missing_ok=True)
 
 
 # ---------- atomic write helper ----------

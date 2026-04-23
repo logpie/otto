@@ -519,13 +519,16 @@ def _print_startup_context(console_: Any, project_dir: Path, run_id: str) -> Non
 
 def _new_run_id(project_dir: "Path | None" = None) -> str:
     """Unified session_id allocation (see otto.paths.new_session_id)."""
-    from otto import paths
+    injected = os.environ.get("OTTO_RUN_ID", "").strip()
+    if injected:
+        return injected
     if project_dir is None:
         # Fallback for callers that don't pass project_dir (legacy tests).
         import secrets
         stamp = time.strftime("%Y-%m-%d-%H%M%S")
         return f"{stamp}-{secrets.token_hex(3)}"
-    return paths.new_session_id(project_dir)
+    from otto.runs.registry import allocate_run_id
+    return allocate_run_id(project_dir)
 
 
 async def _run_spec_phase(

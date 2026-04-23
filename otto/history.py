@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-import json
 import time
-import warnings
 from collections import deque
 from pathlib import Path
 from typing import Any
 
 from otto import paths
-from otto.observability import append_text_log
 from otto.redaction import redact_text
+from otto.runs.history import append_history_snapshot
 
 
 def history_run_id(entry: dict[str, Any]) -> str:
@@ -42,10 +40,7 @@ def command_family(command: str | None) -> str:
 
 
 def append_history_entry(project_dir: Path, entry: dict[str, Any]) -> dict[str, Any]:
-    """Append one normalized entry to cross-session history."""
-    history_path = paths.history_jsonl(project_dir)
-    history_path.parent.mkdir(parents=True, exist_ok=True)
-
+    """Append one normalized terminal snapshot to cross-session history."""
     run_id = history_run_id(entry)
     payload = dict(entry)
     payload["run_id"] = run_id
@@ -59,20 +54,22 @@ def append_history_entry(project_dir: Path, entry: dict[str, Any]) -> dict[str, 
         if isinstance(value, str):
             payload[key] = redact_text(value)
 
-    try:
-        append_text_log(
-            history_path,
-            [json.dumps(payload, separators=(",", ":"))],
-            retries=1,
-            strict=True,
-        )
-    except OSError as exc:
-        warnings.warn(
-            f"cross-session history write failed: {history_path}: {exc}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-    return payload
+    payload.setdefault("domain", "atomic")
+    payload.setdefault("run_type", command_family(payload.get("command")))
+    payload.setdefault("history_kind", "terminal_snapshot")
+    payload.setdefault("status", "done" if payload.get("passed") else "failed")
+    payload.setdefault("terminal_outcome", "success" if payload.get("passed") else "failure")
+    payload.setdefault("finished_at", payload.get("timestamp"))
+    payload.setdefault("started_at", payload.get("started_at"))
+    payload.setdefault("queue_task_id", payload.get("queue_task_id"))
+    payload.setdefault("merge_id", payload.get("merge_id"))
+    payload.setdefault("branch", payload.get("branch"))
+    payload.setdefault("worktree", payload.get("worktree"))
+    payload.setdefault("resumable", payload.get("resumable", True))
+    payload.setdefault("manifest_path", payload.get("manifest_path"))
+    payload.setdefault("summary_path", payload.get("summary_path"))
+    payload.setdefault("primary_log_path", payload.get("primary_log_path"))
+    return append_history_snapshot(project_dir, payload, strict=True)
 
 
 def tail_jsonl_entries(path: Path, *, limit: int) -> list[tuple[int, str]]:

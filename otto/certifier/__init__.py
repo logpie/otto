@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import subprocess
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -2105,7 +2106,10 @@ async def run_agentic_certifier(
 
     from otto import paths
     if session_id is None:
-        session_id = paths.new_session_id(project_dir)
+        session_id = os.environ.get("OTTO_RUN_ID", "").strip()
+    if session_id is None or not session_id:
+        from otto.runs.registry import allocate_run_id
+        session_id = allocate_run_id(project_dir)
     prior_session_ids = [
         resolved.name
         for resolved in (
@@ -2130,6 +2134,47 @@ async def run_agentic_certifier(
     report_dir.mkdir(parents=True, exist_ok=True)
     evidence_dir = report_dir / "evidence"
     evidence_dir.mkdir(parents=True, exist_ok=True)
+    publisher = None
+    if write_history and write_session_summary and merge_context is None:
+        from otto.pipeline import _current_branch_name, _current_head_sha
+        from otto.runs.registry import RunPublisher, make_run_record
+
+        publisher = RunPublisher(
+            project_dir,
+            make_run_record(
+                project_dir=project_dir,
+                run_id=run_id,
+                domain="atomic",
+                run_type="certify",
+                command="certify",
+                display_name=f"certify: {intent[:80]}".strip(),
+                status="running",
+                cwd=project_dir,
+                identity={
+                    "queue_task_id": os.environ.get("OTTO_QUEUE_TASK_ID"),
+                    "merge_id": None,
+                    "parent_run_id": None,
+                },
+                source={
+                    "invoked_via": "queue" if os.environ.get("OTTO_INTERNAL_QUEUE_RUNNER") == "1" else "cli",
+                    "argv": list(sys.argv[1:]),
+                    "resumable": False,
+                },
+                git={"branch": _current_branch_name(project_dir), "worktree": None, "target_branch": None, "head_sha": _current_head_sha(project_dir)},
+                intent={"summary": intent[:200], "intent_path": str(project_dir / "intent.md"), "spec_path": None},
+                artifacts={
+                    "session_dir": str(paths.session_dir(project_dir, run_id)),
+                    "manifest_path": str(paths.session_dir(project_dir, run_id) / "manifest.json"),
+                    "checkpoint_path": None,
+                    "summary_path": str(paths.session_summary(project_dir, run_id)),
+                    "primary_log_path": str(report_dir / "narrative.log"),
+                    "extra_log_paths": [str(report_dir / "proof-of-work.html")],
+                },
+                adapter_key="atomic.certify",
+                last_event="starting",
+            ),
+        )
+        publisher.__enter__()
 
     prompt = _render_certifier_prompt(
         mode=mode,
@@ -2289,6 +2334,20 @@ async def run_agentic_certifier(
             intent=intent,
             command="certify",
             breakdown=breakdown_summary,
+        )
+
+    if publisher is not None:
+        publisher.finalize(
+            status="done" if passed else "failed",
+            terminal_outcome="success" if passed else "failure",
+            updates={
+                "metrics": {
+                    "cost_usd": float(cost or 0),
+                    "stories_passed": parsed.stories_passed,
+                    "stories_tested": parsed.stories_tested,
+                },
+                "last_event": "completed" if passed else "failed",
+            },
         )
 
     return report
