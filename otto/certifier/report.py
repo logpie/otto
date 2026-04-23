@@ -30,3 +30,4 @@ class CertificationReport:
     diagnosis: str = ""
     child_session_ids: list[str] = field(default_factory=list)
     subagent_errors: list[dict[str, Any]] = field(default_factory=list)
+    token_usage: dict[str, int] = field(default_factory=dict)

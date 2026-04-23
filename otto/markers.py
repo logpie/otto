@@ -207,18 +207,57 @@ def _extract_evidence(text: str) -> dict[str, str]:
     evidence: dict[str, str] = {}
     current_id: str | None = None
     lines: list[str] = []
-    for line in _iter_marker_lines(text):
+
+    fence_char = ""
+    fence_len = 0
+    in_frontmatter = False
+    at_document_start = True
+    for line in text.splitlines():
         stripped = line.strip()
+
+        if current_id is not None:
+            if stripped.startswith("STORY_EVIDENCE_END:"):
+                evidence[current_id] = "\n".join(lines)
+                current_id = None
+                lines = []
+            else:
+                lines.append(line)
+            continue
+
+        if line.startswith("    ") or line.startswith("\t"):
+            continue
+        if at_document_start and stripped == "---":
+            in_frontmatter = True
+            at_document_start = False
+            continue
+        if in_frontmatter:
+            if stripped == "---":
+                in_frontmatter = False
+            continue
+        if not stripped:
+            continue
+        at_document_start = False
+        if stripped.startswith(">"):
+            continue
+
+        match = re.match(r"^([`~]{3,})(.*)$", stripped)
+        if match:
+            marker = match.group(1)
+            char = marker[0]
+            if not fence_char:
+                fence_char = char
+                fence_len = len(marker)
+                continue
+            if char == fence_char and len(marker) >= fence_len:
+                fence_char = ""
+                fence_len = 0
+            continue
+        if fence_char:
+            continue
+
         if stripped.startswith("STORY_EVIDENCE_START:"):
             current_id = stripped.split(":", 1)[1].strip()
             lines = []
-        elif stripped.startswith("STORY_EVIDENCE_END:"):
-            if current_id:
-                evidence[current_id] = "\n".join(lines)
-            current_id = None
-            lines = []
-        elif current_id is not None:
-            lines.append(line)
     return evidence
 
 

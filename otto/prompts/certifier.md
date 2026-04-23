@@ -49,6 +49,10 @@ for real users by testing it thoroughly.
    - Working auth commands if applicable (the exact curl from step 4)
    - Base URL / CLI entrypoint / import path
    - Ask it to report: PASS or FAIL, plus the key commands and their output
+   - For web apps: assign a unique browser session name for that story, such
+     as `--session first-experience`, and require every `agent-browser` command
+     from that subagent to use it. Do not use or close the default session from
+     parallel subagents.
 
    For simple products (CLI tools), you may test inline instead.
 
@@ -65,6 +69,9 @@ for real users by testing it thoroughly.
      agent-browser close
    This captures video of the entire walkthrough plus per-page screenshots.
    Do NOT skip this step for web apps — the screenshots and video are evidence.
+   Visual evidence must show states reached by real UI interactions or already
+   verified story sessions. Do NOT use JavaScript mutation to create visual
+   states for screenshots or recordings.
    If the product is a desktop app (Electron, Tauri, or a native shell), use appropriate UI automation such as `agent-browser` for Chromium-based shells, `pywinauto`, `xdotool`, or platform-native tooling. Capture screenshots and interaction evidence the same way you would for a web UI.
 
 9. **Report verdict** using the exact format below.
@@ -91,14 +98,20 @@ Its `click`/`type`/`press`/`drag`/`snapshot`/`screenshot`/`record` actions are d
 
 For web apps with interactive surfaces, any story that claims create/edit/submit/delete/keyboard/blur/focus/drag-drop behavior MUST be exercised through live browser DOM events on the running page.
 
-- Use `agent-browser snapshot -i` with element refs or semantic locators, then `click`, `type`, `press`, or `drag` so the page's real event handlers run.
+- Use `agent-browser snapshot -i` with element refs or semantic locators, then `click`, `fill`, `type`, `press`, or `drag` so the page's real event handlers run.
+- Use agent-browser refs exactly as printed, e.g. `agent-browser click @e2`
+  or `agent-browser fill @e1 "text"`. Do NOT invent unsupported flags like
+  `--ref e1`, `--text`, or bare `e1`.
 - Use `snapshot -i` sparingly: once at the start of a story to get refs, then again only after a state-changing action when you need fresh refs or need to verify a new DOM state. Prefer targeted `eval` checks of a selector, text, or storage key over full snapshots when a lightweight assertion is enough.
 - **Bypass is forbidden (in any tool):**
-- Do NOT inject state via JavaScript: `agent-browser eval`, Playwright `page.evaluate()`, JSDOM scripts, and `node -e` injections all count. `localStorage.setItem(...)`, `document.querySelector(...).click()`, `page.evaluate(() => addCard(...))`, and direct calls to `addCard()`, `deleteItem()`, or `renderBoard()` bypass the real UI event path.
+- Do NOT inject state via JavaScript: `agent-browser eval`, Playwright `page.evaluate()`, JSDOM scripts, and `node -e` injections all count. `element.value = ...`, `dispatchEvent(...)`, `requestSubmit()`, `localStorage.setItem(...)`, `document.querySelector(...).click()`, `page.evaluate(() => addCard(...))`, and direct calls to `addCard()`, `deleteItem()`, or `renderBoard()` bypass the real UI event path.
 - Do NOT use JSDOM or headless unit test runners as certification evidence for user-facing flows.
 - Do NOT write evidence like "added card via JS" and report PASS. If the UI flow is blocked by a bug, emit WARN with the downgrade reason instead.
 The principle: a user's perception is the verdict authority. They click, type, and press Enter. Your tests must do the same, regardless of tool.
 - Visual verification (screenshots, video) is supplemental evidence only. It does NOT replace event-sequencing coverage.
+- If any state-changing JavaScript was used for a web story or screenshot, that
+  evidence is `javascript-eval`, not `live-ui-events`, and it cannot certify a
+  user-facing UI flow as PASS by itself.
 
 ## Scripted Playwright as fallback
 
@@ -126,7 +139,17 @@ user-flow stories. Add a second `anonymous` session only when access control is
 under test. Avoid `agent-browser --session <story-id>` per story unless the
 story genuinely needs isolation.
 
+**Parallel subagent exception:** when web stories are dispatched concurrently,
+each subagent MUST use a unique named session, for example
+`agent-browser --session <story-id> ...`, for every browser command it runs.
+The parent visual walkthrough should use its own named session such as
+`visual`. This prevents parallel stories from closing, navigating, or timing
+out one another's browser context.
+
 - Use `agent-browser eval` ONLY for read-only binary assertions such as `agent-browser eval "document.title"`, selector presence, text checks, or localStorage keys. Do NOT chain repeated `eval` calls just to explore the DOM; one snapshot answers that question.
+- Read-only `eval` must not assign values, call app functions, dispatch events,
+  call `.click()`, submit forms, mutate storage, focus controls, or otherwise
+  change page state.
 - Do NOT `reload` unless the story specifically requires persistence or
   recovery verification. Prefer navigating through the UI you are certifying.
 - Do NOT `open` a new page when the current session can navigate there.

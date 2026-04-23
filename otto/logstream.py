@@ -282,7 +282,12 @@ class JsonlMessageWriter:
         self._phase_name = (phase_name or "BUILD").strip().lower()
         self._phase = self._phase_name if self._phase_name in {"build", "certify", "spec"} else "build"
         self._phase_started_monotonic = self._start
-        self._phase_usage_current = {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}
+        self._phase_usage_current = {
+            "input_tokens": 0,
+            "cached_input_tokens": 0,
+            "output_tokens": 0,
+            "cost_usd": 0.0,
+        }
         self._phase_usage_totals: dict[str, dict[str, float | int]] = {}
         self._last_usage_seen: dict[str, float] | None = None
         self._tool_by_id: dict[str, str] = {}
@@ -342,13 +347,20 @@ class JsonlMessageWriter:
         if include_open and not self._closed:
             current = data.setdefault(
                 self._phase,
-                {"duration_s": 0.0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0},
+                {
+                    "duration_s": 0.0,
+                    "input_tokens": 0,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 0,
+                    "cost_usd": 0.0,
+                },
             )
             current["duration_s"] = float(current.get("duration_s", 0.0)) + max(
                 time.monotonic() - self._phase_started_monotonic,
                 0.0,
             )
             current["input_tokens"] = int(current.get("input_tokens", 0) or 0) + int(self._phase_usage_current.get("input_tokens", 0) or 0)
+            current["cached_input_tokens"] = int(current.get("cached_input_tokens", 0) or 0) + int(self._phase_usage_current.get("cached_input_tokens", 0) or 0)
             current["output_tokens"] = int(current.get("output_tokens", 0) or 0) + int(self._phase_usage_current.get("output_tokens", 0) or 0)
             current["cost_usd"] = float(current.get("cost_usd", 0.0) or 0.0) + float(self._phase_usage_current.get("cost_usd", 0.0) or 0.0)
         return data
@@ -391,6 +403,7 @@ class JsonlMessageWriter:
         if usage is not None:
             clean_usage = {
                 "input_tokens": int(usage.get("input_tokens", 0) or 0),
+                "cached_input_tokens": int(usage.get("cached_input_tokens", 0) or 0),
                 "output_tokens": int(usage.get("output_tokens", 0) or 0),
             }
             cost_value = usage.get("cost_usd")
@@ -413,8 +426,15 @@ class JsonlMessageWriter:
             return {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}
         current = {
             "input_tokens": max(int(usage.get("input_tokens", usage.get("tokens_in", 0)) or 0), 0),
+            "cached_input_tokens": max(int(usage.get("cached_input_tokens", 0) or 0), 0),
             "output_tokens": max(int(usage.get("output_tokens", usage.get("tokens_out", 0)) or 0), 0),
-            "cost_usd": float(usage.get("total_cost_usd", 0.0) or 0.0),
+            "cost_usd": float(
+                usage.get(
+                    "total_cost_usd",
+                    usage.get("cost_usd", usage.get("estimated_cost_usd", 0.0)),
+                )
+                or 0.0
+            ),
         }
         previous = self._last_usage_seen
         self._last_usage_seen = current
@@ -431,6 +451,7 @@ class JsonlMessageWriter:
     def _record_usage(self, record: dict[str, Any]) -> None:
         delta = self._usage_delta(record.get("usage"))
         self._phase_usage_current["input_tokens"] += int(delta.get("input_tokens", 0) or 0)
+        self._phase_usage_current["cached_input_tokens"] += int(delta.get("cached_input_tokens", 0) or 0)
         self._phase_usage_current["output_tokens"] += int(delta.get("output_tokens", 0) or 0)
         self._phase_usage_current["cost_usd"] += float(delta.get("cost_usd", 0.0) or 0.0)
 
@@ -441,13 +462,25 @@ class JsonlMessageWriter:
             self._write_phase_event("phase_end", phase, duration_s=duration_s, usage=usage)
         totals = self._phase_usage_totals.setdefault(
             phase,
-            {"duration_s": 0.0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0},
+            {
+                "duration_s": 0.0,
+                "input_tokens": 0,
+                "cached_input_tokens": 0,
+                "output_tokens": 0,
+                "cost_usd": 0.0,
+            },
         )
         totals["duration_s"] = float(totals.get("duration_s", 0.0)) + duration_s
         totals["input_tokens"] = int(totals.get("input_tokens", 0) or 0) + int(usage.get("input_tokens", 0) or 0)
+        totals["cached_input_tokens"] = int(totals.get("cached_input_tokens", 0) or 0) + int(usage.get("cached_input_tokens", 0) or 0)
         totals["output_tokens"] = int(totals.get("output_tokens", 0) or 0) + int(usage.get("output_tokens", 0) or 0)
         totals["cost_usd"] = float(totals.get("cost_usd", 0.0) or 0.0) + float(usage.get("cost_usd", 0.0) or 0.0)
-        self._phase_usage_current = {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}
+        self._phase_usage_current = {
+            "input_tokens": 0,
+            "cached_input_tokens": 0,
+            "output_tokens": 0,
+            "cost_usd": 0.0,
+        }
 
     def _start_phase(self, phase: str) -> None:
         self._phase = phase
@@ -656,7 +689,15 @@ class NarrativeFormatter:
 
         total_segment = "total="
         if isinstance(total_cost_usd, int | float):
-            total_segment += f"${float(total_cost_usd):.2f} "
+            if float(total_cost_usd) > 0:
+                total_segment += f"${float(total_cost_usd):.2f} "
+            else:
+                tokens = _total_token_usage(breakdown)
+                if tokens["input_tokens"] or tokens["output_tokens"]:
+                    total_segment += (
+                        f"{_format_compact_tokens(tokens['input_tokens'])} in/"
+                        f"{_format_compact_tokens(tokens['output_tokens'])} out "
+                    )
         total_segment += _format_elapsed_seconds(total_elapsed)
         parts.append(total_segment)
         return (
@@ -1167,6 +1208,26 @@ def _format_elapsed_seconds(elapsed_s: float) -> str:
         return f"{h}:{m:02d}:{s:02d}"
     m, s = divmod(secs, 60)
     return f"{m}:{s:02d}"
+
+
+def _format_compact_tokens(value: int | float) -> str:
+    number = max(float(value or 0), 0.0)
+    if number >= 1_000_000:
+        return f"{number / 1_000_000:.1f}M".rstrip("0").rstrip(".")
+    if number >= 1_000:
+        return f"{number / 1_000:.1f}K".rstrip("0").rstrip(".")
+    return str(int(number))
+
+
+def _total_token_usage(breakdown: dict[str, dict[str, Any]] | None) -> dict[str, int]:
+    totals = {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0}
+    for phase_data in (breakdown or {}).values():
+        if not isinstance(phase_data, dict):
+            continue
+        for key in totals:
+            if isinstance(phase_data.get(key), int | float):
+                totals[key] += int(phase_data[key])
+    return totals
 
 
 def _looks_like_closing_summary(text: str) -> bool:

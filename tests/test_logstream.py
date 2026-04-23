@@ -1090,6 +1090,32 @@ class TestMakeSessionLogger:
             "build",
         ]
 
+    def test_phase_usage_tracks_cached_input_tokens(self, tmp_path):
+        cbs = make_session_logger(tmp_path)
+        try:
+            cbs["on_message"](
+                AssistantMessage(
+                    content=[TextBlock(text="hello")],
+                    usage={
+                        "input_tokens": 100,
+                        "cached_input_tokens": 80,
+                        "output_tokens": 10,
+                    },
+                )
+            )
+        finally:
+            cbs["_close"]()
+
+        records = [
+            json.loads(line)
+            for line in (tmp_path / "messages.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        phase_end = [rec for rec in records if rec.get("type") == "phase_end"][-1]
+        assert phase_end["usage"]["input_tokens"] == 100
+        assert phase_end["usage"]["cached_input_tokens"] == 80
+        assert phase_end["usage"]["output_tokens"] == 10
+
     def test_subagent_error_event_is_written(self, tmp_path):
         cbs = make_session_logger(tmp_path)
         try:
