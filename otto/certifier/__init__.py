@@ -2253,8 +2253,9 @@ async def run_agentic_certifier(
 
     logger.info("Running agentic certifier on %s", project_dir)
     timeout = budget.for_call() if budget is not None else None
-    from otto.pipeline import _make_atomic_terminal_callback
+    from otto.pipeline import _make_atomic_heartbeat_callback, _make_atomic_terminal_callback
     terminal_callback = _make_atomic_terminal_callback(project_dir, run_id, console.print)
+    heartbeat_callback = _make_atomic_heartbeat_callback(project_dir, run_id)
 
     text, cost, agent_session_id, breakdown = await run_agent_with_timeout(
         prompt,
@@ -2264,6 +2265,7 @@ async def run_agentic_certifier(
         timeout=timeout,
         project_dir=project_dir,
         on_terminal_event=terminal_callback,
+        on_heartbeat=heartbeat_callback,
         verbose=verbose,
     )
 

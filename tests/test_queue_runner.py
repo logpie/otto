@@ -1507,3 +1507,66 @@ def test_reconcile_and_tick_preserve_running_orphaned_child_until_manifest_final
             os.killpg(child["pgid"], signal.SIGKILL)
         except ProcessLookupError:
             pass
+
+
+def test_tick_history_repair_waits_for_successful_state_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    repo = init_repo(tmp_path)
+    append_task(repo, QueueTask(id="t1", command_argv=["build", "x"]))
+    state = load_state(repo)
+    state["tasks"]["t1"] = {
+        "status": "done",
+        "finished_at": "2026-04-23T00:00:00Z",
+        "child": None,
+        "cost_usd": 0.0,
+        "duration_s": 0.0,
+        "failure_reason": None,
+        "attempt_run_id": "run-123",
+    }
+    write_state(repo, state)
+
+    runner = Runner(repo, RunnerConfig(), otto_bin="/bin/true")
+
+    def _boom(_state: dict[str, Any]) -> None:
+        raise runner_module.StatePersistenceError("disk full")
+
+    monkeypatch.setattr(runner, "_write_state_or_raise", _boom)
+
+    with pytest.raises(runner_module.StatePersistenceError, match="disk full"):
+        runner._tick()
+
+    assert not _paths.history_jsonl(repo).exists()
+    persisted = load_state(repo)
+    assert persisted["tasks"]["t1"].get("history_appended") is not True
+
+
+def test_startup_reconcile_history_repair_waits_for_successful_state_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    repo = init_repo(tmp_path)
+    append_task(repo, QueueTask(id="t1", command_argv=["build", "x"]))
+    state = load_state(repo)
+    state["tasks"]["t1"] = {
+        "status": "failed",
+        "finished_at": "2026-04-23T00:00:00Z",
+        "child": None,
+        "cost_usd": 0.0,
+        "duration_s": 0.0,
+        "failure_reason": "boom",
+        "attempt_run_id": "run-456",
+    }
+    write_state(repo, state)
+
+    runner = Runner(repo, RunnerConfig(), otto_bin="/bin/true")
+
+    def _boom(_state: dict[str, Any]) -> None:
+        raise runner_module.StatePersistenceError("disk full")
+
+    monkeypatch.setattr(runner, "_write_state_or_raise", _boom)
+
+    with pytest.raises(runner_module.StatePersistenceError, match="disk full"):
+        runner._reconcile_on_startup()
+
+    assert not _paths.history_jsonl(repo).exists()
+    persisted = load_state(repo)
+    assert persisted["tasks"]["t1"].get("history_appended") is not True

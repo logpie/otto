@@ -403,11 +403,18 @@ def _ack_atomic_cancel_commands(project_dir: Path, run_id: str) -> bool:
     return cancelled
 
 
+def _raise_if_atomic_cancel_requested(project_dir: Path, run_id: str) -> None:
+    if _ack_atomic_cancel_commands(project_dir, run_id):
+        raise KeyboardInterrupt("cancelled by command")
+
+
 def _make_atomic_terminal_callback(
     project_dir: Path,
     run_id: str,
     callback: Any,
 ) -> Any:
+    from otto.runs.registry import HEARTBEAT_INTERVAL_S
+
     if callback is None:
         return None
 
@@ -417,13 +424,19 @@ def _make_atomic_terminal_callback(
         nonlocal last_poll_at
         callback(message)
         now = time.monotonic()
-        if now - last_poll_at < 2.0:
+        if now - last_poll_at < HEARTBEAT_INTERVAL_S:
             return
         last_poll_at = now
-        if _ack_atomic_cancel_commands(project_dir, run_id):
-            raise KeyboardInterrupt("cancelled by command")
+        _raise_if_atomic_cancel_requested(project_dir, run_id)
 
     return _wrapped
+
+
+def _make_atomic_heartbeat_callback(project_dir: Path, run_id: str) -> Any:
+    def _heartbeat() -> None:
+        _raise_if_atomic_cancel_requested(project_dir, run_id)
+
+    return _heartbeat
 
 
 def _strict_mode_guidance(strict_mode: bool) -> str:
@@ -716,6 +729,7 @@ async def build_agentic_v3(
     # run_budget_seconds bounds the whole run.
     timeout = budget.for_call() if budget is not None else None
     terminal_callback = _make_atomic_terminal_callback(project_dir, build_id, console.print)
+    heartbeat_callback = _make_atomic_heartbeat_callback(project_dir, build_id)
 
     try:
         text, cost, session_id, breakdown_data = await run_agent_with_timeout(
@@ -726,6 +740,7 @@ async def build_agentic_v3(
             project_dir=project_dir,
             capture_tool_output=True,
             on_terminal_event=terminal_callback,
+            on_heartbeat=heartbeat_callback,
             verbose=verbose,
             strict_mode=strict_mode,
         )

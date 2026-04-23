@@ -391,6 +391,7 @@ async def run_agent_with_timeout(
     project_dir: Path,
     capture_tool_output: bool = False,
     on_terminal_event: Callable[[str], None] | None = None,
+    on_heartbeat: Callable[[], None] | None = None,
     verbose: bool = False,
     strict_mode: bool = False,
 ) -> tuple[str, float, str, dict[str, Any]]:
@@ -477,26 +478,52 @@ async def run_agent_with_timeout(
         return str(crash_path)
 
     heartbeat_task: asyncio.Task[None] | None = None
-    if on_terminal_event is not None:
-        async def _heartbeat() -> None:
-            interval_s = 20
+    heartbeat_error: BaseException | None = None
+    if on_terminal_event is not None or on_heartbeat is not None:
+        from otto.runs.registry import HEARTBEAT_INTERVAL_S
+
+        async def _heartbeat(agent_task: asyncio.Task[tuple[str, float, ResultMessage]]) -> None:
+            nonlocal heartbeat_error
+            interval_s = HEARTBEAT_INTERVAL_S
+            terminal_interval_s = 20.0
+            last_terminal_heartbeat_at = narrative.last_terminal_event_monotonic()
             while True:
                 await asyncio.sleep(interval_s)
-                if (asyncio.get_running_loop().time()
-                        - narrative.last_terminal_event_monotonic()) < interval_s:
-                    continue
-                narrative.write_heartbeat(_fmt_elapsed(narrative.phase_elapsed_seconds()))
-
-        heartbeat_task = asyncio.create_task(_heartbeat())
+                try:
+                    if on_heartbeat is not None:
+                        on_heartbeat()
+                    if on_terminal_event is None:
+                        continue
+                    now = asyncio.get_running_loop().time()
+                    if (now - narrative.last_terminal_event_monotonic()) < terminal_interval_s:
+                        continue
+                    if (now - last_terminal_heartbeat_at) < terminal_interval_s:
+                        continue
+                    narrative.write_heartbeat(_fmt_elapsed(narrative.phase_elapsed_seconds()))
+                    last_terminal_heartbeat_at = narrative.last_terminal_event_monotonic()
+                except BaseException as exc:  # pragma: no cover - exercised via agent_task cancellation path
+                    heartbeat_error = exc
+                    agent_task.cancel()
+                    return
 
     try:
-        text, cost, result_msg = await asyncio.wait_for(
-            run_agent_query(prompt, options,
-                            capture_tool_output=capture_tool_output,
-                            state=agent_state,
-                            **callbacks),
-            timeout=timeout,
+        agent_task = asyncio.create_task(
+            run_agent_query(
+                prompt,
+                options,
+                capture_tool_output=capture_tool_output,
+                state=agent_state,
+                **callbacks,
+            )
         )
+        if on_terminal_event is not None or on_heartbeat is not None:
+            heartbeat_task = asyncio.create_task(_heartbeat(agent_task))
+        try:
+            text, cost, result_msg = await asyncio.wait_for(agent_task, timeout=timeout)
+        except asyncio.CancelledError:
+            if heartbeat_error is not None:
+                raise heartbeat_error
+            raise
         session_id = getattr(result_msg, "session_id", "") or agent_state.get("session_id", "")
         if getattr(result_msg, "is_error", False) is True:
             reason = getattr(result_msg, "result", None) or "agent returned an error result"

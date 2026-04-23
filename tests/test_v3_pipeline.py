@@ -4,18 +4,19 @@ Mocks run_agent_query (no LLM calls). Tests the full pipeline wiring:
 prompt construction → result parsing → PoW writing → checkpoint → BuildResult.
 """
 
+import asyncio
 import json
-import subprocess
 from pathlib import Path
 import subprocess
+import time
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from otto.agent import AssistantMessage, TextBlock, ToolResultBlock, ToolUseBlock
+from otto.agent import AssistantMessage, ResultMessage, TextBlock, ToolResultBlock, ToolUseBlock
 from otto import paths as _paths
 from otto.pipeline import _ack_atomic_cancel_commands, _commit_artifacts, build_agentic_v3
-from otto.runs.registry import append_jsonl_row
+from otto.runs.registry import HEARTBEAT_INTERVAL_S, append_jsonl_row
 from tests.conftest import make_mock_query as _make_mock_query
 
 # `tmp_git_repo` fixture comes from tests/conftest.py.
@@ -455,6 +456,45 @@ def test_atomic_cancel_ack_waits_for_durable_checkpoint(tmp_git_repo, monkeypatc
     monkeypatch.setattr(checkpoint_module, "write_cancel_checkpoint_marker", real_writer)
     assert _ack_atomic_cancel_commands(tmp_git_repo, run_id) is True
 
+    ack_rows = _paths.session_command_acks(tmp_git_repo, run_id).read_text().splitlines()
+    assert len(ack_rows) == 1
+    checkpoint = json.loads(_paths.session_checkpoint(tmp_git_repo, run_id).read_text())
+    assert checkpoint["status"] == "paused"
+    assert checkpoint["phase"] == "cancel_requested"
+    assert checkpoint["cancel_requested"] is True
+
+
+@pytest.mark.asyncio
+async def test_silent_atomic_run_polls_cancel_on_heartbeat(tmp_git_repo):
+    run_id = "silent-cancel-123"
+
+    async def _enqueue_cancel() -> None:
+        await asyncio.sleep(0.1)
+        append_jsonl_row(
+            _paths.session_command_requests(tmp_git_repo, run_id),
+            {
+                "schema_version": 1,
+                "command_id": "cmd-heartbeat-cancel",
+                "run_id": run_id,
+                "domain": "atomic",
+                "kind": "cancel",
+                "requested_at": "2026-04-23T00:00:00Z",
+            },
+        )
+
+    async def _silent_run_agent_query(*args, **kwargs):
+        await asyncio.sleep(30)
+        return "", 0.0, ResultMessage(session_id=run_id, total_cost_usd=0.0)
+
+    cancel_task = asyncio.create_task(_enqueue_cancel())
+    started_at = time.monotonic()
+    with patch("otto.agent.run_agent_query", side_effect=_silent_run_agent_query):
+        with pytest.raises(KeyboardInterrupt, match="cancelled by command"):
+            await build_agentic_v3("test", tmp_git_repo, {}, run_id=run_id)
+    elapsed = time.monotonic() - started_at
+    await cancel_task
+
+    assert elapsed < HEARTBEAT_INTERVAL_S + 1.0
     ack_rows = _paths.session_command_acks(tmp_git_repo, run_id).read_text().splitlines()
     assert len(ack_rows) == 1
     checkpoint = json.loads(_paths.session_checkpoint(tmp_git_repo, run_id).read_text())

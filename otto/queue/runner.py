@@ -433,7 +433,6 @@ class Runner:
 
         # Reap finished children
         self._reap_children(state)
-        self._repair_terminal_queue_history(tasks, state)
 
         # Dispatch new work (skip during graceful shutdown)
         if self.shutdown_level is None:
@@ -441,6 +440,7 @@ class Runner:
 
         # Persist state
         self._write_state_or_raise(state)
+        self._repair_terminal_queue_history(tasks, state)
         for cmd in applied_commands:
             append_command_ack(
                 self.project_dir,
@@ -543,8 +543,8 @@ class Runner:
                 ts["resumed_from_checkpoint"] = True
             else:
                 _mark_failed(ts, "watcher restart: child gone, no checkpoint")
-        self._repair_terminal_queue_history(list(tasks_by_id.values()), state)
         self._write_state_or_raise(state)
+        self._repair_terminal_queue_history(list(tasks_by_id.values()), state)
         for cmd in commands:
             append_command_ack(
                 self.project_dir,
@@ -699,7 +699,6 @@ class Runner:
                     self._finish_terminating(ts)
                 else:
                     self._finalize_task_from_manifest(ts, tid)
-                self._finalize_queue_attempt(tid, ts)
                 self._join_output_pump(pid)
                 logger.info("reaped %s: %s (observed dead after ECHILD)", tid, ts.get("status"))
                 continue
@@ -710,12 +709,10 @@ class Runner:
             if status == "terminating":
                 ts["exit_code"] = exit_code
                 self._finish_terminating(ts)
-                self._finalize_queue_attempt(tid, ts)
                 self._join_output_pump(pid)
                 logger.info("reaped %s: %s", tid, ts.get("status"))
                 continue
             self._finalize_task_from_manifest(ts, tid, exit_code=exit_code)
-            self._finalize_queue_attempt(tid, ts)
             self._join_output_pump(pid)
             if ts.get("status") == "done":
                 logger.info(
