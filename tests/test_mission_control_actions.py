@@ -7,6 +7,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import otto.tui.mission_control_actions as mission_control_actions
 from otto import paths
 from otto.queue.schema import QueueTask, append_task, write_state as write_queue_state
 from otto.runs.registry import make_run_record, read_jsonl_rows, write_record
@@ -460,6 +461,32 @@ def test_merge_selected_and_all_shell_out(tmp_path: Path, monkeypatch) -> None:
 
     assert _FakePopen.calls[0]["argv"][-3:] == ["merge", "task-1", "task-2"]
     assert _FakePopen.calls[1]["argv"][-2:] == ["merge", "--all"]
+
+
+def test_otto_cli_argv_prefers_entrypoint_next_to_python(monkeypatch, tmp_path: Path) -> None:
+    fake_python = tmp_path / "bin" / "python"
+    fake_otto = tmp_path / "bin" / "otto"
+    fake_python.parent.mkdir(parents=True)
+    fake_python.write_text("")
+    fake_otto.write_text("")
+    monkeypatch.setattr(mission_control_actions.sys, "executable", str(fake_python))
+
+    assert mission_control_actions._otto_cli_argv("merge", "--all") == [str(fake_otto), "merge", "--all"]
+
+
+def test_otto_cli_argv_falls_back_to_python_module(monkeypatch, tmp_path: Path) -> None:
+    fake_python = tmp_path / "bin" / "python"
+    fake_python.parent.mkdir(parents=True)
+    fake_python.write_text("")
+    monkeypatch.setattr(mission_control_actions.sys, "executable", str(fake_python))
+
+    assert mission_control_actions._otto_cli_argv("merge", "--all") == [
+        str(fake_python),
+        "-m",
+        "otto.cli",
+        "merge",
+        "--all",
+    ]
 
 
 def test_queue_cancel_without_task_id_fails_fast(tmp_path: Path) -> None:

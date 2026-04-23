@@ -13,7 +13,6 @@ import click
 from otto.display import CONTEXT_SETTINGS, console, rich_escape
 from otto.config import ConfigError, require_git, resolve_project_dir
 from otto.theme import error_console
-from otto.cli import _signal_interrupt_guard
 
 
 def _positive_budget_option(
@@ -232,6 +231,8 @@ def _run_improve(
 
     from otto import paths as _paths
     try:
+        from otto.cli import _signal_interrupt_guard
+
         with _signal_interrupt_guard():
             with _paths.project_lock(project_dir, command_id, break_lock=break_lock):
                 run_id = resume_state.run_id or ""
