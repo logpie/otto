@@ -472,6 +472,46 @@ class TestStandaloneCertifierPrompt:
         assert "{spec_section}" not in rendered
         assert "## Spec" not in rendered
 
+    def test_standalone_certifier_inherits_spec_from_prior_session(self, tmp_path):
+        from otto.certifier import _render_certifier_prompt
+
+        session_spec = tmp_path / "otto_logs" / "sessions" / "run-1" / "spec" / "spec.md"
+        session_spec.parent.mkdir(parents=True)
+        session_spec.write_text(MINIMAL_VALID)
+
+        rendered = _render_certifier_prompt(
+            mode="thorough",
+            intent="counter app",
+            evidence_dir=tmp_path / "evidence",
+            project_dir=tmp_path,
+            prior_session_ids=["run-1"],
+        )
+
+        assert "## Spec" in rendered
+        assert "Must Have" in rendered
+        assert "Increment button" in rendered
+
+    def test_certifier_prompts_include_product_type_matrix_and_desktop_guidance(self, tmp_path):
+        from otto.certifier import _render_certifier_prompt
+
+        standard = _render_certifier_prompt(
+            mode="standard",
+            intent="desktop app",
+            evidence_dir=tmp_path / "evidence",
+        )
+        thorough = _render_certifier_prompt(
+            mode="thorough",
+            intent="grpc service",
+            evidence_dir=tmp_path / "evidence-thorough",
+        )
+
+        for rendered in (standard, thorough):
+            assert "Product-type interaction matrix:" in rendered
+            assert "- gRPC service: use `grpcurl`;" in rendered
+            assert "- Queue consumer / worker: enqueue a test message;" in rendered
+            assert "- Batch / data pipeline: feed fixture inputs;" in rendered
+            assert "Desktop app" in rendered or "desktop app" in rendered
+
 
 class TestReviewSpecResumeState:
     @pytest.mark.asyncio

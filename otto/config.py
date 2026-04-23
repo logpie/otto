@@ -57,6 +57,7 @@ DEFAULTS: dict[str, Any] = {
     "skip_product_qa":        False,
     "split_mode":             False,
     "strict_mode":            False,
+    "allow_dirty_repo":       False,
 
     # Features (opt-in)
     "memory":                 False,
@@ -80,10 +81,36 @@ DEFAULT_CONFIG: dict[str, Any] = DEFAULTS
 
 SUPPORTED_PROVIDERS = {"claude", "codex"}
 SUPPORTED_CERTIFIER_MODES = ("fast", "standard", "thorough", "hillclimb", "target")
+_REPO_STATE_MARKERS: tuple[tuple[str, str], ...] = (
+    ("MERGE_HEAD", "merge in progress"),
+    ("rebase-merge", "rebase in progress"),
+    ("rebase-apply", "rebase/apply in progress"),
+    ("CHERRY_PICK_HEAD", "cherry-pick in progress"),
+    ("REVERT_HEAD", "revert in progress"),
+    ("BISECT_LOG", "bisect in progress"),
+)
 
 
 class ConfigError(ValueError):
     """User-facing configuration error."""
+
+
+def _run_git(
+    project_dir: Path,
+    *args: str,
+    check: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+            check=check,
+        )
+    except OSError as exc:
+        raise ConfigError(f"Failed to run git {' '.join(args)!r}: {exc}") from exc
+    return result
 
 
 def _normalize_intent(s: str) -> str:
@@ -370,7 +397,6 @@ def resolve_intent(project_dir: Path) -> str | None:
             )
     return None
 
-
 def resolve_intent_for_enqueue(
     project_dir: Path, *, explicit: str | None = None,
 ) -> str | None:
@@ -385,6 +411,52 @@ def resolve_intent_for_enqueue(
         if trimmed:
             return trimmed
     return resolve_intent(project_dir)
+
+def resolve_intent_provenance(project_dir: Path) -> dict[str, str]:
+    """Return intent text plus the source/fallback metadata used to resolve it."""
+    intent_path = project_dir / "intent.md"
+    readme_path = project_dir / "README.md"
+    fallback_reason = ""
+    source = ""
+    resolved_text = ""
+
+    if intent_path.exists():
+        try:
+            intent = intent_path.read_text().strip()
+        except (UnicodeDecodeError, IsADirectoryError, PermissionError, OSError) as exc:
+            fallback_reason = f"intent.md was unreadable: {exc}"
+        else:
+            if intent and not _looks_like_intent_log(intent):
+                return {
+                    "source": "intent.md",
+                    "fallback_reason": "",
+                    "resolved_text": validate_text_limit(
+                        intent,
+                        kind="intent",
+                        source=str(intent_path),
+                        max_chars=MAX_INTENT_CHARS,
+                    ),
+                }
+            fallback_reason = "intent.md was empty or looked like an Otto-generated intent log"
+
+    if readme_path.exists():
+        try:
+            readme = readme_path.read_text().strip()
+        except (UnicodeDecodeError, IsADirectoryError, PermissionError, OSError) as exc:
+            raise ConfigError(f"Failed to read {readme_path}: {exc}") from exc
+        if readme:
+            source = "README.md"
+            resolved_text = validate_text_limit(
+                readme,
+                kind="intent",
+                source=str(readme_path),
+                max_chars=MAX_INTENT_CHARS,
+            )
+    return {
+        "source": source,
+        "fallback_reason": fallback_reason,
+        "resolved_text": resolved_text,
+    }
 
 
 def _looks_like_intent_log(text: str) -> bool:
@@ -428,6 +500,109 @@ def git_meta_dir(project_dir: Path) -> Path:
     if not path.is_absolute():
         path = (project_dir / path).resolve()
     return path
+
+
+def git_dir(project_dir: Path) -> Path:
+    """Return the worktree-specific git dir (`git rev-parse --git-dir`)."""
+    result = _run_git(project_dir, "rev-parse", "--git-dir")
+    if result.returncode != 0 or not (result.stdout or "").strip():
+        stderr = (result.stderr or "").strip()
+        raise ConfigError(
+            f"Could not resolve git dir for {project_dir}: {stderr or 'unknown git error'}"
+        )
+    path = Path((result.stdout or "").strip())
+    if not path.is_absolute():
+        path = (project_dir / path).resolve()
+    return path
+
+
+def repo_preflight_issues(project_dir: Path) -> dict[str, list[str]]:
+    """Return dirty-vs-blocking repo-state issues before build/improve runs."""
+    dirty_issues: list[str] = []
+    blocking_issues: list[str] = []
+    dirty_files: list[str] = []
+
+    worktree = _run_git(project_dir, "diff", "--quiet")
+    if worktree.returncode == 1:
+        dirty_issues.append("working tree has unstaged changes")
+    elif worktree.returncode not in (0, 1):
+        stderr = (worktree.stderr or "").strip()
+        blocking_issues.append(
+            f"`git diff --quiet` failed: {stderr or 'unknown git error'}"
+        )
+
+    index = _run_git(project_dir, "diff", "--cached", "--quiet")
+    if index.returncode == 1:
+        dirty_issues.append("index has staged but uncommitted changes")
+    elif index.returncode not in (0, 1):
+        stderr = (index.stderr or "").strip()
+        blocking_issues.append(
+            f"`git diff --cached --quiet` failed: {stderr or 'unknown git error'}"
+        )
+
+    unmerged = _run_git(project_dir, "diff", "--name-only", "--diff-filter=U")
+    if unmerged.returncode != 0:
+        stderr = (unmerged.stderr or "").strip()
+        blocking_issues.append(
+            f"`git diff --name-only --diff-filter=U` failed: {stderr or 'unknown git error'}"
+        )
+    else:
+        conflicted = [line.strip() for line in unmerged.stdout.splitlines() if line.strip()]
+        if conflicted:
+            blocking_issues.append(
+                f"repository has unmerged paths: {', '.join(conflicted[:5])}"
+            )
+
+    try:
+        current_git_dir = git_dir(project_dir)
+    except ConfigError as exc:
+        blocking_issues.append(str(exc))
+    else:
+        for name, label in _REPO_STATE_MARKERS:
+            if (current_git_dir / name).exists():
+                blocking_issues.append(f"repository has {label}")
+
+    if dirty_issues:
+        try:
+            status = _run_git(project_dir, "status", "--porcelain")
+            if status.returncode == 0:
+                for line in (status.stdout or "").splitlines():
+                    path = line[3:].strip() if len(line) > 3 else line.strip()
+                    if " -> " in path:
+                        path = path.split(" -> ", 1)[1].strip()
+                    if path:
+                        dirty_files.append(path)
+                    if len(dirty_files) >= 20:
+                        break
+        except Exception:
+            dirty_files = []
+
+    return {"dirty": dirty_issues, "blocking": blocking_issues, "dirty_files": dirty_files}
+
+
+def ensure_safe_repo_state(project_dir: Path, *, allow_dirty: bool = False) -> None:
+    """Refuse dirty/conflicted repos unless the caller explicitly opts in."""
+    issues = repo_preflight_issues(project_dir)
+    blocking = list(issues["blocking"])
+    dirty = [] if allow_dirty else list(issues["dirty"])
+    problems = [*blocking, *dirty]
+    if not problems:
+        return
+    dirty_files = list(issues.get("dirty_files", []) or [])
+    dirty_suffix = ""
+    if dirty_files:
+        dirty_suffix = "\nFirst dirty files:\n" + "\n".join(f"- {path}" for path in dirty_files)
+    suffix = (
+        "Resolve the repo state above before running Otto."
+        if allow_dirty and blocking
+        else "Re-run with `--allow-dirty` only if you intentionally want Otto to proceed on a dirty tree."
+    )
+    raise ConfigError(
+        "Refusing to run Otto in the current git state:\n"
+        + "\n".join(f"- {item}" for item in problems)
+        + dirty_suffix
+        + f"\n{suffix}"
+    )
 
 
 def _merge_defaults(raw: dict[str, Any]) -> dict[str, Any]:
@@ -665,7 +840,8 @@ def detect_test_command(project_dir: Path) -> str | None:
     project with Python e2e tests), chains them with &&.
     Returns None only if no framework detected.
     """
-    candidates = []
+    candidates: list[str] = []
+    has_orchestrator = False
 
     # npm/node/deno test (check first — JS projects often also have tests/ dir)
     pkg_json = project_dir / "package.json"
@@ -708,6 +884,19 @@ def detect_test_command(project_dir: Path) -> str | None:
     # Also check root-level test files
     if not has_py_tests:
         has_py_tests = any(project_dir.glob("test_*.py"))
+    if not has_py_tests:
+        pytest_ini = project_dir / "pytest.ini"
+        setup_cfg = project_dir / "setup.cfg"
+        pyproject = project_dir / "pyproject.toml"
+        has_py_tests = pytest_ini.exists()
+        if not has_py_tests and setup_cfg.exists():
+            has_py_tests = "[tool:pytest]" in setup_cfg.read_text()
+        if not has_py_tests and pyproject.exists():
+            try:
+                pyproject_data = pyproject.read_text()
+            except OSError:
+                pyproject_data = ""
+            has_py_tests = "[tool.pytest.ini_options]" in pyproject_data
     if has_py_tests:
         # Check project venv first — Flask/Django projects install deps there
         venv_pytest = project_dir / ".venv" / "bin" / "pytest"
@@ -721,11 +910,13 @@ def detect_test_command(project_dir: Path) -> str | None:
         # tox already detected — don't also add pytest (tox runs it)
         candidates = [c for c in candidates if c not in ("pytest",) and not c.endswith("/pytest")]
         candidates.append("tox")
+        has_orchestrator = True
 
     # nox (Python test runner — similar to tox)
     if (project_dir / "noxfile.py").exists():
         candidates = [c for c in candidates if c not in ("pytest",) and not c.endswith("/pytest")]
         candidates.append("nox")
+        has_orchestrator = True
 
     # go test
     if (project_dir / "go.mod").exists():
@@ -754,7 +945,13 @@ def detect_test_command(project_dir: Path) -> str | None:
     # make test (generic fallback)
     makefile = project_dir / "Makefile"
     if makefile.exists() and "test:" in makefile.read_text():
-        candidates.append("make test")
+        makefile_text = makefile.read_text()
+        wraps_known_orchestrator = any(
+            token in makefile_text
+            for token in ("tox", "nox", "pytest", "python -m pytest", "python -m unittest")
+        )
+        if not wraps_known_orchestrator and not has_orchestrator:
+            candidates.append("make test")
 
     if not candidates:
         return None
@@ -902,15 +1099,19 @@ def require_git() -> None:
 def checkpoint_fingerprint(project_dir: Path) -> dict[str, str]:
     """Capture a lightweight resume fingerprint for the current workspace."""
     try:
-        git_sha = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=project_dir,
-            capture_output=True,
-            text=True,
-            check=False,
-        ).stdout.strip()
-    except OSError:
+        git_sha = _run_git(project_dir, "rev-parse", "HEAD").stdout.strip()
+    except ConfigError:
         git_sha = ""
+
+    try:
+        git_status = _run_git(
+            project_dir,
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+        ).stdout
+    except ConfigError:
+        git_status = ""
 
     prompt_dir = Path(__file__).resolve().parent / "prompts"
     digest = hashlib.sha256()
@@ -926,5 +1127,6 @@ def checkpoint_fingerprint(project_dir: Path) -> dict[str, str]:
 
     return {
         "git_sha": git_sha,
+        "git_status": git_status,
         "prompt_hash": prompt_hash,
     }

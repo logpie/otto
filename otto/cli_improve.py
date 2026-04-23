@@ -11,8 +11,9 @@ from pathlib import Path
 import click
 
 from otto.display import CONTEXT_SETTINGS, console, rich_escape
-from otto.config import require_git, resolve_project_dir
+from otto.config import ConfigError, require_git, resolve_project_dir
 from otto.theme import error_console
+from otto.cli import _signal_interrupt_guard
 
 
 def _positive_budget_option(
@@ -67,9 +68,9 @@ def _exit_for_lock_busy(exc) -> None:
 
 def _resolve_intent(project_dir: Path) -> str | None:
     """Resolve product description from intent.md or README.md."""
-    from otto.config import _normalize_intent, resolve_intent
+    from otto.config import _normalize_intent, resolve_intent_provenance
     try:
-        intent = _normalize_intent(resolve_intent(project_dir) or "")
+        intent = _normalize_intent(resolve_intent_provenance(project_dir).get("resolved_text", "") or "")
     except Exception as exc:
         error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
         sys.exit(2)
@@ -154,6 +155,7 @@ def _run_improve(
     in_worktree: bool = False,
     break_lock: bool = False,
     force: bool = False,
+    allow_dirty: bool = False,
     cli_overrides: dict | None = None,
 ) -> None:
     """CLI wrapper: branch creation, display, and report around the shared loop.
@@ -230,27 +232,29 @@ def _run_improve(
 
     from otto import paths as _paths
     try:
-        with _paths.project_lock(project_dir, command_id, break_lock=break_lock):
-            run_id = resume_state.run_id or ""
-            if not run_id:
-                run_id = _paths.new_session_id(project_dir)
-            _run_improve_locked(
-                project_dir=project_dir,
-                intent=intent,
-                rounds=rounds,
-                focus=focus,
-                certifier_mode=certifier_mode,
-                command_label=command_label,
-                command_id=command_id,
-                subcommand=subcommand,
-                target=target,
-                split=split,
-                resume=resume,
-                resume_state=resume_state,
-                run_id=run_id,
-                in_worktree=in_worktree,
-                cli_overrides=cli_overrides or {},
-            )
+        with _signal_interrupt_guard():
+            with _paths.project_lock(project_dir, command_id, break_lock=break_lock):
+                run_id = resume_state.run_id or ""
+                if not run_id:
+                    run_id = _paths.new_session_id(project_dir)
+                _run_improve_locked(
+                    project_dir=project_dir,
+                    intent=intent,
+                    rounds=rounds,
+                    focus=focus,
+                    certifier_mode=certifier_mode,
+                    command_label=command_label,
+                    command_id=command_id,
+                    subcommand=subcommand,
+                    target=target,
+                    split=split,
+                    resume=resume,
+                    resume_state=resume_state,
+                    run_id=run_id,
+                    in_worktree=in_worktree,
+                    allow_dirty=allow_dirty,
+                    cli_overrides=cli_overrides or {},
+                )
     except _paths.LockBreakError as exc:
         error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
         sys.exit(1)
@@ -274,11 +278,12 @@ def _run_improve_locked(
     resume_state,
     run_id: str,
     in_worktree: bool = False,
+    allow_dirty: bool = False,
     cli_overrides: dict | None = None,
 ) -> None:
     from otto import paths as _paths
     from otto.cli import _load_config_or_exit, _print_config_banner, _record_cli_override
-    from otto.config import get_max_rounds, get_max_turns_per_call
+    from otto.config import ensure_safe_repo_state, get_max_rounds, get_max_turns_per_call
     from otto.pipeline import build_agentic_v3, run_certify_fix_loop
 
     config_path = project_dir / "otto.yaml"
@@ -357,7 +362,21 @@ def _run_improve_locked(
     if overrides.get("strict"):
         config["strict_mode"] = True
         sources["strict_mode"] = "--strict"
+    if allow_dirty:
+        config["allow_dirty_repo"] = True
+        sources["allow_dirty_repo"] = "--allow-dirty"
+    if overrides.get("debug_unredacted"):
+        config["debug_unredacted"] = True
+        sources["debug_unredacted"] = "--debug-unredacted"
     config["_verbose"] = bool(overrides.get("verbose"))
+    try:
+        from otto.config import resolve_intent_provenance
+
+        intent_meta = resolve_intent_provenance(project_dir)
+    except Exception:
+        intent_meta = {}
+    config["_intent_source"] = intent_meta.get("source") or "cli-argument"
+    config["_intent_fallback_reason"] = intent_meta.get("fallback_reason") or ""
     try:
         config["max_certify_rounds"] = get_max_rounds(config)
         config["max_turns_per_call"] = get_max_turns_per_call(config)
@@ -365,6 +384,46 @@ def _run_improve_locked(
         error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
         sys.exit(2)
     _print_config_banner(console, config, sources, config_path)
+    if overrides.get("debug_unredacted"):
+        console.print("  [bold red]UNREDACTED LOGS — do not share[/bold red]")
+    try:
+        ensure_safe_repo_state(project_dir, allow_dirty=allow_dirty)
+    except ConfigError as exc:
+        if resume_state.run_id:
+            try:
+                from otto.checkpoint import load_checkpoint, write_checkpoint
+                from otto.observability import dirty_worktree_files
+
+                prior_cp = load_checkpoint(project_dir, run_id=resume_state.run_id) or {}
+                write_checkpoint(
+                    project_dir,
+                    run_id=resume_state.run_id,
+                    command=prior_cp.get("command", command_id) or command_id,
+                    certifier_mode=prior_cp.get("certifier_mode", certifier_mode) or certifier_mode,
+                    prompt_mode=prior_cp.get("prompt_mode", "improve") or "improve",
+                    focus=prior_cp.get("focus"),
+                    target=prior_cp.get("target"),
+                    max_rounds=int(prior_cp.get("max_rounds", resolved_rounds) or resolved_rounds),
+                    status=prior_cp.get("status", "paused") or "paused",
+                    phase=prior_cp.get("phase", "") or "",
+                    split_mode=prior_cp.get("split_mode"),
+                    session_id=prior_cp.get("agent_session_id", "") or "",
+                    current_round=int(prior_cp.get("current_round", 0) or 0),
+                    total_cost=float(prior_cp.get("total_cost", 0.0) or 0.0),
+                    total_duration=float(prior_cp.get("total_duration", 0.0) or 0.0),
+                    rounds=list(prior_cp.get("rounds", []) or []),
+                    child_session_ids=list(prior_cp.get("child_session_ids", []) or []),
+                    intent=prior_cp.get("intent"),
+                    spec_path=prior_cp.get("spec_path"),
+                    spec_hash=prior_cp.get("spec_hash"),
+                    spec_version=int(prior_cp.get("spec_version", 0) or 0),
+                    spec_cost=float(prior_cp.get("spec_cost", 0.0) or 0.0),
+                    dirty_files=dirty_worktree_files(project_dir),
+                )
+            except Exception:
+                pass
+        error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
+        sys.exit(2)
 
     from otto.budget import RunBudget
     budget = RunBudget.start_from(
@@ -598,9 +657,11 @@ def register_improve_commands(main: click.Group) -> None:
     @click.option("--thorough", is_flag=True, help="Bug certification depth (default)")
     @click.option("--strict", is_flag=True, help="Require two consecutive PASS rounds before stopping")
     @click.option("--verbose", is_flag=True, help="Show detailed live progress, including tool-call counts")
+    @click.option("--debug-unredacted", is_flag=True, help="Also write unredacted raw logs under sessions/<id>/raw/ (do not share)")
+    @click.option("--allow-dirty", is_flag=True, help="Proceed even if the repo has tracked modifications, staged changes, or an in-progress git operation")
     @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
     @click.option("--force", is_flag=True, help="Override resume checkpoint mismatch checks")
-    def bugs(focus, rounds, split, resume, force_cross_command_resume, in_worktree, budget, max_turns, model, provider, effort, fast, standard, thorough, strict, verbose, break_lock, force):
+    def bugs(focus, rounds, split, resume, force_cross_command_resume, in_worktree, budget, max_turns, model, provider, effort, fast, standard, thorough, strict, verbose, debug_unredacted, allow_dirty, break_lock, force):
         """Find and fix bugs, edge cases, and error handling gaps.
 
         One agent certifies, reads findings, fixes, and re-certifies
@@ -635,6 +696,7 @@ def register_improve_commands(main: click.Group) -> None:
             in_worktree=in_worktree,
             break_lock=break_lock,
             force=force,
+            allow_dirty=allow_dirty,
             cli_overrides={
                 "budget": budget,
                 "max_turns": max_turns,
@@ -643,6 +705,7 @@ def register_improve_commands(main: click.Group) -> None:
                 "effort": effort,
                 "strict": strict,
                 "verbose": verbose,
+                "debug_unredacted": debug_unredacted,
                 "certifier_mode_explicit": bool(fast or standard or thorough),
             },
         )
@@ -666,9 +729,11 @@ def register_improve_commands(main: click.Group) -> None:
     @click.option("--effort", default=None, help="Override effort level for every agent: low | medium | high | max")
     @click.option("--strict", is_flag=True, help="Require two consecutive PASS rounds before stopping")
     @click.option("--verbose", is_flag=True, help="Show detailed live progress, including tool-call counts")
+    @click.option("--debug-unredacted", is_flag=True, help="Also write unredacted raw logs under sessions/<id>/raw/ (do not share)")
+    @click.option("--allow-dirty", is_flag=True, help="Proceed even if the repo has tracked modifications, staged changes, or an in-progress git operation")
     @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
     @click.option("--force", is_flag=True, help="Override resume checkpoint mismatch checks")
-    def feature(focus, rounds, split, resume, force_cross_command_resume, in_worktree, budget, max_turns, model, provider, effort, strict, verbose, break_lock, force):
+    def feature(focus, rounds, split, resume, force_cross_command_resume, in_worktree, budget, max_turns, model, provider, effort, strict, verbose, debug_unredacted, allow_dirty, break_lock, force):
         """Suggest and implement product improvements.
 
         One agent evaluates the product, identifies improvements, implements
@@ -697,6 +762,7 @@ def register_improve_commands(main: click.Group) -> None:
             in_worktree=in_worktree,
             break_lock=break_lock,
             force=force,
+            allow_dirty=allow_dirty,
             cli_overrides={
                 "budget": budget,
                 "max_turns": max_turns,
@@ -705,6 +771,7 @@ def register_improve_commands(main: click.Group) -> None:
                 "effort": effort,
                 "strict": strict,
                 "verbose": verbose,
+                "debug_unredacted": debug_unredacted,
             },
         )
 
@@ -727,9 +794,11 @@ def register_improve_commands(main: click.Group) -> None:
     @click.option("--effort", default=None, help="Override effort level for every agent: low | medium | high | max")
     @click.option("--strict", is_flag=True, help="Require two consecutive PASS rounds before stopping")
     @click.option("--verbose", is_flag=True, help="Show detailed live progress, including tool-call counts")
+    @click.option("--debug-unredacted", is_flag=True, help="Also write unredacted raw logs under sessions/<id>/raw/ (do not share)")
+    @click.option("--allow-dirty", is_flag=True, help="Proceed even if the repo has tracked modifications, staged changes, or an in-progress git operation")
     @click.option("--break-lock", is_flag=True, help="Force-clear the project lock before starting")
     @click.option("--force", is_flag=True, help="Override resume checkpoint mismatch checks")
-    def target(goal, rounds, split, resume, force_cross_command_resume, in_worktree, budget, max_turns, model, provider, effort, strict, verbose, break_lock, force):
+    def target(goal, rounds, split, resume, force_cross_command_resume, in_worktree, budget, max_turns, model, provider, effort, strict, verbose, debug_unredacted, allow_dirty, break_lock, force):
         """Optimize toward a measurable target.
 
         Measures a metric, compares to the target, and iterates until met.
@@ -815,6 +884,7 @@ def register_improve_commands(main: click.Group) -> None:
             in_worktree=in_worktree,
             break_lock=break_lock,
             force=force,
+            allow_dirty=allow_dirty,
             cli_overrides={
                 "budget": budget,
                 "max_turns": max_turns,
@@ -823,5 +893,6 @@ def register_improve_commands(main: click.Group) -> None:
                 "effort": effort,
                 "strict": strict,
                 "verbose": verbose,
+                "debug_unredacted": debug_unredacted,
             },
         )

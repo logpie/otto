@@ -17,6 +17,7 @@ from otto.agent import (
     run_agent_query,
     run_agent_with_timeout,
 )
+from otto.markers import parse_certifier_markers
 
 
 class _FakeStdout:
@@ -209,6 +210,7 @@ async def test_run_agent_query_streams_markers_without_retaining_full_tool_blob(
 
     assert "STORY_RESULT: smoke | PASS | ok" in text
     assert "VERDICT: PASS" in text
+    assert huge_blob not in text
     assert len(text) < 60_000
 
 
@@ -254,12 +256,67 @@ async def test_run_agent_query_dedupes_marker_block_when_final_assistant_repeats
         capture_tool_output=False,
     )
 
-    from otto.markers import parse_certifier_markers
+    parsed = parse_certifier_markers(text)
+    assert [round_data["round"] for round_data in parsed.certify_rounds] == [1, 2]
+    assert parsed.verdict_pass is True
+    assert [story["story_id"] for story in parsed.stories] == ["smoke"]
+
+
+@pytest.mark.asyncio
+async def test_codex_missing_binary_surfaces_provider_specific_hint(tmp_path, monkeypatch):
+    async def missing_codex(*args, **kwargs):
+        raise FileNotFoundError("codex")
+
+    monkeypatch.setattr("otto.agent.asyncio.create_subprocess_exec", missing_codex)
+
+    with pytest.raises(RuntimeError, match="codex CLI not found in PATH"):
+        async for _message in query(
+            prompt="List files",
+            options=ClaudeAgentOptions(provider="codex", cwd=str(tmp_path)),
+        ):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_run_agent_query_strips_duplicate_certify_round_recap(monkeypatch):
+    round_report = (
+        "CERTIFY_ROUND: 1\n"
+        "STORIES_TESTED: 1\n"
+        "STORIES_PASSED: 0\n"
+        "STORY_RESULT: smoke | FAIL | first round failed\n"
+        "VERDICT: FAIL\n"
+        "DIAGNOSIS: first round failed\n"
+        "\n"
+        "CERTIFY_ROUND: 2\n"
+        "STORIES_TESTED: 1\n"
+        "STORIES_PASSED: 1\n"
+        "STORY_RESULT: smoke | PASS | second round passed\n"
+        "VERDICT: PASS\n"
+        "DIAGNOSIS: fixed\n"
+    )
+
+    async def fake_query(*, prompt, options=None, state=None):
+        yield AssistantMessage(content=[
+            ToolResultBlock(content=round_report, tool_use_id="t1"),
+        ])
+        yield AssistantMessage(content=[
+            TextBlock(text=f"Certifier passed. Here are the results:\n\n{round_report}"),
+        ])
+        yield ResultMessage(total_cost_usd=0.1)
+
+    monkeypatch.setattr("otto.agent._query_claude", fake_query)
+
+    text, _cost, _result = await run_agent_query(
+        "test",
+        AgentOptions(),
+        capture_tool_output=True,
+    )
 
     parsed = parse_certifier_markers(text)
     assert [round_data["round"] for round_data in parsed.certify_rounds] == [1, 2]
     assert parsed.verdict_pass is True
     assert [story["story_id"] for story in parsed.stories] == ["smoke"]
+    assert "Certifier passed. Here are the results:" in text
 
 
 @pytest.mark.asyncio
@@ -303,3 +360,51 @@ async def test_run_agent_with_timeout_raises_on_error_result(tmp_path, monkeypat
             timeout=30,
             project_dir=tmp_path,
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "backend_attr"),
+    [("claude", "_query_claude"), ("codex", "_query_codex")],
+)
+async def test_run_agent_with_timeout_supports_debug_unredacted_for_all_providers(
+    tmp_path,
+    monkeypatch,
+    provider,
+    backend_attr,
+):
+    session_id = f"{provider}-session"
+    assistant_text = f"{provider} raw channel ok"
+
+    async def fake_provider_query(*, prompt, options=None, state=None):
+        assert prompt == "test"
+        assert options is not None
+        yield AssistantMessage(
+            content=[TextBlock(text=assistant_text)],
+            session_id=session_id,
+        )
+        yield ResultMessage(
+            subtype="success",
+            is_error=False,
+            session_id=session_id,
+            result=assistant_text,
+            total_cost_usd=0.25,
+            usage={"total_cost_usd": 0.25},
+        )
+
+    monkeypatch.setattr(f"otto.agent.{backend_attr}", fake_provider_query)
+
+    text, cost, returned_session_id, _breakdown = await run_agent_with_timeout(
+        "test",
+        AgentOptions(provider=provider, debug_unredacted=True),
+        log_dir=tmp_path / "build",
+        timeout=30,
+        project_dir=tmp_path,
+    )
+
+    assert text == assistant_text
+    assert cost == 0.25
+    assert returned_session_id == session_id
+    assert (tmp_path / "build" / "messages.jsonl").exists()
+    assert (tmp_path / "raw" / "messages.jsonl").exists()
+    assert assistant_text in (tmp_path / "raw" / "messages.jsonl").read_text(encoding="utf-8")

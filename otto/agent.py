@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
+import traceback
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from otto.observability import iso_timestamp, write_crash_artifact
 _SDK_IMPORT_ERROR_MESSAGE = ""
 
 try:
@@ -118,6 +121,7 @@ class AgentOptions:
     disallowed_tools: list[str] | None = None
     output_format: dict[str, Any] | None = None
     max_subagent_dispatches: int | None = None
+    debug_unredacted: bool | None = None
 
 
 # Backward-compatible name used throughout the codebase and tests.
@@ -162,6 +166,8 @@ def make_agent_options(
     if opts.max_subagent_dispatches is None:
         max_rounds = int(cfg.get("max_certify_rounds", get_max_rounds(cfg)))
         opts.max_subagent_dispatches = max(20, max_rounds * 20)
+    if opts.debug_unredacted is None:
+        opts.debug_unredacted = bool(cfg.get("debug_unredacted"))
     opts.provider = agent_provider(cfg, agent_type)
     model = agent_model(cfg, agent_type)
     if model:
@@ -180,11 +186,33 @@ class AgentCallError(Exception):
     blank the session_id and ``otto build --resume`` would start a fresh
     agent session instead of continuing the existing SDK conversation.
     """
-    def __init__(self, reason: str, session_id: str = ""):
+    def __init__(
+        self,
+        reason: str,
+        session_id: str = "",
+        total_cost_usd: float | None = None,
+        *,
+        crash_path: str = "",
+        traceback_text: str = "",
+        last_events: list[dict[str, Any]] | None = None,
+        last_provider_stderr: str = "",
+    ):
         from otto.redaction import redact_text
 
         self.reason = redact_text(reason)
         self.session_id = session_id
+        self.total_cost_usd = (
+            float(total_cost_usd) if isinstance(total_cost_usd, (int, float)) else None
+        )
+        self.crash_path = crash_path
+        self.traceback_text = traceback_text
+        self.last_events = list(last_events or [])
+        self.last_provider_stderr = last_provider_stderr
+        self.last_activity = ""
+        self.last_tool_name = ""
+        self.last_tool_args_summary = ""
+        self.last_story_id = ""
+        self.last_operation_started_at = ""
         super().__init__(self.reason)
 
 
@@ -203,8 +231,14 @@ class _TranscriptAccumulator:
         self._carry = ""
 
     def add_assistant_text(self, text: str) -> None:
-        self._append(self._assistant_parts, "_assistant_chars", self._assistant_limit, text)
-        self._collect_markers(text)
+        text_to_store = self._strip_redundant_marker_recap(text)
+        self._append(
+            self._assistant_parts,
+            "_assistant_chars",
+            self._assistant_limit,
+            text_to_store,
+        )
+        self._collect_markers(text_to_store)
 
     def add_tool_output(self, text: str) -> None:
         self._collect_markers(text)
@@ -230,10 +264,21 @@ class _TranscriptAccumulator:
             )
             for line in assistant_text.splitlines()
         )
-        if self._marker_lines and not assistant_has_markers:
-            parts.append("\n".join(self._marker_lines))
         if self._keep_tool_output:
+            retained_lines = {
+                line.strip()
+                for part in [*self._assistant_parts, *self._tool_parts]
+                for line in part.splitlines()
+                if line.strip()
+            }
+            missing_marker_lines = [
+                line for line in self._marker_lines if line not in retained_lines
+            ]
+            if missing_marker_lines:
+                parts.append("\n".join(missing_marker_lines))
             parts.extend(self._tool_parts)
+        elif self._marker_lines and not assistant_has_markers:
+            parts.append("\n".join(self._marker_lines))
         return "\n\n".join(part for part in parts if part)
 
     def _append(
@@ -251,6 +296,42 @@ class _TranscriptAccumulator:
             removed = bucket.popleft()
             setattr(self, count_attr, getattr(self, count_attr) - len(removed))
 
+    def _strip_redundant_marker_recap(self, text: str) -> str:
+        """Drop duplicated marker blocks from closing recap prose.
+
+        Improve/build runs capture certifier marker lines from subagent tool
+        output so they can be parsed later. If the parent agent then echoes the
+        same `CERTIFY_ROUND` block in a closing assistant summary, parsing the
+        combined transcript sees `1, 2, 1, 2` and trips the non-monotonic guard
+        even though the underlying certifier output was valid.
+
+        Keep the prose, but strip contiguous recap blocks only when we've
+        already seen round markers earlier in the transcript. A recap block
+        starts at `CERTIFY_ROUND:` and runs until the next blank line or end of
+        input, so newly added marker lines inside that block are removed
+        without having to enumerate them here.
+        """
+        if (
+            "CERTIFY_ROUND:" not in text
+            or not any(line.startswith("CERTIFY_ROUND:") for line in self._marker_lines)
+        ):
+            return text
+
+        filtered_lines: list[str] = []
+        skipping_marker_block = False
+        for line in text.splitlines():
+            stripped = line.strip()
+            if skipping_marker_block:
+                if not stripped:
+                    skipping_marker_block = False
+                continue
+            if stripped.startswith("CERTIFY_ROUND:"):
+                skipping_marker_block = True
+                continue
+            filtered_lines.append(line)
+
+        return "\n".join(filtered_lines)
+
     def _collect_markers(self, fragment: str) -> None:
         if not fragment:
             return
@@ -260,13 +341,23 @@ class _TranscriptAccumulator:
         combined = self._carry + separator + fragment
         lines = combined.splitlines(keepends=True)
         self._carry = ""
+        in_coverage_block = False
         for raw_line in lines:
             if not raw_line.endswith(("\n", "\r")):
                 self._carry = raw_line
                 continue
             stripped = raw_line.strip()
             if not stripped or stripped.startswith(">"):
+                in_coverage_block = False
                 continue
+            if stripped.startswith(("COVERAGE_OBSERVED:", "COVERAGE_GAPS:")):
+                self._marker_lines.append(stripped)
+                in_coverage_block = True
+                continue
+            if in_coverage_block and stripped.startswith("- "):
+                self._marker_lines.append(stripped)
+                continue
+            in_coverage_block = False
             if (
                 stripped.startswith(
                     (
@@ -326,12 +417,19 @@ async def run_agent_with_timeout(
         verbose=verbose,
         strict_mode=strict_mode,
         project_dir=project_dir,
+        debug_unredacted=bool(getattr(options, "debug_unredacted", False) or False),
     )
     close_fh = callbacks.pop("_close")
     narrative = callbacks.pop("_narrative")
+    jsonl_writer = callbacks.pop("_jsonl")
     # Mutable bag — streaming handlers update it so timeout/crash paths can
     # recover the last-known session_id for a resumable checkpoint.
-    agent_state: dict[str, Any] = {"session_id": "", "child_session_ids": []}
+    agent_state: dict[str, Any] = {
+        "session_id": "",
+        "child_session_ids": [],
+        "total_cost_usd": None,
+        "provider_stderr": "",
+    }
 
     def _append_narrative(line: str) -> None:
         """Append a terminal-error marker to narrative.log for human debugging."""
@@ -355,6 +453,28 @@ async def run_agent_with_timeout(
         if mins:
             return f"{hours}h {mins:02d}m {seconds:02d}s"
         return f"{hours}h 00m {seconds:02d}s"
+
+    def _write_crash_details(
+        exc: BaseException,
+        *,
+        traceback_text: str = "",
+    ) -> str:
+        session_dir = log_dir.parent
+        payload = {
+            "occurred_at": iso_timestamp(),
+            "phase": (phase_name or "").strip().lower() or "build",
+            "exception_class": exc.__class__.__name__,
+            "exception_message": str(exc),
+            "traceback": traceback_text,
+            "provider": _provider_name(options),
+            "model": getattr(options, "model", None) or "",
+            "agent_session_id": agent_state.get("session_id", ""),
+            "last_n_events": jsonl_writer.last_records(20),
+            "last_provider_stderr": agent_state.get("provider_stderr", "") or "",
+        }
+        crash_path = write_crash_artifact(session_dir, payload)
+        _append_narrative(f"crash details: {crash_path}")
+        return str(crash_path)
 
     heartbeat_task: asyncio.Task[None] | None = None
     if on_terminal_event is not None:
@@ -387,12 +507,29 @@ async def run_agent_with_timeout(
                 "build_duration_s": narrative.build_duration_or_none(),
                 "recovered_tool_errors": 0,
                 "child_session_ids": [],
+                "last_activity": narrative.latest_activity(),
+                "last_tool_name": narrative.latest_tool_name(),
+                "last_tool_args_summary": narrative.latest_tool_args_summary(),
+                "last_story_id": narrative.current_story_id(),
+                "last_operation_started_at": narrative.last_operation_started_at(),
+                "subagent_errors": [
+                    item for item in jsonl_writer.last_records(40)
+                    if item.get("type") == "subagent_error"
+                ],
             }
             finalize_stats = narrative.finalize(None)
             breakdown_data["recovered_tool_errors"] = int(
                 finalize_stats.get("recovered_tool_errors", 0)
             )
-            raise AgentCallError(str(reason), session_id=session_id)
+            err = AgentCallError(
+                str(reason),
+                session_id=session_id,
+                total_cost_usd=float(cost or 0.0),
+            )
+            err.crash_path = _write_crash_details(err)
+            err.last_events = jsonl_writer.last_records(20)
+            err.last_provider_stderr = agent_state.get("provider_stderr", "") or ""
+            raise err
         child_session_ids = [
             sid for sid in agent_state.get("child_session_ids", []) or []
             if sid and sid != session_id
@@ -402,6 +539,16 @@ async def run_agent_with_timeout(
             "build_duration_s": narrative.build_duration_or_none(),
             "recovered_tool_errors": 0,
             "child_session_ids": child_session_ids,
+            "phase_usage": jsonl_writer.phase_breakdown(),
+            "last_activity": narrative.latest_activity(),
+            "last_tool_name": narrative.latest_tool_name(),
+            "last_tool_args_summary": narrative.latest_tool_args_summary(),
+            "last_story_id": narrative.current_story_id(),
+            "last_operation_started_at": narrative.last_operation_started_at(),
+            "subagent_errors": [
+                item for item in jsonl_writer.last_records(40)
+                if item.get("type") == "subagent_error"
+            ],
         }
         phase = (phase_name or "").lower()
         finalize_breakdown: dict[str, dict[str, float | int]] | None = None
@@ -450,14 +597,26 @@ async def run_agent_with_timeout(
             finalize_stats.get("recovered_tool_errors", 0)
         )
         return text, cost, session_id, breakdown_data
-    except AgentCallError:
+    except AgentCallError as err:
         from otto.pipeline import _cleanup_orphan_processes
 
         _cleanup_orphan_processes(
             project_dir,
             process_group_id=agent_state.get("process_group_id"),
         )
-        raise
+        err.session_id = err.session_id or agent_state.get("session_id", "")
+        if err.total_cost_usd is None and agent_state.get("total_cost_usd") is not None:
+            err.total_cost_usd = float(agent_state.get("total_cost_usd"))
+        if not err.crash_path:
+            err.crash_path = _write_crash_details(err, traceback_text=err.traceback_text)
+        err.last_events = jsonl_writer.last_records(20)
+        err.last_provider_stderr = agent_state.get("provider_stderr", "") or ""
+        err.last_activity = narrative.latest_activity()
+        err.last_tool_name = narrative.latest_tool_name()
+        err.last_tool_args_summary = narrative.latest_tool_args_summary()
+        err.last_story_id = narrative.current_story_id()
+        err.last_operation_started_at = narrative.last_operation_started_at()
+        raise err
     except asyncio.TimeoutError:
         log.error("Agent timed out after %ds", timeout)
         _append_narrative(f"\u2501\u2501\u2501 Timed out after {timeout}s")
@@ -466,10 +625,20 @@ async def run_agent_with_timeout(
             project_dir,
             process_group_id=agent_state.get("process_group_id"),
         )
-        raise AgentCallError(
+        err = AgentCallError(
             f"Timed out after {timeout}s",
             session_id=agent_state.get("session_id", ""),
+            total_cost_usd=float(agent_state.get("total_cost_usd", 0.0) or 0.0),
         )
+        err.crash_path = _write_crash_details(err)
+        err.last_events = jsonl_writer.last_records(20)
+        err.last_provider_stderr = agent_state.get("provider_stderr", "") or ""
+        err.last_activity = narrative.latest_activity()
+        err.last_tool_name = narrative.latest_tool_name()
+        err.last_tool_args_summary = narrative.latest_tool_args_summary()
+        err.last_story_id = narrative.current_story_id()
+        err.last_operation_started_at = narrative.last_operation_started_at()
+        raise err
     except KeyboardInterrupt:
         _append_narrative("\u2501\u2501\u2501 KeyboardInterrupt")
         from otto.pipeline import _cleanup_orphan_processes
@@ -486,10 +655,22 @@ async def run_agent_with_timeout(
             project_dir,
             process_group_id=agent_state.get("process_group_id"),
         )
-        raise AgentCallError(
+        tb = traceback.format_exc()
+        err = AgentCallError(
             f"Agent crashed: {exc}",
             session_id=agent_state.get("session_id", ""),
+            total_cost_usd=float(agent_state.get("total_cost_usd", 0.0) or 0.0),
         )
+        err.traceback_text = tb
+        err.crash_path = _write_crash_details(err, traceback_text=tb)
+        err.last_events = jsonl_writer.last_records(20)
+        err.last_provider_stderr = agent_state.get("provider_stderr", "") or ""
+        err.last_activity = narrative.latest_activity()
+        err.last_tool_name = narrative.latest_tool_name()
+        err.last_tool_args_summary = narrative.latest_tool_args_summary()
+        err.last_story_id = narrative.current_story_id()
+        err.last_operation_started_at = narrative.last_operation_started_at()
+        raise err
     finally:
         if heartbeat_task is not None:
             heartbeat_task.cancel()
@@ -765,15 +946,20 @@ async def _query_codex(
     opts = options or AgentOptions()
     env = dict(opts.env or {})
 
-    process = await asyncio.create_subprocess_exec(
-        *_codex_command(opts),
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        cwd=opts.cwd or None,
-        env=env,
-        start_new_session=True,
-    )
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *_codex_command(opts),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            cwd=opts.cwd or None,
+            env=env,
+            start_new_session=True,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "codex CLI not found in PATH; install it from https://github.com/openai/codex"
+        ) from exc
     if state is not None:
         state["process_group_id"] = process.pid
 
@@ -801,6 +987,8 @@ async def _query_codex(
             if not line:
                 continue
             raw_lines.append(line)
+            if state is not None:
+                state["provider_stderr"] = "\n".join(raw_lines[-50:])
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
@@ -846,6 +1034,8 @@ async def _query_codex(
         if not saw_result or return_code != 0:
             error_lines = raw_lines[-20:]
             error_text = "\n".join(error_lines) or f"codex exited with code {return_code}"
+            if state is not None:
+                state["provider_stderr"] = error_text
             yield ResultMessage(
                 subtype="error",
                 is_error=True,
@@ -875,6 +1065,18 @@ async def query(
 
     async for message in _query_claude(prompt=prompt, options=options, state=state):
         yield message
+
+
+def _usage_total_cost_usd(message: Any) -> float | None:
+    usage = getattr(message, "usage", None)
+    if isinstance(usage, dict):
+        raw = usage.get("total_cost_usd")
+        if isinstance(raw, (int, float)):
+            return float(raw)
+    raw = getattr(usage, "total_cost_usd", None)
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    return None
 
 
 def tool_use_summary(block) -> str:
@@ -928,7 +1130,7 @@ def tool_use_summary(block) -> str:
 
 async def run_agent_query(
     prompt: str,
-    options: ClaudeAgentOptions,
+    options: AgentOptions,
     *,
     on_text: Callable[[str], Any] | None = None,
     on_tool: Callable[[Any], Any] | None = None,
@@ -937,7 +1139,9 @@ async def run_agent_query(
     on_message: Callable[[Any], Any] | None = None,
     capture_tool_output: bool = False,
     state: dict[str, Any] | None = None,
-) -> tuple[str, float, Any]:
+    _raw_jsonl: Any | None = None,
+    _raw_narrative: Any | None = None,
+) -> tuple[str, float | None, Any]:
     """Run a provider query, dispatching normalized events to callbacks.
 
     If capture_tool_output=True, tool result content (including subagent output)
@@ -952,7 +1156,13 @@ async def run_agent_query(
     soon as a session_id is seen on any streamed message. This lets callers
     that cancel the task (e.g. on timeout) still recover the session_id for
     a resumable checkpoint.
+
+    ``run_agent_with_timeout`` forwards a shared callback bag from the session
+    logger. The private raw-log writers are consumed by ``on_message`` there,
+    and are accepted here only so that debug-unredacted logging can pass
+    through this layer unchanged for both providers.
     """
+    _ = (_raw_jsonl, _raw_narrative)
     transcript = _TranscriptAccumulator(keep_tool_output=capture_tool_output)
     cost = 0.0
     result_msg = None
@@ -966,6 +1176,11 @@ async def run_agent_query(
     message_iter = query(**query_kwargs)
 
     async for message in message_iter:
+        usage_cost = _usage_total_cost_usd(message)
+        if usage_cost is not None:
+            cost = max(cost, usage_cost)
+            if state is not None:
+                state["total_cost_usd"] = cost
         # Capture session_id eagerly. Every SDK message type carries it,
         # and we need it to build a resumable checkpoint even when the
         # stream is later cancelled (timeout) or crashes.
@@ -991,6 +1206,8 @@ async def run_agent_query(
             raw_cost = getattr(message, "total_cost_usd", None)
             if isinstance(raw_cost, (int, float)):
                 cost = max(cost, float(raw_cost))
+                if state is not None:
+                    state["total_cost_usd"] = cost
             if on_result:
                 on_result(message)
         elif isinstance(message, (AssistantMessage, UserMessage)):
@@ -1019,6 +1236,7 @@ async def run_agent_query(
                             raise AgentCallError(
                                 "max_subagent dispatch cap reached; check for agent loops",
                                 session_id=(state or {}).get("session_id", ""),
+                                total_cost_usd=cost,
                             )
                     if on_tool:
                         on_tool(block)

@@ -299,14 +299,27 @@ def _render_certifier_prompt(
     target: str | None = None,
     stories: list[dict[str, Any]] | None = None,
     merge_context: dict[str, Any] | None = None,
+    project_dir: Path | None = None,
+    run_id: str | None = None,
+    prior_session_ids: list[str] | None = None,
 ) -> str:
     """Render a standalone certifier prompt with safe placeholder defaults."""
     from otto.config import validate_certifier_mode
     from otto.prompts import render_prompt
+    from otto.spec import format_spec_section
 
     mode = validate_certifier_mode(mode)
     focus_section = f"## Improvement Focus\n{focus}" if focus else ""
     stories_section = _format_stories_section(stories, merge_context=merge_context)
+    spec_section = ""
+    if project_dir is not None:
+        spec_section = format_spec_section(
+            _resolve_certifier_spec_content(
+                project_dir,
+                run_id=run_id or "",
+                prior_session_ids=prior_session_ids or [],
+            )
+        )
     prompt_name = {
         "standard": "certifier.md",
         "fast": "certifier-fast.md",
@@ -320,9 +333,72 @@ def _render_certifier_prompt(
         evidence_dir=str(evidence_dir),
         focus_section=focus_section,
         stories_section=stories_section,
-        spec_section="",
+        spec_section=spec_section,
         target=target or "",
     )
+
+
+def _resolve_certifier_spec_content(
+    project_dir: Path,
+    *,
+    run_id: str,
+    prior_session_ids: list[str],
+) -> str:
+    from otto import paths
+    from otto.history import tail_jsonl_entries
+
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+
+    def _add(path: Path | None) -> None:
+        if path is None:
+            return
+        resolved = path.resolve(strict=False)
+        if resolved in seen:
+            return
+        seen.add(resolved)
+        candidates.append(resolved)
+
+    def _spec_from_session_id(session_id: str) -> None:
+        if not session_id:
+            return
+        session_dir = paths.session_dir(project_dir, session_id)
+        _add(session_dir / "spec" / "spec.md")
+        for meta_path in (paths.session_checkpoint(project_dir, session_id), paths.session_summary(project_dir, session_id)):
+            if not meta_path.exists():
+                continue
+            try:
+                data = json.loads(meta_path.read_text())
+            except Exception:
+                continue
+            spec_path = str(data.get("spec_path") or "").strip()
+            if spec_path:
+                _add(Path(spec_path))
+
+    _spec_from_session_id(run_id)
+    for session_id in prior_session_ids:
+        _spec_from_session_id(session_id)
+
+    root_spec = project_dir / "spec.md"
+    _add(root_spec if root_spec.exists() else None)
+
+    history_path = paths.history_jsonl(project_dir)
+    if history_path.exists():
+        for _, line in reversed(tail_jsonl_entries(history_path, limit=10)):
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            _spec_from_session_id(str(entry.get("run_id") or entry.get("build_id") or "").strip())
+
+    for path in candidates:
+        try:
+            content = path.read_text().strip()
+        except OSError:
+            continue
+        if content:
+            return content
+    return ""
 
 
 def _human_duration(seconds: float) -> str:
@@ -760,6 +836,7 @@ def _coverage_render_data(report: dict[str, Any]) -> dict[str, Any]:
 
 def _efficiency_render_data(report: dict[str, Any]) -> dict[str, Any]:
     raw = dict(report.get("efficiency") or {})
+    suppressed = bool(raw.get("suppress_browser_stats"))
     stories_total = max(int(report.get("stories_total_count") or report.get("stories_tested") or 0), 0)
     total_browser_calls = max(int(raw.get("total_browser_calls") or 0), 0)
     distinct_sessions = max(int(raw.get("distinct_sessions") or 0), 0)
@@ -780,6 +857,7 @@ def _efficiency_render_data(report: dict[str, Any]) -> dict[str, Any]:
         "top_verbs_text": ", ".join(f"{name} ({count})" for name, count in top_verbs) or "none recorded",
         "outlier": bool(raw.get("outlier")),
         "outlier_reason": str(raw.get("outlier_reason") or "").strip(),
+        "suppressed": suppressed,
     }
 
 
@@ -883,6 +961,10 @@ def _round_history(
         round_diagnosis = _diagnosis_text(round_data.get("diagnosis", ""), verdict_text)
         duration_s = durations[index] if index < len(durations) else 0.0
         cost_usd = raw_costs[index] if index < len(raw_costs) else 0.0
+        fix_commits = list(round_data.get("fix_commits", []) or [])
+        fix_diff_stat = str(round_data.get("fix_diff_stat", "") or "")
+        still_failing_after_fix = list(round_data.get("still_failing_after_fix", []) or [])
+        subagent_errors = list(round_data.get("subagent_errors", []) or [])
         history.append(
             {
                 "round": round_data.get("round", index + 1),
@@ -898,6 +980,10 @@ def _round_history(
                 "duration_human": _human_duration(duration_s),
                 "cost_usd": round(cost_usd, 4),
                 "cost_estimated": not bool(round_timings),
+                "fix_commits": fix_commits,
+                "fix_diff_stat": fix_diff_stat,
+                "still_failing_after_fix": still_failing_after_fix,
+                "subagent_errors": subagent_errors,
             }
         )
     return history
@@ -909,6 +995,17 @@ def _visual_evidence(
     certifier_mode: str,
     stories: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    def _story_looks_visual(story: dict[str, Any]) -> bool:
+        surface = str(story.get("surface") or "").strip().lower()
+        methodology = str(story.get("methodology") or "").strip().lower()
+        visual_surfaces = {"dom", "screenshot", "video", "localstorage"}
+        visual_methods = {"live-ui-events", "javascript-eval", "visual-only"}
+        return (
+            surface in visual_surfaces
+            or methodology in visual_methods
+            or Path(str(story.get("failure_evidence") or "").strip()).suffix.lower() == ".png"
+        )
+
     evidence_root = evidence_dir or (base_dir / "evidence")
     screenshots = sorted(evidence_root.glob("*.png")) if evidence_root.exists() else []
     recordings = sorted(evidence_root.glob("*.webm")) if evidence_root.exists() else []
@@ -973,10 +1070,21 @@ def _visual_evidence(
         for image in images
         if image["name"] not in assigned
     ]
+    non_visual_product = not images and not videos and not any(
+        _story_looks_visual(story) for story in stories
+    )
     if images or videos:
         absence_reason = ""
+        visible = True
+        suppress_browser_stats = False
+    elif non_visual_product:
+        absence_reason = ""
+        visible = False
+        suppress_browser_stats = True
     else:
         absence_reason = f"not collected (mode={certifier_mode})"
+        visible = True
+        suppress_browser_stats = False
     return {
         "images": images,
         "videos": videos,
@@ -984,6 +1092,8 @@ def _visual_evidence(
         "buckets": buckets,
         "unassigned": unassigned,
         "absence_reason": absence_reason,
+        "visible": visible,
+        "suppress_browser_stats": suppress_browser_stats,
         "evidence_dir": str(evidence_root),
         "evidence_dir_href": _relative_href(base_dir, evidence_root) if evidence_root.exists() else "",
     }
@@ -1003,6 +1113,7 @@ def _artifacts(
         _artifact_entry(report_dir, "proof-of-work.json", report_dir / "proof-of-work.json", present=True),
         _artifact_entry(report_dir, "narrative.log", log_dir / "narrative.log"),
         _artifact_entry(report_dir, "messages.jsonl", log_dir / "messages.jsonl"),
+        _artifact_entry(report_dir, "runtime.json", session_dir / "runtime.json"),
         _artifact_entry(report_dir, "session", session_dir),
     ]
     if spec_path:
@@ -1162,6 +1273,8 @@ def _build_pow_report_data(
             if str(story.get("story_id") or "").strip()
         },
     )
+    if visual.get("suppress_browser_stats"):
+        efficiency["suppress_browser_stats"] = True
     round_history = _round_history(
         certify_rounds=certify_rounds or [],
         stories=story_results,
@@ -1389,31 +1502,33 @@ def _render_pow_markdown(
             lines.append("- Evidence: not provided by certifier.")
         lines.append("")
 
-    lines.extend(["## Visual Evidence", ""])
-    if visual["recording"]:
-        lines.append(f"- Recording: [{visual['recording']['name']}]({visual['recording']['href']})")
-    image_items = []
-    for bucket in visual["buckets"]:
-        for item in bucket["items"]:
-            label = f"{bucket['story_id']}: {item['name']}"
-            image_items.append(f"- {label} ({bucket['status']}): [{item['name']}]({item['href']})")
-    for item in visual["unassigned"]:
-        image_items.append(f"- Unassigned: [{item['name']}]({item['href']})")
-    if image_items:
-        lines.extend(image_items)
-    else:
-        lines.append(f"- Visual evidence: {visual['absence_reason']}")
+    if visual.get("visible", True):
+        lines.extend(["## Visual Evidence", ""])
+        if visual["recording"]:
+            lines.append(f"- Recording: [{visual['recording']['name']}]({visual['recording']['href']})")
+        image_items = []
+        for bucket in visual["buckets"]:
+            for item in bucket["items"]:
+                label = f"{bucket['story_id']}: {item['name']}"
+                image_items.append(f"- {label} ({bucket['status']}): [{item['name']}]({item['href']})")
+        for item in visual["unassigned"]:
+            image_items.append(f"- Unassigned: [{item['name']}]({item['href']})")
+        if image_items:
+            lines.extend(image_items)
+        else:
+            lines.append(f"- Visual evidence: {visual['absence_reason']}")
 
-    lines.extend(["", "## Efficiency", ""])
-    lines.append(
-        f"- Total browser calls: {efficiency['total_browser_calls']} across "
-        f"{efficiency['stories_total']} {efficiency['story_label']} "
-        f"({efficiency['avg_calls_per_story']:.1f} per story)"
-    )
-    lines.append(f"- Distinct browser sessions: {efficiency['distinct_sessions']}")
-    lines.append(f"- Top verbs: {efficiency['top_verbs_text']}")
-    if efficiency["outlier"] and efficiency["outlier_reason"]:
-        lines.append(f"- ⚠ Efficiency note: {efficiency['outlier_reason']}")
+    if not efficiency.get("suppressed"):
+        lines.extend(["", "## Efficiency", ""])
+        lines.append(
+            f"- Total browser calls: {efficiency['total_browser_calls']} across "
+            f"{efficiency['stories_total']} {efficiency['story_label']} "
+            f"({efficiency['avg_calls_per_story']:.1f} per story)"
+        )
+        lines.append(f"- Distinct browser sessions: {efficiency['distinct_sessions']}")
+        lines.append(f"- Top verbs: {efficiency['top_verbs_text']}")
+        if efficiency["outlier"] and efficiency["outlier_reason"]:
+            lines.append(f"- ⚠ Efficiency note: {efficiency['outlier_reason']}")
 
     lines.extend(["", "## Coverage and Limitations", ""])
     if coverage["legacy_mode"]:
@@ -1717,77 +1832,79 @@ def _render_pow_html(report: dict[str, Any]) -> str:
             html_lines.extend(render_story_article(story, compressed=story["status"] == "pass"))
         html_lines.append("</section>")
 
-    html_lines.extend(
-        [
-            "<section class='card'>",
-            "<h2>Visual Evidence</h2>",
-        ]
-    )
-    if visual["recording"]:
-        item = visual["recording"]
+    if visual.get("visible", True):
         html_lines.extend(
             [
-                "<div class='visual-item'>",
-                f"<a href='{esc(item['href'])}'>{esc(item['name'])}</a> — full walkthrough",
-                f"<video controls><source src='{esc(item['href'])}' type='video/webm'></video>",
-                "</div>",
+                "<section class='card'>",
+                "<h2>Visual Evidence</h2>",
             ]
         )
-    if visual["buckets"] or visual["unassigned"]:
-        for bucket in visual["buckets"]:
+        if visual["recording"]:
+            item = visual["recording"]
             html_lines.extend(
                 [
-                    "<div class='visual-group'>",
-                    f"<h3>{esc(bucket['story_id'])} <span class='badge {esc(bucket['status'])}'>{esc(bucket['status'].upper())}</span></h3>",
-                    "<div class='visual-grid'>",
+                    "<div class='visual-item'>",
+                    f"<a href='{esc(item['href'])}'>{esc(item['name'])}</a> — full walkthrough",
+                    f"<video controls><source src='{esc(item['href'])}' type='video/webm'></video>",
+                    "</div>",
                 ]
             )
-            for item in bucket["items"]:
-                caption = f" — {item['caption']}" if item.get("caption") else ""
+        if visual["buckets"] or visual["unassigned"]:
+            for bucket in visual["buckets"]:
                 html_lines.extend(
                     [
-                        "<div class='visual-item'>",
-                        f"<a href='{esc(item['href'])}'>{esc(item['name'])}</a>{esc(caption)}",
-                        f"<img src='{esc(item['href'])}' alt='{esc(item['name'])}'>",
-                        "</div>",
+                        "<div class='visual-group'>",
+                        f"<h3>{esc(bucket['story_id'])} <span class='badge {esc(bucket['status'])}'>{esc(bucket['status'].upper())}</span></h3>",
+                        "<div class='visual-grid'>",
                     ]
                 )
-            html_lines.extend(["</div>", "</div>"])
-        if visual["unassigned"]:
-            html_lines.extend(["<div class='visual-group'>", "<h3>Unassigned</h3>", "<div class='visual-grid'>"])
-            for item in visual["unassigned"]:
-                caption = f" — {item['caption']}" if item.get("caption") else ""
-                html_lines.extend(
-                    [
-                        "<div class='visual-item'>",
-                        f"<a href='{esc(item['href'])}'>{esc(item['name'])}</a>{esc(caption)}",
-                        f"<img src='{esc(item['href'])}' alt='{esc(item['name'])}'>",
-                        "</div>",
-                    ]
-                )
-            html_lines.extend(["</div>", "</div>"])
-    else:
-        html_lines.append(f"<div class='note'>Visual evidence: {esc(visual['absence_reason'])}</div>")
-    html_lines.extend(["</section>"])
+                for item in bucket["items"]:
+                    caption = f" — {item['caption']}" if item.get("caption") else ""
+                    html_lines.extend(
+                        [
+                            "<div class='visual-item'>",
+                            f"<a href='{esc(item['href'])}'>{esc(item['name'])}</a>{esc(caption)}",
+                            f"<img src='{esc(item['href'])}' alt='{esc(item['name'])}'>",
+                            "</div>",
+                        ]
+                    )
+                html_lines.extend(["</div>", "</div>"])
+            if visual["unassigned"]:
+                html_lines.extend(["<div class='visual-group'>", "<h3>Unassigned</h3>", "<div class='visual-grid'>"])
+                for item in visual["unassigned"]:
+                    caption = f" — {item['caption']}" if item.get("caption") else ""
+                    html_lines.extend(
+                        [
+                            "<div class='visual-item'>",
+                            f"<a href='{esc(item['href'])}'>{esc(item['name'])}</a>{esc(caption)}",
+                            f"<img src='{esc(item['href'])}' alt='{esc(item['name'])}'>",
+                            "</div>",
+                        ]
+                    )
+                html_lines.extend(["</div>", "</div>"])
+        else:
+            html_lines.append(f"<div class='note'>Visual evidence: {esc(visual['absence_reason'])}</div>")
+        html_lines.extend(["</section>"])
 
-    html_lines.extend(
-        [
-            "<section class='card efficiency'>",
-            "<h2>Efficiency</h2>",
-            "<ul class='efficiency-list'>",
-            (
-                f"<li>Total browser calls: {efficiency['total_browser_calls']} across "
-                f"{efficiency['stories_total']} {efficiency['story_label']} "
-                f"({efficiency['avg_calls_per_story']:.1f} per story)</li>"
-            ),
-            f"<li>Distinct browser sessions: {efficiency['distinct_sessions']}</li>",
-            f"<li>Top verbs: {esc(efficiency['top_verbs_text'])}</li>",
-            "</ul>",
-        ]
-    )
-    if efficiency["outlier"] and efficiency["outlier_reason"]:
-        html_lines.append(f"<div class='note warn'>Efficiency note: {esc(efficiency['outlier_reason'])}</div>")
-    html_lines.append("</section>")
+    if not efficiency.get("suppressed"):
+        html_lines.extend(
+            [
+                "<section class='card efficiency'>",
+                "<h2>Efficiency</h2>",
+                "<ul class='efficiency-list'>",
+                (
+                    f"<li>Total browser calls: {efficiency['total_browser_calls']} across "
+                    f"{efficiency['stories_total']} {efficiency['story_label']} "
+                    f"({efficiency['avg_calls_per_story']:.1f} per story)</li>"
+                ),
+                f"<li>Distinct browser sessions: {efficiency['distinct_sessions']}</li>",
+                f"<li>Top verbs: {esc(efficiency['top_verbs_text'])}</li>",
+                "</ul>",
+            ]
+        )
+        if efficiency["outlier"] and efficiency["outlier_reason"]:
+            html_lines.append(f"<div class='note warn'>Efficiency note: {esc(efficiency['outlier_reason'])}</div>")
+        html_lines.append("</section>")
 
     if coverage["legacy_mode"]:
         html_lines.append(
@@ -1936,11 +2053,11 @@ def _render_pow_html(report: dict[str, Any]) -> str:
 
 
 def _write_pow_report(output_dir: Path, report: dict[str, Any]) -> None:
-    from otto.observability import write_json_file
+    from otto.observability import write_json_file, write_text_atomic
 
     write_json_file(output_dir / "proof-of-work.json", report)
-    (output_dir / "proof-of-work.md").write_text(_render_pow_markdown(report) + "\n")
-    (output_dir / "proof-of-work.html").write_text(_render_pow_html(report))
+    write_text_atomic(output_dir / "proof-of-work.md", _render_pow_markdown(report) + "\n")
+    write_text_atomic(output_dir / "proof-of-work.html", _render_pow_html(report))
 
 
 # ---------------------------------------------------------------------------
@@ -1989,8 +2106,25 @@ async def run_agentic_certifier(
     from otto import paths
     if session_id is None:
         session_id = paths.new_session_id(project_dir)
+    prior_session_ids = [
+        resolved.name
+        for resolved in (
+            paths.resolve_pointer(project_dir, paths.PAUSED_POINTER),
+            paths.resolve_pointer(project_dir, paths.LATEST_POINTER),
+        )
+        if resolved is not None and resolved.name != session_id
+    ]
     paths.ensure_session_scaffold(project_dir, session_id, phase="certify")
     paths.set_pointer(project_dir, paths.LATEST_POINTER, session_id)
+    from otto.pipeline import _runtime_metadata
+    from otto.observability import update_input_provenance, write_runtime_metadata, sha256_text
+
+    write_runtime_metadata(paths.session_dir(project_dir, session_id), _runtime_metadata(project_dir))
+    update_input_provenance(
+        paths.session_dir(project_dir, session_id),
+        intent={"source": "cli-argument", "fallback_reason": "", "resolved_text": intent, "sha256": sha256_text(intent)},
+        spec={"source": "none", "path": "", "sha256": ""},
+    )
     run_id = session_id
     report_dir = paths.certify_dir(project_dir, session_id)
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -2005,6 +2139,9 @@ async def run_agentic_certifier(
         target=target,
         stories=stories,
         merge_context=merge_context,
+        project_dir=project_dir,
+        run_id=run_id,
+        prior_session_ids=prior_session_ids,
     )
 
     from otto.memory import inject_memory
@@ -2048,6 +2185,9 @@ async def run_agentic_certifier(
         metric_value=parsed.metric_value,
         metric_met=parsed.metric_met,
         run_id=run_id,
+        diagnosis=parsed.diagnosis,
+        child_session_ids=list(breakdown.get("child_session_ids", []) or []),
+        subagent_errors=list(breakdown.get("subagent_errors", []) or []),
     )
 
     try:
@@ -2206,4 +2346,6 @@ def _generate_agentic_html_pow(
         coverage_emitted=coverage_emitted,
         round_timings=None,
     )
-    (output_dir / "proof-of-work.html").write_text(_render_pow_html(report))
+    from otto.observability import write_text_atomic
+
+    write_text_atomic(output_dir / "proof-of-work.html", _render_pow_html(report))

@@ -76,7 +76,9 @@ class ResumeState:
     session_started_at: str = ""
     child_session_ids: list[str] = field(default_factory=list)
     git_sha: str = ""
+    git_status: str = ""
     prompt_hash: str = ""
+    missing_paused_session_path: str = ""
     # Spec-gate fields (new; all empty/None for pre-spec checkpoints)
     intent: str = ""              # canonical intent (for resume without CLI intent)
     run_id: str = ""              # session_id in the new layout (kept as run_id for compat)
@@ -91,6 +93,14 @@ class ResumeState:
     prompt_mode: str = ""
     focus: str = ""
     max_rounds: int = 0
+    last_activity: str = ""
+    last_tool_name: str = ""
+    last_tool_args_summary: str = ""
+    last_story_id: str = ""
+    last_operation_started_at: str = ""
+    last_round_failures: list[str] = field(default_factory=list)
+    last_diagnosis: str = ""
+    dirty_files: list[str] = field(default_factory=list)
 
     @property
     def session_id(self) -> str:
@@ -144,6 +154,12 @@ def print_resume_status(console: Any, state: ResumeState, resume_flag: bool, exp
     lockstep with ``resolve_resume()``.
     """
     if resume_flag and not state.resumed:
+        if state.missing_paused_session_path:
+            console.print(
+                "\n  [yellow]Your paused session at "
+                f"{state.missing_paused_session_path} was deleted; nothing to resume.[/yellow]\n"
+            )
+            return
         if state.completed_session_id:
             console.print(
                 "\n  [yellow]Last run completed "
@@ -176,6 +192,14 @@ def print_resume_status(console: Any, state: ResumeState, resume_flag: bool, exp
         f"\n  [info]{status} "
         f"(${state.total_cost:.2f} spent so far)[/info]\n"
     )
+    if state.last_activity or state.last_operation_started_at:
+        activity = state.last_activity or "unknown activity"
+        when = state.last_operation_started_at or "unknown time"
+        failures = ", ".join(state.last_round_failures) if state.last_round_failures else "none"
+        console.print(
+            "  [dim]resuming from: "
+            f"{activity} at {when}, last round had: {failures}[/dim]"
+        )
     if state.child_session_ids:
         console.print(
             "  [yellow]Prior child subagent sessions may still be orphaned; "
@@ -299,6 +323,11 @@ def resolve_resume(
     checkpoint = load_checkpoint(project_dir)
 
     if not checkpoint:
+        missing_paused_session_path = ""
+        if resume:
+            missing = _missing_paused_session_path(project_dir)
+            if missing is not None:
+                missing_paused_session_path = str(missing)
         if resume:
             logger.info("No checkpoint found; starting fresh despite --resume")
             completed = _find_recent_completed_session(
@@ -308,11 +337,12 @@ def resolve_resume(
             if completed is not None:
                 session_id, verdict, command = completed
                 return ResumeState(
+                    missing_paused_session_path=missing_paused_session_path,
                     completed_session_id=session_id,
                     completed_verdict=verdict,
                     completed_command=command,
                 )
-        return ResumeState()
+        return ResumeState(missing_paused_session_path=missing_paused_session_path)
 
     if not resume:
         cr = checkpoint.get("current_round", 0)
@@ -328,9 +358,11 @@ def resolve_resume(
     current_round = checkpoint.get("current_round", 0) or 0
     current_fingerprint = checkpoint_fingerprint(project_dir)
     git_sha = checkpoint.get("git_sha", "") or ""
+    git_status = checkpoint.get("git_status", "") or ""
     prompt_hash = checkpoint.get("prompt_hash", "") or ""
     fingerprint_mismatch = bool(
         (git_sha and git_sha != current_fingerprint.get("git_sha", ""))
+        or (git_status != current_fingerprint.get("git_status", ""))
         or (prompt_hash and prompt_hash != current_fingerprint.get("prompt_hash", ""))
     )
     command_mismatch = bool(prior_cmd) and prior_cmd != expected_command
@@ -344,15 +376,18 @@ def resolve_resume(
             )
         if fingerprint_mismatch:
             raise ValueError(
-                "Checkpoint fingerprint does not match the current code/prompt state. "
+                "Checkpoint fingerprint does not match the current code/prompt/worktree state. "
+                "The paused run's git status differs from the current tree. "
                 "Pass `--force --resume` to override."
             )
     if fingerprint_mismatch and force:
         logger.warning(
-            "Resuming despite fingerprint mismatch (checkpoint git_sha=%s prompt_hash=%s, current git_sha=%s prompt_hash=%s)",
+            "Resuming despite fingerprint mismatch (checkpoint git_sha=%s git_status=%r prompt_hash=%s, current git_sha=%s git_status=%r prompt_hash=%s)",
             git_sha,
+            git_status,
             prompt_hash,
             current_fingerprint.get("git_sha", ""),
+            current_fingerprint.get("git_status", ""),
             current_fingerprint.get("prompt_hash", ""),
         )
     return ResumeState(
@@ -374,6 +409,7 @@ def resolve_resume(
         session_started_at=checkpoint.get("started_at", "") or "",
         child_session_ids=list(checkpoint.get("child_session_ids", []) or []),
         git_sha=git_sha,
+        git_status=git_status,
         prompt_hash=prompt_hash,
         intent=checkpoint.get("intent", "") or "",
         run_id=_checkpoint_run_id(checkpoint),
@@ -385,7 +421,44 @@ def resolve_resume(
         prompt_mode=checkpoint.get("prompt_mode", "") or "",
         focus=checkpoint.get("focus", "") or "",
         max_rounds=int(checkpoint.get("max_rounds", 0) or 0),
+        last_activity=checkpoint.get("last_activity", "") or "",
+        last_tool_name=checkpoint.get("last_tool_name", "") or "",
+        last_tool_args_summary=checkpoint.get("last_tool_args_summary", "") or "",
+        last_story_id=checkpoint.get("last_story_id", "") or "",
+        last_operation_started_at=checkpoint.get("last_operation_started_at", "") or "",
+        last_round_failures=list(checkpoint.get("last_round_failures", []) or []),
+        last_diagnosis=checkpoint.get("last_diagnosis", "") or "",
+        dirty_files=list(checkpoint.get("dirty_files", []) or []),
     )
+
+
+def _missing_paused_session_path(project_dir: Path) -> Path | None:
+    """Return the paused session path when the pointer exists but the session is gone."""
+    pointer_target = paths.resolve_pointer(project_dir, paths.PAUSED_POINTER)
+    if pointer_target is not None:
+        return None
+
+    logs_dir = paths.logs_dir(project_dir)
+    symlink_path = logs_dir / paths.PAUSED_POINTER
+    if symlink_path.is_symlink():
+        try:
+            target = symlink_path.resolve(strict=False)
+        except OSError:
+            return None
+        if not target.exists():
+            return target
+
+    pointer_file = logs_dir / f"{paths.PAUSED_POINTER}.txt"
+    if pointer_file.exists():
+        try:
+            session_id = pointer_file.read_text().strip()
+        except OSError:
+            return None
+        if session_id:
+            target = paths.session_dir(project_dir, session_id)
+            if not target.exists():
+                return target
+    return None
 
 
 def initial_build_completed(phase: str) -> bool:
@@ -423,6 +496,14 @@ def write_checkpoint(
     spec_hash: str | None = None,
     spec_version: int | None = None,
     spec_cost: float | None = None,
+    last_activity: str | None = None,
+    last_tool_name: str | None = None,
+    last_tool_args_summary: str | None = None,
+    last_story_id: str | None = None,
+    last_operation_started_at: str | None = None,
+    last_round_failures: list[str] | None = None,
+    last_diagnosis: str | None = None,
+    dirty_files: list[str] | None = None,
 ) -> None:
     """Write checkpoint to disk. Called after each round.
 
@@ -472,6 +553,7 @@ def write_checkpoint(
             set(child_session_ids or (prior.get("child_session_ids", []) if prior else []) or [])
         ),
         "git_sha": fingerprint.get("git_sha", ""),
+        "git_status": fingerprint.get("git_status", ""),
         "prompt_hash": fingerprint.get("prompt_hash", ""),
         "intent": intent if intent is not None else (prior.get("intent", "") if prior else ""),
         "spec_path": spec_path if spec_path is not None else (prior.get("spec_path", "") if prior else ""),
@@ -480,6 +562,28 @@ def write_checkpoint(
         "spec_cost": float(
             spec_cost if spec_cost is not None
             else (prior.get("spec_cost", 0.0) if prior else 0.0)
+        ),
+        "last_activity": last_activity if last_activity is not None else (prior.get("last_activity", "") if prior else ""),
+        "last_tool_name": last_tool_name if last_tool_name is not None else (prior.get("last_tool_name", "") if prior else ""),
+        "last_tool_args_summary": (
+            last_tool_args_summary if last_tool_args_summary is not None
+            else (prior.get("last_tool_args_summary", "") if prior else "")
+        ),
+        "last_story_id": last_story_id if last_story_id is not None else (prior.get("last_story_id", "") if prior else ""),
+        "last_operation_started_at": (
+            last_operation_started_at if last_operation_started_at is not None
+            else (prior.get("last_operation_started_at", "") if prior else "")
+        ),
+        "last_round_failures": (
+            list(last_round_failures)
+            if last_round_failures is not None
+            else list(prior.get("last_round_failures", []) if prior else [])
+        ),
+        "last_diagnosis": last_diagnosis if last_diagnosis is not None else (prior.get("last_diagnosis", "") if prior else ""),
+        "dirty_files": (
+            list(dirty_files)
+            if dirty_files is not None
+            else list(prior.get("dirty_files", []) if prior else [])
         ),
         "started_at": _read_started_at(checkpoint_path),
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
