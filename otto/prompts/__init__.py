@@ -21,6 +21,9 @@ _KNOWN_PLACEHOLDERS = frozenset({
     "evidence_dir",
     "target",
     "strict_mode",
+    "project_context",
+    "project_intent_section",
+    "merge_section",
 })
 
 _PLACEHOLDER_PATTERN = re.compile(

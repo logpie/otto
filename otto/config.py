@@ -24,6 +24,7 @@ import yaml
 
 AGENT_TYPES = ("build", "certifier", "spec", "fix")
 MAX_INTENT_CHARS = 8 * 1024
+PROJECT_INTENT_MIN_CHARS = 50
 MAX_SPEC_CHARS = 32 * 1024
 MAX_CERTIFY_ROUNDS = 50
 
@@ -302,6 +303,27 @@ def validate_text_limit(text: str, *, kind: str, source: str, max_chars: int) ->
     )
 
 
+def read_project_intent_md(project_dir: Path, *, min_chars: int = 1) -> str | None:
+    """Read project-root intent.md when present and sufficiently informative."""
+    from otto import paths
+
+    intent_path = paths.project_intent_md(project_dir)
+    if not intent_path.exists():
+        return None
+    try:
+        intent = intent_path.read_text().strip()
+    except (UnicodeDecodeError, IsADirectoryError, PermissionError, OSError) as exc:
+        raise ConfigError(f"Failed to read {intent_path}: {exc}") from exc
+    if not intent or len(intent) < min_chars or _looks_like_intent_log(intent):
+        return None
+    return validate_text_limit(
+        intent,
+        kind="intent",
+        source=str(intent_path),
+        max_chars=MAX_INTENT_CHARS,
+    )
+
+
 def resolve_intent(project_dir: Path) -> str | None:
     """Resolve the user-owned product description from intent.md or README.md.
 
@@ -309,35 +331,31 @@ def resolve_intent(project_dir: Path) -> str | None:
     `intent.md` is treated as a single curated product description. Legacy
     cumulative otto-generated intent logs are ignored and we fall back to README.md.
     """
-    intent_path = project_dir / "intent.md"
-    readme_path = project_dir / "README.md"
-    if intent_path.exists():
-        try:
-            intent = intent_path.read_text().strip()
-        except (UnicodeDecodeError, IsADirectoryError, PermissionError, OSError) as exc:
-            if readme_path.exists():
-                try:
-                    readme = readme_path.read_text().strip()
-                except (UnicodeDecodeError, IsADirectoryError, PermissionError, OSError) as readme_exc:
-                    raise ConfigError(
-                        f"Failed to read {intent_path}: {exc}. "
-                        f"Fallback {readme_path} also failed: {readme_exc}"
-                    ) from exc
-                if readme:
-                    return validate_text_limit(
-                        readme,
-                        kind="intent",
-                        source=str(readme_path),
-                        max_chars=MAX_INTENT_CHARS,
-                    )
-            raise ConfigError(f"Failed to read {intent_path}: {exc}") from exc
-        if intent and not _looks_like_intent_log(intent):
-            return validate_text_limit(
-                intent,
-                kind="intent",
-                source=str(intent_path),
-                max_chars=MAX_INTENT_CHARS,
-            )
+    from otto import paths
+
+    readme_path = paths.project_readme_md(project_dir)
+    try:
+        intent = read_project_intent_md(project_dir)
+    except ConfigError as exc:
+        if readme_path.exists():
+            try:
+                readme = readme_path.read_text().strip()
+            except (UnicodeDecodeError, IsADirectoryError, PermissionError, OSError) as readme_exc:
+                intent_path = paths.project_intent_md(project_dir)
+                raise ConfigError(
+                    f"Failed to read {intent_path}: {exc}. "
+                    f"Fallback {readme_path} also failed: {readme_exc}"
+                ) from exc
+            if readme:
+                return validate_text_limit(
+                    readme,
+                    kind="intent",
+                    source=str(readme_path),
+                    max_chars=MAX_INTENT_CHARS,
+                )
+        raise
+    if intent:
+        return intent
     if readme_path.exists():
         try:
             intent = readme_path.read_text().strip()

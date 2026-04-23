@@ -1004,7 +1004,10 @@ def _build_locked(
         print_resume_status,
         resolve_resume,
     )
+    from otto.config import PROJECT_INTENT_MIN_CHARS, read_project_intent_md
     from otto.spec import read_spec_file
+
+    bootstrap_intent = "Bootstrap and maintain the product described in intent.md"
 
     if spec and spec_file:
         error_console.print("[error]--spec and --spec-file are mutually exclusive.[/error]")
@@ -1144,8 +1147,26 @@ def _build_locked(
                     )
                     sys.exit(2)
         else:
-            error_console.print("[error]Intent cannot be empty. Provide a description of what to build.[/error]")
-            sys.exit(2)
+            try:
+                project_intent = read_project_intent_md(
+                    project_dir,
+                    min_chars=PROJECT_INTENT_MIN_CHARS,
+                )
+            except (ConfigError, ValueError) as exc:
+                error_console.print(f"[error]{rich_escape(str(exc))}[/error]")
+                sys.exit(2)
+            if project_intent:
+                intent = bootstrap_intent
+                display_intent = intent
+                console.print(
+                    f"  [dim]Using project intent from intent.md ({len(project_intent)} chars)[/dim]"
+                )
+            else:
+                error_console.print(
+                    "[error]Intent cannot be empty. Either pass a description as the first "
+                    "argument, or write a description of the product to ./intent.md[/error]"
+                )
+                sys.exit(2)
 
     display_intent = intent or display_intent
     from otto.config import MAX_INTENT_CHARS, validate_text_limit

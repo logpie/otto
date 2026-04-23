@@ -13,6 +13,8 @@ You are a senior developer. Work autonomously.
    - Existing project: plan what to ADD or CHANGE. Identify which files to modify,
      what new files to create, and what existing behavior must not break.
    - New project: design the architecture — data models, API routes or CLI commands.
+   - If the runtime intent says the product is described in `intent.md`, read
+     `./intent.md` before planning and treat it as the primary product spec.
 
 3. **Build**: Implement.
    - Existing project: follow existing conventions (naming, structure, patterns).

@@ -8,9 +8,18 @@ from pathlib import Path
 import click
 
 from otto.agent import AssistantMessage, AgentOptions, ResultMessage, TextBlock, _safe_read, query
-from otto.config import agent_provider, create_config, load_config, resolve_project_dir
+from otto import paths as _paths
+from otto.config import (
+    PROJECT_INTENT_MIN_CHARS,
+    agent_provider,
+    create_config,
+    load_config,
+    read_project_intent_md,
+    resolve_project_dir,
+)
 from otto.config import ensure_bookkeeping_setup
 from otto.display import CONTEXT_SETTINGS, console
+from otto.prompts import render_prompt
 from otto.testing import _subprocess_env
 from otto.theme import error_console
 
@@ -18,7 +27,7 @@ from otto.theme import error_console
 def _build_file_tree(project_dir: Path, limit: int) -> str:
     """Build a shallow file tree string for LLM context."""
     tree_lines = ["."]
-    excluded_dirs = {".git", "node_modules", "__pycache__"}
+    excluded_dirs = {".git", "node_modules", "__pycache__", _paths.LOGS_ROOT_NAME}
 
     for root, dirs, files in os.walk(project_dir):
         root_path = Path(root)
@@ -83,7 +92,7 @@ async def _run_setup_query(prompt: str, project_dir: Path, config: dict | None =
         permission_mode="bypassPermissions",
         cwd=str(project_dir),
         setting_sources=[],
-        system_prompt="You are a project analyst. Output ONLY the markdown content for CLAUDE.md. No explanation, no preamble, no tool use.",
+        system_prompt={"type": "preset", "preset": "claude_code"},
         env=_subprocess_env(project_dir),
         provider=agent_provider(config or {}),
     )
@@ -111,14 +120,14 @@ def register_setup_command(main: click.Group) -> None:
         require_git()
         project_dir = resolve_project_dir(Path.cwd())
 
-        config_path = project_dir / "otto.yaml"
+        config_path = _paths.project_otto_yaml(project_dir)
         if not config_path.exists():
             create_config(project_dir)
             console.print("[success]Created otto.yaml[/success]")
         config = load_config(config_path)
         ensure_bookkeeping_setup(project_dir, config)
 
-        claude_md = project_dir / "CLAUDE.md"
+        claude_md = _paths.project_claude_md(project_dir)
         existing_content = None
         mode = "generate"
 
@@ -148,6 +157,14 @@ def register_setup_command(main: click.Group) -> None:
 
         context_parts = _gather_project_context(project_dir)
         console.print("[dim]Scanning project...[/dim]")
+        try:
+            project_intent = read_project_intent_md(
+                project_dir,
+                min_chars=PROJECT_INTENT_MIN_CHARS,
+            )
+        except ValueError as exc:
+            error_console.print(f"[error]{exc}[/error]")
+            raise SystemExit(2) from exc
 
         if existing_content:
             merge_section = f"""
@@ -162,25 +179,19 @@ contradict what the codebase actually does. Deduplicate."""
         else:
             merge_section = ""
 
-        prompt = f"""Write a CLAUDE.md for a coding agent working on this project.
+        project_intent_section = ""
+        if project_intent:
+            project_intent_section = (
+                "--- intent.md (authoritative product description) ---\n"
+                f"{project_intent}"
+            )
 
-CLAUDE.md tells the agent what it needs to know to work effectively here.
-Include: build/test commands, project structure, key conventions, and anything
-that would cause mistakes without guidance.
-
-Project files:
-{chr(10).join(context_parts)}
-{merge_section}
-
-Guidelines:
-- Point to files/directories rather than inlining specifics that go stale.
-- Avoid counts, version numbers, or facts that change frequently.
-- Keep it concise — the agent reads code well, just orient it.
-- Include these principles if relevant to the project:
-  - Check for existing patterns before writing new code
-  - After changing a shared type/interface, check all consumers
-  - Fix root causes — don't add workarounds or special cases
-Output ONLY the markdown content."""
+        prompt = render_prompt(
+            "setup-claude.md",
+            project_context=chr(10).join(context_parts),
+            project_intent_section=project_intent_section,
+            merge_section=merge_section,
+        )
 
         console.print("[dim]Generating CLAUDE.md...[/dim]")
         try:

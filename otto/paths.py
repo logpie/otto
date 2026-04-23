@@ -77,6 +77,26 @@ def logs_dir(project_dir: Path) -> Path:
     return Path(project_dir) / LOGS_ROOT_NAME
 
 
+def project_intent_md(project_dir: Path) -> Path:
+    """Return the project-root intent.md path."""
+    return Path(project_dir) / "intent.md"
+
+
+def project_readme_md(project_dir: Path) -> Path:
+    """Return the project-root README.md path."""
+    return Path(project_dir) / "README.md"
+
+
+def project_otto_yaml(project_dir: Path) -> Path:
+    """Return the project-root otto.yaml path."""
+    return Path(project_dir) / "otto.yaml"
+
+
+def project_claude_md(project_dir: Path) -> Path:
+    """Return the project-root CLAUDE.md path."""
+    return Path(project_dir) / "CLAUDE.md"
+
+
 def sessions_root(project_dir: Path) -> Path:
     return logs_dir(project_dir) / SESSIONS_DIR_NAME
 
