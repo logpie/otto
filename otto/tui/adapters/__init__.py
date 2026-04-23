@@ -7,12 +7,16 @@ from otto.tui.adapters.merge import MergeMissionControlAdapter
 from otto.tui.adapters.queue import QueueMissionControlAdapter
 from otto.tui.mission_control_model import MissionControlAdapter
 
+_ATOMIC_ADAPTER = AtomicMissionControlAdapter()
+_QUEUE_ADAPTER = QueueMissionControlAdapter()
+_MERGE_ADAPTER = MergeMissionControlAdapter()
+
 _ADAPTERS: dict[str, MissionControlAdapter] = {
-    "atomic.build": AtomicMissionControlAdapter(),
-    "atomic.improve": AtomicMissionControlAdapter(),
-    "atomic.certify": AtomicMissionControlAdapter(),
-    "queue.attempt": QueueMissionControlAdapter(),
-    "merge.run": MergeMissionControlAdapter(),
+    "atomic.build": _ATOMIC_ADAPTER,
+    "atomic.improve": _ATOMIC_ADAPTER,
+    "atomic.certify": _ATOMIC_ADAPTER,
+    "queue.attempt": _QUEUE_ADAPTER,
+    "merge.run": _MERGE_ADAPTER,
 }
 
 
@@ -20,4 +24,8 @@ def adapter_for_key(adapter_key: str) -> MissionControlAdapter:
     return _ADAPTERS.get(adapter_key, _ADAPTERS["atomic.build"])
 
 
-__all__ = ["adapter_for_key"]
+def all_adapters() -> tuple[MissionControlAdapter, ...]:
+    return (_ATOMIC_ADAPTER, _QUEUE_ADAPTER, _MERGE_ADAPTER)
+
+
+__all__ = ["adapter_for_key", "all_adapters"]

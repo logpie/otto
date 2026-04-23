@@ -3,17 +3,46 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 
+from otto import paths
 from otto.manifest import queue_index_path_for
-from otto.queue.runtime import INTERRUPTED_STATUS
-from otto.queue.schema import load_queue
+from otto.queue.runtime import INTERRUPTED_STATUS, checkpoint_path_for_task, task_display_status
+from otto.queue.schema import load_queue, load_state
+from otto.runs.registry import make_run_record, read_live_records
 from otto.runs.schema import is_terminal_status
 from otto.tui.mission_control_actions import make_action
 from otto.tui.mission_control_model import ArtifactRef, DetailModel, HistoryRow
 
 
 class QueueMissionControlAdapter:
+    def legacy_records(self, project_dir: Path, now: datetime):
+        try:
+            tasks = load_queue(project_dir)
+            state = load_state(project_dir)
+        except Exception:
+            return []
+
+        task_states = state.get("tasks", {}) if isinstance(state, dict) else {}
+        existing_task_ids = {
+            str(record.identity.get("queue_task_id") or "").strip()
+            for record in read_live_records(project_dir)
+            if record.domain == "queue"
+        }
+        records = []
+        for task in tasks:
+            if task.id in existing_task_ids:
+                continue
+            task_state = task_states.get(task.id) if isinstance(task_states, dict) else None
+            records.append(_legacy_queue_record(project_dir, task, task_state, now))
+        return records
+
+    def live_overlay(self, record, overlay):
+        if str(record.identity.get("compatibility_warning") or "").strip() == "legacy queue mode":
+            return None
+        return overlay
+
     def row_label(self, record) -> str:
         task_id = str(record.identity.get("queue_task_id") or record.run_id)
         summary = str(record.intent.get("summary") or "").strip()
@@ -203,6 +232,81 @@ def _queue_worktree(record) -> str | None:
     except Exception:
         return None
     return None
+
+
+def _legacy_queue_record(project_dir, task, task_state, now):
+    state = task_state if isinstance(task_state, dict) else {}
+    status = task_display_status(state)
+    session_run_id = str(state.get("child_run_id") or state.get("attempt_run_id") or "").strip()
+    worktree_path = (project_dir / task.worktree).resolve(strict=False) if task.worktree else project_dir.resolve(strict=False)
+    session_root = paths.sessions_root(worktree_path)
+    session_dir = paths.session_dir(worktree_path, session_run_id) if session_run_id else session_root
+    checkpoint_path = checkpoint_path_for_task(project_dir, task)
+    queue_manifest = queue_index_path_for(project_dir, task.id)
+    child_manifest = session_dir / "manifest.json" if session_run_id else None
+    primary_log_path = paths.build_dir(worktree_path, session_run_id) / "narrative.log" if session_run_id else None
+    started_at = str(state.get("started_at") or task.added_at or now.strftime("%Y-%m-%dT%H:%M:%SZ")).strip()
+    finished_at = str(state.get("finished_at") or "").strip() or None
+    if not is_terminal_status(status):
+        finished_at = None
+    updated_at = finished_at or str(state.get("started_at") or "").strip() or started_at
+    record = make_run_record(
+        project_dir=project_dir,
+        run_id=session_run_id or f"queue-compat:{task.id}",
+        domain="queue",
+        run_type="queue",
+        command=" ".join(task.command_argv[:2]) if task.command_argv else "queue",
+        display_name=f"{task.id}: legacy queue mode",
+        status=status,
+        cwd=worktree_path,
+        identity={
+            "queue_task_id": task.id,
+            "merge_id": None,
+            "parent_run_id": None,
+            "child_run_id": session_run_id or None,
+            "expected_child_run_id": str(state.get("attempt_run_id") or "").strip() or None,
+            "compatibility_warning": "legacy queue mode",
+        },
+        source={
+            "invoked_via": "queue",
+            "argv": list(task.command_argv),
+            "resumable": bool(task.resumable),
+        },
+        git={"branch": task.branch, "worktree": task.worktree, "target_branch": None, "head_sha": None},
+        intent={"summary": task.resolved_intent or task.id, "intent_path": None, "spec_path": task.spec_file_path},
+        artifacts={
+            "session_dir": str(session_dir),
+            "manifest_path": str(child_manifest.resolve(strict=False)) if child_manifest and child_manifest.exists() else None,
+            "checkpoint_path": str(checkpoint_path.resolve(strict=False)) if checkpoint_path is not None else None,
+            "summary_path": str(paths.session_summary(worktree_path, session_run_id).resolve(strict=False)) if session_run_id else None,
+            "primary_log_path": str(primary_log_path.resolve(strict=False)) if primary_log_path and primary_log_path.exists() else None,
+            "extra_log_paths": [],
+            "queue_manifest_path": str(queue_manifest.resolve(strict=False)) if queue_manifest is not None else None,
+        },
+        metrics={"cost_usd": _coerce_float(state.get("cost_usd"))},
+        adapter_key="queue.attempt",
+        last_event=str(state.get("failure_reason") or "legacy queue mode"),
+    )
+    record.writer = {}
+    record.timing.update({
+        "started_at": started_at,
+        "updated_at": updated_at,
+        "heartbeat_at": updated_at,
+        "finished_at": finished_at,
+        "duration_s": _coerce_float(state.get("duration_s")),
+        "heartbeat_interval_s": 60.0,
+        "heartbeat_seq": 0,
+    })
+    return record
+
+
+def _coerce_float(value) -> float | None:
+    try:
+        if value in (None, ""):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _artifact(label: str, path: str, *, kind: str = "file") -> ArtifactRef:

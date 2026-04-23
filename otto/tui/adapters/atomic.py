@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
 from otto.queue.runtime import INTERRUPTED_STATUS
@@ -11,6 +12,14 @@ from otto.tui.mission_control_model import ArtifactRef, DetailModel, HistoryRow
 
 
 class AtomicMissionControlAdapter:
+    def legacy_records(self, project_dir: Path, now: datetime):
+        del project_dir, now
+        return []
+
+    def live_overlay(self, record, overlay):
+        del record
+        return overlay
+
     def row_label(self, record) -> str:
         summary = str(record.intent.get("summary") or "").strip()
         return summary or record.display_name or record.run_id

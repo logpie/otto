@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from otto import paths
 from otto.merge.state import MergeState, write_state
+from otto.queue.schema import QueueTask, append_task, write_state as write_queue_state
 from otto.runs.registry import make_run_record
 from otto.tui.mission_control_model import StaleOverlay
 from otto.tui.adapters import adapter_for_key
@@ -113,6 +115,43 @@ def test_queue_adapter_legacy_mode_disables_registry_dependent_actions(tmp_path:
     assert actions["o"].reason == "legacy queue mode has no registry-backed log view"
     assert actions["e"].enabled is False
     assert actions["e"].reason == "legacy queue mode has no registry-backed artifacts"
+
+
+def test_queue_adapter_owns_legacy_record_and_overlay_compat(tmp_path: Path) -> None:
+    append_task(
+        tmp_path,
+        QueueTask(
+            id="legacy-task",
+            command_argv=["build", "legacy task"],
+            added_at="2026-04-23T12:00:00Z",
+            resolved_intent="legacy queue task",
+            branch="build/legacy-task",
+            worktree=".worktrees/legacy-task",
+        ),
+    )
+    write_queue_state(
+        tmp_path,
+        {
+            "schema_version": 1,
+            "watcher": None,
+            "tasks": {
+                "legacy-task": {
+                    "status": "queued",
+                    "started_at": "2026-04-23T12:00:00Z",
+                }
+            },
+        },
+    )
+
+    adapter = adapter_for_key("queue.attempt")
+    records = adapter.legacy_records(
+        tmp_path,
+        datetime(2026, 4, 23, 12, 1, tzinfo=timezone.utc),
+    )
+
+    assert [record.identity["queue_task_id"] for record in records] == ["legacy-task"]
+    assert records[0].identity["compatibility_warning"] == "legacy queue mode"
+    assert adapter.live_overlay(records[0], StaleOverlay("stale", "STALE", "writer unavailable", False)) is None
 
 
 def test_merge_adapter_renders_state_details(tmp_path: Path) -> None:

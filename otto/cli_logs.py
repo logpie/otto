@@ -28,8 +28,7 @@ def _is_merge_cert_session(project_dir: Path, run_id: str) -> bool:
 
 
 def _load_history_entries(project_dir: Path, *, limit_hint: int = 50) -> list[dict]:
-    del limit_hint
-    return load_project_history_rows(project_dir)
+    return load_project_history_rows(project_dir, limit_hint=limit_hint)
 
 
 def register_history_command(main: click.Group) -> None:

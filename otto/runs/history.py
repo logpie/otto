@@ -79,36 +79,197 @@ def read_history_rows(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def load_project_history_rows(project_dir: Path) -> list[dict[str, Any]]:
+def load_project_history_rows(project_dir: Path, *, limit_hint: int | None = None) -> list[dict[str, Any]]:
     """Merge v2, legacy, and archived history rows into one deduped timeline."""
     sources = [
         paths.history_jsonl(project_dir),
         paths.logs_dir(project_dir) / paths.LEGACY_RUN_HISTORY,
         *(archive / paths.LEGACY_RUN_HISTORY for archive in paths.archived_pre_restructure_dirs(project_dir)),
     ]
+    if limit_hint is None or limit_hint <= 0:
+        loaded_sources = [
+            _LoadedHistorySource(
+                path=source,
+                source_index=source_index,
+                rows=read_history_rows(source),
+                exhausted=True,
+                fallback_ts=_source_fallback_ts(source),
+            )
+            for source_index, source in enumerate(sources)
+            if source.exists()
+        ]
+    else:
+        loaded_sources = _load_bounded_history_sources(sources, limit_hint=max(limit_hint, 1))
+    selected = _dedupe_history_entries(_flatten_history_entries(loaded_sources))
+    selected.sort(key=lambda item: item[0])
+    return [entry for _, _, _, entry in selected]
+
+
+class _LoadedHistorySource:
+    def __init__(
+        self,
+        *,
+        path: Path,
+        source_index: int,
+        rows: list[dict[str, Any]],
+        exhausted: bool,
+        fallback_ts: float,
+    ) -> None:
+        self.path = path
+        self.source_index = source_index
+        self.rows = rows
+        self.exhausted = exhausted
+        self.fallback_ts = fallback_ts
+
+
+def _load_bounded_history_sources(sources: list[Path], *, limit_hint: int) -> list[_LoadedHistorySource]:
+    loaded_sources = [
+        (
+            _load_history_source(source, source_index=source_index, limit=limit_hint)
+            if source.exists()
+            else _LoadedHistorySource(
+                path=source,
+                source_index=source_index,
+                rows=[],
+                exhausted=True,
+                fallback_ts=0.0,
+            )
+        )
+        for source_index, source in enumerate(sources)
+    ]
+    if not any(source.rows or not source.exhausted for source in loaded_sources):
+        return []
+
+    while True:
+        selected = _dedupe_history_entries(_flatten_history_entries(loaded_sources))
+        pending_expansions: set[int] = set()
+        if len(selected) < limit_hint:
+            pending_expansions.update(
+                index for index, source in enumerate(loaded_sources) if not source.exhausted
+            )
+        for item in selected:
+            _, source_index, _, entry = item
+            for higher_index in range(source_index):
+                higher_source = loaded_sources[higher_index]
+                if higher_source.exhausted:
+                    continue
+                if not _source_rows_might_suppress(higher_source.rows, entry):
+                    pending_expansions.add(higher_index)
+        if not pending_expansions:
+            return loaded_sources
+        for source_index in pending_expansions:
+            source = loaded_sources[source_index]
+            next_limit = max(len(source.rows) * 2, limit_hint)
+            loaded_sources[source_index] = _load_history_source(
+                source.path,
+                source_index=source.source_index,
+                limit=next_limit,
+            )
+
+
+def _load_history_source(path: Path, *, source_index: int, limit: int) -> _LoadedHistorySource:
+    rows, exhausted = _tail_history_rows(path, limit=limit)
+    return _LoadedHistorySource(
+        path=path,
+        source_index=source_index,
+        rows=rows,
+        exhausted=exhausted,
+        fallback_ts=_source_fallback_ts(path),
+    )
+
+
+def _tail_history_rows(path: Path, *, limit: int) -> tuple[list[dict[str, Any]], bool]:
+    if limit <= 0:
+        return [], False
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            cursor = handle.tell()
+            buffered = b""
+            rows_rev: list[dict[str, Any]] = []
+            hit_limit = False
+            while cursor > 0 and len(rows_rev) < limit:
+                read_size = min(8192, cursor)
+                cursor -= read_size
+                handle.seek(cursor)
+                chunk = handle.read(read_size)
+                buffered = chunk + buffered
+                parts = buffered.splitlines()
+                if cursor > 0:
+                    buffered = parts[0]
+                    complete_lines = parts[1:]
+                else:
+                    buffered = b""
+                    complete_lines = parts
+                for raw_line in reversed(complete_lines):
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if not line:
+                        continue
+                    try:
+                        value = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(value, dict):
+                        rows_rev.append(value)
+                        if len(rows_rev) >= limit:
+                            hit_limit = True
+                            break
+            return list(reversed(rows_rev)), cursor == 0 and not hit_limit
+    except OSError:
+        return [], True
+
+
+def _flatten_history_entries(
+    sources: list[_LoadedHistorySource],
+) -> list[tuple[tuple[float, int, int], int, int, dict[str, Any]]]:
     entries: list[tuple[tuple[float, int, int], int, int, dict[str, Any]]] = []
-    for source_index, source in enumerate(sources):
-        if not source.exists():
-            continue
-        try:
-            fallback_ts = source.stat().st_mtime
-        except OSError:
-            fallback_ts = 0.0
-        for line_index, entry in enumerate(read_history_rows(source)):
+    for source in sources:
+        for line_index, entry in enumerate(source.rows):
             entries.append((
                 _history_sort_key(
                     entry,
-                    fallback_ts=fallback_ts,
-                    source_index=source_index,
+                    fallback_ts=source.fallback_ts,
+                    source_index=source.source_index,
                     line_index=line_index,
                 ),
-                source_index,
+                source.source_index,
                 line_index,
                 entry,
             ))
-    selected = _dedupe_history_entries(entries)
-    selected.sort(key=lambda item: item[0])
-    return [entry for _, _, _, entry in selected]
+    return entries
+
+
+def _source_rows_might_suppress(
+    rows: list[dict[str, Any]],
+    candidate: dict[str, Any],
+) -> bool:
+    candidate_run_id = _history_run_id(candidate)
+    candidate_command = str(candidate.get("command") or "").strip()
+    candidate_normalized_command = _normalize_command_label(candidate_command) if candidate_command else ""
+    candidate_dedupe_key = str(candidate.get("dedupe_key") or "").strip()
+    for row in rows:
+        dedupe_key = str(row.get("dedupe_key") or "").strip()
+        if candidate_dedupe_key and dedupe_key == candidate_dedupe_key:
+            return True
+        run_id = _history_run_id(row)
+        if not candidate_run_id or run_id != candidate_run_id:
+            continue
+        command = str(row.get("command") or "").strip()
+        normalized_command = _normalize_command_label(command) if command else ""
+        if candidate_normalized_command == normalized_command:
+            return True
+        if candidate_normalized_command and not normalized_command:
+            return True
+        if normalized_command and not candidate_normalized_command:
+            return True
+    return False
+
+
+def _source_fallback_ts(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
 
 
 def _dedupe_history_entries(
