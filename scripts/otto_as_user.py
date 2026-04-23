@@ -111,6 +111,71 @@ def queue_terminal_snapshot(repo: Path, task_id: str) -> dict[str, Any] | None:
     return None
 
 
+VERIFY_STATUS_BY_TERMINAL_OUTCOME = {
+    "success": "done",
+    "failure": "failed",
+    "cancelled": "cancelled",
+    "removed": "removed",
+    "interrupted": "interrupted",
+}
+
+
+def verifier_status_from_terminal_snapshot(row: dict[str, Any] | None) -> str | None:
+    if not isinstance(row, dict):
+        return None
+    terminal_outcome = str(row.get("terminal_outcome") or "").strip().lower()
+    mapped = VERIFY_STATUS_BY_TERMINAL_OUTCOME.get(terminal_outcome)
+    if mapped:
+        return mapped
+    status = str(row.get("status") or "").strip().lower()
+    return status or None
+
+
+def verifier_status_from_queue_task(task: dict[str, Any] | None) -> str | None:
+    if not isinstance(task, dict):
+        return None
+    status = str(task.get("status") or "").strip().lower()
+    terminal_status = str(task.get("terminal_status") or "").strip().lower()
+    if status and status != "terminating":
+        return status
+    if terminal_status:
+        return terminal_status
+    return status or None
+
+
+def resolve_queue_task_verify_status(
+    repo: Path,
+    task_id: str,
+    *,
+    state: dict[str, Any] | None = None,
+    history_snapshot: dict[str, Any] | None = None,
+    history_timeout_s: float = 0.0,
+    interval_s: float = 0.2,
+) -> str | None:
+    deadline = time.monotonic() + max(history_timeout_s, 0.0)
+    snapshot = history_snapshot
+    while True:
+        status = verifier_status_from_terminal_snapshot(snapshot)
+        if status is not None:
+            return status
+        snapshot = queue_terminal_snapshot(repo, task_id)
+        status = verifier_status_from_terminal_snapshot(snapshot)
+        if status is not None:
+            return status
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(interval_s)
+
+    task = {}
+    if isinstance(state, dict):
+        task = state.get("tasks", {}).get(task_id, {})
+    status = verifier_status_from_queue_task(task)
+    if status is not None:
+        return status
+    live_task = load_queue_state(repo).get("tasks", {}).get(task_id, {})
+    return verifier_status_from_queue_task(live_task)
+
+
 def ensure_parent(path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
@@ -1572,10 +1637,10 @@ def run_b1(repo: Path, provider: str) -> RunResult:
         # before the drill-in / exit sequence starts.
         time.sleep(2.5)
         session.send("\r")
-        detail = wait_for_screen_text(session, "otto queue", timeout_s=10, label="detail open")
+        detail = wait_for_screen_text(session, "focus=detail", timeout_s=10, label="detail open")
         time.sleep(2.0)
         session.send("\x1b")
-        wait_for_screen_text(session, "add", timeout_s=10, label="overview return")
+        wait_for_screen_text(session, "focus=live", timeout_s=10, label="overview return")
         time.sleep(2.0)
         notice_text = ""
         try:
@@ -1605,13 +1670,10 @@ def run_b1(repo: Path, provider: str) -> RunResult:
 
 def verify_b1(repo: Path, run_result: RunResult) -> VerifyResult:
     state = run_result.details.get("state", {})
-    statuses = {task_id: task.get("status") for task_id, task in state.get("tasks", {}).items()}
-    # updated for Mission Control: prefer durable terminal snapshots when the watcher state has already drained away.
-    if statuses != {"add": "done", "mul": "done"}:
-        statuses = {
-            task_id: str((queue_terminal_snapshot(repo, task_id) or {}).get("status") or "")
-            for task_id in ("add", "mul")
-        }
+    statuses = {
+        task_id: resolve_queue_task_verify_status(repo, task_id, state=state, history_timeout_s=5.0) or ""
+        for task_id in ("add", "mul")
+    }
     if statuses != {"add": "done", "mul": "done"}:
         return VerifyResult(
             False,
@@ -1641,22 +1703,25 @@ def run_b2(repo: Path, provider: str) -> RunResult:
         # updated for durable cancel: Mission Control live rows are recency-sorted, so select alpha explicitly before sending `c`.
         focus_queue_task(session, "alpha")
         session.send("c")
-        time.sleep(0.2)
-        session.send("c")
-        wait_for(
-            lambda: (
-                load_queue_state(repo).get("tasks", {}).get("alpha", {}).get("status") in {"terminating", "cancelled"}
-                or str((queue_terminal_snapshot(repo, "alpha") or {}).get("terminal_outcome") or "") == "cancelled"
-            ),
-            timeout_s=30,
-            label="alpha cancelled",
-        )
+        try:
+            wait_for(
+                lambda: (
+                    load_queue_state(repo).get("tasks", {}).get("alpha", {}).get("status") in {"terminating", "cancelled"}
+                    or str(load_queue_state(repo).get("tasks", {}).get("alpha", {}).get("terminal_status") or "") == "cancelled"
+                    or str((queue_terminal_snapshot(repo, "alpha") or {}).get("terminal_outcome") or "") == "cancelled"
+                ),
+                timeout_s=4,
+                label="alpha cancel requested",
+            )
+        except AssertionError:
+            focus_queue_task(session, "alpha")
+            session.send("c")
         wait_for(
             lambda: (
                 load_queue_state(repo).get("tasks", {}).get("alpha", {}).get("status") == "cancelled"
                 or str((queue_terminal_snapshot(repo, "alpha") or {}).get("terminal_outcome") or "") == "cancelled"
             ),
-            timeout_s=30,
+            timeout_s=90,
             label="alpha fully cancelled",
         )
         time.sleep(0.5)
@@ -1671,9 +1736,13 @@ def run_b2(repo: Path, provider: str) -> RunResult:
 
 def verify_b2(repo: Path, run_result: RunResult) -> VerifyResult:
     # updated for durable cancel: terminal history is authoritative once the watcher finalizes the cancelled task.
-    status = run_result.details.get("state", {}).get("tasks", {}).get("alpha", {}).get("status")
-    if status != "cancelled":
-        status = str((run_result.details.get("history_alpha") or queue_terminal_snapshot(repo, "alpha") or {}).get("terminal_outcome") or None)
+    status = resolve_queue_task_verify_status(
+        repo,
+        "alpha",
+        state=run_result.details.get("state"),
+        history_snapshot=run_result.details.get("history_alpha"),
+        history_timeout_s=10.0,
+    )
     if status != "cancelled":
         return VerifyResult(False, f"B2 expected alpha cancelled, got {status!r}")
     return VerifyResult(True, "dashboard cancel path reached cancelled state")

@@ -182,6 +182,47 @@ def test_verify_b1_accepts_durable_history_when_queue_state_is_empty(tmp_path: P
     assert verify.passed is True
 
 
+def test_verify_b1_maps_success_terminal_outcome_to_done(tmp_path: Path) -> None:
+    from otto import paths
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    history_path = paths.history_jsonl(repo)
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    history_path.write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "history_kind": "terminal_snapshot",
+                    "run_id": f"run-{task_id}",
+                    "queue_task_id": task_id,
+                    "terminal_outcome": "success",
+                    "dedupe_key": f"terminal_snapshot:run-{task_id}",
+                }
+            )
+            for task_id in ("add", "mul")
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    run_result = OTTO_AS_USER.RunResult(
+        scenario_id="B1",
+        returncode=0,
+        started_at="2026-04-23T00:00:00Z",
+        finished_at="2026-04-23T00:00:01Z",
+        duration_s=5.0,
+        recording_path=str(tmp_path / "recording.cast"),
+        repo_path=str(repo),
+        debug_log=str(tmp_path / "debug.log"),
+        details={"state": {"tasks": {}}, "watcher_rc": None, "notice_text": ""},
+    )
+
+    verify = OTTO_AS_USER.verify_b1(repo, run_result)
+
+    assert verify.passed is True
+
+
 def test_verify_b3_accepts_mission_control_zero_row_footer(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -234,6 +275,36 @@ def test_verify_b2_accepts_cancelled_terminal_history(tmp_path: Path) -> None:
         repo_path=str(repo),
         debug_log=str(tmp_path / "debug.log"),
         details={"state": {"tasks": {}}, "history_alpha": None},
+    )
+
+    verify = OTTO_AS_USER.verify_b2(repo, run_result)
+
+    assert verify.passed is True
+
+
+def test_verify_b2_falls_back_to_queue_terminal_status_without_stringifying_none(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run_result = OTTO_AS_USER.RunResult(
+        scenario_id="B2",
+        returncode=0,
+        started_at="2026-04-23T00:00:00Z",
+        finished_at="2026-04-23T00:00:01Z",
+        duration_s=5.0,
+        recording_path=str(tmp_path / "recording.cast"),
+        repo_path=str(repo),
+        debug_log=str(tmp_path / "debug.log"),
+        details={
+            "state": {
+                "tasks": {
+                    "alpha": {
+                        "status": "terminating",
+                        "terminal_status": "cancelled",
+                    }
+                }
+            },
+            "history_alpha": None,
+        },
     )
 
     verify = OTTO_AS_USER.verify_b2(repo, run_result)
