@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import json
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -80,6 +81,51 @@ def test_debug_fast_args_respects_env(monkeypatch) -> None:
     assert OTTO_AS_USER_NIGHTLY._debug_fast_args() == ["--fast"]
 
 
+def test_run_failures_accumulates_and_returns_first() -> None:
+    failures = OTTO_AS_USER_NIGHTLY.RunFailures()
+
+    assert failures.soft_assert(True, "unused") is True
+    assert failures.soft_assert(False, "first failure") is False
+    failures.fail("second failure")
+    failures.note("kept going")
+
+    assert failures.first() == "first failure"
+    assert failures.all() == ["first failure", "second failure"]
+    assert failures.notes == ["kept going"]
+
+
+def test_audit_artifacts_post_run_reports_dangling_history_paths(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    history_dir = repo / "otto_logs" / "cross-sessions"
+    history_dir.mkdir(parents=True)
+    history_path = history_dir / "history.jsonl"
+    history_path.write_text(
+        json.dumps(
+            {
+                "run_id": "run-1",
+                "manifest_path": str(repo / "missing-manifest.json"),
+                "summary_path": str(repo / "missing-summary.json"),
+                "primary_log_path": str(repo / "missing.log"),
+                "terminal_outcome": "mystery",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    failures = OTTO_AS_USER_NIGHTLY.RunFailures()
+    details: dict[str, object] = {"merge-spawn-argv": []}
+
+    OTTO_AS_USER_NIGHTLY._audit_artifacts_post_run(repo, failures, details)
+
+    assert failures.all() == [
+        f"audit: history row run-1.manifest_path dangles: {repo / 'missing-manifest.json'}",
+        f"audit: history row run-1.summary_path dangles: {repo / 'missing-summary.json'}",
+        f"audit: history row run-1.primary_log_path dangles: {repo / 'missing.log'}",
+        "audit: history row run-1 has invalid terminal_outcome='mystery'",
+    ]
+
+
 def test_run_n9_uses_fast_args_for_build_and_queue(monkeypatch, tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -124,7 +170,8 @@ def test_run_n9_uses_fast_args_for_build_and_queue(monkeypatch, tmp_path: Path) 
     monkeypatch.setattr(OTTO_AS_USER_NIGHTLY.base, "log_line", lambda text: log_lines.append(text))
 
     @contextmanager
-    def fake_capture_mission_control_action_spawns():
+    def fake_capture_mission_control_action_spawns(*, stderr_paths=None):
+        assert stderr_paths == {"merge": artifact_dir / "merge-stderr.log"}
         yield []
 
     monkeypatch.setattr(
@@ -179,6 +226,10 @@ def test_run_n9_uses_fast_args_for_build_and_queue(monkeypatch, tmp_path: Path) 
         "--fast",
         OTTO_AS_USER_NIGHTLY.N9_BUILD_INTENT,
     ]
+    assert hasattr(popen_calls[0]["kwargs"]["stderr"], "write")
+    assert popen_calls[0]["kwargs"]["stderr"] is not subprocess.STDOUT
+    assert hasattr(popen_calls[1]["kwargs"]["stderr"], "write")
+    assert popen_calls[1]["kwargs"]["stderr"] is not subprocess.STDOUT
     assert log_lines.count("[N9] OTTO_DEBUG_FAST=1 — using --fast for all otto invocations") == 1
 
 
@@ -188,10 +239,33 @@ def test_n9_merge_spawn_matcher_accepts_direct_and_module_argv() -> None:
         OTTO_AS_USER_NIGHTLY._argv_invokes_otto_subcommand(
             [sys.executable, "-m", "otto.cli", "merge", "add-post"],
             "merge",
-        )
-        is True
+    )
+    is True
     )
     assert OTTO_AS_USER_NIGHTLY._argv_invokes_otto_subcommand(["true", "intent.txt"], "merge") is False
+
+
+def test_capture_mission_control_action_spawns_redirects_merge_stderr(monkeypatch, tmp_path: Path) -> None:
+    mission_control_actions = importlib.import_module("otto.tui.mission_control_actions")
+    calls: list[dict[str, object]] = []
+
+    class FakeProc:
+        pid = 4242
+
+    def fake_popen(argv, *args, **kwargs):
+        calls.append({"argv": [str(part) for part in argv], "kwargs": kwargs})
+        return FakeProc()
+
+    fake_subprocess = type("FakeSubprocess", (), {"Popen": staticmethod(fake_popen)})()
+    monkeypatch.setattr(mission_control_actions, "subprocess", fake_subprocess)
+
+    stderr_path = tmp_path / "merge-stderr.log"
+    with OTTO_AS_USER_NIGHTLY._capture_mission_control_action_spawns(stderr_paths={"merge": stderr_path}) as spawns:
+        mission_control_actions.subprocess.Popen(["otto", "merge", "add-post"], text=True)
+
+    assert calls[0]["argv"] == ["otto", "merge", "add-post"]
+    assert hasattr(calls[0]["kwargs"]["stderr"], "write")
+    assert spawns[0]["stderr_path"] == stderr_path
 
 
 def test_checkout_main_before_merge_step_uses_checked_helper(monkeypatch, tmp_path: Path) -> None:
@@ -250,6 +324,9 @@ def test_verify_n9_checks_realistic_session_and_uses_visible_hidden(
 ) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
+    merge_state = repo / "otto_logs" / "merge" / "merge-1" / "state.json"
+    merge_state.parent.mkdir(parents=True)
+    merge_state.write_text("{}", encoding="utf-8")
     artifact_dir = tmp_path / "artifacts"
     artifact_dir.mkdir()
 
@@ -348,6 +425,9 @@ def test_verify_n9_rejects_merge_all(tmp_path: Path) -> None:
 def test_verify_n9_accepts_legacy_queue_cancel_ack_field(monkeypatch, tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
+    merge_state = repo / "otto_logs" / "merge" / "merge-1" / "state.json"
+    merge_state.parent.mkdir(parents=True)
+    merge_state.write_text("{}", encoding="utf-8")
     artifact_dir = tmp_path / "artifacts"
     artifact_dir.mkdir()
 
@@ -398,6 +478,9 @@ def test_verify_n9_accepts_legacy_queue_cancel_ack_field(monkeypatch, tmp_path: 
 def test_verify_n9_accepts_merge_live_record_fallback(monkeypatch, tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     repo.mkdir()
+    merge_state = repo / "otto_logs" / "merge" / "merge-1" / "state.json"
+    merge_state.parent.mkdir(parents=True)
+    merge_state.write_text("{}", encoding="utf-8")
     artifact_dir = tmp_path / "artifacts"
     artifact_dir.mkdir()
 

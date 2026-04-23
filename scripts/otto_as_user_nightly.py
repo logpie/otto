@@ -81,6 +81,29 @@ class VerifyResult:
         return self.detail
 
 
+class RunFailures:
+    def __init__(self):
+        self.failures: list[str] = []
+        self.notes: list[str] = []
+
+    def soft_assert(self, cond: bool, msg: str) -> bool:
+        if not cond:
+            self.failures.append(msg)
+        return cond
+
+    def fail(self, msg: str) -> None:
+        self.failures.append(msg)
+
+    def note(self, msg: str) -> None:
+        self.notes.append(msg)
+
+    def first(self) -> str:
+        return self.failures[0] if self.failures else ""
+
+    def all(self) -> list[str]:
+        return list(self.failures)
+
+
 @dataclass
 class NightlyOutcome:
     scenario: base.Scenario
@@ -415,10 +438,32 @@ def _background_log_path(label: str) -> Path:
     return ctx.artifact_dir / base.attempt_filename(f"{label}.log", attempt_index)
 
 
+def _stderr_log_path(phase: str) -> Path:
+    return _background_log_path(f"{phase}-stderr")
+
+
 def _read_log(path: Path) -> str:
     if not path.exists():
         return ""
     return path.read_text(encoding="utf-8")
+
+
+def _read_log_tail(path: Path, *, max_lines: int = 30) -> str:
+    if not path.exists():
+        return ""
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    if not lines:
+        return ""
+    return "\n".join(lines[-max_lines:])
+
+
+def _record_stderr_tail(details: dict[str, Any], phase: str, path: Path) -> None:
+    if not path.exists():
+        return
+    details[f"{phase}-stderr-path"] = str(path)
+    tail = _read_log_tail(path)
+    if tail:
+        details[f"{phase}-stderr-tail"] = tail
 
 
 def _n9_phase_log_path(repo: Path) -> Path:
@@ -503,6 +548,62 @@ def _artifact_paths_resolve(snapshot: dict[str, Any]) -> bool:
     return True
 
 
+def _audit_artifacts_post_run(repo: Path, failures: RunFailures, details: dict[str, Any]) -> None:
+    from otto import paths
+    from otto.runs.registry import writer_identity_gone_or_stale
+    from otto.runs.schema import STATUS_VALUES, is_terminal_status
+
+    history_rows = base.read_jsonl(paths.history_jsonl(repo))
+    details["audit-history-row-count"] = len(history_rows)
+    valid_terminal_outcomes = {"success", "failure", "cancelled", "interrupted", "removed"}
+    for row in history_rows:
+        run_id = str(row.get("run_id") or "?")
+        for path_field in ("manifest_path", "summary_path", "primary_log_path"):
+            raw_path = str(row.get(path_field) or "").strip()
+            if raw_path and not Path(raw_path).exists():
+                failures.fail(f"audit: history row {run_id}.{path_field} dangles: {raw_path}")
+        outcome = row.get("terminal_outcome")
+        if outcome is not None and outcome not in valid_terminal_outcomes:
+            failures.fail(f"audit: history row {run_id} has invalid terminal_outcome={outcome!r}")
+
+    live_dir = paths.live_runs_dir(repo)
+    live_count = 0
+    if live_dir.exists():
+        for live_file in sorted(live_dir.glob("*.json")):
+            live_count += 1
+            try:
+                payload = json.loads(live_file.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                failures.fail(f"audit: live record {live_file.name} unreadable: {exc}")
+                continue
+            run_id = str(payload.get("run_id") or live_file.stem)
+            status = str(payload.get("status") or "").strip()
+            writer = payload.get("writer") if isinstance(payload.get("writer"), dict) else {}
+            if status not in STATUS_VALUES:
+                failures.fail(f"audit: live record {run_id} has invalid status={status!r}")
+                continue
+            if is_terminal_status(status) and writer_identity_gone_or_stale(writer):
+                failures.fail(f"audit: live record {run_id} is terminal status={status!r} but still present after gc")
+            if not is_terminal_status(status) and writer_identity_gone_or_stale(writer):
+                failures.fail(f"audit: live record {run_id} is non-terminal status={status!r} with stale writer")
+    details["audit-live-record-count"] = live_count
+
+    merge_attempted = any(
+        details.get(key)
+        for key in (
+            "merge-detected-via",
+            "merge-live-record-seen",
+            "merge-history-run-id",
+            "merge-run-id",
+            "merge-spawn-argv",
+        )
+    )
+    merge_state_paths = sorted(paths.merge_dir(repo).glob("*/state.json")) if paths.merge_dir(repo).exists() else []
+    details["audit-merge-state-paths"] = [str(path) for path in merge_state_paths]
+    if merge_attempted and not merge_state_paths:
+        failures.fail("audit: merge was attempted but otto_logs/merge/<id>/state.json is missing")
+
+
 def _n9_overlap_delay_s() -> float:
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return 0.0
@@ -522,20 +623,38 @@ def _argv_invokes_otto_subcommand(argv: list[str], subcommand: str) -> bool:
 
 
 @contextmanager
-def _capture_mission_control_action_spawns() -> Any:
+def _capture_mission_control_action_spawns(*, stderr_paths: dict[str, Path] | None = None) -> Any:
     import otto.tui.mission_control_actions as mission_control_actions
 
     real_popen = mission_control_actions.subprocess.Popen
     spawns: list[dict[str, Any]] = []
 
     def _wrapped_popen(argv: Any, *args: Any, **kwargs: Any) -> Any:
-        proc = real_popen(argv, *args, **kwargs)
+        argv_list = [str(part) for part in argv]
+        stderr_path: Path | None = None
+        stderr_handle = None
+        if stderr_paths:
+            for subcommand, candidate_path in stderr_paths.items():
+                if _argv_invokes_otto_subcommand(argv_list, subcommand):
+                    stderr_path = candidate_path
+                    stderr_path.parent.mkdir(parents=True, exist_ok=True)
+                    stderr_handle = stderr_path.open("w", encoding="utf-8")
+                    kwargs["stderr"] = stderr_handle
+                    break
+        try:
+            proc = real_popen(argv, *args, **kwargs)
+        except Exception:
+            if stderr_handle is not None:
+                stderr_handle.close()
+            raise
         spawns.append(
             {
-                "argv": [str(part) for part in argv],
+                "argv": argv_list,
                 "proc": proc,
                 "pid": getattr(proc, "pid", None),
                 "started_monotonic": time.monotonic(),
+                "stderr_path": stderr_path,
+                "stderr_handle": stderr_handle,
             }
         )
         return proc
@@ -545,6 +664,11 @@ def _capture_mission_control_action_spawns() -> Any:
         yield spawns
     finally:
         mission_control_actions.subprocess.Popen = real_popen
+        for spawn in spawns:
+            stderr_handle = spawn.get("stderr_handle")
+            if stderr_handle is not None:
+                stderr_handle.flush()
+                stderr_handle.close()
 
 
 def _terminate_process_group(proc: subprocess.Popen[str] | None) -> None:
@@ -812,6 +936,7 @@ async def _drive_n9_mission_control(
     repo: Path,
     build_run_id: str,
     details: dict[str, Any],
+    failures: RunFailures,
     runtime: dict[str, Any],
     start_build_flow: Any,
     start_queue_flow: Any,
@@ -927,441 +1052,493 @@ async def _drive_n9_mission_control(
         return False
 
     async with app.run_test() as pilot:
-        start_build_flow()
-        build_proc = runtime["build_proc"]
-        build_started = runtime["build_started"]
-        if build_proc is None or build_started is None:
-            raise AssertionError("N9 failed to start the standalone build from Mission Control")
+        build_proc = None
+        build_started = None
+        watcher_started = None
+        cancel_item = None
+        other_queue_item = None
 
-        build_item = await _wait_for(
-            lambda: next((item for item in app.state.live_runs.items if item.record.run_id == build_run_id), None),
-            timeout_s=5.0,
-            message="N9 Mission Control did not show the standalone build row within 5s",
-        )
-        details["build-live-row-latency-ms"] = int((time.monotonic() - build_started) * 1000)
-        if build_item.record.status != "running":
+        try:
+            start_build_flow()
+            build_proc = runtime["build_proc"]
+            build_started = runtime["build_started"]
+            if build_proc is None or build_started is None:
+                raise AssertionError("N9 failed to start the standalone build from Mission Control")
+
             build_item = await _wait_for(
+                lambda: next((item for item in app.state.live_runs.items if item.record.run_id == build_run_id), None),
+                timeout_s=5.0,
+                message="N9 Mission Control did not show the standalone build row within 5s",
+            )
+            details["build-live-row-latency-ms"] = int((time.monotonic() - build_started) * 1000)
+            if build_item.record.status != "running":
+                await _wait_for(
+                    lambda: next(
+                        (
+                            item
+                            for item in app.state.live_runs.items
+                            if item.record.run_id == build_run_id and item.record.status == "running"
+                        ),
+                        None,
+                    ),
+                    timeout_s=5.0,
+                    message="N9 Mission Control never rendered the standalone build as running",
+                )
+
+            start_queue_flow()
+            watcher_started = runtime["watcher_started"]
+            if watcher_started is None:
+                raise AssertionError("N9 failed to start the queue watcher")
+            queue_items = await _wait_for(
+                lambda: _queue_items() if len(_queue_items()) >= 2 else None,
+                timeout_s=30.0,
+                message="N9 expected two live queue rows within 30s of starting the watcher",
+            )
+            for task_id, item in queue_items.items():
+                details["queue-run-ids"][task_id] = item.record.run_id
+                details["queue-live-latency-ms"][task_id] = int((time.monotonic() - watcher_started) * 1000)
+            queue_run_ids = {item.record.run_id for item in queue_items.values()}
+            concurrent_live_rows = [
+                item
+                for item in app.state.live_runs.items
+                if item.record.run_id in queue_run_ids | {build_run_id}
+            ]
+            if len(concurrent_live_rows) < 3:
+                raise AssertionError("N9 did not show the standalone build and both queue rows concurrently")
+            if any(is_terminal_status(item.record.status) for item in concurrent_live_rows):
+                raise AssertionError("N9 overlapping live rows became terminal before Mission Control inspected them")
+            details["overlapping-live-run-ids"] = [item.record.run_id for item in concurrent_live_rows]
+        except Exception as exc:
+            failures.fail(f"phase overlap: {exc}")
+
+        try:
+            await _focus_live_run(build_run_id)
+            await pilot.press("enter")
+            await _wait_for(
+                lambda: app.state.focus == "detail" and (_detail() is not None and _detail().run_id == build_run_id),
+                timeout_s=5.0,
+                message="N9 standalone build detail view did not open",
+            )
+            build_detail = await _wait_for(
+                lambda: _detail() if _detail() is not None and not is_terminal_status(_detail().record.status) else None,
+                timeout_s=10.0,
+                message="N9 standalone build detail never reached an active state",
+            )
+            initial_build_hb = int(build_detail.record.timing.get("heartbeat_seq") or 0)
+            build_heartbeat_progress = await _wait_for(
+                lambda: (
+                    _detail()
+                    if _detail() is not None and int(_detail().record.timing.get("heartbeat_seq") or 0) > initial_build_hb
+                    else None
+                ),
+                timeout_s=4.0,
+                message="N9 standalone heartbeat did not advance while Detail was open",
+            )
+            details["standalone-heartbeat-advanced"] = True
+            details["standalone-heartbeat-from"] = initial_build_hb
+            details["standalone-heartbeat-to"] = int(build_heartbeat_progress.record.timing.get("heartbeat_seq") or 0)
+            if len(build_detail.log_paths) < 2:
+                raise AssertionError("N9 standalone detail did not expose a second log path for `o`")
+            initial_build_log_path = build_detail.selected_log_path
+            await pilot.press("o")
+            await _wait_for(
+                lambda: _detail() is not None and _detail().selected_log_path != initial_build_log_path,
+                timeout_s=5.0,
+                message="N9 `o` did not switch the standalone detail to a second log",
+            )
+            details["standalone-log-cycled"] = True
+            details["standalone-log-before"] = initial_build_log_path
+            details["standalone-log-after"] = _detail().selected_log_path
+            _write_n9_phase_snapshot(app, repo, phase="build-running")
+        except Exception as exc:
+            failures.fail(f"phase build-detail: {exc}")
+        finally:
+            if app.state.focus == "detail":
+                await pilot.press("escape")
+                await pilot.pause(0.2)
+
+        try:
+            active_queue_rows = [
+                item
+                for item in app.state.live_runs.items
+                if item.record.domain == "queue" and not is_terminal_status(item.record.status)
+            ]
+            if len(active_queue_rows) < 2:
+                raise AssertionError("N9 queue rows settled before Pilot could cancel one while both were live")
+            cancel_item = next(
+                (item for item in active_queue_rows if str(item.record.identity.get("queue_task_id")) == "add-delete"),
+                active_queue_rows[0],
+            )
+            cancel_task_id = str(cancel_item.record.identity.get("queue_task_id") or "")
+            other_queue_item = next(
+                item for item in active_queue_rows if item.record.run_id != cancel_item.record.run_id
+            )
+            other_queue_task_id = str(other_queue_item.record.identity.get("queue_task_id") or "")
+            details["other-queue-task-id"] = other_queue_task_id
+            details["other-queue-run-id"] = other_queue_item.record.run_id
+            details["cancelled-queue-task-id"] = cancel_task_id
+            details["cancelled-queue-run-id"] = cancel_item.record.run_id
+            await _focus_live_run(cancel_item.record.run_id)
+            await pilot.press("enter")
+            await _wait_for(
+                lambda: app.state.focus == "detail" and (_detail() is not None and _detail().run_id == cancel_item.record.run_id),
+                timeout_s=5.0,
+                message="N9 could not reopen queue detail for cancellation",
+            )
+            heartbeat_interval_s = max(float(_detail().record.timing.get("heartbeat_interval_s") or 5.0), 0.1)
+            cancel_pressed_at = time.monotonic()
+            await pilot.press("c")
+            cancelled_snapshot = await _wait_for(
+                lambda: _terminal_snapshot_for_queue_task(
+                    cancel_task_id,
+                    outcome="cancelled",
+                    run_id=cancel_item.record.run_id,
+                ),
+                timeout_s=max(8.0, 4.0 * heartbeat_interval_s),
+                message="N9 queue cancel was not recorded in history",
+            )
+            details["queue-cancel-history-path"] = str(history_path)
+            details["queue-cancel-history-latency-ms"] = int((time.monotonic() - cancel_pressed_at) * 1000)
+            details["queue-cancel-history-run-id"] = str(cancelled_snapshot.get("run_id") or "")
+            await _wait_for(
+                lambda: (
+                    _detail() is not None
+                    and _detail().record.run_id == cancel_item.record.run_id
+                    and _detail().record.status == "cancelled"
+                ),
+                timeout_s=max(app.state.live_runs.refresh_interval_s + 1.0, 2.0),
+                message="N9 Mission Control detail did not refresh to cancelled within one cycle",
+            )
+            details["queue-cancelled-latency-ms"] = int((time.monotonic() - cancel_pressed_at) * 1000)
+            details["queue-refresh-window-ms"] = int(max(app.state.live_runs.refresh_interval_s, 0.5) * 1000)
+            _write_n9_phase_snapshot(app, repo, phase="queue-cancelled")
+        except Exception as exc:
+            failures.fail(f"phase queue-cancel: {exc}")
+        finally:
+            if app.state.focus == "detail":
+                await pilot.press("escape")
+                await pilot.pause(0.2)
+
+        try:
+            if other_queue_item is None:
+                raise AssertionError("N9 could not identify the other queue row after cancellation")
+            other_queue_task_id = str(other_queue_item.record.identity.get("queue_task_id") or "")
+            other_queue_snapshot = await _wait_for(
+                lambda: _terminal_snapshot_for_queue_task(
+                    other_queue_task_id,
+                    outcome="success",
+                    run_id=other_queue_item.record.run_id,
+                ),
+                timeout_s=budget.timeout_for(3 * 60),
+                message="N9 other queue task did not finish naturally within 3 minutes",
+            )
+            details["other-queue-terminal-outcome"] = str(other_queue_snapshot.get("terminal_outcome") or "")
+            _write_n9_phase_snapshot(app, repo, phase="queue-success")
+
+            watcher_proc = runtime["watcher_proc"]
+            watcher_step = runtime["watcher_step"]
+            if watcher_proc is None or watcher_step is None or watcher_started is None:
+                raise AssertionError("N9 queue watcher was not available for post-cancel inspection")
+            await _wait_for(
+                lambda: watcher_proc.poll() is not None,
+                timeout_s=budget.timeout_for(60),
+                message="N9 queue watcher did not settle after the cancel",
+            )
+            watcher_rc = watcher_proc.poll()
+            if watcher_rc != 0:
+                raise AssertionError(f"N9 queue watcher exited with rc={watcher_rc}")
+            watcher_step["rc"] = watcher_rc
+            watcher_step["duration_s"] = round(time.monotonic() - watcher_started, 1)
+            details["watcher-returncode"] = watcher_rc
+        except Exception as exc:
+            failures.fail(f"phase queue-settle: {exc}")
+
+        try:
+            if build_proc is None:
+                raise AssertionError("N9 standalone build process was unavailable for final inspection")
+            await _focus_live_run(build_run_id)
+            await pilot.press("enter")
+            await _wait_for(
+                lambda: app.state.focus == "detail" and (_detail() is not None and _detail().run_id == build_run_id),
+                timeout_s=5.0,
+                message="N9 standalone build detail could not be reopened after queue settlement",
+            )
+            build_finished_naturally = await _wait_until(
+                lambda: build_proc.poll() is not None,
+                timeout_s=8 * 60.0,
+                pause_s=0.2,
+            )
+            if build_finished_naturally:
+                build_finished_at = time.monotonic()
+                build_rc = build_proc.poll()
+                if build_rc != 0:
+                    raise AssertionError(f"N9 standalone build exited with rc={build_rc}")
+                await _wait_for(
+                    lambda: next(
+                        (
+                            item
+                            for item in app.state.live_runs.items
+                            if item.record.run_id == build_run_id and item.record.status == "done"
+                        ),
+                        None,
+                    ),
+                    timeout_s=max(app.state.live_runs.refresh_interval_s + 1.0, 2.0),
+                    message="N9 Mission Control did not reflect build status=done within one refresh cycle",
+                )
+                details["build-finished-naturally"] = True
+                details["build-live-done-latency-ms"] = int((time.monotonic() - build_finished_at) * 1000)
+                _write_n9_phase_snapshot(app, repo, phase="build-done")
+            else:
+                current_detail = _detail()
+                if current_detail is None:
+                    raise AssertionError("N9 standalone build detail was unavailable for cancellation")
+                request_path = paths.session_command_requests(Path(current_detail.record.cwd), build_run_id)
+                ack_path = paths.session_command_acks(Path(current_detail.record.cwd), build_run_id)
+                pre_ack_ids = set(load_command_ack_ids(ack_path))
+                cancel_pressed_at = time.monotonic()
+                await pilot.press("c")
+                await _wait_for(
+                    lambda: set(load_command_ack_ids(ack_path)) - pre_ack_ids,
+                    timeout_s=15.0,
+                    message="N9 standalone cancel ack did not arrive",
+                )
+                details["standalone-cancel-request-path"] = str(request_path)
+                details["standalone-cancel-ack-path"] = str(ack_path)
+                details["standalone-cancel-ack-latency-ms"] = int((time.monotonic() - cancel_pressed_at) * 1000)
+                cancelled_detail = await _wait_for(
+                    lambda: (
+                        _detail()
+                        if _detail() is not None
+                        and _detail().record.run_id == build_run_id
+                        and _detail().record.status == "cancelled"
+                        else None
+                    ),
+                    timeout_s=max(app.state.live_runs.refresh_interval_s + 1.0, 2.0),
+                    message="N9 Mission Control did not refresh the standalone detail to cancelled",
+                )
+                details["standalone-cancelled-via-pilot"] = True
+                details["standalone-cancelled-latency-ms"] = int((time.monotonic() - cancel_pressed_at) * 1000)
+                details["standalone-terminal-status"] = cancelled_detail.record.status
+                _write_n9_phase_snapshot(app, repo, phase="build-cancelled")
+                await _wait_for(
+                    lambda: build_proc.poll() is not None,
+                    timeout_s=max(30.0, budget.timeout_for(90)),
+                    message="N9 standalone process did not exit after the Mission Control cancel",
+                )
+        except Exception as exc:
+            failures.fail(f"phase build-settle: {exc}")
+        finally:
+            if app.state.focus == "detail":
+                await pilot.press("escape")
+                await pilot.pause(0.2)
+
+        try:
+            await _focus_history_run(build_run_id)
+            history_rows = await _wait_for(
+                lambda: _history_rows() if len(_history_rows()) >= 3 else None,
+                timeout_s=20.0,
+                message="N9 History did not show the three terminal rows after queue settlement",
+            )
+            details["history-pre-merge-run-ids"] = [item.row.run_id for item in history_rows[:3]]
+            terminal_outcomes = {item.row.run_id: item.row.terminal_outcome for item in history_rows}
+            details["history-terminal-outcomes-pre-merge"] = terminal_outcomes
+            if build_run_id not in terminal_outcomes or terminal_outcomes[build_run_id] not in {"success", "cancelled"}:
+                raise AssertionError("N9 History did not record the standalone build as a terminal row")
+            cancelled_history_item = next(
+                (item for item in history_rows if item.row.run_id == details["cancelled-queue-run-id"]),
+                None,
+            )
+            if cancelled_history_item is None or cancelled_history_item.row.terminal_outcome != "cancelled":
+                raise AssertionError("N9 History did not record the cancelled queue row as cancelled")
+            success_history_item = next(
+                (
+                    item
+                    for item in history_rows
+                    if item.row.domain == "queue"
+                    and item.row.run_id != details["cancelled-queue-run-id"]
+                    and item.row.terminal_outcome == "success"
+                ),
+                None,
+            )
+            if success_history_item is None:
+                raise AssertionError("N9 History did not record a succeeded queue row")
+            details["succeeded-queue-run-id"] = success_history_item.row.run_id
+            details["succeeded-queue-task-id"] = success_history_item.row.queue_task_id
+            _write_n9_phase_snapshot(app, repo, phase="history-pre-merge")
+        except Exception as exc:
+            failures.fail(f"phase history: {exc}")
+
+        try:
+            cancelled_run_id = str(details.get("cancelled-queue-run-id") or "")
+            if not cancelled_run_id:
+                raise AssertionError("N9 cancelled queue row was unavailable for History detail inspection")
+            await _focus_history_run(cancelled_run_id)
+            await pilot.press("enter")
+            await _wait_for(
+                lambda: app.state.focus == "detail" and (_detail() is not None and _detail().run_id == cancelled_run_id),
+                timeout_s=5.0,
+                message="N9 cancelled history detail did not open",
+            )
+            await pilot.press("e")
+            editor_spawn = await _wait_for(
                 lambda: next(
                     (
-                        item
-                        for item in app.state.live_runs.items
-                        if item.record.run_id == build_run_id and item.record.status == "running"
+                        spawn
+                        for spawn in action_spawns
+                        if spawn["argv"] and Path(spawn["argv"][0]).name == "true"
                     ),
                     None,
                 ),
                 timeout_s=5.0,
-                message="N9 Mission Control never rendered the standalone build as running",
+                message="N9 did not attempt to spawn $EDITOR from the cancelled history row",
             )
+            details["editor-spawn-attempted"] = True
+            details["editor-spawn-argv"] = editor_spawn["argv"]
+            _write_n9_phase_snapshot(app, repo, phase="history-cancelled-detail")
+        except Exception as exc:
+            failures.fail(f"phase editor: {exc}")
 
-        start_queue_flow()
-        watcher_started = runtime["watcher_started"]
-        if watcher_started is None:
-            raise AssertionError("N9 failed to start the queue watcher")
-        queue_items = await _wait_for(
-            lambda: _queue_items() if len(_queue_items()) >= 2 else None,
-            timeout_s=30.0,
-            message="N9 expected two live queue rows within 30s of starting the watcher",
-        )
-        for task_id, item in queue_items.items():
-            details["queue-run-ids"][task_id] = item.record.run_id
-            details["queue-live-latency-ms"][task_id] = int((time.monotonic() - watcher_started) * 1000)
-        queue_run_ids = {item.record.run_id for item in queue_items.values()}
-        concurrent_live_rows = [
-            item
-            for item in app.state.live_runs.items
-            if item.record.run_id in queue_run_ids | {build_run_id}
-        ]
-        if len(concurrent_live_rows) < 3:
-            raise AssertionError("N9 did not show the standalone build and both queue rows concurrently")
-        if any(is_terminal_status(item.record.status) for item in concurrent_live_rows):
-            raise AssertionError("N9 overlapping live rows became terminal before Mission Control inspected them")
-        details["overlapping-live-run-ids"] = [item.record.run_id for item in concurrent_live_rows]
+        try:
+            succeeded_queue_run_id = str(details.get("succeeded-queue-run-id") or "")
+            succeeded_queue_task_id = str(details.get("succeeded-queue-task-id") or "")
+            if not succeeded_queue_run_id or not succeeded_queue_task_id:
+                raise AssertionError("N9 succeeded queue row was unavailable for the selected-row merge")
+            await _focus_live_run(succeeded_queue_run_id)
+            focused_live_item = await _wait_for(
+                lambda: (
+                    _live_run_item(succeeded_queue_run_id)
+                    if app.state.focus == "live" and app.state.selection.run_id == succeeded_queue_run_id
+                    else None
+                ),
+                timeout_s=5.0,
+                message="N9 could not restore focus to the succeeded queue row in Live before merge",
+            )
+            if focused_live_item.record.status != "done":
+                raise AssertionError(
+                    f"N9 expected the merge candidate to remain done in Live, got status={focused_live_item.record.status!r}"
+                )
+            if str(focused_live_item.record.identity.get("queue_task_id") or "") != succeeded_queue_task_id:
+                raise AssertionError("N9 focused the wrong queue row before merge")
+            details["merge-focus-run-id"] = focused_live_item.record.run_id
+            details["merge-focus-task-id"] = str(focused_live_item.record.identity.get("queue_task_id") or "")
+            _write_n9_phase_snapshot(app, repo, phase="live-pre-merge-focus")
 
-        await _focus_live_run(build_run_id)
-        await pilot.press("enter")
-        await _wait_for(
-            lambda: app.state.focus == "detail" and (_detail() is not None and _detail().run_id == build_run_id),
-            timeout_s=5.0,
-            message="N9 standalone build detail view did not open",
-        )
-        build_detail = await _wait_for(
-            lambda: _detail() if _detail() is not None and not is_terminal_status(_detail().record.status) else None,
-            timeout_s=10.0,
-            message="N9 standalone build detail never reached an active state",
-        )
-        initial_build_hb = int(build_detail.record.timing.get("heartbeat_seq") or 0)
-        build_heartbeat_progress = await _wait_for(
-            lambda: (
-                _detail()
-                if _detail() is not None and int(_detail().record.timing.get("heartbeat_seq") or 0) > initial_build_hb
-                else None
-            ),
-            timeout_s=4.0,
-            message="N9 standalone heartbeat did not advance while Detail was open",
-        )
-        details["standalone-heartbeat-advanced"] = True
-        details["standalone-heartbeat-from"] = initial_build_hb
-        details["standalone-heartbeat-to"] = int(build_heartbeat_progress.record.timing.get("heartbeat_seq") or 0)
-        if len(build_detail.log_paths) < 2:
-            raise AssertionError("N9 standalone detail did not expose a second log path for `o`")
-        initial_build_log_path = build_detail.selected_log_path
-        await pilot.press("o")
-        await _wait_for(
-            lambda: _detail() is not None and _detail().selected_log_path != initial_build_log_path,
-            timeout_s=5.0,
-            message="N9 `o` did not switch the standalone detail to a second log",
-        )
-        details["standalone-log-cycled"] = True
-        details["standalone-log-before"] = initial_build_log_path
-        details["standalone-log-after"] = _detail().selected_log_path
-        _write_n9_phase_snapshot(app, repo, phase="build-running")
-
-        await pilot.press("escape")
-        await pilot.pause(0.2)
-
-        active_queue_rows = [
-            item
-            for item in app.state.live_runs.items
-            if item.record.domain == "queue" and not is_terminal_status(item.record.status)
-        ]
-        if len(active_queue_rows) < 2:
-            raise AssertionError("N9 queue rows settled before Pilot could cancel one while both were live")
-        cancel_item = next(
-            (item for item in active_queue_rows if str(item.record.identity.get("queue_task_id")) == "add-delete"),
-            active_queue_rows[0],
-        )
-        cancel_task_id = str(cancel_item.record.identity.get("queue_task_id"))
-        other_queue_item = next(
-            item for item in active_queue_rows if item.record.run_id != cancel_item.record.run_id
-        )
-        other_queue_task_id = str(other_queue_item.record.identity.get("queue_task_id"))
-        details["other-queue-task-id"] = other_queue_task_id
-        details["other-queue-run-id"] = other_queue_item.record.run_id
-        details["cancelled-queue-task-id"] = cancel_task_id
-        details["cancelled-queue-run-id"] = cancel_item.record.run_id
-        await _focus_live_run(cancel_item.record.run_id)
-        await pilot.press("enter")
-        await _wait_for(
-            lambda: app.state.focus == "detail" and (_detail() is not None and _detail().run_id == cancel_item.record.run_id),
-            timeout_s=5.0,
-            message="N9 could not reopen queue detail for cancellation",
-        )
-        heartbeat_interval_s = max(float(_detail().record.timing.get("heartbeat_interval_s") or 5.0), 0.1)
-        cancel_pressed_at = time.monotonic()
-        await pilot.press("c")
-        cancelled_snapshot = await _wait_for(
-            lambda: _terminal_snapshot_for_queue_task(
-                cancel_task_id,
-                outcome="cancelled",
-                run_id=cancel_item.record.run_id,
-            ),
-            timeout_s=max(8.0, 4.0 * heartbeat_interval_s),
-            message="N9 queue cancel was not recorded in history",
-        )
-        details["queue-cancel-history-path"] = str(history_path)
-        details["queue-cancel-history-latency-ms"] = int((time.monotonic() - cancel_pressed_at) * 1000)
-        details["queue-cancel-history-run-id"] = str(cancelled_snapshot.get("run_id") or "")
-        await _wait_for(
-            lambda: (
-                _detail() is not None
-                and _detail().record.run_id == cancel_item.record.run_id
-                and _detail().record.status == "cancelled"
-            ),
-            timeout_s=max(app.state.live_runs.refresh_interval_s + 1.0, 2.0),
-            message="N9 Mission Control detail did not refresh to cancelled within one cycle",
-        )
-        details["queue-cancelled-latency-ms"] = int((time.monotonic() - cancel_pressed_at) * 1000)
-        details["queue-refresh-window-ms"] = int(max(app.state.live_runs.refresh_interval_s, 0.5) * 1000)
-        _write_n9_phase_snapshot(app, repo, phase="queue-cancelled")
-        await pilot.press("escape")
-        await pilot.pause(0.2)
-
-        other_queue_snapshot = await _wait_for(
-            lambda: _terminal_snapshot_for_queue_task(
-                other_queue_task_id,
-                outcome="success",
-                run_id=other_queue_item.record.run_id,
-            ),
-            timeout_s=budget.timeout_for(3 * 60),
-            message="N9 other queue task did not finish naturally within 3 minutes",
-        )
-        details["other-queue-terminal-outcome"] = str(other_queue_snapshot.get("terminal_outcome") or "")
-        _write_n9_phase_snapshot(app, repo, phase="queue-success")
-
-        watcher_proc = runtime["watcher_proc"]
-        await _wait_for(
-            lambda: watcher_proc.poll() is not None,
-            timeout_s=budget.timeout_for(60),
-            message="N9 queue watcher did not settle after the cancel",
-        )
-        watcher_rc = watcher_proc.poll()
-        if watcher_rc != 0:
-            raise AssertionError(f"N9 queue watcher exited with rc={watcher_rc}")
-        runtime["watcher_step"]["rc"] = watcher_rc
-        runtime["watcher_step"]["duration_s"] = round(time.monotonic() - watcher_started, 1)
-        details["watcher-returncode"] = watcher_rc
-
-        await _focus_live_run(build_run_id)
-        await pilot.press("enter")
-        await _wait_for(
-            lambda: app.state.focus == "detail" and (_detail() is not None and _detail().run_id == build_run_id),
-            timeout_s=5.0,
-            message="N9 standalone build detail could not be reopened after queue settlement",
-        )
-        build_finished_naturally = await _wait_until(
-            lambda: build_proc.poll() is not None,
-            timeout_s=8 * 60.0,
-            pause_s=0.2,
-        )
-        if build_finished_naturally:
-            build_finished_at = time.monotonic()
-            build_rc = build_proc.poll()
-            if build_rc != 0:
-                raise AssertionError(f"N9 standalone build exited with rc={build_rc}")
+            checkout_main_before_merge()
+            await pilot.press("space")
+            selected_run_ids_after_space = await _wait_for(
+                lambda: (
+                    sorted(app.state.selected_run_ids)
+                    if succeeded_queue_run_id in app.state.selected_run_ids
+                    else None
+                ),
+                timeout_s=5.0,
+                message="N9 could not multi-select the succeeded queue row before merge",
+            )
+            details["merge-selected-run-ids-after-space"] = selected_run_ids_after_space
             await _wait_for(
+                lambda: (
+                    app.state.focus == "live"
+                    and app.state.selection.run_id == succeeded_queue_run_id
+                    and (_live_run_item(succeeded_queue_run_id) is not None)
+                    and _live_run_item(succeeded_queue_run_id).record.status == "done"
+                ),
+                timeout_s=5.0,
+                message="N9 lost the succeeded queue row before issuing merge",
+            )
+            _write_n9_phase_snapshot(app, repo, phase="live-merge-row-selected")
+
+            preexisting_merge_history_ids = {item.row.run_id for item in _merge_history_rows()}
+            preexisting_merge_live_ids = {record.run_id for record in _merge_live_records()}
+            preexisting_action_spawn_count = len(action_spawns)
+            merge_requested_at = time.monotonic()
+            await pilot.press("m")
+            _write_n9_phase_snapshot(app, repo, phase="merge-requested")
+            merge_signal = await _wait_for(
+                lambda: (
+                    next(
+                        (
+                            {
+                                "kind": "spawn",
+                                "argv": spawn["argv"],
+                                "proc": spawn["proc"],
+                                "run_id": None,
+                            }
+                            for spawn in action_spawns[preexisting_action_spawn_count:]
+                            if _argv_invokes_otto_subcommand(spawn["argv"], "merge")
+                        ),
+                        None,
+                    )
+                    or next(
+                        (
+                            {
+                                "kind": "live-record",
+                                "argv": None,
+                                "proc": None,
+                                "run_id": record.run_id,
+                            }
+                            for record in _merge_live_records()
+                            if record.run_id not in preexisting_merge_live_ids
+                        ),
+                        None,
+                    )
+                    or next(
+                        (
+                            {
+                                "kind": "history",
+                                "argv": None,
+                                "proc": None,
+                                "run_id": item.row.run_id,
+                            }
+                            for item in _merge_history_rows()
+                            if item.row.run_id not in preexisting_merge_history_ids
+                        ),
+                        None,
+                    )
+                ),
+                timeout_s=30.0,
+                message="N9 did not trigger a merge from Mission Control",
+            )
+            merge_spawn_argv = merge_signal.get("argv") or []
+            if "--all" in merge_spawn_argv:
+                raise AssertionError("N9 merge action used `--all` instead of selected queue rows")
+            if merge_spawn_argv:
+                details["merge-spawn-argv"] = merge_spawn_argv
+            details["merge-detected-via"] = merge_signal["kind"]
+            if merge_signal["kind"] in {"live-record", "history"}:
+                details["merge-live-record-seen"] = True
+            merge_run_id = merge_signal.get("run_id")
+            if merge_run_id:
+                details["merge-run-id"] = merge_run_id
+            merge_history_item = await _wait_for(
                 lambda: next(
                     (
                         item
-                        for item in app.state.live_runs.items
-                        if item.record.run_id == build_run_id and item.record.status == "done"
-                    ),
-                    None,
-                ),
-                timeout_s=max(app.state.live_runs.refresh_interval_s + 1.0, 2.0),
-                message="N9 Mission Control did not reflect build status=done within one refresh cycle",
-            )
-            details["build-finished-naturally"] = True
-            details["build-live-done-latency-ms"] = int((time.monotonic() - build_finished_at) * 1000)
-            _write_n9_phase_snapshot(app, repo, phase="build-done")
-        else:
-            request_path = paths.session_command_requests(Path(_detail().record.cwd), build_run_id)
-            ack_path = paths.session_command_acks(Path(_detail().record.cwd), build_run_id)
-            pre_ack_ids = set(load_command_ack_ids(ack_path))
-            cancel_pressed_at = time.monotonic()
-            await pilot.press("c")
-            await _wait_for(
-                lambda: set(load_command_ack_ids(ack_path)) - pre_ack_ids,
-                timeout_s=15.0,
-                message="N9 standalone cancel ack did not arrive",
-            )
-            details["standalone-cancel-request-path"] = str(request_path)
-            details["standalone-cancel-ack-path"] = str(ack_path)
-            details["standalone-cancel-ack-latency-ms"] = int((time.monotonic() - cancel_pressed_at) * 1000)
-            cancelled_detail = await _wait_for(
-                lambda: (
-                    _detail()
-                    if _detail() is not None
-                    and _detail().record.run_id == build_run_id
-                    and _detail().record.status == "cancelled"
-                    else None
-                ),
-                timeout_s=max(app.state.live_runs.refresh_interval_s + 1.0, 2.0),
-                message="N9 Mission Control did not refresh the standalone detail to cancelled",
-            )
-            details["standalone-cancelled-via-pilot"] = True
-            details["standalone-cancelled-latency-ms"] = int((time.monotonic() - cancel_pressed_at) * 1000)
-            details["standalone-terminal-status"] = cancelled_detail.record.status
-            _write_n9_phase_snapshot(app, repo, phase="build-cancelled")
-            await _wait_for(
-                lambda: build_proc.poll() is not None,
-                timeout_s=max(30.0, budget.timeout_for(90)),
-                message="N9 standalone process did not exit after the Mission Control cancel",
-            )
-
-        await pilot.press("escape")
-        await pilot.pause(0.2)
-
-        await _focus_history_run(build_run_id)
-        history_rows = await _wait_for(
-            lambda: _history_rows() if len(_history_rows()) >= 3 else None,
-            timeout_s=20.0,
-            message="N9 History did not show the three terminal rows after queue settlement",
-        )
-        details["history-pre-merge-run-ids"] = [item.row.run_id for item in history_rows[:3]]
-        terminal_outcomes = {item.row.run_id: item.row.terminal_outcome for item in history_rows}
-        details["history-terminal-outcomes-pre-merge"] = terminal_outcomes
-        if build_run_id not in terminal_outcomes or terminal_outcomes[build_run_id] not in {"success", "cancelled"}:
-            raise AssertionError("N9 History did not record the standalone build as a terminal row")
-        cancelled_history_item = next(
-            (item for item in history_rows if item.row.run_id == details["cancelled-queue-run-id"]),
-            None,
-        )
-        if cancelled_history_item is None or cancelled_history_item.row.terminal_outcome != "cancelled":
-            raise AssertionError("N9 History did not record the cancelled queue row as cancelled")
-        success_history_item = next(
-            (
-                item
-                for item in history_rows
-                if item.row.domain == "queue" and item.row.run_id != details["cancelled-queue-run-id"] and item.row.terminal_outcome == "success"
-            ),
-            None,
-        )
-        if success_history_item is None:
-            raise AssertionError("N9 History did not record a succeeded queue row")
-        details["succeeded-queue-run-id"] = success_history_item.row.run_id
-        details["succeeded-queue-task-id"] = success_history_item.row.queue_task_id
-        _write_n9_phase_snapshot(app, repo, phase="history-pre-merge")
-
-        await _focus_history_run(details["cancelled-queue-run-id"])
-        await pilot.press("enter")
-        await _wait_for(
-            lambda: app.state.focus == "detail" and (_detail() is not None and _detail().run_id == details["cancelled-queue-run-id"]),
-            timeout_s=5.0,
-            message="N9 cancelled history detail did not open",
-        )
-        await pilot.press("e")
-        editor_spawn = await _wait_for(
-            lambda: next(
-                (
-                    spawn
-                    for spawn in action_spawns
-                    if spawn["argv"] and Path(spawn["argv"][0]).name == "true"
-                ),
-                None,
-            ),
-            timeout_s=5.0,
-            message="N9 did not attempt to spawn $EDITOR from the cancelled history row",
-        )
-        details["editor-spawn-attempted"] = True
-        details["editor-spawn-argv"] = editor_spawn["argv"]
-        _write_n9_phase_snapshot(app, repo, phase="history-cancelled-detail")
-
-        await _focus_live_run(details["succeeded-queue-run-id"])
-        focused_live_item = await _wait_for(
-            lambda: (
-                _live_run_item(details["succeeded-queue-run-id"])
-                if app.state.focus == "live"
-                and app.state.selection.run_id == details["succeeded-queue-run-id"]
-                else None
-            ),
-            timeout_s=5.0,
-            message="N9 could not restore focus to the succeeded queue row in Live before merge",
-        )
-        if focused_live_item.record.status != "done":
-            raise AssertionError(
-                f"N9 expected the merge candidate to remain done in Live, got status={focused_live_item.record.status!r}"
-            )
-        if str(focused_live_item.record.identity.get("queue_task_id") or "") != details["succeeded-queue-task-id"]:
-            raise AssertionError("N9 focused the wrong queue row before merge")
-        details["merge-focus-run-id"] = focused_live_item.record.run_id
-        details["merge-focus-task-id"] = str(focused_live_item.record.identity.get("queue_task_id") or "")
-        _write_n9_phase_snapshot(app, repo, phase="live-pre-merge-focus")
-
-        checkout_main_before_merge()
-        await pilot.press("space")
-        selected_run_ids_after_space = await _wait_for(
-            lambda: (
-                sorted(app.state.selected_run_ids)
-                if details["succeeded-queue-run-id"] in app.state.selected_run_ids
-                else None
-            ),
-            timeout_s=5.0,
-            message="N9 could not multi-select the succeeded queue row before merge",
-        )
-        details["merge-selected-run-ids-after-space"] = selected_run_ids_after_space
-        await _wait_for(
-            lambda: (
-                app.state.focus == "live"
-                and app.state.selection.run_id == details["succeeded-queue-run-id"]
-                and (_live_run_item(details["succeeded-queue-run-id"]) is not None)
-                and _live_run_item(details["succeeded-queue-run-id"]).record.status == "done"
-            ),
-            timeout_s=5.0,
-            message="N9 lost the succeeded queue row before issuing merge",
-        )
-        _write_n9_phase_snapshot(app, repo, phase="live-merge-row-selected")
-
-        preexisting_merge_history_ids = {item.row.run_id for item in _merge_history_rows()}
-        preexisting_merge_live_ids = {record.run_id for record in _merge_live_records()}
-        preexisting_action_spawn_count = len(action_spawns)
-        merge_requested_at = time.monotonic()
-        await pilot.press("m")
-        _write_n9_phase_snapshot(app, repo, phase="merge-requested")
-        merge_signal = await _wait_for(
-            lambda: (
-                next(
-                    (
-                        {
-                            "kind": "spawn",
-                            "argv": spawn["argv"],
-                            "proc": spawn["proc"],
-                            "run_id": None,
-                        }
-                        for spawn in action_spawns[preexisting_action_spawn_count:]
-                        if _argv_invokes_otto_subcommand(spawn["argv"], "merge")
-                    ),
-                    None,
-                )
-                or next(
-                    (
-                        {
-                            "kind": "live-record",
-                            "argv": None,
-                            "proc": None,
-                            "run_id": record.run_id,
-                        }
-                        for record in _merge_live_records()
-                        if record.run_id not in preexisting_merge_live_ids
-                    ),
-                    None,
-                )
-                or next(
-                    (
-                        {
-                            "kind": "history",
-                            "argv": None,
-                            "proc": None,
-                            "run_id": item.row.run_id,
-                        }
                         for item in _merge_history_rows()
                         if item.row.run_id not in preexisting_merge_history_ids
+                        and (merge_run_id is None or item.row.run_id == merge_run_id)
+                        and item.row.terminal_outcome
                     ),
                     None,
-                )
-            ),
-            timeout_s=30.0,
-            message="N9 did not trigger a merge from Mission Control",
-        )
-        merge_spawn_argv = merge_signal.get("argv") or []
-        if "--all" in merge_spawn_argv:
-            raise AssertionError("N9 merge action used `--all` instead of selected queue rows")
-        if merge_spawn_argv:
-            details["merge-spawn-argv"] = merge_spawn_argv
-        details["merge-detected-via"] = merge_signal["kind"]
-        if merge_signal["kind"] in {"live-record", "history"}:
-            details["merge-live-record-seen"] = True
-        merge_run_id = merge_signal.get("run_id")
-        if merge_run_id:
-            details["merge-run-id"] = merge_run_id
-        merge_history_item = await _wait_for(
-            lambda: next(
-                (
-                    item
-                    for item in _merge_history_rows()
-                    if item.row.run_id not in preexisting_merge_history_ids
-                    and (merge_run_id is None or item.row.run_id == merge_run_id)
-                    and item.row.terminal_outcome
                 ),
-                None,
-            ),
-            timeout_s=budget.timeout_for(12 * 60),
-            message="N9 merge did not reach terminal history within the scenario budget",
-        )
-        details["merge-live-record-seen"] = True
-        details["merge-history-run-id"] = merge_history_item.row.run_id
-        details["merge-history-terminal-outcome"] = merge_history_item.row.terminal_outcome
-        merge_step = {
-            "label": "merge-selected",
-            "argv": merge_spawn_argv or ["otto", "merge", str(details["succeeded-queue-task-id"])],
-            "rc": 0 if merge_history_item.row.terminal_outcome == "success" else 1,
-            "duration_s": round(time.monotonic() - merge_requested_at, 1),
-        }
-        runtime["merge_step"] = merge_step
-        if merge_history_item.row.terminal_outcome != "success":
-            raise AssertionError(
-                f"N9 merge completed with terminal_outcome={merge_history_item.row.terminal_outcome!r}"
+                timeout_s=budget.timeout_for(12 * 60),
+                message="N9 merge did not reach terminal history within the scenario budget",
             )
-        _write_n9_phase_snapshot(app, repo, phase="merge-complete")
+            details["merge-live-record-seen"] = True
+            details["merge-history-run-id"] = merge_history_item.row.run_id
+            details["merge-history-terminal-outcome"] = merge_history_item.row.terminal_outcome
+            runtime["merge_step"] = {
+                "label": "merge-selected",
+                "argv": merge_spawn_argv or ["otto", "merge", succeeded_queue_task_id],
+                "rc": 0 if merge_history_item.row.terminal_outcome == "success" else 1,
+                "duration_s": round(time.monotonic() - merge_requested_at, 1),
+            }
+            if merge_history_item.row.terminal_outcome != "success":
+                raise AssertionError(
+                    f"N9 merge completed with terminal_outcome={merge_history_item.row.terminal_outcome!r}"
+                )
+            _write_n9_phase_snapshot(app, repo, phase="merge-complete")
+        except Exception as exc:
+            failures.fail(f"phase merge: {exc}")
 
 
 def run_n9(repo: Path, provider: str) -> base.RunResult:
@@ -1370,6 +1547,7 @@ def run_n9(repo: Path, provider: str) -> base.RunResult:
     started = base.now_iso()
     budget = ScenarioBudget(_fixture_spec("N9").budget_s)
     debug_fast_args = _debug_fast_args()
+    failures = RunFailures()
     steps: list[dict[str, Any]] = []
     details: dict[str, Any] = {
         "steps": steps,
@@ -1396,10 +1574,14 @@ def run_n9(repo: Path, provider: str) -> base.RunResult:
     build_started: float | None = None
     build_handle = None
     watcher_handle = None
+    build_stderr_handle = None
+    watcher_stderr_handle = None
     build_log_path = _background_log_path("n9-build")
     watcher_log_path = _background_log_path("n9-queue-run")
+    build_stderr_path = _stderr_log_path("build")
+    watcher_stderr_path = _stderr_log_path("queue-run")
+    merge_stderr_path = _stderr_log_path("merge")
     outputs: list[str] = []
-    result_returncode = 1
     wall_started = time.monotonic()
     runtime: dict[str, Any] = {
         "build_proc": None,
@@ -1410,6 +1592,7 @@ def run_n9(repo: Path, provider: str) -> base.RunResult:
         "merge_step": None,
     }
     old_editor = os.environ.get("EDITOR")
+    action_spawns: list[dict[str, Any]] = []
 
     def _checkout_main_before_merge() -> None:
         steps.append(_checkout_main_before_merge_step(repo))
@@ -1432,14 +1615,15 @@ def run_n9(repo: Path, provider: str) -> base.RunResult:
         ]
         base.log_line(f"$ {base.shell_join(watcher_argv)}  # background")
         runtime["watcher_started"] = time.monotonic()
-        nonlocal watcher_handle
+        nonlocal watcher_handle, watcher_stderr_handle
         watcher_handle = watcher_log_path.open("w", encoding="utf-8")
+        watcher_stderr_handle = watcher_stderr_path.open("w", encoding="utf-8")
         runtime["watcher_proc"] = subprocess.Popen(
             watcher_argv,
             cwd=repo,
             env=base.current_ctx().env,
             stdout=watcher_handle,
-            stderr=subprocess.STDOUT,
+            stderr=watcher_stderr_handle,
             text=True,
             preexec_fn=os.setsid,
         )
@@ -1452,26 +1636,80 @@ def run_n9(repo: Path, provider: str) -> base.RunResult:
         steps.append(runtime["watcher_step"])
 
     def _start_build_flow() -> None:
-        nonlocal build_handle, build_proc, build_started
+        nonlocal build_handle, build_proc, build_started, build_stderr_handle
         if runtime["build_proc"] is not None:
             return
         base.log_line(f"$ {base.shell_join(build_argv)}  # background")
         build_env = dict(base.current_ctx().env)
         build_env["OTTO_RUN_ID"] = build_run_id
         build_handle = build_log_path.open("w", encoding="utf-8")
+        build_stderr_handle = build_stderr_path.open("w", encoding="utf-8")
         build_started = time.monotonic()
         build_proc = subprocess.Popen(
             build_argv,
             cwd=repo,
             env=build_env,
             stdout=build_handle,
-            stderr=subprocess.STDOUT,
+            stderr=build_stderr_handle,
             text=True,
             preexec_fn=os.setsid,
         )
         runtime["build_proc"] = build_proc
         runtime["build_started"] = build_started
         steps.append(build_step)
+
+    def _record_failure(label: str, exc: Exception) -> None:
+        failures.fail(f"{label}: {exc}")
+
+    def _finalize_build_process() -> None:
+        if build_proc is None or build_started is None:
+            failures.fail("phase build-process: N9 standalone build never started")
+            return
+        if build_step["rc"] is None:
+            build_step["rc"] = build_proc.wait(timeout=1.0)
+            build_step["duration_s"] = round(time.monotonic() - build_started, 1)
+        if build_step["rc"] != 0 and details.get("standalone-cancelled-via-pilot") is not True:
+            failures.fail(f"phase build-process: N9 standalone build exited with rc={build_step['rc']}")
+
+    def _finalize_queue_process() -> None:
+        watcher_proc = runtime["watcher_proc"]
+        watcher_step = runtime["watcher_step"]
+        watcher_started = runtime["watcher_started"]
+        if watcher_proc is None or watcher_step is None or watcher_started is None:
+            failures.fail("phase queue-process: N9 never started the queue watcher")
+            return
+        if watcher_step["rc"] is None:
+            if watcher_proc.poll() is None:
+                watcher_step["rc"] = watcher_proc.wait(timeout=budget.timeout_for(60))
+            else:
+                watcher_step["rc"] = watcher_proc.poll()
+            watcher_step["duration_s"] = round(time.monotonic() - watcher_started, 1)
+        if watcher_step["rc"] != 0:
+            failures.fail(f"phase queue-process: N9 queue watcher exited with rc={watcher_step['rc']}")
+
+    def _finalize_merge_step() -> None:
+        if runtime["merge_step"] is None:
+            failures.fail("phase merge-process: N9 did not record the selected-row merge step")
+            return
+        if runtime["merge_step"] not in steps:
+            steps.append(runtime["merge_step"])
+
+    def _capture_history_and_gc() -> None:
+        snapshots = _read_terminal_snapshots(repo)
+        details["history-terminal-snapshot-count"] = len(snapshots)
+        details["history-terminal-outcomes"] = {
+            str(row.get("run_id") or ""): str(row.get("terminal_outcome") or "")
+            for row in snapshots
+        }
+        details["history-artifacts-resolve"] = all(_artifact_paths_resolve(row) for row in snapshots)
+
+        gc_removed = garbage_collect_live_records(repo, terminal_retention_s=0)
+        details["gc-removed-run-ids"] = gc_removed
+        live_records = read_live_records(repo)
+        details["live-records-terminal-after-gc"] = all(
+            record.status in {"done", "failed", "cancelled", "removed", "interrupted"}
+            for record in live_records
+        )
 
     try:
         phase_log = Path(details["phase-log-path"])
@@ -1499,61 +1737,44 @@ def run_n9(repo: Path, provider: str) -> base.RunResult:
         }
 
         os.environ["EDITOR"] = "true"
-        with _capture_mission_control_action_spawns() as action_spawns:
-            asyncio.run(
-                _drive_n9_mission_control(
-                    repo=repo,
-                    build_run_id=build_run_id,
-                    details=details,
-                    runtime=runtime,
-                    start_build_flow=_start_build_flow,
-                    start_queue_flow=_start_queue_flow,
-                    checkout_main_before_merge=_checkout_main_before_merge,
-                    budget=budget,
-                    action_spawns=action_spawns,
+        with _capture_mission_control_action_spawns(stderr_paths={"merge": merge_stderr_path}) as action_spawns:
+            try:
+                asyncio.run(
+                    _drive_n9_mission_control(
+                        repo=repo,
+                        build_run_id=build_run_id,
+                        details=details,
+                        failures=failures,
+                        runtime=runtime,
+                        start_build_flow=_start_build_flow,
+                        start_queue_flow=_start_queue_flow,
+                        checkout_main_before_merge=_checkout_main_before_merge,
+                        budget=budget,
+                        action_spawns=action_spawns,
+                    )
                 )
-            )
+            except Exception as exc:
+                _record_failure("phase mission-control", exc)
             details["action-spawns"] = [
                 {"argv": spawn["argv"], "pid": spawn["pid"]}
                 for spawn in action_spawns
             ]
-
-        if build_proc is None or build_started is None:
-            raise AssertionError("N9 standalone build never started")
-        build_rc = build_proc.wait(timeout=1.0)
-        build_step["rc"] = build_rc
-        build_step["duration_s"] = round(time.monotonic() - build_started, 1)
-        if build_rc != 0 and details.get("standalone-cancelled-via-pilot") is not True:
-            raise AssertionError(f"N9 standalone build exited with rc={build_rc}")
-
-        if runtime["watcher_proc"] is None or runtime["watcher_step"] is None:
-            raise AssertionError("N9 never started the queue watcher")
-        if runtime["watcher_proc"].poll() is None:
-            watcher_rc = runtime["watcher_proc"].wait(timeout=budget.timeout_for(60))
-            runtime["watcher_step"]["rc"] = watcher_rc
-            runtime["watcher_step"]["duration_s"] = round(time.monotonic() - runtime["watcher_started"], 1)
-        if runtime["watcher_step"]["rc"] != 0:
-            raise AssertionError(f"N9 queue watcher exited with rc={runtime['watcher_step']['rc']}")
-        if runtime["merge_step"] is None:
-            raise AssertionError("N9 did not record the selected-row merge step")
-        steps.append(runtime["merge_step"])
-
-        snapshots = _read_terminal_snapshots(repo)
-        details["history-terminal-snapshot-count"] = len(snapshots)
-        details["history-terminal-outcomes"] = {
-            str(row.get("run_id") or ""): str(row.get("terminal_outcome") or "")
-            for row in snapshots
-        }
-        details["history-artifacts-resolve"] = all(_artifact_paths_resolve(row) for row in snapshots)
-
-        gc_removed = garbage_collect_live_records(repo, terminal_retention_s=0)
-        details["gc-removed-run-ids"] = gc_removed
-        live_records = read_live_records(repo)
-        details["live-records-terminal-after-gc"] = all(record.status in {"done", "failed", "cancelled", "removed"} for record in live_records)
-        result_returncode = 0
-    except Exception as exc:
-        details["error"] = str(exc)
-        result_returncode = 1
+        try:
+            _finalize_build_process()
+        except Exception as exc:
+            _record_failure("phase build-process", exc)
+        try:
+            _finalize_queue_process()
+        except Exception as exc:
+            _record_failure("phase queue-process", exc)
+        try:
+            _finalize_merge_step()
+        except Exception as exc:
+            _record_failure("phase merge-process", exc)
+        try:
+            _capture_history_and_gc()
+        except Exception as exc:
+            _record_failure("phase history-post", exc)
     finally:
         if old_editor is None:
             os.environ.pop("EDITOR", None)
@@ -1565,11 +1786,24 @@ def run_n9(repo: Path, provider: str) -> base.RunResult:
         if watcher_handle is not None:
             watcher_handle.flush()
             watcher_handle.close()
+        if build_stderr_handle is not None:
+            build_stderr_handle.flush()
+            build_stderr_handle.close()
+        if watcher_stderr_handle is not None:
+            watcher_stderr_handle.flush()
+            watcher_stderr_handle.close()
         if build_proc is not None and build_proc.poll() is None:
             details["build-cleanup-forced"] = _wait_then_terminate_process_group(build_proc, wait_s=2.0)
         watcher_proc = runtime["watcher_proc"]
         if watcher_proc is not None and watcher_proc.poll() is None:
             details["watcher-cleanup-forced"] = _wait_then_terminate_process_group(watcher_proc, wait_s=15.0)
+        _record_stderr_tail(details, "build", build_stderr_path)
+        _record_stderr_tail(details, "queue-run", watcher_stderr_path)
+        _record_stderr_tail(details, "merge", merge_stderr_path)
+        try:
+            _audit_artifacts_post_run(repo, failures, details)
+        except Exception as exc:
+            _record_failure("phase audit", exc)
         build_output = _read_log(build_log_path)
         watcher_output = _read_log(watcher_log_path)
         if build_output:
@@ -1578,6 +1812,11 @@ def run_n9(repo: Path, provider: str) -> base.RunResult:
             outputs.append(watcher_output)
 
     total_duration_s = round(time.monotonic() - wall_started, 1)
+    if failures.failures:
+        details["failures"] = failures.all()
+        details["error"] = failures.first()
+    if failures.notes:
+        details["notes"] = list(failures.notes)
     return _base_run_result(
         "N9",
         repo,
@@ -1585,62 +1824,102 @@ def run_n9(repo: Path, provider: str) -> base.RunResult:
         "\n".join(part for part in outputs if part),
         total_duration_s,
         details,
-        result_returncode,
+        1 if failures.failures else 0,
     )
 
 
 def verify_n9(repo: Path, run_result: base.RunResult) -> VerifyResult:
     details = run_result.details
+    failures = RunFailures()
+    for message in details.get("failures") or []:
+        failures.fail(str(message))
     queue_cancel_history_latency_ms = details.get("queue-cancel-history-latency-ms")
     if queue_cancel_history_latency_ms is None:
         queue_cancel_history_latency_ms = details.get("cancel-ack-latency-ms")
     if run_result.returncode != 0:
-        return _build_failure(run_result, "N9 realistic Mission Control session failed before verification")
-    if details.get("build-live-row-latency-ms") is None or details.get("build-live-row-latency-ms") > 5000:
-        return VerifyResult(False, "N9 Mission Control did not surface the standalone build row in time")
-    if details.get("build-finished-naturally") is not True and details.get("standalone-cancelled-via-pilot") is not True:
-        return VerifyResult(False, "N9 standalone build neither finished nor cancelled via Mission Control")
-    if details.get("standalone-cancelled-via-pilot") is True and details.get("standalone-cancel-ack-latency-ms") is None:
-        return VerifyResult(False, "N9 standalone cancel never received an ack")
-    if details.get("standalone-heartbeat-advanced") is not True:
-        return VerifyResult(False, "N9 standalone heartbeat did not advance while Detail was open")
-    if details.get("standalone-log-cycled") is not True:
-        return VerifyResult(False, "N9 did not switch standalone logs with `o`")
-    if queue_cancel_history_latency_ms is None:
-        return VerifyResult(False, "N9 queue cancel was not confirmed via terminal history")
-    if details.get("queue-cancelled-latency-ms") is None:
-        return VerifyResult(False, "N9 Mission Control never refreshed the cancelled queue row")
-    if details.get("editor-spawn-attempted") is not True:
-        return VerifyResult(False, "N9 did not attempt to spawn $EDITOR from History")
+        failures.fail(f"N9 realistic Mission Control session failed before verification (rc={run_result.returncode})")
+    failures.soft_assert(
+        details.get("build-live-row-latency-ms") is not None and details.get("build-live-row-latency-ms") <= 5000,
+        "N9 Mission Control did not surface the standalone build row in time",
+    )
+    failures.soft_assert(
+        details.get("build-finished-naturally") is True or details.get("standalone-cancelled-via-pilot") is True,
+        "N9 standalone build neither finished nor cancelled via Mission Control",
+    )
+    if details.get("standalone-cancelled-via-pilot") is True:
+        failures.soft_assert(
+            details.get("standalone-cancel-ack-latency-ms") is not None,
+            "N9 standalone cancel never received an ack",
+        )
+    failures.soft_assert(
+        details.get("standalone-heartbeat-advanced") is True,
+        "N9 standalone heartbeat did not advance while Detail was open",
+    )
+    failures.soft_assert(
+        details.get("standalone-log-cycled") is True,
+        "N9 did not switch standalone logs with `o`",
+    )
+    failures.soft_assert(
+        queue_cancel_history_latency_ms is not None,
+        "N9 queue cancel was not confirmed via terminal history",
+    )
+    failures.soft_assert(
+        details.get("queue-cancelled-latency-ms") is not None,
+        "N9 Mission Control never refreshed the cancelled queue row",
+    )
+    failures.soft_assert(
+        details.get("editor-spawn-attempted") is True,
+        "N9 did not attempt to spawn $EDITOR from History",
+    )
     merge_argv = details.get("merge-spawn-argv") or []
     if "--all" in merge_argv:
-        return VerifyResult(False, "N9 merge was not launched from selected queue rows")
-    if int(details.get("history-terminal-snapshot-count") or 0) < 3:
-        return VerifyResult(False, "N9 expected at least three terminal history snapshots after merge")
+        failures.fail("N9 merge was not launched from selected queue rows")
+    failures.soft_assert(
+        int(details.get("history-terminal-snapshot-count") or 0) >= 3,
+        "N9 expected at least three terminal history snapshots after merge",
+    )
     terminal_outcomes = details.get("history-terminal-outcomes") or {}
     merge_run_id = details.get("merge-run-id") or details.get("merge-history-run-id")
     merge_history_success = bool(
         merge_run_id and terminal_outcomes.get(merge_run_id) == "success"
     ) or details.get("merge-history-terminal-outcome") == "success"
     merge_observed = bool(merge_argv) or details.get("merge-live-record-seen") is True or merge_history_success
-    if not merge_observed:
-        return VerifyResult(False, "N9 merge was not observed from selected queue rows")
+    failures.soft_assert(
+        merge_observed,
+        "N9 merge was not observed from selected queue rows",
+    )
     cancelled_run_id = details.get("cancelled-queue-run-id")
-    if not cancelled_run_id or terminal_outcomes.get(cancelled_run_id) != "cancelled":
-        return VerifyResult(False, "N9 cancelled queue row was not recorded as terminal_outcome=cancelled")
-    if sum(1 for outcome in terminal_outcomes.values() if outcome == "cancelled") < 1:
-        return VerifyResult(False, "N9 expected at least one cancelled terminal snapshot")
-    if sum(1 for outcome in terminal_outcomes.values() if outcome == "success") < 2:
-        return VerifyResult(False, "N9 expected at least two successful terminal snapshots")
-    if details.get("history-artifacts-resolve") is not True:
-        return VerifyResult(False, "N9 terminal history rows referenced missing artifacts")
-    if details.get("live-records-terminal-after-gc") is not True:
-        return VerifyResult(False, "N9 left non-terminal live records after cleanup")
+    failures.soft_assert(
+        bool(cancelled_run_id) and terminal_outcomes.get(cancelled_run_id) == "cancelled",
+        "N9 cancelled queue row was not recorded as terminal_outcome=cancelled",
+    )
+    failures.soft_assert(
+        sum(1 for outcome in terminal_outcomes.values() if outcome == "cancelled") >= 1,
+        "N9 expected at least one cancelled terminal snapshot",
+    )
+    failures.soft_assert(
+        sum(1 for outcome in terminal_outcomes.values() if outcome == "success") >= 2,
+        "N9 expected at least two successful terminal snapshots",
+    )
+    failures.soft_assert(
+        details.get("history-artifacts-resolve") is True,
+        "N9 terminal history rows referenced missing artifacts",
+    )
+    failures.soft_assert(
+        details.get("live-records-terminal-after-gc") is True,
+        "N9 left non-terminal live records after cleanup",
+    )
+    try:
+        _audit_artifacts_post_run(repo, failures, details)
+    except Exception as exc:
+        failures.fail(f"verify audit: {exc}")
     visible, hidden = _visible_and_hidden(repo, run_result)
     if visible.returncode != 0:
-        return VerifyResult(False, "N9 visible tests failed after the realistic operator session")
+        failures.fail("N9 visible tests failed after the realistic operator session")
     if hidden.returncode != 0:
-        return VerifyResult(False, "N9 hidden realistic-session checks failed after merge")
+        failures.fail("N9 hidden realistic-session checks failed after merge")
+    if failures.failures:
+        return VerifyResult(False, failures.first(), failures.all())
     return VerifyResult(True, "N9 drove a realistic Mission Control operator session and kept the substrate coherent")
 
 
