@@ -7,7 +7,6 @@ import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -166,6 +165,7 @@ def run_dashboard(
 ) -> int:
     from otto.cli_queue import _install_runner_logging
 
+    del concurrent  # kept for CLI compatibility while the wrapper delegates to Mission Control
     _install_runner_logging(project_dir, quiet=True)
     runner = Runner(project_dir, runner_config, otto_bin=otto_bin)
     app = MissionControlApp(

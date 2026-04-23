@@ -2,17 +2,27 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from pathlib import Path
 
+from rich.cells import cell_len
+from rich.style import Style
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical
+from textual.css.query import NoMatches
+from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
+from textual.strip import Strip
 from textual.worker import Worker, WorkerState
 from textual.widgets import DataTable, Input, Log, Static
 
 from otto.runs.registry import gc_terminal_records
+from otto.theme import (
+    MISSION_CONTROL_THEME,
+    mission_control_banner_style,
+    mission_control_status_style,
+    mission_control_status_text,
+)
 from otto.tui.adapters import adapter_for_key
 from otto.tui.mission_control_actions import ActionResult, execute_merge_all
 from otto.tui.mission_control_model import (
@@ -23,39 +33,70 @@ from otto.tui.mission_control_model import (
 )
 
 
+class SearchableLog(Log):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.search_query = ""
+        self.current_match: tuple[int, int, int] | None = None
+        self.match_count = 0
+
+    def set_search(
+        self,
+        query: str,
+        *,
+        current_match: tuple[int, int, int] | None = None,
+        match_count: int = 0,
+    ) -> None:
+        self.search_query = query
+        self.current_match = current_match
+        self.match_count = match_count
+        self._render_line_cache.clear()
+        self.refresh()
+
+    def _render_line_strip(self, y: int, rich_style: Style) -> Strip:
+        selection = self.text_selection
+        if y in self._render_line_cache and selection is None:
+            return self._render_line_cache[y]
+
+        processed = self._process_line(self._lines[y])
+        line_text = Text(processed, no_wrap=True)
+        line_text.stylize(rich_style)
+        if self.search_query:
+            current = self.current_match if self.current_match and self.current_match[0] == y else None
+            for start, end in _find_substring_spans(processed, self.search_query):
+                style = (
+                    MISSION_CONTROL_THEME.search_current
+                    if current == (y, start, end)
+                    else MISSION_CONTROL_THEME.search_match
+                )
+                line_text.stylize(style, start, end)
+        if self.highlight:
+            line_text = self.highlighter(line_text)
+        if selection is not None and (select_span := selection.get_span(y - self._clear_y)) is not None:
+            start, end = select_span
+            if end == -1:
+                end = len(line_text)
+            selection_style = self.screen.get_component_rich_style("screen--selection")
+            line_text.stylize(selection_style, start, end)
+
+        line = Strip(line_text.render(self.app.console), cell_len(processed))
+        if selection is None:
+            self._render_line_cache[y] = line
+        return line
+
+
 class HelpModal(ModalScreen[None]):
     BINDINGS = [
-        Binding("escape", "close", "Close"),
-        Binding("q", "close", "Close"),
+        Binding("escape", "close", "Close", priority=True),
+        Binding("q", "close", "Close", priority=True),
     ]
 
     def compose(self) -> ComposeResult:
         with Container(id="help-modal"):
-            yield Static(
-                "\n".join(
-                    [
-                        "Mission Control",
-                        "",
-                        "Tab / Shift-Tab: cycle panes",
-                        "1 / 2 / 3: focus Live / History / Detail",
-                        "j/k or Up/Down: move selection",
-                        "Space: toggle multi-select on current live row",
-                        "Enter: pin selection and focus Detail",
-                        "Esc: return to originating list",
-                        "a: toggle active-only live rows",
-                        "t: cycle type filter",
-                        "f: cycle history outcome filter",
-                        "/: substring history filter",
-                        "[ / ]: history page",
-                        "o: cycle logs",
-                        "s: toggle log follow",
-                        "Home / End: top / resume follow",
-                        "c / r / R / x / m / M / e: run actions",
-                        "?: help",
-                    ]
-                ),
-                id="help-body",
-            )
+            yield Static("Mission Control Help", id="filter-title")
+            with VerticalScroll(id="help-scroll"):
+                yield Static(_help_text(), id="help-body")
+            yield Static("Esc closes. Up/Down or PageUp/PageDown scroll.", id="filter-help")
 
     def action_close(self) -> None:
         self.dismiss(None)
@@ -63,23 +104,33 @@ class HelpModal(ModalScreen[None]):
 
 class FilterModal(ModalScreen[str | None]):
     BINDINGS = [
-        Binding("escape", "cancel", "Cancel"),
-        Binding("enter", "apply", "Apply"),
+        Binding("escape", "cancel", "Cancel", priority=True),
+        Binding("enter", "apply", "Apply", priority=True),
     ]
 
-    def __init__(self, initial_value: str) -> None:
+    def __init__(
+        self,
+        initial_value: str,
+        *,
+        title: str = "History Filter",
+        placeholder: str = "intent, branch, task id, run id",
+        help_text: str = "Enter apply / Esc cancel",
+    ) -> None:
         super().__init__()
         self._initial_value = initial_value
+        self._title = title
+        self._placeholder = placeholder
+        self._help_text = help_text
 
     def compose(self) -> ComposeResult:
         with Container(id="filter-modal"):
-            yield Static("History Filter", id="filter-title")
+            yield Static(self._title, id="filter-title")
             yield Input(
                 value=self._initial_value,
-                placeholder="intent, branch, task id, run id",
+                placeholder=self._placeholder,
                 id="filter-input",
             )
-            yield Static("Enter apply / Esc cancel", id="filter-help")
+            yield Static(self._help_text, id="filter-help")
 
     def on_mount(self) -> None:
         self.query_one("#filter-input", Input).focus()
@@ -96,9 +147,9 @@ class FilterModal(ModalScreen[str | None]):
 
 class MessageModal(ModalScreen[None]):
     BINDINGS = [
-        Binding("escape", "close", "Close"),
-        Binding("enter", "close", "Close"),
-        Binding("q", "close", "Close"),
+        Binding("escape", "close", "Close", priority=True),
+        Binding("enter", "close", "Close", priority=True),
+        Binding("q", "close", "Close", priority=True),
     ]
 
     def __init__(self, title: str, message: str) -> None:
@@ -126,7 +177,7 @@ class MissionControlApp(App[int]):
     }
 
     #banner {
-        color: yellow;
+        color: __BANNER_INFO__;
         height: 1;
     }
 
@@ -141,11 +192,11 @@ class MissionControlApp(App[int]):
     }
 
     .pane.focused {
-        border: round $accent;
+        border: round __FOCUS__;
     }
 
     .pane-title {
-        color: $accent;
+        color: __FOCUS__;
         padding-bottom: 1;
     }
 
@@ -174,33 +225,38 @@ class MissionControlApp(App[int]):
     }
 
     #status-bar {
-        color: green;
+        color: __BANNER_SUCCESS__;
         height: auto;
     }
 
     #footer {
-        color: cyan;
+        color: __FOCUS__;
         height: auto;
     }
 
     #help-modal {
-        width: 72;
-        height: auto;
-        border: round $accent;
+        width: 84;
+        height: 28;
+        border: round __FOCUS__;
         padding: 1 2;
         background: $surface;
+    }
+
+    #help-scroll {
+        height: 1fr;
+        overflow-y: auto;
     }
 
     #filter-modal {
         width: 60;
         height: auto;
-        border: round $accent;
+        border: round __FOCUS__;
         padding: 1 2;
         background: $surface;
     }
 
     #filter-title {
-        color: $accent;
+        color: __FOCUS__;
         padding-bottom: 1;
     }
 
@@ -208,7 +264,9 @@ class MissionControlApp(App[int]):
         color: $text-muted;
         padding-top: 1;
     }
-    """
+    """.replace("__BANNER_INFO__", MISSION_CONTROL_THEME.banner_info).replace(
+        "__BANNER_SUCCESS__", MISSION_CONTROL_THEME.banner_success
+    ).replace("__FOCUS__", MISSION_CONTROL_THEME.focus)
 
     BINDINGS = [
         Binding("tab", "cycle_focus_forward", "Next Pane", show=False, priority=True),
@@ -229,6 +287,9 @@ class MissionControlApp(App[int]):
         Binding("t", "cycle_type_filter", "Type Filter", show=False),
         Binding("f", "cycle_outcome_filter", "Outcome Filter", show=False),
         Binding("/", "open_query_filter", "Query Filter", show=False),
+        Binding("ctrl+f", "open_log_search", "Log Search", show=False),
+        Binding("n", "log_search_next", "Next Match", show=False, priority=True),
+        Binding("N", "log_search_prev", "Prev Match", show=False, priority=True),
         Binding("[", "history_prev_page", "Prev Page", show=False, priority=True),
         Binding("]", "history_next_page", "Next Page", show=False, priority=True),
         Binding("pageup", "history_prev_page", "Prev Page", show=False, priority=True),
@@ -273,6 +334,10 @@ class MissionControlApp(App[int]):
         self._artifact_paths: list[str] = []
         self._filter_return_pane: PaneName = "history"
         self._action_banner: str | None = None
+        self._banner_severity = "info"
+        self._log_search_query = ""
+        self._log_search_match_index = -1
+        self._log_search_match_total = 0
 
     def compose(self) -> ComposeResult:
         yield Static("", id="banner")
@@ -288,7 +353,7 @@ class MissionControlApp(App[int]):
                 yield Static("", id="detail-meta")
                 yield DataTable(id="detail-artifacts")
                 yield Static("", id="detail-actions")
-                yield Log(id="detail-log")
+                yield SearchableLog(id="detail-log")
         yield Static("", id="status-bar")
         yield Static("", id="footer")
 
@@ -297,11 +362,17 @@ class MissionControlApp(App[int]):
         self.state = self.model.refresh(self.state)
         self._configure_tables()
         self._render_state()
+        self._poll_log(clear_only=False)
         self._schedule_refresh()
         self._focus_pane(self.state.focus)
 
     def action_quit(self) -> None:
         self.exit(0)
+
+    def on_unmount(self) -> None:
+        if self._refresh_timer is not None:
+            self._refresh_timer.stop()
+            self._refresh_timer = None
 
     def action_show_help(self) -> None:
         self.push_screen(HelpModal())
@@ -364,6 +435,9 @@ class MissionControlApp(App[int]):
         self._render_footer()
 
     def action_return_to_origin(self) -> None:
+        if isinstance(self.screen, ModalScreen):
+            self.screen.dismiss(None)
+            return
         self._focus_pane(self.state.selection.origin_pane)
 
     def action_toggle_active_only(self) -> None:
@@ -379,8 +453,25 @@ class MissionControlApp(App[int]):
         self._refresh_state()
 
     def action_open_query_filter(self) -> None:
+        if self.state.focus == "detail":
+            self.action_open_log_search()
+            return
         self._filter_return_pane = self.state.focus if self.state.focus in {"live", "history"} else self.state.selection.origin_pane
         self.push_screen(FilterModal(self.state.filters.query), self._apply_query_filter)
+
+    def action_open_log_search(self) -> None:
+        if self.state.focus != "detail":
+            return
+        self._filter_return_pane = "detail"
+        self.push_screen(
+            FilterModal(
+                self._log_search_query,
+                title="Log Search",
+                placeholder="substring search in current log",
+                help_text="Enter apply / Esc cancel / n next / N previous",
+            ),
+            self._apply_log_search,
+        )
 
     def action_history_prev_page(self) -> None:
         if self.state.focus != "history":
@@ -418,10 +509,16 @@ class MissionControlApp(App[int]):
 
     def action_log_bottom(self) -> None:
         self._follow_log = True
-        log_widget = self.query_one("#detail-log", Log)
+        log_widget = self.query_one("#detail-log", SearchableLog)
         log_widget.auto_scroll = True
         log_widget.scroll_end(animate=False)
         self._render_footer()
+
+    def action_log_search_next(self) -> None:
+        self._advance_log_search(1)
+
+    def action_log_search_prev(self) -> None:
+        self._advance_log_search(-1)
 
     def action_invoke_action(self, key: str) -> None:
         detail = self.model.detail_view(self.state)
@@ -433,10 +530,12 @@ class MissionControlApp(App[int]):
             if not selected_queue_task_ids:
                 message = "no selected done queue rows"
                 self._action_banner = message
+                self._banner_severity = "warning"
                 self._render_banner()
                 self.notify(message, severity="warning")
                 return
             self._action_banner = "merge selected requested..."
+            self._banner_severity = "info"
             self._render_banner()
             self.run_worker(
                 lambda: self._execute_detail_action(
@@ -455,10 +554,12 @@ class MissionControlApp(App[int]):
                 if not action.enabled:
                     message = action.reason or action.preview
                     self._action_banner = message
+                    self._banner_severity = "warning"
                     self._render_banner()
                     self.notify(message, severity="warning")
                     return
                 self._action_banner = f"{action.label} requested..."
+                self._banner_severity = "info"
                 self._render_banner()
                 self.run_worker(
                     lambda: self._execute_detail_action(
@@ -477,6 +578,7 @@ class MissionControlApp(App[int]):
 
     def action_merge_all(self) -> None:
         self._action_banner = "merge all requested..."
+        self._banner_severity = "info"
         self._render_banner()
         self.run_worker(
             self._execute_merge_all,
@@ -505,7 +607,12 @@ class MissionControlApp(App[int]):
             )
 
     def _tick(self) -> None:
-        self._refresh_state()
+        try:
+            self._refresh_state()
+        except NoMatches:
+            if self._refresh_timer is not None:
+                self._refresh_timer.stop()
+                self._refresh_timer = None
 
     def _refresh_state(self) -> None:
         prior_log_path = self.model.detail_view(self.state).selected_log_path if self.model.detail_view(self.state) else None
@@ -527,7 +634,12 @@ class MissionControlApp(App[int]):
         self._highlight_panes()
 
     def _render_banner(self) -> None:
-        self.query_one("#banner", Static).update(self._action_banner or self.state.last_event_banner or "")
+        banner = self._action_banner or self.state.last_event_banner or ""
+        if not banner:
+            self.query_one("#banner", Static).update("")
+            return
+        severity = self._banner_severity if self._action_banner else "info"
+        self.query_one("#banner", Static).update(Text(banner, style=mission_control_banner_style(severity)))
 
     def _render_live(self) -> None:
         table = self.query_one("#live-table", DataTable)
@@ -536,7 +648,11 @@ class MissionControlApp(App[int]):
         for item in self.state.live_runs.items:
             status = item.overlay.label if item.overlay is not None else item.record.status.upper()
             table.add_row(
-                status,
+                mission_control_status_text(
+                    status,
+                    status=item.record.status,
+                    overlay=item.overlay.level if item.overlay is not None else None,
+                ),
                 item.record.run_type,
                 item.display_id,
                 item.branch_task,
@@ -556,7 +672,7 @@ class MissionControlApp(App[int]):
             display_id = row.queue_task_id or row.run_id
             table.add_row(
                 item.completed_at_display,
-                item.outcome_display,
+                mission_control_status_text(item.outcome_display, status=row.status),
                 row.run_type,
                 display_id,
                 item.duration_display,
@@ -577,30 +693,36 @@ class MissionControlApp(App[int]):
         if detail is None:
             meta.update("No selection.")
             actions.update("")
-            self.query_one("#detail-log", Log).clear()
+            self.query_one("#detail-log", SearchableLog).clear()
             return
 
         started = detail.record.timing.get("started_at") or "-"
         finished = detail.record.timing.get("finished_at") or "-"
         duration = detail.record.timing.get("duration_s")
         cost = detail.record.metrics.get("cost_usd")
-        overlay = f"\noverlay: {detail.overlay.label} ({detail.overlay.reason})" if detail.overlay is not None else ""
-        meta.update(
-            "\n".join(
-                [
-                    detail.detail.title,
-                    f"run id: {detail.record.run_id}",
-                    f"status: {detail.record.status}{overlay}",
-                    f"type: {detail.record.run_type}",
-                    f"started: {started}",
-                    f"finished: {finished}",
-                    f"duration: {duration if duration is not None else '-'}",
-                    f"cost: {cost if cost is not None else '-'}",
-                    *detail.detail.summary_lines,
-                    f"log: {detail.selected_log_path or '-'}",
-                ]
-            )
+        meta_text = Text()
+        meta_text.append(f"{detail.detail.title}\n")
+        meta_text.append(f"run id: {detail.record.run_id}\n")
+        meta_text.append("status: ")
+        meta_text.append(
+            detail.overlay.label if detail.overlay is not None else detail.record.status,
+            style=mission_control_status_style(
+                detail.record.status,
+                overlay=detail.overlay.level if detail.overlay is not None else None,
+            ),
         )
+        if detail.overlay is not None:
+            meta_text.append(f" ({detail.overlay.reason})")
+        meta_text.append("\n")
+        meta_text.append(f"type: {detail.record.run_type}\n")
+        meta_text.append(f"started: {started}\n")
+        meta_text.append(f"finished: {finished}\n")
+        meta_text.append(f"duration: {duration if duration is not None else '-'}\n")
+        meta_text.append(f"cost: {cost if cost is not None else '-'}\n")
+        for line in detail.detail.summary_lines:
+            meta_text.append(f"{line}\n")
+        meta_text.append(f"log: {detail.selected_log_path or '-'}")
+        meta.update(meta_text)
         for artifact in detail.artifacts:
             artifacts.add_row(artifact.label, artifact.path, "yes" if artifact.exists else "no")
             self._artifact_paths.append(artifact.path)
@@ -617,6 +739,12 @@ class MissionControlApp(App[int]):
 
     def _render_status(self) -> None:
         query = self.state.filters.query or "-"
+        log_search = "-"
+        if self._log_search_query:
+            if self._log_search_match_total:
+                log_search = f"{self._log_search_query} ({self._log_search_match_index + 1}/{self._log_search_match_total})"
+            else:
+                log_search = f"{self._log_search_query} (0/0)"
         self.query_one("#status-bar", Static).update(
             " | ".join(
                 [
@@ -625,6 +753,7 @@ class MissionControlApp(App[int]):
                     f"active_only={'on' if self.state.filters.active_only else 'off'}",
                     f"selected={len(self.state.selected_run_ids)}",
                     f"query={query}",
+                    f"log_search={log_search}",
                     f"history={self.state.history_page.page + 1}/{self.state.history_page.total_pages}",
                     f"rows={self.state.live_runs.total_count} live, {self.state.history_page.total_rows} history",
                 ]
@@ -634,9 +763,14 @@ class MissionControlApp(App[int]):
     def _render_footer(self) -> None:
         prefix = "queue compat" if self.queue_compat else "mission control"
         follow = "follow=on" if self._follow_log else "follow=off"
-        self.query_one("#footer", Static).update(
-            f"{prefix} | Tab cycle panes | 1/2/3 focus | space select | / filter | ? help | a active | t type | f outcome | c/r/R/x/m/M/e actions | o logs | s {follow}"
-        )
+        if self.state.focus == "live":
+            hint = "j/k move | space select | Enter detail | a active | t type | ? help"
+        elif self.state.focus == "history":
+            hint = "j/k move | / filter | f outcome | [ ] page | Enter detail | ? help"
+        else:
+            search_hint = "n next | N prev | " if self._log_search_query else ""
+            hint = f"/ or Ctrl-F search log | {search_hint}o logs | s {follow} | Home/End scroll | e open | Esc back | ? help"
+        self.query_one("#footer", Static).update(f"{prefix} | {hint}")
 
     def _highlight_panes(self) -> None:
         for pane_name, pane_id in (("live", "#live-pane"), ("history", "#history-pane"), ("detail", "#detail-pane")):
@@ -653,7 +787,7 @@ class MissionControlApp(App[int]):
         history.add_columns("completed", "outcome", "type", "id", "duration", "cost", "summary")
         artifacts = self.query_one("#detail-artifacts", DataTable)
         artifacts.add_columns("artifact", "path", "exists")
-        self.query_one("#detail-log", Log).auto_scroll = True
+        self.query_one("#detail-log", SearchableLog).auto_scroll = True
 
     def _schedule_refresh(self) -> None:
         if self._refresh_timer is not None:
@@ -744,16 +878,19 @@ class MissionControlApp(App[int]):
 
     def _rebuild_log_tailer(self) -> None:
         self._log_tailer = self.model.log_tailer(self.state)
+        self._log_search_match_index = -1
 
     def _poll_log(self, *, clear_only: bool) -> None:
         result = self._log_tailer.poll()
         if clear_only and not result.clear:
             return
-        log_widget = self.query_one("#detail-log", Log)
+        log_widget = self.query_one("#detail-log", SearchableLog)
         if result.clear:
             log_widget.clear()
         if result.lines:
             log_widget.write_lines(result.lines)
+        if self._log_search_query:
+            self._sync_log_search_highlighting(announce=False)
         log_widget.auto_scroll = self._follow_log
         if self._follow_log:
             log_widget.scroll_end(animate=False)
@@ -763,6 +900,15 @@ class MissionControlApp(App[int]):
             self.state.filters.query = value.strip()
             self.state.filters.history_page = 0
             self._refresh_state()
+        self._focus_pane(self._filter_return_pane)
+
+    def _apply_log_search(self, value: str | None) -> None:
+        if value is not None:
+            self._log_search_query = value.strip()
+            self._log_search_match_index = -1
+            self._sync_log_search_highlighting(announce=bool(self._log_search_query))
+            if self._log_search_match_total:
+                self._jump_to_current_log_match()
         self._focus_pane(self._filter_return_pane)
 
     def _execute_detail_action(
@@ -794,6 +940,7 @@ class MissionControlApp(App[int]):
             self._action_banner = None
         elif result.message:
             self._action_banner = result.message
+            self._banner_severity = result.severity or ("success" if result.ok else "error")
         self._render_banner()
         if result.message:
             self.notify(result.message, severity=result.severity)
@@ -825,5 +972,145 @@ class MissionControlApp(App[int]):
         task_id = detail.record.identity.get("queue_task_id")
         return [str(task_id)] if task_id else None
 
+    def _advance_log_search(self, delta: int) -> None:
+        if self.state.focus != "detail":
+            return
+        if not self._log_search_query:
+            self.notify("no active log search", severity="warning")
+            return
+        matches = self._current_log_matches()
+        if not matches:
+            self.notify("no log matches", severity="warning")
+            return
+        if self._log_search_match_index < 0:
+            self._log_search_match_index = 0 if delta > 0 else len(matches) - 1
+        else:
+            self._log_search_match_index = (self._log_search_match_index + delta) % len(matches)
+        self.query_one("#detail-log", SearchableLog).set_search(
+            self._log_search_query,
+            current_match=matches[self._log_search_match_index],
+            match_count=len(matches),
+        )
+        self._log_search_match_total = len(matches)
+        self._jump_to_current_log_match()
+
+    def _sync_log_search_highlighting(self, *, announce: bool) -> None:
+        log_widget = self.query_one("#detail-log", SearchableLog)
+        if not self._log_search_query:
+            self._log_search_match_index = -1
+            self._log_search_match_total = 0
+            log_widget.set_search("", current_match=None, match_count=0)
+            self._render_status()
+            self._render_footer()
+            return
+        matches = self._current_log_matches()
+        if not matches:
+            self._log_search_match_index = -1
+            self._log_search_match_total = 0
+            log_widget.set_search(self._log_search_query, current_match=None, match_count=0)
+            self._render_status()
+            self._render_footer()
+            if announce:
+                self.notify("no log matches", severity="warning")
+            return
+        if self._log_search_match_index < 0 or self._log_search_match_index >= len(matches):
+            self._log_search_match_index = 0
+        self._log_search_match_total = len(matches)
+        log_widget.set_search(
+            self._log_search_query,
+            current_match=matches[self._log_search_match_index],
+            match_count=len(matches),
+        )
+        self._render_status()
+        self._render_footer()
+
+    def _jump_to_current_log_match(self) -> None:
+        matches = self._current_log_matches()
+        if not matches or self._log_search_match_index < 0:
+            return
+        line, _start, _end = matches[self._log_search_match_index]
+        self._follow_log = False
+        log_widget = self.query_one("#detail-log", SearchableLog)
+        log_widget.auto_scroll = False
+        log_widget.scroll_to(y=max(0, line - 2), animate=False, force=True, immediate=True)
+        self._render_status()
+        self._render_footer()
+
+    def _current_log_matches(self) -> list[tuple[int, int, int]]:
+        lines = self.query_one("#detail-log", SearchableLog).lines
+        matches: list[tuple[int, int, int]] = []
+        for line_number, line in enumerate(lines):
+            matches.extend((line_number, start, end) for start, end in _find_substring_spans(line, self._log_search_query))
+        return matches
+
 
 __all__ = ["FilterModal", "HelpModal", "MessageModal", "MissionControlApp"]
+
+
+def _help_text() -> str:
+    return "\n".join(
+        [
+            "Panes",
+            "Live Runs shows active and recently finished live registry rows across build, improve, certify, merge, and queue.",
+            "History shows terminal snapshots and older rows with paging, substring filtering, and outcome/type filters.",
+            "Detail + Logs shows metadata, artifacts, legal actions, and the currently selected log stream for the selected row.",
+            "",
+            "Navigation",
+            "Tab / Shift-Tab cycle panes.",
+            "1 / 2 / 3 focus Live / History / Detail.",
+            "j / k or Up / Down move the current row or artifact selection.",
+            "Enter pins the current row and focuses Detail.",
+            "Esc returns from Detail to the pane where the selection came from.",
+            "q quits the app. ? opens this help.",
+            "",
+            "Filters And Selection",
+            "a toggles active-only live rows.",
+            "t cycles the run type filter: all, build, improve, certify, merge, queue.",
+            "f cycles the history outcome filter: all, success, failed, interrupted, cancelled.",
+            "/ opens the history substring filter from Live or History. Matches run id, task id, branch, and intent.",
+            "Space toggles multi-select on the current live row. Multi-select is used for queue merge-on-done flows.",
+            "[ and ] move history pages when History has focus.",
+            "",
+            "Detail And Logs",
+            "o cycles between available log files for the selected run.",
+            "s toggles log follow mode.",
+            "Home jumps to the top of the current log. End resumes follow and jumps to the bottom.",
+            "/ or Ctrl-F opens substring search for the current log when Detail has focus.",
+            "n jumps to the next log search match. N jumps to the previous match.",
+            "Log search highlights every match and uses a stronger highlight for the current match.",
+            "",
+            "Actions",
+            "c cancel, r resume, R retry, x cleanup, m merge selected queue item(s), M merge all done queue items, e open the selected artifact or log.",
+            "Disabled actions stay visible with a reason so compatibility and capability limits are explicit.",
+            "",
+            "Status Codes",
+            "RUNNING / STARTING: active work in progress.",
+            "QUEUED / PAUSED: waiting state managed by queue or workflow control.",
+            "DONE: terminal success.",
+            "FAILED: terminal failure.",
+            "INTERRUPTED: stopped before completion but may be resumable.",
+            "CANCELLED: stopped intentionally.",
+            "REMOVED: terminal row retained briefly before cleanup.",
+            "LAGGING: heartbeat overdue, but the writer still appears alive or the reader is in a grace window.",
+            "STALE: heartbeat stalled and the writer identity is gone.",
+            "",
+            "Compatibility Notes",
+            "queue compat mode keeps `otto queue dashboard` muscle memory by opening Mission Control filtered to queue runs.",
+            "Legacy queue rows say `legacy queue mode` and disable registry-backed logs or artifact actions that old watchers cannot provide.",
+        ]
+    )
+
+
+def _find_substring_spans(text: str, query: str) -> list[tuple[int, int]]:
+    needle = query.casefold().strip()
+    if not needle:
+        return []
+    haystack = text.casefold()
+    spans: list[tuple[int, int]] = []
+    start = 0
+    while True:
+        index = haystack.find(needle, start)
+        if index < 0:
+            return spans
+        spans.append((index, index + len(needle)))
+        start = index + len(needle)

@@ -10,7 +10,8 @@ from otto import paths
 from otto.history import append_history_entry
 from otto.queue.schema import QueueTask, append_task, write_state
 from otto.runs.registry import make_run_record, update_record, write_record
-from otto.tui.mission_control import MissionControlApp
+from otto.theme import MISSION_CONTROL_THEME
+from otto.tui.mission_control import HelpModal, MissionControlApp, SearchableLog
 from otto.tui.mission_control_actions import ActionResult
 from otto.tui.mission_control_model import MissionControlFilters
 
@@ -267,6 +268,95 @@ async def test_mission_control_query_filter_modal_applies_and_cancels(tmp_path: 
         history = app.query_one("#history-table", DataTable)
         assert app.state.filters.query == "keep"
         assert history.row_count == 1
+
+
+@pytest.mark.asyncio
+async def test_mission_control_help_modal_opens_and_closes(tmp_path: Path) -> None:
+    repo = tmp_path
+    build_log = paths.build_dir(repo, "build-run") / "narrative.log"
+    build_log.parent.mkdir(parents=True, exist_ok=True)
+    build_log.write_text("build primary\n")
+    _write_live_record(repo, run_id="build-run", run_type="build", status="running", primary_log=build_log)
+
+    app = MissionControlApp(repo)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("?")
+        await pilot.pause()
+
+        assert isinstance(app.screen, HelpModal)
+        assert "Status Codes" in str(app.screen.query_one("#help-body", Static).content)
+        assert "Compatibility Notes" in str(app.screen.query_one("#help-body", Static).content)
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not isinstance(app.screen, HelpModal)
+
+
+@pytest.mark.asyncio
+async def test_mission_control_log_search_keybind_tracks_matches(tmp_path: Path) -> None:
+    repo = tmp_path
+    build_log = paths.build_dir(repo, "build-run") / "narrative.log"
+    build_log.parent.mkdir(parents=True, exist_ok=True)
+    build_log.write_text("alpha start\nbeta alpha\ngamma\nALPHA end\n")
+    _write_live_record(repo, run_id="build-run", run_type="build", status="running", primary_log=build_log)
+
+    app = MissionControlApp(repo)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("3")
+        await pilot.pause()
+        await pilot.press("ctrl+f")
+        await pilot.pause()
+
+        app.screen.query_one("#filter-input", Input).value = "alpha"
+        app.screen.action_apply()
+        await pilot.pause()
+
+        log_widget = app.query_one("#detail-log", SearchableLog)
+        assert app._log_search_query == "alpha"
+        assert app._log_search_match_total == 3
+        assert app._log_search_match_index == 0
+        assert log_widget.current_match == (0, 0, 5)
+
+        await pilot.press("n")
+        await pilot.pause()
+        assert app._log_search_match_index == 1
+        assert log_widget.current_match == (1, 5, 10)
+
+        await pilot.press("N")
+        await pilot.pause()
+        assert app._log_search_match_index == 0
+        assert log_widget.current_match == (0, 0, 5)
+
+
+@pytest.mark.asyncio
+async def test_mission_control_status_cells_use_theme_colors(tmp_path: Path) -> None:
+    repo = tmp_path
+    running_log = paths.build_dir(repo, "build-running") / "narrative.log"
+    running_log.parent.mkdir(parents=True, exist_ok=True)
+    running_log.write_text("running\n")
+    failed_log = paths.build_dir(repo, "build-failed") / "narrative.log"
+    failed_log.parent.mkdir(parents=True, exist_ok=True)
+    failed_log.write_text("failed\n")
+
+    _write_live_record(repo, run_id="build-running", run_type="build", status="running", primary_log=running_log)
+    _write_live_record(repo, run_id="build-failed", run_type="build", status="failed", primary_log=failed_log)
+
+    app = MissionControlApp(repo)
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        live = app.query_one("#live-table", DataTable)
+        running_row = live.get_row_at(0)
+        failed_row = live.get_row_at(1)
+
+        assert str(running_row[0]) == "RUNNING"
+        assert running_row[0].style == MISSION_CONTROL_THEME.running
+        assert str(failed_row[0]) == "FAILED"
+        assert failed_row[0].style == MISSION_CONTROL_THEME.failed
 
 
 @pytest.mark.asyncio

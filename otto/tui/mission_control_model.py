@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -13,7 +14,7 @@ from typing import Any, Callable, Literal, Protocol
 from otto import paths
 from otto.history import command_family, history_run_id, normalize_command_label
 from otto.runs.history import load_project_history_rows
-from otto.runs.registry import read_live_records, writer_identity_matches_live_process
+from otto.runs.registry import load_live_record, read_live_records, writer_identity_matches_live_process
 from otto.runs.schema import RunRecord, is_terminal_status
 from otto.tui.mission_control_actions import ActionResult, ActionState
 
@@ -29,6 +30,7 @@ _TERMINAL_ESCAPE_RE = re.compile(
 _LOG_UNAVAILABLE_PLACEHOLDER = "<log file no longer available>"
 _TYPE_FILTERS: tuple[TypeFilter, ...] = ("all", "build", "improve", "certify", "merge", "queue")
 _OUTCOME_FILTERS: tuple[OutcomeFilter, ...] = ("all", "success", "failed", "interrupted", "cancelled")
+_DEFAULT_LIVE_RECORDS_LOADER = read_live_records
 _STATUS_PRIORITY = {
     "running": 0,
     "starting": 0,
@@ -214,6 +216,22 @@ class _StaleTracker:
     last_progress_monotonic: float
 
 
+@dataclass(slots=True)
+class LiveRegistryCacheStats:
+    directory_checks: int = 0
+    snapshot_hits: int = 0
+    file_stats: int = 0
+    record_hits: int = 0
+    record_misses: int = 0
+
+
+@dataclass(slots=True)
+class _CachedLiveRecord:
+    mtime_ns: int
+    size: int
+    record: RunRecord
+
+
 class LogTailer:
     """Poll a log file and return appended complete lines."""
 
@@ -289,6 +307,7 @@ class MissionControlModel:
         now_fn: Callable[[], datetime] | None = None,
         monotonic_fn: Callable[[], float] | None = None,
         process_probe: Callable[[dict[str, Any]], bool] | None = None,
+        live_records_loader: Callable[[Path], list[RunRecord]] | None = None,
     ) -> None:
         self.project_dir = Path(project_dir)
         self.history_page_size = history_page_size
@@ -296,12 +315,18 @@ class MissionControlModel:
         self._now_fn = now_fn or _utc_now
         self._monotonic_fn = monotonic_fn or time.monotonic
         self._process_probe = process_probe or _writer_process_matches
+        self._live_records_loader = live_records_loader or read_live_records
         self._seen_live_ids: set[str] = set()
         self._seen_live_ids_bootstrapped = False
         self._stale_trackers: dict[str, _StaleTracker] = {}
         self._last_poll_monotonic: float | None = None
         self._last_poll_wall: datetime | None = None
         self._suspend_started_monotonic: float | None = None
+        self._live_registry_dir_mtime_ns: int | None = None
+        self._live_registry_cache_ready = False
+        self._live_registry_snapshot: list[RunRecord] = []
+        self._live_registry_entries: dict[str, _CachedLiveRecord] = {}
+        self._live_registry_cache_stats = LiveRegistryCacheStats()
 
     def initial_state(
         self,
@@ -408,6 +433,9 @@ class MissionControlModel:
     def log_tailer(self, state: MissionControlState) -> LogTailer:
         return LogTailer(lambda: self._selected_log_path(state))
 
+    def live_registry_cache_stats(self) -> LiveRegistryCacheStats:
+        return replace(self._live_registry_cache_stats)
+
     def cycle_type_filter(self, state: MissionControlState) -> MissionControlState:
         idx = _TYPE_FILTERS.index(state.filters.type_filter)
         state.filters.type_filter = _TYPE_FILTERS[(idx + 1) % len(_TYPE_FILTERS)]
@@ -435,7 +463,11 @@ class MissionControlModel:
         return Path(detail.selected_log_path)
 
     def _load_live_records(self, now: datetime) -> list[RunRecord]:
-        records = read_live_records(self.project_dir)
+        records = (
+            self._cached_live_records()
+            if self._live_records_loader is _DEFAULT_LIVE_RECORDS_LOADER
+            else list(self._live_records_loader(self.project_dir))
+        )
         if not self.queue_compat:
             return records
         merged = list(records)
@@ -444,6 +476,54 @@ class MissionControlModel:
         for adapter in all_adapters():
             merged.extend(adapter.legacy_records(self.project_dir, now, records))
         return merged
+
+    def _cached_live_records(self) -> list[RunRecord]:
+        live_dir = paths.live_runs_dir(self.project_dir)
+        self._live_registry_cache_stats.directory_checks += 1
+        try:
+            dir_stat = live_dir.stat()
+        except OSError:
+            self._live_registry_dir_mtime_ns = None
+            self._live_registry_cache_ready = True
+            self._live_registry_snapshot = []
+            self._live_registry_entries.clear()
+            return []
+
+        if self._live_registry_cache_ready and dir_stat.st_mtime_ns == self._live_registry_dir_mtime_ns:
+            self._live_registry_cache_stats.snapshot_hits += 1
+            return list(self._live_registry_snapshot)
+
+        records: list[RunRecord] = []
+        next_entries: dict[str, _CachedLiveRecord] = {}
+        for path in sorted(live_dir.glob("*.json")):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            self._live_registry_cache_stats.file_stats += 1
+            cache_key = str(path)
+            cached = self._live_registry_entries.get(cache_key)
+            if cached is not None and cached.mtime_ns == stat.st_mtime_ns and cached.size == stat.st_size:
+                self._live_registry_cache_stats.record_hits += 1
+                record = cached.record
+            else:
+                try:
+                    record = load_live_record(self.project_dir, path.stem)
+                except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
+                    continue
+                self._live_registry_cache_stats.record_misses += 1
+            records.append(record)
+            next_entries[cache_key] = _CachedLiveRecord(
+                mtime_ns=stat.st_mtime_ns,
+                size=stat.st_size,
+                record=record,
+            )
+
+        self._live_registry_dir_mtime_ns = dir_stat.st_mtime_ns
+        self._live_registry_cache_ready = True
+        self._live_registry_snapshot = records
+        self._live_registry_entries = next_entries
+        return list(records)
 
     def _build_live_items(
         self,
