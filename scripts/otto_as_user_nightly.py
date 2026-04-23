@@ -802,6 +802,7 @@ async def _drive_n9_mission_control(
     from otto.tui.mission_control import MissionControlApp
 
     app = MissionControlApp(repo)
+    history_path = paths.history_jsonl(repo)
 
     async def _wait_for(predicate: Any, *, timeout_s: float, message: str, pause_s: float = 0.1) -> Any:
         deadline = time.monotonic() + timeout_s
@@ -811,6 +812,17 @@ async def _drive_n9_mission_control(
             if value:
                 return value
         raise AssertionError(message)
+
+    def _cancelled_terminal_snapshot_for_queue_task(task_id: str, *, run_id: str | None = None) -> dict[str, Any] | None:
+        for row in reversed(_read_terminal_snapshots(repo)):
+            if str(row.get("queue_task_id") or "") != task_id:
+                continue
+            if str(row.get("terminal_outcome") or "") != "cancelled":
+                continue
+            if run_id is not None and str(row.get("run_id") or "") != run_id:
+                continue
+            return row
+        return None
 
     async def _focus_live_run(run_id: str) -> None:
         await pilot.press("1")
@@ -1051,20 +1063,20 @@ async def _drive_n9_mission_control(
             timeout_s=5.0,
             message="N9 could not reopen queue detail for cancellation",
         )
-        request_path = paths.session_command_requests(Path(_detail().record.cwd), cancel_item.record.run_id)
-        ack_path = paths.session_command_acks(Path(_detail().record.cwd), cancel_item.record.run_id)
-        pre_ack_ids = set(load_command_ack_ids(ack_path))
         heartbeat_interval_s = max(float(_detail().record.timing.get("heartbeat_interval_s") or 5.0), 0.1)
         cancel_pressed_at = time.monotonic()
         await pilot.press("c")
-        await _wait_for(
-            lambda: set(load_command_ack_ids(ack_path)) - pre_ack_ids,
-            timeout_s=max(15.0, 3.0 * heartbeat_interval_s),
-            message="N9 queue cancel ack did not arrive",
+        cancelled_snapshot = await _wait_for(
+            lambda: _cancelled_terminal_snapshot_for_queue_task(
+                cancel_task_id,
+                run_id=cancel_item.record.run_id,
+            ),
+            timeout_s=max(8.0, 4.0 * heartbeat_interval_s),
+            message="N9 queue cancel was not recorded in history",
         )
-        details["cancel-request-path"] = str(request_path)
-        details["cancel-ack-path"] = str(ack_path)
-        details["cancel-ack-latency-ms"] = int((time.monotonic() - cancel_pressed_at) * 1000)
+        details["queue-cancel-history-path"] = str(history_path)
+        details["queue-cancel-history-latency-ms"] = int((time.monotonic() - cancel_pressed_at) * 1000)
+        details["queue-cancel-history-run-id"] = str(cancelled_snapshot.get("run_id") or "")
         await _wait_for(
             lambda: (
                 _detail() is not None
@@ -1214,6 +1226,7 @@ def run_n9(repo: Path, provider: str) -> base.RunResult:
         "queue-run-ids": {},
         "queue-live-latency-ms": {},
         "cancel-ack-latency-ms": None,
+        "queue-cancel-history-latency-ms": None,
         "queue-cancelled-latency-ms": None,
         "editor-spawn-attempted": False,
         "history-terminal-snapshot-count": 0,
@@ -1413,6 +1426,9 @@ def run_n9(repo: Path, provider: str) -> base.RunResult:
 
 def verify_n9(repo: Path, run_result: base.RunResult) -> VerifyResult:
     details = run_result.details
+    queue_cancel_history_latency_ms = details.get("queue-cancel-history-latency-ms")
+    if queue_cancel_history_latency_ms is None:
+        queue_cancel_history_latency_ms = details.get("cancel-ack-latency-ms")
     if run_result.returncode != 0:
         return _build_failure(run_result, "N9 realistic Mission Control session failed before verification")
     if details.get("build-live-row-latency-ms") is None or details.get("build-live-row-latency-ms") > 5000:
@@ -1425,8 +1441,8 @@ def verify_n9(repo: Path, run_result: base.RunResult) -> VerifyResult:
         return VerifyResult(False, "N9 standalone heartbeat did not advance while Detail was open")
     if details.get("standalone-log-cycled") is not True:
         return VerifyResult(False, "N9 did not switch standalone logs with `o`")
-    if details.get("cancel-ack-latency-ms") is None:
-        return VerifyResult(False, "N9 queue cancel never received an ack")
+    if queue_cancel_history_latency_ms is None:
+        return VerifyResult(False, "N9 queue cancel was not confirmed via terminal history")
     if details.get("queue-cancelled-latency-ms") is None:
         return VerifyResult(False, "N9 Mission Control never refreshed the cancelled queue row")
     if details.get("editor-spawn-attempted") is not True:
