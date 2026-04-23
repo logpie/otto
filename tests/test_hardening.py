@@ -1053,6 +1053,31 @@ def test_parser_accepts_structured_story_result_fields():
     assert "200 OK" in story["evidence"]
 
 
+def test_parser_preserves_fenced_code_inside_story_evidence():
+    from otto.markers import parse_certifier_markers
+
+    parsed = parse_certifier_markers(
+        "STORY_EVIDENCE_START: smoke\n"
+        "```bash\n"
+        "curl -i http://localhost:8000/health\n"
+        "# HTTP/1.1 200 OK\n"
+        "```\n"
+        "STORY_EVIDENCE_END: smoke\n"
+        "STORIES_TESTED: 1\n"
+        "STORIES_PASSED: 1\n"
+        "STORY_RESULT: smoke | PASS | summary=Health check passed\n"
+        "VERDICT: PASS\n"
+        "DIAGNOSIS: null\n"
+    )
+
+    assert parsed.stories[0]["evidence"] == (
+        "```bash\n"
+        "curl -i http://localhost:8000/health\n"
+        "# HTTP/1.1 200 OK\n"
+        "```"
+    )
+
+
 def test_parser_ignores_evidence_markers_inside_frontmatter_and_fenced_code():
     from otto.markers import parse_certifier_markers
 
@@ -2025,6 +2050,58 @@ class TestProofOfWorkRendering:
         assert "<h2>Efficiency</h2>" in html
         assert "Total browser calls: 9 across 1 story (9.0 per story)" in html
         assert "Efficiency note:" not in html
+
+    def test_pow_report_shows_tokens_when_cost_not_reported(self, tmp_path):
+        from otto.certifier import _build_pow_report_data, _render_pow_html, _render_pow_markdown
+
+        (tmp_path / "messages.jsonl").write_text(
+            json.dumps(
+                {
+                    "type": "phase_end",
+                    "phase": "certify",
+                    "usage": {
+                        "input_tokens": 123456,
+                        "cached_input_tokens": 120000,
+                        "output_tokens": 789,
+                    },
+                }
+            )
+            + "\n"
+        )
+        options = type("Opts", (), {"provider": "codex", "model": "gpt-5.5", "effort": None})()
+        report = _build_pow_report_data(
+            project_dir=tmp_path,
+            report_dir=tmp_path,
+            log_dir=tmp_path,
+            run_id="run-1",
+            session_id="sdk-session-1",
+            pipeline_mode="agentic_certifier",
+            certifier_mode="standard",
+            outcome="passed",
+            story_results=[{"story_id": "smoke", "passed": True, "summary": "ok"}],
+            diagnosis="",
+            certify_rounds=None,
+            duration_s=2.0,
+            certifier_cost_usd=0.0,
+            total_cost_usd=0.0,
+            intent="Smoke test the browser flow.",
+            options=options,
+            evidence_dir=None,
+            stories_tested=1,
+            stories_passed=1,
+        )
+
+        md = _render_pow_markdown(report)
+        html = _render_pow_html(report)
+
+        assert report["token_usage"] == {
+            "input_tokens": 123456,
+            "cached_input_tokens": 120000,
+            "output_tokens": 789,
+        }
+        assert "- Cost: not reported by provider" in md
+        assert "- Tokens: 123,456 input (120,000 cached), 789 output" in md
+        assert "Cost: not reported by provider; Tokens:" in html
 
     def test_certifier_prompts_require_failure_evidence(self):
         standard = (Path(__file__).resolve().parents[1] / "otto" / "prompts" / "certifier.md").read_text()

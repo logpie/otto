@@ -58,6 +58,10 @@ is to find what's broken, weak, or missing — not just verify the happy path.
    Decide the story list before dispatching subagents. If one defect spans
    multiple stories, keep it under the primary story instead of creating a
    second duplicate finding for the same root cause.
+   If you dispatch parallel subagents for web stories, assign each one a unique
+   `agent-browser --session <story-id>` session and require that session on
+   every browser command it runs. Do not use or close the default browser
+   session from parallel subagents.
    Plan stories appropriate to product type:
    - For web/app products: First Experience, CRUD Lifecycle, Data Isolation, Persistence, Access Control, Search/Filter, Edge Cases.
    - For library products: Public API contract, Import surface, Return-value correctness, Error handling, Edge-case inputs.
@@ -65,7 +69,10 @@ is to find what's broken, weak, or missing — not just verify the happy path.
    - For pipelines: Input fixture → output validation, Schema/format compliance, Recovery from bad input.
    - For services (gRPC/queue/worker): Happy-path message, Error-path message, State consistency, Metric/log observability.
 
-7. **Visual verification** (web apps only): save screenshots to {evidence_dir}
+7. **Visual verification** (web apps only): save screenshots to {evidence_dir}.
+   Visual evidence must show states reached by real UI interactions or already
+   verified story sessions. Do NOT use JavaScript mutation to create visual
+   states for screenshots or recordings.
 
 8. **Report findings** using the exact format below.
 
@@ -89,14 +96,20 @@ Its `click`/`type`/`press`/`drag`/`snapshot`/`screenshot`/`record` actions are d
 
 For web apps with interactive surfaces, any story that claims create/edit/submit/delete/keyboard/blur/focus/drag-drop behavior MUST be exercised through live browser DOM events on the running page.
 
-- Use `agent-browser snapshot -i` with element refs or semantic locators, then `click`, `type`, `press`, or `drag` so the page's real event handlers run.
+- Use `agent-browser snapshot -i` with element refs or semantic locators, then `click`, `fill`, `type`, `press`, or `drag` so the page's real event handlers run.
+- Use agent-browser refs exactly as printed, e.g. `agent-browser click @e2`
+  or `agent-browser fill @e1 "text"`. Do NOT invent unsupported flags like
+  `--ref e1`, `--text`, or bare `e1`.
 - Use `snapshot -i` deliberately: once at the start of a story to get refs, and again only when a state-changing action requires fresh refs or a full DOM re-check. Prefer focused `eval` checks of a selector, text, or storage key over repeated full snapshots when a lightweight assertion will do.
 - **Bypass is forbidden (in any tool):**
-- Do NOT inject state via JavaScript: `agent-browser eval`, Playwright `page.evaluate()`, JSDOM scripts, and `node -e` injections all count. `localStorage.setItem(...)`, `document.querySelector(...).click()`, `page.evaluate(() => addCard(...))`, and direct calls to `addCard()`, `deleteItem()`, or `renderBoard()` bypass the real UI event path.
+- Do NOT inject state via JavaScript: `agent-browser eval`, Playwright `page.evaluate()`, JSDOM scripts, and `node -e` injections all count. `element.value = ...`, `dispatchEvent(...)`, `requestSubmit()`, `localStorage.setItem(...)`, `document.querySelector(...).click()`, `page.evaluate(() => addCard(...))`, and direct calls to `addCard()`, `deleteItem()`, or `renderBoard()` bypass the real UI event path.
 - Do NOT use JSDOM or headless unit test runners as certification evidence for user-facing flows.
 - Do NOT write evidence like "added card via JS" and report PASS. If the UI flow is blocked by a bug, emit WARN with the downgrade reason instead.
 The principle: a user's perception is the verdict authority. They click, type, and press Enter. Your tests must do the same, regardless of tool.
 - Visual verification (screenshots, video) is supplemental evidence only. It does NOT replace event-sequencing coverage.
+- If any state-changing JavaScript was used for a web story or screenshot, that
+  evidence is `javascript-eval`, not `live-ui-events`, and it cannot certify a
+  user-facing UI flow as PASS by itself.
 
 ## Scripted Playwright as fallback
 
@@ -121,7 +134,17 @@ user-flow stories. Add `anonymous` only when access control is part of the
 story. Avoid per-story `--session <story-id>` churn unless isolation is the
 point of the test.
 
+**Parallel subagent exception:** when web stories are dispatched concurrently,
+each subagent MUST use a unique named session, for example
+`agent-browser --session <story-id> ...`, for every browser command it runs.
+The parent visual walkthrough should use its own named session such as
+`visual`. This prevents parallel stories from closing, navigating, or timing
+out one another's browser context.
+
 - Use `agent-browser eval` only for read-only binary assertions such as `agent-browser eval "document.title"`. Do not turn it into repeated DOM exploration when one snapshot would answer the question.
+- Read-only `eval` must not assign values, call app functions, dispatch events,
+  call `.click()`, submit forms, mutate storage, focus controls, or otherwise
+  change page state.
 - Do not `reload` unless you are verifying persistence or recovery.
 - Do not `open` a new page when the current session can navigate there.
 - Stop once the evidence is decisive; extra probes after a clear PASS or FAIL should only exist to localize the defect you are reporting.

@@ -415,6 +415,10 @@ def _human_duration(seconds: float) -> str:
     return " ".join(parts)
 
 
+def _human_int(value: int | float) -> str:
+    return f"{int(value):,}"
+
+
 def _safe_git(project_dir: Path, *args: str) -> str:
     try:
         result = subprocess.run(
@@ -1159,18 +1163,81 @@ def _show_round_timeline(round_history: list[dict[str, Any]]) -> bool:
     return len(round_history) > 1
 
 
-def _cost_summary(certifier_cost_usd: float, total_cost_usd: float) -> dict[str, Any]:
+def _token_usage_summary(messages_jsonl: Path) -> dict[str, int]:
+    """Return total token usage from phase events, falling back to result usage."""
+    phase_totals = {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0}
+    fallback: dict[str, int] = {}
+    try:
+        with messages_jsonl.open(encoding="utf-8") as fh:
+            for raw_line in fh:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                usage = rec.get("usage")
+                if not isinstance(usage, dict):
+                    continue
+                item = {
+                    "input_tokens": int(usage.get("input_tokens", 0) or 0),
+                    "cached_input_tokens": int(usage.get("cached_input_tokens", 0) or 0),
+                    "output_tokens": int(usage.get("output_tokens", 0) or 0),
+                }
+                if rec.get("type") == "phase_end":
+                    for key, value in item.items():
+                        phase_totals[key] += value
+                elif rec.get("type") == "result":
+                    fallback = item
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return {}
+
+    total = phase_totals if any(phase_totals.values()) else fallback
+    return {key: value for key, value in total.items() if value > 0}
+
+
+def _token_usage_lines(token_usage: dict[str, int]) -> list[str]:
+    if not token_usage:
+        return []
+    input_tokens = token_usage.get("input_tokens", 0)
+    cached_tokens = token_usage.get("cached_input_tokens", 0)
+    output_tokens = token_usage.get("output_tokens", 0)
+    if cached_tokens:
+        input_part = (
+            f"{_human_int(input_tokens)} input "
+            f"({_human_int(cached_tokens)} cached)"
+        )
+    else:
+        input_part = f"{_human_int(input_tokens)} input"
+    return [f"Tokens: {input_part}, {_human_int(output_tokens)} output"]
+
+
+def _cost_summary(
+    certifier_cost_usd: float,
+    total_cost_usd: float,
+    *,
+    token_usage: dict[str, int] | None = None,
+) -> dict[str, Any]:
     certifier = round(float(certifier_cost_usd or 0.0), 2)
     total = round(float(total_cost_usd or 0.0), 2)
+    token_lines = _token_usage_lines(token_usage or {})
     if certifier == total:
+        cost_line = f"Cost: ${total:.2f}"
+        display = f"Cost: ${total:.2f}"
+        if total == 0 and token_lines:
+            display = f"Cost: not reported by provider; {token_lines[0]}"
+            cost_line = "Cost: not reported by provider"
+        lines = [cost_line, *token_lines]
         return {
-            "display": f"Cost: ${total:.2f}",
-            "lines": [f"Cost: ${total:.2f}"],
+            "display": display,
+            "lines": lines,
             "certifier_equals_total": True,
         }
     return {
         "display": f"Cost: certifier ${certifier:.2f}, total ${total:.2f}",
-        "lines": [f"Certifier cost: ${certifier:.2f}", f"Total cost: ${total:.2f}"],
+        "lines": [
+            f"Certifier cost: ${certifier:.2f}",
+            f"Total cost: ${total:.2f}",
+            *token_lines,
+        ],
         "certifier_equals_total": False,
     }
 
@@ -1291,7 +1358,12 @@ def _build_pow_report_data(
         spec_path=str(spec_context.get("spec_path") or ""),
         evidence_dir=evidence_dir,
     )
-    cost_summary = _cost_summary(certifier_cost_usd, total_cost_usd)
+    token_usage = _token_usage_summary(log_dir / "messages.jsonl")
+    cost_summary = _cost_summary(
+        certifier_cost_usd,
+        total_cost_usd,
+        token_usage=token_usage,
+    )
     verdict_label = "PASS with warnings" if outcome == "passed" and counts["warn_count"] > 0 else ("PASS" if outcome == "passed" else "FAIL")
     data = {
         "schema_version": _SCHEMA_VERSION,
@@ -1307,6 +1379,7 @@ def _build_pow_report_data(
         "duration_human": _human_duration(duration_s),
         "certifier_cost_usd": round(float(certifier_cost_usd or 0.0), 4),
         "total_cost_usd": round(float(total_cost_usd or 0.0), 4),
+        "token_usage": token_usage,
         "pipeline_mode": pipeline_mode,
         "mode": pipeline_mode,
         "certifier_mode": certifier_mode,
@@ -2309,6 +2382,7 @@ async def run_agentic_certifier(
             diagnosis=parsed.diagnosis,
             child_session_ids=list(breakdown.get("child_session_ids", []) or []),
             subagent_errors=list(breakdown.get("subagent_errors", []) or []),
+            token_usage=_token_usage_summary(report_dir / "messages.jsonl"),
         )
 
         try:
@@ -2370,13 +2444,18 @@ async def run_agentic_certifier(
         if write_session_summary:
             from otto.pipeline import _write_session_summary
 
+            usage = dict((breakdown.get("phase_usage") or {}).get("certify") or {})
             breakdown_summary = {
                 "certify": {
                     "duration_s": total_duration,
-                    "cost_usd": float(cost or 0.0),
                     "rounds": certify_rounds_count,
                 }
             }
+            if float(cost or 0.0) > 0:
+                breakdown_summary["certify"]["cost_usd"] = float(cost or 0.0)
+            for key in ("input_tokens", "cached_input_tokens", "output_tokens"):
+                if isinstance(usage.get(key), (int, float)):
+                    breakdown_summary["certify"][key] = int(usage[key])
             _write_session_summary(
                 project_dir,
                 run_id,

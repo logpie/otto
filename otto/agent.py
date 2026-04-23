@@ -613,6 +613,19 @@ async def run_agent_with_timeout(
                     "cost_usd": float(cost or 0.0),
                 }
             }
+        if finalize_breakdown is not None:
+            for usage_phase, usage in (breakdown_data.get("phase_usage") or {}).items():
+                if usage_phase not in finalize_breakdown or not isinstance(usage, dict):
+                    continue
+                for key in ("input_tokens", "cached_input_tokens", "output_tokens"):
+                    if isinstance(usage.get(key), (int, float)):
+                        finalize_breakdown[usage_phase][key] = int(usage[key])
+                if (
+                    isinstance(usage.get("cost_usd"), (int, float))
+                    and float(usage["cost_usd"]) > 0
+                    and "cost_usd" not in finalize_breakdown[usage_phase]
+                ):
+                    finalize_breakdown[usage_phase]["cost_usd"] = float(usage["cost_usd"])
         if phase == "build" and finalize_breakdown is not None:
             estimated_costs = estimate_phase_costs(log_dir / "messages.jsonl", float(cost or 0.0))
             if estimated_costs:
@@ -762,8 +775,25 @@ def _codex_prompt(prompt: str, options: AgentOptions) -> str:
     compat = _codex_compat_prelude(options)
     if compat:
         parts.append(compat)
+    tool_compat = _codex_tool_compat_prelude(prompt)
+    if tool_compat:
+        parts.append(tool_compat)
     parts.append(prompt)
     return "\n\n".join(part for part in parts if part).strip()
+
+
+def _codex_tool_compat_prelude(prompt: str) -> str:
+    """Translate Otto's Claude-flavored tool names for Codex sessions."""
+    lower = prompt.lower()
+    if "agent tool" not in lower and "subagent" not in lower and "sub-agent" not in lower:
+        return ""
+    return (
+        "Codex provider compatibility:\n"
+        "- When these instructions say to use the Agent tool or subagents, "
+        "use Codex's `spawn_agent` tool.\n"
+        "- After spawning subagents, use the Codex wait tool to collect every "
+        "subagent result before reporting."
+    )
 
 
 def _sdk_options(options: AgentOptions | None) -> Any:
@@ -956,12 +986,41 @@ def _codex_command(options: AgentOptions) -> list[str]:
         command.append("--full-auto")
     if options.model:
         command.extend(["-m", options.model])
+    if options.effort:
+        effort = _codex_reasoning_effort(options.effort)
+        if effort:
+            command.extend(["-c", f"model_reasoning_effort={json.dumps(effort)}"])
     if options.cwd and not options.resume:
         command.extend(["-C", options.cwd])
     if options.resume:
         command.append(options.resume)
     command.append("-")
     return command
+
+
+def _codex_reasoning_effort(effort: str | None) -> str:
+    value = str(effort or "").strip().lower()
+    if value == "max":
+        return "xhigh"
+    return value
+
+
+def _codex_collab_result_text(item: dict[str, Any], child_id: str | None = None) -> str:
+    states = item.get("agents_states")
+    if not isinstance(states, dict):
+        return ""
+    if child_id:
+        child_state = states.get(child_id)
+        if isinstance(child_state, dict):
+            return str(child_state.get("message", "") or "")
+        return ""
+    messages: list[str] = []
+    for child_state in states.values():
+        if isinstance(child_state, dict):
+            message = str(child_state.get("message", "") or "")
+            if message:
+                messages.append(message)
+    return "\n\n".join(messages)
 
 
 async def _query_codex(
@@ -988,7 +1047,9 @@ async def _query_codex(
             "codex CLI not found in PATH; install it from https://github.com/openai/codex"
         ) from exc
     if state is not None:
-        state["process_group_id"] = process.pid
+        pid = getattr(process, "pid", None)
+        if isinstance(pid, int):
+            state["process_group_id"] = pid
 
     final_prompt = _codex_prompt(prompt, opts)
     stdout = process.stdout
@@ -1004,6 +1065,8 @@ async def _query_codex(
     last_text = ""
     saw_result = False
     raw_lines: list[str] = []
+    emitted_collab_tool_ids: set[str] = set()
+    child_tool_use_by_thread_id: dict[str, str] = {}
 
     try:
         while True:
@@ -1044,6 +1107,58 @@ async def _query_codex(
                 if event_type == "item.completed":
                     output = str(item.get("aggregated_output", "") or "")
                     yield AssistantMessage(content=[ToolResultBlock(content=output, tool_use_id=item_id)])
+                    continue
+
+            if item_type == "collab_tool_call":
+                item_id = str(item.get("id", "") or "") or None
+                tool = str(item.get("tool", "") or "")
+                receiver_thread_ids = [
+                    str(child_id)
+                    for child_id in (item.get("receiver_thread_ids") or [])
+                    if child_id
+                ]
+                if state is not None and receiver_thread_ids:
+                    existing_children = set(state.get("codex_child_session_ids", []) or [])
+                    existing_children.update(receiver_thread_ids)
+                    state["codex_child_session_ids"] = sorted(existing_children)
+
+                if tool == "spawn_agent":
+                    prompt_text = str(item.get("prompt", "") or "")
+                    if item_id and event_type in {"item.started", "item.completed"}:
+                        if item_id not in emitted_collab_tool_ids:
+                            emitted_collab_tool_ids.add(item_id)
+                            yield AssistantMessage(
+                                content=[
+                                    ToolUseBlock(
+                                        name="Agent",
+                                        input={
+                                            "subagent_type": "codex",
+                                            "prompt": prompt_text,
+                                        },
+                                        id=item_id,
+                                    )
+                                ],
+                                session_id=session_id,
+                            )
+                    if item_id and event_type == "item.completed":
+                        for child_id in receiver_thread_ids:
+                            child_tool_use_by_thread_id[child_id] = item_id
+                    continue
+
+                if tool == "wait" and event_type == "item.completed":
+                    for child_id in receiver_thread_ids:
+                        content = _codex_collab_result_text(item, child_id)
+                        if not content:
+                            continue
+                        yield AssistantMessage(
+                            content=[
+                                ToolResultBlock(
+                                    content=content,
+                                    tool_use_id=child_tool_use_by_thread_id.get(child_id) or item_id,
+                                )
+                            ],
+                            session_id=child_id,
+                        )
                     continue
 
             if event_type == "turn.completed":

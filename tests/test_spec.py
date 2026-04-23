@@ -511,6 +511,12 @@ class TestStandaloneCertifierPrompt:
             assert "- Queue consumer / worker: enqueue a test message;" in rendered
             assert "- Batch / data pipeline: feed fixture inputs;" in rendered
             assert "Desktop app" in rendered or "desktop app" in rendered
+            assert "Parallel subagent exception:" in rendered
+            assert "agent-browser --session <story-id>" in rendered
+            assert "Do NOT invent unsupported flags like" in rendered
+            assert "--ref e1" in rendered
+            assert "Visual evidence must show states reached by real UI interactions" in rendered
+            assert "evidence is `javascript-eval`, not `live-ui-events`" in rendered
 
 
 class TestReviewSpecResumeState:

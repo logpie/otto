@@ -1028,6 +1028,8 @@ async def build_agentic_v3(
                     phase_entry["cost_usd"] = _round_cost(float(usage["cost_usd"]))
                 if isinstance(usage.get("input_tokens"), (int, float)):
                     phase_entry["input_tokens"] = int(usage["input_tokens"])
+                if isinstance(usage.get("cached_input_tokens"), (int, float)):
+                    phase_entry["cached_input_tokens"] = int(usage["cached_input_tokens"])
                 if isinstance(usage.get("output_tokens"), (int, float)):
                     phase_entry["output_tokens"] = int(usage["output_tokens"])
                 if phase_name == "certify":

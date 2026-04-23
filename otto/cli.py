@@ -1912,7 +1912,25 @@ def _certify_locked(
     else:
         console.print(f"  [red bold]FAILED[/red bold] \u2014 {passed_count}/{len(story_results)} stories")
 
-    console.print(f"  Cost: ${total_certify_cost:.2f}  Duration: {duration:.0f}s")
+    token_usage = getattr(report, "token_usage", {}) or {}
+    if total_certify_cost > 0 or not token_usage:
+        cost_text = f"Cost: ${total_certify_cost:.2f}"
+    else:
+        input_tokens = int(token_usage.get("input_tokens", 0) or 0)
+        cached_tokens = int(token_usage.get("cached_input_tokens", 0) or 0)
+        output_tokens = int(token_usage.get("output_tokens", 0) or 0)
+        if cached_tokens:
+            cost_text = (
+                "Cost: not reported by provider; "
+                f"Tokens: {input_tokens:,} input ({cached_tokens:,} cached), "
+                f"{output_tokens:,} output"
+            )
+        else:
+            cost_text = (
+                "Cost: not reported by provider; "
+                f"Tokens: {input_tokens:,} input, {output_tokens:,} output"
+            )
+    console.print(f"  {cost_text}  Duration: {duration:.0f}s")
 
     # PoW report location — new layout uses session-scoped paths, pointed
     # to by the `latest` symlink. Fall back to the legacy certifier/latest

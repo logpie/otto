@@ -157,6 +157,124 @@ def test_codex_resume_command_uses_resume_subcommand_shape():
     assert command[-2:] == ["thread-123", "-"]
 
 
+def test_codex_command_passes_reasoning_effort():
+    from otto.agent import _codex_command
+
+    command = _codex_command(ClaudeAgentOptions(
+        provider="codex",
+        cwd="/tmp/project",
+        effort="low",
+    ))
+
+    assert "-c" in command
+    assert 'model_reasoning_effort="low"' in command
+
+
+def test_codex_command_maps_max_effort_to_xhigh():
+    from otto.agent import _codex_command
+
+    command = _codex_command(ClaudeAgentOptions(
+        provider="codex",
+        cwd="/tmp/project",
+        effort="max",
+    ))
+
+    assert 'model_reasoning_effort="xhigh"' in command
+
+
+def test_codex_prompt_adds_agent_tool_compatibility_guidance():
+    from otto.agent import _codex_prompt
+
+    prompt = _codex_prompt(
+        "Dispatch a certifier agent using the Agent tool.",
+        ClaudeAgentOptions(provider="codex"),
+    )
+
+    assert "Codex provider compatibility:" in prompt
+    assert "spawn_agent" in prompt
+    assert "wait tool" in prompt
+
+
+@pytest.mark.asyncio
+async def test_codex_query_normalizes_collab_subagent_events(tmp_path, monkeypatch):
+    process = _FakeProcess([
+        '{"type":"thread.started","thread_id":"thread-parent"}\n',
+        '{"type":"turn.started"}\n',
+        '{"type":"item.started","item":{"id":"item_0","type":"collab_tool_call","tool":"spawn_agent","sender_thread_id":"thread-parent","receiver_thread_ids":[],"prompt":"Run certifier story.","agents_states":{},"status":"in_progress"}}\n',
+        '{"type":"item.completed","item":{"id":"item_0","type":"collab_tool_call","tool":"spawn_agent","sender_thread_id":"thread-parent","receiver_thread_ids":["thread-child"],"prompt":"Run certifier story.","agents_states":{"thread-child":{"status":"pending_init","message":null}},"status":"completed"}}\n',
+        '{"type":"item.started","item":{"id":"item_1","type":"collab_tool_call","tool":"wait","sender_thread_id":"thread-parent","receiver_thread_ids":["thread-child"],"prompt":null,"agents_states":{},"status":"in_progress"}}\n',
+        '{"type":"item.completed","item":{"id":"item_1","type":"collab_tool_call","tool":"wait","sender_thread_id":"thread-parent","receiver_thread_ids":["thread-child"],"prompt":null,"agents_states":{"thread-child":{"status":"completed","message":"STORY_RESULT: smoke | PASS | ok\\nVERDICT: PASS"}},"status":"completed"}}\n',
+        '{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"Certifier done."}}\n',
+        '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":3}}\n',
+    ])
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return process
+
+    monkeypatch.setattr("otto.agent.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    state: dict[str, object] = {}
+    messages = []
+    async for message in query(
+        prompt="Certify",
+        options=ClaudeAgentOptions(
+            provider="codex",
+            cwd=str(tmp_path),
+            permission_mode="bypassPermissions",
+        ),
+        state=state,
+    ):
+        messages.append(message)
+
+    tool_use = messages[0].content[0]
+    assert isinstance(tool_use, ToolUseBlock)
+    assert tool_use.name == "Agent"
+    assert tool_use.id == "item_0"
+    assert tool_use.input["subagent_type"] == "codex"
+    assert tool_use.input["prompt"] == "Run certifier story."
+
+    tool_result = messages[1].content[0]
+    assert isinstance(tool_result, ToolResultBlock)
+    assert tool_result.tool_use_id == "item_0"
+    assert tool_result.content == "STORY_RESULT: smoke | PASS | ok\nVERDICT: PASS"
+    assert messages[1].session_id == "thread-child"
+
+    assert isinstance(messages[2].content[0], TextBlock)
+    assert messages[2].content[0].text == "Certifier done."
+    assert isinstance(messages[3], ResultMessage)
+    assert messages[3].session_id == "thread-parent"
+    assert state["codex_child_session_ids"] == ["thread-child"]
+
+
+@pytest.mark.asyncio
+async def test_run_agent_query_tracks_codex_child_sessions(tmp_path, monkeypatch):
+    process = _FakeProcess([
+        '{"type":"thread.started","thread_id":"thread-parent"}\n',
+        '{"type":"item.started","item":{"id":"item_0","type":"collab_tool_call","tool":"spawn_agent","sender_thread_id":"thread-parent","receiver_thread_ids":[],"prompt":"Run certifier story.","agents_states":{},"status":"in_progress"}}\n',
+        '{"type":"item.completed","item":{"id":"item_0","type":"collab_tool_call","tool":"spawn_agent","sender_thread_id":"thread-parent","receiver_thread_ids":["thread-child"],"prompt":"Run certifier story.","agents_states":{"thread-child":{"status":"pending_init","message":null}},"status":"completed"}}\n',
+        '{"type":"item.completed","item":{"id":"item_1","type":"collab_tool_call","tool":"wait","sender_thread_id":"thread-parent","receiver_thread_ids":["thread-child"],"prompt":null,"agents_states":{"thread-child":{"status":"completed","message":"STORY_RESULT: smoke | PASS | ok\\nVERDICT: PASS"}},"status":"completed"}}\n',
+        '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":3}}\n',
+    ])
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return process
+
+    monkeypatch.setattr("otto.agent.asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    state: dict[str, object] = {}
+    text, _cost, result = await run_agent_query(
+        "Certify",
+        AgentOptions(provider="codex", cwd=str(tmp_path)),
+        capture_tool_output=True,
+        state=state,
+    )
+
+    assert "STORY_RESULT: smoke | PASS | ok" in text
+    assert isinstance(result, ResultMessage)
+    assert result.session_id == "thread-parent"
+    assert state["child_session_ids"] == ["thread-child", "thread-parent"]
+
+
 def test_make_agent_options_cli_overrides_beat_per_agent_yaml(tmp_path):
     config = {
         "provider": "claude",
