@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
@@ -315,6 +316,160 @@ def _append_session_history(
     )
 
 
+def _read_json_dict(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _append_cancelled_atomic_history(
+    project_dir: Path,
+    *,
+    run_id: str,
+    command: str,
+    certifier_mode: str,
+    intent: str,
+    stories: list[dict[str, Any]] | None,
+    duration_s: float,
+    total_cost_usd: float,
+    rounds: int,
+    started_at: str | None = None,
+    finished_at: str | None = None,
+    branch: str | None = None,
+    worktree: str | None = None,
+    spec_path: str | None = None,
+) -> None:
+    from otto import paths
+    from otto.history import command_family, normalize_command_label
+    from otto.runs.history import append_history_snapshot, build_terminal_snapshot, read_history_rows
+
+    dedupe_key = f"terminal_snapshot:{run_id}"
+    if any(str(row.get("dedupe_key") or "") == dedupe_key for row in read_history_rows(paths.history_jsonl(project_dir))):
+        return
+
+    story_rows = list(stories or [])
+    passed_count, failed_count, warn_count = _history_story_counts(story_rows)
+    run_type = command_family(command)
+    primary_phase = "certify" if run_type == "certify" else "improve" if run_type == "improve" else "build"
+    session_dir = paths.session_dir(project_dir, run_id)
+    normalized_command = normalize_command_label(command)
+    resolved_spec_path = str(spec_path or "").strip() or None
+    artifacts = {
+        "session_dir": str(session_dir),
+        "manifest_path": str(session_dir / "manifest.json"),
+        "checkpoint_path": None if run_type == "certify" else str(paths.session_checkpoint(project_dir, run_id)),
+        "summary_path": str(paths.session_summary(project_dir, run_id)),
+        "primary_log_path": str(session_dir / primary_phase / "narrative.log"),
+        "extra_log_paths": [],
+    }
+    append_history_snapshot(
+        project_dir,
+        build_terminal_snapshot(
+            run_id=run_id,
+            domain="atomic",
+            run_type=run_type,
+            command=normalized_command,
+            intent_meta={
+                "summary": intent[:200],
+                "intent_path": str(paths.session_intent(project_dir, run_id)),
+                "spec_path": resolved_spec_path,
+            },
+            status="cancelled",
+            terminal_outcome="cancelled",
+            timing={
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "timestamp": finished_at or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "duration_s": duration_s,
+            },
+            metrics={"cost_usd": float(total_cost_usd)},
+            git={"branch": branch or _current_branch_name(project_dir), "worktree": worktree},
+            source={"resumable": run_type != "certify"},
+            artifacts=artifacts,
+            extra_fields={
+                "passed": False,
+                "certifier_mode": certifier_mode,
+                "mode": certifier_mode,
+                "stories_passed": passed_count + warn_count,
+                "stories_tested": len(story_rows),
+                "passed_count": passed_count,
+                "failed_count": failed_count,
+                "warn_count": warn_count,
+                "certify_rounds": rounds,
+                "certifier_cost_usd": 0.0 if run_type == "certify" else None,
+            },
+        ),
+        strict=True,
+    )
+
+
+def _persist_atomic_cancelled_terminal_state(
+    project_dir: Path,
+    *,
+    run_id: str,
+    command: str,
+    certifier_mode: str,
+    intent: str,
+    stories: list[dict[str, Any]] | None = None,
+    duration_s: float,
+    total_cost_usd: float,
+    rounds: int,
+    breakdown: dict[str, dict[str, Any]] | None = None,
+    runtime_path: str = "",
+    spec_path: str | None = None,
+    final_record: Any = None,
+) -> None:
+    from otto import paths
+
+    _write_session_summary(
+        project_dir,
+        run_id,
+        verdict="cancelled",
+        passed=False,
+        cost=total_cost_usd,
+        duration=duration_s,
+        stories_passed=0,
+        stories_tested=len(stories or []),
+        rounds=rounds,
+        status="cancelled",
+        intent=intent,
+        command=command,
+        breakdown=breakdown or None,
+        runtime_path=runtime_path,
+    )
+    if os.environ.get("OTTO_INTERNAL_QUEUE_RUNNER") == "1":
+        return
+
+    summary = _read_json_dict(paths.session_summary(project_dir, run_id))
+    checkpoint = _read_json_dict(paths.session_checkpoint(project_dir, run_id))
+    finished_at = str(summary.get("completed_at") or checkpoint.get("updated_at") or "").strip() or None
+    started_at = None
+    branch = None
+    worktree = None
+    if final_record is not None:
+        started_at = final_record.timing.get("started_at")
+        branch = final_record.git.get("branch")
+        worktree = final_record.git.get("worktree")
+    _append_cancelled_atomic_history(
+        project_dir,
+        run_id=run_id,
+        command=command,
+        certifier_mode=certifier_mode,
+        intent=intent,
+        stories=stories,
+        duration_s=duration_s,
+        total_cost_usd=total_cost_usd,
+        rounds=rounds,
+        started_at=started_at or str(checkpoint.get("started_at") or "").strip() or None,
+        finished_at=finished_at,
+        branch=branch or str(summary.get("branch") or "").strip() or None,
+        worktree=worktree,
+        spec_path=spec_path,
+    )
+
+
 def _repair_atomic_history(project_dir: Path) -> None:
     from otto.runs.atomic_repair import repair_atomic_history
 
@@ -574,6 +729,11 @@ async def build_agentic_v3(
         if publisher is not None:
             publisher.__enter__()
 
+    start_time = time.monotonic()
+    total_run_cost = float(prior_total_cost if prior_total_cost else (spec_cost or 0.0))
+    story_results: list[dict[str, Any]] = []
+    certify_rounds: list[dict[str, Any]] = []
+    breakdown: dict[str, dict[str, Any]] = {}
     try:
         # Resumed SDK sessions already carry prior context; avoid polluting
         # intent.md or stdin when the user resumes without a fresh intent.
@@ -689,7 +849,6 @@ async def build_agentic_v3(
                 )
 
         logger.info("Starting agentic v3 build: %s", build_id)
-        start_time = time.monotonic()
 
         from otto.checkpoint import load_checkpoint, write_checkpoint
 
@@ -845,7 +1004,7 @@ async def build_agentic_v3(
         target_mode = bool(config.get("_target")) or certifier_mode == "target"
         round_timings = list(breakdown_data.get("round_timings", []))
 
-        breakdown: dict[str, dict[str, Any]] = {}
+        breakdown = {}
         if spec_cost > 0.0 and spec_duration > 0.0:
             breakdown["spec"] = {
                 "duration_s": round(spec_duration, 1),
@@ -1145,6 +1304,38 @@ async def build_agentic_v3(
             breakdown=breakdown,
             child_session_ids=list(breakdown_data.get("child_session_ids", []) or []),
         )
+    except KeyboardInterrupt as exc:
+        if manage_checkpoint and str(exc) == "cancelled by command":
+            total_duration = round(
+                float(prior_total_duration or spec_duration or 0.0) + (time.monotonic() - start_time),
+                1,
+            )
+            final_record = None
+            if publisher is not None:
+                final_record = publisher.finalize(
+                    status="cancelled",
+                    terminal_outcome="cancelled",
+                    updates={
+                        "metrics": {"cost_usd": float(total_run_cost or 0.0)},
+                        "last_event": "cancelled",
+                    },
+                )
+            _persist_atomic_cancelled_terminal_state(
+                project_dir,
+                run_id=build_id,
+                command=command,
+                certifier_mode=str(certifier_mode or ""),
+                intent=intent,
+                stories=story_results,
+                duration_s=total_duration,
+                total_cost_usd=total_run_cost,
+                rounds=max(len(certify_rounds), 0),
+                breakdown=breakdown,
+                runtime_path=runtime_path,
+                spec_path=str(config.get("_spec_path") or "").strip() or None,
+                final_record=final_record,
+            )
+        raise
     finally:
         if publisher is not None:
             publisher.stop()
@@ -1381,6 +1572,12 @@ async def run_certify_fix_loop(
     )
     if publisher is not None:
         publisher.__enter__()
+    loop_start = time.monotonic()
+    total_cost = resume_cost
+    checkpoint_rounds = list(resume_rounds or [])
+    last_completed_round = max(start_round - 1, 0)
+    split_breakdown: dict[str, dict[str, Any]] = {}
+    last_stories: list[dict[str, Any]] = []
     try:
         total_cost = resume_cost
         loop_start = time.monotonic()
@@ -1389,7 +1586,7 @@ async def run_certify_fix_loop(
         checkpoint_rounds = list(resume_rounds or [])
         last_completed_round = max(start_round - 1, 0)
         checkpoint_phase = "initial_build" if not skip_initial_build else "certify"
-        split_breakdown: dict[str, dict[str, Any]] = {}
+        split_breakdown = {}
         if spec_cost > 0.0 and spec_duration > 0.0:
             split_breakdown["spec"] = {
                 "duration_s": round(spec_duration, 1),
@@ -1465,7 +1662,7 @@ async def run_certify_fix_loop(
             except Exception as exc:
                 logger.warning("Failed to write split-mode checkpoint: %s", exc)
 
-        last_stories: list[dict[str, Any]] = []
+        last_stories = []
         last_diagnosis_text = ""
         child_session_ids_seen: set[str] = set()
 
@@ -2016,6 +2213,35 @@ async def run_certify_fix_loop(
             breakdown=split_breakdown,
             child_session_ids=sorted(child_session_ids_seen),
         )
+    except KeyboardInterrupt as exc:
+        if str(exc) == "cancelled by command":
+            total_duration = round(resume_duration + (time.monotonic() - loop_start), 1)
+            final_record = None
+            if publisher is not None:
+                final_record = publisher.finalize(
+                    status="cancelled",
+                    terminal_outcome="cancelled",
+                    updates={
+                        "metrics": {"cost_usd": float(total_cost or 0.0)},
+                        "last_event": "cancelled",
+                    },
+                )
+            _persist_atomic_cancelled_terminal_state(
+                project_dir,
+                run_id=build_id,
+                command=command,
+                certifier_mode=str(certifier_mode or ""),
+                intent=intent,
+                stories=last_stories,
+                duration_s=total_duration,
+                total_cost_usd=total_cost,
+                rounds=max(last_completed_round, len(checkpoint_rounds)),
+                breakdown=split_breakdown,
+                runtime_path=runtime_path,
+                spec_path=str(config.get("_spec_path") or "").strip() or None,
+                final_record=final_record,
+            )
+        raise
     finally:
         if publisher is not None:
             publisher.stop()

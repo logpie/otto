@@ -504,6 +504,52 @@ async def test_silent_atomic_run_polls_cancel_on_heartbeat(tmp_git_repo):
 
 
 @pytest.mark.asyncio
+async def test_cancelled_atomic_run_appends_terminal_history_snapshot(tmp_git_repo):
+    from otto.runs.history import read_history_rows
+
+    run_id = "cancelled-history-123"
+
+    async def _enqueue_cancel() -> None:
+        await asyncio.sleep(0.1)
+        append_jsonl_row(
+            _paths.session_command_requests(tmp_git_repo, run_id),
+            {
+                "schema_version": 1,
+                "command_id": "cmd-cancel-history",
+                "run_id": run_id,
+                "domain": "atomic",
+                "kind": "cancel",
+                "requested_at": "2026-04-23T00:00:00Z",
+            },
+        )
+
+    async def _silent_run_agent_query(*args, **kwargs):
+        await asyncio.sleep(30)
+        return "", 0.0, ResultMessage(session_id=run_id, total_cost_usd=0.0)
+
+    cancel_task = asyncio.create_task(_enqueue_cancel())
+    with patch("otto.agent.run_agent_query", side_effect=_silent_run_agent_query):
+        with pytest.raises(KeyboardInterrupt, match="cancelled by command"):
+            await build_agentic_v3("test cancelled history", tmp_git_repo, {}, run_id=run_id)
+    await cancel_task
+
+    summary = json.loads(_paths.session_summary(tmp_git_repo, run_id).read_text())
+    assert summary["status"] == "cancelled"
+
+    history_row = next(
+        row
+        for row in read_history_rows(_paths.history_jsonl(tmp_git_repo))
+        if row.get("run_id") == run_id
+    )
+    assert history_row["history_kind"] == "terminal_snapshot"
+    assert history_row["status"] == "cancelled"
+    assert history_row["terminal_outcome"] == "cancelled"
+    assert history_row["resumable"] is True
+    assert history_row["run_id"] == run_id
+    assert history_row["summary_path"] == str(_paths.session_summary(tmp_git_repo, run_id))
+
+
+@pytest.mark.asyncio
 async def test_resume_totals_include_prior_cost_and_duration(tmp_git_repo):
     from otto import paths as _paths
 
