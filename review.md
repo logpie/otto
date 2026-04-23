@@ -437,3 +437,23 @@ Final state: 790 tests passing. Commits 0ea657fb5, fb24488c5, 4f194f71e.
 - APPROVED. No new issues.
 
 Final state: 786 tests passing. Commits b0251805d, 7fb53ce57, 03d41b2f6, 2ee8e7466.
+
+## Implementation Gate — 2026-04-23 — Phase 3 (mutations)
+
+### Round 1 — Codex
+- [CRITICAL] SIGTERM fallback signaled dead/reused process — fixed by Codex
+- [IMPORTANT] Cancel appended without checking current state — fixed by Codex
+- [IMPORTANT] Cleanup didn't check writer is dead — fixed by Codex
+- [IMPORTANT] Queue cancel enabled with missing task_id — fixed by Codex
+- [NOTE] Requeue suppressed --as on collision — fixed by Codex
+- [NOTE] Subprocess only reported spawn-window failure — fixed by Codex
+- [NOTE] m was single-select — fixed by Codex (multi-select with space)
+
+### Round 2 — Codex
+- [IMPORTANT] Cancel preflight broke legacy queue compat rows — fixed by Codex
+- [NOTE] M (merge-all) didn't surface late exits — fixed by Codex
+
+### Round 3 — Codex re-reviewed Round 2 fixes
+- APPROVED. No new issues.
+
+Final state: 814 tests passing. Commits 7f8718742, 7b226b639, 7990b0c96.
