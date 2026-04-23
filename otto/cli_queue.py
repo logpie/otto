@@ -422,7 +422,7 @@ def register_queue_commands(main: click.Group) -> None:
     @click.option("--dashboard-mouse", is_flag=True,
                   help="Enable mouse capture (loses terminal copy in most terminals)")
     def dashboard(dashboard_mouse: bool) -> None:
-        """Open a read-only queue dashboard for an active watcher.
+        """Open a read-only queue dashboard in Mission Control filtered to queue runs.
 
         \b
             otto queue dashboard                  # re-open the live queue UI

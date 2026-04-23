@@ -206,6 +206,18 @@ def main():
     os.environ.pop("OTTO_INTERNAL_QUEUE_RUNNER", None)
 
 
+@main.command(context_settings=CONTEXT_SETTINGS)
+@click.option("--dashboard-mouse", is_flag=True,
+              help="Enable mouse capture (loses terminal copy in most terminals)")
+def dashboard(dashboard_mouse: bool) -> None:
+    """Open Mission Control for this project."""
+    from otto.tui.mission_control import MissionControlApp
+
+    project_dir = Path.cwd()
+    app = MissionControlApp(project_dir, dashboard_mouse=dashboard_mouse)
+    sys.exit(int(app.run(mouse=dashboard_mouse) or 0))
+
+
 def _load_yaml_raw(config_path: Path) -> dict[str, Any]:
     if not config_path.exists():
         return {}
