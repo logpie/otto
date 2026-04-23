@@ -1,13 +1,22 @@
 ---
 name: otto-as-user
-description: Run Otto's CLI and queue dashboard as a real user would, using a real provider and saving per-scenario asciinema recordings plus logs under bench-results/as-user.
+description: Run Otto's CLI and queue dashboard as a real user would, using a real provider. Two tiers — daily (37 short toy scenarios with asciinema recordings, ~$12) and nightly (4 medium-fixture seeded scenarios with hidden-test oracles, ~$10). Pick the tier the user asks for; default to daily if unspecified.
 ---
 
 # Otto As User
 
 ## Description
 
-Drive Otto end to end as a real user, against throwaway git repos, with real LLM runs and per-scenario terminal recordings for review.
+Drive Otto end to end as a real user, against throwaway git repos, with real LLM runs.
+
+Two harness tiers are available:
+
+| Tier | Harness | Scenarios | Style | Per-run cost | Wall time |
+|------|---------|-----------|-------|--------------|-----------|
+| **daily** | `scripts/otto_as_user.py` | 37 (groups A–E, U) | toy projects, short, asciinema-recorded | ~$12 full / ~$2 quick | ~60min full / ~10min quick |
+| **nightly** | `scripts/otto_as_user_nightly.py` | 4 (N1, N2, N4, N8) | seeded medium fixtures, hidden-test oracles, no recording | ~$10 | ~60min |
+
+If the user says "run otto-as-user" without qualifier → use **daily**. If they say "nightly" or "real-world" or "seeded" → use **nightly**.
 
 ## When to invoke
 
@@ -17,6 +26,8 @@ Drive Otto end to end as a real user, against throwaway git repos, with real LLM
 - When the user says "test with codex" or "test with claude" and wants Otto exercised through its own CLI
 
 ## How to invoke
+
+### Daily tier (37 toy scenarios, recorded)
 
 From the repo root:
 
@@ -32,6 +43,23 @@ From the repo root:
 .venv/bin/python scripts/otto_as_user.py --mode quick --scenario-delay 10  # slower, less rate-limit risk
 ```
 
+### Nightly tier (4 seeded medium-fixture scenarios, hidden oracles)
+
+```bash
+.venv/bin/python scripts/otto_as_user_nightly.py --dry-run        # show plan + fixture paths, no spend
+.venv/bin/python scripts/otto_as_user_nightly.py                  # run all 4 sequentially
+.venv/bin/python scripts/otto_as_user_nightly.py --scenario N4    # cheapest single ($1.2-1.8, 3-10min)
+.venv/bin/python scripts/otto_as_user_nightly.py --scenario N1,N2,N4,N8 --scenario-delay 10
+```
+
+Nightly scenarios:
+- **N1** — evolving product loop: build feature → improve bugs → improve target on a multi-user task tracker. Hidden tests check user-data isolation + N+1 query elimination.
+- **N2** — semantic auth merge: queue 2 branches (password reset + remember-me) touching the same auth code, merge, hidden tests verify both flows + login still works.
+- **N4** — certifier trap: build CSV bulk import where intent uses product language ("customers should not see each other's data"), not engineering terms. Hidden tests enforce tenant isolation + idempotency.
+- **N8** — stale merge context: 3-branch queue (rename → edit-old-location → add-new-tests). Hidden tests verify the rename, the merged logic, and the regression tests all coexist on main.
+
+Nightly fixtures live in `scripts/fixtures_nightly/<scenario>/` with `intent.md`, `otto.yaml`, `tests/visible/` (Otto sees), `tests/hidden/` (oracle, run after Otto exits).
+
 Provider mapping:
 
 - "test with Claude" -> `--provider claude`
@@ -45,23 +73,36 @@ Dependency:
 
 ## Cost expectations
 
+Daily tier:
 - `--mode quick`: roughly 5 scenarios, about `$2`, around `10m`
 - `--mode full`: all scenarios, roughly `$10-15`, around `30m`
 
+Nightly tier:
+- `--scenario N4`: ~`$1.5`, `3-10m` (cheapest validation that the harness still works)
+- all 4: ~`$8-12`, `~60m`
+
 ## Reading results
 
-Artifacts land under:
+Daily artifacts:
 
 ```text
 bench-results/as-user/<run-id>/<scenario>/
 ```
 
-Key files:
-
 - `recording.cast`: asciinema capture
 - `debug.log`: combined runner output for that scenario
 - `run_result.json`: raw scenario metadata
 - `verify.json`: verification outcome
+
+Nightly artifacts (no `recording.cast` — long real-LLM runs are mostly progress dots):
+
+```text
+bench-results/as-user-nightly/<run-id>/<scenario>/
+```
+
+- `debug.log`: combined runner output
+- `tests-visible.log` / `tests-hidden.log`: pytest output from the oracle pass
+- `run_result.json` / `verify.json` / `attempt.json`: structured outcome
 
 Playback:
 
@@ -104,8 +145,20 @@ When a scenario fails (FAIL, not INFRA), review `recording.cast` first, then `de
 
 ## Adding new scenarios
 
+### Daily tier (toy projects, recorded)
+
 - Add a new `setup_*`, `run_*`, and `verify_*` trio in `scripts/otto_as_user.py`
 - Register it in `SCENARIOS` with cost, duration, quick/full membership, and `requires_pty`
 - Keep quick mode to the highest-signal 4-6 scenarios
 - Prefer tiny repos and tiny intents so the scenario stays cheap
 - For TUI scenarios, make the PTY interaction happen inside the internal recorded run so `recording.cast` captures the live dashboard
+
+### Nightly tier (seeded fixtures, hidden oracles)
+
+- Create `scripts/fixtures_nightly/<name>/` with `intent.md`, `otto.yaml`, `app/`, `tests/visible/`, `tests/hidden/`, `restore.sh`
+- Visible tests must PASS on the initial fixture state (precondition for Otto's job)
+- Hidden tests must FAIL on the initial fixture state (otherwise the trap is misdesigned)
+- Add the scenario's `setup_*`, `run_*`, `verify_*` trio in `scripts/otto_as_user_nightly.py`
+- Register in `SCENARIOS` and the nightly fixture spec map
+- Use product language in `intent.md` (not engineering terms) when testing certifier inference
+- Reference design rationale: 4 nightly scenarios were picked from Codex's 8-scenario design (#1, #2, #4, #8 had highest bug-finding density). The other 4 (#3 dual-migration, #5 discovery-heavy, #6 cross-module-refactor, #7 long-horizon-pause-resume) are deferred to a future weekly tier.
