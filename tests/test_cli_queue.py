@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
 from pathlib import Path
 
 from click.testing import CliRunner
@@ -14,9 +16,12 @@ from otto import paths
 from otto.queue.schema import (
     COMMANDS_FILE,
     QUEUE_FILE,
+    QueueTask,
+    append_task,
     load_queue,
     write_state,
 )
+from otto.runs.history import append_history_snapshot, read_history_rows
 from tests._helpers import init_repo
 
 
@@ -423,6 +428,138 @@ def test_queue_rm_refuses_finished_task_without_watcher(tmp_path: Path):
     assert "task csv is done" in out
     assert "otto queue cleanup csv" in out
     assert [task.id for task in load_queue(repo)] == ["csv"]
+
+
+def test_queue_cleanup_preserves_session_artifacts_and_repairs_history(tmp_path: Path, monkeypatch) -> None:
+    repo = tmp_path
+    task_id = "csv"
+    run_id = "2026-04-23-170653-229eda"
+    worktree = repo / ".worktrees" / task_id
+    session_dir = paths.ensure_session_scaffold(worktree, run_id, phase="build")
+    build_log = session_dir / "build" / "narrative.log"
+    build_log.write_text("build log\n", encoding="utf-8")
+    checkpoint = session_dir / "checkpoint.json"
+    checkpoint.write_text("{}\n", encoding="utf-8")
+    summary = session_dir / "summary.json"
+    summary.write_text(json.dumps({"run_id": run_id, "command": "build"}, indent=2), encoding="utf-8")
+    proof = session_dir / "certify" / "proof-of-work.json"
+    proof.parent.mkdir(parents=True, exist_ok=True)
+    proof.write_text("{\"stories\": []}\n", encoding="utf-8")
+    manifest = session_dir / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "command": "build",
+                "argv": ["build", "csv export"],
+                "queue_task_id": task_id,
+                "run_id": run_id,
+                "branch": "build/csv",
+                "checkpoint_path": str(checkpoint.resolve()),
+                "proof_of_work_path": str(proof.resolve()),
+                "cost_usd": 0.5,
+                "duration_s": 2.0,
+                "started_at": "2026-04-23T17:06:53Z",
+                "finished_at": "2026-04-23T17:07:03Z",
+                "head_sha": None,
+                "resolved_intent": "csv export",
+                "exit_status": "success",
+                "schema_version": 1,
+                "extra": {},
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    queue_manifest = repo / "otto_logs" / "queue" / task_id / "manifest.json"
+    queue_manifest.parent.mkdir(parents=True, exist_ok=True)
+    queue_manifest.write_text(
+        json.dumps(
+            {
+                **json.loads(manifest.read_text(encoding="utf-8")),
+                "mirror_of": str(manifest.resolve()),
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    append_task(
+        repo,
+        QueueTask(
+            id=task_id,
+            command_argv=["build", "csv export"],
+            added_at="2026-04-23T17:06:00Z",
+            branch="build/csv",
+            worktree=".worktrees/csv",
+        ),
+    )
+    append_history_snapshot(
+        repo,
+        {
+            "run_id": run_id,
+            "status": "done",
+            "terminal_outcome": "success",
+            "session_dir": str(session_dir.resolve()),
+            "manifest_path": str(manifest.resolve()),
+            "summary_path": str(summary.resolve()),
+            "checkpoint_path": str(checkpoint.resolve()),
+            "primary_log_path": str(build_log.resolve()),
+            "extra_log_paths": [str(proof.resolve())],
+            "artifacts": {
+                "session_dir": str(session_dir.resolve()),
+                "manifest_path": str(manifest.resolve()),
+                "summary_path": str(summary.resolve()),
+                "checkpoint_path": str(checkpoint.resolve()),
+                "primary_log_path": str(build_log.resolve()),
+                "extra_log_paths": [str(proof.resolve())],
+            },
+        },
+        strict=True,
+    )
+
+    def _fake_git_worktree_remove(project_dir: Path, wt_path: Path, *, force: bool):
+        del project_dir, force
+        shutil.rmtree(wt_path)
+        return subprocess.CompletedProcess(["git", "worktree", "remove"], 0, "", "")
+
+    monkeypatch.setattr(cli_queue_module, "_git_worktree_remove", _fake_git_worktree_remove)
+
+    code, out, _ = _run(["queue", "cleanup", task_id], cwd=repo)
+
+    dst_session = repo / "otto_logs" / "sessions" / run_id
+    assert code == 0, out
+    assert dst_session.exists()
+    assert not worktree.exists()
+
+    queue_manifest_data = json.loads(queue_manifest.read_text(encoding="utf-8"))
+    assert queue_manifest_data["mirror_of"] == str((dst_session / "manifest.json").resolve())
+    assert queue_manifest_data["checkpoint_path"] == str((dst_session / "checkpoint.json").resolve())
+    assert queue_manifest_data["proof_of_work_path"] == str((dst_session / "certify" / "proof-of-work.json").resolve())
+
+    rows = read_history_rows(paths.history_jsonl(repo))
+    history_row = next(
+        row for row in reversed(rows)
+        if row.get("dedupe_key") == f"terminal_snapshot:{run_id}"
+    )
+    assert history_row["session_dir"] == str(dst_session.resolve())
+    assert history_row["manifest_path"] == str((dst_session / "manifest.json").resolve())
+    assert history_row["summary_path"] == str((dst_session / "summary.json").resolve())
+    assert history_row["checkpoint_path"] == str((dst_session / "checkpoint.json").resolve())
+    assert history_row["primary_log_path"] == str((dst_session / "build" / "narrative.log").resolve())
+    assert history_row["extra_log_paths"] == [str((dst_session / "certify" / "proof-of-work.json").resolve())]
+    assert history_row["artifacts"]["manifest_path"] == history_row["manifest_path"]
+    assert history_row["artifacts"]["summary_path"] == history_row["summary_path"]
+    assert history_row["artifacts"]["primary_log_path"] == history_row["primary_log_path"]
+
+    for artifact_path in (
+        history_row["session_dir"],
+        history_row["manifest_path"],
+        history_row["summary_path"],
+        history_row["checkpoint_path"],
+        history_row["primary_log_path"],
+        *history_row["extra_log_paths"],
+    ):
+        assert Path(artifact_path).exists(), artifact_path
 
 
 def test_queue_cancel_without_watcher_removes_queued_task(tmp_path: Path):

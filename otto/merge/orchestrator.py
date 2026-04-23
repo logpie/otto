@@ -20,7 +20,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -32,6 +31,7 @@ from typing import Any
 
 from otto import paths
 from otto.merge import git_ops
+from otto.queue.artifacts import preserve_queue_session_artifacts
 from otto.merge.state import (
     BranchOutcome,
     MergeState,
@@ -741,8 +741,6 @@ def _graduate_merged_task_sessions(
     if not queue_lookup:
         return
     try:
-        from otto import paths
-        from otto.manifest import queue_index_path_for
         from otto.queue.schema import load_queue
     except ImportError:
         return
@@ -769,57 +767,17 @@ def _graduate_merged_task_sessions(
             wt_path = project_dir / wt_path
         if not wt_path.exists():
             continue
-        step = "queue manifest lookup"
+        step = "preserve queue artifacts"
         try:
-            queue_manifest_path = queue_index_path_for(project_dir, task_id)
-            if queue_manifest_path is None:
-                raise ValueError("queue task id missing")
-            queue_manifest = _read_json(queue_manifest_path)
-            run_id = str(queue_manifest.get("run_id") or "").strip()
-            if not run_id:
-                raise ValueError("queue manifest missing run_id")
-
-            step = "locate session"
-            src_session_dir = paths.session_dir(wt_path, run_id)
-            dst_session_dir = paths.session_dir(project_dir, run_id)
-            if dst_session_dir.exists():
-                logger.warning(
-                    "cleanup-on-success: graduation skipped for %s; destination exists: %s -> %s",
-                    task_id, src_session_dir, dst_session_dir,
-                )
-                continue
-            if not src_session_dir.exists():
-                raise FileNotFoundError(src_session_dir)
-
-            step = "move session"
-            dst_session_dir.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(src_session_dir), str(dst_session_dir))
-
-            step = "rewrite summary"
-            summary_path = dst_session_dir / "summary.json"
-            if summary_path.exists():
-                summary = _read_json(summary_path)
-                summary["merge_commit_sha"] = merge_commit_sha
-                summary["merged_at"] = merged_at
-                _atomic_write_json(summary_path, summary)
-
-            step = "rewrite canonical manifest"
-            canonical_manifest_path = dst_session_dir / "manifest.json"
-            canonical_manifest = _read_json(canonical_manifest_path)
-            _rewrite_manifest_after_graduation(
-                canonical_manifest,
-                old_session_dir=src_session_dir,
-                new_session_dir=dst_session_dir,
+            preserve_queue_session_artifacts(
+                project_dir,
+                task_id=task_id,
+                worktree_path=wt_path,
                 merge_commit_sha=merge_commit_sha,
                 merged_at=merged_at,
+                refuse_existing_destination=True,
+                strict=True,
             )
-            _atomic_write_json(canonical_manifest_path, canonical_manifest)
-
-            step = "rewrite queue index"
-            queue_manifest = dict(canonical_manifest)
-            queue_manifest["mirror_of"] = str(canonical_manifest_path.resolve())
-            _atomic_write_json(queue_manifest_path, queue_manifest)
-
             step = "remove worktree"
             r = subprocess.run(
                 ["git", "worktree", "remove", "--force", str(wt_path)],
@@ -832,6 +790,11 @@ def _graduate_merged_task_sessions(
                 )
                 continue
             graduated.append(task_id)
+        except FileExistsError as exc:
+            logger.warning(
+                "cleanup-on-success: graduation skipped for %s; destination exists: %s",
+                task_id, exc,
+            )
         except Exception as exc:
             logger.warning(
                 "cleanup-on-success: graduation failed for %s at step=%s: %s",
@@ -1417,47 +1380,3 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
         except FileNotFoundError:
             pass
         raise
-
-
-def _rewrite_manifest_after_graduation(
-    manifest: dict[str, Any],
-    *,
-    old_session_dir: Path,
-    new_session_dir: Path,
-    merge_commit_sha: str,
-    merged_at: str,
-) -> None:
-    manifest["checkpoint_path"] = _relocate_session_path(
-        manifest.get("checkpoint_path"),
-        old_session_dir=old_session_dir,
-        new_session_dir=new_session_dir,
-    )
-    manifest["proof_of_work_path"] = _relocate_session_path(
-        manifest.get("proof_of_work_path"),
-        old_session_dir=old_session_dir,
-        new_session_dir=new_session_dir,
-    )
-    extra = manifest.get("extra")
-    if not isinstance(extra, dict):
-        extra = {}
-    extra["merge_commit_sha"] = merge_commit_sha
-    extra["merged_at"] = merged_at
-    manifest["extra"] = extra
-
-
-def _relocate_session_path(
-    value: Any,
-    *,
-    old_session_dir: Path,
-    new_session_dir: Path,
-) -> str | None:
-    if not value:
-        return None
-    src_path = Path(str(value))
-    if src_path.is_absolute():
-        try:
-            rel = src_path.relative_to(old_session_dir)
-        except ValueError:
-            return str(src_path)
-        return str((new_session_dir / rel).resolve())
-    return str((new_session_dir / src_path).resolve())

@@ -36,6 +36,7 @@ import yaml
 
 from otto import paths
 from otto.display import CONTEXT_SETTINGS, console, rich_escape
+from otto.queue.artifacts import preserve_queue_session_artifacts
 from otto.theme import error_console
 from otto.queue.runtime import (
     INTERRUPTED_STATUS,
@@ -941,6 +942,20 @@ def register_queue_commands(main: click.Group) -> None:
                 continue
             wt_path = project_dir / t.worktree
             if not wt_path.exists():
+                continue
+            try:
+                preserve_queue_session_artifacts(
+                    project_dir,
+                    task_id=t.id,
+                    worktree_path=wt_path,
+                    strict=False,
+                )
+            except Exception as exc:
+                console.print(
+                    f"  [yellow]✗[/yellow] could not preserve queue artifacts for {t.worktree}: "
+                    f"{rich_escape(str(exc))}"
+                )
+                skipped += 1
                 continue
             r = _git_worktree_remove(project_dir, wt_path, force=force)
             if r.returncode == 0:

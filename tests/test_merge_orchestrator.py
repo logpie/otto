@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 import pytest
 
+from otto import paths
 from otto.certifier.report import CertificationOutcome, CertificationReport
 from otto.merge import conflict_agent
 from otto.merge.orchestrator import (
@@ -31,6 +32,7 @@ from otto.merge.orchestrator import (
 from otto.merge import git_ops
 from otto.merge.state import MergeState, find_latest_merge_id, load_state
 from otto.queue.schema import QueueTask, append_task
+from otto.runs.history import append_history_snapshot, read_history_rows
 from otto.runs.registry import load_live_record
 from tests._helpers import init_repo
 
@@ -588,6 +590,9 @@ def test_graduate_merged_task_session_end_to_end(tmp_path: Path):
     src_session = worktree / "otto_logs" / "sessions" / run_id
     src_session.mkdir(parents=True, exist_ok=True)
     (src_session / "checkpoint.json").write_text("{}\n")
+    build_dir = src_session / "build"
+    build_dir.mkdir(parents=True, exist_ok=True)
+    (build_dir / "narrative.log").write_text("build log\n", encoding="utf-8")
     certify_dir = src_session / "certify"
     certify_dir.mkdir(parents=True, exist_ok=True)
     (certify_dir / "proof-of-work.json").write_text("{\"stories\": []}\n")
@@ -622,6 +627,29 @@ def test_graduate_merged_task_session_end_to_end(tmp_path: Path):
         **canonical_manifest,
         "mirror_of": str((src_session / "manifest.json").resolve()),
     }, indent=2))
+    append_history_snapshot(
+        repo,
+        {
+            "run_id": run_id,
+            "status": "done",
+            "terminal_outcome": "success",
+            "session_dir": str(src_session.resolve()),
+            "manifest_path": str((src_session / "manifest.json").resolve()),
+            "summary_path": str((src_session / "summary.json").resolve()),
+            "checkpoint_path": str((src_session / "checkpoint.json").resolve()),
+            "primary_log_path": str((src_session / "build" / "narrative.log").resolve()),
+            "extra_log_paths": [str((src_session / "certify" / "proof-of-work.json").resolve())],
+            "artifacts": {
+                "session_dir": str(src_session.resolve()),
+                "manifest_path": str((src_session / "manifest.json").resolve()),
+                "summary_path": str((src_session / "summary.json").resolve()),
+                "checkpoint_path": str((src_session / "checkpoint.json").resolve()),
+                "primary_log_path": str((src_session / "build" / "narrative.log").resolve()),
+                "extra_log_paths": [str((src_session / "certify" / "proof-of-work.json").resolve())],
+            },
+        },
+        strict=True,
+    )
 
     expected_merge_sha = git_ops.head_sha(repo)
     _graduate_merged_task_sessions(repo, {"build/task-1": "task-1"})
@@ -646,6 +674,26 @@ def test_graduate_merged_task_session_end_to_end(tmp_path: Path):
     assert mirror["checkpoint_path"] == manifest["checkpoint_path"]
     assert mirror["proof_of_work_path"] == manifest["proof_of_work_path"]
     assert mirror["extra"]["merge_commit_sha"] == expected_merge_sha
+
+    history_row = next(
+        row for row in reversed(read_history_rows(paths.history_jsonl(repo)))
+        if row.get("dedupe_key") == f"terminal_snapshot:{run_id}"
+    )
+    assert history_row["session_dir"] == str(dst_session.resolve())
+    assert history_row["manifest_path"] == str((dst_session / "manifest.json").resolve())
+    assert history_row["summary_path"] == str((dst_session / "summary.json").resolve())
+    assert history_row["checkpoint_path"] == str((dst_session / "checkpoint.json").resolve())
+    assert history_row["primary_log_path"] == str((dst_session / "build" / "narrative.log").resolve())
+    assert history_row["extra_log_paths"] == [str((dst_session / "certify" / "proof-of-work.json").resolve())]
+    for artifact_path in (
+        history_row["session_dir"],
+        history_row["manifest_path"],
+        history_row["summary_path"],
+        history_row["checkpoint_path"],
+        history_row["primary_log_path"],
+        *history_row["extra_log_paths"],
+    ):
+        assert Path(artifact_path).exists(), artifact_path
 
 
 def test_graduate_skips_collision_and_preserves_worktree(tmp_path: Path):
