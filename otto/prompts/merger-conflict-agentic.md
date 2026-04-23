@@ -20,6 +20,10 @@ integration where every branch's behaviors survive.
 
 {conflict_files_listing}
 
+## Additional files you MAY edit if needed for coherence
+
+{secondary_files_listing}
+
 ## Full merge diff
 
 ```diff
@@ -34,8 +38,10 @@ integration where every branch's behaviors survive.
 
 When you stop, the orchestrator validates:
 1. No conflict markers remain anywhere
-2. No files outside the conflict list above were modified
-3. HEAD has not changed (you should NOT commit; orchestrator commits)
+2. You may edit the conflict files above freely
+3. You may also edit the additional files above only when needed to keep imports, helpers, or tests coherent with the merged behavior
+4. Any edit outside both lists fails validation
+5. HEAD has not changed (you should NOT commit; orchestrator commits)
 
 Both the structural validation AND the project's tests should pass.
 
@@ -43,6 +49,8 @@ Both the structural validation AND the project's tests should pass.
 
 - You have full tool access including Bash. Use the project's test command
   (above) to verify the integration actually works.
+- Prefer resolving the marker-bearing files first. Touch secondary files only
+  when the merge would otherwise leave adjacent code or tests incoherent.
 - For each conflict region in a file: text above `=======` is from the
   earlier-merged side, text below is from the later-merged side. Decide
   per region — preserve both where compatible, prefer the LATER side on

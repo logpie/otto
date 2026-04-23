@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from otto import paths
 from otto.merge import git_ops
 from otto.merge.state import (
     BranchOutcome,
@@ -85,7 +86,7 @@ _ATOMIC_BRANCH_RE = re.compile(
 @contextmanager
 def merge_lock(project_dir: Path):
     """Hold the per-project merge lock for the entire `otto merge` run."""
-    path = project_dir / "otto_logs" / MERGE_LOCK_FILE
+    path = paths.logs_dir(project_dir) / MERGE_LOCK_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
     handle = open(path, "a+", encoding="utf-8")
     try:
@@ -605,11 +606,12 @@ async def _run_post_merge_verification(
         cert_passed=cert_passed,
         cert_story_results=list(cert_report.story_results),
         post_merge_pow_path=str(
-            (project_dir / "otto_logs" / "sessions" / cert_report.run_id / "certify" / "proof-of-work.html").resolve()
+            (paths.certify_dir(project_dir, cert_report.run_id) / "proof-of-work.html").resolve()
         ),
         note=(
             f"cert {'PASSED' if cert_passed else 'FAILED'} "
-            f"({cert_report.outcome.value}); see otto_logs/sessions/{cert_report.run_id}/certify/proof-of-work.html"
+            f"({cert_report.outcome.value}); see "
+            f"{paths.certify_dir(project_dir, cert_report.run_id).relative_to(project_dir) / 'proof-of-work.html'}"
         ),
     )
 
@@ -653,7 +655,17 @@ async def _run_consolidated_agentic_merge(
         ConsolidatedConflictContext,
         resolve_all_conflicts,
     )
+    from otto.merge.edit_scope import (
+        EditScopeError,
+        build_edit_scope,
+        collect_branch_touch_union,
+    )
     logger.info("consolidated agent-mode merge of %d branches", len(branches))
+    branch_touch_union = collect_branch_touch_union(
+        project_dir,
+        target=options.target,
+        branches=branches,
+    )
 
     # Phase 1: sequential merges. Conflicts get staged as marker-laden
     # commits so the loop can continue to the next branch (we resolve them
@@ -771,7 +783,46 @@ async def _run_consolidated_agentic_merge(
     pre_head = git_ops.head_sha(project_dir)
     pre_diff_files = set(git_ops.changed_files(project_dir))
     pre_untracked_files = set(git_ops.untracked_files(project_dir))
-    expected_uu = set(accumulated_conflict_files)
+    try:
+        edit_scope = build_edit_scope(
+            project_dir=project_dir,
+            conflict_files=set(accumulated_conflict_files),
+            branch_touch_union=branch_touch_union,
+        )
+    except EditScopeError as exc:
+        conflicted_branch_count = len(
+            [outcome for outcome in state.outcomes if outcome.status == "merged_with_markers"]
+        )
+        unresolved_branches = _update_consolidated_conflict_outcomes(
+            state=state,
+            status="agent_giveup",
+            agent_invoked=False,
+            note=(
+                "consolidated agent scope construction failed on the shared conflict set "
+                f"for {len(accumulated_conflict_files)} files across {conflicted_branch_count} "
+                f"conflicted branches: {exc}"
+            ),
+        )
+        state.paused_stage = "manual_fix_required"
+        state.paused_at_index = (
+            state.branches_in_order.index(unresolved_branches[0])
+            if unresolved_branches
+            else None
+        )
+        state.paused_branch = unresolved_branches[0] if unresolved_branches else None
+        state.paused_branch_head = None
+        write_state(project_dir, state)
+        return MergeRunResult(
+            success=False,
+            merge_id=merge_id,
+            state=state,
+            note=(
+                "consolidated agent-mode resolver gave up before invocation: "
+                f"{exc}\n"
+                f"  Files with markers: {accumulated_conflict_files}\n"
+                "  Resolve manually: edit files, `git add`, `git commit --amend`."
+            ),
+        )
 
     # Build context: ALL branches' intents + stories, full diff
     intents = _gather_intents(project_dir, branches, queue_lookup)
@@ -790,13 +841,15 @@ async def _run_consolidated_agentic_merge(
         all_intents=intents,
         all_stories=stories,
         conflict_files=accumulated_conflict_files,
+        secondary_files=sorted(edit_scope.secondary_files),
+        branch_touch_union=sorted(edit_scope.branch_touch_union),
         conflict_diff=diff,
         test_command=test_command,
     )
     attempt = await resolve_all_conflicts(
         project_dir=project_dir, config=config, ctx=ctx,
         pre_head=pre_head,
-        expected_uu_files=expected_uu,
+        edit_scope=edit_scope,
         pre_untracked_files=pre_untracked_files,
         pre_diff_files=pre_diff_files,
         budget=budget,
@@ -811,7 +864,7 @@ async def _run_consolidated_agentic_merge(
             agent_invoked=attempt.agent_invoked,
             note=(
                 "consolidated agent failed on the shared conflict set "
-                f"for {len(expected_uu)} files across {conflicted_branch_count} "
+                f"for {len(edit_scope.primary_files)} files across {conflicted_branch_count} "
                 f"conflicted branches: {attempt.note}"
             ),
         )
@@ -834,7 +887,8 @@ async def _run_consolidated_agentic_merge(
         )
 
     # Stage + commit the agent's resolution
-    add_r = git_ops.add_paths(project_dir, accumulated_conflict_files)
+    edited_files = sorted(attempt.edited_files)
+    add_r = git_ops.add_paths(project_dir, edited_files)
     if not add_r.ok:
         unresolved_branches = _update_consolidated_conflict_outcomes(
             state=state,
@@ -883,6 +937,11 @@ async def _run_consolidated_agentic_merge(
     conflicted_branch_count = len(
         [outcome for outcome in state.outcomes if outcome.status == "merged_with_markers"]
     )
+    secondary_edit_note = ""
+    if attempt.edited_secondary_files:
+        secondary_listing = ", ".join(sorted(attempt.edited_secondary_files))
+        secondary_edit_note = f"; secondary edits: {secondary_listing}"
+        logger.info("merge %s secondary edits: %s", merge_id, secondary_listing)
     _update_consolidated_conflict_outcomes(
         state=state,
         status="conflict_resolved",
@@ -891,7 +950,7 @@ async def _run_consolidated_agentic_merge(
         note=(
             "resolved by consolidated agent in one shared call "
             f"(total cost ${attempt.cost_usd:.2f} across {conflicted_branch_count} "
-            "conflicted branches)"
+            f"conflicted branches){secondary_edit_note}"
         ),
     )
     state.paused_stage = None
@@ -911,7 +970,14 @@ async def _run_consolidated_agentic_merge(
                 branches=branches,
                 queue_lookup=queue_lookup,
             ),
-            note="cert skipped per --no-certify",
+            note=(
+                "cert skipped per --no-certify"
+                + (
+                    f"; secondary edits: {', '.join(sorted(attempt.edited_secondary_files))}"
+                    if attempt.edited_secondary_files
+                    else ""
+                )
+            ),
         )
     result = await _run_post_merge_verification(
         project_dir=project_dir, config=config, options=options,
@@ -957,7 +1023,7 @@ def _gather_intents(
                 out[t.branch] = t.resolved_intent
     except (OSError, ValueError) as exc:
         logger.debug("intent gathering: skipping queue.yml: %s", exc)
-    sessions = project_dir / "otto_logs" / "sessions"
+    sessions = paths.sessions_root(project_dir)
     if sessions.exists():
         for run_dir in sessions.iterdir():
             mp = run_dir / "manifest.json"

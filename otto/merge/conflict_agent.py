@@ -8,9 +8,9 @@ to self-verify and use Bash to inspect branch context with `git diff` /
 `git show`.
 
 Validation guarantees (`validate_post_agent`):
-1. Out-of-scope edits — `post_diff − pre_diff ⊆ expected_uu_files`
+1. Out-of-scope edits — `post_diff − pre_diff ⊆ edit_scope.allowed_files`
 2. Agent-created untracked files are delta-cleaned; cleanup failures fail closed
-3. No conflict markers remain — content scan of `expected_uu_files`
+3. No conflict markers remain — content scan of `edit_scope.primary_files`
    (markers can live in committed files where `git diff --check` is blind)
 4. HEAD unchanged (agent didn't `commit`/`reset`)
 
@@ -22,10 +22,12 @@ from __future__ import annotations
 
 import logging
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from otto import paths
+from otto.merge.edit_scope import EditScope
 from otto.merge import git_ops
 
 logger = logging.getLogger("otto.merge.conflict_agent")
@@ -38,6 +40,17 @@ class ConflictResolutionAttempt:
     agent_invoked: bool = True  # False only if pre-flight rejected the call
     cost_usd: float = 0.0
     retries_used: int = 0
+    edited_files: set[str] = field(default_factory=set)
+    edited_secondary_files: set[str] = field(default_factory=set)
+
+
+@dataclass
+class PostAgentValidationResult:
+    ok: bool
+    error: str | None = None
+    edited_files: set[str] = field(default_factory=set)
+    edited_primary_files: set[str] = field(default_factory=set)
+    edited_secondary_files: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -54,6 +67,8 @@ class ConsolidatedConflictContext:
     all_intents: dict[str, str]              # branch → resolved intent
     all_stories: list[dict[str, Any]]        # union with source_branch tag
     conflict_files: list[str]                # ALL files with markers
+    secondary_files: list[str]               # adjacent files allowed for coherence only
+    branch_touch_union: list[str]            # deterministic merge blast radius
     conflict_diff: str                       # full diff covering every conflict
     test_command: str | None = None          # project's test command (from config)
 
@@ -129,16 +144,16 @@ def validate_post_agent(
     *,
     project_dir: Path,
     pre_diff_files: set[str],
-    expected_uu_files: set[str],
+    edit_scope: EditScope,
     pre_untracked_files: set[str],
     pre_head: str,
-) -> tuple[bool, str | None]:
+) -> PostAgentValidationResult:
     """Validate orchestrator-side after the agent returns.
 
-    Returns (ok, error_message). Checks:
-    1. Out-of-scope edits — `post_diff - pre_diff` must ⊆ `expected_uu_files`
+    Returns a structured result. Checks:
+    1. Out-of-scope edits — `post_diff - pre_diff` must ⊆ `edit_scope.allowed_files`
     2. Agent-created untracked files are delta-cleaned; cleanup failures fail closed
-    3. No conflict markers remain in `expected_uu_files` (content scan —
+    3. No conflict markers remain in `edit_scope.primary_files` (content scan —
        `git diff --check` is blind to markers in already-committed files)
     4. HEAD unchanged
 
@@ -147,29 +162,49 @@ def validate_post_agent(
     """
     post_diff_files = set(git_ops.changed_files(project_dir))
     delta = post_diff_files - pre_diff_files
-    out_of_scope = delta - expected_uu_files
+    out_of_scope = delta - edit_scope.allowed_files
     if out_of_scope:
-        return (False, f"agent edited files outside conflict set: {sorted(out_of_scope)!r}")
+        return PostAgentValidationResult(
+            ok=False,
+            error=f"agent edited files outside conflict edit scope: {sorted(out_of_scope)!r}",
+        )
     new_untracked = set(git_ops.untracked_files(project_dir)) - pre_untracked_files
     if new_untracked:
         failed_cleanup = set(_cleanup_agent_untracked_delta(project_dir, new_untracked))
         remaining_untracked = set(git_ops.untracked_files(project_dir)) - pre_untracked_files
         failed_cleanup |= remaining_untracked
         if failed_cleanup:
-            return (False, (
-                f"could not clean up agent-created files: {sorted(failed_cleanup)!r}. "
-                f"Inspect the working tree manually, then re-run the merge."
-            ))
-    leftover = _files_with_markers(project_dir, expected_uu_files)
+            return PostAgentValidationResult(
+                ok=False,
+                error=(
+                    f"could not clean up agent-created files: {sorted(failed_cleanup)!r}. "
+                    f"Inspect the working tree manually, then re-run the merge."
+                ),
+            )
+    leftover = _files_with_markers(project_dir, edit_scope.primary_files)
     if leftover:
-        return (False, f"conflict markers still in files: {leftover!r}")
+        return PostAgentValidationResult(
+            ok=False,
+            error=f"conflict markers still in files: {leftover!r}",
+        )
     dc = git_ops.diff_check(project_dir)
     if not dc.ok:
-        return (False, f"git diff --check failed: {dc.stdout.strip()}\n{dc.stderr.strip()}")
+        return PostAgentValidationResult(
+            ok=False,
+            error=f"git diff --check failed: {dc.stdout.strip()}\n{dc.stderr.strip()}",
+        )
     cur_head = git_ops.head_sha(project_dir)
     if cur_head != pre_head:
-        return (False, f"HEAD changed during agent call: {pre_head} → {cur_head}")
-    return (True, None)
+        return PostAgentValidationResult(
+            ok=False,
+            error=f"HEAD changed during agent call: {pre_head} → {cur_head}",
+        )
+    return PostAgentValidationResult(
+        ok=True,
+        edited_files=delta,
+        edited_primary_files=delta & edit_scope.primary_files,
+        edited_secondary_files=delta & edit_scope.secondary_files,
+    )
 
 
 def render_consolidated_prompt(ctx: ConsolidatedConflictContext) -> str:
@@ -177,6 +212,7 @@ def render_consolidated_prompt(ctx: ConsolidatedConflictContext) -> str:
     from otto.prompts import _PROMPTS_DIR
     template = (_PROMPTS_DIR / "merger-conflict-agentic.md").read_text()
     files_listing = "\n".join(f"- {f}" for f in ctx.conflict_files)
+    secondary_listing = "\n".join(f"- {f}" for f in ctx.secondary_files)
     branches_listing = "\n".join(f"- {b}" for b in ctx.all_branches)
     test_section = (
         f"After resolving, verify with `{ctx.test_command}`."
@@ -190,6 +226,7 @@ def render_consolidated_prompt(ctx: ConsolidatedConflictContext) -> str:
         .replace("{branch_intents_section}", _format_branch_intents(ctx.all_intents))
         .replace("{stories_section}", _format_stories(ctx.all_stories))
         .replace("{conflict_files_listing}", files_listing or "(none)")
+        .replace("{secondary_files_listing}", secondary_listing or "(none)")
         .replace("{conflict_diff}", ctx.conflict_diff[:80000])
         .replace("{test_command_section}", test_section)
     )
@@ -201,7 +238,7 @@ async def resolve_all_conflicts(
     config: dict[str, Any],
     ctx: ConsolidatedConflictContext,
     pre_head: str,
-    expected_uu_files: set[str],
+    edit_scope: EditScope,
     pre_untracked_files: set[str],
     pre_diff_files: set[str],
     budget: Any | None = None,
@@ -209,7 +246,7 @@ async def resolve_all_conflicts(
     """Agent-mode consolidated resolver. ONE Claude session, full tools.
 
     Caller (orchestrator) captures pre_head / pre_diff_files /
-    pre_untracked_files / expected_uu_files BEFORE this call. We invoke
+    pre_untracked_files / edit_scope BEFORE this call. We invoke
     validate_post_agent ONCE on return; on failure the merge bails (the
     agent already had a full test-driven retry budget within its session).
     """
@@ -242,7 +279,7 @@ async def resolve_all_conflicts(
         text, cost, _session, _breakdown = await run_agent_with_timeout(
             prompt,
             options,
-            log_dir=project_dir / "otto_logs" / "merge" / "conflict-agent-agentic",
+            log_dir=paths.logs_dir(project_dir) / "merge" / "conflict-agent-agentic",
             timeout=timeout,
             project_dir=project_dir,
         )
@@ -255,19 +292,21 @@ async def resolve_all_conflicts(
     # Single orchestrator-level validation — the agent self-corrects within
     # its session via the project's test command + Bash (test-driven retry
     # at the agent layer is more powerful than re-rolling at this layer).
-    ok, err = validate_post_agent(
+    validation = validate_post_agent(
         project_dir=project_dir,
         pre_diff_files=pre_diff_files,
-        expected_uu_files=expected_uu_files,
+        edit_scope=edit_scope,
         pre_untracked_files=pre_untracked_files,
         pre_head=pre_head,
     )
-    if ok:
+    if validation.ok:
         return ConflictResolutionAttempt(
             success=True, cost_usd=float(cost or 0), retries_used=0,
             note="resolved by agent-mode consolidated resolver",
+            edited_files=validation.edited_files,
+            edited_secondary_files=validation.edited_secondary_files,
         )
     return ConflictResolutionAttempt(
         success=False, cost_usd=float(cost or 0), retries_used=0,
-        note=f"agent finished but validation failed: {err}",
+        note=f"agent finished but validation failed: {validation.error}",
     )

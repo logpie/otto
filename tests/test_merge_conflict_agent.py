@@ -15,6 +15,7 @@ from otto.merge.conflict_agent import (
     resolve_all_conflicts,
     validate_post_agent,
 )
+from otto.merge.edit_scope import EditScope
 
 
 def _init_repo(tmp_path: Path) -> str:
@@ -108,15 +109,19 @@ def test_validate_post_agent_catches_committed_markers(tmp_path: Path):
         ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, text=True, check=True
     ).stdout.strip()
 
-    ok, err = validate_post_agent(
+    result = validate_post_agent(
         project_dir=tmp_path,
         pre_diff_files=set(),
-        expected_uu_files={"f.py"},
+        edit_scope=EditScope(
+            primary_files={"f.py"},
+            secondary_files=set(),
+            branch_touch_union={"f.py"},
+        ),
         pre_untracked_files=set(),
         pre_head=head,
     )
-    assert not ok
-    assert err is not None and "f.py" in err and "markers" in err
+    assert result.ok is False
+    assert result.error is not None and "f.py" in result.error and "markers" in result.error
 
 
 def test_validate_post_agent_cleans_agent_created_untracked_files(
@@ -130,16 +135,16 @@ def test_validate_post_agent_cleans_agent_created_untracked_files(
     (output_dir / "report.log").write_text("report\n")
 
     caplog.set_level(logging.INFO, logger="otto.merge.conflict_agent")
-    ok, err = validate_post_agent(
+    result = validate_post_agent(
         project_dir=tmp_path,
         pre_diff_files=set(),
-        expected_uu_files=set(),
+        edit_scope=EditScope(primary_files=set(), secondary_files=set(), branch_touch_union=set()),
         pre_untracked_files=set(),
         pre_head=head,
     )
 
-    assert ok, f"cleanup should allow validation to pass; got err={err}"
-    assert err is None
+    assert result.ok, f"cleanup should allow validation to pass; got err={result.error}"
+    assert result.error is None
     assert not notes.exists()
     assert not output_dir.exists()
     messages = [record.getMessage() for record in caplog.records]
@@ -155,16 +160,16 @@ def test_validate_post_agent_preserves_preexisting_untracked_files(tmp_path: Pat
     new_file = tmp_path / "new.txt"
     new_file.write_text("remove me\n")
 
-    ok, err = validate_post_agent(
+    result = validate_post_agent(
         project_dir=tmp_path,
         pre_diff_files=set(),
-        expected_uu_files=set(),
+        edit_scope=EditScope(primary_files=set(), secondary_files=set(), branch_touch_union=set()),
         pre_untracked_files=pre_untracked_files,
         pre_head=head,
     )
 
-    assert ok, f"only agent-created residue should be cleaned; got err={err}"
-    assert err is None
+    assert result.ok, f"only agent-created residue should be cleaned; got err={result.error}"
+    assert result.error is None
     assert existing.exists()
     assert not new_file.exists()
     assert set(git_ops.untracked_files(tmp_path)) == {"existing.txt"}
@@ -183,18 +188,18 @@ def test_validate_post_agent_fails_when_untracked_cleanup_fails(tmp_path: Path, 
 
     monkeypatch.setattr(Path, "unlink", raising_unlink)
 
-    ok, err = validate_post_agent(
+    result = validate_post_agent(
         project_dir=tmp_path,
         pre_diff_files=set(),
-        expected_uu_files=set(),
+        edit_scope=EditScope(primary_files=set(), secondary_files=set(), branch_touch_union=set()),
         pre_untracked_files=set(),
         pre_head=head,
     )
 
-    assert not ok
-    assert err is not None
-    assert "could not clean up agent-created files" in err
-    assert "new.txt" in err
+    assert result.ok is False
+    assert result.error is not None
+    assert "could not clean up agent-created files" in result.error
+    assert "new.txt" in result.error
     assert victim.exists()
 
 
@@ -202,14 +207,14 @@ def test_validate_post_agent_passes_clean_tree(tmp_path: Path):
     """Clean tree, expected_uu_files empty, HEAD unchanged → passes."""
     head = _init_repo(tmp_path)
 
-    ok, err = validate_post_agent(
+    result = validate_post_agent(
         project_dir=tmp_path,
         pre_diff_files=set(),
-        expected_uu_files=set(),
+        edit_scope=EditScope(primary_files=set(), secondary_files=set(), branch_touch_union=set()),
         pre_untracked_files=set(),
         pre_head=head,
     )
-    assert ok, f"clean tree should pass; got err={err}"
+    assert result.ok, f"clean tree should pass; got err={result.error}"
 
 
 def test_resolve_all_conflicts_uses_log_dir_for_agent_call(tmp_path: Path):
@@ -220,6 +225,8 @@ def test_resolve_all_conflicts_uses_log_dir_for_agent_call(tmp_path: Path):
         all_intents={"feat-a": "change f", "feat-b": "change f differently"},
         all_stories=[],
         conflict_files=["tracked.py"],
+        secondary_files=[],
+        branch_touch_union=["tracked.py"],
         conflict_diff="<<<<<<< ours\nA\n=======\nB\n>>>>>>> theirs\n",
         test_command=None,
     )
@@ -240,7 +247,11 @@ def test_resolve_all_conflicts_uses_log_dir_for_agent_call(tmp_path: Path):
             config={"provider": "claude"},
             ctx=ctx,
             pre_head=head,
-            expected_uu_files=set(),
+            edit_scope=EditScope(
+                primary_files=set(),
+                secondary_files=set(),
+                branch_touch_union=set(),
+            ),
             pre_untracked_files=set(),
             pre_diff_files=set(),
             budget=None,

@@ -1,0 +1,7 @@
+default_branch: main
+provider: claude
+test_command: pytest tests/visible -q
+certifier_mode: fast
+system_prompt:
+  type: preset
+  preset: claude_code

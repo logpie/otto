@@ -346,6 +346,7 @@ def test_consolidated_merge_upgrades_conflicted_branch_outcomes(
             success=True,
             note="resolved for test",
             cost_usd=12.34,
+            edited_files={"f1.txt", "f2.txt"},
         )
 
     monkeypatch.setattr(conflict_agent, "resolve_all_conflicts", fake_resolve_all_conflicts)
