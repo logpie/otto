@@ -14,7 +14,7 @@ Two harness tiers are available:
 | Tier | Harness | Scenarios | Style | Per-run cost | Wall time |
 |------|---------|-----------|-------|--------------|-----------|
 | **daily** | `scripts/otto_as_user.py` | 37 (groups A–E, U) | toy projects, short, asciinema-recorded | ~$12 full / ~$2 quick | ~60min full / ~10min quick |
-| **nightly** | `scripts/otto_as_user_nightly.py` | 4 (N1, N2, N4, N8) | seeded medium fixtures, hidden-test oracles, no recording | ~$10 | ~60min |
+| **nightly** | `scripts/otto_as_user_nightly.py` | 5 (N1, N2, N4, N8, N9) | seeded medium fixtures, hidden-test oracles, no recording | ~$12 | ~80min |
 
 If the user says "run otto-as-user" without qualifier → use **daily**. If they say "nightly" or "real-world" or "seeded" → use **nightly**.
 
@@ -57,6 +57,7 @@ Nightly scenarios:
 - **N2** — semantic auth merge: queue 2 branches (password reset + remember-me) touching the same auth code, merge, hidden tests verify both flows + login still works.
 - **N4** — certifier trap: build CSV bulk import where intent uses product language ("customers should not see each other's data"), not engineering terms. Hidden tests enforce tenant isolation + idempotency.
 - **N8** — stale merge context: 3-branch queue (rename → edit-old-location → add-new-tests). Hidden tests verify the rename, the merged logic, and the regression tests all coexist on main.
+- **N9** — Mission Control workflow: drives the canonical run registry, durable cancel command protocol, and history v2 snapshots end-to-end. Standalone build (to be cancelled) + 2 queue tasks + merge. Hidden tests verify registry coherence, terminal_outcome=cancelled (not failure) on the cancelled build, no zombie writers, all artifact paths resolve. Proves the TUI substrate works under real-LLM cross-process load.
 
 Nightly fixtures live in `scripts/fixtures_nightly/<scenario>/` with `intent.md`, `otto.yaml`, `tests/visible/` (Otto sees), `tests/hidden/` (oracle, run after Otto exits).
 
