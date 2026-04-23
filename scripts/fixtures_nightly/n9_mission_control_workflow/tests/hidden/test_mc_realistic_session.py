@@ -9,6 +9,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 HISTORY_PATH = REPO_ROOT / "otto_logs" / "cross-sessions" / "history.jsonl"
 LIVE_DIR = REPO_ROOT / "otto_logs" / "cross-sessions" / "runs" / "live"
 PHASE_LOG_PATH = REPO_ROOT / "otto_logs" / "cross-sessions" / "mission-control-pilot-phases.jsonl"
+REQUIRED_PATHS = ["primary_log_path"]
+REQUIRED_FOR_SUCCESS_ATOMIC_OR_QUEUE = ["summary_path"]
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -66,10 +68,23 @@ def test_realistic_session_writes_expected_terminal_history() -> None:
     for row in rows:
         assert row["schema_version"] == 2
         assert row["dedupe_key"] == f"terminal_snapshot:{row['run_id']}"
-        for key in ("manifest_path", "summary_path", "primary_log_path"):
+        domain = row.get("domain")
+        outcome = row.get("terminal_outcome")
+
+        for key in REQUIRED_PATHS:
             value = row.get(key)
             assert value, f"missing {key} for {row['run_id']}"
-            assert Path(value).exists(), f"missing {key}: {value}"
+            assert Path(value).exists(), f"dangling {key} for {row['run_id']}: {value}"
+
+        if domain in ("atomic", "queue") and outcome == "success":
+            for key in REQUIRED_FOR_SUCCESS_ATOMIC_OR_QUEUE:
+                value = row.get(key)
+                assert value, f"missing {key} for {row['run_id']}"
+                assert Path(value).exists(), f"dangling {key} for {row['run_id']}: {value}"
+
+        manifest = row.get("manifest_path")
+        if manifest:
+            assert Path(manifest).exists(), f"dangling manifest_path for {row['run_id']}: {manifest}"
 
 
 def test_live_records_are_gced_or_terminal_only() -> None:
