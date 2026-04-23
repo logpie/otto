@@ -372,6 +372,69 @@ def test_runner_marks_failed_on_nonzero_exit(tmp_path: Path):
         runner._lock_fh.close()
 
 
+def test_refresh_repairs_mixed_version_child_without_attempt_run_id(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    task = QueueTask(
+        id="t1",
+        command_argv=["build", "test"],
+        branch="build/t1-test",
+        worktree=".worktrees/t1",
+    )
+    worktree = repo / ".worktrees" / "t1"
+    _paths.ensure_session_scaffold(worktree, "child-123")
+    _paths.session_checkpoint(worktree, "child-123").write_text(json.dumps({
+        "run_id": "child-123",
+        "status": "in_progress",
+        "updated_at": "2026-04-23T00:00:00Z",
+    }))
+
+    runner = Runner(repo, RunnerConfig(concurrent=1), otto_bin="/bin/true")
+    state = load_state(repo)
+    state["tasks"]["t1"] = {"status": "running", "child": None, "failure_reason": None}
+
+    runner._refresh_queue_run_records([task], state)
+
+    record = json.loads(_paths.live_run_path(repo, "child-123").read_text())
+    assert record["identity"]["child_run_id"] == "child-123"
+    assert record["identity"]["expected_child_run_id"] is None
+    assert record["identity"]["compatibility_warning"] == "child predates run-id"
+    assert record["artifacts"]["session_dir"].endswith("/child-123")
+
+
+def test_refresh_repairs_mixed_version_child_with_expected_attempt_run_id(tmp_path: Path):
+    repo = init_repo(tmp_path)
+    task = QueueTask(
+        id="t1",
+        command_argv=["build", "test"],
+        branch="build/t1-test",
+        worktree=".worktrees/t1",
+    )
+    worktree = repo / ".worktrees" / "t1"
+    _paths.ensure_session_scaffold(worktree, "legacy-child-123")
+    _paths.session_checkpoint(worktree, "legacy-child-123").write_text(json.dumps({
+        "run_id": "legacy-child-123",
+        "status": "in_progress",
+        "updated_at": "2026-04-23T00:00:00Z",
+    }))
+
+    runner = Runner(repo, RunnerConfig(concurrent=1), otto_bin="/bin/true")
+    state = load_state(repo)
+    state["tasks"]["t1"] = {
+        "status": "running",
+        "attempt_run_id": "expected-123",
+        "child": None,
+        "failure_reason": None,
+    }
+
+    runner._refresh_queue_run_records([task], state)
+
+    record = json.loads(_paths.live_run_path(repo, "expected-123").read_text())
+    assert record["identity"]["child_run_id"] == "legacy-child-123"
+    assert record["identity"]["expected_child_run_id"] == "expected-123"
+    assert record["identity"]["compatibility_warning"] == "child predates run-id"
+    assert record["artifacts"]["session_dir"].endswith("/legacy-child-123")
+
+
 def test_runner_respects_concurrent_cap(tmp_path: Path):
     repo = init_repo(tmp_path)
     fake_otto = _make_fake_otto(tmp_path, exit_code=0, sleep=0.5)

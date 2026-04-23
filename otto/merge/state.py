@@ -58,8 +58,12 @@ class MergeState:
     schema_version: int = MERGE_STATE_SCHEMA_VERSION
     merge_id: str = ""
     started_at: str = ""
+    finished_at: str | None = None
     target: str = ""                          # branch we're merging into
     target_head_before: str = ""              # SHA of target HEAD at start
+    status: str = "running"
+    terminal_outcome: str | None = None
+    note: str | None = None
     branches_in_order: list[str] = field(default_factory=list)
     outcomes: list[BranchOutcome] = field(default_factory=list)
     # Manual follow-up hints if the merge stops after a consolidated failure:
@@ -86,7 +90,10 @@ def write_state(project_dir: Path, state: MergeState) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
     payload = asdict(state)
-    tmp.write_text(json.dumps(payload, indent=2, sort_keys=False))
+    with tmp.open("w", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, indent=2, sort_keys=False))
+        handle.flush()
+        os.fsync(handle.fileno())
     os.replace(tmp, path)
     return path
 

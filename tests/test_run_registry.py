@@ -14,6 +14,7 @@ from otto.runs.registry import (
     garbage_collect_live_records,
     make_run_record,
     read_live_records,
+    RunPublisher,
     write_record,
 )
 
@@ -111,3 +112,26 @@ def test_new_run_id_prefers_otto_run_id_env(tmp_path: Path, monkeypatch) -> None
     monkeypatch.setenv("OTTO_RUN_ID", "2026-04-23-010101-abc123")
     assert _new_run_id(tmp_path) == "2026-04-23-010101-abc123"
 
+
+def test_run_publisher_ignores_updates_after_finalize(tmp_path: Path) -> None:
+    run_id = allocate_run_id(tmp_path)
+    publisher = RunPublisher(
+        tmp_path,
+        make_run_record(
+            project_dir=tmp_path,
+            run_id=run_id,
+            domain="atomic",
+            run_type="build",
+            command="build",
+            display_name="build: test",
+            status="running",
+            cwd=tmp_path,
+        ),
+    )
+    publisher.__enter__()
+    publisher.finalize(status="done", terminal_outcome="success")
+    publisher.update({"status": "running", "last_event": "stale heartbeat"})
+
+    record = json.loads(paths.live_run_path(tmp_path, run_id).read_text())
+    assert record["status"] == "done"
+    assert record["terminal_outcome"] == "success"

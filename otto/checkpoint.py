@@ -766,6 +766,41 @@ def complete_checkpoint(
         pass
 
 
+def write_cancel_checkpoint_marker(
+    project_dir: Path,
+    *,
+    run_id: str,
+    command: str | None = None,
+    note: str = "cancelled by command",
+) -> dict[str, Any]:
+    """Durably persist an in-flight cancel marker for replay-safe command acks."""
+    if not run_id:
+        raise ValueError("write_cancel_checkpoint_marker requires a non-empty run_id")
+
+    paths.ensure_session_scaffold(project_dir, run_id)
+    checkpoint_path = _checkpoint_path_for(project_dir, run_id)
+    prior = _read_prior(checkpoint_path) or {}
+    data = _normalize_checkpoint_data(prior)
+
+    now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    if not data.get("run_id"):
+        data["run_id"] = run_id
+    if not data.get("command"):
+        data["command"] = command or "build"
+    if not data.get("status"):
+        data["status"] = "in_progress"
+    data["status"] = "paused"
+    data["phase"] = "cancel_requested"
+    data["updated_at"] = now_iso
+    data["cancel_requested"] = True
+    data["cancel_requested_at"] = now_iso
+    data["cancel_note"] = note
+
+    _write_checkpoint_file(checkpoint_path, data)
+    paths.set_pointer(project_dir, paths.PAUSED_POINTER, run_id, strict=True)
+    return data
+
+
 def _read_started_at(checkpoint_path: Path) -> str:
     """Preserve original started_at from existing checkpoint."""
     now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())

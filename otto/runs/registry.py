@@ -387,6 +387,8 @@ class RunPublisher:
         self.patch_getter = patch_getter
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+        self._finalized = False
 
     def __enter__(self) -> "RunPublisher":
         write_record(self.project_dir, self.record)
@@ -402,12 +404,15 @@ class RunPublisher:
         self.stop()
 
     def update(self, updates: dict[str, Any], *, heartbeat: bool = True) -> RunRecord:
-        self.record = update_record(
-            self.project_dir,
-            self.record.run_id,
-            updates,
-            heartbeat=heartbeat,
-        )
+        with self._lock:
+            if self._finalized:
+                return self.record
+            self.record = update_record(
+                self.project_dir,
+                self.record.run_id,
+                updates,
+                heartbeat=heartbeat,
+            )
         return self.record
 
     def finalize(
@@ -417,14 +422,19 @@ class RunPublisher:
         terminal_outcome: str | None,
         updates: dict[str, Any] | None = None,
     ) -> RunRecord:
+        with self._lock:
+            if self._finalized:
+                return self.record
+            self._finalized = True
         self.stop()
-        self.record = finalize_record(
-            self.project_dir,
-            self.record.run_id,
-            status=status,
-            terminal_outcome=terminal_outcome,
-            updates=updates,
-        )
+        with self._lock:
+            self.record = finalize_record(
+                self.project_dir,
+                self.record.run_id,
+                status=status,
+                terminal_outcome=terminal_outcome,
+                updates=updates,
+            )
         return self.record
 
     def stop(self) -> None:
@@ -436,13 +446,16 @@ class RunPublisher:
     def _loop(self) -> None:
         while not self._stop.wait(self.heartbeat_interval_s):
             try:
-                updates = self.patch_getter() if self.patch_getter is not None else {}
-                self.record = update_record(
-                    self.project_dir,
-                    self.record.run_id,
-                    updates or {},
-                    heartbeat=True,
-                )
+                with self._lock:
+                    if self._finalized:
+                        return
+                    updates = self.patch_getter() if self.patch_getter is not None else {}
+                    self.record = update_record(
+                        self.project_dir,
+                        self.record.run_id,
+                        updates or {},
+                        heartbeat=True,
+                    )
             except Exception:
                 continue
 

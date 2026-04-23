@@ -2061,6 +2061,56 @@ def _write_pow_report(output_dir: Path, report: dict[str, Any]) -> None:
     write_text_atomic(output_dir / "proof-of-work.html", _render_pow_html(report))
 
 
+def _repair_standalone_certify_history(project_dir: Path) -> None:
+    from otto import paths
+    from otto.history import append_history_entry
+    from otto.runs.history import read_history_rows
+
+    history_rows = read_history_rows(paths.history_jsonl(project_dir))
+    seen = {
+        str(row.get("dedupe_key") or "")
+        for row in history_rows
+        if isinstance(row, dict)
+    }
+    sessions_root = paths.sessions_root(project_dir)
+    if not sessions_root.exists():
+        return
+
+    for summary_path in sorted(sessions_root.glob("*/summary.json")):
+        try:
+            summary = json.loads(summary_path.read_text())
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            continue
+        if str(summary.get("command") or "") != "certify":
+            continue
+        run_id = str(summary.get("run_id") or summary_path.parent.name).strip()
+        if not run_id:
+            continue
+        dedupe_key = f"terminal_snapshot:{run_id}"
+        if dedupe_key in seen:
+            continue
+        append_history_entry(
+            project_dir,
+            {
+                "run_id": run_id,
+                "command": "certify",
+                "intent": str(summary.get("intent") or "")[:200],
+                "passed": bool(summary.get("passed")),
+                "stories_passed": int(summary.get("stories_passed") or 0),
+                "stories_tested": int(summary.get("stories_tested") or 0),
+                "cost_usd": float(summary.get("cost_usd") or 0.0),
+                "certifier_cost_usd": float(summary.get("cost_usd") or 0.0),
+                "duration_s": float(summary.get("duration_s") or 0.0),
+                "certify_rounds": int(summary.get("rounds") or 0),
+                "status": "done" if bool(summary.get("passed")) else "failed",
+                "terminal_outcome": "success" if bool(summary.get("passed")) else "failure",
+                "summary_path": str(summary_path),
+                "timestamp": str(summary.get("completed_at") or ""),
+            },
+        )
+        seen.add(dedupe_key)
+
+
 # ---------------------------------------------------------------------------
 # Agentic certifier — single agent, subagent-driven
 # ---------------------------------------------------------------------------
@@ -2103,6 +2153,8 @@ async def run_agentic_certifier(
 
     config = config or {}
     start_time = time.monotonic()
+    if merge_context is None and write_history:
+        _repair_standalone_certify_history(project_dir)
 
     from otto import paths
     if session_id is None:
@@ -2135,7 +2187,12 @@ async def run_agentic_certifier(
     evidence_dir = report_dir / "evidence"
     evidence_dir.mkdir(parents=True, exist_ok=True)
     publisher = None
-    if write_history and write_session_summary and merge_context is None:
+    if (
+        write_history
+        and write_session_summary
+        and merge_context is None
+        and os.environ.get("OTTO_INTERNAL_QUEUE_RUNNER") != "1"
+    ):
         from otto.pipeline import _current_branch_name, _current_head_sha
         from otto.runs.registry import RunPublisher, make_run_record
 
@@ -2196,6 +2253,8 @@ async def run_agentic_certifier(
 
     logger.info("Running agentic certifier on %s", project_dir)
     timeout = budget.for_call() if budget is not None else None
+    from otto.pipeline import _make_atomic_terminal_callback
+    terminal_callback = _make_atomic_terminal_callback(project_dir, run_id, console.print)
 
     text, cost, agent_session_id, breakdown = await run_agent_with_timeout(
         prompt,
@@ -2204,7 +2263,7 @@ async def run_agentic_certifier(
         phase_name="CERTIFY",
         timeout=timeout,
         project_dir=project_dir,
-        on_terminal_event=console.print,
+        on_terminal_event=terminal_callback,
         verbose=verbose,
     )
 
@@ -2292,24 +2351,21 @@ async def run_agentic_certifier(
     )
 
     if write_history:
-        try:
-            from otto.pipeline import _append_session_history
+        from otto.pipeline import _append_session_history
 
-            _append_session_history(
-                project_dir,
-                run_id=run_id,
-                command="certify",
-                certifier_mode=mode,
-                intent=intent,
-                stories=story_results,
-                passed=passed,
-                duration_s=total_duration,
-                total_cost_usd=float(cost or 0),
-                certifier_cost_usd=float(cost or 0),
-                rounds=certify_rounds_count,
-            )
-        except Exception as exc:
-            logger.warning("Failed to append standalone certify history: %s", exc)
+        _append_session_history(
+            project_dir,
+            run_id=run_id,
+            command="certify",
+            certifier_mode=mode,
+            intent=intent,
+            stories=story_results,
+            passed=passed,
+            duration_s=total_duration,
+            total_cost_usd=float(cost or 0),
+            certifier_cost_usd=float(cost or 0),
+            rounds=certify_rounds_count,
+        )
 
     if write_session_summary:
         from otto.pipeline import _write_session_summary

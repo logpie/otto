@@ -290,6 +290,10 @@ def _atomic_artifacts(project_dir: Path, run_id: str, *, primary_phase: str) -> 
     }
 
 
+def _atomic_registry_enabled() -> bool:
+    return os.environ.get("OTTO_INTERNAL_QUEUE_RUNNER") != "1"
+
+
 def _atomic_publisher(
     *,
     project_dir: Path,
@@ -299,6 +303,9 @@ def _atomic_publisher(
     primary_phase: str,
     cwd: Path | None = None,
 ) -> Any:
+    if not _atomic_registry_enabled():
+        return None
+
     from otto.runs.registry import RunPublisher, make_run_record
 
     command_label = command.replace(".", " ")
@@ -363,6 +370,7 @@ def _finalize_atomic_publisher(
 
 def _ack_atomic_cancel_commands(project_dir: Path, run_id: str) -> bool:
     from otto import paths
+    from otto.checkpoint import write_cancel_checkpoint_marker
     from otto.runs.registry import append_command_ack, begin_command_drain, finish_command_drain
 
     commands = begin_command_drain(
@@ -371,18 +379,51 @@ def _ack_atomic_cancel_commands(project_dir: Path, run_id: str) -> bool:
         paths.session_command_acks(project_dir, run_id),
     )
     cancelled = False
+    state_version: int | None = None
     for cmd in commands:
-        if str(cmd.get("kind") or cmd.get("cmd") or "") == "cancel":
+        kind = str(cmd.get("kind") or cmd.get("cmd") or "")
+        if kind == "cancel":
+            if not cancelled:
+                checkpoint = write_cancel_checkpoint_marker(
+                    project_dir,
+                    run_id=run_id,
+                    command=None,
+                )
+                state_version = int(checkpoint.get("current_round") or 0)
             cancelled = True
         append_command_ack(
             paths.session_command_acks(project_dir, run_id),
             cmd,
             writer_id=f"atomic:{run_id}",
-            outcome="applied" if cancelled else "ignored",
+            outcome="applied" if kind == "cancel" else "ignored",
+            state_version=state_version,
         )
     if commands:
         finish_command_drain(paths.session_command_requests_processing(project_dir, run_id))
     return cancelled
+
+
+def _make_atomic_terminal_callback(
+    project_dir: Path,
+    run_id: str,
+    callback: Any,
+) -> Any:
+    if callback is None:
+        return None
+
+    last_poll_at = 0.0
+
+    def _wrapped(message: str) -> None:
+        nonlocal last_poll_at
+        callback(message)
+        now = time.monotonic()
+        if now - last_poll_at < 2.0:
+            return
+        last_poll_at = now
+        if _ack_atomic_cancel_commands(project_dir, run_id):
+            raise KeyboardInterrupt("cancelled by command")
+
+    return _wrapped
 
 
 def _strict_mode_guidance(strict_mode: bool) -> str:
@@ -473,7 +514,8 @@ async def build_agentic_v3(
             intent=intent,
             primary_phase="build",
         )
-        publisher.__enter__()
+        if publisher is not None:
+            publisher.__enter__()
 
     # Resumed SDK sessions already carry prior context; avoid polluting
     # intent.md or stdin when the user resumes without a fresh intent.
@@ -673,6 +715,7 @@ async def build_agentic_v3(
     # wait_for accepts this), so a call-level safety cap is unnecessary —
     # run_budget_seconds bounds the whole run.
     timeout = budget.for_call() if budget is not None else None
+    terminal_callback = _make_atomic_terminal_callback(project_dir, build_id, console.print)
 
     try:
         text, cost, session_id, breakdown_data = await run_agent_with_timeout(
@@ -682,7 +725,7 @@ async def build_agentic_v3(
             timeout=timeout,
             project_dir=project_dir,
             capture_tool_output=True,
-            on_terminal_event=console.print,
+            on_terminal_event=terminal_callback,
             verbose=verbose,
             strict_mode=strict_mode,
         )
@@ -1262,7 +1305,8 @@ async def run_certify_fix_loop(
         intent=intent,
         primary_phase="improve",
     )
-    publisher.__enter__()
+    if publisher is not None:
+        publisher.__enter__()
     total_cost = resume_cost
     loop_start = time.monotonic()
     from otto.config import get_max_rounds
@@ -1364,8 +1408,9 @@ async def run_certify_fix_loop(
             ],
             last_diagnosis=last_diagnosis_text,
         )
-        publisher.update({"status": "paused", "last_event": f"paused before {phase}"})
-        publisher.stop()
+        if publisher is not None:
+            publisher.update({"status": "paused", "last_event": f"paused before {phase}"})
+            publisher.stop()
         return BuildResult(
             passed=False, build_id=build_id, total_cost=total_cost,
             rounds=use_rounds,
@@ -1433,8 +1478,9 @@ async def run_certify_fix_loop(
                 ],
                 last_diagnosis=last_diagnosis_text,
             )
-            publisher.update({"status": "paused", "last_event": "paused during initial build"})
-            publisher.stop()
+            if publisher is not None:
+                publisher.update({"status": "paused", "last_event": "paused during initial build"})
+                publisher.stop()
             return BuildResult(passed=False, build_id=build_id, total_cost=total_cost)
         build_phase_duration += time.monotonic() - build_call_start
         total_cost += result.total_cost
@@ -1810,8 +1856,9 @@ async def run_certify_fix_loop(
                 )
             except OSError as exc:
                 logger.warning("Failed to mark checkpoint paused: %s", exc)
-            publisher.update({"status": "paused", "last_event": f"paused during round {round_num}"})
-            publisher.stop()
+            if publisher is not None:
+                publisher.update({"status": "paused", "last_event": f"paused during round {round_num}"})
+                publisher.stop()
             return BuildResult(
                 passed=False, build_id=build_id, rounds=actual_rounds,
                 total_cost=total_cost,
@@ -1833,8 +1880,9 @@ async def run_certify_fix_loop(
                 )
             except OSError as exc:
                 logger.warning("Failed to mark checkpoint paused: %s", exc)
-            publisher.update({"status": "paused", "last_event": f"paused during round {round_num}"})
-            publisher.stop()
+            if publisher is not None:
+                publisher.update({"status": "paused", "last_event": f"paused during round {round_num}"})
+                publisher.stop()
             raise
 
     # Final journal entry gets its own round_id so attribution is unambiguous

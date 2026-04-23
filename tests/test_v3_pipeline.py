@@ -13,7 +13,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from otto.agent import AssistantMessage, TextBlock, ToolResultBlock, ToolUseBlock
-from otto.pipeline import _commit_artifacts, build_agentic_v3
+from otto import paths as _paths
+from otto.pipeline import _ack_atomic_cancel_commands, _commit_artifacts, build_agentic_v3
+from otto.runs.registry import append_jsonl_row
 from tests.conftest import make_mock_query as _make_mock_query
 
 # `tmp_git_repo` fixture comes from tests/conftest.py.
@@ -408,6 +410,57 @@ async def test_completed_checkpoint_total_cost_and_run_id_match_build_result(tmp
     assert checkpoint["total_cost"] == pytest.approx(0.75)
     assert result.total_cost == pytest.approx(0.75)
     assert _paths.resolve_pointer(tmp_git_repo, _paths.PAUSED_POINTER) is None
+
+
+@pytest.mark.asyncio
+async def test_queue_spawned_atomic_run_skips_live_registry(tmp_git_repo, monkeypatch):
+    run_id = "queue-attempt-123"
+    monkeypatch.setenv("OTTO_INTERNAL_QUEUE_RUNNER", "1")
+
+    with patch("otto.agent.run_agent_query", side_effect=_make_mock_query(AGENT_OUTPUT_PASS)):
+        result = await build_agentic_v3("test", tmp_git_repo, {}, run_id=run_id)
+
+    assert result.build_id == run_id
+    assert not _paths.live_run_path(tmp_git_repo, run_id).exists()
+    assert _paths.session_summary(tmp_git_repo, run_id).exists()
+
+
+def test_atomic_cancel_ack_waits_for_durable_checkpoint(tmp_git_repo, monkeypatch):
+    from otto import checkpoint as checkpoint_module
+
+    run_id = "cancel-run-123"
+    _paths.ensure_session_scaffold(tmp_git_repo, run_id)
+    request = {
+        "schema_version": 1,
+        "command_id": "cmd-1",
+        "run_id": run_id,
+        "domain": "atomic",
+        "kind": "cancel",
+        "requested_at": "2026-04-23T00:00:00Z",
+    }
+    append_jsonl_row(_paths.session_command_requests(tmp_git_repo, run_id), request)
+
+    real_writer = checkpoint_module.write_cancel_checkpoint_marker
+
+    def _boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(checkpoint_module, "write_cancel_checkpoint_marker", _boom)
+    with pytest.raises(OSError):
+        _ack_atomic_cancel_commands(tmp_git_repo, run_id)
+
+    assert not _paths.session_command_acks(tmp_git_repo, run_id).exists()
+    assert _paths.session_command_requests_processing(tmp_git_repo, run_id).exists()
+
+    monkeypatch.setattr(checkpoint_module, "write_cancel_checkpoint_marker", real_writer)
+    assert _ack_atomic_cancel_commands(tmp_git_repo, run_id) is True
+
+    ack_rows = _paths.session_command_acks(tmp_git_repo, run_id).read_text().splitlines()
+    assert len(ack_rows) == 1
+    checkpoint = json.loads(_paths.session_checkpoint(tmp_git_repo, run_id).read_text())
+    assert checkpoint["status"] == "paused"
+    assert checkpoint["phase"] == "cancel_requested"
+    assert checkpoint["cancel_requested"] is True
 
 
 @pytest.mark.asyncio

@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import errno
 import fcntl
+import json
 import logging
 import os
 import signal
@@ -37,6 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from otto.manifest import queue_index_path_for
+from otto import paths
 from otto.queue.runtime import (
     IN_FLIGHT_STATUSES,
     INTERRUPTED_STATUS,
@@ -127,6 +129,31 @@ def _mark_failed(ts: dict[str, Any], reason: str) -> None:
     ts["finished_at"] = now_iso()
     ts["child"] = None
     ts["failure_reason"] = reason
+
+
+def _terminal_outcome_for_status(status: str) -> str | None:
+    mapping = {
+        "done": "success",
+        "failed": "failure",
+        "cancelled": "cancelled",
+        "removed": "removed",
+        INTERRUPTED_STATUS: "interrupted",
+    }
+    return mapping.get(str(status or ""))
+
+
+def _session_id_from_artifact_path(path: Path | None) -> str | None:
+    if path is None:
+        return None
+    try:
+        parts = path.parts
+        index = parts.index(paths.SESSIONS_DIR_NAME)
+    except ValueError:
+        return None
+    if index + 1 >= len(parts):
+        return None
+    session_id = str(parts[index + 1]).strip()
+    return session_id or None
 
 
 # ---------- PID-reuse-safe child validation ----------
@@ -406,6 +433,7 @@ class Runner:
 
         # Reap finished children
         self._reap_children(state)
+        self._repair_terminal_queue_history(tasks, state)
 
         # Dispatch new work (skip during graceful shutdown)
         if self.shutdown_level is None:
@@ -515,6 +543,7 @@ class Runner:
                 ts["resumed_from_checkpoint"] = True
             else:
                 _mark_failed(ts, "watcher restart: child gone, no checkpoint")
+        self._repair_terminal_queue_history(list(tasks_by_id.values()), state)
         self._write_state_or_raise(state)
         for cmd in commands:
             append_command_ack(
@@ -880,22 +909,85 @@ class Runner:
         self._write_queue_run_record(task, state["tasks"][task.id], status="running")
         logger.info("spawned %s: pid=%d, branch=%s", task.id, proc.pid, branch)
 
+    def _recover_child_run_id(self, task: QueueTask, ts: dict[str, Any]) -> str | None:
+        manifest_path = queue_index_path_for(self.project_dir, task.id)
+        if manifest_path is not None and manifest_path.exists():
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, TypeError, ValueError):
+                manifest = None
+            if isinstance(manifest, dict):
+                run_id = str(manifest.get("run_id") or "").strip()
+                if run_id:
+                    ts["manifest_path"] = str(manifest_path)
+                    return run_id
+                checkpoint_path = manifest.get("checkpoint_path")
+                if isinstance(checkpoint_path, str) and checkpoint_path:
+                    session_id = _session_id_from_artifact_path(Path(checkpoint_path).expanduser())
+                    if session_id:
+                        return session_id
+        checkpoint_path = checkpoint_path_for_task(self.project_dir, task)
+        if checkpoint_path is not None:
+            session_id = _session_id_from_artifact_path(checkpoint_path)
+            if session_id:
+                return session_id
+        manifest_path_str = str(ts.get("manifest_path") or "").strip()
+        if manifest_path_str:
+            session_id = _session_id_from_artifact_path(Path(manifest_path_str).expanduser())
+            if session_id:
+                return session_id
+        return None
+
+    def _reconcile_task_identity(self, task: QueueTask, ts: dict[str, Any]) -> None:
+        attempt_run_id = str(ts.get("attempt_run_id") or "").strip()
+        child_run_id = self._recover_child_run_id(task, ts) or str(ts.get("child_run_id") or "").strip()
+        if child_run_id:
+            ts["child_run_id"] = child_run_id
+        if not attempt_run_id and child_run_id:
+            ts["compatibility_warning"] = "child predates run-id"
+            return
+        if attempt_run_id and child_run_id and child_run_id != attempt_run_id:
+            ts["compatibility_warning"] = "child predates run-id"
+        elif not child_run_id:
+            ts.pop("child_run_id", None)
+            ts.pop("compatibility_warning", None)
+        else:
+            ts.pop("compatibility_warning", None)
+
+    def _queue_record_run_id(self, ts: dict[str, Any]) -> str:
+        attempt_run_id = str(ts.get("attempt_run_id") or "").strip()
+        if attempt_run_id:
+            return attempt_run_id
+        return str(ts.get("child_run_id") or "").strip()
+
+    def _history_snapshot_exists(self, run_id: str) -> bool:
+        from otto.runs.history import read_history_rows
+
+        dedupe_key = f"terminal_snapshot:{run_id}"
+        return any(
+            str(row.get("dedupe_key") or "") == dedupe_key
+            for row in read_history_rows(paths.history_jsonl(self.project_dir))
+            if isinstance(row, dict)
+        )
+
     def _queue_run_artifacts(self, task: QueueTask, ts: dict[str, Any]) -> dict[str, Any]:
-        attempt_run_id = str(ts.get("attempt_run_id") or "")
+        self._reconcile_task_identity(task, ts)
+        session_run_id = str(ts.get("child_run_id") or ts.get("attempt_run_id") or "")
         wt_path = self._worktree_for(task)
-        session_dir = wt_path / "otto_logs" / "sessions" / attempt_run_id
+        session_dir = paths.session_dir(wt_path, session_run_id) if session_run_id else paths.sessions_root(wt_path)
         manifest_path = ts.get("manifest_path") or (session_dir / "manifest.json")
         return {
             "session_dir": str(session_dir),
             "manifest_path": str(manifest_path) if manifest_path else None,
-            "checkpoint_path": str(session_dir / "checkpoint.json"),
-            "summary_path": str(session_dir / "summary.json"),
-            "primary_log_path": str(session_dir / "build" / "narrative.log"),
+            "checkpoint_path": str(paths.session_checkpoint(wt_path, session_run_id)) if session_run_id else None,
+            "summary_path": str(paths.session_summary(wt_path, session_run_id)) if session_run_id else None,
+            "primary_log_path": str(paths.build_dir(wt_path, session_run_id) / "narrative.log") if session_run_id else None,
             "extra_log_paths": [],
         }
 
     def _write_queue_run_record(self, task: QueueTask, ts: dict[str, Any], *, status: str) -> None:
-        attempt_run_id = str(ts.get("attempt_run_id") or "").strip()
+        self._reconcile_task_identity(task, ts)
+        attempt_run_id = self._queue_record_run_id(ts)
         if not attempt_run_id:
             return
         command = " ".join(task.command_argv[:2]) if task.command_argv else "queue"
@@ -915,7 +1007,7 @@ class Runner:
                 "merge_id": None,
                 "parent_run_id": None,
                 "child_run_id": ts.get("child_run_id"),
-                "expected_child_run_id": attempt_run_id,
+                "expected_child_run_id": str(ts.get("attempt_run_id") or "").strip() or None,
                 "compatibility_warning": ts.get("compatibility_warning"),
             },
             source={
@@ -944,7 +1036,8 @@ class Runner:
             task = tasks_by_id.get(task_id)
             if task is None:
                 continue
-            attempt_run_id = str(ts.get("attempt_run_id") or "").strip()
+            self._reconcile_task_identity(task, ts)
+            attempt_run_id = self._queue_record_run_id(ts)
             if not attempt_run_id:
                 continue
             status = str(ts.get("status") or "queued")
@@ -956,6 +1049,11 @@ class Runner:
                     attempt_run_id,
                     {
                         "status": status,
+                        "identity": {
+                            "child_run_id": ts.get("child_run_id"),
+                            "expected_child_run_id": str(ts.get("attempt_run_id") or "").strip() or None,
+                            "compatibility_warning": ts.get("compatibility_warning"),
+                        },
                         "artifacts": self._queue_run_artifacts(task, ts),
                         "metrics": {"cost_usd": ts.get("cost_usd")},
                         "last_event": str(ts.get("failure_reason") or status),
@@ -1130,9 +1228,6 @@ class Runner:
         ts["child"] = None
 
     def _finalize_queue_attempt(self, task_id: str, ts: dict[str, Any]) -> None:
-        attempt_run_id = str(ts.get("attempt_run_id") or "").strip()
-        if not attempt_run_id or ts.get("history_appended"):
-            return
         status = str(ts.get("status") or "")
         if status not in {"done", "failed", "cancelled", "removed", INTERRUPTED_STATUS}:
             return
@@ -1140,7 +1235,14 @@ class Runner:
         task = tasks.get(task_id)
         if task is None:
             return
-        terminal_outcome = "success" if status == "done" else status
+        self._reconcile_task_identity(task, ts)
+        attempt_run_id = self._queue_record_run_id(ts)
+        if not attempt_run_id:
+            return
+        if ts.get("history_appended") or self._history_snapshot_exists(attempt_run_id):
+            ts["history_appended"] = True
+            return
+        terminal_outcome = _terminal_outcome_for_status(status)
         try:
             finalize_record(
                 self.project_dir,
@@ -1164,31 +1266,39 @@ class Runner:
                 )
             except Exception as exc:
                 logger.debug("failed to finalize queue run record for %s: %s", task_id, exc)
-        try:
-            from otto.history import append_history_entry
+        from otto.history import append_history_entry
 
-            append_history_entry(
-                self.project_dir,
-                {
-                    "run_id": attempt_run_id,
-                    "domain": "queue",
-                    "run_type": "queue",
-                    "command": " ".join(task.command_argv[:2]) if task.command_argv else "queue",
-                    "queue_task_id": task_id,
-                    "intent": (task.resolved_intent or task_id)[:200],
-                    "passed": status == "done",
-                    "status": status,
-                    "terminal_outcome": terminal_outcome,
-                    "cost_usd": float(ts.get("cost_usd") or 0.0),
-                    "duration_s": float(ts.get("duration_s") or 0.0),
-                    "manifest_path": ts.get("manifest_path"),
-                    "primary_log_path": self._queue_run_artifacts(task, ts).get("primary_log_path"),
-                    "timestamp": ts.get("finished_at") or now_iso(),
-                },
-            )
-            ts["history_appended"] = True
-        except Exception as exc:
-            logger.debug("failed to append queue history for %s: %s", task_id, exc)
+        append_history_entry(
+            self.project_dir,
+            {
+                "run_id": attempt_run_id,
+                "domain": "queue",
+                "run_type": "queue",
+                "command": " ".join(task.command_argv[:2]) if task.command_argv else "queue",
+                "queue_task_id": task_id,
+                "intent": (task.resolved_intent or task_id)[:200],
+                "passed": status == "done",
+                "status": status,
+                "terminal_outcome": terminal_outcome,
+                "cost_usd": float(ts.get("cost_usd") or 0.0),
+                "duration_s": float(ts.get("duration_s") or 0.0),
+                "manifest_path": ts.get("manifest_path"),
+                "primary_log_path": self._queue_run_artifacts(task, ts).get("primary_log_path"),
+                "timestamp": ts.get("finished_at") or now_iso(),
+            },
+        )
+        ts["history_appended"] = True
+
+    def _repair_terminal_queue_history(self, tasks: list[QueueTask], state: dict[str, Any]) -> None:
+        tasks_by_id = {task.id: task for task in tasks}
+        for task_id, ts in state.get("tasks", {}).items():
+            task = tasks_by_id.get(task_id)
+            if task is None:
+                continue
+            status = str(ts.get("status") or "")
+            if status not in {"done", "failed", "cancelled", "removed", INTERRUPTED_STATUS}:
+                continue
+            self._finalize_queue_attempt(task_id, ts)
 
     def _write_state_or_raise(self, state: dict[str, Any]) -> None:
         try:
