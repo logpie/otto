@@ -194,6 +194,10 @@ def _python_bin() -> str:
     return sys.executable
 
 
+def _debug_fast_args() -> list[str]:
+    return ["--fast"] if os.environ.get("OTTO_DEBUG_FAST") == "1" else []
+
+
 def _read_intent(path: Path) -> str:
     return path.read_text(encoding="utf-8").strip()
 
@@ -1365,6 +1369,7 @@ def run_n9(repo: Path, provider: str) -> base.RunResult:
 
     started = base.now_iso()
     budget = ScenarioBudget(_fixture_spec("N9").budget_s)
+    debug_fast_args = _debug_fast_args()
     steps: list[dict[str, Any]] = []
     details: dict[str, Any] = {
         "steps": steps,
@@ -1412,9 +1417,9 @@ def run_n9(repo: Path, provider: str) -> base.RunResult:
     def _start_queue_flow() -> None:
         if runtime["watcher_proc"] is not None:
             return
-        base.queue_build(repo, "add-post", provider, N9_POST_INTENT)
+        base.queue_build(repo, "add-post", provider, N9_POST_INTENT, *debug_fast_args)
         steps.append({"label": "queue-add-post", "rc": 0, "task_id": "add-post"})
-        base.queue_build(repo, "add-delete", provider, N9_DELETE_INTENT)
+        base.queue_build(repo, "add-delete", provider, N9_DELETE_INTENT, *debug_fast_args)
         steps.append({"label": "queue-add-delete", "rc": 0, "task_id": "add-delete"})
         watcher_argv = [
             str(base.OTTO_BIN),
@@ -1474,12 +1479,15 @@ def run_n9(repo: Path, provider: str) -> base.RunResult:
             phase_log.unlink()
         build_run_id = allocate_run_id(repo)
         details["build-run-id"] = build_run_id
+        if debug_fast_args:
+            base.log_line("[N9] OTTO_DEBUG_FAST=1 — using --fast for all otto invocations")
         build_argv = [
             str(base.OTTO_BIN),
             "build",
             "--provider",
             provider,
             "--allow-dirty",
+            *debug_fast_args,
             N9_BUILD_INTENT,
         ]
         build_step = {

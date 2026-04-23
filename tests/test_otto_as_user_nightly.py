@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -65,6 +67,119 @@ def test_main_dry_run_supports_each_core_scenario(capsys) -> None:
         out = capsys.readouterr().out
         assert f"{scenario_id}:" in out
         assert "provider: claude" in out
+
+
+def test_debug_fast_args_respects_env(monkeypatch) -> None:
+    monkeypatch.delenv("OTTO_DEBUG_FAST", raising=False)
+    assert OTTO_AS_USER_NIGHTLY._debug_fast_args() == []
+
+    monkeypatch.setenv("OTTO_DEBUG_FAST", "0")
+    assert OTTO_AS_USER_NIGHTLY._debug_fast_args() == []
+
+    monkeypatch.setenv("OTTO_DEBUG_FAST", "1")
+    assert OTTO_AS_USER_NIGHTLY._debug_fast_args() == ["--fast"]
+
+
+def test_run_n9_uses_fast_args_for_build_and_queue(monkeypatch, tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    artifact_dir = tmp_path / "artifacts"
+    artifact_dir.mkdir()
+    debug_log = artifact_dir / "debug.log"
+    recording_path = artifact_dir / "recording.cast"
+    monkeypatch.setenv("OTTO_DEBUG_FAST", "1")
+
+    scenario = OTTO_AS_USER_NIGHTLY.SCENARIOS["N9"]
+    ctx = OTTO_AS_USER_NIGHTLY.base.ExecutionContext(
+        scenario=scenario,
+        artifact_dir=artifact_dir,
+        repo=repo,
+        provider="claude",
+        debug_log=debug_log,
+        recording_path=recording_path,
+    )
+    monkeypatch.setattr(OTTO_AS_USER_NIGHTLY.base, "EXECUTION_CONTEXT", ctx)
+
+    registry = importlib.import_module("otto.runs.registry")
+    monkeypatch.setattr(registry, "allocate_run_id", lambda repo_arg: "build-run-id")
+    monkeypatch.setattr(registry, "garbage_collect_live_records", lambda repo_arg, terminal_retention_s=0: [])
+    monkeypatch.setattr(registry, "read_live_records", lambda repo_arg: [])
+
+    queue_calls: list[dict[str, object]] = []
+
+    def fake_queue_build(repo_arg: Path, task_id: str, provider: str, intent: str, *extra_inner: str) -> None:
+        queue_calls.append(
+            {
+                "repo": repo_arg,
+                "task_id": task_id,
+                "provider": provider,
+                "intent": intent,
+                "extra_inner": extra_inner,
+            }
+        )
+
+    monkeypatch.setattr(OTTO_AS_USER_NIGHTLY.base, "queue_build", fake_queue_build)
+
+    log_lines: list[str] = []
+    monkeypatch.setattr(OTTO_AS_USER_NIGHTLY.base, "log_line", lambda text: log_lines.append(text))
+
+    @contextmanager
+    def fake_capture_mission_control_action_spawns():
+        yield []
+
+    monkeypatch.setattr(
+        OTTO_AS_USER_NIGHTLY,
+        "_capture_mission_control_action_spawns",
+        fake_capture_mission_control_action_spawns,
+    )
+
+    async def fake_drive_n9_mission_control(**kwargs):
+        kwargs["start_build_flow"]()
+        kwargs["start_queue_flow"]()
+        kwargs["runtime"]["merge_step"] = {
+            "label": "merge-selected",
+            "argv": ["otto", "merge", "add-post"],
+            "rc": 0,
+            "duration_s": 0.1,
+        }
+
+    monkeypatch.setattr(OTTO_AS_USER_NIGHTLY, "_drive_n9_mission_control", fake_drive_n9_mission_control)
+    monkeypatch.setattr(OTTO_AS_USER_NIGHTLY, "_read_terminal_snapshots", lambda repo_arg: [])
+
+    popen_calls: list[dict[str, object]] = []
+
+    class FakePopen:
+        def __init__(self, argv, **kwargs):
+            self.argv = [str(part) for part in argv]
+            self.kwargs = kwargs
+            self.pid = 1000 + len(popen_calls)
+            self._returncode = None
+            popen_calls.append({"argv": self.argv, "kwargs": kwargs, "proc": self})
+
+        def poll(self):
+            return self._returncode
+
+        def wait(self, timeout=None):
+            self._returncode = 0
+            return 0
+
+    monkeypatch.setattr(OTTO_AS_USER_NIGHTLY.subprocess, "Popen", FakePopen)
+
+    result = OTTO_AS_USER_NIGHTLY.run_n9(repo, "claude")
+
+    assert result.returncode == 0
+    assert [call["task_id"] for call in queue_calls] == ["add-post", "add-delete"]
+    assert all(call["extra_inner"] == ("--fast",) for call in queue_calls)
+    assert popen_calls[0]["argv"] == [
+        str(OTTO_AS_USER_NIGHTLY.base.OTTO_BIN),
+        "build",
+        "--provider",
+        "claude",
+        "--allow-dirty",
+        "--fast",
+        OTTO_AS_USER_NIGHTLY.N9_BUILD_INTENT,
+    ]
+    assert log_lines.count("[N9] OTTO_DEBUG_FAST=1 — using --fast for all otto invocations") == 1
 
 
 def test_n9_merge_spawn_matcher_accepts_direct_and_module_argv() -> None:
