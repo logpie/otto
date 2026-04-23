@@ -44,6 +44,29 @@ class _FakePopen:
         return ("", "")
 
 
+class _FakeLongRunningPopen:
+    def __init__(
+        self,
+        argv,
+        *,
+        cwd,
+        stdout,
+        stderr,
+        text,
+    ) -> None:
+        del argv, cwd, stdout, stderr, text
+        self.returncode = None
+        self.pid = 4343
+
+    def poll(self):
+        return self.returncode
+
+    def communicate(self):
+        time.sleep(0.05)
+        self.returncode = 1
+        return ("", "late failure")
+
+
 def _record(
     repo: Path,
     *,
@@ -163,6 +186,7 @@ def test_cancel_falls_back_to_sigterm_after_one_heartbeat(tmp_path: Path, monkey
     )
     record.timing["heartbeat_interval_s"] = 0.05
     sent: list[tuple[int, int]] = []
+    monkeypatch.setattr("otto.tui.mission_control_actions.writer_identity_matches_live_process", lambda writer: True)
     monkeypatch.setattr("otto.tui.mission_control_actions.os.killpg", lambda pgid, sig: sent.append((pgid, sig)))
 
     result = execute_action(record, "c", tmp_path)
@@ -170,6 +194,73 @@ def test_cancel_falls_back_to_sigterm_after_one_heartbeat(tmp_path: Path, monkey
     assert sent == [(321, 15)]
     assert result.ok is False
     assert "cancel unacked" in str(result.message)
+
+
+def test_cancel_skips_sigterm_for_stale_writer_identity(tmp_path: Path, monkeypatch) -> None:
+    record = _record(
+        tmp_path,
+        run_id="atomic-run",
+        domain="atomic",
+        run_type="build",
+        status="running",
+        adapter_key="atomic.build",
+    )
+    record.timing["heartbeat_interval_s"] = 0.05
+    sent: list[tuple[int, int]] = []
+    monkeypatch.setattr("otto.tui.mission_control_actions.writer_identity_matches_live_process", lambda writer: False)
+    monkeypatch.setattr("otto.tui.mission_control_actions.os.killpg", lambda pgid, sig: sent.append((pgid, sig)))
+
+    result = execute_action(record, "c", tmp_path)
+
+    assert sent == []
+    assert result.message == "writer no longer alive — cancel acknowledged via stale state"
+
+
+def test_cancel_rejects_terminalized_live_record_before_append(tmp_path: Path) -> None:
+    record = _record(
+        tmp_path,
+        run_id="atomic-run",
+        domain="atomic",
+        run_type="build",
+        status="running",
+        adapter_key="atomic.build",
+    )
+    write_record(tmp_path, {**record.to_dict(), "status": "done"})
+
+    result = execute_action(record, "c", tmp_path)
+
+    assert result.modal_title == "Cancel unavailable"
+    assert result.message == "run already terminal (done)"
+    assert read_jsonl_rows(paths.session_command_requests(tmp_path, "atomic-run")) == []
+
+
+def test_cancel_rejects_duplicate_pending_cancel_before_append(tmp_path: Path) -> None:
+    record = _record(
+        tmp_path,
+        run_id="atomic-run",
+        domain="atomic",
+        run_type="build",
+        status="running",
+        adapter_key="atomic.build",
+    )
+    append_jsonl_row = {
+        "schema_version": 1,
+        "command_id": "cmd-existing",
+        "run_id": "atomic-run",
+        "domain": "atomic",
+        "kind": "cancel",
+        "requested_at": "2026-04-23T12:00:00Z",
+        "requested_by": {"source": "tui", "pid": os.getpid()},
+        "args": {},
+    }
+    paths.session_command_requests(tmp_path, "atomic-run").parent.mkdir(parents=True, exist_ok=True)
+    paths.session_command_requests(tmp_path, "atomic-run").write_text(json.dumps(append_jsonl_row) + "\n", encoding="utf-8")
+
+    result = execute_action(record, "c", tmp_path)
+
+    rows = read_jsonl_rows(paths.session_command_requests(tmp_path, "atomic-run"))
+    assert len(rows) == 1
+    assert result.message == "cancel already pending"
 
 
 def test_resume_queue_calls_queue_resume_subprocess(tmp_path: Path, monkeypatch) -> None:
@@ -230,17 +321,18 @@ def test_retry_uses_stored_source_argv(tmp_path: Path, monkeypatch) -> None:
 
 def test_requeue_reconstructs_queue_cli_from_stored_task_definition(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("otto.tui.mission_control_actions.subprocess.Popen", _FakePopen)
-    _FakePopen.calls.clear()
-    append_task(
-        tmp_path,
-        QueueTask(
-            id="task-1",
+    monkeypatch.setattr(
+        "otto.tui.mission_control_actions._load_queue_task",
+        lambda project_dir, task_id: QueueTask(
+            id=task_id,
             command_argv=["build", "ship it", "--fast"],
             after=["base-task"],
             added_at="2026-04-23T12:00:00Z",
             resolved_intent="ship it",
         ),
     )
+    monkeypatch.setattr("otto.tui.mission_control_actions.load_queue", lambda project_dir: [])
+    _FakePopen.calls.clear()
     record = _record(
         tmp_path,
         run_id="queue-run",
@@ -254,7 +346,37 @@ def test_requeue_reconstructs_queue_cli_from_stored_task_definition(tmp_path: Pa
     execute_action(record, "R", tmp_path)
 
     argv = _FakePopen.calls[-1]["argv"]
-    assert argv[-7:] == ["queue", "build", "ship it", "--after", "base-task", "--", "--fast"]
+    assert argv[-9:] == ["queue", "build", "ship it", "--after", "base-task", "--as", "task-1", "--", "--fast"]
+
+
+def test_requeue_reports_task_id_collision_modal(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "otto.tui.mission_control_actions._load_queue_task",
+        lambda project_dir, task_id: QueueTask(
+            id=task_id,
+            command_argv=["build", "ship it"],
+            added_at="2026-04-23T12:00:00Z",
+            resolved_intent="ship it",
+        ),
+    )
+    monkeypatch.setattr(
+        "otto.tui.mission_control_actions.load_queue",
+        lambda project_dir: [QueueTask(id="task-1", command_argv=["build", "ship it"], added_at="2026-04-23T12:00:00Z")],
+    )
+    record = _record(
+        tmp_path,
+        run_id="queue-run",
+        domain="queue",
+        run_type="queue",
+        status="done",
+        adapter_key="queue.attempt",
+        queue_task_id="task-1",
+    )
+
+    result = execute_action(record, "R", tmp_path)
+
+    assert result.modal_title == "Requeue failed"
+    assert result.message == "task task-1 already exists — pick a new id or remove the existing first"
 
 
 def test_remove_queued_task_calls_queue_rm(tmp_path: Path, monkeypatch) -> None:
@@ -312,6 +434,23 @@ def test_merge_selected_and_all_shell_out(tmp_path: Path, monkeypatch) -> None:
     assert _FakePopen.calls[1]["argv"][-2:] == ["merge", "--all"]
 
 
+def test_queue_cancel_without_task_id_fails_fast(tmp_path: Path) -> None:
+    record = _record(
+        tmp_path,
+        run_id="queue-run",
+        domain="queue",
+        run_type="queue",
+        status="running",
+        adapter_key="queue.attempt",
+        queue_task_id=None,
+    )
+
+    result = execute_action(record, "c", tmp_path)
+
+    assert result.modal_title == "Cancel unavailable"
+    assert result.message == "queue task id unknown"
+
+
 def test_open_file_uses_editor_env(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("EDITOR", "vim -f")
     monkeypatch.setattr("otto.tui.mission_control_actions.subprocess.Popen", _FakePopen)
@@ -330,6 +469,34 @@ def test_open_file_uses_editor_env(tmp_path: Path, monkeypatch) -> None:
     execute_action(record, "e", tmp_path, selected_artifact_path=str(artifact_path))
 
     assert _FakePopen.calls[-1]["argv"] == ["vim", "-f", str(artifact_path)]
+
+
+def test_long_running_subprocess_reports_late_failure(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("otto.tui.mission_control_actions.subprocess.Popen", _FakeLongRunningPopen)
+    observed: list[ActionResult] = []
+    ready = threading.Event()
+    record = _record(
+        tmp_path,
+        run_id="build-run",
+        domain="atomic",
+        run_type="build",
+        status="failed",
+        adapter_key="atomic.build",
+        argv=["build", "ship it"],
+    )
+
+    result = execute_action(
+        record,
+        "R",
+        tmp_path,
+        post_result=lambda delayed: (observed.append(delayed), ready.set()),
+    )
+
+    assert result.ok is True
+    assert result.message == "retry build launched"
+    assert ready.wait(timeout=1.0) is True
+    assert observed[0].modal_title == "retry build failed"
+    assert observed[0].modal_message == "late failure"
 
 
 def test_disabled_action_reason_surfaces_without_execution(tmp_path: Path, monkeypatch) -> None:

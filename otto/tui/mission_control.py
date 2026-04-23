@@ -38,6 +38,7 @@ class HelpModal(ModalScreen[None]):
                         "Tab / Shift-Tab: cycle panes",
                         "1 / 2 / 3: focus Live / History / Detail",
                         "j/k or Up/Down: move selection",
+                        "Space: toggle multi-select on current live row",
                         "Enter: pin selection and focus Detail",
                         "Esc: return to originating list",
                         "a: toggle active-only live rows",
@@ -220,6 +221,7 @@ class MissionControlApp(App[int]):
         Binding("k", "cursor_up", "Up", show=False, priority=True),
         Binding("down", "cursor_down", "Down", show=False, priority=True),
         Binding("j", "cursor_down", "Down", show=False, priority=True),
+        Binding("space", "toggle_selected", "Select", show=False, priority=True),
         Binding("enter", "open_detail", "Detail", show=False, priority=True),
         Binding("escape", "return_to_origin", "Back", show=False, priority=True),
         Binding("a", "toggle_active_only", "Active Only", show=False),
@@ -341,6 +343,20 @@ class MissionControlApp(App[int]):
     def action_open_detail(self) -> None:
         self._focus_pane("detail")
 
+    def action_toggle_selected(self) -> None:
+        run_id = self.state.selection.run_id
+        if run_id is None:
+            return
+        live_ids = {item.record.run_id for item in self.state.live_runs.items}
+        if run_id not in live_ids:
+            return
+        if run_id in self.state.selected_run_ids:
+            self.state.selected_run_ids.remove(run_id)
+        else:
+            self.state.selected_run_ids.add(run_id)
+        self._render_status()
+        self._render_footer()
+
     def action_return_to_origin(self) -> None:
         self._focus_pane(self.state.selection.origin_pane)
 
@@ -401,6 +417,28 @@ class MissionControlApp(App[int]):
         detail = self.model.detail_view(self.state)
         if detail is None:
             self.notify("no selection", severity="warning")
+            return
+        if key == "m" and self.state.selected_run_ids:
+            selected_queue_task_ids = self._selected_queue_task_ids(detail, key)
+            if not selected_queue_task_ids:
+                message = "no selected done queue rows"
+                self._action_banner = message
+                self._render_banner()
+                self.notify(message, severity="warning")
+                return
+            self._action_banner = "merge selected requested..."
+            self._render_banner()
+            self.run_worker(
+                lambda: self._execute_detail_action(
+                    detail.record,
+                    key,
+                    selected_queue_task_ids=selected_queue_task_ids,
+                ),
+                name=f"mission-control-action:{key}",
+                group="mission-control-actions",
+                thread=True,
+                exit_on_error=False,
+            )
             return
         for action in detail.legal_actions:
             if action.key == key:
@@ -575,6 +613,7 @@ class MissionControlApp(App[int]):
                     f"focus={self.state.focus}",
                     f"type={self.state.filters.type_filter}",
                     f"active_only={'on' if self.state.filters.active_only else 'off'}",
+                    f"selected={len(self.state.selected_run_ids)}",
                     f"query={query}",
                     f"history={self.state.history_page.page + 1}/{self.state.history_page.total_pages}",
                     f"rows={self.state.live_runs.total_count} live, {self.state.history_page.total_rows} history",
@@ -586,7 +625,7 @@ class MissionControlApp(App[int]):
         prefix = "queue compat" if self.queue_compat else "mission control"
         follow = "follow=on" if self._follow_log else "follow=off"
         self.query_one("#footer", Static).update(
-            f"{prefix} | Tab cycle panes | 1/2/3 focus | / filter | ? help | a active | t type | f outcome | c/r/R/x/m/M/e actions | o logs | s {follow}"
+            f"{prefix} | Tab cycle panes | 1/2/3 focus | space select | / filter | ? help | a active | t type | f outcome | c/r/R/x/m/M/e actions | o logs | s {follow}"
         )
 
     def _highlight_panes(self) -> None:
@@ -731,6 +770,7 @@ class MissionControlApp(App[int]):
             self.project_dir,
             selected_artifact_path=selected_artifact_path,
             selected_queue_task_ids=selected_queue_task_ids,
+            post_result=lambda result: self.call_from_thread(self._handle_action_result, result),
         )
 
     def _execute_merge_all(self) -> ActionResult:
@@ -758,6 +798,17 @@ class MissionControlApp(App[int]):
     def _selected_queue_task_ids(self, detail, key: str) -> list[str] | None:
         if key != "m":
             return None
+        if self.state.selected_run_ids:
+            task_ids = [
+                str(item.record.identity.get("queue_task_id"))
+                for item in self.state.live_runs.items
+                if item.record.run_id in self.state.selected_run_ids
+                and item.record.domain == "queue"
+                and item.record.status == "done"
+                and item.record.identity.get("queue_task_id")
+            ]
+            if task_ids:
+                return task_ids
         task_id = detail.record.identity.get("queue_task_id")
         return [str(task_id)] if task_id else None
 

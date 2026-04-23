@@ -21,7 +21,7 @@ def _run(args: list[str], *, cwd: Path) -> tuple[int, str]:
     return result.exit_code, result.output
 
 
-def test_cleanup_cli_removes_terminal_live_record_and_writes_tombstone(tmp_path: Path) -> None:
+def test_cleanup_cli_removes_terminal_live_record_and_writes_tombstone(tmp_path: Path, monkeypatch) -> None:
     record = make_run_record(
         project_dir=tmp_path,
         run_id="atomic-run",
@@ -34,6 +34,7 @@ def test_cleanup_cli_removes_terminal_live_record_and_writes_tombstone(tmp_path:
         adapter_key="atomic.build",
     )
     write_record(tmp_path, record)
+    monkeypatch.setattr("otto.runs.registry.writer_identity_gone_or_stale", lambda writer: True)
 
     code, out = _run(["cleanup", "atomic-run"], cwd=tmp_path)
 
@@ -63,3 +64,47 @@ def test_cleanup_live_record_rejects_non_terminal(tmp_path: Path) -> None:
         assert "not terminal" in str(exc)
     else:
         raise AssertionError("expected ValueError for non-terminal run")
+
+
+def test_cleanup_live_record_rejects_terminal_run_while_writer_alive(tmp_path: Path, monkeypatch) -> None:
+    record = make_run_record(
+        project_dir=tmp_path,
+        run_id="atomic-run",
+        domain="atomic",
+        run_type="build",
+        command="build",
+        display_name="build",
+        status="failed",
+        cwd=tmp_path,
+        adapter_key="atomic.build",
+    )
+    write_record(tmp_path, record)
+    monkeypatch.setattr("otto.runs.registry.writer_identity_gone_or_stale", lambda writer: False)
+
+    try:
+        cleanup_live_record(tmp_path, "atomic-run")
+    except ValueError as exc:
+        assert str(exc) == "writer still alive — wait for finalization"
+    else:
+        raise AssertionError("expected ValueError for live writer")
+
+
+def test_cleanup_cli_rejects_writer_alive(tmp_path: Path, monkeypatch) -> None:
+    record = make_run_record(
+        project_dir=tmp_path,
+        run_id="atomic-run",
+        domain="atomic",
+        run_type="build",
+        command="build",
+        display_name="build",
+        status="failed",
+        cwd=tmp_path,
+        adapter_key="atomic.build",
+    )
+    write_record(tmp_path, record)
+    monkeypatch.setattr("otto.runs.registry.writer_identity_gone_or_stale", lambda writer: False)
+
+    code, out = _run(["cleanup", "atomic-run"], cwd=tmp_path)
+
+    assert code == 2
+    assert "writer still alive — wait for finalization" in out

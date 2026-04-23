@@ -150,6 +150,8 @@ def garbage_collect_live_records(
                 continue
             if not is_terminal_status(record.status):
                 continue
+            if not writer_identity_gone_or_stale(record.writer):
+                continue
             finished_at = _parse_iso(record.timing.get("finished_at") or record.timing.get("updated_at"))
             if finished_at is None:
                 continue
@@ -177,9 +179,18 @@ def cleanup_live_record(project_dir: Path, run_id: str) -> RunRecord:
         record = _read_record_path(path)
         if not is_terminal_status(record.status):
             raise ValueError(f"run {run_id} is not terminal")
+        if not writer_identity_gone_or_stale(record.writer):
+            raise ValueError("writer still alive — wait for finalization")
         _append_tombstone(project_dir, record)
         path.unlink(missing_ok=True)
         return record
+
+
+def load_live_record(project_dir: Path, run_id: str) -> RunRecord:
+    path = paths.live_run_path(project_dir, run_id)
+    if not path.exists():
+        raise FileNotFoundError(run_id)
+    return _read_record_path(path)
 
 
 def current_writer_identity(writer_id: str) -> dict[str, Any]:
@@ -201,6 +212,63 @@ def current_writer_identity(writer_id: str) -> dict[str, Any]:
         "boot_id": _boot_id(),
         "process_start_time_ns": start_time_ns,
     }
+
+
+def writer_identity_matches_live_process(writer: dict[str, Any]) -> bool:
+    if not writer:
+        return False
+    pid = writer.get("pid")
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    expected_pgid = writer.get("pgid")
+    expected_start_ns = writer.get("process_start_time_ns")
+    expected_boot_id = str(writer.get("boot_id") or "").strip()
+    if expected_boot_id:
+        current_boot_id = _boot_id()
+        if current_boot_id and current_boot_id != expected_boot_id:
+            return False
+    try:
+        import psutil
+
+        try:
+            proc = psutil.Process(pid)
+        except psutil.NoSuchProcess:
+            return False
+        if isinstance(expected_start_ns, int):
+            try:
+                actual_start_ns = int(proc.create_time() * 1_000_000_000)
+            except (psutil.NoSuchProcess, ProcessLookupError):
+                return False
+            if abs(actual_start_ns - expected_start_ns) > 100_000_000:
+                return False
+        if isinstance(expected_pgid, int):
+            try:
+                actual_pgid = os.getpgid(pid)
+            except ProcessLookupError:
+                return False
+            if actual_pgid != expected_pgid:
+                return False
+        return proc.is_running()
+    except ImportError:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            pass
+        if isinstance(expected_pgid, int):
+            try:
+                if os.getpgid(pid) != expected_pgid:
+                    return False
+            except ProcessLookupError:
+                return False
+        return True
+
+
+def writer_identity_gone_or_stale(writer: dict[str, Any]) -> bool:
+    if not writer:
+        return True
+    return not writer_identity_matches_live_process(writer)
 
 
 def make_run_record(

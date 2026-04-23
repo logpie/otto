@@ -39,7 +39,7 @@ def test_allocate_run_id_multiprocess_race(tmp_path: Path) -> None:
     assert len(ids) == len(set(ids))
 
 
-def test_write_and_gc_live_record_appends_tombstone(tmp_path: Path) -> None:
+def test_write_and_gc_live_record_appends_tombstone(tmp_path: Path, monkeypatch) -> None:
     run_id = allocate_run_id(tmp_path)
     record = make_run_record(
         project_dir=tmp_path,
@@ -53,6 +53,7 @@ def test_write_and_gc_live_record_appends_tombstone(tmp_path: Path) -> None:
     )
     record.timing["finished_at"] = "2026-04-20T00:00:00Z"
     write_record(tmp_path, record)
+    monkeypatch.setattr("otto.runs.registry.writer_identity_gone_or_stale", lambda writer: True)
 
     removed = garbage_collect_live_records(
         tmp_path,
@@ -65,6 +66,32 @@ def test_write_and_gc_live_record_appends_tombstone(tmp_path: Path) -> None:
     row = json.loads(tombstones[0])
     assert row["run_id"] == run_id
     assert row["status"] == "done"
+
+
+def test_gc_skips_terminal_record_while_writer_alive(tmp_path: Path, monkeypatch) -> None:
+    run_id = allocate_run_id(tmp_path)
+    record = make_run_record(
+        project_dir=tmp_path,
+        run_id=run_id,
+        domain="atomic",
+        run_type="build",
+        command="build",
+        display_name="build: test",
+        status="done",
+        cwd=tmp_path,
+    )
+    record.timing["finished_at"] = "2026-04-20T00:00:00Z"
+    write_record(tmp_path, record)
+    monkeypatch.setattr("otto.runs.registry.writer_identity_gone_or_stale", lambda writer: False)
+
+    removed = garbage_collect_live_records(
+        tmp_path,
+        terminal_retention_s=1.0,
+        now=datetime(2026, 4, 23, tzinfo=timezone.utc),
+    )
+
+    assert removed == []
+    assert paths.live_run_path(tmp_path, run_id).exists()
 
 
 def test_read_live_records_skips_malformed_rows(tmp_path: Path) -> None:

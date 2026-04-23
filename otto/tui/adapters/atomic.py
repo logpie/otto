@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from otto.queue.runtime import INTERRUPTED_STATUS
+from otto.runs.registry import writer_identity_gone_or_stale
 from otto.runs.schema import RunRecord
 from otto.runs.schema import is_terminal_status
 from otto.tui.mission_control_actions import ActionResult, execute_action, make_action
@@ -64,6 +65,7 @@ class AtomicMissionControlAdapter:
         )
         argv = record.source.get("argv")
         argv_preview = " ".join(str(part) for part in (argv or []))
+        cleanup_enabled = is_terminal_status(record.status) and writer_identity_gone_or_stale(record.writer)
         return [
             make_action(
                 "c",
@@ -124,8 +126,14 @@ class AtomicMissionControlAdapter:
             make_action(
                 "x",
                 "cleanup",
-                enabled=is_terminal_status(record.status),
-                reason=None if is_terminal_status(record.status) else "run is still active",
+                enabled=cleanup_enabled,
+                reason=(
+                    None
+                    if cleanup_enabled
+                    else "run is still active"
+                    if not is_terminal_status(record.status)
+                    else "writer still alive — wait for finalization"
+                ),
                 preview=f"would clean terminal artifacts for {record.run_id}",
             ),
             make_action(
@@ -152,6 +160,7 @@ class AtomicMissionControlAdapter:
         *,
         selected_artifact_path: str | None = None,
         selected_queue_task_ids: list[str] | None = None,
+        post_result=None,
     ) -> ActionResult:
         return execute_action(
             record,
@@ -159,6 +168,7 @@ class AtomicMissionControlAdapter:
             project_dir,
             selected_artifact_path=selected_artifact_path,
             selected_queue_task_ids=selected_queue_task_ids,
+            post_result=post_result,
         )
 
     def detail_panel_renderer(self, record) -> DetailModel:

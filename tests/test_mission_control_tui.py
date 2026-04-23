@@ -309,6 +309,7 @@ async def test_mission_control_keybinds_dispatch_real_actions(tmp_path: Path) ->
         artifacts={"summary_path": str(artifact_path), "primary_log_path": str(failed_log)},
         adapter_key="atomic.build",
     )
+    failed.writer.update({"pid": 999999, "pgid": 999999, "process_start_time_ns": 1, "boot_id": ""})
     queue_done = make_run_record(
         project_dir=repo,
         run_id="queue-done",
@@ -377,3 +378,72 @@ async def test_mission_control_keybinds_dispatch_real_actions(tmp_path: Path) ->
     assert ("build-failed", "e", str(artifact_path), None) in calls
     assert ("queue-done", "m", None, ["task-1"]) in calls
     assert merge_all_calls == ["M"]
+
+
+@pytest.mark.asyncio
+async def test_mission_control_space_selects_multiple_queue_rows_for_merge(tmp_path: Path) -> None:
+    repo = tmp_path
+    queue_a_log = paths.build_dir(repo, "queue-a") / "narrative.log"
+    queue_a_log.parent.mkdir(parents=True, exist_ok=True)
+    queue_a_log.write_text("a\n")
+    queue_b_log = paths.build_dir(repo, "queue-b") / "narrative.log"
+    queue_b_log.parent.mkdir(parents=True, exist_ok=True)
+    queue_b_log.write_text("b\n")
+
+    queue_a = make_run_record(
+        project_dir=repo,
+        run_id="queue-a",
+        domain="queue",
+        run_type="queue",
+        command="queue",
+        display_name="queue a",
+        status="done",
+        cwd=repo,
+        identity={"queue_task_id": "task-a", "merge_id": None, "parent_run_id": None},
+        artifacts={"primary_log_path": str(queue_a_log)},
+        adapter_key="queue.attempt",
+    )
+    queue_b = make_run_record(
+        project_dir=repo,
+        run_id="queue-b",
+        domain="queue",
+        run_type="queue",
+        command="queue",
+        display_name="queue b",
+        status="done",
+        cwd=repo,
+        identity={"queue_task_id": "task-b", "merge_id": None, "parent_run_id": None},
+        artifacts={"primary_log_path": str(queue_b_log)},
+        adapter_key="queue.attempt",
+    )
+    for record in (queue_a, queue_b):
+        write_record(repo, record)
+
+    app = MissionControlApp(repo, initial_filters=MissionControlFilters(type_filter="queue"))
+    calls: list[tuple[str, str, list[str] | None]] = []
+
+    def _fake_execute(record, action_kind, *, selected_artifact_path=None, selected_queue_task_ids=None):
+        del selected_artifact_path
+        calls.append((record.run_id, action_kind, selected_queue_task_ids))
+        return ActionResult(ok=True, clear_banner=True)
+
+    app._execute_detail_action = _fake_execute
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("space")
+        await pilot.pause()
+        await pilot.press("down")
+        await pilot.pause()
+        await pilot.press("space")
+        await pilot.pause()
+
+        status_bar = app.query_one("#status-bar", Static)
+        footer = app.query_one("#footer", Static)
+        assert "selected=2" in str(status_bar.content)
+        assert "space select" in str(footer.content)
+
+        await pilot.press("m")
+        await pilot.pause()
+
+    assert calls == [("queue-b", "m", ["task-a", "task-b"])]

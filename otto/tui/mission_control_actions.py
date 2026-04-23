@@ -12,12 +12,19 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from otto import paths
 from otto.queue.schema import QueueTask, load_queue
-from otto.runs.registry import append_jsonl_row, load_command_ack_ids, utc_now_iso
-from otto.runs.schema import RunRecord
+from otto.runs.registry import (
+    append_jsonl_row,
+    load_command_ack_ids,
+    load_live_record,
+    read_jsonl_rows,
+    utc_now_iso,
+    writer_identity_matches_live_process,
+)
+from otto.runs.schema import RunRecord, is_terminal_status
 
 _COMMAND_COUNTER = itertools.count(1)
 
@@ -60,20 +67,31 @@ def execute_action(
     *,
     selected_artifact_path: str | None = None,
     selected_queue_task_ids: list[str] | None = None,
+    post_result: Callable[[ActionResult], None] | None = None,
 ) -> ActionResult:
     project_dir = Path(project_dir)
     if action_kind == "c":
         return _execute_cancel(record, project_dir)
     if action_kind == "r":
-        return _execute_resume(record, project_dir)
+        return _execute_resume(record, project_dir, post_result=post_result)
     if action_kind == "R":
-        return _execute_retry(record, project_dir)
+        return _execute_retry(record, project_dir, post_result=post_result)
     if action_kind == "x":
-        return _execute_remove_or_cleanup(record, project_dir)
+        return _execute_remove_or_cleanup(record, project_dir, post_result=post_result)
     if action_kind == "m":
-        return _execute_merge_selected(record, project_dir, selected_queue_task_ids=selected_queue_task_ids)
+        return _execute_merge_selected(
+            record,
+            project_dir,
+            selected_queue_task_ids=selected_queue_task_ids,
+            post_result=post_result,
+        )
     if action_kind == "e":
-        return _execute_open_editor(record, project_dir, selected_artifact_path=selected_artifact_path)
+        return _execute_open_editor(
+            record,
+            project_dir,
+            selected_artifact_path=selected_artifact_path,
+            post_result=post_result,
+        )
     return ActionResult(
         ok=False,
         message="action unavailable",
@@ -90,7 +108,19 @@ def execute_merge_all(project_dir: Path) -> ActionResult:
 
 
 def _execute_cancel(record: RunRecord, project_dir: Path) -> ActionResult:
-    request_path, ack_path, args = _cancel_paths_and_args(record, project_dir)
+    try:
+        request_path, processing_path, ack_path, args = _cancel_paths_and_args(record, project_dir)
+    except ValueError as exc:
+        return _warning_result("Cancel unavailable", str(exc))
+    unavailable = _cancel_unavailable_result(
+        record,
+        project_dir,
+        request_path=request_path,
+        processing_path=processing_path,
+        ack_path=ack_path,
+    )
+    if unavailable is not None:
+        return unavailable
     command_id = _next_command_id()
     envelope = {
         "schema_version": 1,
@@ -112,10 +142,18 @@ def _execute_cancel(record: RunRecord, project_dir: Path) -> ActionResult:
         if command_id in load_command_ack_ids(ack_path):
             return ActionResult(ok=True, refresh=True, clear_banner=True)
         time.sleep(0.05)
-    if _send_sigterm_fallback(record):
+    sent_sigterm, fallback_message = _send_sigterm_fallback(record)
+    if sent_sigterm:
         return ActionResult(
             ok=False,
             message=f"cancel unacked; sent SIGTERM to pgid {record.writer.get('pgid')}",
+            severity="warning",
+            refresh=True,
+        )
+    if fallback_message:
+        return ActionResult(
+            ok=False,
+            message=fallback_message,
             severity="warning",
             refresh=True,
         )
@@ -127,7 +165,12 @@ def _execute_cancel(record: RunRecord, project_dir: Path) -> ActionResult:
     )
 
 
-def _execute_resume(record: RunRecord, project_dir: Path) -> ActionResult:
+def _execute_resume(
+    record: RunRecord,
+    project_dir: Path,
+    *,
+    post_result: Callable[[ActionResult], None] | None,
+) -> ActionResult:
     if record.domain == "queue":
         task_id = _queue_task_id(record)
         if not task_id:
@@ -136,6 +179,7 @@ def _execute_resume(record: RunRecord, project_dir: Path) -> ActionResult:
             _otto_cli_argv("queue", "resume", task_id),
             cwd=project_dir,
             description=f"resume {task_id}",
+            post_result=post_result,
         )
     if record.domain == "merge":
         return _error_result("Resume unavailable", "merge --resume is deferred")
@@ -153,15 +197,22 @@ def _execute_resume(record: RunRecord, project_dir: Path) -> ActionResult:
             _otto_cli_argv("improve", subcommand, "--resume"),
             cwd=cwd,
             description=f"resume improve {subcommand}",
+            post_result=post_result,
         )
     return _launch_process(
         _otto_cli_argv(record.run_type, "--resume"),
         cwd=cwd,
         description=f"resume {record.run_type}",
+        post_result=post_result,
     )
 
 
-def _execute_retry(record: RunRecord, project_dir: Path) -> ActionResult:
+def _execute_retry(
+    record: RunRecord,
+    project_dir: Path,
+    *,
+    post_result: Callable[[ActionResult], None] | None,
+) -> ActionResult:
     if record.domain == "queue":
         queue_task_id = _queue_task_id(record)
         if not queue_task_id:
@@ -172,8 +223,16 @@ def _execute_retry(record: RunRecord, project_dir: Path) -> ActionResult:
             return _error_result("Requeue failed", str(exc))
         argv = _reconstruct_queue_command(task, existing_task_ids={t.id for t in load_queue(project_dir)})
         if argv is None:
-            return _error_result("Requeue failed", f"task id collision for {queue_task_id}")
-        return _launch_process(argv, cwd=project_dir, description=f"requeue {queue_task_id}")
+            return _warning_result(
+                "Requeue failed",
+                f"task {queue_task_id} already exists — pick a new id or remove the existing first",
+            )
+        return _launch_process(
+            argv,
+            cwd=project_dir,
+            description=f"requeue {queue_task_id}",
+            post_result=post_result,
+        )
 
     argv = record.source.get("argv")
     if not isinstance(argv, list) or not argv or not all(isinstance(part, str) and part for part in argv):
@@ -185,10 +244,16 @@ def _execute_retry(record: RunRecord, project_dir: Path) -> ActionResult:
         _otto_cli_argv(*argv),
         cwd=cwd,
         description=f"retry {record.run_type}",
+        post_result=post_result,
     )
 
 
-def _execute_remove_or_cleanup(record: RunRecord, project_dir: Path) -> ActionResult:
+def _execute_remove_or_cleanup(
+    record: RunRecord,
+    project_dir: Path,
+    *,
+    post_result: Callable[[ActionResult], None] | None,
+) -> ActionResult:
     if record.domain == "queue":
         task_id = _queue_task_id(record)
         if not task_id:
@@ -198,17 +263,20 @@ def _execute_remove_or_cleanup(record: RunRecord, project_dir: Path) -> ActionRe
                 _otto_cli_argv("queue", "rm", task_id),
                 cwd=project_dir,
                 description=f"remove {task_id}",
+                post_result=post_result,
             )
         return _launch_process(
             _otto_cli_argv("queue", "cleanup", task_id),
             cwd=project_dir,
             description=f"cleanup {task_id}",
+            post_result=post_result,
         )
 
     return _launch_process(
         _otto_cli_argv("cleanup", record.run_id),
         cwd=project_dir,
         description=f"cleanup {record.run_id}",
+        post_result=post_result,
     )
 
 
@@ -217,6 +285,7 @@ def _execute_merge_selected(
     project_dir: Path,
     *,
     selected_queue_task_ids: list[str] | None,
+    post_result: Callable[[ActionResult], None] | None,
 ) -> ActionResult:
     task_ids = [task_id for task_id in (selected_queue_task_ids or []) if task_id]
     if not task_ids:
@@ -229,6 +298,7 @@ def _execute_merge_selected(
         _otto_cli_argv("merge", *task_ids),
         cwd=project_dir,
         description=f"merge {' '.join(task_ids)}",
+        post_result=post_result,
     )
 
 
@@ -237,6 +307,7 @@ def _execute_open_editor(
     project_dir: Path,
     *,
     selected_artifact_path: str | None,
+    post_result: Callable[[ActionResult], None] | None,
 ) -> ActionResult:
     if not selected_artifact_path:
         return _error_result("Editor launch failed", "no selectable artifact")
@@ -251,24 +322,31 @@ def _execute_open_editor(
         [*editor_argv, selected_artifact_path],
         cwd=project_dir,
         description=f"open {selected_artifact_path}",
+        post_result=post_result,
     )
 
 
-def _cancel_paths_and_args(record: RunRecord, project_dir: Path) -> tuple[Path, Path, dict[str, Any]]:
+def _cancel_paths_and_args(record: RunRecord, project_dir: Path) -> tuple[Path, Path, Path, dict[str, Any]]:
     if record.domain == "queue":
+        task_id = _queue_task_id(record)
+        if not task_id:
+            raise ValueError("queue task id unknown")
         return (
             paths.queue_commands_path(project_dir),
+            paths.queue_commands_processing_path(project_dir),
             paths.queue_command_acks_path(project_dir),
-            {"task_id": _queue_task_id(record)},
+            {"task_id": task_id},
         )
     if record.domain == "merge":
         return (
             paths.merge_command_requests(project_dir),
+            paths.merge_command_requests_processing(project_dir),
             paths.merge_command_acks(project_dir),
             {},
         )
     return (
         paths.session_command_requests(project_dir, record.run_id),
+        paths.session_command_requests_processing(project_dir, record.run_id),
         paths.session_command_acks(project_dir, record.run_id),
         {},
     )
@@ -313,15 +391,22 @@ def _reconstruct_queue_command(task: QueueTask, *, existing_task_ids: set[str]) 
 
     for after_id in task.after:
         args.extend(["--after", after_id])
-    if task.id not in existing_task_ids:
-        args.extend(["--as", task.id])
+    if task.id in existing_task_ids:
+        return None
+    args.extend(["--as", task.id])
     if passthrough:
         args.append("--")
         args.extend(passthrough)
     return _otto_cli_argv(*args)
 
 
-def _launch_process(argv: list[str], *, cwd: Path, description: str) -> ActionResult:
+def _launch_process(
+    argv: list[str],
+    *,
+    cwd: Path,
+    description: str,
+    post_result: Callable[[ActionResult], None] | None = None,
+) -> ActionResult:
     try:
         proc = subprocess.Popen(
             argv,
@@ -338,7 +423,7 @@ def _launch_process(argv: list[str], *, cwd: Path, description: str) -> ActionRe
             break
         time.sleep(0.05)
     if proc.poll() is None:
-        _drain_process_output(proc)
+        _watch_process_completion(proc, description=description, post_result=post_result)
         return ActionResult(ok=True, message=f"{description} launched", refresh=True)
 
     stdout, stderr = proc.communicate()
@@ -348,26 +433,64 @@ def _launch_process(argv: list[str], *, cwd: Path, description: str) -> ActionRe
     return _error_result(f"{description} failed", detail)
 
 
-def _drain_process_output(proc: subprocess.Popen[str]) -> None:
+def _watch_process_completion(
+    proc: subprocess.Popen[str],
+    *,
+    description: str,
+    post_result: Callable[[ActionResult], None] | None,
+) -> None:
     def _drain() -> None:
         try:
-            proc.communicate()
+            stdout, stderr = proc.communicate()
         except Exception:
             return
+        if proc.returncode == 0 or post_result is None:
+            return
+        detail = (stderr or stdout or f"process exited with {proc.returncode}").strip()
+        post_result(_error_result(f"{description} failed", detail))
 
     thread = threading.Thread(target=_drain, name=f"mission-control-drain-{proc.pid}", daemon=True)
     thread.start()
 
 
-def _send_sigterm_fallback(record: RunRecord) -> bool:
+def _send_sigterm_fallback(record: RunRecord) -> tuple[bool, str | None]:
     pgid = record.writer.get("pgid")
     if not isinstance(pgid, int) or pgid <= 0:
-        return False
+        return False, None
+    if not writer_identity_matches_live_process(record.writer):
+        return False, "writer no longer alive — cancel acknowledged via stale state"
     try:
         os.killpg(pgid, signal.SIGTERM)
     except (OSError, ProcessLookupError, PermissionError):
-        return False
-    return True
+        return False, None
+    return True, None
+
+
+def _cancel_unavailable_result(
+    record: RunRecord,
+    project_dir: Path,
+    *,
+    request_path: Path,
+    processing_path: Path,
+    ack_path: Path,
+) -> ActionResult | None:
+    try:
+        live_record = load_live_record(project_dir, record.run_id)
+    except FileNotFoundError:
+        return _warning_result("Cancel unavailable", "live run record no longer exists")
+    if is_terminal_status(live_record.status):
+        return _warning_result("Cancel unavailable", f"run already terminal ({live_record.status})")
+    acked = load_command_ack_ids(ack_path)
+    for path in (request_path, processing_path):
+        for row in read_jsonl_rows(path):
+            if str(row.get("run_id") or "") != record.run_id:
+                continue
+            if str(row.get("kind") or "") != "cancel":
+                continue
+            command_id = str(row.get("command_id") or "")
+            if command_id and command_id not in acked:
+                return _warning_result("Cancel unavailable", "cancel already pending")
+    return None
 
 
 def _otto_cli_argv(*args: str) -> list[str]:
@@ -410,4 +533,15 @@ def _error_result(title: str, message: str) -> ActionResult:
         modal_title=title,
         modal_message=message,
         message=message,
+    )
+
+
+def _warning_result(title: str, message: str) -> ActionResult:
+    return ActionResult(
+        ok=False,
+        severity="warning",
+        modal_title=title,
+        modal_message=message,
+        message=message,
+        refresh=True,
     )

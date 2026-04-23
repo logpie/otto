@@ -10,7 +10,7 @@ from otto import paths
 from otto.manifest import queue_index_path_for
 from otto.queue.runtime import INTERRUPTED_STATUS, checkpoint_path_for_task, task_display_status
 from otto.queue.schema import load_queue, load_state
-from otto.runs.registry import make_run_record
+from otto.runs.registry import make_run_record, writer_identity_gone_or_stale
 from otto.runs.schema import RunRecord
 from otto.runs.schema import is_terminal_status
 from otto.tui.mission_control_actions import ActionResult, execute_action, make_action
@@ -85,6 +85,7 @@ class QueueMissionControlAdapter:
 
     def legal_actions(self, record, overlay):
         task_id = str(record.identity.get("queue_task_id") or record.run_id).strip()
+        queue_task_id = str(record.identity.get("queue_task_id") or "").strip()
         warning = str(record.identity.get("compatibility_warning") or "").strip()
         checkpoint_path = str(record.artifacts.get("checkpoint_path") or "").strip()
         primary_log = str(record.artifacts.get("primary_log_path") or "").strip()
@@ -96,14 +97,28 @@ class QueueMissionControlAdapter:
         argv_preview = " ".join(str(part) for part in (argv or []))
         legacy_logs_reason = "legacy queue mode has no registry-backed log view"
         legacy_artifacts_reason = "legacy queue mode has no registry-backed artifacts"
+        cleanup_enabled = record.status == "queued" or (is_terminal_status(record.status) and writer_identity_gone_or_stale(record.writer))
+        cleanup_reason = (
+            None
+            if cleanup_enabled
+            else "run is still active"
+            if not is_terminal_status(record.status)
+            else "writer still alive — wait for finalization"
+        )
         return [
             make_action(
                 "c",
                 "cancel",
-                enabled=not is_terminal_status(record.status) and not (overlay is not None and overlay.level == "stale"),
+                enabled=(
+                    bool(queue_task_id)
+                    and not is_terminal_status(record.status)
+                    and not (overlay is not None and overlay.level == "stale")
+                ),
                 reason=(
                     "run already terminal"
                     if is_terminal_status(record.status)
+                    else "queue task id unknown"
+                    if not queue_task_id
                     else "writer unavailable (stale overlay)"
                     if overlay is not None and overlay.level == "stale"
                     else None
@@ -149,8 +164,8 @@ class QueueMissionControlAdapter:
             make_action(
                 "x",
                 "remove" if record.status == "queued" else "cleanup",
-                enabled=record.status == "queued" or is_terminal_status(record.status),
-                reason=None if record.status == "queued" or is_terminal_status(record.status) else "run is still active",
+                enabled=cleanup_enabled,
+                reason=cleanup_reason,
                 preview=(
                     f"would shell `otto queue rm {task_id}`"
                     if record.status == "queued"
@@ -213,6 +228,7 @@ class QueueMissionControlAdapter:
         *,
         selected_artifact_path: str | None = None,
         selected_queue_task_ids: list[str] | None = None,
+        post_result=None,
     ) -> ActionResult:
         return execute_action(
             record,
@@ -220,6 +236,7 @@ class QueueMissionControlAdapter:
             project_dir,
             selected_artifact_path=selected_artifact_path,
             selected_queue_task_ids=selected_queue_task_ids,
+            post_result=post_result,
         )
 
     def detail_panel_renderer(self, record) -> DetailModel:

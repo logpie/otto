@@ -87,6 +87,43 @@ def test_queue_adapter_includes_queue_manifest_and_merge_action_preview(tmp_path
     assert "otto merge queue-task" in actions["m"].preview
 
 
+def test_queue_adapter_disables_cancel_without_task_id_and_cleanup_while_writer_alive(tmp_path: Path, monkeypatch) -> None:
+    record = make_run_record(
+        project_dir=tmp_path,
+        run_id="queue-run",
+        domain="queue",
+        run_type="queue",
+        command="queue",
+        display_name="queue task",
+        status="done",
+        cwd=tmp_path,
+        identity={"queue_task_id": None, "merge_id": None, "parent_run_id": None},
+        adapter_key="queue.attempt",
+    )
+    active = make_run_record(
+        project_dir=tmp_path,
+        run_id="queue-active",
+        domain="queue",
+        run_type="queue",
+        command="queue",
+        display_name="queue active",
+        status="running",
+        cwd=tmp_path,
+        identity={"queue_task_id": None, "merge_id": None, "parent_run_id": None},
+        adapter_key="queue.attempt",
+    )
+    monkeypatch.setattr("otto.tui.adapters.queue.writer_identity_gone_or_stale", lambda writer: False)
+
+    adapter = adapter_for_key("queue.attempt")
+    done_actions = {action.key: action for action in adapter.legal_actions(record, None)}
+    active_actions = {action.key: action for action in adapter.legal_actions(active, None)}
+
+    assert active_actions["c"].enabled is False
+    assert active_actions["c"].reason == "queue task id unknown"
+    assert done_actions["x"].enabled is False
+    assert done_actions["x"].reason == "writer still alive — wait for finalization"
+
+
 def test_queue_adapter_legacy_mode_disables_registry_dependent_actions(tmp_path: Path) -> None:
     record = make_run_record(
         project_dir=tmp_path,
@@ -194,3 +231,39 @@ def test_merge_adapter_renders_state_details(tmp_path: Path) -> None:
     assert actions["c"].reason == "writer unavailable (stale overlay)"
     assert actions["r"].enabled is False
     assert actions["r"].reason == "merge --resume is deferred"
+
+
+def test_atomic_and_merge_cleanup_wait_for_writer_finalization(tmp_path: Path, monkeypatch) -> None:
+    atomic = make_run_record(
+        project_dir=tmp_path,
+        run_id="atomic-run",
+        domain="atomic",
+        run_type="build",
+        command="build",
+        display_name="atomic",
+        status="failed",
+        cwd=tmp_path,
+        adapter_key="atomic.build",
+    )
+    merge = make_run_record(
+        project_dir=tmp_path,
+        run_id="merge-run",
+        domain="merge",
+        run_type="merge",
+        command="merge",
+        display_name="merge",
+        status="failed",
+        cwd=tmp_path,
+        identity={"merge_id": "merge-run", "queue_task_id": None, "parent_run_id": None},
+        adapter_key="merge.run",
+    )
+    monkeypatch.setattr("otto.tui.adapters.atomic.writer_identity_gone_or_stale", lambda writer: False)
+    monkeypatch.setattr("otto.tui.adapters.merge.writer_identity_gone_or_stale", lambda writer: False)
+
+    atomic_actions = {action.key: action for action in adapter_for_key("atomic.build").legal_actions(atomic, None)}
+    merge_actions = {action.key: action for action in adapter_for_key("merge.run").legal_actions(merge, None)}
+
+    assert atomic_actions["x"].enabled is False
+    assert atomic_actions["x"].reason == "writer still alive — wait for finalization"
+    assert merge_actions["x"].enabled is False
+    assert merge_actions["x"].reason == "writer still alive — wait for finalization"

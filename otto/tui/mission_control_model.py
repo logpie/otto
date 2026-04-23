@@ -13,7 +13,7 @@ from typing import Any, Callable, Literal, Protocol
 from otto import paths
 from otto.history import command_family, history_run_id, normalize_command_label
 from otto.runs.history import load_project_history_rows
-from otto.runs.registry import read_live_records
+from otto.runs.registry import read_live_records, writer_identity_matches_live_process
 from otto.runs.schema import RunRecord, is_terminal_status
 from otto.tui.mission_control_actions import ActionResult, ActionState
 
@@ -70,6 +70,7 @@ class MissionControlAdapter(Protocol):
         *,
         selected_artifact_path: str | None = None,
         selected_queue_task_ids: list[str] | None = None,
+        post_result: Callable[[ActionResult], None] | None = None,
     ) -> ActionResult: ...
     def detail_panel_renderer(self, record: RunRecord) -> DetailModel: ...
     def legacy_records(self, project_dir: Path, now: datetime, live_records: list[RunRecord]) -> list[RunRecord]: ...
@@ -176,6 +177,7 @@ class MissionControlState:
     live_runs: LiveRunsView
     history_page: HistoryView
     selection: SelectionState
+    selected_run_ids: set[str]
     focus: PaneName
     filters: MissionControlFilters
     last_event_banner: str | None = None
@@ -308,6 +310,7 @@ class MissionControlModel:
                 live_runs=LiveRunsView([], 0, 0, 1.5),
                 history_page=HistoryView([], 0, self.history_page_size, 0, 0),
                 selection=SelectionState(),
+                selected_run_ids=set(),
                 focus=focus,
                 filters=filters or MissionControlFilters(),
                 last_event_banner=None,
@@ -318,6 +321,7 @@ class MissionControlModel:
         filters = replace(previous_state.filters) if previous_state is not None else MissionControlFilters()
         focus = previous_state.focus if previous_state is not None else "live"
         selection = replace(previous_state.selection) if previous_state is not None else SelectionState()
+        selected_run_ids = set(previous_state.selected_run_ids) if previous_state is not None else set()
 
         now = self._now_fn()
         monotonic_now = self._monotonic_fn()
@@ -348,6 +352,7 @@ class MissionControlModel:
         )
 
         selection = self._preserve_selection(selection, live_view, history_view, history_rows)
+        selected_run_ids = self._preserve_selected_run_ids(selected_run_ids, live_view)
         banner = self._banner_for_new_runs(live_records)
 
         self._last_poll_monotonic = monotonic_now
@@ -357,6 +362,7 @@ class MissionControlModel:
             live_runs=live_view,
             history_page=history_view,
             selection=selection,
+            selected_run_ids=selected_run_ids,
             focus=focus,
             filters=filters,
             last_event_banner=banner,
@@ -550,6 +556,10 @@ class MissionControlModel:
             if row.run_id == run_id:
                 return row
         return None
+
+    def _preserve_selected_run_ids(self, selected_run_ids: set[str], live_view: LiveRunsView) -> set[str]:
+        live_ids = {item.record.run_id for item in live_view.items}
+        return {run_id for run_id in selected_run_ids if run_id in live_ids}
 
     def _live_sort_key(self, item: LiveRunItem) -> tuple[int, int, float]:
         updated_at = _parse_iso(item.record.timing.get("updated_at")) or _epoch()
@@ -793,29 +803,7 @@ def _writer_identity(writer: dict[str, Any]) -> tuple[Any, ...]:
 
 
 def _writer_process_matches(writer: dict[str, Any]) -> bool:
-    pid = writer.get("pid")
-    if not isinstance(pid, int) or pid <= 0:
-        return False
-    expected_start_ns = writer.get("process_start_time_ns")
-    expected_boot_id = str(writer.get("boot_id") or "").strip()
-    if expected_boot_id:
-        current_boot = _boot_id()
-        if current_boot and current_boot != expected_boot_id:
-            return False
-    try:
-        import psutil
-
-        proc = psutil.Process(pid)
-        actual_start_ns = int(proc.create_time() * 1_000_000_000)
-        if isinstance(expected_start_ns, int) and abs(actual_start_ns - expected_start_ns) > 5_000_000_000:
-            return False
-        return proc.is_running()
-    except Exception:
-        try:
-            os.kill(pid, 0)
-            return True
-        except OSError:
-            return False
+    return writer_identity_matches_live_process(writer)
 
 
 def _boot_id() -> str:
